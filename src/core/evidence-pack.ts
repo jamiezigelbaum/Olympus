@@ -528,7 +528,15 @@ async function buildPreparedEvidencePackDetailed(
       ...(content?.facts ? { facts: content.facts } : {}),
       ...(hit.score !== undefined ? { score: hit.score } : {}),
     };
-    bindReleaseChunks(candidate.provenance, chunks, content?.chunkHashes ?? []);
+    // A placed window is a substring of its full stored passage, so the full
+    // passages are bound beside the clipped ones with their own hashes.
+    const windowTexts = content?.windowPlacement?.texts ?? [];
+    const windowHashes = content?.windowPlacement?.hashes ?? [];
+    bindReleaseChunks(
+      candidate.provenance,
+      [...chunks, ...windowTexts],
+      [...chunks.map((_, index) => content?.chunkHashes?.[index] ?? []), ...windowTexts.map((_, index) => windowHashes[index] ?? [])],
+    );
     // A provider is expected to throw the typed denial before hydration. If
     // it instead returns S5 content, that is an invariant failure: hard-stop
     // the entire build rather than misreporting it as an extraction miss.

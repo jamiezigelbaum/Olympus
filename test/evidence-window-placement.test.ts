@@ -11,6 +11,7 @@ import type { SourceEmbeddingProvider } from '../src/workers/source-index/embedd
 import { createEvidenceWindowPlacer, type WindowScorer } from '../src/core/evidence-window-placement.ts';
 import { boundedSourceIndexChunks, sourceIndexChunkWindow } from '../src/core/source-index/chunk-selection.ts';
 import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
+import { releasePassageHashes } from '../src/core/release-manifest.ts';
 
 const QUESTION = 'Where is the rendezvous?';
 const ANSWER = 'Assemble beside the amber fountain.';
@@ -478,3 +479,12 @@ test('a scorer skipped as slow is tried again after a minute, so placement is ne
   expect(calls).toBe(2);
   expect(retried.audit.windowsScored).toBe(8);
 });
+
+test('a placed window stays provable: its stored chunk hashes still bind to it for release', async () => {
+  const f = await fixture();
+  const detail = await buildEvidencePackDetailed(f.input);
+  const seat = detail.pack.candidates[0]!;
+  const placed = seat.chunks.find(chunk => chunk.includes(ANSWER));
+  expect(placed).toBeDefined();
+  expect(releasePassageHashes(seat.provenance, placed!).length).toBeGreaterThan(0);
+}, 20_000);

@@ -40319,7 +40319,7 @@ function createConnectorStoreContentProvider(options) {
         const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
         let windowPlacement;
         if (content.truncated && content.windowTexts && content.windowTexts.length > 1) {
-          windowPlacement = { texts: content.windowTexts, ...scoreWindows ? { scoreWindows } : {} };
+          windowPlacement = { texts: content.windowTexts, ...content.windowTextHashes ? { hashes: content.windowTextHashes } : {}, ...scoreWindows ? { scoreWindows } : {} };
         }
         return {
           sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
@@ -50083,7 +50083,11 @@ ${parentKey(ref)}`, { ref, origin });
         ],
         truncated,
         ...windowTexts && windowTexts.length > 1 ? {
-          windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts
+          windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts,
+          windowTextHashes: [
+            ...reactionLine ? [[]] : [],
+            ...windowTexts.map((text2) => chunkRows.filter((chunk) => compactPassageWhitespace(chunk.bounded_text).includes(text2)).map((chunk) => chunk.content_hash))
+          ]
         } : {},
         storedChunks: chunkRows.length,
         mimeType: row.mime_type,
@@ -80885,7 +80889,9 @@ async function buildPreparedEvidencePackDetailed(input) {
       ...content?.facts ? { facts: content.facts } : {},
       ...hit.score !== undefined ? { score: hit.score } : {}
     };
-    bindReleaseChunks(candidate.provenance, chunks, content?.chunkHashes ?? []);
+    const windowTexts = content?.windowPlacement?.texts ?? [];
+    const windowHashes = content?.windowPlacement?.hashes ?? [];
+    bindReleaseChunks(candidate.provenance, [...chunks, ...windowTexts], [...chunks.map((_, index) => content?.chunkHashes?.[index] ?? []), ...windowTexts.map((_, index) => windowHashes[index] ?? [])]);
     assertEvidenceCandidateModelEligible(candidate);
     if (isSecureSensitivity(candidate)) {
       if (input.excludeSecureSensitivity)

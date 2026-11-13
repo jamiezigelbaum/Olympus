@@ -33379,7 +33379,11 @@ ${parentKey(ref)}`, { ref, origin });
       ],
       truncated,
       ...windowTexts && windowTexts.length > 1 ? {
-        windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts
+        windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts,
+        windowTextHashes: [
+          ...reactionLine ? [[]] : [],
+          ...windowTexts.map((text2) => chunkRows.filter((chunk) => compactPassageWhitespace(chunk.bounded_text).includes(text2)).map((chunk) => chunk.content_hash))
+        ]
       } : {},
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,

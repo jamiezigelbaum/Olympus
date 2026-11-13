@@ -2689,6 +2689,8 @@ export function connectorStoreCurrentEmbeddingModelId(
 export interface ConnectorStoreLocalContent {
   // Full text of only the selected passages, index-aligned with chunks.
   windowTexts?: readonly string[];
+  // Stored chunk hashes behind each window text, index-aligned with windowTexts.
+  windowTextHashes?: readonly (readonly string[])[];
   trustTier: SourceTrustTier;
   chunks: readonly string[];
   chunkHashes?: readonly (readonly string[])[];
@@ -15054,6 +15056,11 @@ export class LocalConnectorStore {
       truncated,
       ...(windowTexts && windowTexts.length > 1 ? {
         windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts,
+        // The same text-matched proof as chunkHashes, so a placed window stays releasable.
+        windowTextHashes: [
+          ...(reactionLine ? [[]] : []),
+          ...windowTexts.map(text => chunkRows.filter(chunk => compactPassageWhitespace(chunk.bounded_text).includes(text)).map(chunk => chunk.content_hash)),
+        ],
       } : {}),
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
@@ -17284,7 +17291,7 @@ export function createConnectorStoreContentProvider(
       const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
       let windowPlacement: EvidenceWindowSource | undefined;
       if (content.truncated && content.windowTexts && content.windowTexts.length > 1) {
-        windowPlacement = { texts: content.windowTexts, ...(scoreWindows ? { scoreWindows } : {}) };
+        windowPlacement = { texts: content.windowTexts, ...(content.windowTextHashes ? { hashes: content.windowTextHashes } : {}), ...(scoreWindows ? { scoreWindows } : {}) };
       }
 
       return {

@@ -16,6 +16,8 @@ export type WindowScorer = (query: string, windows: readonly string[], signal: A
 /** Internal hydration snapshot: full text of ONLY the passages already picked. */
 export interface EvidenceWindowSource {
   texts: readonly string[];
+  /** Stored chunk hashes behind each text, index-aligned, so a placed window keeps its release proof. */
+  hashes?: readonly (readonly string[])[];
   /** Indexes into texts, most relevant first. Texts arrive in document order. */
   priority?: readonly number[];
   scoreWindows?: WindowScorer;
