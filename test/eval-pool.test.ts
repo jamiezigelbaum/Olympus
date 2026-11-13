@@ -253,6 +253,15 @@ test('near-duplicate passages share a group in the capture, and replay can keep 
   expect(groups.get('x')).toBe(groups.get('y'));
   expect(groups.has('z')).toBe(false);
   expect(groups.has('w')).toBe(false);
+  // A chain does not join its ends when they fall below the threshold (Codex on #1623):
+  // A~B and B~C are near duplicates, A and C are not, so A and C never share a group.
+  const words = Array.from({ length: 100 }, (_, i) => `w${i}`);
+  const chainA = words.join(' ');
+  const chainB = ['x0', 'x1', 'x2', 'x3', ...words.slice(4)].join(' ');
+  const chainC = ['x0', 'x1', 'x2', 'x3', ...words.slice(4, 96), 'y0', 'y1', 'y2', 'y3'].join(' ');
+  const chain = nearDuplicateGroups(new Map([['a', chainA], ['b', chainB], ['c', chainC]]));
+  expect(chain.get('a')).toBe(chain.get('b'));
+  expect(chain.get('c')).not.toBe(chain.get('a'));
 
   const f = fixture();
   const { capture } = await captureEvalPack({ question, lanes: () => f, reranker: f.reranker, maxResults: 2, maxCharsPerCandidate: 2000, captureDepth: 3 });

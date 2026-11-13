@@ -217,24 +217,30 @@ function shingleSet(passage: string): ReadonlySet<number> {
   return set;
 }
 
-/** Groups of two or more keys whose shingle sets overlap at Jaccard >= 0.85, numbered from 1 in first-seen order. */
+/**
+ * Groups of two or more keys whose shingle sets overlap at Jaccard >= 0.85,
+ * numbered from 1 in first-seen order. A key joins the first group whose every
+ * member it matches, so a chain of near duplicates never joins two ends that
+ * fall below the threshold (Codex on #1623).
+ */
 function groupNearDuplicates(sets: ReadonlyMap<string, ReadonlySet<number>>): Map<string, number> {
-  const keys = [...sets.keys()].filter(k => sets.get(k)!.size > 0);
-  const parent = new Map(keys.map(k => [k, k]));
-  const root = (k: string): string => { while (parent.get(k) !== k) k = parent.get(k)!; return k; };
-  for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) {
-    const a = sets.get(keys[i]!)!, b = sets.get(keys[j]!)!;
+  const similar = (a: ReadonlySet<number>, b: ReadonlySet<number>) => {
     let shared = 0;
     for (const h of a) if (b.has(h)) shared += 1;
-    if (shared / (a.size + b.size - shared) >= NEAR_DUPLICATE_JACCARD) parent.set(root(keys[j]!), root(keys[i]!));
+    return shared / (a.size + b.size - shared) >= NEAR_DUPLICATE_JACCARD;
+  };
+  const clusters: string[][] = [];
+  for (const [key, set] of sets) {
+    if (set.size === 0) continue;
+    const cluster = clusters.find(members => members.every(member => similar(set, sets.get(member)!)));
+    if (cluster) cluster.push(key);
+    else clusters.push([key]);
   }
-  const members = new Map<string, string[]>();
-  for (const k of keys) members.set(root(k), [...(members.get(root(k)) ?? []), k]);
   const groups = new Map<string, number>();
   let next = 1;
-  for (const group of members.values()) {
-    if (group.length < 2) continue;
-    for (const k of group) groups.set(k, next);
+  for (const cluster of clusters) {
+    if (cluster.length < 2) continue;
+    for (const k of cluster) groups.set(k, next);
     next += 1;
   }
   return groups;
