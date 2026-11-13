@@ -395,6 +395,20 @@ describe('approving an import', () => {
   });
 });
 
+describe('an agent asking for files already imported', () => {
+  test('approving it keeps the request, settled as already imported, so the agent reads that outcome', async () => {
+    const f = fixture();
+    const path = f.write('Takeout.mbox', mbox([mail(0)]));
+    const first = await approveKey(f, path);
+    expect(first).toMatchObject({ ok: true, status: 'started' });
+    const requests = new ArchiveImportRequestStore({ path: archiveImportRequestsPath(f.runtime.state.path) });
+    const asked = requests.addPending(path)!;
+    expect(await f.dashboard.approve({ requestId: asked.request_id })).toMatchObject({ ok: true, status: 'already_imported', name: 'Takeout.mbox' });
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ id: asked.request_id, status: 'already_imported', archiveId: (first as { archive_id: string }).archive_id })]);
+    expect(f.runtime.state.list()).toHaveLength(1);
+  });
+});
+
 describe('the Archives row\'s list', () => {
   test('says what each archive holds, how far it is, what waits for the private model, and exactly what was not read', async () => {
     const f = fixture({ model: 'off' });

@@ -1989,8 +1989,13 @@ async function scaleHost(): Promise<ScaleHost> {
       await startFakeWith(config, config.fakeToken, seed);
       const connected = await session.call('POST', '/dashboard/connect/api-key', { source: 'readwise', api_key: config.fakeToken });
       if (connected.status !== 200 || connected.json?.ok !== true) throw new Error(`scale Readwise connect: ${connected.status}`);
-      const sync = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
-      if (sync.status !== 200) throw new Error(`scale Readwise sync: ${sync.status}`);
+      // Deleting Readwise restarts the engine; its sources can answer 501 for a moment after the front is back.
+      let sync = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
+      for (const deadline = Date.now() + 120_000; sync.status !== 200 && Date.now() < deadline;) {
+        await Bun.sleep(5_000);
+        sync = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
+      }
+      if (sync.status !== 200) throw new Error(`scale Readwise sync: ${sync.status}${typeof sync.json?.error?.code === 'string' ? ` ${sync.json.error.code}` : ''}`);
     },
     async readwiseSnapshot() {
       const response = await session.call('GET', '/dashboard.json');

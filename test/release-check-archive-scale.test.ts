@@ -48,6 +48,8 @@ test('measurement percentiles and row counts preserve missing data', () => {
   expect(percentile([100, 1, 3, 2, 4], .95)).toBe(100);
   expect(scaleRowCount({ text: '19,995 messages · judged' })).toBe(19_995);
   expect(scaleRowCount({ text: '3,000 notes' })).toBe(3_000);
+  expect(scaleRowCount({ text: 'Reflect notes · 1994-01-01 to 2024-12-313,000 notes' })).toBe(3_000);
+  expect(scaleRowCount({ text: 'Mail · 1994-01-01 to 2024-12-3119,995 messages' })).toBe(19_995);
   expect(scaleRowCount({ text: 'Counting… 100 items' })).toBeNull();
   expect(scaleRowCount(undefined)).toBeNull();
 });

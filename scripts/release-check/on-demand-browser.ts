@@ -37,8 +37,9 @@ export function driveFolderSearchUrl(name: string): string {
 const BUSY = `[...document.querySelectorAll('[role=progressbar]')].some(e => !e.hasAttribute('aria-valuenow') && (${visible})(e))`;
 const DRIVE_EMPTY = `/no results|no matching|matched this search|try another search|none of your files/i.test(document.body?.innerText || '')`;
 
-/** Drive search has settled: results grid, or the empty state a first run gets before the folder exists. */
-export const DRIVE_SEARCH_SETTLED = `(() => location.pathname.includes('/search') && (${DRIVE_EMPTY} || (!!document.querySelector('[role=grid]') && !${BUSY})))()`;
+/** Drive search has settled: result rows, or the empty state a first run gets before the folder exists.
+ * Drive keeps a visible loading bar on screen even after results show, so the bar is not a signal here. */
+export const DRIVE_SEARCH_SETTLED = `(() => location.pathname.includes('/search') && (${DRIVE_EMPTY} || !!document.querySelector('[role=grid] [role=row]')))()`;
 
 /** What a Drive search page showed, for a failure message: no file names or page text. */
 export const DRIVE_SEARCH_SNAPSHOT = `(() => ({path: location.pathname, grid: !!document.querySelector('[role=grid]'), progress: !!document.querySelector('[role=progressbar]'), busy: ${BUSY}, empty: ${DRIVE_EMPTY}, rows: document.querySelectorAll('[role=row]').length}))()`;
@@ -188,7 +189,7 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
     const listing = providerListingExpression;
     const names = async (folder: SeedFolder) => {
       const tab = folders.get(folder.source)!;
-      await until(() => evaluate(tab.session, `!!document.querySelector('[role=grid], [role=table], table, [data-testid="files-table"], [data-testid="empty-folder"]') && !${BUSY}`), 'provider folder listing unavailable');
+      await until(() => evaluate(tab.session, `!!document.querySelector('[role=grid], [role=table], table, [data-testid="files-table"], [data-testid="empty-folder"]') && (!${BUSY} || !!document.querySelector('[role=row],tr'))`), 'provider folder listing unavailable');
       return evaluate<string[]>(tab.session, listing(folder.source));
     };
     const ui: BrowserSeedUi = {
