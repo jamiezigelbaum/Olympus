@@ -87,6 +87,6 @@ async function assertRouteAnswers(
 
 // Rough char->token budget (~3 chars/token) with a floor so a tight answer
 // budget never starves the model into truncated JSON.
-function maxTokensForChars(chars: number): number {
+export function maxTokensForChars(chars: number): number {
   return Math.max(256, Math.ceil(chars / 3));
 }

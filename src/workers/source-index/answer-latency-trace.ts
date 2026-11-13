@@ -1,4 +1,5 @@
 import type { EvidenceRerankAudit } from '../../core/evidence-reranker.ts';
+import type { LocalAnalystPromptBudget } from './local-analyst-window.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
@@ -150,6 +151,8 @@ export interface SourceAnswerTraceAnalystFit {
   lane: 'local' | 'cloud';
   keptSeats: number[];
   promptBytes?: number;
+  promptBudgetBytes?: number;
+  promptBudgetSource?: LocalAnalystPromptBudget['source'];
 }
 
 const SEAT_ITEM_HASH_HEX = 12;
@@ -559,12 +562,13 @@ export function recordSourceAnswerPackSeats(corpusIds: readonly string[], recenc
   };
 }
 
-export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[], promptBytes?: number): void {
+export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[], promptBytes?: number, budget?: LocalAnalystPromptBudget): void {
   const seats = currentSourceAnswerTrace()?.evidenceSeats;
   if (!seats) return;
   seats.fits.push({
     lane,
     keptSeats: keptSeats.map(nonNegativeCount),
+    ...(budget ? { promptBudgetBytes: budget.bytes, promptBudgetSource: budget.source } : {}),
     ...(promptBytes === undefined ? {} : { promptBytes: nonNegativeCount(promptBytes) }),
   });
 }

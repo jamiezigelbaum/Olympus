@@ -1,3 +1,7 @@
+import { builtInAnalystMaxTokensForChars } from '../../core/analyst-built-in.ts';
+import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitLocalAnalystRoutes, localAnalystWindow, localAnalystPromptBudget, type LocalAnalystPromptBudget } from './local-analyst-window.ts';
+import { maxTokensForChars } from '../../core/analyst-delphi.ts';
+import { DEFAULT_ANALYST_MAX_OUTPUT_CHARS } from '../../core/analyst.ts';
 import { randomUUID } from 'node:crypto';
 import type { RequestOnDemandRead, OnDemandReadLimit } from '../file-extraction/on-demand-read.ts';
 import { onDemandReadingCoverageNote, onDemandCappedCoverageNote, onDemandFailedCoverageNote } from '../../core/names-only-coverage.ts';
@@ -289,16 +293,8 @@ export interface SourceAnswerSelfHealResult {
 export const DEFAULT_MAX_RESULTS = 24;
 const MAX_EVIDENCE_CANDIDATES = 48;
 const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
-// A local model served over an OpenAI-compatible endpoint (Ollama, llama.cpp,
-// Delphi) can run a small context the request cannot raise (Ollama's default
-// num_ctx, for one) and truncates the prompt HEAD, which is where the system
-// rules sit. Nothing in the sovereignty config declares a local context, so a
-// local leg is fitted by TOTAL prompt bytes (system rules, every candidate's
-// labels and local provenance, and passages) to at most the pre-budget
-// footprint that ran safely: 3 candidates x 3,000 chars measured 13,667 bytes.
-// A host that serves a larger context declares it with
-// OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES.
-export const DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13_500;
+// Fallback when the local model's served context window is unknown.
+export { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES } from './local-analyst-window.ts';
 // The OpenClaw infer ceiling less a margin for the CLI's own framing.
 const CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 10_000;
 // Candidate floor for temporal questions - see maxResults derivation below.
@@ -512,7 +508,6 @@ export function createAnalystSourceIndexAnswerHandler(
       let pack = detail.pack;
       const analyzedInputs: ReleaseInput[] = [];
       const chunkHoldNotes = new Set<string>();
-      const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
       // Leg fitting is keyed by the candidates of the pack actually analyzed,
       // so a rebuilt pack (the private-outage fallback below) is fitted and its
       // matchCounts restated against its own candidates, never the first build's.
@@ -575,7 +570,12 @@ export function createAnalystSourceIndexAnswerHandler(
           },
         });
         return {
-          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, 'local', seatOf, analystEvidenceFormat(analyst), candidateGaps),
+          localLeg: (analyst: Analyst): Analyst => fitLocalAnalystRoutes(analyst, leaf => promptBudgetedAnalyst(
+            guarded(leaf), options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES,
+            candidateCorpus, analysisDetail.recencySeats, 'local', seatOf, analystEvidenceFormat(leaf), candidateGaps,
+            outputChars => localAnalystPromptBudget(options.localAnalystPromptByteBudget, localAnalystWindow(leaf),
+              localAnalystWindow(leaf)?.source === 'manifest' ? builtInAnalystMaxTokensForChars(outputChars) : maxTokensForChars(outputChars)),
+          )),
           cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst, true), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, 'cloud', seatOf, analystEvidenceFormat(analyst), candidateGaps),
           trustedLeg: (analyst: Analyst): Analyst => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             // Page asks use the same content-bearing candidates as the computer path.
@@ -1096,15 +1096,18 @@ function promptBudgetedAnalyst(
   seatOf: ReadonlyMap<EvidenceCandidate['provenance'], number>,
   evidenceFormat: AnalystEvidenceFormat,
   candidateGaps: ReadonlyMap<EvidenceCandidate['provenance'], readonly number[]>,
+  budgetForOutputChars?: (outputChars: number) => LocalAnalystPromptBudget,
 ): Analyst {
   return {
     analyze: (pack, analyzeOptions) => {
-      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, candidateGaps);
+      const budget = budgetForOutputChars?.(analyzeOptions.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS);
+      const effectiveBytes = budget?.bytes ?? promptBytes;
+      const fitted = fitPackToPromptBytes(pack, effectiveBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, candidateGaps);
       recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
         const seat = seatOf.get(candidate.provenance);
         return seat === undefined ? [] : [seat];
-      }), analystPromptBytes(fitted, analyzeOptions, evidenceFormat));
-      return analyst.analyze(withPromptBudget(fitted, promptBytes), analyzeOptions)
+      }), analystPromptBytes(fitted, analyzeOptions, evidenceFormat), budget);
+      return analyst.analyze(withPromptBudget(fitted, effectiveBytes), analyzeOptions)
         .then((result) => withUnfittedCoverage(result, pack, fitted));
     },
   };

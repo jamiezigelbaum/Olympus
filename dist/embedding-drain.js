@@ -39469,6 +39469,181 @@ var CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
   ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
   ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
 ]);
+// src/workers/source-index/local-analyst-window.ts
+registerLimit({ id: "answer.local_prompt_bytes", kind: "size", scope: "answer", label: "Local analyst prompt clamp", unit: "bytes", continue: "none" });
+var caches2 = new WeakMap;
+var windows = new WeakMap;
+var routeFitters = new WeakMap;
+var reports = new Map;
+
+// src/workers/classification/sniffer-decision.ts
+var endpoints = new Map;
+
+// src/workers/source-index/built-in-reasoning/install.ts
+var STALE_LOCK_MS2 = 60 * 60000;
+var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+var SPACE_BACKOFF_MS = 15 * 60000;
+var DOWNLOAD_STALL_MS2 = 2 * 60000;
+var VERIFY_TIMEOUT_MS = 15 * 60000;
+var EXTRACT_TIMEOUT_MS = 5 * 60000;
+
+// src/core/analyst-built-in.ts
+var GAP_GENERIC_WORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "are",
+  "was",
+  "were",
+  "with",
+  "from",
+  "that",
+  "this",
+  "these",
+  "those",
+  "not",
+  "any",
+  "all",
+  "its",
+  "their",
+  "there",
+  "which",
+  "what",
+  "when",
+  "where",
+  "who",
+  "whom",
+  "how",
+  "why",
+  "does",
+  "did",
+  "has",
+  "have",
+  "had",
+  "been",
+  "being",
+  "into",
+  "about",
+  "than",
+  "then",
+  "also",
+  "such",
+  "other",
+  "only",
+  "more",
+  "most",
+  "some",
+  "can",
+  "could",
+  "would",
+  "should",
+  "may",
+  "might",
+  "will",
+  "shall",
+  "but",
+  "nor",
+  "yet",
+  "per",
+  "via",
+  "each",
+  "your",
+  "you",
+  "user",
+  "his",
+  "her",
+  "our",
+  "they",
+  "them",
+  "one",
+  "out",
+  "over",
+  "under",
+  "between",
+  "within",
+  "specific",
+  "exact",
+  "precise",
+  "actual",
+  "value",
+  "values",
+  "level",
+  "levels",
+  "number",
+  "numbers",
+  "amount",
+  "detail",
+  "details",
+  "detailed",
+  "information",
+  "info",
+  "result",
+  "results",
+  "data",
+  "figure",
+  "figures",
+  "provided",
+  "provide",
+  "evidence",
+  "found",
+  "find",
+  "missing",
+  "available",
+  "unavailable",
+  "mentioned",
+  "mention",
+  "listed",
+  "list",
+  "given",
+  "give",
+  "stated",
+  "state",
+  "states",
+  "shown",
+  "show",
+  "shows",
+  "included",
+  "include",
+  "includes",
+  "contain",
+  "contains",
+  "contained",
+  "reported",
+  "report",
+  "reports",
+  "document",
+  "documents",
+  "item",
+  "items",
+  "text",
+  "source",
+  "sources",
+  "record",
+  "records",
+  "file",
+  "files",
+  "full",
+  "complete",
+  "entire",
+  "whole",
+  "unknown",
+  "unclear",
+  "unspecified",
+  "specified",
+  "answer",
+  "question",
+  "none",
+  "no",
+  "citations",
+  "citation",
+  "unanswered",
+  "sufficient",
+  "insufficient",
+  "claim",
+  "claims"
+]);
+var utf8 = new TextEncoder;
+
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 
@@ -39514,7 +39689,7 @@ function normalizeRouterResultKey(key2) {
 }
 
 // src/core/evidence-pack.ts
-var utf8 = new TextEncoder;
+var utf82 = new TextEncoder;
 var CUT_SHORT_LANES = new Map([
   [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
   [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
@@ -39612,7 +39787,6 @@ function nonNegativeInteger(value, fallback) {
     return fallback;
   return Math.max(0, Math.floor(value));
 }
-
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
 // src/workers/file-extraction/extractors/bounded-text.ts
@@ -40576,14 +40750,6 @@ var WHATSAPP_STORE_PLACEMENT = Object.freeze({
 var WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp";
 var WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
 var CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
-// src/workers/source-index/built-in-reasoning/install.ts
-var STALE_LOCK_MS2 = 60 * 60000;
-var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-var SPACE_BACKOFF_MS = 15 * 60000;
-var DOWNLOAD_STALL_MS2 = 2 * 60000;
-var VERIFY_TIMEOUT_MS = 15 * 60000;
-var EXTRACT_TIMEOUT_MS = 5 * 60000;
-
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
 var DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
 var DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
@@ -44184,7 +44350,7 @@ async function runSourceEmbeddingDrain(options) {
     chunks_skipped: 0,
     targets: lane.targetKeys.map((target2) => emptyScopeReport(target2))
   }));
-  const reports = laneReports.find((lane) => lane.corpus_id === DROPBOX_CORPUS_ID)?.targets ?? [];
+  const reports2 = laneReports.find((lane) => lane.corpus_id === DROPBOX_CORPUS_ID)?.targets ?? [];
   const totalTargets = sum(lanes, (lane) => lane.targetKeys.length);
   const maxRuns = positiveIntOrUnboundedOption(options.maxRuns, Number.POSITIVE_INFINITY, "maxRuns");
   const maxRuntimeSeconds = positiveIntOrUnboundedOption(options.maxRuntimeSeconds, Number.POSITIVE_INFINITY, "maxRuntimeSeconds");
@@ -44239,7 +44405,7 @@ async function runSourceEmbeddingDrain(options) {
       chunks_skipped: chunksSkipped,
       consecutive_failures: consecutiveFailures,
       transient_lock_retries: transientLockRetries,
-      scopes: reports,
+      scopes: reports2,
       ...explicitRoster ? { lanes: laneReports } : {},
       policy: {
         raw_source_exposed: false,
@@ -44610,13 +44776,13 @@ function normalizeEmbeddingLanes(lanes) {
     };
   });
 }
-function embeddingPassItems(lanes, reports, pass, isolatedLanes) {
+function embeddingPassItems(lanes, reports2, pass, isolatedLanes) {
   return lanes.flatMap((lane, laneIndex) => {
     if (isolatedLanes[laneIndex])
       return [];
     if (pass % lane.cadencePasses !== 0)
       return [];
-    const laneReport = reports[laneIndex];
+    const laneReport = reports2[laneIndex];
     return lane.targetKeys.map((targetKey, targetIndex) => ({
       lane,
       laneIndex,

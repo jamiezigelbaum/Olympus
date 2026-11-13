@@ -22701,10 +22701,27 @@ var init_connector_store = __esm(() => {
   init_local_index();
   init_filter_capabilities();
 });
-// src/workers/answer-activity.ts
-var DEFAULT_ANSWER_LEASE_MS;
-var init_answer_activity = __esm(() => {
-  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+
+// src/workers/source-index/local-analyst-window.ts
+var caches2, windows, routeFitters, reports;
+var init_local_analyst_window = __esm(() => {
+  init_limit_stops();
+  init_model_transport();
+  init_manifest2();
+  registerLimit({ id: "answer.local_prompt_bytes", kind: "size", scope: "answer", label: "Local analyst prompt clamp", unit: "bytes", continue: "none" });
+  caches2 = new WeakMap;
+  windows = new WeakMap;
+  routeFitters = new WeakMap;
+  reports = new Map;
+});
+
+// src/workers/classification/sniffer-decision.ts
+var endpoints;
+var init_sniffer_decision = __esm(() => {
+  init_model_transport();
+  init_sniffer_lane();
+  init_sniffer();
+  endpoints = new Map;
 });
 
 // src/core/evidence-versions.ts
@@ -22974,6 +22991,207 @@ var init_analyst = __esm(() => {
   ]);
 });
 
+// src/workers/source-index/built-in-reasoning/install.ts
+var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
+var init_install = __esm(() => {
+  init_pinned_download();
+  init_olympus_layout();
+  init_off_thread();
+  init_manifest2();
+  STALE_LOCK_MS2 = 60 * 60000;
+  BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
+  SPACE_BACKOFF_MS = 15 * 60000;
+  DOWNLOAD_STALL_MS2 = 2 * 60000;
+  VERIFY_TIMEOUT_MS = 15 * 60000;
+  EXTRACT_TIMEOUT_MS = 5 * 60000;
+});
+
+// src/workers/source-index/built-in-reasoning/server.ts
+var init_server = __esm(() => {
+  init_off_thread();
+  init_model_transport();
+});
+
+// src/core/analyst-built-in.ts
+var GAP_GENERIC_WORDS, utf8;
+var init_analyst_built_in = __esm(() => {
+  init_local_analyst_window();
+  init_sniffer_decision();
+  init_sniffer_lane();
+  init_analyst();
+  init_operation_error();
+  init_model_transport();
+  init_zkapi_consult_settings();
+  init_install();
+  init_manifest2();
+  init_server();
+  GAP_GENERIC_WORDS = new Set([
+    "the",
+    "and",
+    "for",
+    "are",
+    "was",
+    "were",
+    "with",
+    "from",
+    "that",
+    "this",
+    "these",
+    "those",
+    "not",
+    "any",
+    "all",
+    "its",
+    "their",
+    "there",
+    "which",
+    "what",
+    "when",
+    "where",
+    "who",
+    "whom",
+    "how",
+    "why",
+    "does",
+    "did",
+    "has",
+    "have",
+    "had",
+    "been",
+    "being",
+    "into",
+    "about",
+    "than",
+    "then",
+    "also",
+    "such",
+    "other",
+    "only",
+    "more",
+    "most",
+    "some",
+    "can",
+    "could",
+    "would",
+    "should",
+    "may",
+    "might",
+    "will",
+    "shall",
+    "but",
+    "nor",
+    "yet",
+    "per",
+    "via",
+    "each",
+    "your",
+    "you",
+    "user",
+    "his",
+    "her",
+    "our",
+    "they",
+    "them",
+    "one",
+    "out",
+    "over",
+    "under",
+    "between",
+    "within",
+    "specific",
+    "exact",
+    "precise",
+    "actual",
+    "value",
+    "values",
+    "level",
+    "levels",
+    "number",
+    "numbers",
+    "amount",
+    "detail",
+    "details",
+    "detailed",
+    "information",
+    "info",
+    "result",
+    "results",
+    "data",
+    "figure",
+    "figures",
+    "provided",
+    "provide",
+    "evidence",
+    "found",
+    "find",
+    "missing",
+    "available",
+    "unavailable",
+    "mentioned",
+    "mention",
+    "listed",
+    "list",
+    "given",
+    "give",
+    "stated",
+    "state",
+    "states",
+    "shown",
+    "show",
+    "shows",
+    "included",
+    "include",
+    "includes",
+    "contain",
+    "contains",
+    "contained",
+    "reported",
+    "report",
+    "reports",
+    "document",
+    "documents",
+    "item",
+    "items",
+    "text",
+    "source",
+    "sources",
+    "record",
+    "records",
+    "file",
+    "files",
+    "full",
+    "complete",
+    "entire",
+    "whole",
+    "unknown",
+    "unclear",
+    "unspecified",
+    "specified",
+    "answer",
+    "question",
+    "none",
+    "no",
+    "citations",
+    "citation",
+    "unanswered",
+    "sufficient",
+    "insufficient",
+    "claim",
+    "claims"
+  ]);
+  utf8 = new TextEncoder;
+});
+
+// src/core/analyst-delphi.ts
+var init_analyst_delphi = __esm(() => {
+  init_operation_error();
+});
+// src/workers/answer-activity.ts
+var DEFAULT_ANSWER_LEASE_MS;
+var init_answer_activity = __esm(() => {
+  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+});
+
 // src/core/analyst-openclaw-infer.ts
 var MAX_PROMPT_BYTES = 1e5, OPENCLAW_INFER_MAX_PROMPT_BYTES;
 var init_analyst_openclaw_infer = __esm(() => {
@@ -22987,7 +23205,7 @@ var init_analyst_openclaw_infer = __esm(() => {
 var init_evidence_reranker = () => {};
 
 // src/core/evidence-pack.ts
-var utf8, CUT_SHORT_LANES;
+var utf82, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
   init_release_manifest();
@@ -23000,7 +23218,7 @@ var init_evidence_pack = __esm(() => {
   init_router();
   init_types();
   init_answer_latency_trace();
-  utf8 = new TextEncoder;
+  utf82 = new TextEncoder;
   CUT_SHORT_LANES = new Map([
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
     [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
@@ -23102,6 +23320,10 @@ var DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_PO
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
+  init_analyst_built_in();
+  init_local_analyst_window();
+  init_analyst_delphi();
+  init_analyst();
   init_embeddings();
   init_answer_activity();
   init_analyst();
@@ -23120,6 +23342,7 @@ var init_analyst_answer = __esm(() => {
   init_types();
   init_operation_error();
   init_answer_latency_trace();
+  init_local_analyst_window();
   CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
 });
 
@@ -26399,27 +26622,6 @@ var init_remote_vlm = __esm(() => {
     "For tables, reports, receipts, screenshots, or scans, preserve labels, values, dates, units, and row context.",
     "Do not infer private facts beyond the document."
   ].join(" ");
-});
-
-// src/workers/source-index/built-in-reasoning/install.ts
-var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
-var init_install = __esm(() => {
-  init_pinned_download();
-  init_olympus_layout();
-  init_off_thread();
-  init_manifest2();
-  STALE_LOCK_MS2 = 60 * 60000;
-  BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-  SPACE_BACKOFF_MS = 15 * 60000;
-  DOWNLOAD_STALL_MS2 = 2 * 60000;
-  VERIFY_TIMEOUT_MS = 15 * 60000;
-  EXTRACT_TIMEOUT_MS = 5 * 60000;
-});
-
-// src/workers/source-index/built-in-reasoning/server.ts
-var init_server = __esm(() => {
-  init_off_thread();
-  init_model_transport();
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts

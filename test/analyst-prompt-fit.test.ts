@@ -1,3 +1,6 @@
+import { setLocalAnalystWindow, localAnalystPromptBytesForWindow } from '../src/workers/source-index/local-analyst-window.ts';
+import { OperationError } from '../src/core/operation-error.ts';
+import { createSourceAnswerTrace, runWithSourceAnswerTrace } from '../src/workers/source-index/answer-latency-trace.ts';
 import { provedContent, provedReleaseCheck } from './helpers/scripted-search-release.ts';
 import { describe, expect, test } from 'bun:test';
 import { analystEvidenceFormat, analystPromptBytes, createAnalyst, withPromptBudget, type AnalystModelRequest } from '../src/core/analyst.ts';
@@ -280,7 +283,7 @@ describe('Ask local compact evidence', () => {
   });
 });
 
-async function exerciseAsk(analyst: ReturnType<typeof createAnalyst>, cloud = false, truncated = false) {
+async function exerciseAsk(analyst: ReturnType<typeof createAnalyst>, cloud = false, truncated = false, localAnalystPromptByteBudget?: number) {
   const { pack } = analystPromptFixture();
   const corpusId = cloud ? 'internal.fixture.documents' : 'secure_local.fixture.documents';
   const domain = cloud ? 'internal' : 'secure_local';
@@ -301,6 +304,7 @@ async function exerciseAsk(analyst: ReturnType<typeof createAnalyst>, cloud = fa
       }; } } }),
     }),
     releaseCheck: provedReleaseCheck,
+    ...(localAnalystPromptByteBudget === undefined ? {} : { localAnalystPromptByteBudget }),
   }).answer({ question: pack.question, include_internal: true, include_internal_content: true, include_secure_local: !cloud, include_secure_local_content: !cloud, max_results: 24 });
 }
 
@@ -331,4 +335,26 @@ describe('the first three seats read twice as far', () => {
     const sent = fitted.candidates.map((candidate) => bytes(candidate.chunks.join('')));
     expect(Math.max(...sent) - Math.min(...sent)).toBeLessThanOrEqual(8);
   });
+});
+
+for (const fallback of [false, true]) {
+  test(`local fitting uses the actual ${fallback ? 'fallback manifest' : 'server'} route window and audits its budget`, async () => {
+    const calls: AnalystModelRequest[] = [];
+    const make = () => createAnalyst({ complete: async request => { calls.push(request); return { text: completion, modelId: 'fixture' }; } }, { evidenceFormat: 'compact' });
+    const primary = setLocalAnalystWindow(fallback ? createAnalyst({ complete: async () => { throw new OperationError('argus_unreachable', 'offline'); } }) : make(), { windowTokens: 32768, source: 'server' });
+    const analyst = fallback ? withBuiltInFallback(primary, setLocalAnalystWindow(make(), { windowTokens: 12288, source: 'manifest' })) : primary;
+    const trace = createSourceAnswerTrace();
+    await runWithSourceAnswerTrace(trace, () => exerciseAsk(analyst));
+    const budget = localAnalystPromptBytesForWindow(fallback ? 12288 : 32768, fallback ? 800 : Math.ceil(1600 / 3));
+    expect(trace.evidenceSeats?.fits.at(-1)).toMatchObject({ promptBudgetBytes: budget, promptBudgetSource: fallback ? 'manifest' : 'server' });
+    expect(bytes(`${calls[0]!.system}\n\n${calls[0]!.prompt}`)).toBeLessThanOrEqual(budget);
+    expect(bytes(`${calls[0]!.system}\n\n${calls[0]!.prompt}`)).toBeGreaterThan(13500);
+  });
+}
+
+test('Ask env override beats the resolved server window and records env', async () => {
+  const analyst = setLocalAnalystWindow(createAnalyst({ complete: async () => ({ text: completion, modelId: 'fixture' }) }), { windowTokens: 32768, source: 'server' });
+  const trace = createSourceAnswerTrace();
+  await runWithSourceAnswerTrace(trace, () => exerciseAsk(analyst, false, false, 18000));
+  expect(trace.evidenceSeats?.fits.at(-1)).toMatchObject({ promptBudgetBytes: 18000, promptBudgetSource: 'env' });
 });
