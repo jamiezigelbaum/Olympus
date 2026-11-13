@@ -186,6 +186,8 @@ export async function main(argv = process.argv.slice(2)) {
     let windows = 0, privateWindows = 0, unjudgedWindows = 0, groundFailures = 0;
     stage = 'ground-truth';
     const groundCalls = calls, groundHttp = httpCalls;
+    const judgeJobs: Array<{ material: Parameters<typeof snifferMaterialForModel>[0]; hashes: readonly string[]; into: Set<string> }> = [];
+    const hold = (hashes: readonly string[], into: Set<string>) => { privateWindows++; for (const hash of hashes) into.add(hash); };
     for (const [index, item] of picked.entries()) {
       const opened = mounted.find(candidate => candidate.dbPath === item.storePath);
       const { row, parts } = sampled[index]!;
@@ -196,26 +198,35 @@ export async function main(argv = process.argv.slice(2)) {
       for (const window of unseenWindows(parts)) {
         windows++;
         const input = storedJudgeInput(row, window.text, item.provider);
-        let held = input.secret || (input.material === undefined && input.privateWithoutJudge);
-        if (input.material !== undefined && !held) {
-          const material = snifferMaterialForModel(input.material), own = snifferOwnMaterial(material);
-          held = snifferMaterialCarriesSecret(own) || !!snifferInjectionRule(own);
-          if (!held) {
-            // A slow or failed ground-truth call holds the window and counts as unjudged; it never ends the run.
-            let reply: SnifferModelCompletion | undefined;
-            for (const ms of [60_000, 180_000]) {
-              try { reply = await completeSnifferQuestion(model, { pass: 'content', material, ownerContext: ownerContext(), signal: AbortSignal.timeout(ms) }) as SnifferModelCompletion; break; }
-              catch { groundFailures++; }
-            }
-            const parsed = reply && (reply.decisionVerdict ?? parseSnifferBatchResponse(reply.text, new Set([1])).get(1));
-            const verdict = parsed ? { ...parsed, failSafe: reply!.decisionVerdict?.failSafe ?? false } : undefined;
-            if (!verdict || verdict.failSafe) unjudgedWindows++;
-            held = !verdict || snifferVerdictTier(verdict, lane, []).tier !== 'private';
-          }
-        }
-        if (held) { privateWindows++; for (const hash of window.chunkHashes) privateHashes.add(hash); }
+        if (input.secret || (input.material === undefined && input.privateWithoutJudge)) { hold(window.chunkHashes, privateHashes); continue; }
+        if (input.material === undefined) continue;
+        const own = snifferOwnMaterial(snifferMaterialForModel(input.material));
+        if (snifferMaterialCarriesSecret(own) || snifferInjectionRule(own)) { hold(window.chunkHashes, privateHashes); continue; }
+        judgeJobs.push({ material: input.material, hashes: window.chunkHashes, into: privateHashes });
       }
     }
+    // Numbers-only progress on stderr, so a slow run can be told from a stuck one.
+    const progress = (done: number) => process.stderr.write(JSON.stringify({ stage, done, total: judgeJobs.length, windows, calls }) + '\n');
+    progress(0);
+    let next = 0, done = 0;
+    const concurrency = Math.max(1, Math.min(16, Number(process.env.RELEASE_PROOF_CONCURRENCY) || 6));
+    await Promise.all(Array.from({ length: concurrency }, async () => {
+      while (next < judgeJobs.length) {
+        const job = judgeJobs[next++]!;
+        const material = snifferMaterialForModel(job.material);
+        // A slow or failed ground-truth call holds the window and counts as unjudged; it never ends the run.
+        let reply: SnifferModelCompletion | undefined;
+        for (const ms of [60_000, 180_000]) {
+          try { reply = await completeSnifferQuestion(model, { pass: 'content', material, ownerContext: ownerContext(), signal: AbortSignal.timeout(ms) }) as SnifferModelCompletion; break; }
+          catch { groundFailures++; }
+        }
+        const parsed = reply && (reply.decisionVerdict ?? parseSnifferBatchResponse(reply.text, new Set([1])).get(1));
+        const verdict = parsed ? { ...parsed, failSafe: reply!.decisionVerdict?.failSafe ?? false } : undefined;
+        if (!verdict || verdict.failSafe) unjudgedWindows++;
+        if (!verdict || snifferVerdictTier(verdict, lane, []).tier !== 'private') hold(job.hashes, job.into);
+        if (++done % 25 === 0 || done === judgeJobs.length) progress(done);
+      }
+    }));
     const groundTruth = { windows, privateWindows, unjudgedWindows, groundFailures, callsMade: calls - groundCalls, httpCallsMade: httpCalls - groundHttp };
     for (const path of [...appReleaseLogDbPaths(), ...jobLedgerPathsToVisit(ledgers.flatMap(ledger => ledger.knownJobLedgerPaths())).visit]) inside(path);
     stage = 'release-check';
