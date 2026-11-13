@@ -32,11 +32,15 @@ export function driveFolderSearchUrl(name: string): string {
   return `https://drive.google.com/drive/u/0/search?q=${encodeURIComponent(`type:folder "${name}"`)}`;
 }
 
+/** A loading bar the user can see; Drive keeps hidden progressbar elements in the page at rest. */
+const BUSY = `[...document.querySelectorAll('[role=progressbar]')].some(${visible})`;
+const DRIVE_EMPTY = `/no results|no matching|matched this search|try another search|none of your files/i.test(document.body?.innerText || '')`;
+
 /** Drive search has settled: results grid, or the empty state a first run gets before the folder exists. */
-export const DRIVE_SEARCH_SETTLED = `(() => location.pathname.includes('/search') && !document.querySelector('[role=progressbar]') && (!!document.querySelector('[role=grid]') || /no results|matched this search|try another search/i.test(document.body?.innerText || '')))()`;
+export const DRIVE_SEARCH_SETTLED = `(() => location.pathname.includes('/search') && !${BUSY} && (!!document.querySelector('[role=grid]') || ${DRIVE_EMPTY}))()`;
 
 /** What a Drive search page showed, for a failure message: no file names or page text. */
-export const DRIVE_SEARCH_SNAPSHOT = `(() => ({path: location.pathname, grid: !!document.querySelector('[role=grid]'), progress: !!document.querySelector('[role=progressbar]'), rows: document.querySelectorAll('[role=row]').length}))()`;
+export const DRIVE_SEARCH_SNAPSHOT = `(() => ({path: location.pathname, grid: !!document.querySelector('[role=grid]'), progress: !!document.querySelector('[role=progressbar]'), busy: ${BUSY}, empty: ${DRIVE_EMPTY}, rows: document.querySelectorAll('[role=row]').length}))()`;
 
 export async function openBrowserTimingSeeds(machine: Machine, endpoint: string, sources: readonly TimingSource[] = ['dropbox', 'google_drive']) {
   const { host, port } = parseCdpEndpoint(endpoint);
@@ -143,7 +147,7 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
     const listing = providerListingExpression;
     const names = async (folder: SeedFolder) => {
       const tab = folders.get(folder.source)!;
-      await until(() => evaluate(tab.session, `!!document.querySelector('[role=grid], [role=table], table, [data-testid="files-table"], [data-testid="empty-folder"]') && !document.querySelector('[role=progressbar]')`), 'provider folder listing unavailable');
+      await until(() => evaluate(tab.session, `!!document.querySelector('[role=grid], [role=table], table, [data-testid="files-table"], [data-testid="empty-folder"]') && !${BUSY}`), 'provider folder listing unavailable');
       return evaluate<string[]>(tab.session, listing(folder.source));
     };
     const ui: BrowserSeedUi = {
