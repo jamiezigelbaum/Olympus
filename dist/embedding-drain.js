@@ -13490,6 +13490,14 @@ function reportBootStep(env, event, now = Date.now) {
     write(current2, now(), phaseChanged);
   } catch {}
 }
+function duringStoreUpdateStep(env, storeId, step) {
+  reportBootStep(env, { phase: "migrating", storeId });
+  try {
+    return step();
+  } finally {
+    reportBootStep(env, { phase: "starting", storeId });
+  }
+}
 function write(target, nowMs, force) {
   if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS)
     return;
@@ -26366,7 +26374,7 @@ class LocalConnectorStore {
       const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
       if (migrating)
-        validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
+        duringStoreUpdateStep(process.env, SQLITE_STORE_ID, () => validateConnectorStoreRows(this.db, `v${versionAtOpen}`));
       if (options.readOnly === true) {
         const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
@@ -26386,8 +26394,10 @@ class LocalConnectorStore {
         );`);
         validateConnectorStoreSchema(this.db);
         if (migrating) {
-          validateConnectorStoreRows(this.db, "v15");
-          validateConnectorStoreForeignKeys(this.db);
+          duringStoreUpdateStep(process.env, SQLITE_STORE_ID, () => {
+            validateConnectorStoreRows(this.db, "v15");
+            validateConnectorStoreForeignKeys(this.db);
+          });
         }
       }
       if (options.readOnly !== true)

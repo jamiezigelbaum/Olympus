@@ -151,9 +151,9 @@
   },
   {
     "path": "src/core/lifecycle.ts",
-    "symbol": "FRONT_PROGRESS_MAX_STARTS",
+    "symbol": "PROGRESS_MAX_STARTS",
     "reason": "internal",
-    "retire_when": "Remove when the upgrade's readiness wait stops counting front restarts to tell a starting front from a crash loop."
+    "retire_when": "Remove when the upgrade's readiness wait stops counting front and background restarts to tell a starting process from a crash loop."
   },
   {
     "path": "src/core/oauth-relay.ts",

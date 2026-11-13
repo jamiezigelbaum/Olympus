@@ -19693,6 +19693,14 @@ function reportBootStep(env, event, now = Date.now) {
     write(current2, now(), phaseChanged);
   } catch {}
 }
+function duringStoreUpdateStep(env, storeId, step) {
+  reportBootStep(env, { phase: "migrating", storeId });
+  try {
+    return step();
+  } finally {
+    reportBootStep(env, { phase: "starting", storeId });
+  }
+}
 function write(target, nowMs, force) {
   if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS)
     return;
@@ -43137,7 +43145,7 @@ var init_local_index = __esm(() => {
         const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
         validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
         if (migrating)
-          validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
+          duringStoreUpdateStep(process.env, SQLITE_STORE_ID, () => validateConnectorStoreRows(this.db, `v${versionAtOpen}`));
         if (options.readOnly === true) {
           const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
           if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
@@ -43157,8 +43165,10 @@ var init_local_index = __esm(() => {
         );`);
           validateConnectorStoreSchema(this.db);
           if (migrating) {
-            validateConnectorStoreRows(this.db, "v15");
-            validateConnectorStoreForeignKeys(this.db);
+            duringStoreUpdateStep(process.env, SQLITE_STORE_ID, () => {
+              validateConnectorStoreRows(this.db, "v15");
+              validateConnectorStoreForeignKeys(this.db);
+            });
           }
         }
         if (options.readOnly !== true)
@@ -53550,12 +53560,6 @@ async function waitForChildReadiness(input) {
   let deadline = Date.now() + input.startupTimeoutMs;
   const acceptsCleanExit = !input.restartOnCleanExit;
   for (;; ) {
-    if (Date.now() >= deadline) {
-      if (!startupStillInProgress(input.settings, input.child))
-        break;
-      deadline = Date.now() + input.startupTimeoutMs;
-      console.log(`[native-process] startup still in progress past ${Math.round(input.startupTimeoutMs / 1000)} s; waiting`);
-    }
     if (!input.isCurrent(input.lifetime))
       throw new NativeProcessServiceStoppedError;
     if (input.spawnFailed())
@@ -53577,6 +53581,12 @@ async function waitForChildReadiness(input) {
         throw new Error("Child exited during startup.");
       }
       return "ready";
+    }
+    if (Date.now() >= deadline) {
+      if (!startupStillInProgress(input.settings, input.child))
+        break;
+      deadline = Date.now() + input.startupTimeoutMs;
+      console.log(`[native-process] startup still in progress past ${Math.round(input.startupTimeoutMs / 1000)} s; waiting`);
     }
     await delay(input.readinessPollMs);
   }
@@ -254090,7 +254100,7 @@ function readinessFailureDetail(options, outcome) {
   }
   return parts.join("");
 }
-var FRONT_PROGRESS_MAX_STARTS = 3;
+var PROGRESS_MAX_STARTS = 3;
 function waitForWorkerReadiness(options, port, wait) {
   const url = `http://127.0.0.1:${port}/v1/health`;
   let lastCheck;
@@ -254110,6 +254120,7 @@ function waitForWorkerReadiness(options, port, wait) {
   const progressLine = options.progressLine ?? ((line2) => process.stderr.write(`${line2}
 `));
   const frontStarts = new Set;
+  const bootStarts = new Set;
   let lastLineAt = 0;
   let serviceState = "active";
   let ready = probe2();
@@ -254119,11 +254130,14 @@ function waitForWorkerReadiness(options, port, wait) {
       break;
     const now = Date.now();
     const boot = readBoot();
-    const front3 = bootProgressIsLive(boot, now) ? undefined : readFront();
+    if (boot && boot.phase !== "done")
+      bootStarts.add(boot.pid);
+    const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(boot, now);
+    const front3 = bootMoving ? undefined : readFront();
     if (front3 && front3.phase !== "done")
       frontStarts.add(front3.pid);
-    const frontMoving = front3 !== undefined && frontStarts.size <= FRONT_PROGRESS_MAX_STARTS && bootProgressIsLive(front3, now);
-    if (bootProgressIsLive(boot, now) || frontMoving) {
+    const frontMoving = front3 !== undefined && frontStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(front3, now);
+    if (bootMoving || frontMoving) {
       if (now >= firstDeadline && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
         progressLine(frontMoving ? frontProgressLine(front3, now) : bootProgressLine(boot, now));
         lastLineAt = now;

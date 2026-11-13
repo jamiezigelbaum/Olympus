@@ -1096,8 +1096,14 @@ function readinessFailureDetail(
   return parts.join('');
 }
 
-/** A restarted front counts as moving this many times; past that it is crash-looping. */
-const FRONT_PROGRESS_MAX_STARTS = 3;
+/**
+ * A restarted front, or a restarted background, counts as moving this many
+ * times in one wait; past that it is crash-looping. Each new process starts
+ * its progress file over, so without a count a supervisor that keeps
+ * replacing its background holds the wait open with no end and the upgrade
+ * never rolls back (the gate7 forced leg, 2026-11-13).
+ */
+const PROGRESS_MAX_STARTS = 3;
 
 /**
  * Wait for `/v1/health` while the unit stays active. The window is
@@ -1137,6 +1143,7 @@ function waitForWorkerReadiness(
   const readFront = wait.frontProgress ?? options.frontProgress ?? (() => readFrontProgress(lifecycleEnv(options)));
   const progressLine = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
   const frontStarts = new Set<number>();
+  const bootStarts = new Set<number>();
   let lastLineAt = 0;
   let serviceState = 'active';
   let ready = probe();
@@ -1147,10 +1154,12 @@ function waitForWorkerReadiness(
     // Read on every poll: the window restarts from the last poll that saw
     // the worker moving, so the full window begins when it stops.
     const boot = readBoot();
-    const front = bootProgressIsLive(boot, now) ? undefined : readFront();
+    if (boot && boot.phase !== 'done') bootStarts.add(boot.pid);
+    const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(boot, now);
+    const front = bootMoving ? undefined : readFront();
     if (front && front.phase !== 'done') frontStarts.add(front.pid);
-    const frontMoving = front !== undefined && frontStarts.size <= FRONT_PROGRESS_MAX_STARTS && bootProgressIsLive(front, now);
-    if (bootProgressIsLive(boot, now) || frontMoving) {
+    const frontMoving = front !== undefined && frontStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(front, now);
+    if (bootMoving || frontMoving) {
       if (now >= firstDeadline && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
         progressLine(frontMoving ? frontProgressLine(front!, now) : bootProgressLine(boot!, now));
         lastLineAt = now;

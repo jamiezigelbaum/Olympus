@@ -14,6 +14,7 @@ import {
   beginBootProgress,
   bootInProgress,
   bootProgressIsLive,
+  duringStoreUpdateStep,
   finishBootProgress,
   readBootProgress,
   reportBootStep,
@@ -355,6 +356,103 @@ describe('the supervisor waits on boot progress', () => {
   test('a child with no progress still times out', async () => {
     expect(await startWith(false)).toBe('timed out');
   }, 10_000);
+});
+
+describe('a check that reads every row after an update is not a stall (gate7 forced leg, 2026-11-13)', () => {
+  test('inside the step the boot reads as a long update; after it, the stall rule applies again', () => {
+    const env = home();
+    beginBootProgress(env);
+    const seen = duringStoreUpdateStep(env, 'fixture', () => ({
+      phase: readBootProgress(env)?.phase,
+      liveAfter10Min: bootInProgress(env, Date.now() + 10 * 60_000),
+    }));
+    expect(seen).toEqual({ phase: 'migrating', liveAfter10Min: true });
+    expect(readBootProgress(env)?.phase).toBe('starting');
+    expect(bootInProgress(env, Date.now() + 10 * 60_000)).toBe(false);
+  });
+
+  test('a step that throws still returns the boot to starting', () => {
+    const env = home();
+    beginBootProgress(env);
+    expect(() => duringStoreUpdateStep(env, 'fixture', () => { throw new Error('bad rows'); })).toThrow('bad rows');
+    expect(readBootProgress(env)?.phase).toBe('starting');
+  });
+
+  // A real child holds one silent step for longer than the supervisor's
+  // startup timeout, and the supervisor reads its progress as if ten minutes
+  // had passed since the step began: twice the stall limit.
+  async function superviseSilentStep(asUpdateStep: boolean): Promise<string> {
+    const env = home();
+    const readyFile = join(env.HOME!, 'ready');
+    const module = join(import.meta.dir, '..', 'src', 'core', 'boot-progress.ts');
+    const script = `
+      const { beginBootProgress, duringStoreUpdateStep, reportBootStep } = await import(${JSON.stringify(module)});
+      const { writeFileSync } = await import('node:fs');
+      const env = ${JSON.stringify(env)};
+      beginBootProgress(env);
+      const silent = () => { const end = Date.now() + 3000; while (Date.now() < end) {} };
+      if (${asUpdateStep}) duringStoreUpdateStep(env, 'fixture', silent);
+      else { reportBootStep(env, { phase: 'starting', storeId: 'fixture' }); silent(); }
+      writeFileSync(${JSON.stringify(readyFile)}, '');
+      setInterval(() => {}, 1000);
+    `;
+    const service = createNativeProcessService({
+      id: 'fixture', label: 'fixture', initialConfig: {}, reload: { configPrefixes: [] },
+      readinessPollMs: 20, stopGraceMs: 100, restartDelaysMs: [60_000],
+      async prepareStart() {
+        return {
+          command: process.execPath, args: ['-e', script], env: { PATH: process.env.PATH ?? '' },
+          startupTimeoutMs: 1500, endpointOccupied: false,
+          startupInProgress: () => bootInProgress(env, Date.now() + 10 * 60_000),
+          readinessProbe: async () => existsSync(readyFile),
+        };
+      },
+    });
+    try {
+      await service.start({ logger: { warn() {} }, serviceHealth: { reportFailure() {}, clearFailure() {} } });
+      return 'ready';
+    } catch {
+      return 'timed out';
+    } finally {
+      await service.stop();
+    }
+  }
+
+  test('the supervisor waits out a check longer than its timeout and the stall limit', async () => {
+    expect(await superviseSilentStep(true)).toBe('ready');
+  }, 30_000);
+
+  test('the same silence outside an update step still times out', async () => {
+    expect(await superviseSilentStep(false)).toBe('timed out');
+  }, 30_000);
+});
+
+describe('the supervisor probes before it gives up', () => {
+  test('a child that finished its boot during the last wait is ready, not timed out', async () => {
+    const readyAt = Date.now() + 150;
+    const service = createNativeProcessService({
+      id: 'fixture', label: 'fixture', initialConfig: {}, reload: { configPrefixes: [] },
+      // The deadline passes during the wait, and the boot ends then too.
+      readinessPollMs: 400, stopGraceMs: 100, restartDelaysMs: [60_000],
+      async prepareStart() {
+        return {
+          command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], env: { PATH: process.env.PATH ?? '' },
+          startupTimeoutMs: 100, endpointOccupied: false,
+          startupInProgress: () => Date.now() < readyAt,
+          readinessProbe: async () => Date.now() >= readyAt,
+        };
+      },
+    });
+    let outcome = 'ready';
+    try {
+      await service.start({ logger: { warn() {} }, serviceHealth: { reportFailure() {}, clearFailure() {} } });
+    } catch {
+      outcome = 'timed out';
+    } finally {
+      await service.stop();
+    }
+    expect(outcome).toBe('ready');
+  }, 30_000);
 });
 
 describe('the worker reports its boot', () => {
