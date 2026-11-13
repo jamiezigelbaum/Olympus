@@ -15031,7 +15031,7 @@ function engineBackgroundSocketPath(options = {}) {
 function prepareEngineBackgroundSocketDirectory(socketPath) {
   mkdirSync10(dirname23(socketPath), { recursive: true, mode: 448 });
 }
-async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
+async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) {
   const controller = new AbortController;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
@@ -15045,17 +15045,21 @@ async function probeEngineBackground(fetchBackground, authToken, instanceId, tim
       await response.body?.cancel().catch(() => {
         return;
       });
-      return false;
+      return "alive";
     }
     const body = await response.json().catch(() => {
       return;
     });
-    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId);
-  } catch {
-    return false;
+    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId) ? "ready" : "alive";
+  } catch (error) {
+    const name = error?.name;
+    return controller.signal.aborted || name === "AbortError" || name === "TimeoutError" ? "alive" : "down";
   } finally {
     clearTimeout(timeout);
   }
+}
+async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
+  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) === "ready";
 }
 var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_INSTANCE_ENV = "OLYMPUS_ENGINE_BACKGROUND_INSTANCE_ID", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready", ENGINE_COMMANDS_PATH = "/engine/commands", ENGINE_MODEL_COMPLETE_PATH = "/engine/model/complete";
 var init_engine_split = __esm(() => {
@@ -19614,6 +19618,29 @@ function retireStatePath(env, storeId, path) {
   renameSync4(path, backup);
   return true;
 }
+function removeAbandonedBackupCopies(backup) {
+  const prefix = `${basename5(backup)}.`;
+  let names;
+  try {
+    names = readdirSync4(dirname25(backup));
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix))
+      continue;
+    const match = /^(\d+)\.partial(?:-journal|-wal|-shm)?$/.exec(name.slice(prefix.length));
+    if (!match)
+      continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || processAlive(pid))
+      continue;
+    rmSync8(join31(dirname25(backup), name), { force: true });
+    removed += 1;
+  }
+  return removed;
+}
 function preSchemaBackupsOf(dbPath) {
   const prefix = `${basename5(dbPath)}.pre-schema-`;
   try {
@@ -19793,6 +19820,7 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   const file = db.filename;
   const backup = preSchemaBackupPath(file, fromVersion);
   const started = performance.now();
+  removeAbandonedBackupCopies(backup);
   const needed = schemaUpdateSpaceNeeded(statSync12(file).size);
   const free = freeBytes(dirname26(file));
   if (free < needed) {
@@ -220494,9 +220522,10 @@ async function waitForEngineBackground(input) {
   const inProgress = input.inProgress ?? (() => bootInProgress(process.env));
   const deadline = now() + (input.timeoutMs ?? 120000);
   for (;; ) {
-    if (await probeEngineBackground(fetchBackground, input.authToken, undefined, 1000))
+    const answer = await engineBackgroundAnswer(fetchBackground, input.authToken, undefined, 1000);
+    if (answer === "ready")
       return;
-    if (now() >= deadline && !inProgress())
+    if (now() >= deadline && answer === "down" && !inProgress())
       throw new Error("The background engine did not become ready; the front is not serving.");
     await sleep5(input.pollMs ?? 250);
   }
@@ -253197,7 +253226,7 @@ function previousWorkerHealth(options) {
   const minutes = Math.round(timeoutMs / 60000);
   return {
     healthy: false,
-    reason: outcome.serviceState !== "active" ? `stopped (its service is ${outcome.serviceState})` : `did not answer its health check within ${minutes >= 1 ? `${minutes} min` : `${timeoutMs} ms`}`
+    reason: outcome.serviceState !== "active" ? `stopped (its service is ${outcome.serviceState})` : `did not answer its health check within ${minutes >= 1 ? `${minutes} min` : `${timeoutMs} ms`}${outcome.lastCheck ? ` (last check: ${outcome.lastCheck})` : ""}`
   };
 }
 function installManagedWorkerFiles(options = {}) {
@@ -253593,6 +253622,8 @@ function qualifyWorkerReadiness(options, port) {
 }
 function readinessFailureDetail(options, outcome) {
   const parts = [];
+  if (outcome.lastCheck)
+    parts.push(` Its last health check: ${outcome.lastCheck}.`);
   const failures = outcome.front?.failures ?? 0;
   if (failures > 0) {
     parts.push(` Its front stopped ${failures} ${failures === 1 ? "time" : "times"} while starting${outcome.front?.lastFailure ? ` (${outcome.front.lastFailure})` : ""}.`);
@@ -253610,7 +253641,13 @@ function readinessFailureDetail(options, outcome) {
 var FRONT_PROGRESS_MAX_STARTS = 3;
 function waitForWorkerReadiness(options, port, wait) {
   const url = `http://127.0.0.1:${port}/v1/health`;
-  const probe2 = () => wait.probe ? wait.probe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
+  let lastCheck;
+  const probe2 = () => {
+    if (wait.probe)
+      return wait.probe(url);
+    lastCheck = workerHealthCheck(url, options.bunBin);
+    return lastCheck === undefined;
+  };
   const timeoutMs = validateSettleWindow(wait.timeoutMs, "Lifecycle readiness timeout", MAX_READINESS_TIMEOUT_MS);
   const pollMs = validateSettleWindow(options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS, "Lifecycle readiness poll interval", 1e4);
   const waitStartedAt = Date.now();
@@ -253648,7 +253685,7 @@ function waitForWorkerReadiness(options, port, wait) {
   }
   const lastFront = ready ? undefined : readFront();
   const front2 = lastFront && Date.parse(lastFront.updatedAt) >= waitStartedAt ? lastFront : undefined;
-  return { ready, url, serviceState: ready ? "active" : serviceState, front: front2 };
+  return { ready, url, serviceState: ready ? "active" : serviceState, front: front2, ...!ready && lastCheck ? { lastCheck } : {} };
 }
 function workerReadinessPort(options) {
   if (options.port !== undefined)
@@ -253667,31 +253704,40 @@ function validateWorkerReadinessPort(value2) {
   }
   return value2;
 }
-function defaultWorkerReadinessProbe(url, bunBin) {
+function workerHealthCheck(url, bunBin) {
   const executable = bunBin ?? (typeof Bun !== "undefined" ? Bun.which("bun") : null) ?? process.execPath;
   if (!executable || !isAbsolute35(executable))
-    return false;
+    return "no bun executable to run the check";
   let socket;
   try {
     socket = validateWorkerSocket();
-  } catch {
-    return false;
+  } catch (error) {
+    return `the worker socket did not check out (${error instanceof Error ? error.message : "unreadable"})`;
   }
   const script2 = [
     "const url = process.argv.at(-1);",
+    "const fail = (why) => { process.stdout.write(why); process.exit(1); };",
+    "let response;",
     "try {",
-    socket ? `  const response = await fetch(url, { unix: ${JSON.stringify(socket)}, redirect: 'error', signal: AbortSignal.timeout(3000) });` : "  const response = await fetch(url, { signal: AbortSignal.timeout(3000) });",
-    "  const value = response.ok ? await response.json() : undefined;",
-    "  if (!response.ok || !value || value.reachable !== true || value.engine_background === 'unreachable') process.exit(1);",
-    "} catch { process.exit(1); }"
+    socket ? `  response = await fetch(url, { unix: ${JSON.stringify(socket)}, redirect: 'error', signal: AbortSignal.timeout(3000) });` : "  response = await fetch(url, { signal: AbortSignal.timeout(3000) });",
+    "} catch (error) { fail(error?.name === 'TimeoutError' ? 'no answer within 3 s' : `no connection (${error?.code ?? error?.name ?? 'error'})`); }",
+    "if (!response.ok) fail(`status ${response.status}`);",
+    "let value;",
+    "try { value = await response.json(); } catch { fail('an answer that is not JSON'); }",
+    "if (value?.reachable !== true) fail('an answer without reachable: true');",
+    "if (value.engine_background === 'unreachable') fail('the front answered, but its background did not');"
   ].join(`
 `);
   const result = spawnSync17(executable, ["-e", script2, url], {
     encoding: "utf8",
-    stdio: ["ignore", "ignore", "ignore"],
+    stdio: ["ignore", "pipe", "ignore"],
     timeout: 5000
   });
-  return result.status === 0;
+  if (result.status === 0)
+    return;
+  if (result.error || result.signal)
+    return "the check itself did not finish within 5 s";
+  return result.stdout.trim().slice(0, 160) || `the check exited ${result.status}`;
 }
 function serviceInstallOptions(options, dryRun) {
   return {
