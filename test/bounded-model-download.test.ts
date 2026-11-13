@@ -193,8 +193,11 @@ test(`a ${status} chunk already written can be freed while the next read is stil
     onStart: () => {}, onProgress: (bytes) => { if (bytes > 0) written(); },
   });
   await firstWritten;
-  for (let round = 0; round < 3; round += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  // A collection may leave a free chunk for a later one, so collect until it
+  // is gone or enough rounds have passed: a chunk the download still holds
+  // survives every round (#1584).
+  for (let round = 0; round < 20 && first?.deref() !== undefined; round += 1) {
+    await new Promise((resolve) => setTimeout(resolve, round < 3 ? 0 : 10));
     Bun.gc(true);
   }
   const retained = first?.deref() !== undefined;
