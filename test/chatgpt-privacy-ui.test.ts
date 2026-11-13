@@ -185,7 +185,7 @@ interface Setup {
   saves: any[];
 }
 
-async function openPrivacy(options: { description?: string; rules?: unknown[]; pending?: number; sources?: unknown[]; dashboard?: DashboardViewModelV1; setResult?: Serve; getResult?: Serve } = {}): Promise<Setup> {
+async function openPrivacy(options: { description?: string; rules?: unknown[]; pending?: number; sources?: unknown[]; dashboard?: DashboardViewModelV1; setResult?: Serve; getResult?: Serve; scope?: Serve } = {}): Promise<Setup> {
   let issued = 0;
   const saves: any[] = [];
   const dashboard = options.dashboard ?? model({ configured: false, pendingCount: 0 }, { needsYou: [ASK], sources: (options.sources ?? [DROPBOX, GMAIL]) as any });
@@ -197,7 +197,7 @@ async function openPrivacy(options: { description?: string; rules?: unknown[]; p
       saves.push(args);
       return privacyResult(args.description ?? '', args.rules ?? [], 0, { status: 'saved' });
     }),
-    [S.scopeList]: scopeServer,
+    [S.scopeList]: options.scope ?? scopeServer,
   });
   host.push({ structuredContent: dashboard });
   host.button(dashboard.needsYou.length ? 'Set up' : W.edit).click();
@@ -229,10 +229,16 @@ function expectNamesOnlyInPrivacy(host: Host) {
 }
 
 /** The control in the list row that names this folder or label. */
-function rowButton(host: Host, name: string): HTMLButtonElement {
+/** A checklist row's checkbox, by the row's name. */
+function rowBox(host: Host, name: string): HTMLInputElement {
   const row = Array.from(host.doc.querySelectorAll('.frow')).find((node) => (node.querySelector('.fname-text')?.textContent ?? '') === name);
   if (!row) throw new Error(`no row ${name}`);
-  return row.querySelector('.btn') as unknown as HTMLButtonElement;
+  return row.querySelector('input[type=checkbox]') as unknown as HTMLInputElement;
+}
+
+/** Tick (or untick) one row of a checklist, as a click does. */
+function tickRow(host: Host, name: string): void {
+  rowBox(host, name).click();
 }
 
 function ruleRows(host: Host): string[] {
@@ -384,14 +390,15 @@ describe('adding rules', () => {
     // No choices sheet, no Save in pick mode; an already-private folder says so.
     expect(host.doc.querySelector('.fstatus')).toBeNull();
     expect(host.doc.querySelector('.privacy-sheet-actions')).not.toBeNull();
-    expect(rowButton(host, 'Medical Records').textContent).toBe(W.alreadyPrivate);
-    expect(rowButton(host, 'Medical Records').disabled).toBe(true);
-    // Tapping a name drills in.
-    host.button('Tax Returns 2024›').click();
+    expect(rowBox(host, 'Medical Records').checked).toBe(true);
+    expect(rowBox(host, 'Medical Records').disabled).toBe(true);
+    expect(rowBox(host, 'Medical Records').closest('.frow')!.textContent).toContain(W.alreadyPrivate);
+    // The › beside a name drills in.
+    host.button('Open Tax Returns 2024').click();
     await host.settle();
     expect(host.toolCalls(S.scopeList).at(-1)).toEqual({ source_id: 'dropbox.files', parent_key: 'k-a' });
     expect(host.text()).toContain('Therapy Notes');
-    host.button('Choose Therapy Notes').click();
+    tickRow(host, 'Therapy Notes');
     host.button(W.next).click();
     host.button(W.makePrivate).click();
     await host.settle();
@@ -401,6 +408,70 @@ describe('adding rules', () => {
     expect(saves[0].rules).toContainEqual({ kind: 'folder', source_id: 'dropbox.files', key: 'k-a1', display: 'Therapy Notes' });
     expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:add');
     expectNamesOnlyInPrivacy(host);
+  });
+
+  test('a long folder list is ticked several at once: whole level listed, filter, Select all shown, count, one save', async () => {
+    // 150 notebooks over two pages, like an Evernote account (owner feedback, 2026-11-13: about 20 of 180).
+    const names = Array.from({ length: 150 }, (_unused, index) => `${index % 3 === 0 ? 'Therapy' : 'Notes'} ${String(index).padStart(3, '0')}`);
+    const nodes = names.map((name, index) => folderNode(`nb-${index}`, name));
+    const scope = (args: any): Result => {
+      const page = args.cursor === 'c2' ? nodes.slice(100) : nodes.slice(0, 100);
+      const result: any = browse(page, args.source_id);
+      if (args.cursor !== 'c2') Object.assign(result._meta[CHATGPT_SCOPE_META_KEY], { next_cursor: 'c2', remaining: 50 });
+      return result;
+    };
+    const { host, saves } = await openPrivacy({ scope });
+    host.button(W.addRule).click();
+    host.button(W.addFolder).click();
+    host.button(W.next).click();
+    await host.settle();
+    // Both pages, without a Show more.
+    expect(host.toolCalls(S.scopeList)).toEqual([{ source_id: 'dropbox.files' }, { source_id: 'dropbox.files', cursor: 'c2' }]);
+    const boxes = () => Array.from(host.doc.querySelectorAll('input[type=checkbox]')) as unknown as HTMLInputElement[];
+    expect(boxes()).toHaveLength(150);
+    // Nothing is ticked to begin with, and Next waits for a tick.
+    expect(boxes().some((box) => box.checked)).toBe(false);
+    expect(host.button(W.next).disabled).toBe(true);
+    const filter = host.doc.querySelector('input[data-key="picker:filter"]') as unknown as HTMLInputElement;
+    filter.value = 'therapy';
+    filter.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    expect(boxes()).toHaveLength(50);
+    host.button(W.selectAll.replace('{n}', '50')).click();
+    expect(host.text()).toContain(W.selectedCount.many.replace('{n}', '50'));
+    // Untick one, then add one the filter hides.
+    tickRow(host, 'Therapy 000');
+    const again = host.doc.querySelector('input[data-key="picker:filter"]') as unknown as HTMLInputElement;
+    again.value = '';
+    again.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    expect(boxes()).toHaveLength(150);
+    tickRow(host, 'Notes 001');
+    expect(host.text()).toContain(W.selectedCount.many.replace('{n}', '50'));
+    expect(saves).toHaveLength(0);
+    host.button(W.next).click();
+    expect(host.text()).toContain(W.confirmRules.replace('{n}', '50'));
+    host.button(W.makePrivate).click();
+    await host.settle();
+    expect(saves).toHaveLength(1);
+    const folders = saves[0].rules.filter((rule: any) => rule.kind === 'folder');
+    expect(folders).toHaveLength(50);
+    expect(folders).toContainEqual({ kind: 'folder', source_id: 'dropbox.files', key: 'nb-1', display: 'Notes 001' });
+    expect(folders.some((rule: any) => rule.key === 'nb-0')).toBe(false);
+    expect(ruleRows(host)).toHaveLength(50);
+    expectNamesOnlyInPrivacy(host);
+  });
+
+  test('ticking stops at the most rules a save can carry, and says so', async () => {
+    const saved = Array.from({ length: 98 }, (_unused, index) => ({ kind: 'sender', source_id: 'gmail.email', value: `p${index}@example.com`, display: `p${index}@example.com` }));
+    const names = Array.from({ length: 5 }, (_unused, index) => `Box ${index}`);
+    const { host } = await openPrivacy({ rules: saved, scope: (args: any) => browse(names.map((name, index) => folderNode(`b-${index}`, name)), args.source_id) });
+    host.button(W.addRule).click();
+    host.button(W.addFolder).click();
+    host.button(W.next).click();
+    await host.settle();
+    host.button(W.selectAll.replace('{n}', '5')).click();
+    expect(host.text()).toContain(W.selectedCount.many.replace('{n}', '2'));
+    expect(host.text()).toContain(W.ruleLimit.replace('{max}', '2'));
+    expect(rowBox(host, 'Box 4').disabled).toBe(true);
   });
 
   test('with two folder sources the account comes first; Back from the picker returns without a rule', async () => {
@@ -434,9 +505,9 @@ describe('adding rules', () => {
     expect(host.toolCalls(S.scopeList)).toEqual([{ source_id: 'gmail.email' }]);
     expect(host.text()).toContain(W.labelTitle);
     expect(host.text()).toContain('Sent');
-    expect(rowButton(host, 'Lawyer Letters').textContent).toBe(W.alreadyPrivate);
-    expect(rowButton(host, 'Lawyer Letters').disabled).toBe(true);
-    host.button('Choose Kids School').click();
+    expect(rowBox(host, 'Lawyer Letters').checked).toBe(true);
+    expect(rowBox(host, 'Lawyer Letters').disabled).toBe(true);
+    tickRow(host, 'Kids School');
     host.button(W.next).click();
     host.button(W.makePrivate).click();
     await host.settle();
@@ -658,7 +729,7 @@ describe('saving', () => {
             host.button(kind === 'folder' ? W.addFolder : W.addLabel).click();
             host.button(W.next).click();
             await host.settle();
-            host.button(`Choose ${name}`).click();
+            tickRow(host, name);
             host.button(W.next).click();
             host.button(W.makePrivate).click();
           }
@@ -1352,7 +1423,7 @@ describe('privacy sheet persistence boundaries', () => {
       expect(host.text()).toContain('Step 2 of 3');
       expect(host.doc.querySelectorAll('.privacy-sheet-actions')).toHaveLength(1);
       const name = kind === 'folder' ? 'Medical Records' : 'Lawyer Letters';
-      host.button(`Choose ${name}`).click();
+      tickRow(host, name);
       expect(saves).toHaveLength(0);
       host.button(W.next).click();
       expect(host.text()).toContain('Step 3 of 3');
@@ -1360,8 +1431,8 @@ describe('privacy sheet persistence boundaries', () => {
       host.button(W.sheetBack).click();
       await host.settle();
       expect(host.text()).toContain('Step 2 of 3');
-      // The folder browser starts afresh; labels retain the in-session selection.
-      if (kind === 'folder') host.button(`Choose ${name}`).click();
+      // Both lists keep what was ticked.
+      expect(rowBox(host, name).checked).toBe(true);
       host.button(W.next).click();
       const confirm = host.button(W.makePrivate);
       confirm.click(); confirm.click();

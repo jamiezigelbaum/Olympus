@@ -12,8 +12,8 @@
  * written to widget state, model context, the page URL or logs, and the only
  * tool call that carries any of them is the scope save (opaque folder keys;
  * label id and name, which the mail contract requires). Closing the picker
- * drops the session. Pick mode (the privacy flow's Add a folder) saves
- * nothing: it hands the one picked folder's key and name back to its caller.
+ * drops the session. Pick mode (the privacy flow's Add folders) saves
+ * nothing: it hands the picked folders' keys and names back to its caller.
  * Drop mode (the computer's Import an archive) is not a browser at all: a
  * drop zone takes a folder or a file the person drags in or chooses with the
  * system's own dialog. The page hands its files to the host (the page that
@@ -119,16 +119,68 @@ export interface ChatGptPickerKit {
   close(notice: string, refresh: boolean, focusKey: string): void;
 }
 
-/** Words for picking one folder (the privacy flow's Add a folder); the caller owns them. */
+/**
+ * Words for a checklist: a list, often long, where the person ticks several
+ * things at once (always-private folders, notebooks, labels). The caller owns them.
+ */
+export interface ChatGptChecklistWords {
+  /** The filter box's label, and its placeholder ({n} how many are listed). */
+  filter: string;
+  filterPlaceholder: string;
+  /** Ticks every row the filter shows ({n} of them). */
+  selectAll: string;
+  clear: string;
+  /** How many are ticked, across every level. */
+  count: { one: string; many: string };
+  noMatch: string;
+  /** Beside a row the caller already holds: shown ticked, not changeable. */
+  taken: string;
+  chooseFor: string;
+  openFor: string;
+  /** No more can be ticked ({max} the most the caller takes). */
+  limit: string;
+}
+
+/** One row of a checklist: its key and name, whether the caller already holds it, and how to open it. */
+export interface ChatGptChecklistItem {
+  key: string;
+  name: string;
+  taken?: boolean;
+  open?: (() => void) | null;
+}
+
+/** A checklist to draw: the rows, what is ticked (key to name, kept by the caller) and the caller's re-render. */
+export interface ChatGptChecklist {
+  items: ChatGptChecklistItem[];
+  selected: Map<string, string>;
+  filter: string;
+  setFilter(text: string): void;
+  changed(focusKey: string): void;
+  words: ChatGptChecklistWords;
+  /** Prefix of every control's data-key. */
+  keyPrefix: string;
+  /** The most that may be ticked. */
+  limit: number;
+  busy?: boolean;
+  /** Rows after the list (a load-more row, a truncation note). */
+  after?: Array<HTMLElement | null>;
+}
+
+/** Words for picking folders (the privacy flow's Add folders); the caller owns them. */
 export interface ChatGptFolderPickWords {
   back: string;
   title: string;
   intro: string;
-  makePrivate: string;
-  makePrivateFor: string;
-  alreadyPrivate: string;
-  /** Optional three-step privacy sheet; ordinary pickers keep their existing layout. */
-  stepSheet?: { step: string; next: string; back: string };
+  /** The checkbox list's words. */
+  list: ChatGptChecklistWords;
+  /** The three-step privacy sheet around the list. */
+  stepSheet: { step: string; next: string; back: string };
+}
+
+/** Pick mode's options: the most folders that may be picked, and folders already picked on an earlier pass. */
+export interface ChatGptFolderPickOptions {
+  limit?: number;
+  selected?: ChatGptPickedFolder[];
 }
 
 /** Words for importing an archive (the computer's Archives row): the drop zone and what follows it; the caller owns them. */
@@ -199,11 +251,14 @@ export interface ChatGptPicker {
   handles(fix: Any): boolean;
   start(fix: Any, sourceId: string, sourceLabel: string, returnKey: string): void;
   /**
-   * Browse one folder source a level per screen and pick a single folder, with
-   * no choices and no save: `done` gets the folder, or null on Back.
+   * Browse one folder source a level per screen and tick any number of
+   * folders, at any level, with no save: `done` gets them, or null on Back.
    * `taken` keys show as already picked.
    */
-  pickFolder(sourceId: string, sourceLabel: string, words: ChatGptFolderPickWords, taken: string[], done: (folder: ChatGptPickedFolder | null) => void): void;
+  pickFolder(sourceId: string, sourceLabel: string, words: ChatGptFolderPickWords, taken: string[],
+    done: (folders: ChatGptPickedFolder[] | null) => void, options?: ChatGptFolderPickOptions): void;
+  /** Draw a checklist (filter, select all shown, count, checkbox rows); privacy's label list uses it too. */
+  checklist(list: ChatGptChecklist): HTMLElement;
   /**
    * Computer only: a drop zone for a folder or a file to import. What is dropped
    * (or chosen) is uploaded and the engine is asked to approve it; the screen
@@ -237,6 +292,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   const ACCOUNT = '@account';
   /** olympus_scope_set accepts at most this many explicit rules (its input schema's maxItems). */
   const MAX_RULES = 100;
+  /** Pick mode reads up to this many pages of one level by itself (100 folders a page). */
+  const PICK_PAGES = 20;
 
   function handles(fix: Any): boolean {
     return !!fix && (fix.tool === T.connectSource || fix.tool === T.scopeList);
@@ -253,7 +310,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
    * open); only the connected hand-off, which just set a fresh dashboard,
    * skips it.
    */
-  function leave(notice: string, refresh: boolean, picked?: ChatGptPickedFolder): void {
+  function leave(notice: string, refresh: boolean, picked?: ChatGptPickedFolder[]): void {
     stopTimer();
     if (p && p.pick) {
       const done = p.pick.done;
@@ -443,12 +500,102 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   function pickFolder(sourceId: string, sourceLabel: string, words: ChatGptFolderPickWords, taken: string[],
-    done: (folder: ChatGptPickedFolder | null) => void): void {
+    done: (folders: ChatGptPickedFolder[] | null) => void, options?: ChatGptFolderPickOptions): void {
     stopTimer();
     session++;
     if (kit.compact()) kit.fullscreen();
-    openScope(sourceId, sourceLabel, words.title, '', '', undefined, { words, taken: taken.slice(), done });
+    const selected = new Map<string, string>();
+    for (const folder of (options && options.selected) || []) {
+      if (folder && typeof folder.key === 'string' && folder.key && taken.indexOf(folder.key) < 0) selected.set(folder.key, String(folder.name || ''));
+    }
+    const limit = options && typeof options.limit === 'number' && isFinite(options.limit) ? Math.max(0, Math.floor(options.limit)) : MAX_RULES;
+    openScope(sourceId, sourceLabel, words.title, '', '', undefined,
+      { words, taken: taken.slice(), done, selected, limit, filter: '', filterAt: null, pages: new Map() });
   }
+
+  // ---- checklist -----------------------------------------------------------
+  // A long list ticked several at a time: a filter box, Select all of what it
+  // shows, Clear, the count, and one checkbox per row. Names stay on screen.
+  function plain(text: string): string {
+    return String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  }
+
+  function checklist(list: ChatGptChecklist): HTMLElement {
+    const words = list.words;
+    const wrap = el('div', 'checklist');
+    const query = plain(list.filter).trim();
+    const shown = query ? list.items.filter((item) => plain(item.name).indexOf(query) >= 0) : list.items;
+    const open = shown.filter((item) => !item.taken);
+    const full = list.selected.size >= list.limit;
+    if (list.items.length > 8 || list.filter) {
+      const field = el('label', 'field checklist-filter');
+      add(field, el('span', 'field-label', words.filter));
+      const input = el('input', 'text') as HTMLInputElement;
+      input.type = 'search';
+      input.setAttribute('autocomplete', 'off');
+      input.spellcheck = false;
+      input.placeholder = fill(words.filterPlaceholder, { n: kit.count(list.items.length) });
+      input.value = list.filter;
+      input.setAttribute('data-key', list.keyPrefix + 'filter');
+      input.addEventListener('input', () => list.setFilter(input.value));
+      add(field, input);
+      add(wrap, field);
+    }
+    const bar = el('div', 'checklist-bar');
+    const unticked = open.filter((item) => !list.selected.has(item.key));
+    const all = kit.button(fill(words.selectAll, { n: kit.count(open.length) }), list.keyPrefix + 'all',
+      list.busy || !unticked.length || full ? null : () => {
+        for (const item of unticked) {
+          if (list.selected.size >= list.limit) break;
+          list.selected.set(item.key, item.name);
+        }
+        list.changed(list.keyPrefix + 'all');
+      }, 'plain');
+    const clear = kit.button(words.clear, list.keyPrefix + 'clear', list.busy || !list.selected.size ? null : () => {
+      list.selected.clear();
+      list.changed(list.keyPrefix + 'clear');
+    }, 'plain');
+    const tally = el('p', 'checklist-count', fill(list.selected.size === 1 ? words.count.one : words.count.many, { n: kit.count(list.selected.size) }));
+    tally.setAttribute('aria-live', 'polite');
+    add(wrap, add(bar, add(el('div', 'actions'), all, clear), tally));
+    if (full) add(wrap, el('p', 'reason', fill(words.limit, { max: kit.count(list.limit) })));
+    const rows = el('ul', 'flist');
+    for (const item of shown) {
+      const li = el('li', 'frow pick check-row');
+      const label = el('label', 'check');
+      const box = el('input') as HTMLInputElement;
+      box.type = 'checkbox';
+      box.setAttribute('data-key', list.keyPrefix + 'pick:' + item.key);
+      box.checked = !!item.taken || list.selected.has(item.key);
+      box.disabled = !!item.taken || !!list.busy || (!box.checked && full);
+      box.setAttribute('aria-label', fill(words.chooseFor, { name: item.name }));
+      box.addEventListener('change', () => {
+        if (box.checked) {
+          if (list.selected.size < list.limit) list.selected.set(item.key, item.name);
+        } else list.selected.delete(item.key);
+        list.changed(list.keyPrefix + 'pick:' + item.key);
+      });
+      add(label, box, el('span', 'fname-text', item.name));
+      label.title = item.name;
+      add(li, label);
+      if (item.taken) add(li, el('span', 'ftag', words.taken));
+      if (item.open) {
+        const opener = el('button', 'btn check-open') as HTMLButtonElement;
+        opener.type = 'button';
+        opener.textContent = '›';
+        opener.setAttribute('data-key', 'picker:open:' + item.key);
+        opener.setAttribute('aria-label', fill(words.openFor, { name: item.name }));
+        if (list.busy) opener.disabled = true;
+        else opener.addEventListener('click', item.open);
+        add(li, opener);
+      }
+      add(rows, li);
+    }
+    if (!shown.length && list.items.length) add(rows, el('li', 'muted fempty', words.noMatch));
+    for (const row of list.after || []) if (row) add(rows, row);
+    return add(wrap, rows);
+  }
+
 
   // ---- drop mode (Import an archive) -----------------------------------------
   // A folder or a file dragged onto the zone, or chosen with the system's own
@@ -1204,6 +1351,15 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       p.rootCursor = next;
     }
     p.loading = '';
+    // Pick mode lists a level whole, so the filter and Select all see every folder in it.
+    if (p.pick && next && !blockedByComputer(levelAccess)) {
+      const pages = (p.pick.pages.get(parentKey) || 0) + 1;
+      p.pick.pages.set(parentKey, pages);
+      if (pages < PICK_PAGES) {
+        list(parentKey, true, after);
+        return;
+      }
+    }
     if (after) after();
     else kit.render(focus);
   }
@@ -1681,43 +1837,36 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     });
   }
 
-  /** Pick mode: Make private, or Already private when the caller holds it. */
-  function pickButton(key: string, name: string, focusKey: string): HTMLButtonElement {
-    const words = p.pick.words;
-    if (p.pick.taken.indexOf(key) >= 0) return kit.button(words.alreadyPrivate, focusKey, null, 'plain');
-    const selected = p.pick.selected && p.pick.selected.key === key;
-    const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => {
-      if (!words.stepSheet) return leave('', false, { key, name });
-      p.pick.selected = { key, name };
-      kit.render(focusKey);
-    }, 'plain');
-    if (words.stepSheet) control.setAttribute('aria-pressed', String(!!selected));
-    control.setAttribute('aria-label', fill(words.makePrivateFor, { name }));
-    return control;
-  }
-
-  /** Pick mode keeps its own row: the name opens the folder, Make private on the right. */
-  function pickRow(node: Any): HTMLElement {
-    const key = node.key;
-    const li = el('li', 'frow pick');
-    const label = (target: HTMLElement): HTMLElement => {
-      add(target, el('span', 'fname-text', node.name));
-      return target;
-    };
-    if (node.has_children) {
-      const open = el('button', 'fname') as HTMLButtonElement;
-      open.type = 'button';
-      open.setAttribute('data-key', 'picker:open:' + key);
-      label(open);
-      const chevron = el('span', 'chev', '›');
-      chevron.setAttribute('aria-hidden', 'true');
-      add(open, chevron);
-      if (p.loading || p.saving) open.disabled = true;
-      else open.addEventListener('click', () => drill(key));
-      add(li, open);
-    } else add(li, label(el('p', 'fname leaf')));
-    if (node.selectable !== false) add(li, pickButton(key, node.name, 'picker:pick:' + key));
-    return li;
+  /** Pick mode: one level's folders as a checklist (the folder itself, when inside one, first). */
+  function pickList(parentKey: string, nodes: Any[], hasMore: boolean): HTMLElement {
+    const pick = p.pick;
+    // A new level starts with an empty filter.
+    if (pick.filterAt !== parentKey) {
+      pick.filterAt = parentKey;
+      pick.filter = '';
+    }
+    const items: ChatGptChecklistItem[] = [];
+    const here = parentKey ? p.catalog.get(parentKey) : null;
+    if (parentKey && (!here || here.selectable !== false)) {
+      items.push({ key: parentKey, name: nameOf(parentKey), taken: pick.taken.indexOf(parentKey) >= 0 });
+    }
+    for (const node of nodes) {
+      if (node.selectable === false && !node.has_children) continue;
+      items.push({
+        key: node.key, name: node.name, taken: pick.taken.indexOf(node.key) >= 0 || node.selectable === false,
+        open: node.has_children ? () => drill(node.key) : null,
+      });
+    }
+    const after: Array<HTMLElement | null> = [];
+    if (hasMore) after.push(add(el('li', 'fmore'), loadMore(parentKey)));
+    if (p.truncated.has(parentKey)) after.push(el('li', 'muted fmore', Q.truncated));
+    if (!nodes.length && !parentKey) after.push(el('li', 'muted fempty', Q.noFolders));
+    return checklist({
+      items, selected: pick.selected, filter: pick.filter, words: pick.words.list, keyPrefix: 'picker:', limit: pick.limit,
+      busy: !!p.loading, after,
+      setFilter: (text: string) => { pick.filter = text; kit.render('picker:filter'); },
+      changed: (focusKey: string) => kit.render(focusKey),
+    });
   }
 
   /**
@@ -1754,7 +1903,6 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
    * row's right edge. A leaf has the same narrow empty column, so names align.
    */
   function folderRow(node: Any): HTMLElement {
-    if (p.pick) return pickRow(node);
     const key = node.key;
     const li = el('li', 'frow seg-row');
     const busy = p.loading || p.saving;
@@ -1851,7 +1999,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     if (p.pick) {
       const only = add(el('section', 'fsection'), el('h2', '', p.label));
       add(only, loadingLine());
-      add(only, levelList('', p.roots, !!p.rootCursor));
+      add(only, pickList('', p.roots, !!p.rootCursor));
       add(body, only);
       return;
     }
@@ -1883,15 +2031,11 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     add(body, pathLine());
     noticeAndError(body);
     const node = p.catalog.get(key);
-    if (p.pick) {
-      const here = el('div', 'this-row pick');
-      add(here, add(el('p', 'this-text'), el('span', 'this-label', nameOf(key))));
-      if (!node || node.selectable !== false) add(here, pickButton(key, nameOf(key), 'picker:pick-this'));
-      add(body, here);
-    } else add(body, topRow(Q.thisFolder, folderControl(key, nameOf(key), node)));
+    if (!p.pick) add(body, topRow(Q.thisFolder, folderControl(key, nameOf(key), node)));
     add(body, loadingLine());
     const refused = p.access.get(key);
     if (blockedByComputer(refused) && !p.loading) add(body, accessNote(refused, () => list(key, false)));
+    else if (p.pick) add(body, pickList(key, p.branches.get(key) || [], p.cursors.has(key)));
     else add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
   }
 
@@ -2243,7 +2387,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }
     backButton.className = 'btn back';
     add(top, backButton);
-    if (p.pick && p.pick.words.stepSheet) {
+    if (p.pick) {
       page.className += ' privacy';
       add(page, el('p', 'muted', p.pick.words.stepSheet.step));
       const progress = el('progress') as HTMLProgressElement;
@@ -2265,11 +2409,13 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     if (p.mode === 'connect') connectView(page);
     else if (p.mode === 'mail') mailView(page);
     else foldersView(page);
-    if (p.pick && p.pick.words.stepSheet) {
+    if (p.pick) {
       const words = p.pick.words.stepSheet;
+      const chosen: ChatGptPickedFolder[] = [];
+      p.pick.selected.forEach((name: string, key: string) => chosen.push({ key, name: name || nameOf(key) }));
       add(page, add(el('div', 'actions privacy-sheet-actions'),
         kit.button(words.back, deep ? 'picker:up' : 'picker:back', escape, 'plain'),
-        kit.button(words.next, 'picker:pick-next', p.pick.selected && !p.loading ? () => leave('', false, p.pick.selected) : null, 'main')));
+        kit.button(words.next, 'picker:pick-next', chosen.length && !p.loading ? () => leave('', false, chosen) : null, 'main')));
     }
     return page;
   }
@@ -2306,6 +2452,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     handles,
     start,
     pickFolder,
+    checklist,
     pickArchive,
     active: () => !!p || !!drop,
     view,

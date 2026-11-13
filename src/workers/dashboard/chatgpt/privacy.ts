@@ -5,7 +5,8 @@
  * Two tiers are the person's to choose: Personal (shared with ChatGPT, the
  * default) and Private (answered on the Mac only). Secret is detected on the
  * Mac and never offered here. The person describes what is private in their
- * own words and may add always-private folders, Gmail labels and senders.
+ * own words and may add always-private folders, Gmail labels and senders,
+ * several folders or labels in one pass.
  *
  * Like picker.ts, `chatgptPrivacyProgram` is never called on the server: the
  * page inlines its source text and hands it to the client with a small kit.
@@ -104,6 +105,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   let s: Any = null;
   let session = 0;
+  /** olympus_privacy_set takes at most this many rules (privacy-profile.ts PRIVACY_RULES_MAX). A literal: this program sees nothing outside it. */
+  const MAX_RULES = 100;
   let questionTimer: ReturnType<typeof setTimeout> | undefined;
 
   function handles(fix: Any): boolean {
@@ -128,7 +131,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       sender: '', senderError: '',
       questionKey: null, questionVersion: 0, questionLoading: false, generated: null, questionAnswers: {},
       checkKey: null, checking: false, checkResult: null, checkError: '',
-      editingDescription: false, questionsError: '', detailsOpen: false, conflictDetailsOpen: false, candidate: null, ruleKind: '',
+      editingDescription: false, questionsError: '', detailsOpen: false, conflictDetailsOpen: false, candidates: [], ruleKind: '',
+      // Labels ticked on the label list (id to name), its filter, and folders ticked in the picker, kept while the sheet goes Back.
+      labelPicks: new Map(), labelFilter: '', folderPicks: [],
     };
     load();
   }
@@ -251,15 +256,24 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     return !s.server && !s.questionLoading && !s.checking && (s.edited || (s.editingDescription && askedQuestions().length > 0));
   }
 
-  function addRule(rule: Any): void {
-    if (s.saving || s.server) return;
-    // Save only the addition against the saved revision. Other draft edits may
+  /** How many more rules a save can carry. */
+  function room(): number {
+    return Math.max(0, MAX_RULES - kept().length - s.hidden.length);
+  }
+
+  function addRules(added: Any[]): void {
+    if (s.saving || s.server || !added.length) return;
+    // Save only the additions against the saved revision. Other draft edits may
     // lower protection and must retain their separate confirmation.
     const baseline = s.savedRules.slice().concat(s.hidden);
-    if (!s.savedRules.some((item: Any) => identity(item) === identity(rule))) baseline.push(ruleOut(rule));
-    // Record the choice before sending: failures and conflicts do not erase it.
-    L.addTo(s.rules, rule);
-    L.setIntent(s.intents, rule, true);
+    for (const rule of added) {
+      if (!baseline.some((item: Any) => identity(item) === identity(rule))) baseline.push(ruleOut(rule));
+    }
+    // Record the choices before sending: failures and conflicts do not erase them.
+    for (const rule of added) {
+      L.addTo(s.rules, rule);
+      L.setIntent(s.intents, rule, true);
+    }
     changed();
     const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     const args: Any = { description: s.savedDescription, rules: baseline };
@@ -278,9 +292,10 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
         kit.render('privacy:save');
         return;
       }
-      // This immediate save covers only this addition, never other pending edits.
-      if (!L.satisfies([{ rule, present: true }], data.rules)) return conflict(data);
-      draft.intents = draft.intents.filter((intent: Any) => identity(intent.rule) !== identity(rule));
+      // This immediate save covers only these additions, never other pending edits.
+      if (!L.satisfies(added.map((rule: Any) => ({ rule, present: true })), data.rules)) return conflict(data);
+      const ids = added.map(identity);
+      draft.intents = draft.intents.filter((intent: Any) => ids.indexOf(identity(intent.rule)) < 0);
       take(data);
       s.intents = draft.intents;
       const replayed = L.replay(draft, s.rules);
@@ -522,22 +537,34 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const mine = session;
     const taken = kept().filter((rule: Any) => rule.kind === 'folder' && rule.source_id === id && typeof rule.key === 'string')
       .map((rule: Any) => rule.key);
+    // Back from the review keeps what was ticked in this account.
+    const again = s.folderPicks.filter((rule: Any) => rule.source_id === id).map((rule: Any) => ({ key: rule.key, name: rule.display }));
+    s.folderPicks = [];
     s.picking = true;
     kit.picker!.pickFolder(id, label, {
       back: W.backToPrivacy,
       title: W.folderTitle,
       intro: W.folderIntro,
-      makePrivate: W.select,
-      makePrivateFor: W.selectFor,
+      list: listWords(),
       stepSheet: { step: W.stepPick, next: W.next, back: W.sheetBack },
-      alreadyPrivate: W.alreadyPrivate,
-    }, taken, (folder) => {
+    }, taken, (folders) => {
       if (mine !== session || !s) return;
       s.picking = false;
       s.screen = 'kinds';
-      if (folder) reviewRule({ kind: 'folder', source_id: id, key: folder.key, display: folder.name, removed: false });
-      kit.render(folder ? 'privacy:sheet:confirm' : 'privacy:add:folder');
-    });
+      const rules = (folders || []).map((folder) => ({ kind: 'folder', source_id: id, key: folder.key, display: folder.name, removed: false }));
+      s.folderPicks = rules;
+      if (rules.length) reviewRules(rules);
+      kit.render(rules.length ? 'privacy:sheet:confirm' : 'privacy:add:folder');
+    }, { limit: room(), selected: again });
+  }
+
+  /** The checklist's words, shared by folders and labels. */
+  function listWords(): Any {
+    return {
+      filter: W.filter, filterPlaceholder: W.filterPlaceholder, selectAll: W.selectAll, clear: W.clearSelection,
+      count: W.selectedCount, noMatch: W.noMatch, taken: W.alreadyPrivate, chooseFor: W.selectFor, openFor: W.openFor,
+      limit: W.ruleLimit,
+    };
   }
 
   // ---- add a Gmail label -------------------------------------------------
@@ -545,6 +572,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (!gmailConnected()) return;
     s.screen = 'labels';
     s.labels = [];
+    s.labelFilter = '';
     s.labelsLoading = true;
     s.labelsError = '';
     kit.render('privacy:back');
@@ -592,7 +620,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       kit.render('privacy:sender');
       return;
     }
-    reviewRule(rule);
+    reviewRules([rule]);
   }
 
   // ---- views -------------------------------------------------------------
@@ -876,7 +904,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       add(rules, listNode);
     } else add(rules, el('p', 'muted fempty', W.rulesEmpty));
     add(rules, kit.button(W.addRule, 'privacy:add', !s.saving && !s.server ? () => {
-      s.screen = 'kinds'; s.ruleKind = ''; s.candidate = null; s.sender = ''; s.senderError = '';
+      s.screen = 'kinds'; s.ruleKind = ''; s.candidates = []; s.sender = ''; s.senderError = '';
+      s.labelPicks = new Map(); s.folderPicks = [];
       kit.render('privacy:add:folder');
     } : null, 'plain'));
     if (s.server) add(rules, el('p', 'reason', W.conflictAddBlocked));
@@ -964,26 +993,27 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       add(page, line);
       return;
     }
-    const listNode = el('ul', 'flist');
-    if (!s.labels.length) add(listNode, el('li', 'muted fempty', W.noLabels));
+    if (!s.labels.length) {
+      add(page, add(el('ul', 'flist'), el('li', 'muted fempty', W.noLabels)));
+      return;
+    }
     const mail = kit.config.mailSourceId;
-    s.labels.forEach((label: Any, index: number) => {
-      const name = labelName(label);
-      const li = add(el('li', 'frow pick'), add(el('p', 'fname leaf'), el('span', 'fname-text', name)));
-      const rule = { kind: 'label', source_id: mail, key: label.id, value: label.name, display: name, removed: false };
-      if (kept().some((other: Any) => other.kind === 'label' && other.source_id === mail && other.key === label.id)) {
-        add(li, kit.button(W.alreadyPrivate, 'privacy:label:' + index, null, 'plain'));
-      } else {
-        const control = kit.button(s.candidate && identity(s.candidate) === identity(rule) ? W.selected : W.select, 'privacy:label:' + index, () => {
-          s.candidate = rule;
-          kit.render('privacy:sheet:next');
-        }, 'plain');
-        control.setAttribute('aria-label', fill(W.selectFor, { name }));
-        add(li, control);
-      }
-      add(listNode, li);
-    });
-    add(page, listNode);
+    add(page, kit.picker!.checklist({
+      items: s.labels.map((label: Any) => ({
+        key: label.id, name: labelName(label),
+        taken: kept().some((other: Any) => other.kind === 'label' && other.source_id === mail && other.key === label.id),
+      })),
+      selected: s.labelPicks, filter: s.labelFilter, words: listWords(), keyPrefix: 'privacy:label:', limit: room(),
+      setFilter: (text: string) => { s.labelFilter = text; kit.render('privacy:label:filter'); },
+      changed: (focusKey: string) => kit.render(focusKey),
+    }));
+  }
+
+  /** The ticked labels as rules, in the list's order. */
+  function pickedLabels(): Any[] {
+    const mail = kit.config.mailSourceId;
+    return s.labels.filter((label: Any) => s.labelPicks.has(label.id))
+      .map((label: Any) => ({ kind: 'label', source_id: mail, key: label.id, value: label.name, display: labelName(label), removed: false }));
   }
 
   function senderView(page: HTMLElement): void {
@@ -1031,8 +1061,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     return details;
   }
 
-  function reviewRule(rule: Any): void {
-    s.candidate = rule;
+  function reviewRules(rules: Any[]): void {
+    s.candidates = rules;
     s.screen = 'review';
     kit.render('privacy:sheet:confirm');
   }
@@ -1047,7 +1077,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       ['folder', W.addFolder, folders], ['label', W.addLabel, gmailConnected()], ['sender', W.addSender, true],
     ] as const) {
       const button = kit.button(label, 'privacy:add:' + kind, enabled ? () => {
-        s.candidate = null; s.ruleKind = kind; kit.render('privacy:add:' + kind);
+        s.candidates = []; s.ruleKind = kind; kit.render('privacy:add:' + kind);
       } : null, 'plain');
       button.setAttribute('aria-pressed', String(s.ruleKind === kind));
       add(choices, button);
@@ -1078,8 +1108,21 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     else if (s.screen === 'sources') sourcesView(page);
     else if (s.screen === 'labels') labelsView(page);
     else if (s.screen === 'sender') senderView(page);
-    else {
-      add(page, el('h1', '', W.confirmRule), el('p', '', s.candidate.display), el('p', 'reason', kindText(s.candidate)), el('p', 'reason', W.namesShared));
+    else if (s.candidates.length === 1) {
+      const only = s.candidates[0];
+      add(page, el('h1', '', W.confirmRule), el('p', '', only.display), el('p', 'reason', kindText(only)), el('p', 'reason', W.namesShared));
+    } else {
+      add(page, el('h1', '', fill(W.confirmRules, { n: kit.count(s.candidates.length) })));
+      // One kind (folders in one account, or labels): say it once above the names.
+      const kinds = s.candidates.map(kindText);
+      const same = kinds.every((kind: string) => kind === kinds[0]);
+      const first = s.candidates[0];
+      if (same) add(page, el('p', 'reason', first.kind === 'folder' ? fill(W.kindFolders, { source: sourceLabel(first.source_id) }) : first.kind === 'label' ? W.kindLabels : kinds[0]));
+      const names = el('ul', 'review-list');
+      for (const rule of s.candidates) {
+        add(names, same ? el('li', '', rule.display) : add(el('li', 'two-line'), el('span', 'two-top', rule.display), el('span', 'two-bottom', kindText(rule))));
+      }
+      add(page, names, el('p', 'reason', W.namesShared));
     }
     const row = add(el('div', 'actions privacy-sheet-actions'), kit.button(W.sheetBack, 'privacy:sheet:back', sheetBack, 'plain'));
     if (s.screen === 'kinds') add(row, kit.button(W.next, 'privacy:sheet:next', s.ruleKind ? () => {
@@ -1088,10 +1131,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       else addSender();
     } : null, 'main'));
     if (s.screen === 'sender') add(row, kit.button(W.next, 'privacy:sender:add', submitSender, 'main'));
-    if (s.screen === 'labels') add(row, kit.button(W.next, 'privacy:sheet:next', s.candidate ? () => reviewRule(s.candidate) : null, 'main'));
+    if (s.screen === 'labels') add(row, kit.button(W.next, 'privacy:sheet:next', s.labelPicks.size ? () => reviewRules(pickedLabels()) : null, 'main'));
     if (s.screen === 'review') add(row, kit.button(W.makePrivate, 'privacy:sheet:confirm', () => {
       if (!s || s.screen !== 'review' || s.saving || s.server) return;
-      const rule = s.candidate; s.screen = 'main'; addRule(rule); kit.render('privacy:add');
+      const rules = s.candidates; s.screen = 'main'; s.candidates = []; s.labelPicks = new Map(); s.folderPicks = [];
+      addRules(rules); kit.render('privacy:add');
     }, 'main'));
     add(page, row);
   }

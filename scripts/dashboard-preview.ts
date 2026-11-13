@@ -404,7 +404,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     view.model_setup = new ModelSetupService({ config: createPendingPrivacyPolicy(), credentialState: () => 'missing', autoCheck: false }).getStatus();
     return view;
   }
-  if (state.startsWith('privacy-')) return buildDashboardPreviewView('full');
+  if (state.startsWith('privacy-')) return withPreviewEvernote(buildDashboardPreviewView('full'));
   if (state.startsWith('judge-approval')) return buildDashboardPreviewView('full');
   if (state === 'review' || state === 'review-unconfigured' || state === 'review-indexing') return reviewPreview(state);
   if (state === 'models') {
@@ -1800,7 +1800,34 @@ export function previewPrivacySteps(state: string): string | undefined {
   return state === 'privacy-conflict' ? confirm + ',key:privacy:sheet:confirm' : confirm;
 }
 
-export function previewPrivacyScope(sourceId: unknown) {
+/** The privacy states' Evernote: a connected account whose notebooks the privacy picker lists. */
+function withPreviewEvernote(view: SourceDashboardViewModel): SourceDashboardViewModel {
+  const index = view.sources.findIndex((source) => source.source_id === 'evernote.notes');
+  const connected = view.sources.find((source) => source.source_id === 'readwise.library');
+  if (index < 0 || !connected) return view;
+  const own = view.sources[index]!;
+  // Readwise's healthy state, under Evernote's own identity.
+  view.sources[index] = { ...connected, corpus_id: own.corpus_id, source_id: own.source_id, label: own.label, provider: own.provider,
+    family: own.family, trust_domain: own.trust_domain, capabilities: own.capabilities };
+  return view;
+}
+
+/** 180 invented notebook names, like the owner report that asked for ticking many at once. */
+const PREVIEW_NOTEBOOK_TOPICS = ['Recipes', 'Travel', 'Health', 'Taxes', 'Clients', 'Reading', 'Garden', 'Kids', 'House', 'Journal', 'Ideas', 'Car', 'Bank', 'Legal', 'Music', 'Fitness', 'Gifts', 'Work', 'Insurance', 'Therapy'];
+export const PREVIEW_NOTEBOOKS = Array.from({ length: 180 }, (_unused, index) =>
+  `${PREVIEW_NOTEBOOK_TOPICS[index % PREVIEW_NOTEBOOK_TOPICS.length]} ${2008 + Math.floor(index / PREVIEW_NOTEBOOK_TOPICS.length)}`);
+
+export function previewPrivacyScope(sourceId: unknown, cursor?: unknown) {
+  if (sourceId === 'evernote.notes') {
+    // Two pages of 100, as olympus_scope_list returns them.
+    const second = cursor === 'preview-page-2';
+    const names = second ? PREVIEW_NOTEBOOKS.slice(100) : PREVIEW_NOTEBOOKS.slice(0, 100);
+    const data = { kind: 'folders', source_id: sourceId, account_generation: 'preview', scope_revision: 'preview', status: 'approved',
+      nodes: names.map((name) => ({ key: `nb:${name}`, name, kind: 'folder', has_children: false, selectable: true })),
+      selections: [], whole_account_selected: false,
+      ...(second ? {} : { next_cursor: 'preview-page-2', remaining: PREVIEW_NOTEBOOKS.length - 100 }) };
+    return { structuredContent: { kind: data.kind }, _meta: { [SCOPE_UI_META_KEY]: data } };
+  }
   const labels = [{ id: 'Label_preview', name: 'Family' }, { id: 'Label_travel', name: 'Travel' }];
   const data = sourceId === 'gmail.email'
     ? { kind: 'mail', source_id: sourceId, labels }
@@ -2283,7 +2310,7 @@ if (import.meta.main) {
       if ((state.startsWith('privacy-')) && (body.name === PRIVACY_GET_TOOL_NAME || body.name === PRIVACY_SET_TOOL_NAME)) {
         return Response.json(previewPrivacyToolResult(state, body.name === PRIVACY_GET_TOOL_NAME ? 'get' : 'set', body.arguments as PrivacySetInput));
       }
-      if (state.startsWith('privacy-') && body.name === SCOPE_LIST_TOOL_NAME) return Response.json(previewPrivacyScope(body.arguments?.source_id));
+      if (state.startsWith('privacy-') && body.name === SCOPE_LIST_TOOL_NAME) return Response.json(previewPrivacyScope(body.arguments?.source_id, body.arguments?.cursor));
       if (body.name === SCOPE_LIST_TOOL_NAME && body.arguments?.source_id === 'local.files' && state.startsWith('local-files')) {
         return Response.json(previewScopeList(state, body.arguments));
       }

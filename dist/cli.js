@@ -67986,10 +67986,17 @@ var init_vocabulary = __esm(() => {
     stepPick: "Step 2 of 3",
     sheetBack: "Back",
     next: "Next",
-    select: "Choose",
-    selected: "Selected",
     selectFor: "Choose {name}",
     confirmRule: "Keep this private?",
+    confirmRules: "Keep these {n} private?",
+    filter: "Find",
+    filterPlaceholder: "Type to narrow {n}",
+    selectAll: "Select all {n}",
+    clearSelection: "Clear",
+    selectedCount: { one: "1 selected", many: "{n} selected" },
+    noMatch: "Nothing matches.",
+    openFor: "Open {name}",
+    ruleLimit: "You can keep up to {max} always-private rules. Remove one to add more.",
     back: "Back to Olympus",
     title: "What's private for you?",
     intro: "Olympus shares your items with ChatGPT unless you say they're private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.",
@@ -68005,16 +68012,18 @@ var init_vocabulary = __esm(() => {
     namesShared: "Folder and label names and senders you add here are shown to ChatGPT.",
     kindFolder: "Folder in {source}",
     kindLabel: "Gmail label",
+    kindFolders: "Folders in {source}",
+    kindLabels: "Gmail labels",
     kindSender: "Sender",
     remove: "Remove",
     removeFor: "Remove {name}",
     removed: "Removed: {name}",
     undo: "Undo",
     undoFor: "Undo removing {name}",
-    addFolder: "Add a folder",
-    addLabel: "Add a Gmail label",
+    addFolder: "Add folders",
+    addLabel: "Add Gmail labels",
     addSender: "Add a sender",
-    needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
+    needFolderSource: "Connect Dropbox, Google Drive or Evernote to add folders.",
     needGmail: "Connect Gmail to add a label.",
     nothingToSave: "Nothing to save yet. Change a rule or the description first.",
     save: "Save description and answers",
@@ -68038,15 +68047,14 @@ var init_vocabulary = __esm(() => {
     discard: "Discard changes",
     keep: "Keep editing",
     backToPrivacy: "Back to privacy",
-    folderSourceTitle: "Add a folder",
-    folderSourceIntro: "Which account is the folder in?",
-    folderTitle: "Add a folder",
-    folderIntro: "Open a folder in {source} to look inside it. Make private covers everything in the folder.",
+    folderSourceTitle: "Add folders",
+    folderSourceIntro: "Which account are the folders in?",
+    folderTitle: "Add folders",
+    folderIntro: "Tick every folder in {source} to keep private, then choose Next. Open a folder with › to look inside it. Private covers everything in the folder.",
     makePrivate: "Make private",
-    makePrivateFor: "Make {name} private",
     alreadyPrivate: "Already private",
-    labelTitle: "Add a Gmail label",
-    labelIntro: "Mail with a private label is answered only on your computer.",
+    labelTitle: "Add Gmail labels",
+    labelIntro: "Tick every label to keep private. Mail with a private label is answered only on your computer.",
     loadingLabels: "Loading your labels…",
     noLabels: "This mailbox has no labels of its own.",
     sentLabel: "Sent",
@@ -176350,6 +176358,7 @@ function chatgptPickerProgram(kit) {
   let timer = null;
   const ACCOUNT = "@account";
   const MAX_RULES = 100;
+  const PICK_PAGES = 20;
   function handles(fix) {
     return !!fix && (fix.tool === T.connectSource || fix.tool === T.scopeList);
   }
@@ -176531,12 +176540,105 @@ function chatgptPickerProgram(kit) {
     }
     add(page, box);
   }
-  function pickFolder(sourceId, sourceLabel, words, taken, done) {
+  function pickFolder(sourceId, sourceLabel, words, taken, done, options) {
     stopTimer();
     session++;
     if (kit.compact())
       kit.fullscreen();
-    openScope(sourceId, sourceLabel, words.title, "", "", undefined, { words, taken: taken.slice(), done });
+    const selected = new Map;
+    for (const folder of options && options.selected || []) {
+      if (folder && typeof folder.key === "string" && folder.key && taken.indexOf(folder.key) < 0)
+        selected.set(folder.key, String(folder.name || ""));
+    }
+    const limit = options && typeof options.limit === "number" && isFinite(options.limit) ? Math.max(0, Math.floor(options.limit)) : MAX_RULES;
+    openScope(sourceId, sourceLabel, words.title, "", "", undefined, { words, taken: taken.slice(), done, selected, limit, filter: "", filterAt: null, pages: new Map });
+  }
+  function plain(text) {
+    return String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  }
+  function checklist(list) {
+    const words = list.words;
+    const wrap = el("div", "checklist");
+    const query = plain(list.filter).trim();
+    const shown = query ? list.items.filter((item) => plain(item.name).indexOf(query) >= 0) : list.items;
+    const open = shown.filter((item) => !item.taken);
+    const full = list.selected.size >= list.limit;
+    if (list.items.length > 8 || list.filter) {
+      const field = el("label", "field checklist-filter");
+      add(field, el("span", "field-label", words.filter));
+      const input = el("input", "text");
+      input.type = "search";
+      input.setAttribute("autocomplete", "off");
+      input.spellcheck = false;
+      input.placeholder = fill(words.filterPlaceholder, { n: kit.count(list.items.length) });
+      input.value = list.filter;
+      input.setAttribute("data-key", list.keyPrefix + "filter");
+      input.addEventListener("input", () => list.setFilter(input.value));
+      add(field, input);
+      add(wrap, field);
+    }
+    const bar = el("div", "checklist-bar");
+    const unticked = open.filter((item) => !list.selected.has(item.key));
+    const all = kit.button(fill(words.selectAll, { n: kit.count(open.length) }), list.keyPrefix + "all", list.busy || !unticked.length || full ? null : () => {
+      for (const item of unticked) {
+        if (list.selected.size >= list.limit)
+          break;
+        list.selected.set(item.key, item.name);
+      }
+      list.changed(list.keyPrefix + "all");
+    }, "plain");
+    const clear = kit.button(words.clear, list.keyPrefix + "clear", list.busy || !list.selected.size ? null : () => {
+      list.selected.clear();
+      list.changed(list.keyPrefix + "clear");
+    }, "plain");
+    const tally = el("p", "checklist-count", fill(list.selected.size === 1 ? words.count.one : words.count.many, { n: kit.count(list.selected.size) }));
+    tally.setAttribute("aria-live", "polite");
+    add(wrap, add(bar, add(el("div", "actions"), all, clear), tally));
+    if (full)
+      add(wrap, el("p", "reason", fill(words.limit, { max: kit.count(list.limit) })));
+    const rows = el("ul", "flist");
+    for (const item of shown) {
+      const li = el("li", "frow pick check-row");
+      const label = el("label", "check");
+      const box = el("input");
+      box.type = "checkbox";
+      box.setAttribute("data-key", list.keyPrefix + "pick:" + item.key);
+      box.checked = !!item.taken || list.selected.has(item.key);
+      box.disabled = !!item.taken || !!list.busy || !box.checked && full;
+      box.setAttribute("aria-label", fill(words.chooseFor, { name: item.name }));
+      box.addEventListener("change", () => {
+        if (box.checked) {
+          if (list.selected.size < list.limit)
+            list.selected.set(item.key, item.name);
+        } else
+          list.selected.delete(item.key);
+        list.changed(list.keyPrefix + "pick:" + item.key);
+      });
+      add(label, box, el("span", "fname-text", item.name));
+      label.title = item.name;
+      add(li, label);
+      if (item.taken)
+        add(li, el("span", "ftag", words.taken));
+      if (item.open) {
+        const opener = el("button", "btn check-open");
+        opener.type = "button";
+        opener.textContent = "›";
+        opener.setAttribute("data-key", "picker:open:" + item.key);
+        opener.setAttribute("aria-label", fill(words.openFor, { name: item.name }));
+        if (list.busy)
+          opener.disabled = true;
+        else
+          opener.addEventListener("click", item.open);
+        add(li, opener);
+      }
+      add(rows, li);
+    }
+    if (!shown.length && list.items.length)
+      add(rows, el("li", "muted fempty", words.noMatch));
+    for (const row of list.after || [])
+      if (row)
+        add(rows, row);
+    return add(wrap, rows);
   }
   const UPLOAD_PARALLEL = 4;
   const UPLOAD_STATUS_MS = 2000;
@@ -177307,6 +177409,14 @@ function chatgptPickerProgram(kit) {
       p.rootCursor = next;
     }
     p.loading = "";
+    if (p.pick && next && !blockedByComputer(levelAccess)) {
+      const pages = (p.pick.pages.get(parentKey) || 0) + 1;
+      p.pick.pages.set(parentKey, pages);
+      if (pages < PICK_PAGES) {
+        list(parentKey, true, after);
+        return;
+      }
+    }
     if (after)
       after();
     else
@@ -177761,47 +177871,49 @@ function chatgptPickerProgram(kit) {
       pick: (state) => choose(ACCOUNT, p.whole ? "" : state, "picker:seg:" + ACCOUNT + ":" + state)
     });
   }
-  function pickButton(key, name, focusKey) {
-    const words = p.pick.words;
-    if (p.pick.taken.indexOf(key) >= 0)
-      return kit.button(words.alreadyPrivate, focusKey, null, "plain");
-    const selected = p.pick.selected && p.pick.selected.key === key;
-    const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => {
-      if (!words.stepSheet)
-        return leave("", false, { key, name });
-      p.pick.selected = { key, name };
-      kit.render(focusKey);
-    }, "plain");
-    if (words.stepSheet)
-      control.setAttribute("aria-pressed", String(!!selected));
-    control.setAttribute("aria-label", fill(words.makePrivateFor, { name }));
-    return control;
-  }
-  function pickRow(node) {
-    const key = node.key;
-    const li = el("li", "frow pick");
-    const label = (target) => {
-      add(target, el("span", "fname-text", node.name));
-      return target;
-    };
-    if (node.has_children) {
-      const open = el("button", "fname");
-      open.type = "button";
-      open.setAttribute("data-key", "picker:open:" + key);
-      label(open);
-      const chevron = el("span", "chev", "›");
-      chevron.setAttribute("aria-hidden", "true");
-      add(open, chevron);
-      if (p.loading || p.saving)
-        open.disabled = true;
-      else
-        open.addEventListener("click", () => drill(key));
-      add(li, open);
-    } else
-      add(li, label(el("p", "fname leaf")));
-    if (node.selectable !== false)
-      add(li, pickButton(key, node.name, "picker:pick:" + key));
-    return li;
+  function pickList(parentKey, nodes, hasMore) {
+    const pick = p.pick;
+    if (pick.filterAt !== parentKey) {
+      pick.filterAt = parentKey;
+      pick.filter = "";
+    }
+    const items = [];
+    const here = parentKey ? p.catalog.get(parentKey) : null;
+    if (parentKey && (!here || here.selectable !== false)) {
+      items.push({ key: parentKey, name: nameOf(parentKey), taken: pick.taken.indexOf(parentKey) >= 0 });
+    }
+    for (const node of nodes) {
+      if (node.selectable === false && !node.has_children)
+        continue;
+      items.push({
+        key: node.key,
+        name: node.name,
+        taken: pick.taken.indexOf(node.key) >= 0 || node.selectable === false,
+        open: node.has_children ? () => drill(node.key) : null
+      });
+    }
+    const after = [];
+    if (hasMore)
+      after.push(add(el("li", "fmore"), loadMore(parentKey)));
+    if (p.truncated.has(parentKey))
+      after.push(el("li", "muted fmore", Q.truncated));
+    if (!nodes.length && !parentKey)
+      after.push(el("li", "muted fempty", Q.noFolders));
+    return checklist({
+      items,
+      selected: pick.selected,
+      filter: pick.filter,
+      words: pick.words.list,
+      keyPrefix: "picker:",
+      limit: pick.limit,
+      busy: !!p.loading,
+      after,
+      setFilter: (text) => {
+        pick.filter = text;
+        kit.render("picker:filter");
+      },
+      changed: (focusKey) => kit.render(focusKey)
+    });
   }
   function nameParts(target, name, key, node) {
     const main = add(el("span", "fname-main"), el("span", "fname-text", name));
@@ -177828,8 +177940,6 @@ function chatgptPickerProgram(kit) {
     }
   }
   function folderRow(node) {
-    if (p.pick)
-      return pickRow(node);
     const key = node.key;
     const li = el("li", "frow seg-row");
     const busy = p.loading || p.saving;
@@ -177926,7 +178036,7 @@ function chatgptPickerProgram(kit) {
     if (p.pick) {
       const only = add(el("section", "fsection"), el("h2", "", p.label));
       add(only, loadingLine());
-      add(only, levelList("", p.roots, !!p.rootCursor));
+      add(only, pickList("", p.roots, !!p.rootCursor));
       add(body, only);
       return;
     }
@@ -177960,18 +178070,14 @@ function chatgptPickerProgram(kit) {
     add(body, pathLine());
     noticeAndError(body);
     const node = p.catalog.get(key);
-    if (p.pick) {
-      const here = el("div", "this-row pick");
-      add(here, add(el("p", "this-text"), el("span", "this-label", nameOf(key))));
-      if (!node || node.selectable !== false)
-        add(here, pickButton(key, nameOf(key), "picker:pick-this"));
-      add(body, here);
-    } else
+    if (!p.pick)
       add(body, topRow(Q.thisFolder, folderControl(key, nameOf(key), node)));
     add(body, loadingLine());
     const refused = p.access.get(key);
     if (blockedByComputer(refused) && !p.loading)
       add(body, accessNote(refused, () => list(key, false)));
+    else if (p.pick)
+      add(body, pickList(key, p.branches.get(key) || [], p.cursors.has(key)));
     else
       add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
   }
@@ -178304,7 +178410,7 @@ function chatgptPickerProgram(kit) {
     }
     backButton.className = "btn back";
     add(top, backButton);
-    if (p.pick && p.pick.words.stepSheet) {
+    if (p.pick) {
       page.className += " privacy";
       add(page, el("p", "muted", p.pick.words.stepSheet.step));
       const progress = el("progress");
@@ -178329,9 +178435,11 @@ function chatgptPickerProgram(kit) {
       mailView(page);
     else
       foldersView(page);
-    if (p.pick && p.pick.words.stepSheet) {
+    if (p.pick) {
       const words = p.pick.words.stepSheet;
-      add(page, add(el("div", "actions privacy-sheet-actions"), kit.button(words.back, deep ? "picker:up" : "picker:back", escape2, "plain"), kit.button(words.next, "picker:pick-next", p.pick.selected && !p.loading ? () => leave("", false, p.pick.selected) : null, "main")));
+      const chosen = [];
+      p.pick.selected.forEach((name, key) => chosen.push({ key, name: name || nameOf(key) }));
+      add(page, add(el("div", "actions privacy-sheet-actions"), kit.button(words.back, deep ? "picker:up" : "picker:back", escape2, "plain"), kit.button(words.next, "picker:pick-next", chosen.length && !p.loading ? () => leave("", false, chosen) : null, "main")));
     }
     return page;
   }
@@ -178368,6 +178476,7 @@ function chatgptPickerProgram(kit) {
     handles,
     start,
     pickFolder,
+    checklist,
     pickArchive,
     active: () => !!p || !!drop,
     view,
@@ -178403,6 +178512,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
   const L = makeLogic({ mailSourceId: kit.config.mailSourceId, folderSources: kit.config.folderSources, topicWords: W.questions });
   let s = null;
   let session = 0;
+  const MAX_RULES = 100;
   let questionTimer;
   function handles(fix) {
     return !!fix && fix.tool === T.get;
@@ -178454,8 +178564,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       questionsError: "",
       detailsOpen: false,
       conflictDetailsOpen: false,
-      candidate: null,
-      ruleKind: ""
+      candidates: [],
+      ruleKind: "",
+      labelPicks: new Map,
+      labelFilter: "",
+      folderPicks: []
     };
     load();
   }
@@ -178558,14 +178671,21 @@ function chatgptPrivacyProgram(kit, makeLogic) {
   function canSave() {
     return !s.server && !s.questionLoading && !s.checking && (s.edited || s.editingDescription && askedQuestions().length > 0);
   }
-  function addRule(rule) {
-    if (s.saving || s.server)
+  function room() {
+    return Math.max(0, MAX_RULES - kept().length - s.hidden.length);
+  }
+  function addRules(added) {
+    if (s.saving || s.server || !added.length)
       return;
     const baseline = s.savedRules.slice().concat(s.hidden);
-    if (!s.savedRules.some((item) => identity(item) === identity(rule)))
-      baseline.push(ruleOut(rule));
-    L.addTo(s.rules, rule);
-    L.setIntent(s.intents, rule, true);
+    for (const rule of added) {
+      if (!baseline.some((item) => identity(item) === identity(rule)))
+        baseline.push(ruleOut(rule));
+    }
+    for (const rule of added) {
+      L.addTo(s.rules, rule);
+      L.setIntent(s.intents, rule, true);
+    }
     changed();
     const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     const args = { description: s.savedDescription, rules: baseline };
@@ -178587,9 +178707,10 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         kit.render("privacy:save");
         return;
       }
-      if (!L.satisfies([{ rule, present: true }], data.rules))
+      if (!L.satisfies(added.map((rule) => ({ rule, present: true })), data.rules))
         return conflict(data);
-      draft.intents = draft.intents.filter((intent) => identity(intent.rule) !== identity(rule));
+      const ids = added.map(identity);
+      draft.intents = draft.intents.filter((intent) => ids.indexOf(identity(intent.rule)) < 0);
       take(data);
       s.intents = draft.intents;
       const replayed = L.replay(draft, s.rules);
@@ -178815,30 +178936,47 @@ function chatgptPrivacyProgram(kit, makeLogic) {
   function pickIn(id, label) {
     const mine = session;
     const taken = kept().filter((rule) => rule.kind === "folder" && rule.source_id === id && typeof rule.key === "string").map((rule) => rule.key);
+    const again = s.folderPicks.filter((rule) => rule.source_id === id).map((rule) => ({ key: rule.key, name: rule.display }));
+    s.folderPicks = [];
     s.picking = true;
     kit.picker.pickFolder(id, label, {
       back: W.backToPrivacy,
       title: W.folderTitle,
       intro: W.folderIntro,
-      makePrivate: W.select,
-      makePrivateFor: W.selectFor,
-      stepSheet: { step: W.stepPick, next: W.next, back: W.sheetBack },
-      alreadyPrivate: W.alreadyPrivate
-    }, taken, (folder) => {
+      list: listWords(),
+      stepSheet: { step: W.stepPick, next: W.next, back: W.sheetBack }
+    }, taken, (folders) => {
       if (mine !== session || !s)
         return;
       s.picking = false;
       s.screen = "kinds";
-      if (folder)
-        reviewRule({ kind: "folder", source_id: id, key: folder.key, display: folder.name, removed: false });
-      kit.render(folder ? "privacy:sheet:confirm" : "privacy:add:folder");
-    });
+      const rules = (folders || []).map((folder) => ({ kind: "folder", source_id: id, key: folder.key, display: folder.name, removed: false }));
+      s.folderPicks = rules;
+      if (rules.length)
+        reviewRules(rules);
+      kit.render(rules.length ? "privacy:sheet:confirm" : "privacy:add:folder");
+    }, { limit: room(), selected: again });
+  }
+  function listWords() {
+    return {
+      filter: W.filter,
+      filterPlaceholder: W.filterPlaceholder,
+      selectAll: W.selectAll,
+      clear: W.clearSelection,
+      count: W.selectedCount,
+      noMatch: W.noMatch,
+      taken: W.alreadyPrivate,
+      chooseFor: W.selectFor,
+      openFor: W.openFor,
+      limit: W.ruleLimit
+    };
   }
   function addLabel() {
     if (!gmailConnected())
       return;
     s.screen = "labels";
     s.labels = [];
+    s.labelFilter = "";
     s.labelsLoading = true;
     s.labelsError = "";
     kit.render("privacy:back");
@@ -178884,7 +179022,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       kit.render("privacy:sender");
       return;
     }
-    reviewRule(rule);
+    reviewRules([rule]);
   }
   function kindText(rule) {
     if (rule.kind === "folder")
@@ -179201,9 +179339,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     add(rules, kit.button(W.addRule, "privacy:add", !s.saving && !s.server ? () => {
       s.screen = "kinds";
       s.ruleKind = "";
-      s.candidate = null;
+      s.candidates = [];
       s.sender = "";
       s.senderError = "";
+      s.labelPicks = new Map;
+      s.folderPicks = [];
       kit.render("privacy:add:folder");
     } : null, "plain"));
     if (s.server)
@@ -179289,27 +179429,32 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(page, line);
       return;
     }
-    const listNode = el("ul", "flist");
-    if (!s.labels.length)
-      add(listNode, el("li", "muted fempty", W.noLabels));
+    if (!s.labels.length) {
+      add(page, add(el("ul", "flist"), el("li", "muted fempty", W.noLabels)));
+      return;
+    }
     const mail = kit.config.mailSourceId;
-    s.labels.forEach((label, index) => {
-      const name = labelName(label);
-      const li = add(el("li", "frow pick"), add(el("p", "fname leaf"), el("span", "fname-text", name)));
-      const rule = { kind: "label", source_id: mail, key: label.id, value: label.name, display: name, removed: false };
-      if (kept().some((other) => other.kind === "label" && other.source_id === mail && other.key === label.id)) {
-        add(li, kit.button(W.alreadyPrivate, "privacy:label:" + index, null, "plain"));
-      } else {
-        const control = kit.button(s.candidate && identity(s.candidate) === identity(rule) ? W.selected : W.select, "privacy:label:" + index, () => {
-          s.candidate = rule;
-          kit.render("privacy:sheet:next");
-        }, "plain");
-        control.setAttribute("aria-label", fill(W.selectFor, { name }));
-        add(li, control);
-      }
-      add(listNode, li);
-    });
-    add(page, listNode);
+    add(page, kit.picker.checklist({
+      items: s.labels.map((label) => ({
+        key: label.id,
+        name: labelName(label),
+        taken: kept().some((other) => other.kind === "label" && other.source_id === mail && other.key === label.id)
+      })),
+      selected: s.labelPicks,
+      filter: s.labelFilter,
+      words: listWords(),
+      keyPrefix: "privacy:label:",
+      limit: room(),
+      setFilter: (text) => {
+        s.labelFilter = text;
+        kit.render("privacy:label:filter");
+      },
+      changed: (focusKey) => kit.render(focusKey)
+    }));
+  }
+  function pickedLabels() {
+    const mail = kit.config.mailSourceId;
+    return s.labels.filter((label) => s.labelPicks.has(label.id)).map((label) => ({ kind: "label", source_id: mail, key: label.id, value: label.name, display: labelName(label), removed: false }));
   }
   function senderView(page) {
     add(page, el("h1", "", W.senderTitle));
@@ -179357,8 +179502,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     });
     return details;
   }
-  function reviewRule(rule) {
-    s.candidate = rule;
+  function reviewRules(rules) {
+    s.candidates = rules;
     s.screen = "review";
     kit.render("privacy:sheet:confirm");
   }
@@ -179374,7 +179519,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       ["sender", W.addSender, true]
     ]) {
       const button = kit.button(label, "privacy:add:" + kind, enabled ? () => {
-        s.candidate = null;
+        s.candidates = [];
         s.ruleKind = kind;
         kit.render("privacy:add:" + kind);
       } : null, "plain");
@@ -179419,8 +179564,21 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       labelsView(page);
     else if (s.screen === "sender")
       senderView(page);
-    else {
-      add(page, el("h1", "", W.confirmRule), el("p", "", s.candidate.display), el("p", "reason", kindText(s.candidate)), el("p", "reason", W.namesShared));
+    else if (s.candidates.length === 1) {
+      const only = s.candidates[0];
+      add(page, el("h1", "", W.confirmRule), el("p", "", only.display), el("p", "reason", kindText(only)), el("p", "reason", W.namesShared));
+    } else {
+      add(page, el("h1", "", fill(W.confirmRules, { n: kit.count(s.candidates.length) })));
+      const kinds = s.candidates.map(kindText);
+      const same = kinds.every((kind) => kind === kinds[0]);
+      const first = s.candidates[0];
+      if (same)
+        add(page, el("p", "reason", first.kind === "folder" ? fill(W.kindFolders, { source: sourceLabel(first.source_id) }) : first.kind === "label" ? W.kindLabels : kinds[0]));
+      const names = el("ul", "review-list");
+      for (const rule of s.candidates) {
+        add(names, same ? el("li", "", rule.display) : add(el("li", "two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
+      }
+      add(page, names, el("p", "reason", W.namesShared));
     }
     const row = add(el("div", "actions privacy-sheet-actions"), kit.button(W.sheetBack, "privacy:sheet:back", sheetBack, "plain"));
     if (s.screen === "kinds")
@@ -179435,14 +179593,17 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     if (s.screen === "sender")
       add(row, kit.button(W.next, "privacy:sender:add", submitSender, "main"));
     if (s.screen === "labels")
-      add(row, kit.button(W.next, "privacy:sheet:next", s.candidate ? () => reviewRule(s.candidate) : null, "main"));
+      add(row, kit.button(W.next, "privacy:sheet:next", s.labelPicks.size ? () => reviewRules(pickedLabels()) : null, "main"));
     if (s.screen === "review")
       add(row, kit.button(W.makePrivate, "privacy:sheet:confirm", () => {
         if (!s || s.screen !== "review" || s.saving || s.server)
           return;
-        const rule = s.candidate;
+        const rules = s.candidates;
         s.screen = "main";
-        addRule(rule);
+        s.candidates = [];
+        s.labelPicks = new Map;
+        s.folderPicks = [];
+        addRules(rules);
         kit.render("privacy:add");
       }, "main"));
     add(page, row);
@@ -179994,6 +180155,19 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .frow.pick>.fname.leaf{display:flex;align-items:center;padding:0.5rem 0}
 .frow.pick>.fname.two-line{flex-direction:column;align-items:flex-start;gap:0.125rem}
 .frow.pick .two-top{font-weight:500}
+.checklist-filter{margin:0.5rem 0 0.75rem}
+.checklist-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem 1rem;margin:0 0 0.5rem}
+.checklist-count{margin:0;font-size:0.875rem;font-weight:600}
+.frow.check-row{flex-wrap:nowrap;padding:0;min-height:2.75rem}
+.check{display:flex;align-items:center;gap:0.625rem;flex:1 1 auto;min-width:0;min-height:2.75rem;cursor:pointer}
+.check input{flex:none;width:1.125rem;height:1.125rem;margin:0;accent-color:var(--accent)}
+.check .fname-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.check-row .ftag{flex:none}
+.btn.check-open{flex:none;min-width:2.5rem;border:0;font-size:1.25rem;line-height:1}
+.review-list{margin:0.75rem 0;padding-left:1.25rem;columns:14rem auto;column-gap:2rem;overflow-wrap:anywhere}
+.review-list>li{padding:0.125rem 0;break-inside:avoid}
+.review-list .two-line{display:flex;flex-direction:column}
+.review-list .two-bottom{font-size:0.8125rem;color:var(--muted)}
 .add-rules{margin-top:0.75rem}
 .qtopic{margin-top:0.75rem}
 .qtitle{font-size:0.9375rem;font-weight:600;margin:0 0 0.25rem}

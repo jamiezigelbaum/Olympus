@@ -347,6 +347,19 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .frow.pick>.fname.leaf{display:flex;align-items:center;padding:0.5rem 0}
 .frow.pick>.fname.two-line{flex-direction:column;align-items:flex-start;gap:0.125rem}
 .frow.pick .two-top{font-weight:500}
+.checklist-filter{margin:0.5rem 0 0.75rem}
+.checklist-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem 1rem;margin:0 0 0.5rem}
+.checklist-count{margin:0;font-size:0.875rem;font-weight:600}
+.frow.check-row{flex-wrap:nowrap;padding:0;min-height:2.75rem}
+.check{display:flex;align-items:center;gap:0.625rem;flex:1 1 auto;min-width:0;min-height:2.75rem;cursor:pointer}
+.check input{flex:none;width:1.125rem;height:1.125rem;margin:0;accent-color:var(--accent)}
+.check .fname-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.check-row .ftag{flex:none}
+.btn.check-open{flex:none;min-width:2.5rem;border:0;font-size:1.25rem;line-height:1}
+.review-list{margin:0.75rem 0;padding-left:1.25rem;columns:14rem auto;column-gap:2rem;overflow-wrap:anywhere}
+.review-list>li{padding:0.125rem 0;break-inside:avoid}
+.review-list .two-line{display:flex;flex-direction:column}
+.review-list .two-bottom{font-size:0.8125rem;color:var(--muted)}
 .add-rules{margin-top:0.75rem}
 .qtopic{margin-top:0.75rem}
 .qtitle{font-size:0.9375rem;font-weight:600;margin:0 0 0.25rem}
