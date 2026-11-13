@@ -122,7 +122,8 @@ export interface CorpusRow {
   corpus_id: string;
   label: string;
   configured: boolean;
-  retrieval?: { mode: string; state: string };
+  retrieval?: { mode?: string; state: string; reason?: string };
+  embedding_parity?: { chunks?: number; embedded_chunks?: number };
   last_refresh?: { status: string; completed_at?: string };
   counts?: { indexed_items: number };
 }
@@ -166,8 +167,11 @@ export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], no
   if (now - Date.parse(success.completed_at!) > maxAgeH * 3_600_000) return { id, title, status: 'fail', detail: `${said}: the last successful one was more than ${maxAgeH} h ago${running ? ' (one is running now)' : ''}` };
   const failedSince = newest !== undefined && newest !== success && newest.status === 'failed';
   // An empty corpus has nothing to embed, so the engine calls its search degraded for good; only one that holds items counts.
-  const degraded = own.some((row) => row.retrieval?.state === 'degraded' && (row.counts?.indexed_items ?? 0) > 0);
-  return { id, title, status: degraded || failedSince ? 'fail' : 'pass', detail: `${said}${running ? '; a refresh is running' : ''}${failedSince ? `; it failed after the last success (${success.completed_at})` : ''}${degraded ? '; search is degraded' : ''}` };
+  const degradedRows = own.filter((row) => row.retrieval?.state === 'degraded' && (row.counts?.indexed_items ?? 0) > 0);
+  const degraded = degradedRows.length > 0;
+  // Say why, from the engine's own reason codes and embedded/total chunk counts, so the report names the cause (olympus-ops#222).
+  const why = degradedRows.map((row) => `${row.retrieval?.reason ?? 'no reason given'}${row.embedding_parity ? `, ${row.embedding_parity.embedded_chunks ?? 0}/${row.embedding_parity.chunks ?? 0} chunks embedded` : ''}`);
+  return { id, title, status: degraded || failedSince ? 'fail' : 'pass', detail: `${said}${running ? '; a refresh is running' : ''}${failedSince ? `; it failed after the last success (${success.completed_at})` : ''}${degraded ? `; search is degraded (${[...new Set(why)].join('; ')})` : ''}` };
 }
 
 /** The search found an item of this source holding every needle. */

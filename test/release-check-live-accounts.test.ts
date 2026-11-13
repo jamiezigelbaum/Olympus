@@ -32,7 +32,8 @@ describe('live accounts: what each source is held to', () => {
     expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'completed', completed_at: ago(2 * 24 * 60 + 20) } }), corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'running' } })], NOW)).toMatchObject({ status: 'fail', detail: expect.stringContaining('more than 24 h ago (one is running now)') });
     expect(statusCheck(gmail, [corpus('Gmail', { last_refresh: { status: 'running' } })], NOW)).toMatchObject({ status: 'skip', detail: expect.stringMatching(/^Inconclusive: .*the first refresh is still running$/) });
     expect(statusCheck(gmail, [corpus('Gmail'), corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'running' } })], NOW).status).toBe('pass');
-    expect(statusCheck(gmail, [corpus('Gmail', { retrieval: { mode: 'keyword', state: 'degraded' } })], NOW)).toMatchObject({ status: 'fail', detail: expect.stringContaining('search is degraded') });
+    expect(statusCheck(gmail, [corpus('Gmail', { retrieval: { mode: 'keyword', state: 'degraded' } })], NOW)).toMatchObject({ status: 'fail', detail: expect.stringContaining('search is degraded (no reason given)') });
+    expect(statusCheck(gmail, [corpus('Gmail', { retrieval: { mode: 'keyword', state: 'degraded', reason: 'no_current_embedding_artifacts' }, embedding_parity: { chunks: 12, embedded_chunks: 0 } })], NOW).detail).toContain('search is degraded (no_current_embedding_artifacts, 0/12 chunks embedded)');
     // An empty tier corpus (a source with no Private items yet) is degraded for good: it has nothing to embed, and is no fault.
     expect(statusCheck(gmail, [corpus('Gmail'), corpus('Gmail', { corpus_id: 'gmail.private', counts: { indexed_items: 0 }, retrieval: { mode: 'keyword', state: 'degraded' } })], NOW).status).toBe('pass');
     // Cached items are not syncing: a failure newer than the last success fails, and no finished refresh at all fails.
