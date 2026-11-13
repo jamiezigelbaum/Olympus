@@ -375,6 +375,13 @@ Linux descriptor checks run as stores mount and at completion, checking the
 live default data folder and each repeatable `--forbid-root`. Platforms without
 `/proc/self/fd` require explicit `--allow-no-fd-check`. Keep model assets outside
 forbidden data folders, or point the existing model settings at copied assets.
+The eval's own read-only probes wait up to 10 s on a busy file, as the product's
+read-only opens do, so two eval rows can share one copy. A store or ledger the run
+still cannot open fails it with `EVAL_STORE_UNREADABLE`: the message names which
+open failed, SQLite's code, extended errno and path-free message, and how many
+other processes hold the copy open (Linux). `--allow-unreadable-stores` runs
+without them and records the same facts in `skippedStores`. The passage eval's
+summary line starts with `storesOpened` and `storesSkipped`.
 The existing built-in embedding selection, `OLYMPUS_SOURCE_RERANKER*` settings,
 `OLYMPUS_EVAL_MAX_RESULTS`, and `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` apply.
 `--max-chars-per-candidate` overrides the last setting. The local Analyst lane's
