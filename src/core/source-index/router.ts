@@ -19,6 +19,7 @@ import type {
 } from './corpus.ts';
 import {
   applyPerCorpusResultBudget,
+  applyStrengthPoolBudget,
   RESERVED_LEADER_MIN_CONCEPT_SHARE,
   withReservedLeaderSeats,
   withReservedRecencySeats,
@@ -65,6 +66,10 @@ export interface SourceIndexSearchRequest {
   // chat stores' pinned newest messages take the recency seats
   // (withReservedRecencySeats). Decided by the caller's existing heuristic.
   temporalIntent?: boolean;
+  // A reranker pool (evidence-pack): seat every store's leader, then go deep
+  // in the strongest stores first, up to storeDepth of each store's own ranks
+  // (applyStrengthPoolBudget). Absent: stores share seats in even turns.
+  poolAllocation?: { storeDepth: number };
 }
 
 export interface SourceIndexCorpusSearchRequest {
@@ -684,7 +689,9 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     // secure_local corpus lost to every internal one on every query forever.
     tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder),
   });
-  const budgeted = applyPerCorpusResultBudget(fusedAll, request.maxResults);
+  const budgeted = request.poolAllocation
+    ? applyStrengthPoolBudget(fusedAll, request.maxResults, laneOrder, request.poolAllocation.storeDepth)
+    : applyPerCorpusResultBudget(fusedAll, request.maxResults);
   const pool = fusedAll.map((candidate) => candidate.item);
   const leadered = withReservedLeaderSeats(budgeted, pool, request.maxResults);
   const recency = request.temporalIntent

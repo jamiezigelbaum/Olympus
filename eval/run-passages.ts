@@ -86,6 +86,8 @@ export interface PassageReceipt {
   setId: string; maxResults: number; ks: number[];
   /** The reranker's id (its model folder's name), or 'off'. */
   reranker: string;
+  /** Set when the reranker's pool was strength-allocated (OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH); absent: even turns. */
+  rerankPoolStoreDepth?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
   summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
     /** By the expected item's stored chunks (1_chunk, 2-3_chunks, 4+_chunks), when counted. */
@@ -176,7 +178,7 @@ function grouped(rows: readonly PassageRow[], ks: readonly number[], groups: (ro
 }
 
 export async function runPassageEval(input: {
-  dataset: EvalDataset; split?: EvalSplit; maxResults: number; promptBytes?: number;
+  dataset: EvalDataset; split?: EvalSplit; maxResults: number; promptBytes?: number; rerankPoolStoreDepth?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores?: readonly EvalSkippedStore[]; gitSha: string;
   /** The pack, and each store search's returned item ids in order (EvalStoreSearch) when recorded. */
   buildPack: (question: EvalQuestion) => Promise<EvidencePackBuildDetail & { storeSearches?: readonly EvalStoreSearch[] }>;
@@ -282,7 +284,9 @@ export async function runPassageEval(input: {
   return { schema: 3, rule: PASSAGE_MATCH_RULE, gitSha: input.gitSha, split,
     // Identity includes only ids and structural labels; never hashes private text.
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
-    maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off', storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
+    maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off',
+    ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth } : {}),
+    storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
     summary: summaries(rows, ks),
     ...(split === 'open' ? { questions: rows } : {}),
     degradedIds: rows.filter(row => row.degraded).map(row => row.questionId),
@@ -390,6 +394,19 @@ export function questionJudge(model: DraftModel) {
   };
 }
 
+/**
+ * Eval-only arm switch: OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH=<n> draws the
+ * reranker's pool by store strength (every store's leader, then the strongest
+ * stores up to n of their ranks). Unset: even turns, as the product does.
+ */
+export function evalRerankPoolAllocation(env: Record<string, string | undefined>): { storeDepth: number } | undefined {
+  const raw = env.OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH?.trim();
+  if (!raw) return undefined;
+  const storeDepth = Number(raw);
+  if (!Number.isInteger(storeDepth) || storeDepth < 1) throw new Error('OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH must be a whole number of at least 1.');
+  return { storeDepth };
+}
+
 export async function main(argv = process.argv.slice(2), stage?: EvalStage): Promise<void> {
   const enter = (name: string) => enterStage(stage, name, 'passage eval');
   enter('arguments');
@@ -445,6 +462,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(config, process.env) });
     enter('load_reranker');
     const reranker = await prepareBuiltInRerankerFromEnv();
+    const rerankPoolAllocation = reranker ? evalRerankPoolAllocation(process.env) : undefined;
     // Each store search's returned ids, for the funnel's store rank.
     let searches: EvalStoreSearch[] = [];
     const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor, onStoreSearch: search => { searches.push(search); } });
@@ -455,9 +473,10 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const receipt = await runPassageEval({ dataset, split, maxResults, storeCounts: opened.storeCounts, skippedStores: opened.skipped,
       gitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
       ...(promptBytes !== undefined ? { promptBytes } : {}),
+      ...(rerankPoolAllocation ? { rerankPoolStoreDepth: rerankPoolAllocation.storeDepth } : {}),
       buildPack: async q => {
         searches = [];
-        const built = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}) });
+        const built = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}), ...(rerankPoolAllocation ? { rerankPoolAllocation } : {}) });
         return { ...built, storeSearches: searches };
       },
       ...(probe ? { probeLanes: probe } : {}),
