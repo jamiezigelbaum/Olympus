@@ -107,6 +107,7 @@ import { runServerModeLeg } from './server-mode.ts';
 import { SCALE_FORMATS } from './archive-scale-fixtures.ts';
 import { SCALE_BOUND_S, SCALE_REPEAT_S, SCALE_REMOVE_S, scaleChecks, type ScaleObservation } from './archive-scale.ts';
 import type { ArchiveScaleMeasurement } from './report.ts';
+import { runFreshLimits, type LimitsResult } from './fresh-limits.ts';
 import { checkMacOwnerProof } from './mac-owner-proof.ts';
 import { checkMacConsentOwnerProof } from './mac-consent-owner-proof.ts';
 import { checkForwardedSocketOwnerProof } from './forwarded-socket-owner-proof.ts';
@@ -134,6 +135,8 @@ export const INBOX_SELFTESTS: readonly InboxSelftest[] = ['plant-private-reply',
 export const INBOX_SELFTEST_FAILS: Record<InboxSelftest, string> = { 'plant-private-reply': 'private-medical.no-leak', 'wrong-link-id': 'inbox.agent.entry' };
 
 export interface RunOptions {
+  /** Machine-free test seam; CLI candidates always execute the real limits proof. */
+  limitsStage?: typeof runFreshLimits;
   runId: string;
   candidateDir: string;
   candidateLabel: string;
@@ -220,6 +223,7 @@ function sh(value: string): string {
 
 /** One stage of a run: a plain run has one; an upgrade run has three (before, the update itself, after). */
 interface Stage {
+  limits?: LimitsResult;
   id: string;
   label: string;
   version?: string;
@@ -1556,6 +1560,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   if (Date.now() < deadline) await runRelayConsentCheck(run);
   if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
   if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
+  await runLimitsLeg(run);
   await collectEvidence(run, options.outDir);
 }
 
@@ -1564,6 +1569,12 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
 // Mac only, in relay mode: a second account's Connect on the app approval page is refused, the owner's approves (#1186).
 async function runRelayConsentCheck(run: Run): Promise<void> {
   run.add(await run.phase('mac-consent-owner-proof', () => checkMacConsentOwnerProof(run.machine!, !run.options.skipRelay && !!run.options.config.relay)));
+}
+
+/** Always executed on the candidate's provisioned machine; no carry or skip flag can supply this proof. */
+async function runLimitsLeg(run: Run): Promise<void> {
+  run.stage.limits = await run.phase('limits', () => (run.options.limitsStage ?? runFreshLimits)(run.machine!));
+  for (const check of run.stage.limits.checks) run.add(check);
 }
 
 // Last, because installing the anonymous-answer tools and, on Ubuntu, the administrator's AppArmor profile changes what
@@ -1650,6 +1661,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
         if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
         if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
+        await runLimitsLeg(run);
         await collectEvidence(run, options.outDir);
         if (restore) {
           const prepared: RestorePrepared = restore;
@@ -1711,6 +1723,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     ...(last.visual ? { visual: last.visual } : {}),
     ...(last.explore ? { explore: last.explore } : {}),
     ...(last.archiveScale ? { archiveScale: last.archiveScale } : {}),
+    ...(last.limits ? { limits: last.limits } : {}),
     ...(upgrading ? {
       upgrade: {
         from: toPhase(run.stages.get('before')!),

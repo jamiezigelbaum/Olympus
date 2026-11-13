@@ -80,7 +80,7 @@ const verbs = (): string[] => archiveCalls().map((line) => line.split(' ')[0]!);
 function options(extra: Record<string, unknown> = {}) {
   const runId = newRunId();
   const config: RunConfigFile = { driver: [driverPath], agents: [], settleTimeoutS: 5 };
-  return { runId, candidateDir, candidateLabel: 'archive test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipInbox: true, skipJourneys: true, skipExplore: true, skipSuite: true, ...extra };
+  return { runId, candidateDir, candidateLabel: 'archive test', outDir: join(dir, 'out', runId), config, limitsStage: async () => ({ rows: [], checks: [] }), skipRelay: true, skipScreenshots: true, skipInbox: true, skipJourneys: true, skipExplore: true, skipSuite: true, ...extra };
 }
 type Report = Awaited<ReturnType<typeof runReleaseCheck>>;
 const checksOf = (report: Report) => report.machines[0]!.checks;
@@ -88,7 +88,16 @@ const failedIds = (report: Report): string[] => checksOf(report).filter((c) => c
 
 describe('the archive-import leg in a run', () => {
   test('runs after the install checks, in the order the machine needs, and tells each verb what to do', async () => {
-    const report = await runReleaseCheck(options());
+    let limitsRuns = 0;
+    const report = await runReleaseCheck({ ...options(), limitsStage: async machine => {
+      expect(machine.disposable).toBe(true);
+      expect(agentLog().some(line => line.startsWith('archive-'))).toBe(true);
+      limitsRuns++;
+      return { rows: [], checks: [{ id: 'limits.judge.daily_calls', title: 'limits', status: 'fail', detail: 'Raise did not resume judge calls' }] };
+    } });
+    expect(limitsRuns).toBe(1); // Also when the unrelated suite is skipped.
+    expect(report.machines[0]?.limits?.checks[0]?.status).toBe('fail');
+    expect(failedIds(report)).toContain('limits.judge.daily_calls');
     // The Telegram and WhatsApp sources' live inputs are seeded before the other formats (each one's own export is imported beside it
     // once its seed works: scripted here to do nothing, so those imports are not made).
     expect(verbs()).toEqual(['archive-import', 'archive-import', 'archive-seed-live', 'archive-seed-live', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-model', 'archive-model', 'archive-remove', 'archive-changed', 'archive-cleanup', 'archive-collect']);

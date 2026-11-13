@@ -1,5 +1,67 @@
 # Fresh-install canary on test-omarchy
 
+The mandatory `limits` release stage runs on the release-check driver's
+throwaway machine, returned by `machine.ts`'s `provision` verb. The candidate
+runner (`run.ts`) always runs it after a usable fresh install, and after an
+upgrade on the candidate version. There is no opt-in or skip flag. The
+fresh-install flow also calls it after its install checks, with a test seam.
+An existing machine obtained through `machineFor`, including the older canary
+invocation below, cannot supply this proof: the stage fails before issuing any
+machine commands. Never run it on Sparta, an owner's machine or the frozen
+reviewer demo. Provision, execute and destroy through the release-check driver.
+
+The stage saves only its two nonsecret environment settings and the owner limit
+settings in private `/tmp` scratch, preserving all other worker environment
+entries without copying credentials. It sets `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY=1` in the
+installed worker environment, seeds two synthetic records from `fixture.ts`
+through the existing Telegram archive live-seed connector hook,
+and restarts once before taking observations. It installs no account-wide
+privacy rule and needs no real source account. The worker opens the seeded
+stores at boot and judges their pending items with its configured privacy model.
+Fresh identities and material prevent earlier fixture judgments satisfying this
+proof. In the candidate runner this stage follows the other product journeys,
+so its injected stops cannot change their screenshots or backup contents.
+Daily usage counters are preserved, including usage before the stage.
+
+`olympus limits` must report `judge.daily_calls` within 180 seconds, with a
+nonempty label, unit `calls`, limit 1, used calls at least 1 and a valid
+`resumesAt`. Home is read through the engine's own `/dashboard?panel-read`
+JSON, using the fresh-dashboard owner socket and bearer pattern. Its wait
+must match the stop's label, amounts, unit and resume time and expose a Raise
+fix calling `olympus_limits`. One `olympus limits continue judge.daily_calls`
+with `--to` set 50 above the larger of the limit and the calls already used
+today (earlier stages keep the day's count) must return `ok:true`, clear both
+views and allow the persisted daily call counter to increase within 180
+seconds. Both engine and judge worker process ids must stay the
+same across the continuation.
+
+For `venice.credit`, the stage writes the same `kind: venice` marker shape as
+`writeProviderPause`, at the configured pause file (or a temporary path
+configured with `OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE` before the
+restart). It first seeds fresh synthetic items, so the stop has work to hold.
+Seeding restarts the engine, so the no-restart window starts once the engine is
+ready again, and the marker is written only then: startup's billing check would
+otherwise clear it before the stage looks. It refuses to overwrite an existing
+marker. Within 90 seconds the
+CLI must show the billing reason and Home must offer the matching Refill fix.
+One `olympus limits continue venice.credit` uses the product's constant Venice
+billing URL. With a credential, it must return `ok:true`, clear the stop from
+both views, remove the marker and let the judge call counter increase within
+180 seconds, all without a restart. Without a credential, it
+must return `ok:false` with `has not confirmed canConsume=true`, leaving both
+the stop and marker in place. That lift is explicitly **inconclusive**, with
+the reason in its row and a skip check; it is never recorded as a pass.
+
+All waits poll with the stage clock and a deadline. A failed assertion fails
+the stage; the other leg can still produce its own evidence. Cleanup always
+removes the injected marker and restores the saved environment and owner
+settings, restarting only after the no-restart observation interval. The
+driver destroys the machine through its normal teardown. Bundles and private
+scratch live under `/tmp`; failed restoration keeps its receipt there for
+diagnosis. The JSON `limits.rows` and `limits.checks` and HTML Limits table
+contain only limit ids, counts, units, times and fixed outcome reasons; no
+item text, titles, senders, marker paths or machine diagnostics are reported.
+
 Run with the existing SSH driver config and report destination:
 
 ```sh
