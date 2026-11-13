@@ -119,20 +119,18 @@ Enforcement is mechanical, so this survives any thread or tool:
   condition. An entry that is no longer a leftover fails too, so the list only
   shrinks. Do not add an entry to make a change pass — delete the leftover, or
   put it on the public surface.
-- GitHub Actions runs every test in parallel on every push; branch protection
-  requires the substantive static, fast, exchange, deploy-shard, and Go contexts directly, without a billed aggregate runner job.
-- Olympus owns no local Git hook. Protected `main` rejects direct pushes and
-  GitHub's required full-CI lane checks own merge safety, so clones and
-  worktrees do not inherit repository policy through mutable Git configuration.
-  User-installed hooks remain user-owned. The private-host runtime refresh continues
-  to require exact-SHA green CI until the artifact-provenance receipt path is
-  separately proven and adopted.
+- GitHub Actions runs every lane in parallel on every push to `main`: static,
+  fast, exchange, deploy-shard and Go.
+- Olympus owns no local Git hook. User-installed hooks remain user-owned. The
+  private-host runtime refresh continues to require exact-SHA green CI until
+  the artifact-provenance receipt path is separately proven and adopted.
 
 ### Task briefs and completion
 
-Follow the canonical [delivery path](docs/ENGINEERING_PROCESS.md#one-delivery-path): relevant focused
-local proof, required exact-head CI lanes, and the post-merge workflow for the
-exact `main` SHA must be green. Source-pipeline structural changes also require
+Follow the canonical [delivery path](docs/ENGINEERING_PROCESS.md#one-delivery-path): run the
+focused checks for what you changed and the change once for real, commit
+straight to `main` and push; the session that pushed keeps `main`'s CI green
+and fixes forward when it isn't. Source-pipeline structural changes also require
 the held-out eval (`eval/`); contract changes follow the
 [versioned change gate](docs/ENGINEERING_PROCESS.md#contract-evolution).
 
@@ -142,7 +140,7 @@ Canonical: [docs/ops/HARNESS_PROTOCOL.md](docs/ops/HARNESS_PROTOCOL.md) — read
 it before implementing, merging, or deploying from any harness.
 
 A direct instruction from the owner authorizes delivery of that scoped change
-through a short-lived pull request.
+straight to `main`.
 
 ## ChatGPT directory review (until OpenAI's result)
 
@@ -192,17 +190,12 @@ remain outside the repo's ownership.
 
 ## Git
 
-- Multi-session safety: the main checkout stays on `main`. Do ALL branch work
-  in a dedicated `git worktree add` checkout and merge from a detached HEAD
-  there; a branch switch or sweeping `git add` in the main checkout captures
+- Commit straight to `main` and push (owner rule, 13 Nov 2026). No pull
+  request, auto-merge or review wait; if it breaks, fix forward. Pull in
+  `main` before pushing, retry a rejected push, never force-push.
+- Stage only your own files, never `git add .` or `-A`: a Mac checkout may hold
   another session's uncommitted edits (2026-07-08 incident).
-- Deliver implementation through a short-lived topic branch and squash PR.
 - Commits are authored by people only (owner rule, standing). Commit as
   Jamie (or the human contributor); never as Claude or Codex and never with an
   AI `Co-authored-by` trailer, whatever a harness's attribution guidance says.
-  The static checks job rejects a PR whose commits break this, because
-  GitHub's squash merge would credit the AI as a co-author on `main`.
-  Reviewers (including the Codex GitHub reviewer): judge authorship only from
-  the PR's own commits on GitHub, never from a commit your sandbox made while
-  replaying the diff. The static checks job already enforces the rule, so do
-  not raise it as a finding when that job passed.
+  The static checks job rejects any pushed commit that breaks this.
