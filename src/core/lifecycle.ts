@@ -461,6 +461,10 @@ function previousWorkerHealth(
   // Not the upgrade's window: the previous version writes no progress, so its
   // whole start has to fit in this one.
   const timeoutMs = options.rollbackReadinessTimeoutMs ?? options.actionSettleTimeoutMs ?? MAX_READINESS_TIMEOUT_MS;
+  // launchctl and systemctl acknowledge submission, not a running job: the
+  // restored worker gets the same settle the upgrade's own start does.
+  const settled = settleWorkerServiceState(options, ['active']);
+  if (settled.state !== 'active') return { healthy: false, reason: `stopped (its service is ${settled.state})` };
   const probe = options.rollbackReadinessProbe ?? options.readinessProbe;
   const outcome = waitForWorkerReadiness(options, port, {
     timeoutMs,

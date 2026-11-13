@@ -1287,9 +1287,13 @@ export class TierSnifferService {
       // (core/boot-progress.ts retireStatePath, #1563).
       const retired = retiredEmbeddingPrefilterPaths(path);
       for (const directory of retired.directories) retireStatePath(process.env, 'embedding_prefilter_weights', directory);
-      checkpointRetiredLedger(retired.ledger);
-      retireStatePath(process.env, TIER_LEDGER_SQLITE_STORE_ID, retired.ledger);
-      for (const suffix of ['-wal', '-shm']) rmSync(`${retired.ledger}${suffix}`, { force: true });
+      // Only a ledger whose -wal is fully written into it is moved: what a
+      // busy checkpoint leaves in the -wal would be lost. It stays as it is,
+      // and the next start tries again.
+      if (checkpointRetiredLedger(retired.ledger)) {
+        retireStatePath(process.env, TIER_LEDGER_SQLITE_STORE_ID, retired.ledger);
+        for (const suffix of ['-wal', '-shm']) rmSync(`${retired.ledger}${suffix}`, { force: true });
+      }
       this.retiredPrefilterCleaned.add(path);
     }
     return targets;
@@ -2080,17 +2084,21 @@ export function moveFailureName(error: unknown): string {
 
 /**
  * The retired ledger keeps only its main file aside, so what its -wal holds
- * is written into it first. A file that will not open is moved as it is.
+ * is written into it first. Returns whether the main file now holds
+ * everything: no -wal, or a checkpoint that was not busy and wrote every
+ * frame. A file that will not open, or a busy checkpoint, is false.
  */
-function checkpointRetiredLedger(path: string): void {
-  if (!existsSync(path) || !existsSync(`${path}-wal`)) return;
+function checkpointRetiredLedger(path: string): boolean {
+  if (!existsSync(`${path}-wal`)) return true;
+  if (!existsSync(path)) return false;
   let db: Database | undefined;
   try {
     db = new Database(path);
     db.exec('PRAGMA busy_timeout = 10000;');
-    db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    const result = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number; log: number; checkpointed: number } | null;
+    return result !== null && result.busy === 0 && result.log === result.checkpointed;
   } catch {
-    // Moved as it is.
+    return false;
   } finally {
     db?.close();
   }

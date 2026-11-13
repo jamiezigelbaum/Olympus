@@ -95,8 +95,10 @@ test('worker moves both retired model locations and the retired ledger aside onc
     for (const directory of paths.directories) {
       mkdirSync(directory, { recursive: true }); writeFileSync(join(directory, 'weights.json'), 'old weights');
     }
-    for (const suffix of ['', '-wal', '-shm']) writeFileSync(`${paths.ledger}${suffix}`, 'old state');
   }
+  // One retired ledger holds a row only in its -wal (as a crash leaves it); the other has no -wal.
+  walOnlyLedger(retired[0]!.ledger, 'kept-in-wal');
+  writeFileSync(retired[1]!.ledger, 'old state');
   const startedAt = Date.now() - 1_000;
   const installed = new InstalledTierClassification({ env: {} });
   const service = new TierSnifferService({ installed, classificationLedgerPath, lane: BUILT_IN_SNIFFER_LANE,
@@ -119,8 +121,10 @@ test('worker moves both retired model locations and the retired ledger aside onc
     // Two retired ledgers and the live ledger's own pre-update copy (13 to 16), and four weight folders.
     expect(restored.filter(id => id === 'olympus_tier_ledger')).toHaveLength(3);
     expect(restored.filter(id => id === 'embedding_prefilter_weights')).toHaveLength(4);
+    // The row that was only in the -wal came back with the ledger (#1563 review).
+    expect(walOnlyRows(retired[0]!.ledger)).toEqual(['kept-in-wal']);
+    expect(readFileSync(retired[1]!.ledger, 'utf8')).toBe('old state');
     for (const paths of retired) {
-      expect(readFileSync(paths.ledger, 'utf8')).toBe('old state');
       for (const directory of paths.directories) expect(readFileSync(join(directory, 'weights.json'), 'utf8')).toBe('old weights');
     }
     for (const paths of retired) for (const path of [...paths.directories, paths.ledger]) rmSync(path, { recursive: true, force: true });
@@ -128,6 +132,47 @@ test('worker moves both retired model locations and the retired ledger aside onc
     mkdirSync(retired[0]!.directories[0]!);
     await service.runOnce();
     expect(existsSync(retired[0]!.directories[0]!)).toBe(true);
+  } finally { service.stop(); installed.close(); }
+});
+
+/** A WAL database whose one row is committed only in its -wal: copied while the writer is still open. */
+function walOnlyLedger(path: string, value: string): void {
+  const source = `${path}.source`;
+  const writer = new Database(source, { create: true });
+  writer.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE t (v TEXT);');
+  writer.query('INSERT INTO t (v) VALUES (?)').run(value);
+  for (const suffix of ['', '-wal']) writeFileSync(`${path}${suffix}`, readFileSync(`${source}${suffix}`));
+  writer.close();
+  for (const suffix of ['', '-wal', '-shm']) rmSync(`${source}${suffix}`, { force: true });
+}
+
+function walOnlyRows(path: string): string[] {
+  const db = new Database(path, { readonly: true });
+  try { return (db.query('SELECT v FROM t').all() as Array<{ v: string }>).map(row => row.v); }
+  finally { db.close(); }
+}
+
+test('a retired ledger whose -wal cannot be fully checkpointed is left as it is, not moved without it (#1563 review)', async () => {
+  const f = fixture();
+  f.ledger.close();
+  const classificationLedgerPath = join(f.dir, 'classification.jsonl');
+  const retired = retiredEmbeddingPrefilterPaths(classificationLedgerPath);
+  walOnlyLedger(retired.ledger, 'kept-in-wal');
+  // A reader holding a snapshot makes the checkpoint busy without throwing.
+  const reader = new Database(retired.ledger);
+  reader.exec('BEGIN');
+  reader.query('SELECT COUNT(*) FROM t').get();
+  const installed = new InstalledTierClassification({ env: {} });
+  const service = new TierSnifferService({ installed, classificationLedgerPath, lane: BUILT_IN_SNIFFER_LANE,
+    stores: () => [{ dbPath: join(f.dir, 'items.sqlite') }], modelAvailable: () => false,
+    model: { async complete() { throw new Error('Unavailable'); } } });
+  try {
+    await service.runOnce();
+    expect(existsSync(retiredStateBackupPath(retired.ledger))).toBe(false);
+    expect(existsSync(`${retired.ledger}-wal`)).toBe(true);
+    reader.exec('COMMIT');
+    reader.close();
+    expect(walOnlyRows(retired.ledger)).toEqual(['kept-in-wal']);
   } finally { service.stop(); installed.close(); }
 });
 

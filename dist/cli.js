@@ -219081,10 +219081,11 @@ class TierSnifferService {
       const retired = retiredEmbeddingPrefilterPaths(path);
       for (const directory of retired.directories)
         retireStatePath(process.env, "embedding_prefilter_weights", directory);
-      checkpointRetiredLedger(retired.ledger);
-      retireStatePath(process.env, TIER_LEDGER_SQLITE_STORE_ID, retired.ledger);
-      for (const suffix of ["-wal", "-shm"])
-        rmSync46(`${retired.ledger}${suffix}`, { force: true });
+      if (checkpointRetiredLedger(retired.ledger)) {
+        retireStatePath(process.env, TIER_LEDGER_SQLITE_STORE_ID, retired.ledger);
+        for (const suffix of ["-wal", "-shm"])
+          rmSync46(`${retired.ledger}${suffix}`, { force: true });
+      }
       this.retiredPrefilterCleaned.add(path);
     }
     return targets;
@@ -219699,14 +219700,19 @@ function moveFailureName(error2) {
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
 function checkpointRetiredLedger(path) {
-  if (!existsSync118(path) || !existsSync118(`${path}-wal`))
-    return;
+  if (!existsSync118(`${path}-wal`))
+    return true;
+  if (!existsSync118(path))
+    return false;
   let db;
   try {
     db = new Database30(path);
     db.exec("PRAGMA busy_timeout = 10000;");
-    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-  } catch {} finally {
+    const result = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    return result !== null && result.busy === 0 && result.log === result.checkpointed;
+  } catch {
+    return false;
+  } finally {
     db?.close();
   }
 }
@@ -252718,6 +252724,9 @@ function previousWorkerHealth(options) {
     return { healthy: false, reason: "has an unreadable port in its environment file" };
   }
   const timeoutMs = options.rollbackReadinessTimeoutMs ?? options.actionSettleTimeoutMs ?? MAX_READINESS_TIMEOUT_MS;
+  const settled = settleWorkerServiceState(options, ["active"]);
+  if (settled.state !== "active")
+    return { healthy: false, reason: `stopped (its service is ${settled.state})` };
   const probe2 = options.rollbackReadinessProbe ?? options.readinessProbe;
   const outcome = waitForWorkerReadiness(options, port, {
     timeoutMs,
