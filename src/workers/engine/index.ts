@@ -1,3 +1,7 @@
+import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
+import { sourceItemReadSelectedItem, sourceItemReadPage } from '../../core/source-index/selected-items.ts';
+import { itemReadOnDemand } from '../file-extraction/on-demand-read.ts';
+import { assertNoSourceIndexOperationalLeakFields } from '../../core/email.ts';
 import { JUDGE_CHOICES, type JudgeChoice } from '../classification/judge-spending.ts';
 import { type DashboardPeopleView, DASHBOARD_PEOPLE_PATH } from '../dashboard/pages/people.ts';
 import { dashboardModelsOnComputer } from '../dashboard/models-on-computer.ts';
@@ -3021,6 +3025,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               withPreview: true,
             }), ...(ownerTierItems.counts ? { counts: ownerTierItems.counts() } : {}) });
           }
+          if (url.pathname === '/dashboard/privacy/items/read') {
+            const itemId = asOptionalString(record.item_id);
+            if (!itemId) throw new EmailSourceWorkerError(400, 'invalid_request', 'item_id is required.');
+            if (!options.readOwnerItem) throw new EmailSourceWorkerError(501, 'read_unavailable', 'Reading this file is not available.');
+            return json({ ok: true, ...await options.readOwnerItem(itemId) });
+          }
           if (url.pathname === '/dashboard/privacy/items/set') {
             const itemId = asOptionalString(record.item_id);
             const tier = asOptionalString(record.tier);
@@ -3219,6 +3229,20 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const body = fileExtractionRunBody(result);
           assertNoRawEmailFields(body);
           return json(body);
+        }
+
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/index/files/read-on-demand`) {
+          const record = await parseObjectBody(request);
+          const item = record.itemRef as Record<string, unknown> | undefined;
+          const corpusId = item && asOptionalString(item.corpusId);
+          const providerItemId = item && asOptionalString(item.providerItemId);
+          const questionId = asOptionalString(record.questionId);
+          const requester = record.requester;
+          if (!corpusId || !providerItemId || (requester !== 'analyst' && requester !== 'remote_app')) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'A read requires an item reference and an analyst or remote_app requester.');
+          }
+          if (!options.requestOnDemandRead) return json({ state: 'refused', reason: 'read_unavailable' });
+          return json(await options.requestOnDemandRead({ itemRef: { corpusId, providerItemId }, requester, ...(questionId ? { questionId } : {}) }));
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/files/plan`) {
@@ -3434,6 +3458,40 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const exportRequest = await parseDropboxEvalShardExportRequest(request);
           const result: DropboxEvalShardManifest = await dropboxEvalShardExport.export(exportRequest);
           assertNoRawEmailFields(result);
+          return json(result);
+        }
+
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/item/read`) {
+          const record = await parseObjectBody(request);
+          const selected = sourceItemReadSelectedItem(record.selected_item);
+          const page = sourceItemReadPage(record.page, 'page');
+          const pages = sourceItemReadPage(record.pages, 'pages', 3);
+          const store = connectorStoresByCorpusId.get(selected.corpus_id);
+          const refused = { pages: [], totalPages: 0, totalChars: 0, couldNotRead: ['not_in_scope'] };
+          if (!store || selected.family !== store.family) return json(refused);
+          const identity = store.activeLocalItemRow(selected.local_item_id)?.identity;
+          if (!identity || identity.provider !== selected.provider || identity.accountScope !== selected.account_scope
+            || identity.providerItemId !== selected.provider_item_id
+            || identity.providerConversationId !== selected.provider_conversation_id) return json(refused);
+          const result = await store.readItemPages(selected.local_item_id, {
+            page, pages, releaseCheck: options.sourceAnswerReleaseCheck,
+            scope: () => {
+              const scope = connectorStoreReadScope?.(store);
+              if (scope?.allowed === false) return scope;
+              const principal = connectorStorePrincipals.get(store.corpusId);
+              return { allowed: true, ...scope,
+                accountScope: scope?.accountScope ?? connectorStoreAccountScopes.get(store.corpusId) ?? principal?.accountScope,
+                ...(principal ? { filters: { ...scope?.filters, provider: principal.provider } } : {}),
+              };
+            },
+          });
+          if (currentRemoteReadAccess() !== 'active') return json(refused);
+          if (result.couldNotRead.length === 1 && result.couldNotRead[0] === 'names_only' && options.requestOnDemandRead) {
+            Object.assign(result, await itemReadOnDemand(options.requestOnDemandRead, store.corpusId, selected.provider_item_id));
+          }
+          if (result.couldNotRead.includes('not_personal')) throw new EmailSourceWorkerError(403, 'not_personal', 'Private item: ask with source_answer');
+          assertNoRawEmailFields(result);
+          assertNoSourceIndexOperationalLeakFields(result);
           return json(result);
         }
 

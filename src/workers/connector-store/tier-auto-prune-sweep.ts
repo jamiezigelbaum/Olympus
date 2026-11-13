@@ -4,8 +4,11 @@ import { copyServingLayer, tierLedgerIdentityKey, trustDomainRank, type TierLedg
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { pruneSupersededStoreCopy, queueTierLedgerEntry, type TierMoveOptions } from './tier-move.ts';
 import { compareContentVersions } from './tier-content-purge.ts';
+import type { LocalConnectorStore } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 import { registeredTierSets } from './tier-set-registry.ts';
+import { withIdleStoreReclaim } from '../../core/store-reclaim-admission.ts';
+import { SUPERSEDED_SWEEP_SLICE_MS, TIER_DOMAIN_ORDER } from './tiered-store-set.ts';
 
 const STATE = 'automatic-superseded-prune-v1';
 /** How often the engine's background takes a slice of each unfinished sweep: a 250 ms slice every 5 s. */
@@ -25,11 +28,63 @@ interface State {
   pending?: Pending;
   retry?: boolean;
   deleted?: Record<string, number>;
+  /** Persisted before reclaim; completion survives process death and ledger reopen. */
+  reclaimed?: Record<string, { bytesBefore: number; bytesAfter?: number; done?: boolean }>;
   /** The item the last pass failed on, and how many passes in a row failed on it. */
   failing?: { key: string; count: number };
   /** Original chunk counts of receipts stepped past, so a later walk still audits what was already stripped. */
   parked?: Record<string, Pending['copies']>;
   embeddingLedger?: NonNullable<TierMoveOptions['embeddingLedger']>;
+}
+
+/** Leave smaller freelists for normal page reuse: both thresholds must be exceeded. */
+const RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
+const RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1;
+
+type ReclaimStore = (store: LocalConnectorStore, work: () => ReturnType<LocalConnectorStore['reclaimFreePages']>) => ReturnType<LocalConnectorStore['reclaimFreePages']>;
+
+/**
+ * One store per background tick, AFTER pruning is durably done. Old completed
+ * v1 ledgers also enter here: their deleted totals identify exactly which
+ * stores were pruned. Request/startup maintenance never calls this function.
+ */
+export async function reclaimAutomaticSupersededCopies(set: TieredStoreSet, reclaimStore: ReclaimStore = (_store, work) => work()): Promise<boolean> {
+  return await withIdleStoreReclaim(async () => {
+    const ledger = set.ledger;
+    const state: State = JSON.parse(ledger.readMeta(STATE) || '{}');
+    if (!state.done) return false;
+    const save = () => ledger.writeMeta(STATE, JSON.stringify(state));
+    for (const corpusId of Object.keys(state.deleted ?? {})) {
+      if (state.reclaimed?.[corpusId]?.done) continue;
+      const domain = TIER_DOMAIN_ORDER.find(domain => set.legSpec(domain)?.corpusId === corpusId);
+      const store = domain && set.store(domain);
+      if (!store) return false; // unavailable is retryable, never silently complete
+      const space = store.reclaimablePages();
+      if (!space) return false;
+      let receipt = state.reclaimed?.[corpusId];
+      if (!receipt) {
+        receipt = (state.reclaimed ??= {})[corpusId] = { bytesBefore: space.bytes };
+        if (space.free * space.pageBytes < RECLAIM_MAX_RETAINED_FREE_BYTES
+          || space.free / Math.max(1, space.pages) < RECLAIM_MAX_RETAINED_FREE_RATIO) {
+          receipt.done = true;
+          receipt.bytesAfter = space.bytes;
+        }
+        save(); // durable intent before any file changes; retries ignore the thresholds
+      }
+      if (!receipt.done) {
+        const result = await reclaimStore(store, () => store.reclaimFreePages(SUPERSEDED_SWEEP_SLICE_MS));
+        if (!result?.done) return false;
+        receipt.done = true;
+        receipt.bytesAfter = result.bytes;
+        save(); // mark before logging, so ticks/restarts never duplicate the line
+      }
+      console.info(`[tier-auto-prune-reclaim] ledger=${ledger.ledgerId()} tier=${domain}`
+        + ` bytes_before=${receipt.bytesBefore} bytes_after=${receipt.bytesAfter}`);
+      // Only one store's disk work per tick. Completion is read next time.
+      return Object.keys(state.deleted ?? {}).every(id => state.reclaimed?.[id]?.done);
+    }
+    return true;
+  }) ?? false;
 }
 
 type SweepReport = { checked: number; purged: number; kept: number; failed: number; complete: boolean };
@@ -254,17 +309,20 @@ function sweepPage(set: TieredStoreSet, options: {
 
 /**
  * Drives every registered set's sweep on its own clock, so a large ledger is
- * walked in hours whether or not the sniffer or a sync is running. Sets that
- * report done are skipped; the timer never keeps the process alive.
+ * walked in hours whether or not the sniffer or a sync is running. Completed
+ * pruning proceeds to reclaim; only fully reclaimed sets are skipped. The
+ * timer never keeps the process alive.
  */
 export function startSupersededSweepTicker(options: {
   active?: () => boolean;
+  reclaimStore?: ReclaimStore;
   intervalMs?: number;
   sets?: () => readonly TieredStoreSet[];
   /** Tests drive the tick themselves; returns a cancel function. */
   every?: (tick: () => void, ms: number) => () => void;
 } = {}): () => void {
   const finished = new WeakSet<TieredStoreSet>();
+  const reclaiming = new WeakSet<TieredStoreSet>();
   const sets = options.sets ?? registeredTierSets;
   const every = options.every ?? ((tick, ms) => {
     const timer = setInterval(tick, ms);
@@ -274,8 +332,14 @@ export function startSupersededSweepTicker(options: {
   return every(() => {
     if (options.active && !options.active()) return;
     for (const set of sets()) {
-      if (finished.has(set)) continue;
-      if (set.sweepSupersededSlice()) finished.add(set);
+      if (finished.has(set) || reclaiming.has(set)) continue;
+      if (!set.sweepSupersededSlice()) continue;
+      reclaiming.add(set);
+      void reclaimAutomaticSupersededCopies(set, options.reclaimStore).then(done => {
+        if (done) finished.add(set);
+      }).catch(() => {
+        // A closed/busy store or interrupted worker retains its durable intent.
+      }).finally(() => { reclaiming.delete(set); });
     }
   }, options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS);
 }

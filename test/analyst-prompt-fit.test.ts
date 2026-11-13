@@ -1,3 +1,4 @@
+import { provedContent, provedReleaseCheck } from './helpers/scripted-search-release.ts';
 import { describe, expect, test } from 'bun:test';
 import { analystEvidenceFormat, analystPromptBytes, createAnalyst, withPromptBudget, type AnalystModelRequest } from '../src/core/analyst.ts';
 import { withBuiltInFallback } from '../src/core/analyst-built-in.ts';
@@ -290,11 +291,12 @@ async function exerciseAsk(analyst: ReturnType<typeof createAnalyst>, cloud = fa
         matchCount: { matchedItems: 80, contentMatchedItems: 70, saturated: true },
         latencyMs: 1, rawExposed: false as const,
       }) },
-      contentProviders: { [corpusId]: { async fetchLocalContent() { return {
+      contentProviders: provedContent({ [corpusId]: { async fetchLocalContent() { return {
         sensitivity: buildSourceSensitivity({ trustTier: cloud ? 'S2' : 'S4', trustDomain: domain }),
         chunks: pack.candidates[0]!.chunks,
         truncated,
-      }; } } },
+      }; } } }),
     }),
+    releaseCheck: provedReleaseCheck,
   }).answer({ question: pack.question, include_internal: true, include_internal_content: true, include_secure_local: !cloud, include_secure_local_content: !cloud, max_results: 24 });
 }

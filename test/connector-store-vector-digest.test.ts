@@ -19,7 +19,14 @@ beforeAll(() => { delete process.env.OLYMPUS_VECTOR_DIGEST; });
 afterAll(() => { if (digestSetting !== undefined) process.env.OLYMPUS_VECTOR_DIGEST = digestSetting; });
 const modelId = 'digest-fixture';
 const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId, dimension: 3, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0, 0]); } };
-const open = (dbPath = ':memory:') => new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.digest', family: 'file', trustDomain: 'internal', tierLedger: null });
+const open = (dbPath = ':memory:') => {
+  const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.digest', family: 'file', trustDomain: 'internal', tierLedger: null });
+  // These disposable fixtures exercise indexing and backfill, not power-loss
+  // durability. Hundreds of FULL-synchronous commits otherwise dominate seed
+  // time on the runner (with either vacuum mode).
+  database(store).exec('PRAGMA synchronous=OFF');
+  return store;
+};
 const database = (store: LocalConnectorStore) => (store as unknown as { db: Database }).db;
 function connector(count: number): SourceConnector {
   const items: RawItem[] = Array.from({ length: count }, (_, i) => ({

@@ -250,7 +250,11 @@ export function unreadableNames(input: unknown): string[] {
 export interface DashboardSourceWait {
   sourceId: string;
   label: string;
-  reason: 'daily_budget' | 'rate_limit';
+  reason: 'daily_budget' | 'rate_limit' | 'limit';
+  limitLabel?: string;
+  since?: string;
+  waiting?: { items?: number; runs?: number };
+  fix?: DashboardFix;
   api: string;
   resumesAt?: string;
 }
@@ -953,7 +957,7 @@ export interface ConnectSourceResult {
   expiresAt: string;
 }
 
-export type ScopeSelectionState = 'ingest' | 'metadata_only' | 'exclude';
+export type ScopeSelectionState = 'ingest' | 'metadata_only' | 'on_demand' | 'exclude';
 
 export interface ScopeSelection {
   /** Opaque provider key from a node. */

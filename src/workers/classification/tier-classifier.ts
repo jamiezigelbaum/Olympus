@@ -750,6 +750,8 @@ function classifyItemTiersWithPublic(
  */
 export interface ContentTierInput {
   text: string;
+  /** A release window is a fragment, so whole-item trivial-text rules cannot prove it read. */
+  requireModelRead?: boolean;
   metadataTier: TierKey;
   metadataForced: boolean;
   metadataFlagged: boolean;
@@ -827,6 +829,7 @@ export function classifyContentTier(
       ...(input.sender ? { sender: input.sender } : {}),
     },
     text,
+    ...(input.requireModelRead ? { requireModelRead: true } : {}),
     textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
     titleIsConversation: input.titleIsConversation === true,
     ...(input.heldSecret ? { heldSecret: true } : {}),
@@ -1061,6 +1064,7 @@ function metadataPass(args: {
 function contentPass(args: {
   signals: SourceClassificationSignals;
   text: string | undefined;
+  requireModelRead?: boolean;
   textOnly: boolean;
   titleIsConversation?: boolean;
   heldSecret?: boolean;
@@ -1169,7 +1173,7 @@ function contentPass(args: {
 
   // Only complete own text may settle by content rule. Names have already
   // run independently and their tier remains the floor.
-  const rule = args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim())
+  const rule = !args.requireModelRead && args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim())
     ? trivialContentRule(text, args.parentContext) : undefined;
   if (rule) {
     return {

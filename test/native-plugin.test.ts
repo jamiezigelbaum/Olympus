@@ -674,6 +674,7 @@ describe('native OpenClaw plugin adapter', () => {
       'argus_complete',
       'source_answer',
       'source_index_status',
+      'source_item_read',
       'source_index_search',
       'source_watch_create',
       'source_watches',
@@ -701,6 +702,7 @@ describe('native OpenClaw plugin adapter', () => {
     expect(disabled).not.toContain('source_answer');
     expect(disabled).not.toContain('source_index_status');
     expect(disabled).not.toContain('source_index_search');
+    expect(disabled).not.toContain('source_item_read');
     expect(disabled).toEqual([
       'argus_ping',
       'argus_list_models',

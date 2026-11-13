@@ -194,6 +194,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
         || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
+      const judgeStarted = Date.now();
       const content = classifyContentTier(
         {
           text: request.text,
@@ -219,6 +220,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },
       );
+      if (!content.contentPending && anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? '')) {
+        console.info(`[olympus:on-demand] step=judge count=1 ms=${Math.max(0, Date.now() - judgeStarted)}`);
+      }
       // An unusable map or rules file: the content decision is held pending
       // (Private, embedding held) rather than made without them.
       const held = tierClassification?.unavailableReason !== undefined && content.contentTier !== 'secrets';
@@ -317,6 +321,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if (!namesStay) {
         ledger.recordRoutedPlacement(identity, decision, placement);
         return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
+      }
+      if (anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? '')) {
+        contentStore.grantOnDemandRead(ref.localItemId, ref.sourceVersion);
       }
       if (contentStore !== anchorStore) {
         // Bound to the set ledger before any routed copy lands there, so no

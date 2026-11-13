@@ -1,3 +1,5 @@
+import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
+import { recordReleaseManifest } from '../src/core/release-manifest.ts';
 // OpenAPI view of the remote surface (hosted agents slice 3, for Muse).
 //
 // Assembled the way the worker server assembles it: the OpenAPI routes, then
@@ -115,6 +117,8 @@ function startServer(): void {
         answered += 1;
         answerStarted?.();
         if (answerHeld) await answerHeld;
+        // The answer read nothing, so its release manifest names no input.
+        recordReleaseManifest({ inputs: [], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
         return answerFixture();
       },
     },
@@ -123,14 +127,16 @@ function startServer(): void {
   });
   const remote = {
     connections: () => store,
-    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) =>
-      createInProcessOperationContext({
+    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
+      ...createInProcessOperationContext({
         config: ownerConfig(),
         sourceIndexReadEnabled,
         workerFetch: worker.fetch,
         caller,
         signal,
       }),
+      releaseCheck: provedReleaseCheck,
+    }),
   };
   const fetch = withRemoteOpenApiRoutes(
     createRemoteOpenApiHandler(remote),
@@ -239,11 +245,13 @@ describe('OpenAPI document', () => {
     }
   });
 
-  test('lists exactly the remote surface, with stable operationIds and bearer security', async () => {
+  test('lists exactly the REST-served remote operations, with stable operationIds and bearer security', async () => {
     const spec = await getSpec();
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
-    const remote = exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name);
-    expect(remote).toEqual([...V0_4_PUBLIC_REMOTE_MCP_TOOLS]);
+    const allRemote = exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name);
+    expect([...allRemote].sort()).toEqual([...V0_4_PUBLIC_REMOTE_MCP_TOOLS].sort());
+    const remote = allRemote.filter(name => name !== 'source_item_read');
+    expect(spec.paths['/api/v1/tools/source_item_read']).toBeUndefined();
     expect(Object.keys(spec.paths).sort()).toEqual(remote.map((name) => `/api/v1/tools/${name}`).sort());
     expect(Object.values(spec.paths as Record<string, any>).map((item) => Object.keys(item))).toEqual(remote.map(() => ['post']));
     expect(Object.values(spec.paths as Record<string, any>).map((item) => item.post.operationId).sort()).toEqual([...remote].sort());

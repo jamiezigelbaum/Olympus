@@ -1,3 +1,5 @@
+import type { RemoteReadHandleScope } from './remote-read-handles.ts';
+import { parseSourceItemReadResult, SOURCE_ITEM_READ_REFUSALS } from './source-item-read.ts';
 /**
  * What a remote agent receives: the output boundary of the `remote` operation
  * surface (`/mcp` for non-ChatGPT connections, and `POST /api/v1/tools/<name>`),
@@ -35,14 +37,16 @@ import { boundedLogErrorMessage, logErrorOrigin } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
 import { citationTitleWithParent, PARENT_LABEL_MAX_CHARS } from './parent-label.ts';
-import { privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
+import { checkReleaseChunks, passagesWithheldAtReleasableTiers, privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 
 /** The operations the remote surface serves (core/public-surface.ts V0_4_PUBLIC_REMOTE_MCP_TOOLS). */
-export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously';
+export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously' | 'source_item_read';
 
 export interface RemoteOutputOptions {
+  /** Present only on non-ChatGPT remote MCP; never on remote OpenAPI. */
+  issueReadHandle?: RemoteReadHandleScope['issueReadHandle'];
   /** Global count of items awaiting privacy judgment; never item metadata. */
   pendingPrivacyItems?: number | undefined;
   /**
@@ -141,7 +145,8 @@ export const REMOTE_SOURCE_LABELS: readonly string[] = Object.freeze([...new Set
   OTHER_SOURCE_LABEL,
 ])].sort());
 
-function sourceLabel(provider: unknown, family: unknown): string {
+/** The product name a remote result shows for an item's source. */
+export function sourceLabel(provider: unknown, family: unknown): string {
   if (typeof provider === 'string' && Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider)) return PROVIDER_LABELS[provider]!;
   if (typeof family === 'string' && Object.prototype.hasOwnProperty.call(FAMILY_LABELS, family)) return FAMILY_LABELS[family]!;
   return OTHER_SOURCE_LABEL;
@@ -202,6 +207,7 @@ function oneOf(value: unknown, allowed: readonly string[]): string | undefined {
  * output (sender counts, ledgers, item listings) never reaches a remote agent.
  */
 export const REMOTE_WITHHELD_PARAMS: Readonly<Partial<Record<RemoteOperationName, readonly string[]>>> = {
+  source_item_read: ['selected_item'],
   source_index_status: [
     'conversation_id',
     'include_sender_aggregation',
@@ -215,6 +221,7 @@ export const REMOTE_WITHHELD_PARAMS: Readonly<Partial<Record<RemoteOperationName
 };
 
 const REMOTE_DESCRIPTIONS: Readonly<Partial<Record<RemoteOperationName, string>>> = {
+  source_item_read: 'Read more of a found Personal item. Pass its read_handle from olympus_search or source_answer. Handles expire after 30 minutes and work only on this connection. Each page is judged before release.',
   source_index_status: [
     'Inspect source-index corpus status: each corpus\'s refresh status and aggregate counts.',
     'Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.',
@@ -230,6 +237,7 @@ function withheldParams(operation: string): readonly string[] {
 
 /** The parameters an operation declares on the remote surface. */
 export function remoteDeclaredParams(operation: string, declared: readonly string[]): string[] {
+  if (operation === 'source_item_read') return ['read_handle', 'page', 'pages'];
   const withheld = withheldParams(operation);
   return declared.filter((name) => !withheld.includes(name));
 }
@@ -243,6 +251,14 @@ export function remoteToolDescription(operation: string, description: string): s
 
 /** An operation's input schema on the remote surface: withheld parameters removed. */
 export function remoteToolSchema(operation: string, schema: Record<string, unknown>): Record<string, unknown> {
+  if (operation === 'source_item_read') return {
+    type: 'object', additionalProperties: false, required: ['read_handle'],
+    properties: {
+      read_handle: { type: 'string', description: 'The read_handle returned for this item on this connection.' },
+      page: { type: 'integer', minimum: 1, description: 'Page to read (default 1).' },
+      pages: { type: 'integer', minimum: 1, maximum: 3, description: 'Number of pages (default 1).' },
+    },
+  };
   const withheld = withheldParams(operation);
   if (withheld.length === 0) return schema;
   const properties = asRecord(schema.properties) ?? {};
@@ -277,21 +293,32 @@ export async function remoteOperationOutputOffThread(
   options: RemoteOutputOptions = {},
 ): Promise<Record<string, unknown>> {
   const check = options.releaseCheck;
-  if (!check?.inputsOffThread || !['source_answer', 'source_answer_result'].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
+  if (!['source_answer', 'source_answer_result'].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
     return remoteOperationOutput(operation, raw, options);
   }
+  if (!check) return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+    inputs: inputs => inputs.map(() => ({ tier: 'unknown', gone: false })), secureDerivativeDefault: () => 'approval',
+  } });
   let verdicts: readonly ReleaseInputVerdict[] | undefined;
   try {
-    verdicts = await check.inputsOffThread((options.releaseManifests ?? []).flatMap(manifest => manifest.inputs));
+    const inputs = (options.releaseManifests ?? []).flatMap(manifest => manifest.inputs);
+    const chunks = await checkReleaseChunks(check, inputs);
+    verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    if (passagesWithheldAtReleasableTiers(inputs, verdicts, chunks) > 0) verdicts = inputs.map((input, index) => {
+      const tier = verdicts![index];
+      return tier?.tier === 'secret' ? tier : { tier: 'unknown', gone: false };
+    });
   } catch {
     // The synchronous formatter already withholds on an unreadable check.
   }
-  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+  const verified: ReleaseCheck = {
     inputs: () => { if (!verdicts) throw new Error('Release unavailable'); return verdicts; },
     secureDerivativeDefault: () => check.secureDerivativeDefault(),
-  } });
+  };
+  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: verified });
 }
 
+/** Pure synchronous formatting. Every remote transport uses remoteOperationOutputOffThread. */
 export function remoteOperationOutput(
   operation: string,
   raw: unknown,
@@ -306,6 +333,21 @@ export function remoteOperationOutput(
     case 'source_answer_result':
       // Two families: a handed-off source_answer or a handed-off ask_anonymously.
       return pending ?? (isAnonymousAnswerResult(raw) ? anonymousAnswerOutput(raw) : sourceAnswerOutput(raw, options));
+    case 'source_item_read': {
+      const result = parseSourceItemReadResult(raw);
+      if (result.pages.length > 0) {
+        const inputs = (options.releaseManifests ?? []).flatMap(manifest => manifest.inputs);
+        if (inputs.length !== 1 || inputs[0]!.layer === 'names' || !options.releaseCheck) {
+          throw new OperationError('email_policy_violation', 'Current item privacy could not be verified.');
+        }
+        const verdicts = options.releaseCheck.inputs(inputs);
+        if (verdicts.length !== 1 || verdicts[0]!.gone || verdicts[0]!.tier !== 'public_or_personal') {
+          throw new OperationError('not_personal', 'Private item: ask with source_answer');
+        }
+      }
+      if (result.pages.some(page => secretLabelsInText(page.text).length > 0)) throw new OperationError('email_policy_violation', 'Item text withheld.');
+      return { ...result };
+    }
     case 'source_index_status':
       return sourceIndexStatusOutput(raw);
     default:
@@ -356,7 +398,7 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
   const released: ReleasedItem[] = [];
   evidence.forEach((entry, index) => {
     if (dropped.has(index) || citations.length >= MAX_CITATIONS) return;
-    const citation = citationOutput(entry);
+    const citation = citationOutput(entry, options);
     citations.push(citation);
     released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === 'string' ? citation.title : undefined));
   });
@@ -462,8 +504,9 @@ function citesInput(entry: Record<string, unknown>, input: ReleaseInput): boolea
       === input.providerConversationId;
 }
 
-/** Label, title and date only: no provider identifiers, URIs, spans or trust fields. */
-function citationOutput(entry: Record<string, unknown>): Record<string, unknown> {
+/** Allowlisted citation fields, with an optional opaque MCP read handle. */
+function citationOutput(entry: Record<string, unknown>, options: RemoteOutputOptions): Record<string, unknown> {
+  const readHandle = options.issueReadHandle?.(entry);
   const title = scannedText(entry.title, MAX_TITLE, 'line');
   const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
   // A child's parent rides in the title text ("lease.pdf, in 'Flat' from Alice"), scanned and capped
@@ -474,6 +517,7 @@ function citationOutput(entry: Record<string, unknown>): Record<string, unknown>
     : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, 'line');
   return {
     label: sourceLabel(entry.provider, entry.family),
+    ...(readHandle ? { read_handle: readHandle } : {}),
     ...(composed.text && !composed.secret ? { title: composed.text } : {}),
     ...(date ? { date } : {}),
   };
@@ -607,6 +651,7 @@ export type RemoteErrorCode =
   | 'olympus_offline';
 
 const REMOTE_ERROR_TEXT: Readonly<Record<RemoteErrorCode, string>> = {
+  not_personal: 'Private item: ask with source_answer',
   invalid_params: 'The request was not valid. Check the arguments against the tool\'s schema and try again.',
   invalid_request: 'The request was not valid. Check the arguments against the tool\'s schema and try again.',
   unsupported_filter: 'That filter is not supported here.',
@@ -765,6 +810,7 @@ const CITATION_SCHEMA = {
   required: ['label'],
   properties: {
     label: { type: 'string', enum: [...REMOTE_SOURCE_LABELS] },
+    read_handle: { type: 'string', pattern: '^rh_[A-Za-z0-9_-]{22,}$' },
     title: { type: 'string', maxLength: MAX_TITLE },
     date: { type: 'string', format: 'date' },
   },
@@ -925,6 +971,16 @@ export const REMOTE_OUTPUT_SCHEMAS: Readonly<Record<RemoteOperationName, Record<
   },
   ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
   source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+  source_item_read: {
+    type: 'object', additionalProperties: false, required: ['pages', 'totalPages', 'totalChars', 'couldNotRead'],
+    properties: {
+      pages: { type: 'array', maxItems: 3, items: { type: 'object', additionalProperties: false, required: ['page', 'text'],
+        properties: { page: { type: 'integer', minimum: 1 }, text: { type: 'string', maxLength: 12000 } } } },
+      nextPage: { type: 'integer', minimum: 1 }, totalPages: { type: 'integer', minimum: 0 }, totalChars: { type: 'integer', minimum: 0 },
+      couldNotRead: { type: 'array', items: { type: 'string', enum: [...SOURCE_ITEM_READ_REFUSALS] } },
+      etaSeconds: { type: 'integer', minimum: 0 },
+    },
+  },
 };
 
 export function remoteOutputSchema(operation: string): Record<string, unknown> | undefined {

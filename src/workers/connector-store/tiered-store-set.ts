@@ -593,7 +593,8 @@ export class TieredStoreSet {
    */
   repairLowerContent(options: { nowMs?: number; embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): Promise<void> {
     if (this.lowerContentRepair) return this.lowerContentRepair;
-    this.sweepSupersededSlice(options);
+    // The superseded-copy sweep runs only on its own ticker
+    // (startSupersededSweepTicker), which waits while the owner asks.
     const now = options.nowMs ?? Date.now();
     if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS) return Promise.resolve();
     this.lastLowerContentRepairAt = now;
@@ -616,10 +617,10 @@ export class TieredStoreSet {
   }
 
   /**
-   * One time-boxed slice of the one-time superseded-copy sweep. Maintenance
-   * calls take one, and the engine's background takes one every few seconds
-   * (startSupersededSweepTicker) so the walk does not wait on the sniffer's
-   * cadence. True once the sweep is done for this ledger.
+   * One time-boxed slice of the one-time superseded-copy sweep. Only the
+   * engine background's ticker takes them (startSupersededSweepTicker), every
+   * few seconds and never while an owner question is in flight. True once
+   * the sweep is done for this ledger.
    */
   sweepSupersededSlice(options: { embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): boolean {
     if (writableStoreOpensForbidden()) return true;
@@ -1924,7 +1925,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // container's (a folder has no text of its own), so no extraction will
     // ever answer a question about it.
     const deferred = this.set.readsContentLater(item);
-    const namesOnly = deferred
+    const promoted = TIER_DOMAIN_ORDER.some(domain => this.set.store(domain)?.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? ''));
+    const namesOnly = deferred && !promoted
       && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? '')
         || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text = namesOnly ? undefined : connectorStoreItemText(item);

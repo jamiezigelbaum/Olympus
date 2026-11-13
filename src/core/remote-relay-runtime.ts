@@ -1,4 +1,6 @@
 import { createWorkerFetch } from './worker-transport.ts';
+import { RELAY_REQUEST_LOG_PATH } from './connection-requests.ts';
+import type { RequestLogEntry } from '../../connect-relay/shared/request-log.ts';
 /**
  * The relay child: what `olympus __relay-service-run` runs under the Gateway's
  * native relay service (`native-relay-service.ts`).
@@ -128,6 +130,26 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
   writeRelaySecret(dir, relaySecret);
 
   const workerFetch = options.fetch ?? createWorkerFetch({ env: options.env });
+  const requestLogs: RequestLogEntry[] = [];
+  let sendingLogs = false;
+  const sendLogs = async () => {
+    if (sendingLogs) return;
+    sendingLogs = true;
+    try {
+      while (!stopped && requestLogs.length) {
+        const batch = requestLogs.splice(0, 100);
+        const response = await workerFetch(`${target}${RELAY_REQUEST_LOG_PATH}`, {
+          method: 'POST', headers: { [RELAYED_REQUEST_HEADER]: relaySecret, 'content-type': 'application/json' },
+          body: JSON.stringify(batch), signal: AbortSignal.timeout(5_000),
+        }).catch(() => undefined);
+        if (!response?.ok) {
+          requestLogs.unshift(...batch);
+          requestLogs.splice(0, Math.max(0, requestLogs.length - 200));
+          break; // Re-try on the next event or status tick; boot may still be in progress.
+        }
+      }
+    } finally { sendingLogs = false; }
+  };
   const client = new RelayClient({
     relayHost,
     ...(options.relayUrl ? { relayUrl: options.relayUrl } : {}),
@@ -138,6 +160,11 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
     // A demo install also forwards reviewer sign-in; every other install never does.
     forwardedPaths: demoInstallMarked(dir) ? [...FORWARDED_PATHS, DEMO_AUTHORIZE_PATH] : FORWARDED_PATHS,
     onStatus,
+    onRequestLog: entry => {
+      requestLogs.push(entry);
+      if (requestLogs.length > 200) requestLogs.shift();
+      void sendLogs();
+    },
     surfaces: () => readSurfaceEntries(target, relaySecret, workerFetch),
     ...(options.surfaceSyncMs ? { surfaceSyncMs: options.surfaceSyncMs } : {}),
     ...(options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {}),
@@ -153,6 +180,7 @@ export async function startRelayRuntime(options: RelayRuntimeOptions): Promise<R
   // works. Re-assert it whenever it no longer names this instance.
   const reassert = setInterval(() => {
     if (stopped) return;
+    if (requestLogs.length) void sendLogs();
     try {
       const onDisk = readRemoteAccessStatus(dir);
       if (onDisk?.mode === 'relay' && onDisk.instance_id === status.instance_id && onDisk.pid === status.pid) return;

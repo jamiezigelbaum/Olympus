@@ -18,6 +18,7 @@ import {
   dashboardPortArg,
   type DashboardCommandDependencies,
   isV04PublicCliInvocation,
+  PUBLIC_LEAF_USAGE,
   lifecycleRecoverySignalsFromWorkerHttpState,
   olympusCommandHint,
   parseArgs,
@@ -273,6 +274,11 @@ describe('CLI tool surface', () => {
     expect(result.stdout).toContain(process.platform === 'linux' ? 'per-user systemd service' : 'per-user LaunchAgent');
     if (process.platform === 'linux') expect(result.stdout).not.toContain('this Mac');
   }, 30_000);
+
+  test('every command with a usage line is on the public command list', () => {
+    const refused = Object.keys(PUBLIC_LEAF_USAGE).filter((name) => !isV04PublicCliInvocation(name.split(' ')));
+    expect(refused).toEqual([]);
+  });
 
   test('the public CLI catalog rejects repository-only commands before dispatch', async () => {
     expect(isV04PublicCliInvocation(['source', 'answer', 'question'])).toBe(true);

@@ -194,7 +194,7 @@ const SELECTION_SCHEMA = {
   type: 'object',
   properties: {
     key: { type: 'string', maxLength: 4096 },
-    state: { type: 'string', enum: ['ingest', 'metadata_only', 'exclude'] },
+    state: { type: 'string', enum: ['ingest', 'metadata_only', 'on_demand', 'exclude'] },
     ancestor_keys: { type: 'array', items: { type: 'string', maxLength: 4096 }, maxItems: 64 },
   },
   required: ['key', 'state'],
@@ -908,7 +908,7 @@ function parseSelections(value: unknown): OlympusSourceScopeSelection[] {
   return value.map((entry) => {
     const record = typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? entry as Record<string, unknown> : {};
     const key = requiredString(record.key);
-    const state = oneOf(record.state, ['ingest', 'metadata_only', 'exclude'] as const);
+    const state = oneOf(record.state, ['ingest', 'metadata_only', 'on_demand', 'exclude'] as const);
     const ancestors = Array.isArray(record.ancestor_keys)
       ? record.ancestor_keys.filter((ancestor): ancestor is string => typeof ancestor === 'string' && ancestor.length > 0 && ancestor.length <= 4096).slice(0, 64)
       : [];
