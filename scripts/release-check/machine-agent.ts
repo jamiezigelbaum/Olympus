@@ -292,11 +292,43 @@ async function waitForEngine(timeoutMs: number): Promise<number> {
   while (Date.now() - started < timeoutMs) {
     try {
       const dash = await dashboardJson();
-      if (dash.status === 200 && dash.json?.model_setup?.ready === true) return Date.now() - started;
-    } catch { /* engine still starting */ }
+      if (dash.status === 200 && dash.json?.model_setup?.ready === true) {
+        await frontStaysUp(FRONT_SETTLE_MS);
+        return Date.now() - started;
+      }
+    } catch (error) {
+      if (error instanceof FrontRestartError) throw error;
+      /* engine still starting */
+    }
     await sleep(3_000);
   }
   throw new Error(`the engine was not ready (models included) within ${Math.round(timeoutMs / 1000)} s`);
+}
+
+/**
+ * One ready answer is not a steady engine: the rc.4 front said ready, then crashed and was started again about every 20 s
+ * (ops#151). With the split on, every wait for the engine also watches the front for a minute; a front that restarts or is
+ * gone fails the wait.
+ */
+const FRONT_SETTLE_MS = 60_000;
+class FrontRestartError extends Error {}
+
+async function frontStaysUp(watchMs: number): Promise<void> {
+  const first = ownEnginePids();
+  if (!first || first.front.length === 0) return; // not split, or the platform cannot tell
+  const seen = new Set(first.front);
+  let gone = 0;
+  const end = Date.now() + watchMs;
+  while (Date.now() < end) {
+    await sleep(3_000);
+    const now = ownEnginePids();
+    if (!now) continue;
+    if (now.front.length === 0) gone++;
+    for (const pid of now.front) seen.add(pid);
+  }
+  if (seen.size > 1 || gone > 0) {
+    throw new FrontRestartError(`the engine said ready, then its front ${seen.size > 1 ? `restarted ${seen.size - 1} time(s)` : 'was gone'} within ${Math.round(watchMs / 1000)} s${gone > 0 ? ` (no front in ${gone} sample(s))` : ''}`);
+  }
 }
 
 /**
