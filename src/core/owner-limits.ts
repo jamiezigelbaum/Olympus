@@ -1,3 +1,4 @@
+import { providerWaitMessage } from './provider-rate-limits.ts';
 import './consult-transport-zkapi.ts';
 import { JudgeSpending } from '../workers/classification/judge-spending.ts';
 import '../workers/google-connectors/gmail-import-allowance.ts';
@@ -49,6 +50,7 @@ export async function ownerLimits(params: Record<string, unknown>, deps: OwnerLi
   const stop = matches[0]!;
   const registration = { ...registrations.find(limit => limit.id === stop.id)!, ...(stop.continue ? { continue: stop.continue } : {}) };
   if (registration.continue !== 'raise' && (params.to !== undefined || params.keep !== undefined)) throw new OperationError('invalid_params', '--to and --keep apply only to Raise.');
+  if (registration.continue === 'none') throw new OperationError('invalid_params', providerWaitMessage(stop.id, stop.resumesAt) ?? 'This stop resumes on its own.');
   if (registration.continue === 'raise') {
     const integer = registration.unit !== 'usd';
     const minimum = Math.max(stop.limit ?? 0, stop.used ?? 0);

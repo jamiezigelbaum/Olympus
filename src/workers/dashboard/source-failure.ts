@@ -11,6 +11,7 @@
  * (`[olympus:source-scheduler] task_failed … error_hash=…` with the message),
  * so "look for <ref> in Olympus's log" leads to the exact error.
  */
+import { SOURCE_RATE_LIMITED } from '../../core/provider-rate-limits.ts';
 import { redactLogLine } from '../../core/log-redaction.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
 
@@ -51,8 +52,11 @@ const EXACT: Readonly<Record<string, SourceFailureKind>> = {
   sqlite_busy: 'busy_here',
   network: 'network',
   timeout: 'timeout',
-  rate_limited: 'rate_limited',
-  provider_rate_limit: 'rate_limited',
+  rate_limited: SOURCE_RATE_LIMITED,
+  provider_rate_limit: SOURCE_RATE_LIMITED,
+  'x.rate_limit': SOURCE_RATE_LIMITED,
+  'evernote.rate_limit': SOURCE_RATE_LIMITED,
+  'readwise.rate_limit': SOURCE_RATE_LIMITED,
   temporary: 'provider_busy',
   api_request_guard: 'provider_refused',
   embedding_backend_unavailable: 'search_model_unavailable',
@@ -72,7 +76,7 @@ export function sourceFailureKind(errorKind: string | undefined, degradedReason?
     const exact = EXACT[value];
     if (exact) return exact;
     if (OPERATOR_PAUSED_SCHEDULER_MARKERS.has(value) || value.endsWith('_request_guard') || value.endsWith('_clock_regression')) {
-      return value === 'provider_rate_limit' ? 'rate_limited' : 'daily_limit';
+      return 'daily_limit';
     }
     if (value.endsWith('_ledger_busy')) return 'busy_here';
   }

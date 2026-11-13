@@ -1,3 +1,4 @@
+import { createProviderRateLimitReporter, providerRetryTime } from '../../core/provider-rate-limits.ts';
 export const READWISE_API_V2_BASE_URL = 'https://readwise.io/api/v2/';
 export const READWISE_READER_API_V3_BASE_URL = 'https://readwise.io/api/v3/';
 
@@ -11,6 +12,7 @@ export interface ReadwiseApiClientOptions {
   apiV2BaseUrl?: string;
   readerApiV3BaseUrl?: string;
   timeoutMs?: number;
+  now?: () => Date;
 }
 
 export interface ReadwiseReaderListRequest {
@@ -68,6 +70,7 @@ export type ReadwiseExportHighlight = Record<string, unknown>;
 export class ReadwiseApiError extends Error {
   status?: number;
   retryAfter?: string;
+  resumesAt?: string;
 
   constructor(message: string, options: { status?: number; retryAfter?: string } = {}) {
     super(message);
@@ -77,6 +80,8 @@ export class ReadwiseApiError extends Error {
 }
 
 export class ReadwiseApiClient {
+  private readonly providerStops = createProviderRateLimitReporter('readwise');
+  private readonly now: () => Date;
   private token: string;
   private fetchImpl: ReadwiseFetch;
   private apiV2BaseUrl: string;
@@ -84,6 +89,7 @@ export class ReadwiseApiClient {
   private timeoutMs: number;
 
   constructor(options: ReadwiseApiClientOptions) {
+    this.now = options.now ?? (() => new Date());
     const token = options.token.trim();
     if (!token) throw new Error('Readwise API token is required.');
     this.token = token;
@@ -212,7 +218,8 @@ export class ReadwiseApiClient {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const url = new URL(path, options.baseUrl).toString();
-      return await this.fetchImpl(url, {
+      this.providerStops.resume(this.now());
+      const response = await this.fetchImpl(url, {
         method: 'GET',
         headers: {
           Accept: 'application/json',
@@ -220,6 +227,16 @@ export class ReadwiseApiClient {
         },
         signal: controller.signal,
       });
+      if (response.status === 429) {
+        const now = this.now();
+        const error = await errorFromResponse(response, 'Readwise request');
+        // Without a usable provider time, keep the retry in silent pacing.
+        error.resumesAt = providerRetryTime(error.retryAfter, now, 60_000);
+        this.providerStops.report(error.resumesAt, now);
+        throw error;
+      }
+      if (response.ok) this.providerStops.success();
+      return response;
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         throw new ReadwiseApiError('Readwise API request timed out.');
@@ -300,3 +317,5 @@ async function errorFromResponse(response: Response, context: string): Promise<R
     },
   );
 }
+
+// limit-retry: retry:errorFromResponse:retryAfter -> readwise.rate_limit

@@ -756,12 +756,6 @@
     "retire_when": "the existing bounded work refusal is adopted by its owning limit lane with report/continue"
   },
   {
-    "path": "src/workers/dashboard/source-failure.ts",
-    "symbol": "reason:rate_limited",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
     "path": "src/workers/dropbox-files/provider-client.ts",
     "symbol": "retry:dropboxMetadataError:retryAfterMs",
     "reason": "pacing",
@@ -796,12 +790,6 @@
     "symbol": "reason:gmail_requests_spent",
     "reason": "internal",
     "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
-  },
-  {
-    "path": "src/workers/evernote/runtime.ts",
-    "symbol": "reason:rate_limited",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
   },
   {
     "path": "src/workers/google-connectors/drive.ts",
@@ -846,12 +834,6 @@
     "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
   },
   {
-    "path": "src/workers/readwise/api.ts",
-    "symbol": "retry:errorFromResponse:retryAfter",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
     "path": "src/workers/remote-mcp.ts",
     "symbol": "retry:withToolRetryAfter:retryAfter",
     "reason": "pacing",
@@ -877,12 +859,6 @@
   },
   {
     "path": "src/workers/source-scheduler.ts",
-    "symbol": "reason:rate_limited",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/source-scheduler.ts",
     "symbol": "reason:source_budget_exhausted",
     "reason": "pending",
     "retire_when": "the existing bounded work refusal is adopted by its owning limit lane with report/continue"
@@ -901,105 +877,45 @@
   },
   {
     "path": "src/workers/x-bookmarks/api-connector.ts",
-    "symbol": "reason:provider_rate_limit",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/x-bookmarks/api-connector.ts",
     "symbol": "retry:acquireReconciliation:retryAt",
     "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/x-bookmarks/api-connector.ts",
-    "symbol": "retry:guardedPage:retryAt",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
+    "retire_when": "The 429 path is reported by guardedPage. This boundary also schedules preservation-floor refusals and temporary provider outages; retire when those distinct reconciliation stops are adopted or the retries are removed."
   },
   {
     "path": "src/workers/x-bookmarks/api-connector.ts",
     "symbol": "retry:guardedReconcilePostPage:retryAt",
     "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
+    "retire_when": "Retries an incomplete or truncated provider page after its page-size ladder is exhausted, not a provider rate-limit reset; retire when truncation recovery is reported as its own stop or removed."
   },
   {
     "path": "src/workers/x-bookmarks/api-connector.ts",
     "symbol": "retry:incompleteReconcileError:retryAt",
     "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
+    "retire_when": "Retries a traversal that reached its staging/page safety bound without a complete snapshot; retire when incomplete-traversal recovery is reported as its own stop or removed."
   },
   {
     "path": "src/workers/x-bookmarks/api-connector.ts",
     "symbol": "retry:stagedFailureOutcome:retryAt",
     "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
+    "retire_when": "Retries recoverable cursor, window-boundary or scope failures while preserving the staged snapshot; retire when staged recovery is reported as its own stop or removed."
   },
   {
     "path": "src/workers/x-bookmarks/api-connector.ts",
     "symbol": "retry:stagedRecoveryRequiredError:retryAt",
     "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/x-bookmarks/content-recovery.ts",
-    "symbol": "retry:recover:retryAt",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/x-bookmarks/live-control.ts",
-    "symbol": "reason:provider_rate_limit",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/x-bookmarks/live-control.ts",
-    "symbol": "retry:markRequestDispatched:retryAt",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/x-bookmarks/live-control.ts",
-    "symbol": "retry:reserveRequest:retryAt",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/x-bookmarks/live-control.ts",
-    "symbol": "retry:usageGuard:retry_at",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
+    "retire_when": "Retries staged traversal recovery required by repeated structural failures, not provider throttling; retire when staged recovery is reported as its own stop or removed."
   },
   {
     "path": "src/workers/x-bookmarks/live-sync.ts",
     "symbol": "retry:reconcile:retryAt",
     "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/x-bookmarks/live-sync.ts",
-    "symbol": "retry:withGuard:retry_at",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
+    "retire_when": "Retries failed reconciliation membership/coverage or tombstone-accounting proofs without advancing authoritative freshness; retire when these reconciliation refusals are reported as their own stops or removed."
   },
   {
     "path": "src/workers/dropbox-files/provider-client.ts",
     "symbol": "retry:dropboxRetryAfterMs:return",
     "reason": "pacing",
     "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
-  },
-  {
-    "path": "src/workers/evernote/runtime.ts",
-    "symbol": "retry:evernoteSchedulerFailure:retryAt_at",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
-    "path": "src/workers/evernote/runtime.ts",
-    "symbol": "retry:pass:retryAt_at",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
   },
   {
     "path": "src/workers/file-extraction/job-store.ts",
@@ -1050,15 +966,9 @@
     "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
   },
   {
-    "path": "src/workers/x-bookmarks/content-recovery.ts",
-    "symbol": "retry:recoveryRetryAt:return",
-    "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
-  },
-  {
     "path": "src/workers/x-bookmarks/live-sync.ts",
     "symbol": "retry:reconcile:retryAt_at",
     "reason": "pending",
-    "retire_when": "reported as a resumes-at stop (L7 step 4)"
+    "retire_when": "Schedules another reconciliation when the applied result cannot advance the authoritative watermark; retire when that distinct reconciliation wait is reported as its own stop or removed."
   }
 ]

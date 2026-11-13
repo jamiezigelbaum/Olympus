@@ -1,3 +1,5 @@
+import { SOURCE_RATE_LIMITED } from '../core/provider-rate-limits.ts';
+import { ReadwiseApiError } from './readwise/api.ts';
 import { createHash } from 'node:crypto';
 import { parseSchedulerSourceIds, type OlympusConfig } from '../core/config.ts';
 import { boundedLogErrorMessage } from '../core/log-redaction.ts';
@@ -2585,6 +2587,9 @@ function readwiseStoreProgress(
  * of fail-looping the lane at the error backoff all day.
  */
 function readwiseSchedulerFailure(error: unknown): unknown {
+  if (error instanceof ReadwiseApiError && error.status === 429 && error.resumesAt) {
+    return new SourceSchedulerTaskDeferral('Readwise is limiting requests.', { at: error.resumesAt, degradedReason: 'readwise.rate_limit' });
+  }
   if (!(error instanceof ReadwiseRequestBudgetError)) return error;
   return new SourceSchedulerTaskDeferral(error.message, {
     at: error.retryAt,
@@ -3031,6 +3036,9 @@ const SCHEDULER_PARK_REASONS: ReadonlySet<string> = new Set([
   ...UTC_DAY_SCOPED_DEGRADED_REASONS,
   'provider_rate_limit',
   'provider_rate_limited',
+  'x.rate_limit',
+  'evernote.rate_limit',
+  'readwise.rate_limit',
 ]);
 
 /**
@@ -3092,7 +3100,7 @@ function safeSchedulerErrorKind(error: unknown): string {
   if (/vlm_backend_unavailable/i.test(message)) return 'vlm_backend_unavailable';
   if (/SQLITE_BUSY|busy/i.test(message)) return 'sqlite_busy';
   if (/timeout/i.test(message)) return 'timeout';
-  if (/rate.?limit|too many requests/i.test(message)) return 'rate_limited';
+  if (/rate.?limit|too many requests/i.test(message)) return SOURCE_RATE_LIMITED;
   if (/network|connection|ECONN/i.test(message)) return 'network';
   if (/temporar|try again/i.test(message)) return 'temporary';
   return 'task_failed';
@@ -3115,7 +3123,7 @@ function mapExplicitSchedulerErrorKind(value: string): string {
   if (/vlm_backend_unavailable/i.test(value)) return 'vlm_backend_unavailable';
   if (/SQLITE_BUSY|sqlite.?busy|\bbusy\b/i.test(value)) return 'sqlite_busy';
   if (/timeout/i.test(value)) return 'timeout';
-  if (/rate.?limit|too many requests/i.test(value)) return 'rate_limited';
+  if (/rate.?limit|too many requests/i.test(value)) return SOURCE_RATE_LIMITED;
   if (/network|connection|ECONN/i.test(value)) return 'network';
   if (/temporar|try again/i.test(value)) return 'temporary';
   return 'task_failed';
@@ -3214,7 +3222,7 @@ function sanitizeSchedulerWarnings(warnings: readonly string[]): string[] {
     if (/^x_(?:head|reconcile)_[a-z0-9_]+$/.test(warning)) return warning;
     if (/vlm_backend_unavailable/i.test(warning)) return 'vlm_backend_unavailable';
     if (/timeout/i.test(warning)) return 'timeout';
-    if (/rate.?limit|too many requests/i.test(warning)) return 'rate_limited';
+    if (/rate.?limit|too many requests/i.test(warning)) return SOURCE_RATE_LIMITED;
     if (/network|connection|ECONN/i.test(warning)) return 'network';
     return 'task_warning';
   }))];
