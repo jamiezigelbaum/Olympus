@@ -3085,7 +3085,7 @@ function engineBackgroundSocketPath(options = {}) {
 function prepareEngineBackgroundSocketDirectory(socketPath) {
   mkdirSync5(dirname9(socketPath), { recursive: true, mode: 448 });
 }
-async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
+async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) {
   const controller = new AbortController;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
@@ -3099,17 +3099,20 @@ async function probeEngineBackground(fetchBackground, authToken, instanceId, tim
       await response.body?.cancel().catch(() => {
         return;
       });
-      return false;
+      return "alive";
     }
     const body = await response.json().catch(() => {
       return;
     });
-    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId);
+    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId) ? "ready" : "alive";
   } catch {
-    return false;
+    return controller.signal.aborted ? "alive" : "down";
   } finally {
     clearTimeout(timeout);
   }
+}
+async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
+  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) === "ready";
 }
 var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready";
 var init_engine_split = __esm(() => {

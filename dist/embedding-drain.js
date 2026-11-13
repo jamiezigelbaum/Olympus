@@ -13341,11 +13341,42 @@ function write(target, nowMs, force) {
     target.lastWriteMs = nowMs;
   } catch {}
 }
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
 function bootProgressPath(env) {
   return sharedDataPath("boot-progress", env);
 }
 function preSchemaBackupPath(dbPath, version) {
   return `${dbPath}.pre-schema-${version}.bak`;
+}
+function removeAbandonedBackupCopies(backup) {
+  const prefix = `${basename3(backup)}.`;
+  let names;
+  try {
+    names = readdirSync2(dirname18(backup));
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix))
+      continue;
+    const match = /^(\d+)\.partial(?:-journal|-wal|-shm)?$/.exec(name.slice(prefix.length));
+    if (!match)
+      continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || processAlive(pid))
+      continue;
+    rmSync6(join20(dirname18(backup), name), { force: true });
+    removed += 1;
+  }
+  return removed;
 }
 function recordSchemaBackup(env, entry) {
   const path = sharedDataPath("schema-backups", env);
@@ -13450,6 +13481,7 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   report({ phase: "backing_up", storeId });
   const partial = `${backup}.${process.pid}.partial`;
   rmSync7(partial, { force: true });
+  removeAbandonedBackupCopies(backup);
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   try {
     closeSync7(openSync7(partial, "wx", 384));
