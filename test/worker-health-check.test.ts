@@ -12,7 +12,10 @@ const saved = { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR };
 const cleanups: Array<() => void> = [];
 afterEach(() => {
   while (cleanups.length) cleanups.pop()!();
-  process.env.XDG_RUNTIME_DIR = saved.XDG_RUNTIME_DIR;
+  // Assigning undefined would store the string "undefined", which later tests
+  // read as a runtime directory (#1629).
+  if (saved.XDG_RUNTIME_DIR === undefined) delete process.env.XDG_RUNTIME_DIR;
+  else process.env.XDG_RUNTIME_DIR = saved.XDG_RUNTIME_DIR;
 });
 
 // The check runs synchronously (spawnSync), so the server is its own process.
