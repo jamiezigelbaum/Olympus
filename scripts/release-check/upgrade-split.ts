@@ -108,7 +108,7 @@ export function storeFiles(root: string): string[] {
 }
 
 /** `missing` leaves out `retired`: the files a newer version moves aside on purpose (the removed pre-filter's ledger and weights, #1415). */
-export interface StoreFileCount { count: number; missing: number; retired: number; extra: number }
+export interface StoreFileCount { count: number; missing: number; retired: number; extra: number; leftovers?: number }
 
 const RETIRED_LEDGER_SUFFIX = embeddingPrefilterInstallLedgerPath('');
 const RETIRED_DIRECTORY_SUFFIX = embeddingPrefilterDirectory('');
@@ -117,6 +117,25 @@ const RETIRED_DIRECTORY_SUFFIX = embeddingPrefilterDirectory('');
 export function retiredStoreFile(path: string): boolean {
   return path.endsWith(RETIRED_LEDGER_SUFFIX) || path.split(/[\\/]/).slice(0, -1).some((part) => part.endsWith(RETIRED_DIRECTORY_SUFFIX));
 }
+
+/** Files an update leaves only while it runs: schema backups, partial copies and SQLite journals. None may outlast it. */
+export function leftoverFiles(root: string): number {
+  let count = 0;
+  const walk = (dir: string): void => {
+    let entries: import('node:fs').Dirent[];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (/\.pre-schema-.*\.bak$|\.partial|-journal$/.test(entry.name)) count += 1;
+    }
+  };
+  walk(root);
+  return count;
+}
+
+/** What the installer says on stderr when it rolled the stores back (L1, floor c013270b). */
+export const STORES_PUT_BACK = 'Stores put back as they were before the update';
 
 export function compareStoreFiles(before: readonly string[], now: readonly string[]): StoreFileCount {
   const had = new Set(before);
@@ -127,7 +146,7 @@ export function compareStoreFiles(before: readonly string[], now: readonly strin
 }
 
 const filesDetail = (before: number, after: StoreFileCount): string =>
-  `${before} before, ${after.count} after: ${after.missing} missing, ${after.retired ?? 0} retired on purpose, ${after.extra} new`;
+  `${before} before, ${after.count} after: ${after.missing} missing, ${after.retired ?? 0} retired on purpose, ${after.extra} new, ${after.leftovers ?? 'uncounted'} backup, partial or journal file(s) left`;
 
 export interface ForcedFailureObservation {
   /** The installer's own verdict on the broken copy: it must report a failure. */
@@ -151,13 +170,16 @@ export function forcedFailureChecks(obs: ForcedFailureObservation): CheckResult[
   const back = obs.engine.ready && version !== null && version === (obs.beforeVersion ?? null);
   const files = obs.storeFiles?.after;
   // A rollback puts back what the update retired too, so nothing may be gone, retired or not.
-  const kept = files !== undefined && files.missing === 0 && !(files.retired > 0) && files.count === obs.storeFiles!.before;
+  const kept = files !== undefined && files.missing === 0 && !(files.retired > 0) && files.count === obs.storeFiles!.before && files.leftovers === 0;
+  const putBack = obs.installer.failed && (obs.installer.detail ?? '').includes(STORES_PUT_BACK);
   const [installer, rollback, stores] = forcedFailureCheckShapes();
   return [
     {
       ...installer!,
-      status: obs.installer.failed ? 'pass' : 'fail',
-      detail: obs.installer.failed ? (obs.installer.detail ?? 'the installer exited with an error') : 'the installer reported a usable install of a build whose front cannot start',
+      status: putBack ? 'pass' : 'fail',
+      detail: !obs.installer.failed
+        ? 'the installer reported a usable install of a build whose front cannot start'
+        : putBack ? obs.installer.detail! : `the installer failed without saying the stores were put back: ${obs.installer.detail ?? 'no detail'}`,
     },
     {
       ...rollback!,
@@ -178,18 +200,18 @@ export function forcedFailureChecks(obs: ForcedFailureObservation): CheckResult[
 
 function forcedFailureCheckShapes(): Array<Pick<CheckResult, 'id' | 'title'>> {
   return [
-    { id: 'upgrade.forced-failure.installer', title: 'An update whose front crashes on start is reported as failed by the installer' },
+    { id: 'upgrade.forced-failure.installer', title: 'An update whose front crashes on start is reported as failed by the installer, which says it put the stores back' },
     { id: 'upgrade.forced-failure.rollback', title: 'After the failed update, the earlier release is running and healthy' },
-    { id: 'upgrade.forced-failure.stores', title: 'After the failed update, every store file is still there, the retired ones put back, and there are as many as before' },
+    { id: 'upgrade.forced-failure.stores', title: 'After the failed update, every store file is still there, the retired ones put back, as many as before, and no backup, partial or journal file left' },
   ];
 }
 
 /** After the real update: every store file the earlier release had is still there, except the ones the candidate retires (it may add its own). */
 export function storesKeptCheck(before: number | undefined, after: StoreFileCount | undefined): CheckResult {
-  const kept = before !== undefined && after !== undefined && after.missing === 0;
+  const kept = before !== undefined && after !== undefined && after.missing === 0 && after.leftovers === 0;
   return {
     id: 'upgrade.split.stores',
-    title: 'After the update to the split engine, every store file the earlier release had is still there, except the ones it retires on purpose',
+    title: 'After the update to the split engine, every store file the earlier release had is still there, except the ones it retires on purpose, and no backup, partial or journal file is left',
     status: kept ? 'pass' : 'fail',
     detail: before === undefined || after === undefined ? 'the store files were not counted' : filesDetail(before, after),
   };

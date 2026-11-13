@@ -58,7 +58,7 @@ import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import type { StoreView } from './archive-leg.ts';
 import { frontSteadyStage, logMark, seedFrontStoreSet, watchFront, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
-import { compareStoreFiles, storeFiles } from './upgrade-split.ts';
+import { compareStoreFiles, leftoverFiles, storeFiles } from './upgrade-split.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -2169,7 +2169,7 @@ function storeFilesCommand(save: string | undefined, compare: string | undefined
   try { before = JSON.parse(readFileSync(storeList(compare ?? ''), 'utf8')) as string[]; } catch {
     emit({ ok: false, detail: `no saved store-file list ${compare ?? ''}` });
   }
-  emit({ ok: true, before: before.length, ...compareStoreFiles(before, now) });
+  emit({ ok: true, before: before.length, ...compareStoreFiles(before, now), leftovers: leftoverFiles(platform().dataDir) });
 }
 
 async function archiveChangedCommand(seed: string, sizes: number[]): Promise<never> {

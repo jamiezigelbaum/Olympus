@@ -276,7 +276,7 @@ if (verb === 'provision') {
     mark('broken-front-ran');
     if (process.env.FAKE_BROKEN_ACCEPTED === '1') { mark('upgraded'); process.exit(0); }
     if (process.env.FAKE_LOST_STORE === '1') mark('lost-store');
-    console.error('the engine did not become healthy; rolled back'); process.exit(1);
+    console.error('the engine did not become healthy; rolled back'); console.error('Fix: Stores put back as they were before the update: gmail.email. The previous version is running and answered its health check.'); process.exit(1);
   }
   if (process.env.FAKE_UPGRADE_FAIL === '1') { console.error('the installer failed'); process.exit(1); }
   mark('upgraded');
@@ -311,7 +311,7 @@ if (verb === 'provision') {
     samples: process.env.FAKE_FRONT_CRASH === '1' ? [{ front: [20], background: [10] }, { front: [], background: [10] }, { front: [21], background: [10] }] : [{ front: [20], background: [10] }, { front: [20], background: [10] }] });
   else if (sub === 'store-files') {
     if (script.includes('--save')) say({ ok: true, count: 5 });
-    else { const lost = flag('lost-store') ? 1 : 0; say({ ok: true, before: 5, count: 5 - lost, missing: lost, retired: 0, extra: 0 }); }
+    else { const lost = flag('lost-store') ? 1 : 0; say({ ok: true, before: 5, count: 5 - lost, missing: lost, retired: 0, extra: 0, leftovers: 0 }); }
   }
   else if (sub === 'snapshot-state') {
     const migratedNow = upgraded && process.env.FAKE_NO_MIGRATION !== '1' && !flag('revert-policy');
@@ -539,7 +539,7 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
     process.env.FAKE_LOST_STORE = '1';
     report = await runReleaseCheck(splitOptions());
     expect(checkOf(report, 'upgrade.forced-failure.rollback')?.status).toBe('pass');
-    expect(checkOf(report, 'upgrade.forced-failure.stores')?.detail).toBe('5 before, 4 after: 1 missing, 0 retired on purpose, 0 new');
+    expect(checkOf(report, 'upgrade.forced-failure.stores')?.detail).toBe('5 before, 4 after: 1 missing, 0 retired on purpose, 0 new, 0 backup, partial or journal file(s) left');
     expect(checkOf(report, 'upgrade.split.stores')?.status).toBe('fail');
   }, 240_000);
 

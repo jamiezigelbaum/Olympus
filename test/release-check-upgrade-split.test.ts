@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
-  BROKEN_FRONT_LINE, breakFront, brokenBundle, compareStoreFiles, forcedFailureChecks, rehash, repinInstaller, retiredStoreFile, storeFiles, storesKeptCheck,
+  BROKEN_FRONT_LINE, breakFront, brokenBundle, compareStoreFiles, forcedFailureChecks, rehash, repinInstaller, retiredStoreFile, storeFiles, storesKeptCheck, STORES_PUT_BACK, leftoverFiles,
 } from '../scripts/release-check/upgrade-split.ts';
 
 let dir: string;
@@ -80,21 +80,38 @@ describe('store files', () => {
     const ledger = 'classification-ledger.sqlite.embedding-prefilter.tier-ledger.sqlite';
     const weights = 'stores/a.tier-ledger.sqlite.embedding-prefilter/weights.db';
     const before = ['jobs.db', ledger, weights, 'stores/a.tier-ledger.sqlite'];
-    const after = compareStoreFiles(before, ['jobs.db', 'stores/a.tier-ledger.sqlite']);
-    expect(after).toEqual({ count: 2, missing: 0, retired: 2, extra: 0 });
+    const after = { ...compareStoreFiles(before, ['jobs.db', 'stores/a.tier-ledger.sqlite']), leftovers: 0 };
+    expect(after).toEqual({ count: 2, missing: 0, retired: 2, extra: 0, leftovers: 0 });
     expect(retiredStoreFile('stores/a.tier-ledger.sqlite')).toBe(false);
-    expect(storesKeptCheck(4, after)).toMatchObject({ status: 'pass', detail: '4 before, 2 after: 0 missing, 2 retired on purpose, 0 new' });
+    expect(storesKeptCheck(4, after)).toMatchObject({ status: 'pass', detail: '4 before, 2 after: 0 missing, 2 retired on purpose, 0 new, 0 backup, partial or journal file(s) left' });
+    expect(storesKeptCheck(4, { ...after, leftovers: 1 })).toMatchObject({ status: 'fail' });
     expect(storesKeptCheck(4, compareStoreFiles(before, ['jobs.db', ledger, weights]))).toMatchObject({ status: 'fail' });
     const rolledBack = forcedFailureChecks({ installer: { failed: true }, frontRan: 1, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: compareStoreFiles(before, ['jobs.db', ledger, 'stores/a.tier-ledger.sqlite', 'x.db']) } });
-    expect(rolledBack[2]).toMatchObject({ status: 'fail', detail: '4 before, 4 after: 0 missing, 1 retired on purpose, 1 new' });
+    expect(rolledBack[2]).toMatchObject({ status: 'fail', detail: '4 before, 4 after: 0 missing, 1 retired on purpose, 1 new, uncounted backup, partial or journal file(s) left' });
   });
 
   test('a rolled-back update with the same count but another file in place of a lost one still fails', () => {
-    const checks = forcedFailureChecks({ installer: { failed: true }, frontRan: 1, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: { count: 4, missing: 1, retired: 0, extra: 1 } } });
+    const checks = forcedFailureChecks({ installer: { failed: true, detail: `Fix: ${STORES_PUT_BACK}: gmail.email.` }, frontRan: 1, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: { count: 4, missing: 1, retired: 0, extra: 1, leftovers: 0 } } });
     expect(checks.map((check) => [check.id, check.status])).toEqual([
       ['upgrade.forced-failure.installer', 'pass'], ['upgrade.forced-failure.rollback', 'pass'], ['upgrade.forced-failure.stores', 'fail'],
     ]);
     expect(forcedFailureChecks({ installer: { failed: true }, frontRan: 1, engine: { ready: false, detail: 'not ready' }, beforeVersion: '1.4.4' })[1]!.detail).toContain('not ready');
+  });
+
+  test('an installer that fails without saying it put the stores back, or leaves a journal behind, fails (L1)', () => {
+    const obs = { frontRan: 1, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4' };
+    const silent = forcedFailureChecks({ ...obs, installer: { failed: true, detail: 'driver upgrade failed (exit 1)' }, storeFiles: { before: 4, after: { count: 4, missing: 0, retired: 0, extra: 0, leftovers: 0 } } });
+    expect(silent.map((check) => check.status)).toEqual(['fail', 'pass', 'pass']);
+    const journal = forcedFailureChecks({ ...obs, installer: { failed: true, detail: `Fix: ${STORES_PUT_BACK}: jobs.` }, storeFiles: { before: 4, after: { count: 4, missing: 0, retired: 0, extra: 0, leftovers: 1 } } });
+    expect(journal.map((check) => check.status)).toEqual(['pass', 'pass', 'fail']);
+  });
+
+  test('backups, partial copies and journals are counted as leftovers, stores are not', () => {
+    for (const path of ['stores/a.sqlite', 'stores/a.sqlite.pre-schema-12.bak', 'stores/b.sqlite.partial-1', 'jobs.db-journal', 'jobs.db']) {
+      mkdirSync(join(dir, path, '..'), { recursive: true });
+      writeFileSync(join(dir, path), '');
+    }
+    expect(leftoverFiles(dir)).toBe(3);
   });
 
   test('an update that failed before the broken front ever started proves no rollback: every forced-failure check fails', () => {

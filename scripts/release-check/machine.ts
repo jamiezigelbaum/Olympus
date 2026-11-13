@@ -206,7 +206,11 @@ export class CommandDriver {
       ),
       upgrade: async (candidateDir) => {
         const r = await run([...base, 'upgrade', '--machine', info.handle, '--candidate', candidateDir], { timeoutMs: 25 * 60_000, onStderr: log });
-        if (r.code !== 0) throw new Error(`driver upgrade failed (exit ${r.code}${r.timedOut ? ', timed out' : ''})`);
+        if (r.code !== 0) {
+          // The installer's own "Fix:" line says what it put back; the forced-failure check reads it.
+          const fix = r.stderr.split(/[\r\n]+/).map((line) => line.trim()).filter((line) => line.startsWith('Fix:')).pop();
+          throw new Error(`driver upgrade failed (exit ${r.code}${r.timedOut ? ', timed out' : ''})${fix ? `: ${fix.slice(0, 400)}` : ''}`);
+        }
       },
       put: async (from, to) => {
         const r = await run([...base, 'put', '--machine', info.handle, '--from', from, '--to', to], { timeoutMs: 120_000, onStderr: log });
