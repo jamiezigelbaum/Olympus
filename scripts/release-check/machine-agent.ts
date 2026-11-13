@@ -56,6 +56,7 @@ import { explorePages, inboxAnswers } from './explore-pages.ts';
 import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
+import { tierRules } from './fixture.ts';
 import type { StoreView } from './archive-leg.ts';
 import { frontSteadyStage, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
@@ -1938,6 +1939,9 @@ function laneItems(source: string, tier: 'internal' | 'secure_local'): LaneView 
 }
 
 async function frontSteadyCommand(seed: string, watchS: number): Promise<never> {
+  // Proof only (draft #1573): rc.4 holds every Gmail import while a Readwise-scoped label rule exists (fixed by #1624),
+  // so the pinned rules go before the front stage seeds Gmail mail.
+  for (const rule of tierRules()) olympus(['tier', 'rules', 'remove', rule.id]);
   const host: FrontHost = { ...archiveHost(), laneItems, enginePids: ownEnginePids, engineLogPaths: platform().engineLogPaths };
   emit({ ...(await frontSteadyStage(host, { seed, watchS })) });
 }
