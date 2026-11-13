@@ -34,6 +34,7 @@ var ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove";
 var ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop";
 var CLASSIFIER_APPROVE_TOOL_NAME = "olympus_privacy_classifier_approve";
 var PANEL_TOOL_NAMES = [
+  "olympus_limits",
   DASHBOARD_TOOL_NAME,
   CONNECT_SOURCE_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,

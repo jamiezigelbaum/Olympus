@@ -23,6 +23,9 @@ import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from '
 // - The pass only updates ledger decisions. It never moves, embeds or deletes
 //   stored content.
 
+import { registerLimit } from '../../core/limit-stops.ts';
+import { clearOwnerLimitStop, recordOwnerLimitStop, readJudgeCallOverride } from '../../core/owner-limit-state.ts';
+
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -60,6 +63,8 @@ import type {
 } from './sniffer-store.ts';
 import { TIER_CLASSIFIER_VERSION, type TierDecision, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
+
+registerLimit({ id: 'judge.daily_calls', kind: 'calls', scope: 'judge', label: 'Privacy judge daily call budget used', unit: 'calls', continue: 'raise' });
 
 /** The UTC daily cap survives restart. Time slices, not call counts, set the pace. */
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20_000;
@@ -108,12 +113,16 @@ export class SnifferCallBudget {
   private day = '';
   private used = 0;
   private readonly explicitLimit: boolean;
+  private stopRecorded = false;
+  private clearedOnStart = false;
+  private readonly settingsPath: string | undefined;
 
-  constructor(options: { maxCallsPerDay?: number; now?: () => Date; statePath?: string } = {}) {
+  constructor(options: { maxCallsPerDay?: number; now?: () => Date; statePath?: string; settingsPath?: string } = {}) {
     this.explicitLimit = options.maxCallsPerDay !== undefined;
     this.maxCallsPerDay = Math.max(0, Math.floor(options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY));
     this.now = options.now ?? (() => new Date());
     this.statePath = options.statePath;
+    this.settingsPath = options.settingsPath;
     if (this.statePath) {
       try {
         const saved = JSON.parse(readFileSync(this.statePath, 'utf8')) as { day?: unknown; used?: unknown };
@@ -128,9 +137,21 @@ export class SnifferCallBudget {
   }
 
   tryConsume(decisionMode = false): boolean {
-    this.roll();
-    const limit = decisionMode && !this.explicitLimit ? DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY : this.maxCallsPerDay;
-    if (this.used >= limit) return false;
+    const now = this.now();
+    this.roll(now);
+    const limit = readJudgeCallOverride(now, this.settingsPath)
+      ?? (decisionMode && !this.explicitLimit ? DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY : this.maxCallsPerDay);
+    if (this.used >= limit) {
+      recordOwnerLimitStop({ id: 'judge.daily_calls', subject: 'judge', since: now.toISOString(), limit, used: this.used,
+        resumesAt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString() });
+      this.stopRecorded = true;
+      return false;
+    }
+    if (this.stopRecorded || !this.clearedOnStart) {
+      clearOwnerLimitStop('judge.daily_calls', 'judge');
+      this.stopRecorded = false;
+      this.clearedOnStart = true;
+    }
     this.used += 1;
     this.save();
     return true;
@@ -151,8 +172,8 @@ export class SnifferCallBudget {
     return this.used;
   }
 
-  private roll(): void {
-    const day = this.now().toISOString().slice(0, 10);
+  private roll(now = this.now()): void {
+    const day = now.toISOString().slice(0, 10);
     if (day !== this.day) {
       this.day = day;
       this.used = 0;

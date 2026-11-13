@@ -1,3 +1,4 @@
+import { startVeniceCreditRecovery, openVeniceCreditPausePaths, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
 import { fileSourceScopeOnDemandFilters } from '../source-scope-runtime.ts';
 import type { OnDemandReadRequest, OnDemandReadResult } from '../file-extraction/on-demand-read.ts';
@@ -6476,6 +6477,13 @@ export async function main(): Promise<void> {
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
     || connectorStores.some((store) => embedsOnThisComputer(connectorStoreEmbeddingProviders.get(store.corpusId)) && store.queuedEmbeddingItemIds(1).length > 0);
   localPacer.start();
+  const stopCreditRecovery = startVeniceCreditRecovery({
+    paths: () => [...new Set([...openVeniceCreditPausePaths(), ...[olympusConfig.worker.creditMonitor.pauseFile,
+      process.env.OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE].filter((path): path is string => !!path)])],
+    probe: signal => fetchVeniceCreditStatus({ signal, baseUrl: VENICE_BILLING_BASE_URL, balanceOnly: true,
+      env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } }),
+    onResume: () => tierSniffer?.wake(),
+  });
   const stopCpuSampleLog = await startCpuSampleLog(process.env);
 
   // The worker owns a background tick that outlives any request, so the process
@@ -6499,6 +6507,7 @@ export async function main(): Promise<void> {
     clearInterval(captureTick);
     stopSupersededSweep();
     stopCpuSampleLog?.();
+    stopCreditRecovery();
     tierSniffer?.stop();
     localPacer.stop();
     archiveImportDashboard.close();

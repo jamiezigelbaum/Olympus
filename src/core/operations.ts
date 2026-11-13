@@ -1,3 +1,4 @@
+import { ownerLimits } from './owner-limits.ts';
 import { ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from './release-manifest.ts';
 import { DelphiClient } from './delphi.ts';
 import { noteLocalAgentAnswer } from './app-release-agent.ts';
@@ -230,6 +231,23 @@ const PRIVACY_ITEM_SET_PARAMS = {
 } satisfies Record<string, ParamDef>;
 
 export const operations: Operation[] = [
+  {
+    name: 'olympus_limits',
+    description: 'List open work stops with exact reasons, amounts, units and continuation actions; continue one with run_once, raise (--to, optional --keep), or a Venice refill re-check. Raising without keep lasts only this UTC day.',
+    params: {
+      action: { type: 'string', enum: ['list', 'continue'] },
+      id: { type: 'string', description: 'The limit id from the list.' },
+      subject: { type: 'string', description: 'The exact subject from the list; required if more than one matches.' },
+      to: { type: 'number', description: 'New total daily call limit, greater than current limit and calls used.' },
+      keep: { type: 'boolean', description: 'Keep the new daily limit for good.' },
+    },
+    mutating: true,
+    cliHints: { name: 'limits', positional: ['action', 'id'] },
+    handler: async (ctx, params) => ownerLimits(params, {
+      runOnce: subject => ctx.email.limitRunOnce(subject),
+      credit: { env: { ...process.env, ...ctx.config.worker.creditMonitor.credentials } },
+    }),
+  },
   {
     name: 'argus_ping',
     description: 'Check whether the configured Argus local model profile is reachable.',

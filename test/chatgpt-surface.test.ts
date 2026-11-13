@@ -880,6 +880,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'olympus_privacy_questions',
         'olympus_privacy_check',
         'olympus_sync_source',
+        'olympus_limits',
       ]);
       const readOnly = new Set([DASHBOARD_TOOL_NAME, 'olympus_search', 'source_index_status', 'source_answer', 'source_answer_result', 'olympus_scope_list', 'olympus_privacy_get']);
       for (const tool of tools) {

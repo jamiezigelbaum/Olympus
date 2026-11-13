@@ -2589,7 +2589,7 @@ function readwiseSchedulerFailure(error: unknown): unknown {
   return new SourceSchedulerTaskDeferral(error.message, {
     at: error.retryAt,
     degradedReason: READWISE_DAILY_REQUEST_GUARD_REASON,
-  });
+  }, error.amounts ? { limit_stop_limit: error.amounts.limit, ...(error.amounts.used !== undefined ? { limit_stop_used: error.amounts.used } : {}) } : undefined);
 }
 
 function xBookmarksLiveProgress(result: Awaited<ReturnType<XBookmarksConnectorStoreSyncHandler['syncHead']>>): SourceSchedulerTaskRunResult {
@@ -2663,7 +2663,7 @@ function gmailSchedulerFailure(error: unknown): unknown {
   if (error.reason === 'daily_api_request_guard') {
     return new SourceSchedulerTaskDeferral(error.message, {
       at: error.retryAt, degradedReason: GMAIL_DAILY_REQUEST_GUARD_REASON,
-    });
+    }, error.amounts ? { limit_stop_limit: error.amounts.limit, ...(error.amounts.used !== undefined ? { limit_stop_used: error.amounts.used } : {}) } : undefined);
   }
   const errorKind = error.reason === 'future_utc_day'
     ? GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION
@@ -2702,7 +2702,7 @@ function googleDriveSchedulerFailure(error: unknown): unknown {
   if (error.reason === 'daily_api_request_guard') {
     return new SourceSchedulerTaskDeferral(error.message, {
       at: error.retryAt, degradedReason: GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
-    });
+    }, error.amounts ? { limit_stop_limit: error.amounts.limit, ...(error.amounts.used !== undefined ? { limit_stop_used: error.amounts.used } : {}) } : undefined);
   }
   const errorKind = error.reason === 'future_utc_day'
     ? GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION

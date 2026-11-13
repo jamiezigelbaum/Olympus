@@ -1130,6 +1130,7 @@ async function guardedPage<T extends { rateLimit?: XApiRateLimit }>(
         message: 'X bookmarks request deferred by a configured usage guard.',
         retryAt: error.retryAt,
         degradedReason: error.guardKind,
+        ...(error.amounts ? { counts: { limit_stop_limit: error.amounts.limit, limit_stop_used: error.amounts.used } } : {}),
       });
     }
     throw error;

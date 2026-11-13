@@ -1534,6 +1534,8 @@ function printHelp(): void {
   console.log('  olympus settings show|schema');
   console.log('  olympus settings propose <file.json|-> [--from <name>]');
   console.log('  olympus doctor');
+  console.log('  olympus limits');
+  console.log('  olympus limits continue <id> [--subject S] [--to N] [--keep]');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect telegram|whatsapp --pair');

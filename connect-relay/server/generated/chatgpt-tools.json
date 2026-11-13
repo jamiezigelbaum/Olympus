@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=d194fb7a4541"
+          "resourceUri": "ui://olympus/dashboard?v=8fa481f830e8"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=d194fb7a4541",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=8fa481f830e8",
         "openai/ui": {
           "entrypoints": [
             {
@@ -1054,11 +1054,65 @@
         "openai/widgetAccessible": true,
         "openai/visibility": "private"
       }
+    },
+    {
+      "name": "olympus_limits",
+      "title": "Continue stopped work",
+      "description": "For the Olympus Home panel: list work stopped by a limit or continue a stop with the owner’s chosen action.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "continue"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "The limit id from the list."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The exact subject from the list; required if more than one matches."
+          },
+          "to": {
+            "type": "number",
+            "description": "New total daily call limit, greater than current limit and calls used."
+          },
+          "keep": {
+            "type": "boolean",
+            "description": "Keep the new daily limit for good."
+          }
+        },
+        "required": []
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
+      }
     }
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=d194fb7a4541",
+      "uri": "ui://olympus/dashboard?v=8fa481f830e8",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },

@@ -470,6 +470,18 @@ export class EmailClient {
     });
   }
 
+  /** Owner run_once uses the existing operator sync path; usage is still counted. */
+  async limitRunOnce(subject: string): Promise<unknown> {
+    let identity: unknown;
+    try { identity = JSON.parse(subject); } catch { throw new OperationError('invalid_params', 'This stop has no scheduler identity.'); }
+    if (!Array.isArray(identity) || identity.length !== 3 || !identity.every(part => typeof part === 'string')) throw new OperationError('invalid_params', 'Invalid scheduler stop subject.');
+    const source = ({ 'x.bookmarks': 'x', 'readwise.library': 'readwise', 'gmail.email': 'gmail', 'google_drive.docs': 'google-drive' } as Record<string, string>)[identity[0]!];
+    if (!source) throw new OperationError('invalid_params', 'This source has no run-once action.');
+    return this.transport.requestJson(`${this.config.email.baseUrl.replace(/\/v1\/?$/, '')}/dashboard/sync-now`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source }),
+    });
+  }
+
   /**
    * Ask the worker to import an archive or remove one, or list them
    * (archive_import). The worker only records the request and reads; the

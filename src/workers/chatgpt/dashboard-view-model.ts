@@ -17,7 +17,7 @@ import { sourceSupportDetails } from '../dashboard/source-failure.ts';
  * passes the allowlisted response builder (response-builder.ts) before it
  * leaves the engine.
  */
-import { registeredLimits, limitStopSubjects, type LimitStop } from '../../core/limit-stops.ts';
+import { registeredLimits, limitStopReference, limitStopSubjects, type LimitStop } from '../../core/limit-stops.ts';
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { formatSpaceToFree, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import {
@@ -322,12 +322,16 @@ export function buildChatGptDashboardViewModel(
     if (!limit) continue;
     const row = rows.find(({ definition }) => limitStopSubjects(stop).some((subject) =>
       subject === definition.source_id || subject === definition.primary_corpus_id || definition.corpus_source_ids.includes(subject)));
-    const fix = limit.continue === 'run_once' ? row?.sync
-      : limit.continue === 'raise' || limit.continue === 'refill'
-        ? helpLinkFix('Open settings', openPageUrl({ kind: 'fix', section: 'models' })) : undefined;
+    const raiseTo = stop.toContinue?.raiseTo ?? Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1);
+    const fix: DashboardFix | undefined = limit.continue === 'none' ? undefined : {
+      label: limit.continue === 'raise' ? `Raise to ${raiseTo.toLocaleString('en-US')} ${limit.unit === 'calls' && raiseTo === 1 ? 'call' : limit.unit}` : limit.continue === 'refill' ? 'Refill — re-check' : 'Run once',
+      tool: 'olympus_limits', args: { action: 'continue', id: stop.id, subject: limitStopReference(stop),
+        ...(limit.continue === 'raise' ? { to: raiseTo } : {}) },
+    };
     const label = row?.definition.label ?? ({ source: 'Sources', judge: 'Privacy check', answer: 'Answers', outside_help: 'Outside help', extraction: 'Reading' } as const)[limit.scope];
     waits.push({ sourceId: row?.definition.source_id ?? limit.scope, label, api: label,
       reason: 'limit', limitLabel: limit.label, since: stop.since,
+      limit: stop.limit, used: stop.used, unit: limit.unit,
       ...(stop.waiting ? { waiting: stop.waiting } : {}),
       ...(stop.resumesAt ? { resumesAt: stop.resumesAt } : {}), ...(fix ? { fix } : {}) });
   }

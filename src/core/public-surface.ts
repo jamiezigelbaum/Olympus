@@ -8,6 +8,7 @@
  */
 
 export const V0_4_PUBLIC_NATIVE_TOOLS = [
+  'olympus_limits',
   'argus_ping',
   'argus_list_models',
   'argus_complete',
@@ -45,6 +46,7 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
 // own tool budget (timeoutMs up to 600000) and never hands off; a one-shot CLI
 // process could not keep a job alive between two commands.
 export const V0_4_PUBLIC_MCP_TOOLS = [
+  'olympus_limits',
   'argus_ping',
   'argus_list_models',
   'argus_complete',
@@ -65,6 +67,7 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
 // CLI as the command `olympus doctor` through its cliHints; see
 // V0_4_PUBLIC_CLI_COMMANDS for the user-facing command roster.
 export const V0_4_PUBLIC_CLI_OPERATIONS = [
+  'olympus_limits',
   'argus_ping',
   'argus_list_models',
   'argus_complete',
@@ -158,6 +161,8 @@ export const V0_4_PUBLIC_SOURCE_IDS = [
 ] as const;
 
 export const V0_4_PUBLIC_CLI_COMMANDS = [
+  'limits',
+  'limits continue',
   'setup',
   'sovereignty init',
   'worker install',
