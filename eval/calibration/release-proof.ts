@@ -184,9 +184,9 @@ export async function main(argv = process.argv.slice(2)) {
     if (lane.rejudgeReady === false) throw new Error('Judge not ready');
     const inputs: ReleaseInput[] = [], truth: Set<string>[] = [];
     let windows = 0, privateWindows = 0, unjudgedWindows = 0, groundFailures = 0;
-    stage = 'ground-truth';
-    const groundCalls = calls, groundHttp = httpCalls;
-    const judgeJobs: Array<{ material: Parameters<typeof snifferMaterialForModel>[0]; hashes: readonly string[]; into: Set<string> }> = [];
+    stage = 'screen';
+    // Windows the deterministic screens hold are Private truth at once; the rest need a judge call.
+    const judgeJobs: Array<{ item: number; material: Parameters<typeof snifferMaterialForModel>[0]; hashes: readonly string[] }> = [];
     const hold = (hashes: readonly string[], into: Set<string>) => { privateWindows++; for (const hash of hashes) into.add(hash); };
     for (const [index, item] of picked.entries()) {
       const opened = mounted.find(candidate => candidate.dbPath === item.storePath);
@@ -202,17 +202,39 @@ export async function main(argv = process.argv.slice(2)) {
         if (input.material === undefined) continue;
         const own = snifferOwnMaterial(snifferMaterialForModel(input.material));
         if (snifferMaterialCarriesSecret(own) || snifferInjectionRule(own)) { hold(window.chunkHashes, privateHashes); continue; }
-        judgeJobs.push({ material: input.material, hashes: window.chunkHashes, into: privateHashes });
+        judgeJobs.push({ item: index, material: input.material, hashes: window.chunkHashes });
       }
     }
+    for (const path of [...appReleaseLogDbPaths(), ...jobLedgerPathsToVisit(ledgers.flatMap(ledger => ledger.knownJobLedgerPaths())).visit]) inside(path);
+    stage = 'release-check';
+    // The release check runs first, cold, so its timing is the first-question delay. Ground truth
+    // then covers every item the check let ANY chunk of through, in full: a wholly held item
+    // cannot leak, so the leak counts below are exact, not sampled.
+    const check = createReleaseTierCheck(() => scopes, () => 'allow');
+    const raw: Array<{ results: ChunkReleaseResult[]; times: number[]; callsMade: number; httpCallsMade: number }> = [];
+    for (let run = 0; run < 2; run++) {
+      const before = calls, beforeHttp = httpCalls, times: number[] = [], results: ChunkReleaseResult[] = [];
+      for (let at = 0; at < inputs.length; at += 24) {
+        const start = performance.now();
+        results.push(await check.chunks!(inputs.slice(at, at + 24), { budgetMs: RELEASE_CHUNK_JUDGE_BUDGET_MS }));
+        times.push(performance.now() - start);
+      }
+      raw.push({ results, times, callsMade: calls - before, httpCallsMade: httpCalls - beforeHttp });
+      process.stderr.write(JSON.stringify({ stage, run, calls }) + '\n');
+    }
+    const released = new Set<number>();
+    for (const { results } of raw) results.forEach((result, b) => result.allowed.forEach((hashes, i) => { if (hashes.length) released.add(b * 24 + i); }));
+    stage = 'ground-truth';
+    const jobs = judgeJobs.filter(job => released.has(job.item));
+    const groundCalls = calls, groundHttp = httpCalls;
     // Numbers-only progress on stderr, so a slow run can be told from a stuck one.
-    const progress = (done: number) => process.stderr.write(JSON.stringify({ stage, done, total: judgeJobs.length, windows, calls }) + '\n');
+    const progress = (done: number) => process.stderr.write(JSON.stringify({ stage, done, total: jobs.length, itemsReleased: released.size, calls }) + '\n');
     progress(0);
     let next = 0, done = 0;
-    const concurrency = Math.max(1, Math.min(16, Number(process.env.RELEASE_PROOF_CONCURRENCY) || 6));
+    const concurrency = Math.max(1, Math.min(16, Number(process.env.RELEASE_PROOF_CONCURRENCY) || 2));
     await Promise.all(Array.from({ length: concurrency }, async () => {
-      while (next < judgeJobs.length) {
-        const job = judgeJobs[next++]!;
+      while (next < jobs.length) {
+        const job = jobs[next++]!;
         const material = snifferMaterialForModel(job.material);
         // A slow or failed ground-truth call holds the window and counts as unjudged; it never ends the run.
         let reply: SnifferModelCompletion | undefined;
@@ -223,37 +245,28 @@ export async function main(argv = process.argv.slice(2)) {
         const parsed = reply && (reply.decisionVerdict ?? parseSnifferBatchResponse(reply.text, new Set([1])).get(1));
         const verdict = parsed ? { ...parsed, failSafe: reply!.decisionVerdict?.failSafe ?? false } : undefined;
         if (!verdict || verdict.failSafe) unjudgedWindows++;
-        if (!verdict || snifferVerdictTier(verdict, lane, []).tier !== 'private') hold(job.hashes, job.into);
-        if (++done % 25 === 0 || done === judgeJobs.length) progress(done);
+        if (!verdict || snifferVerdictTier(verdict, lane, []).tier !== 'private') hold(job.hashes, truth[job.item]!);
+        if (++done % 25 === 0 || done === jobs.length) progress(done);
       }
     }));
-    const groundTruth = { windows, privateWindows, unjudgedWindows, groundFailures, callsMade: calls - groundCalls, httpCallsMade: httpCalls - groundHttp };
-    for (const path of [...appReleaseLogDbPaths(), ...jobLedgerPathsToVisit(ledgers.flatMap(ledger => ledger.knownJobLedgerPaths())).visit]) inside(path);
-    stage = 'release-check';
-    const check = createReleaseTierCheck(() => scopes, () => 'allow');
-    const runs = [];
+    const groundTruth = { windows, windowsNeedingJudge: judgeJobs.length, itemsReleased: released.size, windowsJudged: jobs.length,
+      privateWindows, unjudgedWindows, groundFailures, callsMade: calls - groundCalls, httpCallsMade: httpCalls - groundHttp };
     const leakedItems = new Set<number>(), leakedPrivateChunks = new Set<string>();
-    for (let run = 0; run < 2; run++) {
-      const before = calls, beforeHttp = httpCalls, times: number[] = [], batches: ReturnType<typeof releaseCounts>[] = [];
+    const runs = raw.map(({ results, times, callsMade, httpCallsMade }) => {
+      const batches = results.map((result, b) => releaseCounts(inputs.slice(b * 24, b * 24 + 24), truth.slice(b * 24, b * 24 + 24), result));
       const perItem: Array<{ chunksAllowed: number; chunksHeld: number }> = [];
-      for (let at = 0; at < inputs.length; at += 24) {
-        const batch = inputs.slice(at, at + 24), start = performance.now();
-        const result = await check.chunks!(batch, { budgetMs: RELEASE_CHUNK_JUDGE_BUDGET_MS });
-        times.push(performance.now() - start);
-        batches.push(releaseCounts(batch, truth.slice(at, at + 24), result));
-        result.allowed.forEach((hashes, i) => {
-          const allowed = new Set(hashes);
-          perItem.push({ chunksAllowed: allowed.size, chunksHeld: new Set(batch[i]!.chunkHashes).size - allowed.size });
-          if (truth[at + i]!.size && allowed.size) leakedItems.add(at + i);
-          for (const hash of allowed) if (truth[at + i]!.has(hash)) leakedPrivateChunks.add(JSON.stringify([at + i, hash]));
-        });
-      }
+      results.forEach((result, b) => result.allowed.forEach((hashes, i) => {
+        const at = b * 24 + i, allowed = new Set(hashes);
+        perItem.push({ chunksAllowed: allowed.size, chunksHeld: new Set(inputs[at]!.chunkHashes).size - allowed.size });
+        if (truth[at]!.size && allowed.size) leakedItems.add(at);
+        for (const hash of allowed) if (truth[at]!.has(hash)) leakedPrivateChunks.add(JSON.stringify([at, hash]));
+      }));
       const sum = (key: keyof ReturnType<typeof releaseCounts>) => batches.reduce((total, batch) => total + batch[key], 0);
-      runs.push({ chunksAllowed: sum('chunksAllowed'), chunksHeld: sum('chunksHeld'), heldPassages: sum('heldPassages'),
+      return { chunksAllowed: sum('chunksAllowed'), chunksHeld: sum('chunksHeld'), heldPassages: sum('heldPassages'),
         privateChunksAllowed: sum('privateChunksAllowed'), itemsWithPrivateWindowAnyAllowed: sum('itemsWithPrivateWindowAnyAllowed'),
-        perItem, ...batchTimes(times), callsMade: calls - before, httpCallsMade: httpCalls - beforeHttp });
-    }
-    return { items: picked.length, itemsWithPrivateWindows: truth.filter(hashes => hashes.size).length, groundTruth, runs,
+        perItem, ...batchTimes(times), callsMade, httpCallsMade };
+    });
+    return { items: picked.length, itemsWithKnownPrivateWindows: truth.filter(hashes => hashes.size).length, groundTruth, runs,
       privateChunksAllowed: leakedPrivateChunks.size,
       itemsWithPrivateWindowAnyAllowed: leakedItems.size, callsMade: calls, httpCallsMade: httpCalls };
   } finally {
