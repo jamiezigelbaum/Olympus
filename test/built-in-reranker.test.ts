@@ -18,6 +18,17 @@ import type { EmbeddingBatch, EmbeddingRuntime, EmbeddingSession } from '../src/
 
 import { createTestClock, flushMicrotasks, type TestTimer } from './helpers/test-clock.ts';
 import { WordPieceTokenizer } from '../src/workers/source-index/built-in-embedding/wordpiece.ts';
+import { builtInEmbeddingPaths } from '../src/workers/source-index/built-in-embedding/assets.ts';
+import { ARCTIC_EMBED_M_V1_5, ONNX_RUNTIME_PACK } from '../src/workers/source-index/built-in-embedding/manifest.ts';
+
+// What the installer leaves once the pinned ONNX runtime is in place.
+function markBuiltInOnnxRuntimeInstalled(env: Record<string, string>): void {
+  const { runtimeDir } = builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5);
+  mkdirSync(runtimeDir, { recursive: true });
+  writeFileSync(join(runtimeDir, 'olympus-runtime.json'), JSON.stringify({
+    packages: [ONNX_RUNTIME_PACK.common, ONNX_RUNTIME_PACK.runtime].map((pack) => ({ name: pack.name, integrity: pack.integrity })),
+  }));
+}
 
 const temporaryDirs: string[] = [];
 afterEach(() => { for (const dir of temporaryDirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -159,6 +170,7 @@ describe('default activation and idle release', () => {
     expect(reranker?.localOnly).toBe(true);
     await reranker!.score({ ...request(), passages: [Array(1000).fill('hello').join(' ')] });
     expect(tokens).toBe(256);
+    markBuiltInOnnxRuntimeInstalled(env);
     // A blank value is the same as unset (a cleared .env line must not turn it off).
     expect(builtInRerankerFromEnv({ env: { ...env, OLYMPUS_SOURCE_RERANKER: ' ' }, totalmem: () => 16 * 1024 ** 3 })).toBeDefined();
     expect(builtInRerankerFromEnv({ env, totalmem: () => 8 * 1024 ** 3 })).toBeUndefined();
@@ -185,6 +197,21 @@ describe('default activation and idle release', () => {
     await found!.prepare();
     expect(prepared).toBe(1);
     expect(createBuiltInRerankerResolver({ env: { ...env, OLYMPUS_SOURCE_RERANKER: 'off' }, totalmem: () => 16 * 1024 ** 3, runtime })()).toBeUndefined();
+  });
+
+  test('without its ONNX runtime installed the reranker stays off, then turns on once the runtime lands', async () => {
+    // A LiteRT (EmbeddingGemma) install never installs the ONNX runtime the
+    // reranker loads; turning on with the model files alone fails every
+    // question with "Cannot find package 'onnxruntime-node'".
+    const root = modelDirectory();
+    const dir = join(root, 'reranker', MMARCO_MMINILMV2_L12_H384_V1.modelId);
+    mkdirSync(dir, { recursive: true });
+    for (const name of ['model.onnx', 'tokenizer.json']) writeFileSync(join(dir, name), readFileSync(join(root, name)));
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: root };
+    const current = createBuiltInRerankerResolver({ env, totalmem: () => 16 * 1024 ** 3 }, () => undefined);
+    expect(current()).toBeUndefined();
+    markBuiltInOnnxRuntimeInstalled(env);
+    expect(current()).toBeDefined();
   });
 
   function idleFixture() {

@@ -550,6 +550,14 @@ interface RuntimeMarker {
   packages: Array<{ name: string; integrity: string }>;
 }
 
+/**
+ * Whether the pinned ONNX runtime the built-in reranker loads is installed.
+ * An install whose embedder runs on LiteRT never installs it on its own.
+ */
+export function builtInOnnxRuntimeInstalled(runtimeDir: string, runtime: OnnxRuntimePackSpec = ONNX_RUNTIME_PACK): boolean {
+  return runtimeInstalled(runtimeDir, [runtime.common, runtime.runtime]);
+}
+
 function runtimeInstalled(runtimeDir: string, packages: readonly PinnedNpmPackage[]): boolean {
   try {
     const marker = JSON.parse(readFileSync(join(runtimeDir, RUNTIME_MARKER), 'utf8')) as RuntimeMarker;

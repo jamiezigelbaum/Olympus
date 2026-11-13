@@ -15994,6 +15994,9 @@ async function verifyModelFiles(dir, files, reporter, useCache = true) {
   }
   reporter.touch();
 }
+function builtInOnnxRuntimeInstalled(runtimeDir, runtime = ONNX_RUNTIME_PACK) {
+  return runtimeInstalled(runtimeDir, [runtime.common, runtime.runtime]);
+}
 function runtimeInstalled(runtimeDir, packages) {
   try {
     const marker = JSON.parse(readFileSync21(join26(runtimeDir, RUNTIME_MARKER), "utf8"));
@@ -164130,7 +164133,10 @@ function builtInRerankerFromEnv(options = {}) {
   const tokenizerPath = join129(modelDir, "tokenizer.json");
   if (!existsSync102(modelPath) || !existsSync102(vocabularyPath) && !existsSync102(tokenizerPath))
     return;
-  const runtimeDir = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim() || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
+  const runtimeOverride = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim();
+  const runtimeDir = runtimeOverride || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
+  if (!options.runtime && !runtimeOverride && !builtInOnnxRuntimeInstalled(runtimeDir))
+    return;
   const runtime = options.runtime ?? onnxRuntimeFromDirectory(runtimeDir);
   const threads2 = positiveInteger7(env[SOURCE_RERANKER_THREADS_ENV]) ?? Math.max(1, Math.min(4, Math.floor(availableParallelism3() / 2)));
   const poolSize = positiveInteger7(env[SOURCE_RERANKER_POOL_ENV]);

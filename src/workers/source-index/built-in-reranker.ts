@@ -18,7 +18,7 @@ import {
   type EvidenceRerankRequest,
   type RerankTimers,
 } from '../../core/evidence-reranker.ts';
-import { builtInEmbeddingPaths } from './built-in-embedding/assets.ts';
+import { builtInEmbeddingPaths, builtInOnnxRuntimeInstalled } from './built-in-embedding/assets.ts';
 import { MMARCO_MMINILMV2_L12_H384_V1 } from './built-in-reranker-manifest.ts';
 import { ARCTIC_EMBED_M_V1_5 } from './built-in-embedding/manifest.ts';
 import { onnxRuntimeFromDirectory, type EmbeddingRuntime, type EmbeddingSession } from './built-in-embedding/runtime.ts';
@@ -212,8 +212,11 @@ export function builtInRerankerFromEnv(options: BuiltInRerankerFromEnvOptions = 
   const vocabularyPath = join(modelDir, 'vocab.txt');
   const tokenizerPath = join(modelDir, 'tokenizer.json');
   if (!existsSync(modelPath) || (!existsSync(vocabularyPath) && !existsSync(tokenizerPath))) return undefined;
-  const runtimeDir = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim()
-    || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
+  const runtimeOverride = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim();
+  const runtimeDir = runtimeOverride || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
+  // The model files land before the runtime; until the pinned runtime is in
+  // place too, loading would fail every question, so the reranker stays off.
+  if (!options.runtime && !runtimeOverride && !builtInOnnxRuntimeInstalled(runtimeDir)) return undefined;
   const runtime = options.runtime ?? onnxRuntimeFromDirectory(runtimeDir);
   const threads = positiveInteger(env[SOURCE_RERANKER_THREADS_ENV])
     ?? Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
