@@ -14,7 +14,7 @@ import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-
 import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitPackToPromptBytes, type AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
 import { analystPromptFixture } from './helpers/analyst-prompt-fixture.ts';
 import {
-  buildEvalPack,
+  buildEvalPack as buildEvalPackDetail,
   createEvalDropboxLanes,
   evalAnswerRepeat,
   evalAnswerStageAudit,
@@ -38,6 +38,19 @@ import { join } from 'node:path';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { BuiltInSourceEmbeddingProvider } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import { reportBuiltInEmbeddingState } from '../src/workers/source-index/built-in-embedding/assets.ts';
+
+/**
+ * The eval's pack, which must hold evidence: an empty one fails here with the
+ * search's own counts (lanes, skips, drops), not later as a crash on
+ * candidates[0] (#1571, seen only under CI load).
+ */
+async function buildEvalPack(...args: Parameters<typeof buildEvalPackDetail>) {
+  const detail = await buildEvalPackDetail(...args);
+  if (detail.pack.candidates.length === 0) {
+    throw new Error(`the eval pack came back empty: ${JSON.stringify(evalRetrievalAudit(detail))}`);
+  }
+  return detail;
+}
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -112,7 +125,7 @@ describe('the real eval report says why a pack is empty (#1233)', () => {
     });
     expect(marked.packCandidateSources.slice(1).every((seat) => seat.expectedItem === undefined)).toBe(true);
 
-    const empty = evalRetrievalAudit(await buildEvalPack({
+    const empty = evalRetrievalAudit(await buildEvalPackDetail({
       question: 'zebra quartz harmonica', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
     }));
     expect(empty).toMatchObject({ packCandidates: 0, policyDeniedCandidates: 0, unreadCandidates: 0 });
