@@ -19,6 +19,18 @@ const note = (event: string, extra: Record<string, unknown> = {}) => {
   appendFileSync(events, `${JSON.stringify({ role, event, pid: process.pid, ...extra })}\n`);
 };
 
+// The handlers go in before the start line: a test that signals as soon as it
+// reads that line would otherwise find a child that died of the default
+// SIGTERM without writing its stop (#1586).
+let server: ReturnType<typeof Bun.serve> | undefined;
+const stop = (signal: string) => {
+  note('stop', { signal });
+  void server?.stop(true);
+  process.exit(143);
+};
+process.once('SIGTERM', () => stop('SIGTERM'));
+process.once('SIGINT', () => stop('SIGINT'));
+
 note('start', {
   argv: process.argv.slice(2),
   socket: process.env.OLYMPUS_ENGINE_BACKGROUND_SOCKET ?? null,
@@ -30,7 +42,6 @@ if (process.env.SAY) {
   console.error(`hello from the ${role} on stderr`);
 }
 
-let server: ReturnType<typeof Bun.serve> | undefined;
 const serve = () => {
   const socket = process.env.OLYMPUS_ENGINE_BACKGROUND_SOCKET!;
   rmSync(socket, { force: true });
@@ -60,11 +71,4 @@ if (role === 'background') {
 const crashAfter = Number(process.env.CRASH_AFTER_MS ?? 0);
 if (crashAfter > 0) setTimeout(() => process.exit(1), crashAfter);
 
-const stop = (signal: string) => {
-  note('stop', { signal });
-  void server?.stop(true);
-  process.exit(143);
-};
-process.once('SIGTERM', () => stop('SIGTERM'));
-process.once('SIGINT', () => stop('SIGINT'));
 setInterval(() => {}, 60_000);
