@@ -6661,8 +6661,11 @@ function readProgressFile(path) {
     return;
   }
 }
-function bootInProgress(env = process.env, now = Date.now()) {
-  return bootProgressIsLive(readBootProgress(env), now);
+function workerStillStarting(env, pid, now = Date.now(), alive = processAlive) {
+  const progress = readBootProgress(env);
+  if (bootProgressIsLive(progress, now, alive))
+    return true;
+  return progress?.phase === "done" && pid !== undefined && progress.pid === pid && alive(pid) && now - Date.parse(progress.updatedAt) < BOOT_READY_ANSWER_GRACE_MS;
 }
 function bootProgressIsLive(progress, now = Date.now(), alive = processAlive) {
   if (!progress || progress.phase === "done" || progress.phase === "failed" || !alive(progress.pid))
@@ -6683,12 +6686,13 @@ function processAlive(pid) {
 function bootProgressPath(env) {
   return sharedDataPath("boot-progress", env);
 }
-var BOOT_PROGRESS_SCHEMA = "olympus.boot-progress.v1", BOOT_LONG_STEP_BACKSTOP_MS, BOOT_STALL_MS;
+var BOOT_PROGRESS_SCHEMA = "olympus.boot-progress.v1", BOOT_LONG_STEP_BACKSTOP_MS, BOOT_STALL_MS, BOOT_READY_ANSWER_GRACE_MS;
 var init_boot_progress = __esm(() => {
   init_atomic_file();
   init_olympus_layout();
   BOOT_LONG_STEP_BACKSTOP_MS = 6 * 60 * 60 * 1000;
   BOOT_STALL_MS = 5 * 60 * 1000;
+  BOOT_READY_ANSWER_GRACE_MS = 15 * 60 * 1000;
 });
 
 // src/core/sqlite-migrations.ts
@@ -32238,7 +32242,7 @@ async function prepareWorkerStart(input, worker) {
     args: ["--no-env-file", settings.executablePath, "__worker-service-run", settings.instanceId],
     endpointOccupied,
     startupFailure: (child) => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
-    startupInProgress: () => bootInProgress(settings.env),
+    startupInProgress: (child) => workerStillStarting(settings.env, child.pid),
     readinessProbe: () => authenticatedReadinessProbe(worker.fetchWorker, settings.readinessUrl, settings.authToken, settings.instanceId, Math.min(READINESS_PROBE_TIMEOUT_MS, Math.max(effectiveStartupTimeoutMs, 1)))
   };
 }
@@ -32463,7 +32467,7 @@ function engineBackgroundLaunch(input) {
     startupTimeoutMs: input.startupTimeoutMs,
     endpointOccupied: false,
     startupFailure: (child) => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
-    startupInProgress: () => bootInProgress(input.env),
+    startupInProgress: (child) => workerStillStarting(input.env, child.pid),
     async readinessProbe(child) {
       const ready = await probeEngineBackground(fetchBackground, input.authToken, input.instanceId, input.probeTimeoutMs);
       if (ready)

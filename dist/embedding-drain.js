@@ -13511,6 +13511,7 @@ function write(target, nowMs, force) {
     target.lastWriteMs = nowMs;
   } catch {}
 }
+var BOOT_READY_ANSWER_GRACE_MS = 15 * 60 * 1000;
 function processAlive(pid) {
   try {
     process.kill(pid, 0);
