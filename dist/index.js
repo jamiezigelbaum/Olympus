@@ -2467,6 +2467,25 @@ var init_still_image_formats = __esm(() => {
   IMAGE_MAX_DECLARED_PIXELS = 16384 * 16384;
 });
 
+// src/workers/source-index/built-in-reranker-manifest.ts
+function candidate(modelId, repository, revision, modelFile, modelBytes, modelSha256, tokenizerFile, tokenizerBytes, tokenizerSha256) {
+  const base = `https://huggingface.co/${repository}/resolve/${revision}`;
+  return {
+    modelId,
+    repository,
+    revision,
+    license: "Apache-2.0",
+    maxTokens: 512,
+    model: { name: "model.onnx", url: `${base}/${modelFile}`, bytes: modelBytes, sha256: modelSha256 },
+    tokenizer: { name: tokenizerFile, url: `${base}/${tokenizerFile}`, bytes: tokenizerBytes, sha256: tokenizerSha256 }
+  };
+}
+var MS_MARCO_MINILM_L6_V2, MMARCO_MMINILMV2_L12_H384_V1;
+var init_built_in_reranker_manifest = __esm(() => {
+  MS_MARCO_MINILM_L6_V2 = candidate("ms-marco-MiniLM-L6-v2-fp32-233902d", "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "onnx/model.onnx", 91011230, "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a", "vocab.txt", 231508, "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3");
+  MMARCO_MMINILMV2_L12_H384_V1 = candidate("mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "onnx/model_qint8_arm64.onnx", 118620017, "1825907d6c1a9001ff78124780bbde20a614a8c3df3b63409cf3c72c6fe5c8b4", "tokenizer.json", 17082660, "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626");
+});
+
 // src/core/http-timeout.ts
 function untilAborted(work, signal) {
   return new Promise((resolve3, reject) => {
@@ -3382,6 +3401,7 @@ function readBuiltInEmbeddingVision(env = process.env, model = BUILT_IN_EMBEDDIN
 }
 var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR", STALE_LOCK_MS, DOWNLOAD_STALL_MS;
 var init_assets = __esm(() => {
+  init_built_in_reranker_manifest();
   init_pinned_download();
   init_olympus_layout();
   init_manifest();
@@ -3693,7 +3713,7 @@ function parseRuleMode(value, label) {
     throw new OperationError("config_error", `${label} must be a string.`);
   }
   const mode = value.trim().toLowerCase();
-  const known = SOURCE_INGESTION_RULE_MODES.find((candidate) => candidate === mode);
+  const known = SOURCE_INGESTION_RULE_MODES.find((candidate2) => candidate2 === mode);
   if (!known) {
     throw new OperationError("config_error", `${label} must be one of ${SOURCE_INGESTION_RULE_MODES.join(", ")}; got ${JSON.stringify(value)}.`);
   }
@@ -8081,18 +8101,18 @@ function resolveOpenClawExecutable(options = {}) {
     const directory = entry.trim();
     if (!directory || !isAbsolute16(directory))
       continue;
-    const candidate = join26(directory, "openclaw");
-    if (isExecutableFile(candidate))
-      return candidate;
+    const candidate2 = join26(directory, "openclaw");
+    if (isExecutableFile(candidate2))
+      return candidate2;
   }
   const which = options.which ?? ((command) => typeof Bun !== "undefined" ? Bun.which(command) : null);
   const found = which("openclaw");
   if (found && isAbsolute16(found))
     return found;
   const home = options.homeDir?.trim() || env.HOME?.trim() || homedir10();
-  for (const candidate of openClawWellKnownPaths(home)) {
-    if (isExecutableFile(candidate))
-      return candidate;
+  for (const candidate2 of openClawWellKnownPaths(home)) {
+    if (isExecutableFile(candidate2))
+      return candidate2;
   }
   return;
 }
@@ -9646,7 +9666,7 @@ function firstNonEmpty(env, names) {
   return;
 }
 function firstExistingSecretRef(env, names) {
-  const name = names.find((candidate) => env[candidate]?.trim());
+  const name = names.find((candidate2) => env[candidate2]?.trim());
   return name ? `env:${name}` : undefined;
 }
 function hasAnyEnv(env, names) {
@@ -12679,18 +12699,18 @@ function trustedChain(path, probe, uid) {
       return true;
   }
 }
-function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) {
+function trustedFallbackExecutable(candidate2, probe = DEFAULT_EXECUTABLE_TRUST) {
   const uid = probe.uid();
   if (uid === undefined)
     return;
   try {
-    const real = probe.realpath(candidate);
+    const real = probe.realpath(candidate2);
     const target = probe.stat(real);
     if (!target.isFile() || !probe.executable(real))
       return;
     if (!trustedChain(real, probe, uid))
       return;
-    if (!trustedChain(probe.realpath(dirname27(candidate)), probe, uid))
+    if (!trustedChain(probe.realpath(dirname27(candidate2)), probe, uid))
       return;
     return real;
   } catch {
@@ -12700,11 +12720,11 @@ function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) 
 function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
   const pathDirectories = (env.PATH ?? "").split(delimiter5).filter(Boolean);
   const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join36(dir, name));
-  for (const candidate of candidates) {
+  for (const candidate2 of candidates) {
     try {
-      accessSync8(candidate, constants5.X_OK);
-      if (statSync16(candidate).isFile())
-        return candidate;
+      accessSync8(candidate2, constants5.X_OK);
+      if (statSync16(candidate2).isFile())
+        return candidate2;
     } catch {}
   }
   if (explicit)
@@ -14346,25 +14366,25 @@ var init_oauth_relay = __esm(() => {
 
 // src/core/publisher-oauth-client.ts
 function isGooglePublisherWebClientId(clientId, env = process.env) {
-  const candidate = clientId?.trim();
-  if (!candidate)
+  const candidate2 = clientId?.trim();
+  if (!candidate2)
     return false;
   const override = env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID?.trim();
-  if (override && candidate === override)
+  if (override && candidate2 === override)
     return true;
-  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
+  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate2);
 }
 function googleDesktopClientSecret(clientId, env = process.env) {
-  const candidate = clientId?.trim();
-  if (!candidate)
+  const candidate2 = clientId?.trim();
+  if (!candidate2)
     return;
   const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
-  if (overrideId && candidate === overrideId) {
+  if (overrideId && candidate2 === overrideId) {
     const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
     if (overrideSecret)
       return overrideSecret;
   }
-  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
+  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate2);
   return known?.secret.trim() || undefined;
 }
 var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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", GOOGLE_DESKTOP_CLIENTS;
@@ -18185,14 +18205,14 @@ var init_file_extraction_source = __esm(() => {
 });
 
 // src/workers/email-source/ingest-filter.ts
-function classifyEmailIngestSkip(candidate, options = {}) {
+function classifyEmailIngestSkip(candidate2, options = {}) {
   const skipOtp = options.skipOtp ?? true;
-  if (skipOtp && isOtpMail(candidate))
+  if (skipOtp && isOtpMail(candidate2))
     return "otp";
   const skipCategories = options.skipCategories ?? DEFAULT_SKIP_CATEGORIES;
-  if (skipCategories.length > 0 && candidate.labels) {
+  if (skipCategories.length > 0 && candidate2.labels) {
     const skip = new Set(skipCategories.map((label) => label.trim().toUpperCase()).filter(Boolean));
-    for (const label of candidate.labels) {
+    for (const label of candidate2.labels) {
       if (skip.has(label.toUpperCase())) {
         return `category:${label.toUpperCase()}`;
       }
@@ -18200,10 +18220,10 @@ function classifyEmailIngestSkip(candidate, options = {}) {
   }
   return;
 }
-function isOtpMail(candidate) {
-  if (candidate.subject && OTP_SUBJECT.test(candidate.subject))
+function isOtpMail(candidate2) {
+  if (candidate2.subject && OTP_SUBJECT.test(candidate2.subject))
     return true;
-  const body = candidate.body?.trim();
+  const body = candidate2.body?.trim();
   if (body && body.length > 0 && body.length <= OTP_BODY_MAX_CHARS && OTP_BODY_CODE.test(body) && OTP_BODY_HINT.test(body)) {
     return true;
   }
@@ -19797,13 +19817,13 @@ function encodeDriveCursor(cursor) {
   }
   return `${GOOGLE_DRIVE_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
 }
-function promotedDriveWatermark(candidate, deferredFloor, watermark) {
-  if (!candidate || !deferredFloor)
-    return candidate;
+function promotedDriveWatermark(candidate2, deferredFloor, watermark) {
+  if (!candidate2 || !deferredFloor)
+    return candidate2;
   const floor = new Date(Date.parse(deferredFloor) - 1).toISOString();
   if (watermark === floor)
-    return candidate;
-  const clamped = floor.localeCompare(candidate) < 0 ? floor : candidate;
+    return candidate2;
+  const clamped = floor.localeCompare(candidate2) < 0 ? floor : candidate2;
   return watermark && clamped.localeCompare(watermark) < 0 ? watermark : clamped;
 }
 function isRetryableDriveContentError(error) {
@@ -21510,7 +21530,7 @@ class MutablePkList {
   }
 }
 function connectorStoreContentPreference(vettedVectorItemIds) {
-  return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
+  return (candidate2) => candidate2.item.chunk?.lane === "keyword" || candidate2.laneRanks.has("recency") || candidate2.laneRanks.has("vector") && vettedVectorItemIds.has(candidate2.item.sourceItem.localItemId);
 }
 var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
@@ -22107,9 +22127,9 @@ class HelperProcess {
 function helperPath() {
   const here = dirname34(fileURLToPath9(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join42(here, name);
-    if (existsSync20(candidate))
-      return candidate;
+    const candidate2 = join42(here, name);
+    if (existsSync20(candidate2))
+      return candidate2;
   }
   throw new Error("The built-in search model helper is missing from this install.");
 }
@@ -22121,12 +22141,12 @@ function resolveBun() {
     ...(process.env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join42(directory, bunName)),
     join42(homedir17(), ".bun", "bin", bunName)
   ];
-  for (const candidate of candidates) {
-    if (!candidate || !isAbsolute21(candidate))
+  for (const candidate2 of candidates) {
+    if (!candidate2 || !isAbsolute21(candidate2))
       continue;
     try {
-      if (statSync19(candidate).isFile())
-        return candidate;
+      if (statSync19(candidate2).isFile())
+        return candidate2;
     } catch {}
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
@@ -23387,11 +23407,11 @@ var init_locator_result_projector = __esm(() => {
         ...input.approvedScopeKey !== undefined ? { approvedScopeKey: input.approvedScopeKey } : {}
       });
       return Object.freeze({
-        project(candidate) {
-          if (input.principal.provider !== "dropbox" || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope) {
+        project(candidate2) {
+          if (input.principal.provider !== "dropbox" || candidate2.sourceItem.family !== "file" || candidate2.sourceItem.provider !== input.principal.provider || candidate2.sourceItem.accountScope !== input.principal.accountScope) {
             return;
           }
-          const locator = locatorFromRootedDropboxPath(candidate.readLocatorUri(), localMapping);
+          const locator = locatorFromRootedDropboxPath(candidate2.readLocatorUri(), localMapping);
           return locator ? { locator } : undefined;
         }
       });
@@ -23471,11 +23491,11 @@ function resolveExtractionCommand(command, options = {}) {
   const isExecutable = options.isExecutable ?? executableFile;
   const directories = [...path.split(delimiter7).filter(Boolean), ...fallbackDirs];
   for (const directory of directories) {
-    const candidate = join44(directory, command);
-    if (isExecutable(candidate)) {
+    const candidate2 = join44(directory, command);
+    if (isExecutable(candidate2)) {
       if (cacheable)
-        resolvedCommands.set(cacheKey, candidate);
-      return candidate;
+        resolvedCommands.set(cacheKey, candidate2);
+      return candidate2;
     }
   }
   return command;
@@ -25810,9 +25830,9 @@ import { fileURLToPath as fileURLToPath10 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync21) {
   let directory = dirname35(fileURLToPath10(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
-    const candidate = join45(directory, APPLE_VISION_OCR_SCRIPT);
-    if (exists(candidate))
-      return candidate;
+    const candidate2 = join45(directory, APPLE_VISION_OCR_SCRIPT);
+    if (exists(candidate2))
+      return candidate2;
     const parent = dirname35(directory);
     if (parent === directory)
       break;
@@ -30955,7 +30975,7 @@ function parseSourceIndexSearchResult(value, context) {
   }
   const auditRecord = asRecord8(value.audit);
   const tierCorpora = Array.isArray(auditRecord.searched_corpora) ? auditRecord.searched_corpora.map((searchedId) => {
-    const entry = typeof searchedId === "string" ? createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list().find((candidate) => candidate.corpusId === searchedId) : undefined;
+    const entry = typeof searchedId === "string" ? createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list().find((candidate2) => candidate2.corpusId === searchedId) : undefined;
     if (!entry || entry.sourceId !== corpus.sourceId) {
       throw new OperationError("email_error", "source index search reported a corpus outside the requested source.");
     }
@@ -32242,19 +32262,19 @@ function resolveBunRuntimePath(configured, env) {
     ...env.BUN_INSTALL ? [join20(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
     ...(env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join20(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
-  for (const candidate of candidates) {
-    if (!isAbsolute12(candidate) || !isBunExecutableName(candidate))
+  for (const candidate2 of candidates) {
+    if (!isAbsolute12(candidate2) || !isBunExecutableName(candidate2))
       continue;
     try {
-      if (statSync8(candidate).isFile())
-        return candidate;
+      if (statSync8(candidate2).isFile())
+        return candidate2;
     } catch {}
   }
   throw new Error("Olympus worker service could not resolve an absolute Bun runtime path.");
 }
 function resolveWorkerExecutablePath(configured, moduleUrl) {
-  const candidate = configured ?? fileURLToPath2(new URL("./cli.js", moduleUrl));
-  return assertExecutableFile(candidate, "worker executable");
+  const candidate2 = configured ?? fileURLToPath2(new URL("./cli.js", moduleUrl));
+  return assertExecutableFile(candidate2, "worker executable");
 }
 function assertExecutableFile(path, label) {
   if (!isAbsolute12(path))
@@ -32975,14 +32995,14 @@ function resolveBunRuntimePath2(configured, env) {
     process.execPath,
     ...(env.PATH ?? "").split(delimiter3).filter(Boolean).map((dir) => join25(dir, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
-  for (const candidate of candidates) {
-    if (!candidate || !isAbsolute15(candidate))
+  for (const candidate2 of candidates) {
+    if (!candidate2 || !isAbsolute15(candidate2))
       continue;
-    if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
+    if (!["bun", "bun.exe"].includes(candidate2.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
     try {
-      if (statSync12(candidate).isFile())
-        return candidate;
+      if (statSync12(candidate2).isFile())
+        return candidate2;
     } catch {}
   }
   throw new NativeProcessConfigurationError("Olympus source embedding drain could not resolve an absolute Bun runtime path.");
@@ -37366,7 +37386,7 @@ function connectedButUnsyncableProblems(deps, state) {
   for (const handle of registry.handles) {
     if (handle.backendState?.status === "reauth_required")
       continue;
-    const lane = CONNECTED_SOURCE_LANES.find((candidate) => candidate.provider === handle.provider && handle.allowedCapabilities.includes(candidate.capability));
+    const lane = CONNECTED_SOURCE_LANES.find((candidate2) => candidate2.provider === handle.provider && handle.allowedCapabilities.includes(candidate2.capability));
     if (!lane)
       continue;
     if (state.selectedSourceIds && !state.selectedSourceIds.has(lane.sourceId))

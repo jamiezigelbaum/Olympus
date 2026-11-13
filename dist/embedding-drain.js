@@ -2860,6 +2860,22 @@ function jpegPixelSize(bytes) {
   return;
 }
 
+// src/workers/source-index/built-in-reranker-manifest.ts
+function candidate(modelId, repository, revision, modelFile, modelBytes, modelSha256, tokenizerFile, tokenizerBytes, tokenizerSha256) {
+  const base = `https://huggingface.co/${repository}/resolve/${revision}`;
+  return {
+    modelId,
+    repository,
+    revision,
+    license: "Apache-2.0",
+    maxTokens: 512,
+    model: { name: "model.onnx", url: `${base}/${modelFile}`, bytes: modelBytes, sha256: modelSha256 },
+    tokenizer: { name: tokenizerFile, url: `${base}/${tokenizerFile}`, bytes: tokenizerBytes, sha256: tokenizerSha256 }
+  };
+}
+var MS_MARCO_MINILM_L6_V2 = candidate("ms-marco-MiniLM-L6-v2-fp32-233902d", "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "onnx/model.onnx", 91011230, "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a", "vocab.txt", 231508, "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3");
+var MMARCO_MMINILMV2_L12_H384_V1 = candidate("mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "onnx/model_qint8_arm64.onnx", 118620017, "1825907d6c1a9001ff78124780bbde20a614a8c3df3b63409cf3c72c6fe5c8b4", "tokenizer.json", 17082660, "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626");
+
 // src/workers/source-index/pinned-download.ts
 import { createHash } from "node:crypto";
 
@@ -3830,6 +3846,40 @@ function reportBuiltInEmbeddingVision(vision, options = {}) {
   }
 }
 async function installBuiltInEmbedding(options = {}) {
+  const installed = await installEmbeddingAssets(options);
+  const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
+  const paths = builtInEmbeddingPaths(options.env, options.model);
+  const reporter = new ProgressReporter(join10(paths.root, "reranker-status.json"), model.modelId, options.now, options.onProgress);
+  try {
+    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+      const dir = join10(paths.root, "reranker", model.modelId);
+      ensureDirectory(dir);
+      const files = [model.model, model.tokenizer];
+      const pending = files.filter((file) => !existsSync6(join10(dir, file.name)));
+      const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
+      const platform = options.platform ?? currentPlatform();
+      const runtimeDir = builtInEmbeddingPaths(options.env, ARCTIC_EMBED_M_V1_5, runtime, platform).runtimeDir;
+      const packages = [runtime.common, runtime.runtime];
+      const needsRuntime = !options.skipRuntime && !runtimeInstalled(runtimeDir, packages);
+      if (needsRuntime && !runtime.platforms.includes(platform)) {
+        throw new BuiltInEmbeddingInstallError("unsupported_platform", `The built-in reranker does not run on ${platform}.`);
+      }
+      reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0) + (needsRuntime ? packages.reduce((sum, pack) => sum + pack.bytes, 0) : 0));
+      for (const file of pending) {
+        await downloadVerified(options.fetchImpl ?? fetch, file.url, join10(dir, file.name), file.bytes, { kind: "sha256", expected: file.sha256 }, reporter, "Downloading the built-in reranker", options.downloadStallMs ?? DOWNLOAD_STALL_MS);
+      }
+      if (needsRuntime) {
+        await installRuntime(options.fetchImpl ?? fetch, runtimeDir, packages, platform, reporter, options.downloadStallMs ?? DOWNLOAD_STALL_MS);
+      }
+      await verifyModelFiles(dir, files, reporter, false);
+      reporter.set("ready", "Built-in reranker installed", 100);
+    });
+  } catch (error) {
+    reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : "disk_write_failed", `Built-in reranker could not be installed; the next install will retry. ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return installed;
+}
+async function installEmbeddingAssets(options) {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
   const platform = options.platform ?? currentPlatform();
@@ -3987,12 +4037,12 @@ function installComplete(paths, modelFiles, runtimePackages) {
   return modelFiles.every((file) => existsSync6(join10(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
 }
 var verifiedThisProcess;
-async function verifyModelFiles(dir, files, reporter) {
+async function verifyModelFiles(dir, files, reporter, useCache = true) {
   for (const file of files) {
     const path = join10(dir, file.name);
     const key = `${path}:${file.sha256}`;
     verifiedThisProcess ??= new Set;
-    if (verifiedThisProcess.has(key))
+    if (useCache && verifiedThisProcess.has(key))
       continue;
     const size = statSync5(path).size;
     const digest = size === file.bytes ? await sha256File(path) : undefined;
@@ -4820,7 +4870,7 @@ function parseRuleMode(value, label) {
     throw new OperationError("config_error", `${label} must be a string.`);
   }
   const mode = value.trim().toLowerCase();
-  const known = SOURCE_INGESTION_RULE_MODES.find((candidate) => candidate === mode);
+  const known = SOURCE_INGESTION_RULE_MODES.find((candidate2) => candidate2 === mode);
   if (!known) {
     throw new OperationError("config_error", `${label} must be one of ${SOURCE_INGESTION_RULE_MODES.join(", ")}; got ${JSON.stringify(value)}.`);
   }
@@ -7758,9 +7808,9 @@ var CREDENTIAL_KEYS = [
 var CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
 var LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
 var CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
-function urlCarriesCredential(candidate, userinfoOnly = false) {
+function urlCarriesCredential(candidate2, userinfoOnly = false) {
   try {
-    const url = new URL(candidate);
+    const url = new URL(candidate2);
     const userinfo = canonicalizeScreeningText(url.password);
     if (userinfo && !isPlaceholderValue(userinfo) && !/^(?:pass(?:word)?|secret|user|username|pwd)$/i.test(userinfo))
       return true;
@@ -8755,11 +8805,11 @@ function foreignQueryStopwords(query, defaultStopwords) {
   const language = keywordQueryLanguage(query, 6, defaultStopwords);
   if (language === "eng" || language === "und")
     return EMPTY;
-  const candidate = functionWords(language);
+  const candidate2 = functionWords(language);
   const tokens = query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
   const defaultSignals = tokens.filter((token) => defaultStopwords.has(key(token))).length;
-  const foreignSignals = tokens.filter((token) => candidate.has(key(token))).length;
-  return defaultSignals > foreignSignals ? EMPTY : new Set(tokens.filter((token) => candidate.has(key(token))));
+  const foreignSignals = tokens.filter((token) => candidate2.has(key(token))).length;
+  return defaultSignals > foreignSignals ? EMPTY : new Set(tokens.filter((token) => candidate2.has(key(token))));
 }
 
 // node_modules/stemmer/index.js
@@ -9866,11 +9916,11 @@ function catalogCategory(catalog, modelId) {
   }
   return;
 }
-function newerCatalog(current2, candidate) {
-  if (!candidate)
+function newerCatalog(current2, candidate2) {
+  if (!candidate2)
     return current2;
-  if (!current2 || candidate.fetchedAtMs > current2.fetchedAtMs)
-    return candidate;
+  if (!current2 || candidate2.fetchedAtMs > current2.fetchedAtMs)
+    return candidate2;
   return current2;
 }
 function catalogIsFresh(catalog, nowMs, ttlMs) {
@@ -10262,7 +10312,7 @@ function readFileSourceScopeApproval(input) {
   if (read.kind === "malformed") {
     return pendingSnapshot(input.sourceId, `malformed:${read.digest}`, account.generation, "malformed");
   }
-  const approval = read.state.approvals.find((candidate) => candidate.source_id === input.sourceId);
+  const approval = read.state.approvals.find((candidate2) => candidate2.source_id === input.sourceId);
   if (!approval) {
     return pendingSnapshot(input.sourceId, `missing:${account.generation}`, account.generation, "missing");
   }
@@ -10311,7 +10361,7 @@ function approveFileSourceScope(input) {
       throw new OperationError("invalid_request", "Choose Whole account and confirm it explicitly to approve the provider root.");
     }
     const existing = readState(input.statePath);
-    const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
+    const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate2) => candidate2.source_id !== input.sourceId) : [];
     const revision = randomUUID5();
     approvals.push({
       source_id: input.sourceId,
@@ -10347,7 +10397,7 @@ function isSameSaveReplayed(statePath, sourceId, request) {
   const read = readState(statePath);
   if (read.kind !== "valid")
     return false;
-  const approval = read.state.approvals.find((candidate) => candidate.source_id === sourceId);
+  const approval = read.state.approvals.find((candidate2) => candidate2.source_id === sourceId);
   return approval !== undefined && approval.replaced_revision === request.expectedRevision && approval.account_generation === request.accountGeneration && approval.whole_account === request.wholeAccount && JSON.stringify(approval.selections) === JSON.stringify(request.selections);
 }
 function pendingSnapshot(sourceId, revision, accountGeneration, reason) {
@@ -10488,7 +10538,7 @@ function readMailSourceScopeApproval(input) {
     return pending(`missing:${account.generation}`, "missing");
   if (read.kind === "malformed")
     return pending(`malformed:${read.digest}`, "malformed");
-  const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
+  const approval = read.state.approvals.find((candidate2) => candidate2.source_id === MAIL_SOURCE_SCOPE_ID);
   if (!approval)
     return pending(`missing:${account.generation}`, "missing");
   if (approval.account_generation !== account.generation) {
@@ -10521,7 +10571,7 @@ function approveMailSourceScope(input) {
     const keptCutoff = current2.status === "approved" && current2.mailScope?.window === input.scope.window ? current2.mailScope.contentAfter : undefined;
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
     const existing = readState2(input.statePath);
-    const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
+    const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate2) => candidate2.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
     const revision = randomUUID6();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
     approvals.push({
@@ -10862,7 +10912,7 @@ function ownerSenderRuleMatches(from, value, raises) {
   const sender = senderAddress(from);
   if (sender)
     return addressMatches(sender, normalized);
-  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
+  return raises && everyAddressIn(from).some((candidate2) => addressMatches(candidate2, normalized));
 }
 
 // src/core/file-extraction-source.ts
@@ -11039,13 +11089,13 @@ var GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
   DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
 ];
 function isGooglePublisherWebClientId(clientId, env = process.env) {
-  const candidate = clientId?.trim();
-  if (!candidate)
+  const candidate2 = clientId?.trim();
+  if (!candidate2)
     return false;
   const override = env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID?.trim();
-  if (override && candidate === override)
+  if (override && candidate2 === override)
     return true;
-  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
+  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate2);
 }
 var DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com";
 var DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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";
@@ -11053,16 +11103,16 @@ var GOOGLE_DESKTOP_CLIENTS = [
   { id: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID, secret: DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET }
 ];
 function googleDesktopClientSecret(clientId, env = process.env) {
-  const candidate = clientId?.trim();
-  if (!candidate)
+  const candidate2 = clientId?.trim();
+  if (!candidate2)
     return;
   const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
-  if (overrideId && candidate === overrideId) {
+  if (overrideId && candidate2 === overrideId) {
     const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
     if (overrideSecret)
       return overrideSecret;
   }
-  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
+  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate2);
   return known?.secret.trim() || undefined;
 }
 
@@ -11426,8 +11476,8 @@ var CREDENTIAL_BROKER_ERROR_SUBSYSTEM = "credential_broker";
 function isCredentialRefreshBusyError(error) {
   if (!error || typeof error !== "object" || Array.isArray(error))
     return false;
-  const candidate = error;
-  return candidate.subsystem === CREDENTIAL_BROKER_ERROR_SUBSYSTEM && candidate.code === "credential_refresh_busy" && candidate.retryable === true && (candidate.retryAfterMs === undefined || typeof candidate.retryAfterMs === "number" && Number.isSafeInteger(candidate.retryAfterMs) && candidate.retryAfterMs > 0);
+  const candidate2 = error;
+  return candidate2.subsystem === CREDENTIAL_BROKER_ERROR_SUBSYSTEM && candidate2.code === "credential_refresh_busy" && candidate2.retryable === true && (candidate2.retryAfterMs === undefined || typeof candidate2.retryAfterMs === "number" && Number.isSafeInteger(candidate2.retryAfterMs) && candidate2.retryAfterMs > 0);
 }
 
 class CredentialBrokerError extends Error {
@@ -13233,14 +13283,14 @@ var OTP_SUBJECT = new RegExp([
 var OTP_BODY_CODE = /\b\d{4,8}\b/;
 var OTP_BODY_HINT = /\b(code|verification|expires? in|valid for)\b/i;
 var OTP_BODY_MAX_CHARS = 900;
-function classifyEmailIngestSkip(candidate, options = {}) {
+function classifyEmailIngestSkip(candidate2, options = {}) {
   const skipOtp = options.skipOtp ?? true;
-  if (skipOtp && isOtpMail(candidate))
+  if (skipOtp && isOtpMail(candidate2))
     return "otp";
   const skipCategories = options.skipCategories ?? DEFAULT_SKIP_CATEGORIES;
-  if (skipCategories.length > 0 && candidate.labels) {
+  if (skipCategories.length > 0 && candidate2.labels) {
     const skip = new Set(skipCategories.map((label) => label.trim().toUpperCase()).filter(Boolean));
-    for (const label of candidate.labels) {
+    for (const label of candidate2.labels) {
       if (skip.has(label.toUpperCase())) {
         return `category:${label.toUpperCase()}`;
       }
@@ -13248,10 +13298,10 @@ function classifyEmailIngestSkip(candidate, options = {}) {
   }
   return;
 }
-function isOtpMail(candidate) {
-  if (candidate.subject && OTP_SUBJECT.test(candidate.subject))
+function isOtpMail(candidate2) {
+  if (candidate2.subject && OTP_SUBJECT.test(candidate2.subject))
     return true;
-  const body = candidate.body?.trim();
+  const body = candidate2.body?.trim();
   if (body && body.length > 0 && body.length <= OTP_BODY_MAX_CHARS && OTP_BODY_CODE.test(body) && OTP_BODY_HINT.test(body)) {
     return true;
   }
@@ -15149,14 +15199,14 @@ function detectIdentityDocumentSignals(haystack) {
 }
 function findValidIban(haystack) {
   const candidates = haystack.toUpperCase().matchAll(/\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]){11,30}\b/g);
-  for (const candidate of candidates) {
-    if (isValidIban(candidate[0]))
+  for (const candidate2 of candidates) {
+    if (isValidIban(candidate2[0]))
       return true;
   }
   return false;
 }
-function isValidIban(candidate) {
-  const compact = candidate.replace(/[\s-]/g, "").toUpperCase();
+function isValidIban(candidate2) {
+  const compact = candidate2.replace(/[\s-]/g, "").toUpperCase();
   if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(compact))
     return false;
   const rearranged = compact.slice(4) + compact.slice(0, 4);
@@ -15238,9 +15288,9 @@ function passesLuhn(digits) {
 var NIF_CHECK_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE";
 function findValidNif(haystack) {
   const candidates = haystack.matchAll(/\b(\d{8})([A-Za-z])\b/g);
-  for (const candidate of candidates) {
-    const number = Number.parseInt(candidate[1], 10);
-    const letter = candidate[2].toUpperCase();
+  for (const candidate2 of candidates) {
+    const number = Number.parseInt(candidate2[1], 10);
+    const letter = candidate2[2].toUpperCase();
     if (NIF_CHECK_LETTERS[number % 23] === letter)
       return true;
   }
@@ -15983,10 +16033,10 @@ function resolveVerdicts(resting, raises, lowers, restingIsConfigured) {
   const reasons = lowers.filter((verdict) => verdict.tier === chosen.tier).map((verdict) => verdict.reason);
   return { tier: chosen.tier, decidedBy: chosen.decidedBy, reasons };
 }
-function maxVerdict(current3, candidate) {
-  if (tierRank(candidate.tier) > tierRank(current3.tier)) {
-    const added = "reasons" in candidate ? candidate.reasons : [candidate.reason];
-    return { tier: candidate.tier, decidedBy: candidate.decidedBy, reasons: [...current3.reasons, ...added] };
+function maxVerdict(current3, candidate2) {
+  if (tierRank(candidate2.tier) > tierRank(current3.tier)) {
+    const added = "reasons" in candidate2 ? candidate2.reasons : [candidate2.reason];
+    return { tier: candidate2.tier, decidedBy: candidate2.decidedBy, reasons: [...current3.reasons, ...added] };
   }
   return current3;
 }
@@ -18065,7 +18115,7 @@ class TierLedger {
       }
       const current3 = this.copies(identity).filter((copy) => copy.state === "current");
       for (const copy of current3) {
-        const planned = plan.copies.find((candidate) => candidate.corpusId === copy.corpusId);
+        const planned = plan.copies.find((candidate2) => candidate2.corpusId === copy.corpusId);
         const servesNames = copy.layers === "metadata" || copy.layers === "both";
         if (!planned || servesNames && planned.layers === "content") {
           throw new Error("Landing extracted content never moves or drops the copy that serves the names.");
@@ -21774,9 +21824,9 @@ class TierSnifferStore {
       if (options.eligible && !this.readOnly) {
         const last = rows.at(-1);
         if (oldest2 && found[0]) {
-          const candidate = found[0];
+          const candidate2 = found[0];
           this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key2, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key2, candidate2.conversationOrder ?? 0, candidate2.priority, candidate2.queuedAt, candidate2.sequence, candidate2.sequence);
         } else if (found.length === 0 && rows.length === scanLimit && last) {
           this.db.query(`INSERT OR REPLACE INTO sniffer_scan
             (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`).run(key2, last.conversation_order, last.priority, last.queued_at, last.question_pk);
@@ -23926,11 +23976,11 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
 }
 function findTierSetLedger(storeDbPath, binding) {
-  for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
-    if (candidate === ":memory:" || !existsSync22(candidate))
+  for (const candidate2 of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
+    if (candidate2 === ":memory:" || !existsSync22(candidate2))
       continue;
-    if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
-      return candidate;
+    if (TierLedger.readLedgerId(candidate2) === binding.ledgerId)
+      return candidate2;
   }
   return;
 }
@@ -28926,7 +28976,7 @@ ${parentKey(ref)}`, { ref, origin });
       entry.itemCount += row.item_count;
       if (row.conversation_id)
         entry.conversations.add(row.conversation_id);
-      const tier = SOURCE_TRUST_TIERS.find((candidate) => candidate === row.trust_tier);
+      const tier = SOURCE_TRUST_TIERS.find((candidate2) => candidate2 === row.trust_tier);
       if (tier && !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: tier }))
         entry.anyPublic = true;
     }
@@ -32866,15 +32916,15 @@ ${parentKey(ref)}`, { ref, origin });
         return { rows: [], skippedReason: scanned.skippedReason };
       const { bestByItem } = scanned;
       dimensionMismatches = scanned.dimensionMismatches;
-      const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+      const candidates = Array.from(bestByItem.entries()).filter(([, candidate2]) => candidate2.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
       rankedItems = [];
       let candidateOffset = 0;
       while (rankedItems.length < limit && candidateOffset < candidates.length) {
         const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
         const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
-        for (const candidate of batch)
-          if (visible.has(candidate[0]))
-            rankedItems.push(candidate);
+        for (const candidate2 of batch)
+          if (visible.has(candidate2[0]))
+            rankedItems.push(candidate2);
         candidateOffset += batch.length;
       }
       if (rankedItems.length >= limit || scanned.exhausted !== false)
@@ -32884,7 +32934,7 @@ ${parentKey(ref)}`, { ref, origin });
       wanted *= 8;
     }
     const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
-    const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
+    const winnersByLocalItemId = new Map(rankedItems.map(([, candidate2]) => [candidate2.localItemId, candidate2]));
     const laneRows = searchRows.flatMap((row) => {
       const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
       if (winner === undefined)
@@ -34159,7 +34209,7 @@ function yieldConnectorStoreVectorScan() {
 }
 var CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8;
 function connectorStoreContentPreference(vettedVectorItemIds) {
-  return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
+  return (candidate2) => candidate2.item.chunk?.lane === "keyword" || candidate2.laneRanks.has("recency") || candidate2.laneRanks.has("vector") && vettedVectorItemIds.has(candidate2.item.sourceItem.localItemId);
 }
 var lexicalContentPreference = connectorStoreContentPreference(new Set);
 function assertConnectorStoreStorageProfile(profile) {
@@ -34274,7 +34324,7 @@ function mergeSearchTextLines(stored, emitted, literalEscapes, preserveOwnedFace
   const rawStoredLines = (stored?.split(`
 `) ?? []).map((value) => value.trim());
   const storedLines = rawStoredLines.map((line) => {
-    const escape = literalEscapes.find((candidate) => line.startsWith(candidate.reservedPrefix));
+    const escape = literalEscapes.find((candidate2) => line.startsWith(candidate2.reservedPrefix));
     return escape && !preserveOwnedFacets ? `${escape.literalEscapePrefix}${line}` : line;
   });
   const unique = [...storedLines, ...emitted?.split(`
@@ -35318,7 +35368,7 @@ function syncRunFromRow(row) {
   };
 }
 function trustTierFromRow(value) {
-  const tier = SOURCE_TRUST_TIERS.find((candidate) => candidate === value);
+  const tier = SOURCE_TRUST_TIERS.find((candidate2) => candidate2 === value);
   if (!tier)
     throw new Error(`Connector store row carries an unknown trust tier "${value}".`);
   return tier;
@@ -36732,9 +36782,9 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
 function helperPath() {
   const here = dirname28(fileURLToPath(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join26(here, name);
-    if (existsSync26(candidate))
-      return candidate;
+    const candidate2 = join26(here, name);
+    if (existsSync26(candidate2))
+      return candidate2;
   }
   throw new Error("The built-in search model helper is missing from this install.");
 }
@@ -36746,12 +36796,12 @@ function resolveBun() {
     ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join26(directory, bunName)),
     join26(homedir12(), ".bun", "bin", bunName)
   ];
-  for (const candidate of candidates) {
-    if (!candidate || !isAbsolute14(candidate))
+  for (const candidate2 of candidates) {
+    if (!candidate2 || !isAbsolute14(candidate2))
       continue;
     try {
-      if (statSync15(candidate).isFile())
-        return candidate;
+      if (statSync15(candidate2).isFile())
+        return candidate2;
     } catch {}
   }
   throw new Error("The built-in search model needs Bun, and none was found.");
@@ -38047,13 +38097,13 @@ function encodeDriveCursor(cursor) {
   }
   return `${GOOGLE_DRIVE_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
 }
-function promotedDriveWatermark(candidate, deferredFloor, watermark) {
-  if (!candidate || !deferredFloor)
-    return candidate;
+function promotedDriveWatermark(candidate2, deferredFloor, watermark) {
+  if (!candidate2 || !deferredFloor)
+    return candidate2;
   const floor = new Date(Date.parse(deferredFloor) - 1).toISOString();
   if (watermark === floor)
-    return candidate;
-  const clamped = floor.localeCompare(candidate) < 0 ? floor : candidate;
+    return candidate2;
+  const clamped = floor.localeCompare(candidate2) < 0 ? floor : candidate2;
   return watermark && clamped.localeCompare(watermark) < 0 ? watermark : clamped;
 }
 function isRetryableDriveContentError(error) {
@@ -38880,11 +38930,11 @@ var DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
       ...input.approvedScopeKey !== undefined ? { approvedScopeKey: input.approvedScopeKey } : {}
     });
     return Object.freeze({
-      project(candidate) {
-        if (input.principal.provider !== "dropbox" || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope) {
+      project(candidate2) {
+        if (input.principal.provider !== "dropbox" || candidate2.sourceItem.family !== "file" || candidate2.sourceItem.provider !== input.principal.provider || candidate2.sourceItem.accountScope !== input.principal.accountScope) {
           return;
         }
-        const locator = locatorFromRootedDropboxPath(candidate.readLocatorUri(), localMapping);
+        const locator = locatorFromRootedDropboxPath(candidate2.readLocatorUri(), localMapping);
         return locator ? { locator } : undefined;
       }
     });
@@ -42545,8 +42595,8 @@ function normalizeSchedulerSourceId(value) {
   return sourceId;
 }
 function taskBootstrapLastSuccessAt(_source, task) {
-  const candidate = task.bootstrapLastSuccessAt?.();
-  return candidate && Number.isFinite(Date.parse(candidate)) ? candidate : undefined;
+  const candidate2 = task.bootstrapLastSuccessAt?.();
+  return candidate2 && Number.isFinite(Date.parse(candidate2)) ? candidate2 : undefined;
 }
 function schedulerTaskStateKey(source, task) {
   return {
@@ -42570,8 +42620,8 @@ function initialNextRunAt(input) {
     return input.firstRun;
   return boundFutureSchedule(cadenceAnchor + (input.persisted?.effectiveIntervalMs ?? input.configuredIntervalMs), input.firstRun);
 }
-function boundFutureSchedule(candidate, now) {
-  return Math.min(candidate, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
+function boundFutureSchedule(candidate2, now) {
+  return Math.min(candidate2, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
 }
 function nextCadenceAfter(anchor, intervalMs, completedAt) {
   const elapsedIntervals = Math.floor(Math.max(0, completedAt - anchor) / intervalMs);

@@ -1,3 +1,4 @@
+import { MMARCO_MMINILMV2_L12_H384_V1, type BuiltInRerankerModelSpec } from '../built-in-reranker-manifest.ts';
 import { downloadPinnedFile } from '../pinned-download.ts';
 import { sharedDataPath } from '../../../core/olympus-layout.ts';
 // Fetches, verifies and installs the built-in embedding model and its runtime
@@ -22,6 +23,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
+  ARCTIC_EMBED_M_V1_5,
   BUILT_IN_EMBEDDING_MODEL,
   builtInEmbeddingModelFiles,
   LITERT_RUNTIME_PACK,
@@ -86,6 +88,8 @@ export interface InstalledBuiltInEmbedding {
 export interface BuiltInEmbeddingInstallerOptions {
   env?: Record<string, string | undefined>;
   model?: BuiltInEmbeddingModelSpec;
+  /** Pinned reranker installed alongside either embedding backend. */
+  rerankerModel?: BuiltInRerankerModelSpec;
   runtime?: OnnxRuntimePackSpec;
   liteRtRuntime?: LiteRtRuntimePackSpec;
   /** `${platform}-${arch}`; defaults to this process. */
@@ -241,6 +245,50 @@ export function reportBuiltInEmbeddingVision(
  */
 export async function installBuiltInEmbedding(
   options: BuiltInEmbeddingInstallerOptions = {},
+): Promise<InstalledBuiltInEmbedding> {
+  const installed = await installEmbeddingAssets(options);
+  const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
+  const paths = builtInEmbeddingPaths(options.env, options.model);
+  // A separate receipt uses the same reporting mechanism without marking a
+  // working embedding model failed when this optional download fails.
+  const reporter = new ProgressReporter(join(paths.root, 'reranker-status.json'), model.modelId, options.now, options.onProgress);
+  try {
+    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+      const dir = join(paths.root, 'reranker', model.modelId);
+      ensureDirectory(dir);
+      const files = [model.model, model.tokenizer];
+      const pending = files.filter((file) => !existsSync(join(dir, file.name)));
+      const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
+      const platform = options.platform ?? currentPlatform();
+      const runtimeDir = builtInEmbeddingPaths(options.env, ARCTIC_EMBED_M_V1_5, runtime, platform).runtimeDir;
+      const packages = [runtime.common, runtime.runtime];
+      const needsRuntime = !options.skipRuntime && !runtimeInstalled(runtimeDir, packages);
+      if (needsRuntime && !runtime.platforms.includes(platform)) {
+        throw new BuiltInEmbeddingInstallError('unsupported_platform', `The built-in reranker does not run on ${platform}.`);
+      }
+      reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0)
+        + (needsRuntime ? packages.reduce((sum, pack) => sum + pack.bytes, 0) : 0));
+      for (const file of pending) {
+        await downloadVerified(options.fetchImpl ?? fetch, file.url, join(dir, file.name), file.bytes,
+          { kind: 'sha256', expected: file.sha256 }, reporter, 'Downloading the built-in reranker',
+          options.downloadStallMs ?? DOWNLOAD_STALL_MS);
+      }
+      if (needsRuntime) {
+        await installRuntime(options.fetchImpl ?? fetch, runtimeDir, packages, platform, reporter,
+          options.downloadStallMs ?? DOWNLOAD_STALL_MS);
+      }
+      await verifyModelFiles(dir, files, reporter, false);
+      reporter.set('ready', 'Built-in reranker installed', 100);
+    });
+  } catch (error) {
+    reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : 'disk_write_failed',
+      `Built-in reranker could not be installed; the next install will retry. ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return installed;
+}
+
+async function installEmbeddingAssets(
+  options: BuiltInEmbeddingInstallerOptions,
 ): Promise<InstalledBuiltInEmbedding> {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
@@ -458,12 +506,13 @@ async function verifyModelFiles(
   dir: string,
   files: readonly PinnedDownload[],
   reporter: ProgressReporter,
+  useCache = true,
 ): Promise<void> {
   for (const file of files) {
     const path = join(dir, file.name);
     const key = `${path}:${file.sha256}`;
     verifiedThisProcess ??= new Set<string>();
-    if (verifiedThisProcess.has(key)) continue;
+    if (useCache && verifiedThisProcess.has(key)) continue;
     const size = statSync(path).size;
     const digest = size === file.bytes ? await sha256File(path) : undefined;
     if (digest !== file.sha256) {

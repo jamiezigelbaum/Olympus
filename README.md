@@ -200,6 +200,14 @@ Ask in ChatGPT the way you normally would: *"What did Sam say about the
 lease?"* ChatGPT searches Olympus and answers from your Personal items, with
 citations.
 
+Olympus also scores search matches with a built-in reranker on computers with
+16 GB of memory or more (16 GiB measured RAM). Scoring runs only on this
+computer. Installing the search model adds one reranker download of about
+136 MB; answers use the fused keyword and vector order until it is installed.
+The reranker is released after 10 idle minutes and loads again when needed.
+Set `OLYMPUS_SOURCE_RERANKER=off` to turn it off, or `built-in` to enable it
+on a computer with less memory.
+
 ### The private answer panel
 
 When some of the items that match your question are Private, a small Olympus

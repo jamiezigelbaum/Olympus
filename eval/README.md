@@ -445,7 +445,13 @@ zero coverage. Receipts contain only scores, safe failure codes and timings,
 with counts and successful-call median/p90 times per family and item length,
 never answer or quote text.
 
-With `OLYMPUS_SOURCE_RERANKER=built-in`, each row also records the reranker's
+The built-in reranker is on by default at 16 GB of RAM and above (16 GiB
+measured RAM); set `OLYMPUS_SOURCE_RERANKER=off` to turn it off or `built-in`
+to enable it with less memory. Its two pinned files add about 136 MB to the
+embedding install. Scoring runs only on this computer, answers use the fused
+order until it is installed, and the session is released after 10 idle minutes.
+
+When reranking is enabled, each row also records the reranker's
 outcome (`applied`, `timed_out` or `failed`), how many candidates it scored and
 promoted, and its time. Summaries count outcomes and give total and longest
 rerank time, and the receipt names the reranker (its model folder) or `off`. A

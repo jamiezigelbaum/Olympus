@@ -57,7 +57,7 @@ export interface EvidenceRerankAudit {
 export const RERANK_PASSAGE_CHARS = 2_000;
 /** A reranker that has not answered by then is abandoned and the fused order stands. */
 export const DEFAULT_RERANK_TIMEOUT_MS = 5_000;
-export const DEFAULT_RERANK_POOL_SIZE = 30;
+export const DEFAULT_RERANK_POOL_SIZE = 24;
 // Sparta scores 360 candidates of 128 tokens in 4 s with MiniLM int8 (#921).
 export const MAX_RERANK_POOL_SIZE = 400;
 

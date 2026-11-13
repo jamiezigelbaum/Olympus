@@ -3336,7 +3336,7 @@ export async function main(): Promise<void> {
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
-      // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
+      // Uses the installed default at 16 GiB RAM and above; the owner can opt out.
       const sourceReranker = await prepareBuiltInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
         requestOnDemandRead: requestFileRead,

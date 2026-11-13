@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   builtInRerankerFromEnv,
+  createCrossEncoderReranker,
   prepareBuiltInRerankerFromEnv,
   SOURCE_RERANKER_ENV,
   SOURCE_RERANKER_MODEL_DIR_ENV,
@@ -13,6 +14,9 @@ import {
 } from '../src/workers/source-index/built-in-reranker.ts';
 import { BUILT_IN_RERANKER_MODELS, MS_MARCO_MINILM_L6_V2, MMARCO_MMINILMV2_L12_H384_V1 } from '../src/workers/source-index/built-in-reranker-manifest.ts';
 import type { EmbeddingBatch, EmbeddingRuntime, EmbeddingSession } from '../src/workers/source-index/built-in-embedding/runtime.ts';
+
+import { createTestClock, flushMicrotasks, type TestTimer } from './helpers/test-clock.ts';
+import { WordPieceTokenizer } from '../src/workers/source-index/built-in-embedding/wordpiece.ts';
 
 const temporaryDirs: string[] = [];
 afterEach(() => { for (const dir of temporaryDirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -124,9 +128,9 @@ describe('built-in reranker model loading', () => {
     expect(loads).toBe(2);
   });
 
-  test('stays disabled by default, and missing model/tokenizer files never load a runtime', async () => {
+  test('missing model/tokenizer files never load a runtime', async () => {
     const runtime: EmbeddingRuntime = { createSession: async () => { throw new Error('must not load'); } };
-    expect(await prepareBuiltInRerankerFromEnv({ env: {}, runtime })).toBeUndefined();
+    expect(await prepareBuiltInRerankerFromEnv({ env: {}, totalmem: () => 16 * 1024 ** 3, runtime })).toBeUndefined();
     expect(builtInRerankerFromEnv({ env: environment('relative/path'), runtime })).toBeUndefined();
     const path = modelDirectory();
     rmSync(join(path, 'tokenizer.json'));
@@ -137,8 +141,114 @@ describe('built-in reranker model loading', () => {
   });
 });
 
+describe('default activation and idle release', () => {
+  test('installed default uses injected memory, pool 24 and 256 pair tokens', async () => {
+    const root = modelDirectory();
+    const dir = join(root, 'reranker', MMARCO_MMINILMV2_L12_H384_V1.modelId);
+    mkdirSync(dir, { recursive: true });
+    for (const name of ['model.onnx', 'tokenizer.json']) writeFileSync(join(dir, name), readFileSync(join(root, name)));
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: root };
+    let tokens = 0;
+    const runtime: EmbeddingRuntime = { createSession: async () => ({ run: async (batch) => {
+      tokens = batch.sequenceLength;
+      return { data: new Float32Array(batch.batchSize), dims: [batch.batchSize, 1] };
+    } }) };
+    const reranker = builtInRerankerFromEnv({ env, totalmem: () => 16 * 1024 ** 3, runtime });
+    expect(reranker?.poolSize).toBe(24);
+    expect(reranker?.localOnly).toBe(true);
+    await reranker!.score({ ...request(), passages: [Array(1000).fill('hello').join(' ')] });
+    expect(tokens).toBe(256);
+    // A blank value is the same as unset (a cleared .env line must not turn it off).
+    expect(builtInRerankerFromEnv({ env: { ...env, OLYMPUS_SOURCE_RERANKER: ' ' }, totalmem: () => 16 * 1024 ** 3 })).toBeDefined();
+    expect(builtInRerankerFromEnv({ env, totalmem: () => 8 * 1024 ** 3 })).toBeUndefined();
+    expect(builtInRerankerFromEnv({ env: { ...env, OLYMPUS_SOURCE_RERANKER: 'built-in' }, totalmem: () => 8 * 1024 ** 3 })).toBeDefined();
+    for (const value of ['off', 'other']) expect(builtInRerankerFromEnv({ env: { ...env, OLYMPUS_SOURCE_RERANKER: value }, totalmem: () => 16 * 1024 ** 3 })).toBeUndefined();
+    rmSync(join(dir, 'model.onnx'));
+    expect(builtInRerankerFromEnv({ env, totalmem: () => 16 * 1024 ** 3 })).toBeUndefined();
+  });
+
+  function idleFixture() {
+    const clock = createTestClock();
+    const handles: TestTimer[] = [];
+    let loads = 0;
+    let releases = 0;
+    let holdRun: Promise<void> = Promise.resolve();
+    let holdRelease: Promise<void> = Promise.resolve();
+    const reranker = createCrossEncoderReranker({
+      id: 'test', timers: { ...clock, setTimeout: (callback, ms) => {
+        const timer = clock.setTimeout(callback, ms);
+        handles.push(timer);
+        return timer;
+      } },
+      tokenizer: new WordPieceTokenizer('[PAD]\n[UNK]\n[CLS]\n[SEP]'),
+      session: async () => {
+        loads++;
+        return {
+          run: async (batch) => { await holdRun; return { data: new Float32Array(batch.batchSize), dims: [batch.batchSize, 1] }; },
+          release: async () => { releases++; await holdRelease; },
+        };
+      },
+    });
+    return { clock, reranker, timerReferenced: () => handles.at(-1)?.hasRef(), loads: () => loads, releases: () => releases,
+      holdRun: (p: Promise<void>) => { holdRun = p; }, holdRelease: (p: Promise<void>) => { holdRelease = p; } };
+  }
+
+  test('releases once after ten idle minutes, and the next score reloads', async () => {
+    const f = idleFixture();
+    await f.reranker.prepare();
+    expect(f.timerReferenced()).toBe(false);
+    await f.clock.advance(600_000 - 1);
+    expect(f.releases()).toBe(0);
+    await f.clock.advance(1);
+    expect(f.releases()).toBe(1);
+    await f.clock.advance(600_000);
+    expect(f.releases()).toBe(1);
+    await f.reranker.score(request());
+    expect(f.loads()).toBe(2);
+  });
+
+  test('each score restarts the idle timer', async () => {
+    const f = idleFixture();
+    await f.reranker.score(request());
+    await f.clock.advance(500_000);
+    await f.reranker.score(request());
+    await f.clock.advance(599_999);
+    expect(f.releases()).toBe(0);
+    await f.clock.advance(1);
+    expect(f.releases()).toBe(1);
+  });
+
+  test('does not release a score in flight at the idle deadline', async () => {
+    const f = idleFixture();
+    await f.reranker.prepare();
+    let finish!: () => void;
+    f.holdRun(new Promise<void>((resolve) => { finish = resolve; }));
+    const scoring = f.reranker.score(request());
+    await f.clock.advance(600_000);
+    expect(f.releases()).toBe(0);
+    finish();
+    await scoring;
+    await f.clock.advance(0);
+    expect(f.releases()).toBe(1);
+  });
+
+  test('a score waits for an asynchronous release before loading fresh', async () => {
+    const f = idleFixture();
+    let finish!: () => void;
+    f.holdRelease(new Promise<void>((resolve) => { finish = resolve; }));
+    await f.reranker.prepare();
+    await f.clock.advance(600_000);
+    const scoring = f.reranker.score(request());
+    await flushMicrotasks();
+    expect(f.loads()).toBe(1);
+    finish();
+    await scoring;
+    expect(f.loads()).toBe(2);
+  });
+});
+
 describe('candidate pins (#921)', () => {
-  test('offers both candidates without selecting a default', () => {
+  test('retains both pinned candidates', () => {
     expect(BUILT_IN_RERANKER_MODELS).toEqual([MS_MARCO_MINILM_L6_V2, MMARCO_MMINILMV2_L12_H384_V1]);
     expect(MS_MARCO_MINILM_L6_V2.revision).toBe('233902d25c440f23af6f7d6e94d2946bac0bee0a');
     expect(MS_MARCO_MINILM_L6_V2.model).toMatchObject({ name: 'model.onnx', bytes: 91_011_230, sha256: '5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a' });
