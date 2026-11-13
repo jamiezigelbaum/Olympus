@@ -52,3 +52,20 @@ test('the compact rules ask for every part of the question the cited items hold'
   const { system } = await compactRequest();
   expect(system).toContain('- Find every part the question asks for (each value, name, date or item). Give each part the cited items hold; put each part they do not hold in "unanswered". Check every part before returning.');
 });
+
+test('the compact reply names each asked-for part before the answer, and the answer gives each', async () => {
+  const { system } = await compactRequest();
+  expect(system).toContain('{"parts": string[], "answer": string,');
+  expect(system).toContain('"parts" lists each thing the question asks for, in the question\'s words, before you write "answer"; "answer" then gives every part the cited items hold.');
+});
+
+test('the bounded schema asks for the parts first, and a reply that carries them parses as before', async () => {
+  const { analystResponseSchema } = await import('../src/core/analyst.ts');
+  const schema = analystResponseSchema(1_200) as { properties: Record<string, unknown>; required: string[] };
+  expect(Object.keys(schema.properties)[0]).toBe('parts');
+  expect(schema.required[0]).toBe('parts');
+  const result = await createAnalyst({
+    complete: async () => ({ text: JSON.stringify({ parts: ['deposit', 'monthly rent'], answer: 'Deposit 2,000 EUR [1]; rent 1,000 EUR [2].', citations: [{ evidence: 1, claim: 'deposit' }, { evidence: 2, claim: 'rent' }], unanswered: [], sufficient: true }), modelId: 'fixture' }),
+  }, { evidenceFormat: 'compact' }).analyze(pack, { localOnly: true });
+  expect(result.answer).toContain('rent 1,000 EUR');
+});
