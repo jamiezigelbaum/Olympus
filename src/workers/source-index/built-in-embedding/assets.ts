@@ -265,6 +265,9 @@ export async function installBuiltInReranker(
   // working embedding model failed when this optional download fails.
   const reporter = new ProgressReporter(join(paths.root, 'reranker-status.json'), model.modelId, options.now, options.onProgress);
   try {
+    // The lock lives in the root; an install that never used the built-in
+    // embedding model has no root yet.
+    ensureDirectory(paths.root);
     await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
       const dir = join(paths.root, 'reranker', model.modelId);
       ensureDirectory(dir);

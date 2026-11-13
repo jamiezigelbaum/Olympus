@@ -15792,6 +15792,7 @@ async function installBuiltInReranker(options = {}) {
   const paths = builtInEmbeddingPaths(options.env, options.model);
   const reporter = new ProgressReporter(join26(paths.root, "reranker-status.json"), model.modelId, options.now, options.onProgress);
   try {
+    ensureDirectory(paths.root);
     await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
       const dir = join26(paths.root, "reranker", model.modelId);
       ensureDirectory(dir);

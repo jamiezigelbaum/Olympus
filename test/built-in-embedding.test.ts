@@ -280,6 +280,15 @@ describe('built-in embedding installer', () => {
     expect(existsSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'install.lock'))).toBe(false);
   });
 
+  test('installs the reranker when the embedding root does not exist yet', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: join(temporaryDir(), 'not-yet', 'created') };
+    const served = servedAssets();
+    await installBuiltInReranker({ env, model: served.model, rerankerModel: served.reranker, skipRuntime: true, fetchImpl: served.fetchImpl });
+    const dir = join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker', served.reranker.modelId);
+    expect(sha256(readFileSync(join(dir, 'model.onnx')))).toBe(served.reranker.model.sha256);
+    expect(existsSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'install.lock'))).toBe(false);
+  });
+
   test('downloads once, verifies every file, unpacks only this platform, and reports progress', async () => {
     const dir = temporaryDir();
     const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
