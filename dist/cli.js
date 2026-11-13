@@ -19820,6 +19820,7 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   const file = db.filename;
   const backup = preSchemaBackupPath(file, fromVersion);
   const started = performance.now();
+  removeAbandonedBackupCopies(backup);
   const needed = schemaUpdateSpaceNeeded(statSync12(file).size);
   const free = freeBytes(dirname26(file));
   if (free < needed) {
@@ -19828,7 +19829,6 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   report({ phase: "backing_up", storeId });
   const partial = `${backup}.${process.pid}.partial`;
   rmSync9(partial, { force: true });
-  removeAbandonedBackupCopies(backup);
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   try {
     closeSync11(openSync11(partial, "wx", 384));

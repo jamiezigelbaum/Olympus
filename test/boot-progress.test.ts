@@ -161,6 +161,21 @@ describe('schema updates back up the store first', () => {
     db.close();
   });
 
+  test('a killed backup\'s part-way copy is gone before the free space is measured', () => {
+    const env = home();
+    const { path, db } = storeAtVersion1(env);
+    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
+    const abandoned = `${path}.pre-schema-1.bak.${gone}.partial`;
+    writeFileSync(abandoned, 'part of a copy');
+    let seenAtMeasure: boolean | undefined;
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, freeBytes: () => {
+      seenAtMeasure = existsSync(abandoned);
+      return Number.MAX_SAFE_INTEGER;
+    } });
+    db.close();
+    expect(seenAtMeasure).toBe(false);
+  }, 30_000);
+
   test('a backup left by an earlier attempt is replaced, since the store may have changed since', () => {
     const env = home();
     const { path, db } = storeAtVersion1(env);

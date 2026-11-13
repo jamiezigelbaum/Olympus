@@ -182,6 +182,8 @@ function backUpBeforeUpdate(
   const started = performance.now();
   // An earlier attempt's copy stays until the new one replaces it: no credit for its space.
   // It is never removed first, since another opener may have just written it.
+  // A killed backup's part-way copy is, before the space is measured.
+  removeAbandonedBackupCopies(backup);
   const needed = schemaUpdateSpaceNeeded(statSync(file).size);
   const free = freeBytes(dirname(file));
   if (free < needed) {
@@ -195,7 +197,6 @@ function backUpBeforeUpdate(
   // Written beside the backup and renamed into place: a backup that exists is whole.
   const partial = `${backup}.${process.pid}.partial`;
   rmSync(partial, { force: true });
-  removeAbandonedBackupCopies(backup);
   // Recorded before the copy starts, so a delete or forget finds a copy a crash left part way.
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   try {
