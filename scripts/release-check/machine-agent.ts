@@ -57,7 +57,7 @@ import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import type { StoreView } from './archive-leg.ts';
-import { frontSteadyStage, type EnginePids, type FrontHost } from './front-steady.ts';
+import { frontSteadyStage, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -1921,8 +1921,24 @@ async function archiveModelCommand(mode: string): Promise<never> {
   emit({ ...(await modelStage(archiveHost(), mode)) });
 }
 
+/** How many live rows a source's store holds, read-only (front-steady.ts's store set). */
+function laneItems(source: string, tier: 'internal' | 'secure_local'): LaneView {
+  const path = resolvedStorePath(source, tier, process.env);
+  if (!existsSync(path)) return { source, tier, exists: false, items: 0 };
+  try {
+    const db = new Database(path, { readonly: true });
+    try {
+      db.exec('PRAGMA busy_timeout = 10000;');
+      const row = db.query('select count(*) as n from items where tombstoned = 0').get() as { n: number } | null;
+      return { source, tier, exists: true, items: Number(row?.n ?? 0) };
+    } finally { db.close(); }
+  } catch (error) {
+    return { source, tier, exists: true, items: 0, error: (error instanceof Error ? error.message : String(error)).slice(0, 160) };
+  }
+}
+
 async function frontSteadyCommand(seed: string, watchS: number): Promise<never> {
-  const host: FrontHost = { ...archiveHost(), env: process.env, enginePids: ownEnginePids, engineLogPaths: platform().engineLogPaths };
+  const host: FrontHost = { ...archiveHost(), laneItems, enginePids: ownEnginePids, engineLogPaths: platform().engineLogPaths };
   emit({ ...(await frontSteadyStage(host, { seed, watchS })) });
 }
 

@@ -17,10 +17,8 @@
  * engine's log must say no process exited unexpectedly and no front opened a store for writing. One read of health would not do:
  * the rc.4 front answered "ready" each time before it crashed.
  */
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Database } from 'bun:sqlite';
-import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../../src/workers/dashboard/vocabulary.ts';
 import { mail as gmailMail, takeoutMbox } from '../../test/support/archive-fixtures-gmail.ts';
 import { FIXTURE_FOLDER } from './archive-fixtures.ts';
@@ -39,9 +37,10 @@ export const FRONT_GMAIL_FILE = 'rc-front-gmail.mbox';
 export interface EnginePids { front: number[]; background: number[] }
 
 export interface FrontHost extends ArchiveHost {
-  env: Record<string, string | undefined>;
   /** The engine's processes by role, from their environments; null where the platform cannot tell. */
   enginePids(): EnginePids | null;
+  /** How many live rows a source's store holds in a tier, read-only (the agent, which may open stores, does the reading). */
+  laneItems(source: string, tier: 'internal' | 'secure_local'): LaneView;
   /** The engine's own log files (stdout and stderr of the unit). */
   engineLogPaths: readonly string[];
 }
@@ -113,21 +112,6 @@ const archiveCount = (json: unknown): number => {
   return Array.isArray(archives) ? archives.length : 0;
 };
 
-/** How many live rows a source's store holds, read-only. */
-function laneView(source: string, tier: 'internal' | 'secure_local', env: Record<string, string | undefined>): LaneView {
-  const path = resolvedStorePath(source, tier, env);
-  if (!existsSync(path)) return { source, tier, exists: false, items: 0 };
-  try {
-    const db = new Database(path, { readonly: true });
-    try {
-      db.exec('PRAGMA busy_timeout = 10000;');
-      const row = db.query('select count(*) as n from items where tombstoned = 0').get() as { n: number } | null;
-      return { source, tier, exists: true, items: Number(row?.n ?? 0) };
-    } finally { db.close(); }
-  } catch (error) {
-    return { source, tier, exists: true, items: 0, error: (error instanceof Error ? error.message : String(error)).slice(0, 160) };
-  }
-}
 
 const sizeOf = (path: string): number => { try { return statSync(path).size; } catch { return 0; } };
 
@@ -181,7 +165,7 @@ export async function frontSteadyStage(host: FrontHost, args: { seed: string; wa
       obs.telegram = { ok: seeded.ok, detail: seeded.detail };
     } else obs.telegram = { ok: false, detail: 'this machine cannot run a live seed hook' };
     obs.archives = archiveCount(host.cli(['status']).json);
-    obs.lanes = [GMAIL_SOURCE, TELEGRAM_SOURCE].flatMap((source) => (['internal', 'secure_local'] as const).map((tier) => laneView(source, tier, host.env)));
+    obs.lanes = [GMAIL_SOURCE, TELEGRAM_SOURCE].flatMap((source) => (['internal', 'secure_local'] as const).map((tier) => host.laneItems(source, tier)));
     // The restart, as the owner's unit does it, then the watch.
     const offsets = host.engineLogPaths.map(sizeOf);
     obs.restart = await host.restartEngine(600_000);
