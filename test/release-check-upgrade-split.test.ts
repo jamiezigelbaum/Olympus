@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
-  BROKEN_FRONT_LINE, breakFront, brokenBundle, compareStoreFiles, forcedFailureChecks, rehash, repinInstaller, storeFiles,
+  BROKEN_FRONT_LINE, breakFront, brokenBundle, compareStoreFiles, forcedFailureChecks, rehash, repinInstaller, retiredStoreFile, storeFiles, storesKeptCheck,
 } from '../scripts/release-check/upgrade-split.ts';
 
 let dir: string;
@@ -29,12 +29,13 @@ describe('the copy whose front cannot start', () => {
     expect(rehash(`${'0'.repeat(64)}  a.tgz\n${'1'.repeat(64)}  other\n`, { 'a.tgz': 'b'.repeat(64) })).toBe(`${'b'.repeat(64)}  a.tgz\n${'1'.repeat(64)}  other\n`);
   });
 
-  test('a bundle copy: the front exits, the original is untouched, and every pin matches what was written', () => {
+  test('a bundle copy: the front exits when it would start to serve, not before, the original is untouched, and every pin matches what was written', () => {
     const candidate = join(dir, 'candidate');
     const work = join(dir, 'work');
     mkdirSync(join(work, 'package', 'dist'), { recursive: true });
     mkdirSync(candidate);
-    writeFileSync(join(work, 'package', 'dist', 'cli.js'), '#!/usr/bin/env bun\nconsole.log("olympus");\n');
+    // Boot work first, then the server, as the worker does.
+    writeFileSync(join(work, 'package', 'dist', 'cli.js'), '#!/usr/bin/env bun\nconsole.log("booted");\nBun.serve({ port: 0, fetch: () => new Response("") }).stop(true);\nconsole.log("served");\n');
     expect(Bun.spawnSync(['tar', '-czf', join(candidate, 'olympus-1.5.0.tgz'), '-C', work, 'package']).exitCode).toBe(0);
     writeFileSync(join(candidate, 'install-linux.sh'), `#!/bin/sh\nOLYMPUS_SHA256=${sha(join(candidate, 'olympus-1.5.0.tgz'))}\nOLYMPUS_BYTES=1\n`);
     writeFileSync(join(candidate, 'SHA256SUMS'), `${sha(join(candidate, 'olympus-1.5.0.tgz'))}  olympus-1.5.0.tgz\n${sha(join(candidate, 'install-linux.sh'))}  install-linux.sh\n`);
@@ -53,10 +54,11 @@ describe('the copy whose front cannot start', () => {
     const entry = join(unpacked, 'package', 'dist', 'cli.js');
     const front = Bun.spawnSync([process.execPath, entry], { env: { ...process.env, OLYMPUS_WORKER_ENGINE_ROLE: 'front' }, stdout: 'pipe', stderr: 'pipe' });
     expect(front.exitCode).toBe(70);
+    expect(front.stdout.toString()).toBe('booted\n');
     expect(front.stderr.toString()).toContain(BROKEN_FRONT_LINE);
     const background = Bun.spawnSync([process.execPath, entry], { env: { ...process.env, OLYMPUS_WORKER_ENGINE_ROLE: 'background' }, stdout: 'pipe' });
     expect(background.exitCode).toBe(0);
-    expect(background.stdout.toString()).toBe('olympus\n');
+    expect(background.stdout.toString()).toBe('booted\nserved\n');
   }, 30_000);
 });
 
@@ -70,12 +72,25 @@ describe('store files', () => {
     expect(before).toEqual(['embedding-ledger.jsonl', 'jobs.db', 'stores/.tier-ledger.sqlite', 'stores/gmail.email/internal.sqlite']);
     rmSync(join(dir, 'stores/.tier-ledger.sqlite'));
     writeFileSync(join(dir, 'new.sqlite'), '');
-    expect(compareStoreFiles(before, storeFiles(dir))).toEqual({ count: 4, missing: 1, extra: 1 });
+    expect(compareStoreFiles(before, storeFiles(dir))).toEqual({ count: 4, missing: 1, retired: 0, extra: 1 });
     expect(storeFiles(join(dir, 'absent'))).toEqual([]);
   });
 
+  test('the pre-filter ledger and weights the candidate retires (#1415) are counted apart: allowed after the update, not after a rollback', () => {
+    const ledger = 'classification-ledger.sqlite.embedding-prefilter.tier-ledger.sqlite';
+    const weights = 'stores/a.tier-ledger.sqlite.embedding-prefilter/weights.db';
+    const before = ['jobs.db', ledger, weights, 'stores/a.tier-ledger.sqlite'];
+    const after = compareStoreFiles(before, ['jobs.db', 'stores/a.tier-ledger.sqlite']);
+    expect(after).toEqual({ count: 2, missing: 0, retired: 2, extra: 0 });
+    expect(retiredStoreFile('stores/a.tier-ledger.sqlite')).toBe(false);
+    expect(storesKeptCheck(4, after)).toMatchObject({ status: 'pass', detail: '4 before, 2 after: 0 missing, 2 retired on purpose, 0 new' });
+    expect(storesKeptCheck(4, compareStoreFiles(before, ['jobs.db', ledger, weights]))).toMatchObject({ status: 'fail' });
+    const rolledBack = forcedFailureChecks({ installer: { failed: true }, frontRan: 1, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: compareStoreFiles(before, ['jobs.db', ledger, 'stores/a.tier-ledger.sqlite', 'x.db']) } });
+    expect(rolledBack[2]).toMatchObject({ status: 'fail', detail: '4 before, 4 after: 0 missing, 1 retired on purpose, 1 new' });
+  });
+
   test('a rolled-back update with the same count but another file in place of a lost one still fails', () => {
-    const checks = forcedFailureChecks({ installer: { failed: true }, frontRan: 1, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: { count: 4, missing: 1, extra: 1 } } });
+    const checks = forcedFailureChecks({ installer: { failed: true }, frontRan: 1, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: { count: 4, missing: 1, retired: 0, extra: 1 } } });
     expect(checks.map((check) => [check.id, check.status])).toEqual([
       ['upgrade.forced-failure.installer', 'pass'], ['upgrade.forced-failure.rollback', 'pass'], ['upgrade.forced-failure.stores', 'fail'],
     ]);
@@ -83,7 +98,7 @@ describe('store files', () => {
   });
 
   test('an update that failed before the broken front ever started proves no rollback: every forced-failure check fails', () => {
-    const checks = forcedFailureChecks({ installer: { failed: true, detail: 'copy failed' }, frontRan: 0, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: { count: 4, missing: 0, extra: 0 } } });
+    const checks = forcedFailureChecks({ installer: { failed: true, detail: 'copy failed' }, frontRan: 0, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: { count: 4, missing: 0, retired: 0, extra: 0 } } });
     expect(checks.map((check) => check.status)).toEqual(['fail', 'fail', 'fail']);
     expect(checks[1]!.detail).toContain('before the broken front started');
   });

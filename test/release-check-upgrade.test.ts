@@ -311,7 +311,7 @@ if (verb === 'provision') {
     samples: process.env.FAKE_FRONT_CRASH === '1' ? [{ front: [20], background: [10] }, { front: [], background: [10] }, { front: [21], background: [10] }] : [{ front: [20], background: [10] }, { front: [20], background: [10] }] });
   else if (sub === 'store-files') {
     if (script.includes('--save')) say({ ok: true, count: 5 });
-    else { const lost = flag('lost-store') ? 1 : 0; say({ ok: true, before: 5, count: 5 - lost, missing: lost, extra: 0 }); }
+    else { const lost = flag('lost-store') ? 1 : 0; say({ ok: true, before: 5, count: 5 - lost, missing: lost, retired: 0, extra: 0 }); }
   }
   else if (sub === 'snapshot-state') {
     const migratedNow = upgraded && process.env.FAKE_NO_MIGRATION !== '1' && !flag('revert-policy');
@@ -533,7 +533,7 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
     process.env.FAKE_LOST_STORE = '1';
     report = await runReleaseCheck(splitOptions());
     expect(checkOf(report, 'upgrade.forced-failure.rollback')?.status).toBe('pass');
-    expect(checkOf(report, 'upgrade.forced-failure.stores')?.detail).toBe('5 before, 4 after: 1 missing, 0 new');
+    expect(checkOf(report, 'upgrade.forced-failure.stores')?.detail).toBe('5 before, 4 after: 1 missing, 0 retired on purpose, 0 new');
     expect(checkOf(report, 'upgrade.split.stores')?.status).toBe('fail');
   }, 240_000);
 

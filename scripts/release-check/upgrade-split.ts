@@ -5,19 +5,27 @@
  * one ledger file short. The upgrade leg with the split on now does what that machine did: the earlier release holds a store
  * set (Gmail with an attachment, Telegram), the owner's engine.json has `worker.engineSplit` on, and the candidate's public
  * installer runs over it. It runs twice:
- * - first a copy of the candidate whose front exits at once: the installer must report the failure, and the earlier release must
- *   be running and healthy again with every store file it had;
- * - then the candidate itself, whose front must then stay up (front-steady.ts) with every store file still there.
+ * - first a copy of the candidate whose front exits as soon as it would serve, which is after the background has finished its boot
+ *   work and migrated the stores: the installer must report the failure, and the earlier release must be running and healthy
+ *   again with every store file it had, the ones the candidate retires included;
+ * - then the candidate itself, whose front must then stay up (front-steady.ts) with every store file still there except the
+ *   ones it retires on purpose (the removed pre-filter's ledger, #1415).
  */
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath } from '../../src/workers/classification/tier-ledger-path.ts';
 import type { CheckResult } from './report.ts';
 
 /** What the broken copy's front prints before it exits, so its own log says why. */
-export const BROKEN_FRONT_LINE = '[release-check] this build\'s front exits on purpose (forced update failure)';
-const BROKEN_FRONT_GUARD = `if (process.env.OLYMPUS_WORKER_ENGINE_ROLE === 'front') { console.error(${JSON.stringify(BROKEN_FRONT_LINE)}); process.exit(70); }\n`;
+export const BROKEN_FRONT_LINE = '[release-check] this build\'s front exits on purpose as it starts to serve (forced update failure)';
+/**
+ * The front waits for the background to finish its boot work (the lock, deletions, the stores' migration) before it serves, so
+ * its first Bun.serve is the earliest point where the update has changed the stores. An exit before that would fail the update
+ * before any store migrated, and its rollback would prove nothing (plan thread, 13 Nov).
+ */
+const BROKEN_FRONT_GUARD = `if (process.env.OLYMPUS_WORKER_ENGINE_ROLE === 'front' && typeof Bun !== 'undefined') { Bun.serve = () => { console.error(${JSON.stringify(BROKEN_FRONT_LINE)}); process.exit(70); }; }\n`;
 
 /** Puts the guard at the top of an entry file, after its shebang if it has one. */
 export function breakFront(source: string): string {
@@ -99,13 +107,27 @@ export function storeFiles(root: string): string[] {
   return out.sort();
 }
 
-export interface StoreFileCount { count: number; missing: number; extra: number }
+/** `missing` leaves out `retired`: the files a newer version moves aside on purpose (the removed pre-filter's ledger and weights, #1415). */
+export interface StoreFileCount { count: number; missing: number; retired: number; extra: number }
+
+const RETIRED_LEDGER_SUFFIX = embeddingPrefilterInstallLedgerPath('');
+const RETIRED_DIRECTORY_SUFFIX = embeddingPrefilterDirectory('');
+
+/** Whether a store file is one the candidate retires on purpose: the pre-filter's install ledger, or a file in its weights folder. */
+export function retiredStoreFile(path: string): boolean {
+  return path.endsWith(RETIRED_LEDGER_SUFFIX) || path.split(/[\\/]/).slice(0, -1).some((part) => part.endsWith(RETIRED_DIRECTORY_SUFFIX));
+}
 
 export function compareStoreFiles(before: readonly string[], now: readonly string[]): StoreFileCount {
   const had = new Set(before);
   const has = new Set(now);
-  return { count: now.length, missing: before.filter((path) => !has.has(path)).length, extra: now.filter((path) => !had.has(path)).length };
+  const gone = before.filter((path) => !has.has(path));
+  const retired = gone.filter(retiredStoreFile).length;
+  return { count: now.length, missing: gone.length - retired, retired, extra: now.filter((path) => !had.has(path)).length };
 }
+
+const filesDetail = (before: number, after: StoreFileCount): string =>
+  `${before} before, ${after.count} after: ${after.missing} missing, ${after.retired ?? 0} retired on purpose, ${after.extra} new`;
 
 export interface ForcedFailureObservation {
   /** The installer's own verdict on the broken copy: it must report a failure. */
@@ -128,7 +150,8 @@ export function forcedFailureChecks(obs: ForcedFailureObservation): CheckResult[
   const version = obs.engine.version ?? null;
   const back = obs.engine.ready && version !== null && version === (obs.beforeVersion ?? null);
   const files = obs.storeFiles?.after;
-  const kept = files !== undefined && files.missing === 0 && files.count === obs.storeFiles!.before;
+  // A rollback puts back what the update retired too, so nothing may be gone, retired or not.
+  const kept = files !== undefined && files.missing === 0 && !(files.retired > 0) && files.count === obs.storeFiles!.before;
   const [installer, rollback, stores] = forcedFailureCheckShapes();
   return [
     {
@@ -148,7 +171,7 @@ export function forcedFailureChecks(obs: ForcedFailureObservation): CheckResult[
       status: kept ? 'pass' : 'fail',
       detail: files === undefined
         ? 'the store files were not counted'
-        : `${obs.storeFiles!.before} before, ${files.count} after: ${files.missing} missing, ${files.extra} new`,
+        : filesDetail(obs.storeFiles!.before, files),
     },
   ];
 }
@@ -157,17 +180,17 @@ function forcedFailureCheckShapes(): Array<Pick<CheckResult, 'id' | 'title'>> {
   return [
     { id: 'upgrade.forced-failure.installer', title: 'An update whose front crashes on start is reported as failed by the installer' },
     { id: 'upgrade.forced-failure.rollback', title: 'After the failed update, the earlier release is running and healthy' },
-    { id: 'upgrade.forced-failure.stores', title: 'After the failed update, every store file is still there and there are as many as before' },
+    { id: 'upgrade.forced-failure.stores', title: 'After the failed update, every store file is still there, the retired ones put back, and there are as many as before' },
   ];
 }
 
-/** After the real update: every store file the earlier release had is still there (the candidate may add its own). */
+/** After the real update: every store file the earlier release had is still there, except the ones the candidate retires (it may add its own). */
 export function storesKeptCheck(before: number | undefined, after: StoreFileCount | undefined): CheckResult {
   const kept = before !== undefined && after !== undefined && after.missing === 0;
   return {
     id: 'upgrade.split.stores',
-    title: 'After the update to the split engine, every store file the earlier release had is still there',
+    title: 'After the update to the split engine, every store file the earlier release had is still there, except the ones it retires on purpose',
     status: kept ? 'pass' : 'fail',
-    detail: before === undefined || after === undefined ? 'the store files were not counted' : `${before} before, ${after.count} after: ${after.missing} missing, ${after.extra} new`,
+    detail: before === undefined || after === undefined ? 'the store files were not counted' : filesDetail(before, after),
   };
 }
