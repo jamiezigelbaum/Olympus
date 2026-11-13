@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
-import { runFreshLimits, LIMITS_HOME, type FreshLimitsOptions, type LimitsHome, type LimitsMachine, type LimitsStop } from '../scripts/release-check/fresh-limits.ts';
+import { judgeRaiseTarget, runFreshLimits, LIMITS_HOME, type FreshLimitsOptions, type LimitsHome, type LimitsMachine, type LimitsStop } from '../scripts/release-check/fresh-limits.ts';
 import type { Machine } from '../scripts/release-check/machine.ts';
 import { renderLimits } from '../scripts/release-check/report.ts';
 import { canaryVerdict } from '../scripts/release-check/canary.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 
-function rig(fault?: 'missing-judge' | 'no-resume' | 'missing-venice' | 'no-credential' | 'no-credential-restart' | 'restart' | 'wrong-home' | 'refill-failed' | 'marker-remains' | 'command-error') {
+function rig(fault?: 'missing-judge' | 'no-resume' | 'venice-no-resume' | 'missing-venice' | 'no-credential' | 'no-credential-restart' | 'restart' | 'wrong-home' | 'refill-failed' | 'marker-remains' | 'command-error') {
   const time = createTestClock();
   const start = time.now();
   const commands: string[] = [];
@@ -14,6 +14,7 @@ function rig(fault?: 'missing-judge' | 'no-resume' | 'missing-venice' | 'no-cred
   let markerAt: number | undefined;
   let marker = false;
   let refilled = false;
+  let refilledAt: number | undefined;
   let closed = false;
   const judge: LimitsStop = { id: 'judge.daily_calls', label: 'Privacy judge daily call budget used', unit: 'calls', limit: 1, used: 1, resumesAt: '2026-01-02T00:00:00.000Z' };
   const venice: LimitsStop = { id: 'venice.credit', label: 'Venice billing/balance.canConsume is false', unit: 'usd', limit: null, used: null };
@@ -31,12 +32,12 @@ function rig(fault?: 'missing-judge' | 'no-resume' | 'missing-venice' | 'no-cred
     commands.push(script);
     if (fault === 'command-error') throw new Error('/private/account Secret title from somebody@example.test');
     if (script.endsWith('limits')) return JSON.stringify({ stops: stops().map(stop => ({ ...stop, subject: '/private/account' })) });
-    if (script.endsWith('limits continue judge.daily_calls --to 50')) {
+    if (script.endsWith('limits continue judge.daily_calls --to 51')) {
       raisedAt = time.now(); return JSON.stringify({ ok: true });
     }
     if (script.endsWith('limits continue venice.credit')) {
       if (fault?.startsWith('no-credential') || fault === 'refill-failed') return JSON.stringify({ ok: false, status_message: 'Venice billing has not confirmed canConsume=true. The stop remains.' });
-      refilled = true; marker = fault === 'marker-remains'; return JSON.stringify({ ok: true });
+      refilled = true; refilledAt = time.now(); marker = fault === 'marker-remains'; return JSON.stringify({ ok: true });
     }
     if (script.includes('/dashboard?panel-read')) return JSON.stringify({ structuredContent: { v: 1, ...await dashboard() } });
     throw new Error('unexpected command');
@@ -48,8 +49,9 @@ function rig(fault?: 'missing-judge' | 'no-resume' | 'missing-venice' | 'no-cred
   };
   const diagnostics: LimitsMachine = {
     prepare: async () => { events.push('prepare'); }, seed: async () => { events.push('seed'); return 2; },
-    snapshot: async () => ({ pid: 41, workerPids: [(raisedAt !== undefined && fault === 'restart') || (markerAt !== undefined && fault === 'no-credential-restart') ? 999 : 42],
-      calls: raisedAt !== undefined && fault !== 'no-resume' && time.now() >= raisedAt + 3000 ? 2 : 1 }),
+    snapshot: async () => ({ pid: 41, workerPids: [(raisedAt !== undefined && fault === 'restart') || (markerAt !== undefined && time.now() >= markerAt + 60_000 && fault === 'no-credential-restart') ? 999 : 42],
+      calls: (raisedAt !== undefined && fault !== 'no-resume' && time.now() >= raisedAt + 3000 ? 2 : 1)
+        + (refilledAt !== undefined && fault !== 'venice-no-resume' && time.now() >= refilledAt + 3000 ? 1 : 0) }),
     hasVeniceCredential: async () => !fault?.startsWith('no-credential'),
     marker: async action => {
       events.push(`marker-${action}`);
@@ -71,16 +73,16 @@ test('limits proves list, Home actions, one-step Raise and Refill, bounded resum
   expect(result.checks.every(check => check.status === 'pass')).toBe(true);
   expect(result.rows).toEqual([
     { id: 'judge.daily_calls', status: 'pass', unit: 'calls', limit: 1, used: 1, callsAfter: 2, resumesAt: '2026-01-02T00:00:00.000Z', startedAt: '2026-01-01T12:00:00.000Z', ms: 5000 },
-    { id: 'venice.credit', status: 'pass', unit: 'usd', startedAt: '2026-01-01T12:00:05.000Z', ms: 60_000 },
+    { id: 'venice.credit', status: 'pass', unit: 'usd', callsAfter: 3, startedAt: '2026-01-01T12:00:05.000Z', ms: 63_000 },
   ]);
   expect(r.commands.filter(command => command.includes('limits continue'))).toEqual([
-    '"$HOME/.local/bin/olympus" limits continue judge.daily_calls --to 50',
+    '"$HOME/.local/bin/olympus" limits continue judge.daily_calls --to 51',
     '"$HOME/.local/bin/olympus" limits continue venice.credit',
   ]);
   expect(r.events.slice(-2)).toEqual(['marker-remove', 'close']);
   expect(r.marker()).toBe(false); expect(r.closed()).toBe(true);
   expect(JSON.stringify(result)).not.toContain('/private/account');
-  expect(renderLimits(result.rows)).toContain('Calls after Raise');
+  expect(renderLimits(result.rows)).toContain('Calls after continue');
 }, 30_000);
 
 test('a judge stop that never appears fails at its deadline', async () => {
@@ -99,6 +101,20 @@ test('Raise clearing the list and Home without more judge calls fails', async ()
   expect(canaryVerdict(result.checks)).toBe('fail');
   expect(r.closed()).toBe(true);
 }, 30_000);
+
+test('Refill clearing the stop without resumed work fails', async () => {
+  const r = rig('venice-no-resume');
+  const result = await runFreshLimits(r.machine, r.options);
+  expect(result.checks.find(check => check.id === 'limits.venice.credit')).toMatchObject({ status: 'fail', detail: 'Refill did not resume work' });
+  expect(result.rows[1]?.status).toBe('fail');
+  expect(r.closed()).toBe(true);
+}, 30_000);
+
+test('Raise targets room above calls earlier stages already used', () => {
+  expect(judgeRaiseTarget({ limit: 1, used: 1 })).toBe(51);
+  expect(judgeRaiseTarget({ limit: 1, used: 80 })).toBe(130);
+  expect(judgeRaiseTarget({ limit: 100, used: 3 })).toBe(150);
+});
 
 test('Venice without a credential stays stopped and records the lift as inconclusive', async () => {
   const r = rig('no-credential');

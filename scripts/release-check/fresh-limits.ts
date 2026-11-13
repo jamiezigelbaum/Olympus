@@ -38,6 +38,10 @@ const CLI = '"$HOME/.local/bin/olympus"';
 export const LIMITS_HOME = `curl -fsS --max-time 10 --unix-socket "\${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock" -H @- 'http://127.0.0.1:8010/dashboard?panel-read' <<EOF
 Authorization: Bearer $(${CLI} dashboard token)
 EOF`;
+/** Continue with room for the proof: above both the current limit and the calls already used today. */
+export function judgeRaiseTarget(stop: Pick<LimitsStop, 'limit' | 'used'>): number {
+  return Math.max(stop.limit ?? 0, stop.used ?? 0) + 50;
+}
 class Assertion extends Error {}
 function assert(value: unknown, message: string): asserts value { if (!value) throw new Assertion(message); }
 const REFILL_UNCONFIRMED = 'has not confirmed canConsume=true';
@@ -111,7 +115,8 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
         && Number.isFinite(stop.used) && stop.used! >= 1 && typeof stop.resumesAt === 'string' && Number.isFinite(Date.parse(stop.resumesAt)), 'judge stop lacks label, calls, limit 1, used calls or resumesAt');
       judge.limit = 1; judge.used = stop.used!; judge.resumesAt = stop.resumesAt;
       await visible(stop, 'Raise');
-      const reply = JSON.parse(await exec(`${CLI} limits continue judge.daily_calls --to 50`));
+      // Earlier stages keep the day's count, so the target sits above what they already used.
+      const reply = JSON.parse(await exec(`${CLI} limits continue judge.daily_calls --to ${judgeRaiseTarget(stop)}`));
       assert(reply.ok === true, 'Raise did not return ok:true');
       await cleared(judge.id, stop.label);
       const after = await poll(() => probe.snapshot(), s => s.calls > 1 && s.calls > before.calls, 180_000, 'Raise did not resume judge calls');
@@ -123,9 +128,12 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
     const venice: LimitsRow = { id: 'venice.credit', status: 'fail', startedAt: new Date(clock.now()).toISOString(), ms: 0, unit: 'usd' };
     result.rows.push(venice);
     await check('venice.credit', async () => {
-      const before = await probe.snapshot();
       const credential = await probe.hasVeniceCredential();
       await probe.marker('write');
+      // Fresh items while Venice is stopped, so Refill has work to resume. Seeding restarts the engine,
+      // so the no-restart window starts after it.
+      assert(await probe.seed() >= 2, 'fewer than 2 synthetic judgment items seeded');
+      const before = await poll(() => probe.snapshot(), s => s.pid > 0 && s.workerPids.length > 0, 180_000, 'engine did not become ready');
       const stops = await poll(list, stops => stops.some(stop => stop.id === venice.id), 90_000, 'venice.credit never appeared within 90 seconds');
       const stop = stops.find(stop => stop.id === venice.id)!;
       assert(typeof stop.label === 'string' && stop.label.includes('canConsume') && stop.unit === 'usd', 'Venice stop lacks its billing reason');
@@ -135,6 +143,8 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
         assert(reply.ok === true, 'Refill did not return ok:true');
         await cleared(venice.id, stop.label);
         assert(!await probe.marker('exists'), 'Refill left its pause marker');
+        const after = await poll(() => probe.snapshot(), s => s.calls > before.calls, 180_000, 'Refill did not resume work');
+        venice.callsAfter = after.calls;
       } else {
         assert(reply.ok === false && typeof reply.status_message === 'string' && reply.status_message.includes(REFILL_UNCONFIRMED), 'Refill without credentials did not report unconfirmed canConsume=true');
         assert((await list()).some(stop => stop.id === venice.id) && await probe.marker('exists'), 'unconfirmed refill cleared the stop or marker');

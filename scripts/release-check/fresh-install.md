@@ -28,20 +28,24 @@ nonempty label, unit `calls`, limit 1, used calls at least 1 and a valid
 `resumesAt`. Home is read through the engine's own `/dashboard?panel-read`
 JSON, using the fresh-dashboard owner socket and bearer pattern. Its wait
 must match the stop's label, amounts, unit and resume time and expose a Raise
-fix calling `olympus_limits`. One
-`olympus limits continue judge.daily_calls --to 50` must return `ok:true`,
-clear both views and allow the persisted daily call counter to increase beyond
-1 within 180 seconds. Both engine and judge worker process ids must stay the
+fix calling `olympus_limits`. One `olympus limits continue judge.daily_calls`
+with `--to` set 50 above the larger of the limit and the calls already used
+today (earlier stages keep the day's count) must return `ok:true`, clear both
+views and allow the persisted daily call counter to increase within 180
+seconds. Both engine and judge worker process ids must stay the
 same across the continuation.
 
 For `venice.credit`, the stage writes the same `kind: venice` marker shape as
 `writeProviderPause`, at the configured pause file (or a temporary path
 configured with `OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE` before the
-restart). It refuses to overwrite an existing marker. Within 90 seconds the
+restart). It refuses to overwrite an existing marker. It then seeds fresh
+synthetic items, so the stop has work to hold; seeding restarts the engine, so
+the no-restart window starts once the engine is ready again. Within 90 seconds the
 CLI must show the billing reason and Home must offer the matching Refill fix.
 One `olympus limits continue venice.credit` uses the product's constant Venice
 billing URL. With a credential, it must return `ok:true`, clear the stop from
-both views and remove the marker without a restart. Without a credential, it
+both views, remove the marker and let the judge call counter increase within
+180 seconds, all without a restart. Without a credential, it
 must return `ok:false` with `has not confirmed canConsume=true`, leaving both
 the stop and marker in place. That lift is explicitly **inconclusive**, with
 the reason in its row and a skip check; it is never recorded as a pass.

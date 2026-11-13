@@ -31,7 +31,7 @@ export interface CheckResult {
 /** Content-free release proof; an unconfirmed refill remains visibly inconclusive. */
 export function renderLimits(rows: readonly LimitsRow[] | undefined): string {
   if (!rows?.length) return '';
-  return '<h2>Limits</h2><table><thead><tr><th>Id</th><th>Result</th><th>Unit</th><th>Limit</th><th>Used</th><th>Calls after Raise</th><th>Resumes at</th><th>Started</th><th>ms</th><th>Reason</th></tr></thead><tbody>'
+  return '<h2>Limits</h2><table><thead><tr><th>Id</th><th>Result</th><th>Unit</th><th>Limit</th><th>Used</th><th>Calls after continue</th><th>Resumes at</th><th>Started</th><th>ms</th><th>Reason</th></tr></thead><tbody>'
     + rows.map(row => `<tr>${[row.id, row.status, row.unit, row.limit, row.used, row.callsAfter, row.resumesAt, row.startedAt, row.ms, row.reason]
       .map(value => `<td>${escapeHtml(value === undefined ? '' : String(value))}</td>`).join('')}</tr>`).join('') + '</tbody></table>';
 }
