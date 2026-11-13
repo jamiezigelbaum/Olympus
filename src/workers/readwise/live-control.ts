@@ -1,7 +1,9 @@
 // Cadence and bound policy for the canonical Readwise connector-store lane.
 // Both provider tasks use the shared worker scheduler and read this config.
 
-export const READWISE_STORE_PULL_INTERVAL_MS = 15 * 60_000;
+import { LIVE_NEW_ITEMS_INTERVAL_MS } from '../live-source-cadence.ts';
+
+export const READWISE_STORE_PULL_INTERVAL_MS = LIVE_NEW_ITEMS_INTERVAL_MS;
 export const READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60_000;
 export const READWISE_STORE_PULL_MAX_ITEMS = 200;
 export const READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60_000;

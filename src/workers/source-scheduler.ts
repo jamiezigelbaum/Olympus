@@ -88,6 +88,7 @@ import {
   isCredentialRefreshBusyError,
 } from './credential-broker/index.ts';
 import { GO_EASY_TRICKLE_EMBED_ITEMS } from './local-pacing.ts';
+import { LIVE_NEW_ITEMS_INTERVAL_MS } from './live-source-cadence.ts';
 
 export type SourceSchedulerTaskKind = 'sync' | 'extract' | 'embed' | 'watch';
 export type SourceSchedulerCadence = 'manual' | 'continuous';
@@ -1630,6 +1631,9 @@ export function createCanonicalDropboxSchedulerSource(input: {
     const scopeHash = schedulerScopeHash(approvedScopeKey);
     tasks.push({
       id: `dropbox.files_store_pull.${scopeHash}`,
+      // list_folder/continue is a cheap incremental check, so new files are
+      // looked for on the shared live-source cadence, not the 30-minute sweep.
+      intervalMs: LIVE_NEW_ITEMS_INTERVAL_MS,
       scopePath: input.policy.roots.find(root => root.approved_scope_key === approvedScopeKey)?.path,
       kind: 'sync',
       writer: true,
