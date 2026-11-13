@@ -1,3 +1,4 @@
+import { limitStopReference } from '../src/core/limit-stops.ts';
 /**
  * Home holds only what the owner must act on (#1085, #1044), and Settings ›
  * Models on this computer names the model that really answers Private
@@ -46,7 +47,7 @@ function viewOf(card: DashboardSourceCard, limitStops: import('../src/core/limit
 }
 
 describe('Needs you holds only what the owner must act on (#1044)', () => {
-  test('an open daily stop makes one row from the record, with Sync now; clearing removes it', () => {
+  test('an open daily stop makes one row from the record, with Run once; clearing removes it', () => {
     const db = new Database(':memory:');
     initializeLimitStops(db);
     const stop = { id: 'x.daily_cost', subject: JSON.stringify(['x.bookmarks', 'internal.x.bookmarks', 'pull']),
@@ -58,21 +59,21 @@ describe('Needs you holds only what the owner must act on (#1044)', () => {
       const view = viewOf(card, listOpenLimitStops(db, NOW));
       expect(view.needsYou).toEqual([]);
       expect(view.waits).toEqual([{ sourceId: 'x.bookmarks', label: 'X bookmarks', api: 'X bookmarks', reason: 'limit',
-        limitLabel: 'daily X API budget used', since: stop.since, waiting: stop.waiting, resumesAt: stop.resumesAt,
-        fix: { label: 'Sync now', tool: 'olympus_sync_source', args: { source_id: 'x.bookmarks' } } }]);
+        limitLabel: 'daily X spending budget used', since: stop.since, limit: 1, used: 1, unit: 'usd', waiting: stop.waiting, resumesAt: stop.resumesAt,
+        fix: { label: 'Run once', tool: 'olympus_limits', args: { action: 'continue', id: stop.id, subject: limitStopReference(stop) } } }]);
       clearLimitStop(stop.id, stop.subject, db);
       expect(viewOf(card, listOpenLimitStops(db, NOW)).waits).toBeUndefined();
     } finally { db.close(); }
   });
 
-  test.each(['raise', 'refill', 'none'] as const)('%s uses settings or has no button', (action) => {
+  test.each(['raise', 'refill', 'none'] as const)('%s calls the shared operation or has no button', (action) => {
     const id = 'home.' + action;
     registerLimit({ id, scope: 'judge', kind: 'cost', label: 'Source budget', unit: 'usd', continue: action });
     const wait = viewOf(xCard(), [{ id, subject: 'judge', since: NOW.toISOString(), limit: 1, used: 1 }]).waits![0]!;
     expect(wait.limitLabel).toBe('Source budget');
     expect(wait.sourceId).toBe('judge');
     if (action === 'none') expect(wait.fix).toBeUndefined();
-    else expect(wait.fix).toMatchObject({ label: 'Open settings', openHref: true, href: 'https://olympusplugin.ai/open/fix/models/' });
+    else expect(wait.fix).toMatchObject({ tool: 'olympus_limits', args: { action: 'continue', id, subject: limitStopReference({ id, subject: 'judge' }), ...(action === 'raise' ? { to: 2 } : {}) } });
   });
 
   test('a sync retrying on its own is not Needs you', () => {

@@ -1,12 +1,12 @@
 import { afterEach, expect, test } from 'bun:test';
-import { cpSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { cpSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { fixtureConnector, openTierFixture, JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
-import { assertEvalFileDescriptors, openEvalDataRoot } from '../eval/data-root.ts';
+import { assertEvalFileDescriptors, openEvalDataRoot, otherProcessesHolding } from '../eval/data-root.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { buildEvalPack, createEvalSourceLanes } from '../eval/retrieval.ts';
 
@@ -63,9 +63,39 @@ test('incompatible stores are counted and skipped without upgrade', async () => 
   const root = temp(); const path = await seed(root);
   const db = new Database(path); db.exec('UPDATE schema_version SET version = 999; PRAGMA wal_checkpoint(TRUNCATE);'); db.close();
   const before = readFileSync(path);
-  const opened = openEvalDataRoot({ dataRoot: root });
+  const opened = openEvalDataRoot({ dataRoot: root, allowUnreadableStores: true });
   try { expect(opened.stores).toHaveLength(0); expect(opened.skipped).toHaveLength(1); } finally { opened.close(); }
   expect(readFileSync(path)).toEqual(before);
+});
+
+test('a store the run cannot open fails the open with SQLite\'s exact error, unless skips are allowed', async () => {
+  const root = temp(); const path = await seed(root);
+  Bun.gc(true);
+  writeFileSync(path, 'not a database '.repeat(512));
+  let failure: unknown;
+  try { openEvalDataRoot({ dataRoot: root }); } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error & { code?: string }).code).toBe('EVAL_STORE_UNREADABLE');
+  expect((failure as Error).message).toContain('1 of 1 store');
+  expect((failure as Error).message).toContain('store_probe SQLITE_NOTADB 26 file is not a database');
+  expect((failure as Error).message).not.toContain(root);
+  const allowed = openEvalDataRoot({ dataRoot: root, allowUnreadableStores: true });
+  try {
+    expect(allowed.skipped).toEqual([{ store: 0, reason: 'unreadable_store', stage: 'store_probe', code: 'SQLITE_NOTADB', errno: 26, message: 'file is not a database' }]);
+  } finally { allowed.close(); }
+});
+
+test('counts other processes holding a file under the copy open', () => {
+  const root = temp(); const proc = temp();
+  const pid = (name: string, targets: string[]) => {
+    mkdirSync(join(proc, name, 'fd'), { recursive: true });
+    targets.forEach((target, index) => symlinkSync(target, join(proc, name, 'fd', String(index))));
+  };
+  pid('101', [join(root, 'store.sqlite')]);
+  pid('102', ['/dev/null']);
+  pid(String(process.pid), [join(root, 'own.sqlite')]);
+  expect(otherProcessesHolding(root, proc)).toBe(1);
+  expect(otherProcessesHolding(root, join(proc, 'missing'))).toBeUndefined();
 });
 
 test('a complete bound tier set follows the copied ledger identity, never the old absolute hint', async () => {

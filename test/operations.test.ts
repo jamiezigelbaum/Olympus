@@ -113,6 +113,7 @@ describe('operations', () => {
     // workflows) were deleted on 2026-09-18; test/public-surface-guard.test.ts
     // is what keeps the registry and the public lists equal from here.
     expect(operations.map((operation) => operation.name)).toEqual([
+      'olympus_limits',
       'argus_ping',
       'argus_list_models',
       'argus_complete',

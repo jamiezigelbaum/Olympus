@@ -2929,6 +2929,7 @@
   },
   "contracts": {
     "tools": [
+      "olympus_limits",
       "argus_ping",
       "argus_list_models",
       "argus_complete",

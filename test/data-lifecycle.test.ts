@@ -1,3 +1,4 @@
+import { retiredStateBackupPath } from '../src/core/boot-progress.ts';
 import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath, resolveClassificationLedgerPath } from '../src/workers/classification/tier-ledger-path.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
@@ -297,7 +298,17 @@ describe('Olympus data lifecycle', () => {
       mkdirSync(join(legacyDir, 'partial-fit'), { recursive: true });
       writeFileSync(join(legacyDir, 'partial-fit', 'scratch.json'), 'retired scratch');
       writeFileSync(join(dir, 'custom', 'unrelated.txt'), 'keep');
+      // What a start moved aside until its upgrade commits (#1563) goes too.
+      const movedLedger = retiredStateBackupPath(auditPath);
+      writeFileSync(movedLedger, 'moved-aside retired ledger');
+      const movedWeights = retiredStateBackupPath(weightsDir);
+      mkdirSync(movedWeights, { recursive: true });
+      writeFileSync(join(movedWeights, 'weights.json'), 'moved-aside weights');
+      const movedLegacy = retiredStateBackupPath(legacyDir);
+      mkdirSync(join(movedLegacy, 'partial-fit'), { recursive: true });
+      writeFileSync(join(movedLegacy, 'partial-fit', 'scratch.json'), 'moved-aside scratch');
       deleteOlympusData({ all: true, homeDir, env });
+      for (const moved of [movedLedger, movedWeights, movedLegacy]) expect(existsSync(moved)).toBe(false);
       expect(existsSync(auditPath)).toBe(false);
       expect(existsSync(weightsPath)).toBe(false);
       expect(existsSync(weightsDir)).toBe(false);

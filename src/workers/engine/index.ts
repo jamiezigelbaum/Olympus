@@ -367,6 +367,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     for (const [ticket, entry] of releaseTickets) if (entry.expires <= Date.now()) releaseTickets.delete(ticket);
   };
   const consultAsk = options.consultAsk;
+  const ownerLimits = options.ownerLimits;
   const archiveImportAgent = options.archiveImportAgent;
   const ownerTierItems = options.ownerTierItems;
   const judgeCheck = options.judgeCheck;
@@ -584,6 +585,15 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // The request's signal (a remote caller gone, a job's deadline)
           // cancels the writer and the session before dispatch.
           return json(await consultAsk(await parseConsultAskRequest(request), request.signal));
+        }
+
+        // olympus_limits: the CLI, local MCP and Home list and continue stops here.
+        // Refusals are OperationErrors (invalid_params), answered as 400s below.
+        if (request.method === 'POST' && url.pathname === `${basePath}/limits`) {
+          if (!ownerLimits) {
+            throw new EmailSourceWorkerError(501, 'limits_not_supported', 'This engine does not report work stops.');
+          }
+          return json(await ownerLimits(await parseObjectBody(request)));
         }
 
         // An agent's side of importing an archive (archive-import/agent.ts): ask

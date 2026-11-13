@@ -749,7 +749,15 @@ function withGuard(
     : !guardRetry || Date.parse(result.retry_at.at) >= Date.parse(guardRetry.at)
       ? result.retry_at
       : guardRetry;
-  return { ...result, ...(retry ? { retry_at: retry } : {}), api_usage: usage };
+  const reason = retry?.degraded_reason;
+  const amounts: Record<string, number> = reason === 'daily_api_request_guard'
+    ? { limit_stop_limit: usage.hard_budgets.api_requests, limit_stop_used: usage.api_requests }
+    : reason === 'daily_resource_read_guard'
+      ? { limit_stop_limit: usage.hard_budgets.resource_reads, limit_stop_used: usage.resource_reads + usage.reserved_resource_reads }
+      : reason === 'daily_cost_guard'
+        ? { limit_stop_limit: usage.hard_budgets.estimated_spend_microusd, limit_stop_used: usage.estimated_spend_microusd }
+        : {};
+  return { ...result, counts: { ...result.counts, ...amounts }, ...(retry ? { retry_at: retry } : {}), api_usage: usage };
 }
 
 function validAttemptedAt(value: string | undefined, now: () => Date): Date {
@@ -776,3 +784,5 @@ function validSnapshotTimestamp(value: string | undefined): Date {
   }
   return timestamp;
 }
+
+// limit-retry: retry:withGuard:retry_at -> x.rate_limit

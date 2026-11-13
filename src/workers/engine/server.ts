@@ -1,3 +1,8 @@
+import { X_CONTENT_RECOVERY_LIMIT_SUBJECT } from '../x-bookmarks/content-recovery.ts';
+import { GMAIL_IMPORT_LIMIT_SUBJECT, withGmailImportRunOnce } from '../google-connectors/gmail-import-allowance.ts';
+import { startVeniceCreditRecovery, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
+import { openVeniceCreditPausePaths, ownerLimitStopHooks } from '../../core/owner-limit-state.ts';
+import { ownerLimits, limitRunOnceSource } from '../../core/owner-limits.ts';
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
 import { fileSourceScopeOnDemandFilters } from '../source-scope-runtime.ts';
 import type { OnDemandReadRequest, OnDemandReadResult } from '../file-extraction/on-demand-read.ts';
@@ -9,7 +14,7 @@ import { createOwnerTierItems, getOwnerTierItem, type OwnerTierItemsContext } fr
 import { createJudgeCheck } from '../classification/judge-check.ts';
 import { prepareBuiltInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, judgeSpendingPath } from '../classification/judge-spending.ts';
-import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, reopenSecondRoundAfterStop, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } from '../classification/judge-pacing.ts';
 import { type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
@@ -454,7 +459,7 @@ import { approveClassifier, resolveClassificationLedgerPath, readClassificationL
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
-import { beginBootProgress, finishBootProgress, reportBootStep } from '../../core/boot-progress.ts';
+import { beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import {
@@ -572,7 +577,17 @@ let workerLaunch: WorkerLaunch = {};
  */
 export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void> {
   workerLaunch = { ...launch };
-  await main();
+  await mainRecordingFrontFailure();
+}
+
+/** A front whose start throws records the error's code before it goes (#1563); a no-op in any other role. */
+async function mainRecordingFrontFailure(): Promise<void> {
+  try {
+    await main();
+  } catch (error) {
+    failFrontProgress(error);
+    throw error;
+  }
 }
 
 /**
@@ -607,8 +622,22 @@ export async function main(): Promise<void> {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
   // The waits on this boot read its progress, not a fixed ceiling (#1494). The
-  // front does not own the data root and never writes it.
+  // front does not own the data root's boot work and never writes that file;
+  // it reports its own start, each store it opens a step (#1563).
   if (engineRole !== 'front') beginBootProgress(process.env);
+  else {
+    beginFrontProgress(process.env);
+    // A front that exits on an error says which, by code, in its progress
+    // file, so an upgrade that waited on it reports the cause and not a
+    // probe timeout (#1563). The exit stays what it was: print, exit 1.
+    const exitOnError = (error: unknown) => {
+      failFrontProgress(error);
+      console.error(error);
+      process.exit(1);
+    };
+    process.once('uncaughtException', exitOnError);
+    process.once('unhandledRejection', exitOnError);
+  }
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
   if (engineRole === 'front') {
@@ -619,6 +648,7 @@ export async function main(): Promise<void> {
     if (!frontToken) throw new Error('The engine front needs the worker auth token.');
     forbidWritableStoreOpens();
     await waitForEngineBackground({ socketPath: engineSocketPath!, authToken: frontToken });
+    reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
   }
   // A retired per-store path setting would open empty stores beside the
@@ -730,7 +760,9 @@ export async function main(): Promise<void> {
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   await carryCloudJudgeApproval(judgeSpending, cloudJudgeRuntime, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
-  const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
+  const initialJudgeChoice = judgeSpending.status();
+  const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { ...initialJudgeChoice,
+    ...(initialJudgeChoice.stop === 'cap' || initialJudgeChoice.stop === 'payment' ? { stop: null, remainingDollars: 1 } : {}) });
   // The local judge's own speed and held share on this install, for the setup estimates (#891).
   const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
@@ -1618,6 +1650,7 @@ export async function main(): Promise<void> {
         }
         return {
           set: gmailArchiveSet.set,
+          reportWait: (reason: string) => gmailImportGate.reportWait?.(reason),
           sync: gmailLaneSyncOptions(ownerRules),
           // The account scope live Gmail writes under, so both inputs name one item.
           account: gmailItemScopeFor(handle),
@@ -2517,8 +2550,8 @@ export async function main(): Promise<void> {
   };
   const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
-    // The split's front reads the queue; the background owns it and runs the jobs.
-    ...(engineRole === 'front' ? { readOnly: true } : {}),
+    // The split's front reads the queue (the runtime takes that from the
+    // process role); the background owns it and runs the jobs.
     enabled: fileExtractionCorpora().length > 0 || dropboxConnectorStoreLane.enabled || localFilesConnectorStoreLane.enabled
       || whatsappConnectorStoreLane.enabled || googleDriveConnectorStoreLane.enabled,
     allowEmpty: true,
@@ -4756,6 +4789,41 @@ export async function main(): Promise<void> {
     ownerTierItems: ownerTierItemsEngine,
     // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
     judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, ownerTierItemsContext, { withPreview: true }) }),
+    ownerLimits: (params) => ownerLimits(params, {
+      runOnce: async (subject, stop) => {
+        if (subject === GMAIL_IMPORT_LIMIT_SUBJECT) {
+          if (!sourceScheduler?.status().enabled || !sourceScheduler.status().sources.some(source => source.source_id === SCHEDULER_SOURCE_IDS.archiveImports)) throw new OperationError('invalid_request', 'The import scheduler is unavailable or disabled.');
+          if (sourceScheduler.hasExecutingTask(new Set([SCHEDULER_SOURCE_IDS.archiveImports]))) return { status: 'busy' };
+          void withGmailImportRunOnce(() => sourceScheduler!.runSource(SCHEDULER_SOURCE_IDS.archiveImports, undefined, 'operator'))
+            .catch(error => console.warn('Gmail import run failed:', error instanceof Error ? error.name : 'unknown'));
+          return { status: 'checking' };
+        }
+        if (subject === X_CONTENT_RECOVERY_LIMIT_SUBJECT) {
+          const recovery = currentXBookmarksRuntime()?.contentRecovery;
+          if (!recovery) throw new OperationError('invalid_request', 'X content recovery is unavailable.');
+          const receipt = await recovery.recover({ execute: true, provenance: 'operator', ...(stop.waiting?.items ? { limit: stop.waiting.items } : {}) });
+          return { status: receipt.status, receipt };
+        }
+        const response = await workerFetchInProcess(new Request('http://olympus-worker.internal/dashboard/sync-now', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: limitRunOnceSource(subject) }),
+        }));
+        const body = await response.json() as { error?: { code?: unknown; message?: unknown } };
+        // A refusal (stopping, scope not approved, no lane) is the route's own words, never a success.
+        if (!response.ok) {
+          throw new OperationError('invalid_request', typeof body.error?.message === 'string' ? body.error.message : `The sync could not start (${response.status}).`);
+        }
+        return body;
+      },
+      credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
+      wake: (id) => {
+        if (id === 'judge.spend_cap' || id === 'judge.payment') {
+          reopenSecondRoundAfterStop(judgeSpending.status().choice, judgeSecondRoundStatePath(process.env));
+          tierSniffer?.resumeCloudLimit();
+        }
+        else tierSniffer?.wake();
+        if (id === 'gmail.import_allowance') void sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.archiveImports).catch(error => console.warn('Gmail import resume failed:', error instanceof Error ? error.name : 'unknown'));
+      },
+    }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
@@ -6048,8 +6116,15 @@ export async function main(): Promise<void> {
   serverOptions.fetch = (async (request, server) => {
     const response = await fetchWithTierLedgerStatus(request, server);
     const path = new URL(request.url).pathname;
-    if ((path === '/v1/health' || path === '/health') && response?.ok && tierLedgerProblems.size) {
-      return Response.json({ ...await response.json() as object, privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) }, { status: response.status, headers: response.headers });
+    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront)) {
+      return Response.json({
+        ...await response.json() as object,
+        ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
+        // The front answers while its background restarts or crash-loops: an
+        // upgrade or rollback reads this before it calls the engine healthy
+        // (#1563 review).
+        ...(engineFront ? { engine_background: await engineFront.backgroundReady() ? 'ready' : 'unreachable' } : {}),
+      }, { status: response.status, headers: response.headers });
     }
     return response;
   }) as typeof serverOptions.fetch;
@@ -6101,6 +6176,7 @@ export async function main(): Promise<void> {
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') finishBootProgress();
+  if (engineFront) finishFrontProgress();
   if (listens) {
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and
   // OpenClaw-hosted installs alike. Dashboard-only backends without this
@@ -6175,7 +6251,7 @@ export async function main(): Promise<void> {
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
-      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } });
   snifferModelBuilt = rawSnifferModel !== undefined;
   // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
@@ -6187,12 +6263,12 @@ export async function main(): Promise<void> {
   const judgeChoice = judgeSpending.status();
   // The front judges nothing, so it runs no double-check either.
   const secondRoundVenice = !engineFront && snifferModel && snifferLane?.kind === 'local' && judgeChoice.choice === 'local-then-venice'
-    && !judgeChoice.stop && (judgeChoice.uncapped === true || judgeChoice.remainingDollars > 0) && cloudJudgeRuntime.source !== 'off'
+    && judgeChoice.stop !== 'storage' && cloudJudgeRuntime.source !== 'off'
     && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
       lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
       promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
     })
-    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } })
     : undefined;
   if (!engineFront && judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
     console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
@@ -6414,6 +6490,7 @@ export async function main(): Promise<void> {
         people: ({ request }) => runForwarded(request),
         source_sync: ({ request }) => runForwarded(request),
         data_export: ({ request }) => runForwarded(request),
+        owner_limits: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.
         judge_now: ({ items, budgetMs }) => runChunkJudgment(items, budgetMs),
@@ -6476,6 +6553,18 @@ export async function main(): Promise<void> {
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
     || connectorStores.some((store) => embedsOnThisComputer(connectorStoreEmbeddingProviders.get(store.corpusId)) && store.queuedEmbeddingItemIds(1).length > 0);
   localPacer.start();
+  // The plugin's credit monitor runs in Node and writes only the marker; the marker check reports it here.
+  const configuredCreditMarkers = (): string[] => [olympusConfig.worker.creditMonitor.pauseFile,
+    process.env.OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE].filter((path): path is string => !!path);
+  // The split's front stays a reader: recovery writes the scheduler store, so only the writer runs it.
+  const stopCreditRecovery = engineFront ? () => {} : startVeniceCreditRecovery({
+    paths: () => [...new Set([...openVeniceCreditPausePaths(), ...configuredCreditMarkers()])],
+    markers: configuredCreditMarkers,
+    stops: ownerLimitStopHooks,
+    probe: signal => fetchVeniceCreditStatus({ signal, baseUrl: VENICE_BILLING_BASE_URL, balanceOnly: true,
+      env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } }),
+    onResume: () => tierSniffer?.wake(),
+  });
   const stopCpuSampleLog = await startCpuSampleLog(process.env);
 
   // The worker owns a background tick that outlives any request, so the process
@@ -6499,6 +6588,7 @@ export async function main(): Promise<void> {
     clearInterval(captureTick);
     stopSupersededSweep();
     stopCpuSampleLog?.();
+    stopCreditRecovery();
     tierSniffer?.stop();
     localPacer.stop();
     archiveImportDashboard.close();
@@ -6599,5 +6689,5 @@ export function resolveEmailSourceBindHostFromEnv(env: Record<string, string | u
 }
 
 if (import.meta.main) {
-  await main();
+  await mainRecordingFrontFailure();
 }

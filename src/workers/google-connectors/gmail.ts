@@ -1,3 +1,4 @@
+import { ownerLimitSettingsPath, readOwnerLimitOverride } from '../../core/owner-limit-settings.ts';
 import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -987,8 +988,10 @@ export function createGmailDailyRequestBudget(options: {
   now?: () => Date;
 } = {}): GoogleDailyRequestBudget {
   const env = options.env ?? process.env;
+  const limitSettings = ownerLimitSettingsPath();
   return new GoogleDailyRequestBudget({
     provider: 'Gmail',
+    dailyRequestBudgetOverride: now => readOwnerLimitOverride('gmail.dailyRequests', now, limitSettings),
     dailyRequestBudget: gmailDailyRequestBudgetFromEnv(env),
     statePath: options.statePath?.trim() || defaultGmailRequestBudgetStatePath(env),
     ...(options.now ? { now: options.now } : {}),

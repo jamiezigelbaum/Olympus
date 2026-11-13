@@ -2954,6 +2954,7 @@ export function chatgptDashboardClient(
     const api = String(wait.api || wait.label);
     const facts = [wait.reason === 'limit' ? String(wait.limitLabel || '')
       : fill(wait.reason === 'rate_limit' ? P.home.waitRateLimit : P.home.waitBudget, { api })];
+    if (wait.reason === 'limit' && (wait.limit != null || wait.used != null)) facts.push(String(wait.used ?? '?') + ' / ' + String(wait.limit ?? '?') + ' ' + String(wait.unit || ''));
     if (wait.reason === 'limit' && wait.since) facts.push('since ' + String(wait.since));
     if (wait.waiting?.items !== undefined) facts.push(String(wait.waiting.items) + ' items waiting');
     if (wait.waiting?.runs !== undefined) facts.push(String(wait.waiting.runs) + ' runs waiting');
@@ -2964,7 +2965,7 @@ export function chatgptDashboardClient(
     const row = add(el('li', 'row home-line'), body);
     if (wait.fix) {
       const source = (state.data?.sources || []).find((entry: Any) => entry.id === wait.sourceId);
-      const key = 'limit:' + String(wait.sourceId);
+      const key = 'limit:' + String(wait.fix.args?.id || wait.sourceId) + ':' + String(wait.fix.args?.subject || '');
       add(body, add(el('div', 'source-actions'), wait.fix.tool === config.syncTool && source && syncChecking(source)
         ? checkingControl(key) : fixControl(wait.fix, key, 'plain', false, { id: wait.sourceId, label: wait.label })));
     }

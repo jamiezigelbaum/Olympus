@@ -48,6 +48,9 @@ export interface McpSourceSessionOptions {
   rateLimitRetries?: number;
   rateLimitBackoffMs?: number;
   callTimeoutMs?: number;
+  /** Content-free request lifecycle, used by the owning source's provider wait reporter. */
+  onSuccess?: () => void;
+  onRateLimit?: (retryAfterMs: number) => void;
 }
 
 const RATE_LIMIT_TEXT = /rate.?limit|too many requests|\b429\b/i;
@@ -148,9 +151,12 @@ export class McpSourceSession {
   private async paced<T>(work: () => Promise<T>): Promise<T> {
     await this.pacer.turn();
     try {
-      return await work();
+      const result = await work();
+      this.options.onSuccess?.();
+      return result;
     } catch (error) {
       const kind = errorKind(error);
+      if (kind === 'rate' || kind === 'rate_limited') this.options.onRateLimit?.(error instanceof McpSourceError ? error.retryAfterMs ?? 15 * 60_000 : 15 * 60_000);
       if (error instanceof McpSourceError) throw error;
       throw new McpSourceError(kind === 'rate' ? 'rate_limited' : kind ?? 'server_error', { cause: error });
     }
@@ -175,6 +181,10 @@ export class McpSourceSession {
         result = await work();
       } catch (error) {
         const kind = errorKind(error);
+        if (kind === 'rate_limited' && error instanceof McpSourceError) {
+          this.options.onRateLimit?.(error.retryAfterMs ?? 15 * 60_000);
+          throw error;
+        }
         if (kind !== 'rate') {
           if (error instanceof McpSourceError) throw error;
           throw new McpSourceError(kind ?? 'server_error', { cause: error });
@@ -189,9 +199,12 @@ export class McpSourceSession {
           else if (PERMISSION_TEXT.test(text)) throw new McpSourceError('permission_missing');
         }
       }
-      if (!limited) return result as T;
+      if (!limited) { this.options.onSuccess?.(); return result as T; }
       const wait = backoffMs * attempt;
-      if (attempt > retries) throw new McpSourceError('rate_limited', { retryAfterMs: wait });
+      if (attempt > retries) {
+        this.options.onRateLimit?.(wait);
+        throw new McpSourceError('rate_limited', { retryAfterMs: wait });
+      }
       this.rateLimitRetries += 1;
       this.pacer.backoff(wait);
     }

@@ -183,6 +183,7 @@ import {
 import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores, tierCommandRewritesStores } from './workers/classification/tier-cli.ts';
 import { DataOwnerBusyError } from './core/data-owner-lock.ts';
 import { callWorkerCli, runLocallyOrThroughWorker, WorkerUnreachableError } from './core/cli-via-worker.ts';
+import { ownerLimits } from './core/owner-limits.ts';
 import { backupOlympusData, restoreOlympusBackup, deriveBackupKey } from './data-backup.ts';
 import { parseProposalFrom, parseSettingsProposalInput, SETTINGS_PROPOSAL_SCHEMA, SettingsProposalError } from './core/settings-proposal.ts';
 import { olympusDataRoot } from './core/olympus-layout.ts';
@@ -928,7 +929,13 @@ async function main(): Promise<void> {
         'Enable the appropriate proof gate and, for private/admin email tools, use an approved local/private model surface.',
       );
     }
-    const result = await operation.handler(ctx, params);
+    // olympus limits opens the scheduler store: here only while Olympus is down, else through the worker.
+    const result = operation.name === 'olympus_limits'
+      ? await runLocallyOrThroughWorker(
+        () => ownerLimits(params, { credit: { env: { ...process.env, ...ctx.config.worker.creditMonitor.credentials } } }),
+        () => operation.handler(ctx, params),
+      )
+      : await operation.handler(ctx, params);
     console.log(JSON.stringify(result, null, 2));
     // A health walk that reports ok:false and exits 0 cannot be looped on:
     // "run it until it goes green" needs an exit code and a line a human can
@@ -1534,6 +1541,8 @@ function printHelp(): void {
   console.log('  olympus settings show|schema');
   console.log('  olympus settings propose <file.json|-> [--from <name>]');
   console.log('  olympus doctor');
+  console.log('  olympus limits');
+  console.log('  olympus limits continue <id> [--subject S] [--to N] [--keep]');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect telegram|whatsapp --pair');
