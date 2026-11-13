@@ -99,16 +99,17 @@ describe('fresh read-on-demand without write tokens', () => {
       try { return new Function('document', 'location', 'getComputedStyle', `return ${DRIVE_SEARCH_SETTLED}`)(window.document, window.location, window.getComputedStyle.bind(window)); }
       finally { void window.happyDOM.close(); }
     };
-    expect(settled('/drive/u/0/search', '<div role="grid"></div>')).toBe(true);
+    expect(settled('/drive/u/0/search', '<div role="grid"><div role="row"></div></div>')).toBe(true);
+    expect(settled('/drive/u/0/search', '<div role="grid"></div>')).toBe(false);
     expect(settled('/drive/u/0/search', '<div>None of your files or folders matched this search</div>')).toBe(true);
-    // Drive keeps a hidden progressbar in the page at rest; only a visible one means still loading.
+    // Drive keeps loading bars on screen at rest, so rows or the empty state decide, not the bar.
     expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div>No results</div>')).toBe(true);
-    expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div role="grid"></div>', true)).toBe(false);
+    expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div role="grid"><div role="row"></div></div>', true)).toBe(true);
     // The storage meter is a visible bar with a value; it never means loading.
-    expect(settled('/drive/u/0/search', '<div role="progressbar" aria-valuenow="1"></div><div role="grid"></div>', true)).toBe(true);
+    expect(settled('/drive/u/0/search', '<div role="progressbar" aria-valuenow="1"></div><div role="grid"><div role="row"></div></div>', true)).toBe(true);
     // The empty-state text is final even while another visible bar is on the page.
     expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div>No results</div>', true)).toBe(true);
-    expect(settled('/drive/u/0/my-drive', '<div role="grid"></div>')).toBe(false);
+    expect(settled('/drive/u/0/my-drive', '<div role="grid"><div role="row"></div></div>')).toBe(false);
     expect(settled('/drive/u/0/search', '<div>Loading</div>')).toBe(false);
   });
 
