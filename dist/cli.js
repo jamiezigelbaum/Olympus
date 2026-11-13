@@ -219704,6 +219704,7 @@ function checkpointRetiredLedger(path) {
   let db;
   try {
     db = new Database30(path);
+    db.exec("PRAGMA busy_timeout = 10000;");
     db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   } catch {} finally {
     db?.close();

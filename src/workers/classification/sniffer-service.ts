@@ -2087,6 +2087,7 @@ function checkpointRetiredLedger(path: string): void {
   let db: Database | undefined;
   try {
     db = new Database(path);
+    db.exec('PRAGMA busy_timeout = 10000;');
     db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   } catch {
     // Moved as it is.
