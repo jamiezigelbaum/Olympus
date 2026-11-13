@@ -70,7 +70,7 @@ test('p173: embedding windows recover the paraphrased answer inside the already 
   expect(detail.windowPlacement).toMatchObject({ scorer: 'embedding', windowsScored: 24, timedOut: false });
   // All three seats share this store scorer.
   expect(f.calls.filter(call => call.length > 1).map(call => call.length)).toEqual([24]);
-}, 20_000);
+});
 
 test('reranker windows recover the same answer and leave seat order intact', async () => {
   const f = await fixture();
@@ -85,7 +85,7 @@ test('reranker windows recover the same answer and leave seat order intact', asy
   expect(detail.windowPlacement).toMatchObject({ scorer: 'reranker', windowsScored: 24, timedOut: false });
   // The pack rerank, then one call holding every eligible seat.
   expect(calls.map(call => call.length)).toEqual([4, 24]);
-}, 20_000);
+});
 
 for (const providerName of ['fixture', 'venice']) test(`secure_local windows refuse cloud provider ${providerName}`, async () => {
   const f = await fixture({ secure: true, backend: 'cloud', providerName });
@@ -93,7 +93,7 @@ for (const providerName of ['fixture', 'venice']) test(`secure_local windows ref
   expect(text(detail)).not.toContain(ANSWER);
   expect(f.calls).toEqual([]);
   expect(detail.windowPlacement).toMatchObject({ scorer: 'none', windowsScored: 0, timedOut: false });
-}, 20_000);
+});
 
 test('hung window scoring is bounded by the shared deadline and audited using the injected clock', async () => {
   const f = await fixture();
@@ -111,7 +111,7 @@ test('hung window scoring is bounded by the shared deadline and audited using th
   expect(text(detail)).not.toContain(ANSWER);
   expect(detail.windowPlacement).toMatchObject({ scorer: 'reranker', windowsScored: 0, timedOut: true, elapsedMs: 1500 });
   expect(clock.pendingTimers()).toBe(0);
-}, 20_000);
+});
 
 test('only the top three multi-passage seats change, with the original character and byte limits', async () => {
   const f = await fixture({ single: true });
@@ -123,7 +123,7 @@ test('only the top three multi-passage seats change, with the original character
   for (const candidate of detail.pack.candidates) expect(candidate.chunks.join('').length).toBeLessThanOrEqual(3000);
   const bounded = await buildEvidencePackDetailed({ ...f.input, evidenceByteBudget: 4800 });
   for (const candidate of bounded.pack.candidates) expect(utf8ByteLength(candidate.chunks.join(''))).toBeLessThanOrEqual(1200);
-}, 20_000);
+});
 
 
 test('all three eligible leading seats receive windows; the fourth keeps its exact word clip', async () => {
@@ -133,7 +133,7 @@ test('all three eligible leading seats receive windows; the fourth keeps its exa
   expect(text(detail, 3)).not.toContain(ANSWER);
   expect(detail.windowPlacement).toMatchObject({ seats: 3, windowsScored: 24 });
   expect(f.calls.filter(call => call.length > 1).map(call => call.length)).toEqual([24]);
-}, 20_000);
+});
 
 test('ordinary cloud embeddings also fall back without sending window text', async () => {
   const f = await fixture({ backend: 'cloud' });
@@ -141,7 +141,7 @@ test('ordinary cloud embeddings also fall back without sending window text', asy
   expect(f.calls).toEqual([]);
   expect(text(detail)).not.toContain(ANSWER);
   expect(detail.windowPlacement).toMatchObject({ scorer: 'none', windowsScored: 0 });
-}, 20_000);
+});
 
 test('placement shares never split code points and stay inside the character and UTF-8 clips', () => {
   const full = '😀'.repeat(2000);
@@ -194,7 +194,7 @@ test('placement follows the final reranked seats rather than the hydration order
   for (let seat = 0; seat < 3; seat++) expect(text(detail, seat)).toContain(ANSWER);
   expect(text(detail, 3)).not.toContain(ANSWER);
   expect(detail.windowPlacement).toMatchObject({ seats: 3, scorer: 'reranker', windowsScored: 24 });
-}, 20_000);
+});
 
 
 test('a scorer rejection after consuming the deadline still records a timeout', async () => {
@@ -214,7 +214,7 @@ test('secure_local placement uses the allowed local embedding provider', async (
   const detail = await buildEvidencePackDetailed(f.input);
   expect(text(detail)).toContain(ANSWER);
   expect(detail.windowPlacement).toMatchObject({ scorer: 'embedding', windowsScored: 24 });
-}, 20_000);
+});
 
 test('selected-item and recency builds never invoke the otherwise configured reranker for windows', async () => {
   const f = await fixture({ shortTail: true });
@@ -231,7 +231,7 @@ test('selected-item and recency builds never invoke the otherwise configured rer
     expect(detail.rerank).toBeUndefined();
     expect(detail.windowPlacement?.scorer).toBe('embedding');
   }
-}, 20_000);
+});
 
 test('each seat scores at most eight windows (its word clip plus seven spread over the whole chunk), 24 per question', async () => {
   const full = 'x'.repeat(4000);
@@ -463,7 +463,7 @@ test('a scorer skipped as slow is tried again after a minute, so placement is ne
   const chunks = ['o'.repeat(600)];
   const clock = createTestClock();
   let calls = 0;
-  const slow: WindowScorer = (_query, windows) => { calls++; return new Promise(resolve => { clock.setTimeout(() => resolve(windows.map(() => 0)), 2_000); }); };
+  const slow: WindowScorer = (_query, windows) => { calls++; return new Promise(settle => { clock.setTimeout(() => settle(windows.map(() => 0)), 2_000); }); };
   const first = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
   const pending = first.place(chunks, { texts: ['x'.repeat(4000)], scoreWindows: slow });
   await clock.advance(2_000);
@@ -487,4 +487,4 @@ test('a placed window stays provable: its stored chunk hashes still bind to it f
   const placed = seat.chunks.find(chunk => chunk.includes(ANSWER));
   expect(placed).toBeDefined();
   expect(releasePassageHashes(seat.provenance, placed!).length).toBeGreaterThan(0);
-}, 20_000);
+});
