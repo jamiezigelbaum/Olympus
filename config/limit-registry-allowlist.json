@@ -612,12 +612,6 @@
     "retire_when": "Remove when the resumable pacing/retry boundary SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS is retired or adopted."
   },
   {
-    "path": "src/workers/telegram-messages/media-child.ts",
-    "symbol": "LIVE_MEDIA_MAX_READ_BYTES",
-    "reason": "pending",
-    "retire_when": "The limits adopter for src/workers/telegram-messages/media-child.ts must register/report/clear LIVE_MEDIA_MAX_READ_BYTES and expose its continue action."
-  },
-  {
     "path": "src/workers/whatsapp/archive-input.ts",
     "symbol": "SLOT_CAP",
     "reason": "internal",

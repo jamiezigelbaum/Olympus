@@ -10889,6 +10889,7 @@ class FileExtractionSourceError extends Error {
   retryable;
   errorHash;
   retryAt;
+  sizeBytes;
   constructor(errorKind, options = {}) {
     super(errorKind);
     this.name = "FileExtractionSourceError";
@@ -10898,6 +10899,8 @@ class FileExtractionSourceError extends Error {
     const errorHash = options.detailForHash === undefined ? undefined : createHash5("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
     if (errorHash)
       this.errorHash = errorHash;
+    if (options.sizeBytes !== undefined && Number.isSafeInteger(options.sizeBytes) && options.sizeBytes >= 0)
+      this.sizeBytes = options.sizeBytes;
     if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt)))
       this.retryAt = options.retryAt;
   }
@@ -38617,6 +38620,17 @@ async function errorFromResponse(response, context2) {
 // src/workers/source-scheduler.ts
 import { createHash as createHash20 } from "node:crypto";
 
+// src/core/source-size-limits.ts
+var SOURCE_FILE_SIZE_CEILING = 256 * 1024 * 1024;
+var SOURCE_SIZE_LIMITS = [
+  { id: "dropbox.max_file_bytes", subject: "dropbox.files", providers: ["dropbox"], defaultBytes: 8000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+  { id: "local_files.max_file_bytes", subject: "local.files", providers: ["local_files"], defaultBytes: 64000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+  { id: "telegram.media_quota", subject: "telegram.messages", providers: ["telegram", "telegram.media"], bytesOnly: true, defaultBytes: 64 * 1024 * 1024, ceilingBytes: SOURCE_FILE_SIZE_CEILING }
+];
+registerLimit({ id: "dropbox.max_file_bytes", kind: "size", scope: "extraction", label: "Dropbox file size", unit: "bytes", continue: "raise" });
+registerLimit({ id: "local_files.max_file_bytes", kind: "size", scope: "extraction", label: "Local file size", unit: "bytes", continue: "raise" });
+registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
+
 // src/core/file-mime.ts
 var MIME_BY_EXTENSION = Object.freeze({
   pdf: "application/pdf",
@@ -40738,7 +40752,6 @@ var READ_OBJECTS = new Set([
 // src/workers/telegram-messages/media-child.ts
 var TELEGRAM_CHILD_KEY = "media";
 var TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
-var LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;
 var MEDIA_DISK_FLOOR_BYTES = 5 * 1024 * 1024 * 1024;
 
 // src/workers/telegram-messages/capture-spool-connector.ts
@@ -40959,6 +40972,9 @@ var remembered = new Map;
 // src/workers/telegram-messages/archive-target.ts
 var PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 
+// src/workers/file-extraction/size-limit-stops.ts
+var reporter = createLimitStopReporter();
+
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile2, realpath, stat as stat2 } from "node:fs/promises";
 import { relative as relative6, resolve as resolve10, sep as sep6 } from "node:path";
@@ -41159,7 +41175,7 @@ class DropboxExtractionSource {
       throw await downloadFailure(response);
     const declaredSize = parsePositiveInteger(response.headers.get("content-length") ?? undefined);
     if (maxBytes !== undefined && declaredSize !== undefined && declaredSize > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_too_large", { sizeBytes: declaredSize });
     }
     let bytes;
     try {
@@ -41170,7 +41186,7 @@ class DropboxExtractionSource {
       throw error;
     }
     if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
     }
     const contentType = response.headers.get("content-type");
     return {
@@ -41239,14 +41255,14 @@ async function readVerifiedCandidate(input) {
   if (!fileStat.isFile())
     return;
   if (input.maxBytes !== undefined && fileStat.size > input.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
+    throw new FileExtractionSourceError("source_too_large", { sizeBytes: fileStat.size });
   }
   if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
     return;
   }
   const bytes = new Uint8Array(await readFile2(input.candidatePath));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
+    throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
   }
   if (computeDropboxContentHash(bytes) !== input.contentHash)
     return;

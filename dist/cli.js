@@ -68693,7 +68693,7 @@ function readSettings(path) {
   settingsCache = { path, stamp, value };
   return value;
 }
-function readOwnerLimitOverride(key2, now, path = ownerLimitSettingsPath()) {
+function readOwnerLimitOverride(key2, now, path = ownerLimitSettingsPath(), heldItem) {
   const [group, name] = key2.split(".");
   const value = readSettings(path)[group]?.[name];
   if (!value)
@@ -68701,9 +68701,15 @@ function readOwnerLimitOverride(key2, now, path = ownerLimitSettingsPath()) {
   const valid = (n) => Number.isFinite(n) && n >= 0 && (key2 === "zkapi.dailySpend" || Number.isSafeInteger(n));
   if (!valid(value.to) || typeof value.keep !== "boolean" || value.base !== undefined && !valid(value.base))
     throw new Error(`Owner ${key2} setting is invalid.`);
+  if (isSizeLimitKey(key2)) {
+    const granted = heldItem === undefined ? undefined : value.heldItems?.[heldItem];
+    if (granted !== undefined && !valid(granted))
+      throw new Error(`Owner ${key2} held-file setting is invalid.`);
+    return value.keep ? value.to : granted ?? value.base;
+  }
   return value.keep || value.day === now.toISOString().slice(0, 10) ? value.to : value.base;
 }
-function saveOwnerLimitOverride(key2, to, keep, now, path = ownerLimitSettingsPath()) {
+function saveOwnerLimitOverride(key2, to, keep, now, path = ownerLimitSettingsPath(), heldItems) {
   if (!Number.isFinite(to) || to < 0 || key2 !== "zkapi.dailySpend" && !Number.isSafeInteger(to))
     throw new TypeError("Invalid owner limit amount.");
   mkdirSync35(dirname56(path), { recursive: true, mode: 448 });
@@ -68712,7 +68718,7 @@ function saveOwnerLimitOverride(key2, to, keep, now, path = ownerLimitSettingsPa
     const [group, name] = key2.split(".");
     const prior = raw[group]?.[name];
     const base = prior?.keep ? prior.to : prior?.base;
-    const value = { to, keep, ...!keep ? { day: now.toISOString().slice(0, 10), ...base !== undefined ? { base } : {} } : {} };
+    const value = { to, keep, ...!keep ? { ...isSizeLimitKey(key2) ? { heldItems: { ...prior?.heldItems, ...Object.fromEntries((heldItems ?? []).map((item) => [item, to])) } } : { day: now.toISOString().slice(0, 10) }, ...base !== undefined ? { base } : {} } : {} };
     writePrivateFileAtomicSync(path, JSON.stringify({ ...raw, [group]: { ...raw[group], [name]: value } }) + `
 `);
     settingsCache = undefined;
@@ -68720,6 +68726,9 @@ function saveOwnerLimitOverride(key2, to, keep, now, path = ownerLimitSettingsPa
 }
 function readJudgeCallOverride(now, path = ownerLimitSettingsPath()) {
   return readOwnerLimitOverride("judge.dailyCalls", now, path);
+}
+function isSizeLimitKey(key2) {
+  return ["dropbox.max_file_bytes", "local_files.max_file_bytes", "telegram.media_quota"].includes(key2);
 }
 var settingsCache;
 var init_owner_limit_settings = __esm(() => {
@@ -68772,6 +68781,7 @@ var init_file_extraction_source = __esm(() => {
     retryable;
     errorHash;
     retryAt;
+    sizeBytes;
     constructor(errorKind, options = {}) {
       super(errorKind);
       this.name = "FileExtractionSourceError";
@@ -68781,6 +68791,8 @@ var init_file_extraction_source = __esm(() => {
       const errorHash = options.detailForHash === undefined ? undefined : createHash39("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
+      if (options.sizeBytes !== undefined && Number.isSafeInteger(options.sizeBytes) && options.sizeBytes >= 0)
+        this.sizeBytes = options.sizeBytes;
       if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt)))
         this.retryAt = options.retryAt;
     }
@@ -80935,17 +80947,23 @@ async function buildPreparedEvidencePackDetailed(input) {
   const searched = new Set(routed.searchedCorpora);
   const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora.filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));
   const limitStopGaps = [];
+  const sizeHeldSources = new Set;
   const limits2 = registeredLimits();
   const now = (input.now?.() ?? new Date).getTime();
   for (const stop of input.limitStops ?? []) {
     const limit = limits2.find((entry) => entry.id === stop.id);
-    if (limit?.scope !== "source" || stop.resumesAt && Date.parse(stop.resumesAt) <= now)
+    if (limit?.scope !== "source" && !(limit?.scope === "extraction" && limit.kind === "size") || stop.resumesAt && Date.parse(stop.resumesAt) <= now)
       continue;
     if (limitStopSubjects(stop).some((subject) => searched.has(subject) || searchedSources.has(subject))) {
-      limitStopGaps.push(`${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
+      if (limit.kind === "size")
+        for (const subject of limitStopSubjects(stop))
+          sizeHeldSources.add(subject);
+      const heldFiles = stop.waiting?.items ?? 0;
+      limitStopGaps.push(limit.kind === "size" ? `${limit.label}: ${heldFiles} ${heldFiles === 1 ? "file" : "files"} held because they are too large; not read. Raise the size limit to continue.` : `${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
     }
   }
   extractionGaps.push(...limitStopGaps);
+  const sizeHeldCorpora = new Set(defaultSourceCorpusRegistryConfig().corpora.filter((corpus) => sizeHeldSources.has(corpus.sourceId)).map((corpus) => corpus.corpusId));
   const policyDeniedCoverageGaps = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes = [];
@@ -81049,7 +81067,8 @@ async function buildPreparedEvidencePackDetailed(input) {
       unreadCandidates += 1;
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
-    const gap = extractionGapFor(hit, provider !== undefined, content);
+    const sizeHeld = !content?.chunks.length && sizeHeldCorpora.has(hit.corpusId);
+    const gap = sizeHeld ? undefined : extractionGapFor(hit, provider !== undefined, content);
     candidateExtractionGapIndexes.push(gap ? [extractionGaps.length] : []);
     if (gap)
       extractionGaps.push(gap);
@@ -87702,6 +87721,35 @@ var init_x_bookmarks = __esm(() => {
   init_reconcile_state();
 });
 
+// src/core/source-size-limits.ts
+import { createHash as createHash53 } from "node:crypto";
+function sourceSizeLimitForProvider(provider) {
+  return SOURCE_SIZE_LIMITS.find((limit) => limit.providers.includes(provider));
+}
+function sizeHeldItemKey(ref) {
+  return createHash53("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
+}
+function sourceSizeBytes(policy, ref, now = new Date, fallback = policy.defaultBytes) {
+  return Math.min(sourceSizeCeiling(policy, ref?.mimeType), readOwnerLimitOverride(policy.id, now, undefined, ref ? sizeHeldItemKey(ref) : undefined) ?? fallback);
+}
+function sourceSizeCeiling(policy, mimeType) {
+  return mimeType?.startsWith("image/") ? Math.min(policy.ceilingBytes, 64 * 1024 * 1024) : policy.ceilingBytes;
+}
+var SOURCE_FILE_SIZE_CEILING, SOURCE_SIZE_LIMITS;
+var init_source_size_limits = __esm(() => {
+  init_limit_stops();
+  init_owner_limit_settings();
+  SOURCE_FILE_SIZE_CEILING = 256 * 1024 * 1024;
+  SOURCE_SIZE_LIMITS = [
+    { id: "dropbox.max_file_bytes", subject: "dropbox.files", providers: ["dropbox"], defaultBytes: 8000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+    { id: "local_files.max_file_bytes", subject: "local.files", providers: ["local_files"], defaultBytes: 64000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+    { id: "telegram.media_quota", subject: "telegram.messages", providers: ["telegram", "telegram.media"], bytesOnly: true, defaultBytes: 64 * 1024 * 1024, ceilingBytes: SOURCE_FILE_SIZE_CEILING }
+  ];
+  registerLimit({ id: "dropbox.max_file_bytes", kind: "size", scope: "extraction", label: "Dropbox file size", unit: "bytes", continue: "raise" });
+  registerLimit({ id: "local_files.max_file_bytes", kind: "size", scope: "extraction", label: "Local file size", unit: "bytes", continue: "raise" });
+  registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
+});
+
 // src/workers/source-checkpoint.ts
 function isBoundedSourceCheckpoint(value) {
   return typeof value === "string" && value.length > 0 && value.length <= SOURCE_CHECKPOINT_MAX_LENGTH;
@@ -88175,12 +88223,13 @@ var init_provider_client = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector.ts
-import { createHash as createHash53 } from "node:crypto";
+import { createHash as createHash54 } from "node:crypto";
 function createDropboxSourceConnector(options) {
   const account = requireNonEmpty3(options.account, "Dropbox source connector account");
   const credentialHandle = options.credentialHandle?.trim() || DEFAULT_CREDENTIAL_HANDLE;
   const broker = options.broker ?? createEnvCredentialBroker();
-  const maxFetchBytes = normalizePositiveInteger(options.maxFetchBytes, DEFAULT_MAX_FETCH_BYTES);
+  const sizePolicy = sourceSizeLimitForProvider("dropbox");
+  const configuredMaxFetchBytes = normalizePositiveInteger(options.maxFetchBytes, sizePolicy.defaultBytes);
   const recursive = options.recursive ?? true;
   const rootListPath = listRootPath(options.rootFolderPath, options.approvedScopeKey, account);
   const connectorId = options.connectorId?.trim() || CONNECTOR_ID;
@@ -88462,6 +88511,7 @@ function createDropboxSourceConnector(options) {
           };
         }
       }
+      const maxFetchBytes = sourceSizeBytes(sizePolicy, identity2, new Date(fetchedAt), configuredMaxFetchBytes);
       const downloader = await ensureDownloadClient();
       try {
         const downloaded = await downloader.download({
@@ -88676,7 +88726,7 @@ function resumedPageOffset(cursor, page2) {
   return cursor.pageDigest === metadataPageDigest(page2) ? cursor.itemOffset : 0;
 }
 function metadataPageDigest(page2) {
-  return createHash53("sha256").update(JSON.stringify({
+  return createHash54("sha256").update(JSON.stringify({
     entries: page2.entries,
     cursor: page2.cursor?.trim() || null,
     hasMore: Boolean(page2.hasMore)
@@ -88691,7 +88741,7 @@ function providerItemIdFromLocalItemId(localItemId, account) {
 }
 function deletedProviderItemId(entry) {
   const ref = entry.pathLower || entry.pathDisplay || entry.name;
-  return `deleted:${createHash53("sha256").update(ref).digest("hex").slice(0, 32)}`;
+  return `deleted:${createHash54("sha256").update(ref).digest("hex").slice(0, 32)}`;
 }
 function listRootPath(rootFolderPath, approvedScopeKey, account) {
   const explicit = rootFolderPath?.trim();
@@ -88726,8 +88776,9 @@ function requireNonEmpty3(value, label) {
 function nowIso2() {
   return new Date().toISOString();
 }
-var CONNECTOR_ID = "dropbox", DEFAULT_CREDENTIAL_HANDLE = "dropbox.personal", DEFAULT_MAX_FETCH_BYTES = 8000000, DEFAULT_PAGE_LIMIT = 1000, MAX_PAGE_LIMIT = 2000, MAX_TRAVERSAL_ITEMS = 1e5, DELETED_FOLDER_LOOKAHEAD_ENTRIES = 50000, DROPBOX_PAGE_CURSOR_PREFIX = "dbxp1:", FOLDER_MIME_TYPE = "inode/directory", UNKNOWN_MIME_TYPE = "application/octet-stream";
+var CONNECTOR_ID = "dropbox", DEFAULT_CREDENTIAL_HANDLE = "dropbox.personal", DEFAULT_PAGE_LIMIT = 1000, MAX_PAGE_LIMIT = 2000, MAX_TRAVERSAL_ITEMS = 1e5, DELETED_FOLDER_LOOKAHEAD_ENTRIES = 50000, DROPBOX_PAGE_CURSOR_PREFIX = "dbxp1:", FOLDER_MIME_TYPE = "inode/directory", UNKNOWN_MIME_TYPE = "application/octet-stream";
 var init_connector3 = __esm(() => {
+  init_source_size_limits();
   init_credential_broker();
   init_file_mime();
   init_provider_client();
@@ -88979,7 +89030,7 @@ var init_connector_store2 = __esm(() => {
 });
 
 // src/workers/dropbox-files/provider-store-sync.ts
-import { createHash as createHash54 } from "node:crypto";
+import { createHash as createHash55 } from "node:crypto";
 function createDropboxProviderStoreSyncHandler(options) {
   const account = required2(options.account, "Dropbox connector-store account");
   if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
@@ -89118,7 +89169,7 @@ function createDropboxProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash54("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash55("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: dropboxScopedCheckpoint(sync.cursor, connectorId, options.scope !== undefined)
       };
@@ -89130,7 +89181,7 @@ function dropboxConnectorIdForScope(account, approvedScopeKey, scope) {
   const normalizedAccount = required2(account, "Dropbox connector account");
   const normalizedScope = required2(approvedScopeKey, "Dropbox approved scope key");
   const approvedScopeIdentity = scope ? `\x00${required2(scope.generation, "Dropbox approved scope generation")}` + `\x00${required2(scope.revision, "Dropbox approved scope revision")}` : "";
-  const scopeHash = createHash54("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
+  const scopeHash = createHash55("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
   return `dropbox.files.${scopeHash}`;
 }
 function dropboxScopedCheckpoint(cursor, connectorId, scoped) {
@@ -89347,14 +89398,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash55 } from "node:crypto";
+import { createHash as createHash56 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash55("sha256").update(block).digest());
+    blockDigests.push(createHash56("sha256").update(block).digest());
   }
-  return createHash55("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash56("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -90285,7 +90336,7 @@ var init_corpus_adapter4 = __esm(() => {
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID = LEGACY_TELEGRAM_MESSAGES_CORPUS_ID;
 });
 // src/workers/connector-store/capture-spool-secrets.ts
-import { createHash as createHash56 } from "node:crypto";
+import { createHash as createHash57 } from "node:crypto";
 import { closeSync as closeSync18, fsyncSync as fsyncSync3, lstatSync as lstatSync29, openSync as openSync18, readSync as readSync3, writeSync as writeSync4 } from "node:fs";
 import { join as join71 } from "node:path";
 async function redactCaptureSpoolLines(options) {
@@ -90449,7 +90500,7 @@ function addCaptureSpoolRedactions(...results) {
   }), { recordsRedacted: 0, recordsBlanked: 0 });
 }
 function secretsDigest(ledger) {
-  const hash = createHash56("sha256");
+  const hash = createHash57("sha256");
   for (const { identity: identity2, names } of ledger.secretsIdentities()) {
     hash.update([
       identity2.provider,
@@ -90483,7 +90534,7 @@ var init_capture_spool_secrets = __esm(() => {
 });
 
 // src/workers/connector-store/spool-file-identity.ts
-import { createHash as createHash57 } from "node:crypto";
+import { createHash as createHash58 } from "node:crypto";
 import { closeSync as closeSync19, openSync as openSync19, readSync as readSync4, statSync as statSync27 } from "node:fs";
 function spoolFileIdentity(path) {
   try {
@@ -90514,7 +90565,7 @@ function firstLineDigest(path) {
     const newline = head.subarray(0, read).indexOf(NEWLINE);
     if (newline < 0 && read < SPOOL_IDENTITY_HEAD_BYTES)
       return "none";
-    return createHash57("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
+    return createHash58("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
   } finally {
     closeSync19(fd2);
   }
@@ -90534,7 +90585,7 @@ function spoolBoundaryDigest(path, offset) {
     const read = window2.length === 0 ? 0 : readSync4(fd2, window2, 0, window2.length, start);
     if (read < window2.length)
       return;
-    return createHash57("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
+    return createHash58("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
   } finally {
     closeSync19(fd2);
   }
@@ -91239,8 +91290,8 @@ function telegramLiveMediaBytes(child, spoolDir, locator) {
   if (!path)
     throw new Error("Telegram no longer has this media file.");
   const size = lstatSync30(path).size;
-  if (size > LIVE_MEDIA_MAX_READ_BYTES)
-    throw new Error("Telegram media file is larger than one read.");
+  if (size > sourceSizeBytes(sourceSizeLimitForProvider("telegram"), { ...child.identity, mimeType: child.mimeType }))
+    throw new FileExtractionSourceError("source_too_large", { sizeBytes: size });
   const bytes = readFileSync47(path);
   return { ...child, content: { kind: "bytes", mimeType: child.mimeType, bytes: new Uint8Array(bytes) } };
 }
@@ -91317,18 +91368,19 @@ function telegramMediaDiskLow(spoolDir, space = diskSpaceOf) {
     return false;
   }
 }
-var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX = "telegram-live-media:v1:", LIVE_MEDIA_MAX_READ_BYTES, CAPTURE_MARK2 = "~at:", MEDIA_DISK_FLOOR_BYTES, MEDIA_DISK_FLOOR_SHARE = 0.05, TEMPORARY_MARK = ".tmp.", diskSpaceOf = (path) => {
+var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX = "telegram-live-media:v1:", CAPTURE_MARK2 = "~at:", MEDIA_DISK_FLOOR_BYTES, MEDIA_DISK_FLOOR_SHARE = 0.05, TEMPORARY_MARK = ".tmp.", diskSpaceOf = (path) => {
   const stat3 = statfsSync3(path);
   return { free: Number(stat3.bavail) * Number(stat3.bsize), total: Number(stat3.blocks) * Number(stat3.bsize) };
 }, MEDIA_WAITING_FILE = ".capture-media-waiting.jsonl";
 var init_media_child = __esm(() => {
+  init_source_size_limits();
+  init_file_extraction_source();
   TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
-  LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;
   MEDIA_DISK_FLOOR_BYTES = 5 * 1024 * 1024 * 1024;
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
-import { createHash as createHash58 } from "node:crypto";
+import { createHash as createHash59 } from "node:crypto";
 import { closeSync as closeSync20, existsSync as existsSync59, lstatSync as lstatSync31, openSync as openSync20, readSync as readSync6, readdirSync as readdirSync11 } from "node:fs";
 import { join as join73 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
@@ -92003,7 +92055,7 @@ function normalizeBudget(value) {
   return value;
 }
 function sha2563(value) {
-  return createHash58("sha256").update(value).digest("hex");
+  return createHash59("sha256").update(value).digest("hex");
 }
 function telegramConversationSize(message2) {
   const size = message2.conversationSize;
@@ -92349,7 +92401,7 @@ var init_account = __esm(() => {
 });
 
 // src/workers/archive-import/telegram/connector.ts
-import { createHash as createHash59 } from "node:crypto";
+import { createHash as createHash60 } from "node:crypto";
 function manifestTag(input) {
   return input.manifestSha256.slice(0, 16);
 }
@@ -92416,7 +92468,7 @@ function parseCursor(input, cursor) {
   return { resume, assumedZone: flag === "1:", done: false };
 }
 function sha2564(value) {
-  return createHash59("sha256").update(value).digest("hex");
+  return createHash60("sha256").update(value).digest("hex");
 }
 function placeOf(event) {
   const path = event.path;
@@ -92811,7 +92863,7 @@ function telegramPeerId(kind, bareId) {
 var CHANNEL_OFFSET = 1000000000000n;
 
 // src/workers/telegram-messages/export-facts.ts
-import { createHash as createHash60 } from "node:crypto";
+import { createHash as createHash61 } from "node:crypto";
 function telegramContactBaseKey(value) {
   if (!isRecord5(value))
     return "unreadable";
@@ -92823,9 +92875,9 @@ function telegramContactBaseKey(value) {
     return `peer${(telegramScalar(value.type) ?? "").replace(/[^a-z_]+/g, "")}:${peerId}`;
   const phone = telegramScalar(value.phone_number)?.replace(/\D+/g, "");
   if (phone)
-    return `phone${createHash60("sha256").update(phone).digest("hex").slice(0, 24)}`;
+    return `phone${createHash61("sha256").update(phone).digest("hex").slice(0, 24)}`;
   const names = [value.first_name, value.last_name, value.name, value.category, value.date_unixtime ?? value.date].map((part) => telegramScalar(part) ?? "");
-  return `name${createHash60("sha256").update(names.join("\x1F")).digest("hex").slice(0, 24)}`;
+  return `name${createHash61("sha256").update(names.join("\x1F")).digest("hex").slice(0, 24)}`;
 }
 function telegramExportFacts(root, file) {
   const key2 = `${file.relPath}\x1F${file.version.dev}:${file.version.ino}:${file.version.size}:${file.version.mtimeMs}`;
@@ -92905,7 +92957,7 @@ var init_export_facts = __esm(() => {
 });
 
 // src/workers/telegram-messages/export-records.ts
-import { createHash as createHash61 } from "node:crypto";
+import { createHash as createHash62 } from "node:crypto";
 function telegramMarkedChatId(type, id) {
   if (!id || !/^-?\d{1,20}$/.test(id))
     return;
@@ -92941,7 +92993,7 @@ function liveIso(iso2) {
   return iso2?.replace(/\.000Z$/, "Z");
 }
 function sha2565(value) {
-  return createHash61("sha256").update(value).digest("hex");
+  return createHash62("sha256").update(value).digest("hex");
 }
 function telegramExportReactions(value) {
   if (!Array.isArray(value))
@@ -93266,7 +93318,7 @@ var init_export_input = __esm(() => {
 });
 
 // src/workers/telegram-messages/archive-target.ts
-import { createHash as createHash62 } from "node:crypto";
+import { createHash as createHash63 } from "node:crypto";
 function telegramExportUserId(root, relPath, expected) {
   const reader = root.openFile(relPath, expected ? { expected } : {});
   try {
@@ -93293,7 +93345,7 @@ function telegramExportUserId(root, relPath, expected) {
   }
 }
 function telegramProviderAccountId(userId) {
-  return `telegram:${createHash62("sha256").update(userId).digest("hex").slice(0, 16)}`;
+  return `telegram:${createHash63("sha256").update(userId).digest("hex").slice(0, 16)}`;
 }
 function telegramArchiveTarget(options) {
   let connector;
@@ -93558,8 +93610,1822 @@ function connectorStoreExtractionCandidateReader(store, filters) {
   };
 }
 
+// src/workers/file-extraction/job-store.ts
+import { chmodSync as chmodSync23, mkdirSync as mkdirSync40 } from "node:fs";
+import { createHash as createHash64, randomUUID as randomUUID23 } from "node:crypto";
+import { dirname as dirname67 } from "node:path";
+import { Database as Database19 } from "bun:sqlite";
+function settleUnreadable(candidates, classify2) {
+  const items = [];
+  let blocked = 0;
+  for (const candidate of candidates) {
+    let verdict = "unreadable";
+    if (classify2) {
+      try {
+        verdict = classify2(candidate);
+      } catch {
+        verdict = "blocked_policy";
+      }
+    }
+    if (verdict === "blocked_policy")
+      blocked += 1;
+    else if (verdict === "unreadable")
+      items.push(candidate);
+  }
+  items.sort((a, b) => a.failedAt === b.failedAt ? a.ref.localItemId.localeCompare(b.ref.localItemId) : a.failedAt < b.failedAt ? 1 : -1);
+  return { items, blocked };
+}
+function unreadableCandidate(itemRows) {
+  let newest;
+  for (const row of itemRows) {
+    if (row.status !== "failed_terminal" && row.status !== "skipped_too_large")
+      continue;
+    if (!newest || row.updated_at > newest.updated_at)
+      newest = row;
+  }
+  return newest ? { ref: refFromRow(newest), failedAt: newest.updated_at, ...newest.status === "skipped_too_large" ? { errorKind: "source_too_large" } : newest.last_error_kind ? { errorKind: newest.last_error_kind } : {} } : undefined;
+}
+
+class LocalFileExtractionJobStore {
+  dbPath;
+  readonly;
+  db;
+  grantAuthorityId;
+  unregisterPath;
+  constructor(dbPath = defaultFileExtractionJobsDbPath(), options = {}) {
+    this.dbPath = dbPath;
+    this.readonly = options.readonly === true;
+    const inMemory = dbPath === ":memory:";
+    if (!this.readonly)
+      assertWritableStoreOpenAllowed("extraction job store", dbPath);
+    if (!inMemory && !this.readonly) {
+      mkdirSync40(dirname67(dbPath), { recursive: true, mode: 448 });
+    }
+    this.db = this.readonly ? new Database19(dbPath, { readonly: true }) : new Database19(dbPath, { create: true });
+    if (!inMemory && !this.readonly)
+      chmodSync23(dbPath, 384);
+    const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
+    if (this.readonly) {
+      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
+    } else {
+      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;`);
+    }
+    assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
+    if (!this.readonly) {
+      runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
+      this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_reads (
+        corpus_id TEXT NOT NULL, provider_item_id TEXT NOT NULL, job_id TEXT PRIMARY KEY REFERENCES extraction_jobs(job_id) ON DELETE CASCADE,
+        reason TEXT NOT NULL DEFAULT 'on_demand', requester TEXT NOT NULL, question_id TEXT,
+        reserved_bytes INTEGER NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS on_demand_question ON on_demand_reads(question_id);
+      CREATE INDEX IF NOT EXISTS on_demand_item ON on_demand_reads(corpus_id, provider_item_id);
+      CREATE TABLE IF NOT EXISTS on_demand_waiting (
+        question_id TEXT NOT NULL, corpus_id TEXT NOT NULL, provider_item_id TEXT NOT NULL,
+        PRIMARY KEY(question_id, corpus_id, provider_item_id)
+      );`);
+      createUnroutableItemsTable(this.db);
+      this.unregisterPath = registerExtractionJobsDbPath(dbPath);
+    }
+  }
+  close() {
+    this.unregisterPath?.();
+    closeSqliteStore(this.db);
+  }
+  invalidateUnsettledForCorpus(corpusId) {
+    this.assertWritable("scope queue invalidation");
+    const id = requireBoundedString(corpusId, "corpusId");
+    return this.db.transaction(() => {
+      this.db.query("DELETE FROM extraction_unroutable_items WHERE corpus_id = ?").run(id);
+      return this.db.query(`
+        DELETE FROM extraction_jobs
+        WHERE corpus_id = ? AND status IN ('queued', 'leased')
+      `).run(id).changes;
+    }).immediate();
+  }
+  recordUnroutable(refs) {
+    this.assertWritable("record unroutable items");
+    const now = nowIso3();
+    const insert = this.db.query(`
+      INSERT INTO extraction_unroutable_items (
+        corpus_id, provider, account_scope, approved_scope_key, local_item_id,
+        provider_item_id, source_version, content_hash, mime_type, seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(corpus_id, local_item_id) DO UPDATE SET
+        provider = excluded.provider,
+        account_scope = excluded.account_scope,
+        approved_scope_key = excluded.approved_scope_key,
+        provider_item_id = excluded.provider_item_id,
+        source_version = excluded.source_version,
+        content_hash = excluded.content_hash,
+        mime_type = excluded.mime_type,
+        seen_at = excluded.seen_at
+    `);
+    this.db.transaction(() => {
+      for (const rawRef of refs) {
+        const ref = requireItemRef(rawRef);
+        insert.run(ref.corpusId, ref.provider, ref.accountScope, ref.approvedScopeKey, ref.localItemId, ref.providerItemId, ref.sourceVersion ?? null, ref.contentHash ?? null, ref.mimeType ?? null, now);
+      }
+    }).immediate();
+  }
+  enqueueOnDemandRead(request, job, grant, limits2 = { files: 3, bytes: 25 * 1024 * 1024 }) {
+    this.assertWritable("on_demand");
+    if (!Number.isSafeInteger(limits2.files) || limits2.files < 1 || !Number.isSafeInteger(limits2.bytes) || limits2.bytes < 1) {
+      throw new TypeError("Invalid on-demand limits.");
+    }
+    if (job.refs.length !== 1)
+      throw new TypeError("On-demand reads require one ref.");
+    return this.db.transaction(() => {
+      const previous = this.db.query(`SELECT j.status, j.source_version FROM on_demand_reads r
+        JOIN extraction_jobs j ON j.job_id = r.job_id
+        WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId);
+      if (previous && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? "")) {
+        if (previous.status === "leased" || previous.status === "indexed")
+          return { state: "reading", etaSeconds: 60 };
+        if (previous.status === "queued" || previous.status === "failed_retryable")
+          return { state: "queued", etaSeconds: 60 };
+        const ownerRetry = request.requester === "owner" && previous.status === "skipped_too_large";
+        if (!ownerRetry)
+          return { state: "refused", reason: "read_failed" };
+      }
+      const size = job.refs[0].sizeBytes;
+      const used = this.db.query(`SELECT COUNT(*) AS files, COALESCE(SUM(reserved_bytes), 0) AS bytes
+        FROM on_demand_reads WHERE question_id = ? AND requester != 'owner'`).get(request.questionId ?? null);
+      const bytes = size ?? Math.max(0, limits2.bytes - used.bytes);
+      if (request.requester !== "owner" && (used.files >= limits2.files || bytes < 1 || used.bytes + bytes > limits2.bytes)) {
+        this.db.query(`INSERT OR IGNORE INTO on_demand_waiting VALUES (?, ?, ?)`).run(request.questionId ?? "", request.itemRef.corpusId, request.itemRef.providerItemId);
+        const waiting = this.db.query("SELECT COUNT(*) AS n FROM on_demand_waiting WHERE question_id = ?").get(request.questionId ?? "");
+        return { state: "capped", reason: {
+          id: "on_demand_reads_per_question",
+          limit: limits2,
+          used,
+          waiting_names_count: waiting.n,
+          resumes: "never"
+        } };
+      }
+      grant();
+      this.db.query("DELETE FROM on_demand_waiting WHERE corpus_id = ? AND provider_item_id = ?").run(request.itemRef.corpusId, request.itemRef.providerItemId);
+      const queued = this.enqueue({
+        ...job,
+        force: true,
+        priority: 100,
+        ...request.requester !== "owner" ? { maxBytesPerFile: Math.max(1, bytes) } : {}
+      });
+      const ref = queued.jobRefs[0];
+      this.db.query(`INSERT INTO on_demand_reads
+        (corpus_id, provider_item_id, job_id, requester, question_id, reserved_bytes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id) DO UPDATE SET requester = excluded.requester, question_id = excluded.question_id,
+          reserved_bytes = excluded.reserved_bytes, created_at = excluded.created_at`).run(request.itemRef.corpusId, request.itemRef.providerItemId, ref.jobId, request.requester, request.questionId ?? null, bytes, nowIso3());
+      return { state: "queued", etaSeconds: 60 };
+    }).immediate();
+  }
+  pendingOnDemandReads() {
+    return this.db.query(`SELECT j.* FROM on_demand_reads r CROSS JOIN extraction_jobs j ON j.job_id = r.job_id
+      WHERE j.status = 'queued' OR (j.status = 'failed_retryable' AND (j.next_retry_at IS NULL OR j.next_retry_at <= ?))
+        OR (j.status = 'leased' AND j.leased_until <= ?) ORDER BY r.rowid LIMIT 100`).all(nowIso3(), nowIso3()).map((row) => recordFromRow2(row).ref);
+  }
+  onDemandSettledLanes() {
+    return this.db.query(`SELECT DISTINCT j.corpus_id, j.provider, j.account_scope, j.approved_scope_key
+      FROM on_demand_reads r CROSS JOIN extraction_jobs j ON j.job_id = r.job_id
+      WHERE j.status NOT IN ('queued', 'leased', 'failed_retryable', 'indexed') LIMIT 100`).all().map((row) => ({
+      corpusId: row.corpus_id,
+      provider: row.provider,
+      accountScope: row.account_scope,
+      approvedScopeKey: row.approved_scope_key
+    }));
+  }
+  recordOnDemandFetchedBytes(jobId, bytes) {
+    this.db.query("UPDATE on_demand_reads SET reserved_bytes = ? WHERE job_id = ?").run(bytes, jobId);
+  }
+  onDemandJob(jobId) {
+    return this.db.query("SELECT 1 FROM on_demand_reads WHERE job_id = ?").get(jobId) !== null;
+  }
+  recordSizeRefusal(jobId, leaseToken, amounts) {
+    this.assertWritable("size_refusal");
+    if (amounts.sizeBytes !== undefined)
+      requireSafeInteger(amounts.sizeBytes, "sizeBytes");
+    if (amounts.maxBytes !== undefined)
+      requirePositiveSafeInteger(amounts.maxBytes, "maxBytes");
+    this.db.query(`UPDATE extraction_jobs SET size_bytes = COALESCE(?, size_bytes),
+      max_bytes_per_file = COALESCE(?, max_bytes_per_file)
+      WHERE job_id = ? AND lease_token = ? AND status = 'leased'`).run(amounts.sizeBytes ?? null, amounts.maxBytes ?? null, jobId, leaseToken);
+  }
+  sizeHeldJobs(providers) {
+    if (providers.length === 0)
+      return [];
+    const rows = this.db.query(`SELECT j.* FROM extraction_jobs j
+      WHERE j.provider IN (${providers.map(() => "?").join(",")}) AND j.status = 'skipped_too_large'
+        AND (j.last_error_kind = 'source_too_large' OR j.size_bytes > j.max_bytes_per_file)
+        AND NOT EXISTS (SELECT 1 FROM extraction_jobs newer
+          WHERE newer.provider = j.provider AND newer.account_scope = j.account_scope
+            AND newer.provider_item_id = j.provider_item_id AND newer.local_item_id = j.local_item_id
+            AND ((newer.source_version = j.source_version AND newer.status IN ('indexed', 'blocked_policy'))
+              OR newer.created_at > j.created_at
+              OR (newer.rowid > j.rowid AND (newer.source_version != j.source_version OR newer.content_hash != j.content_hash))))
+    `).all(...providers);
+    return rows.map((row) => ({
+      jobId: row.job_id,
+      ref: refFromRow(row),
+      ...row.max_bytes_per_file === null ? {} : { maxBytes: row.max_bytes_per_file }
+    }));
+  }
+  requeueSizeHeld(jobIds, to) {
+    this.assertWritable("size_raise");
+    requirePositiveSafeInteger(to, "size limit");
+    this.db.transaction(() => {
+      const update = this.db.query(`UPDATE extraction_jobs SET status = CASE WHEN size_bytes > ? THEN 'skipped_too_large' ELSE 'queued' END, max_bytes_per_file = ?,
+        attempts = 0, last_error_kind = NULL, last_error_hash = NULL, next_retry_at = NULL, updated_at = ?
+        WHERE job_id = ? AND status = 'skipped_too_large'`);
+      for (const id of jobIds)
+        update.run(to, to, nowIso3(), id);
+    }).immediate();
+  }
+  enqueue(request) {
+    this.assertWritable("enqueue");
+    const extractorKind = requireToken3(request.extractorKind, "extractorKind");
+    const extractorVersion = requireKeyPart(request.extractorVersion, "extractorVersion");
+    const policyDecision = requirePolicyDecision(request.policyDecision ?? "index_allowed");
+    const policyDecisionSupplied = request.policyDecision === undefined ? 0 : 1;
+    const priority = request.priority === undefined ? 0 : requireSafeInteger(request.priority, "priority");
+    const maxBytesPerFile = request.maxBytesPerFile === undefined ? undefined : requirePositiveSafeInteger(request.maxBytesPerFile, "maxBytesPerFile");
+    const force = request.force === true;
+    const now = nowIso3();
+    let jobsQueued = 0;
+    let jobsExisting = 0;
+    let jobsForced = 0;
+    let jobsSkippedTooLarge = 0;
+    const jobRefs = [];
+    this.db.transaction(() => {
+      for (const rawRef of request.refs) {
+        const ref = requireItemRef(rawRef);
+        this.db.query("DELETE FROM extraction_unroutable_items WHERE corpus_id = ? AND local_item_id = ?").run(ref.corpusId, ref.localItemId);
+        const status = maxBytesPerFile !== undefined && ref.sizeBytes !== undefined && ref.sizeBytes > maxBytesPerFile ? "skipped_too_large" : "queued";
+        const existing = this.existingJob(ref, extractorKind, extractorVersion);
+        const jobId = existing?.job_id ?? makeJobId();
+        const redacted = itemNameRedacted(this.db, ref);
+        const name = redacted ? null : ref.name ?? null;
+        const reread = !redacted && existing !== undefined && existing !== null && status === "queued" && takeRestoredReread(this.db, existing.job_id);
+        const identityReread = !redacted && status === "queued" && existing !== undefined && existing !== null && existing.status === "failed_terminal" && existing.last_error_kind === AMBIGUOUS_IDENTITY_ERROR_KIND && (existing.janitor_terminal_requeue_count ?? 0) < 1;
+        const forceExisting = Boolean(existing) && (force || reread || identityReread) && status === "queued";
+        const reset = forceExisting ? 1 : 0;
+        this.db.query(`
+          INSERT INTO extraction_jobs (
+            job_id, corpus_id, provider, account_scope, approved_scope_key,
+            provider_item_id, local_item_id, source_version, content_hash,
+            name, mime_type, size_bytes, extractor_kind, extractor_version,
+            policy_decision, status, priority, max_bytes_per_file, attempts,
+            temp_bytes_cleaned, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
+          ON CONFLICT(corpus_id, provider, account_scope, provider_item_id,
+                      source_version, content_hash, extractor_kind, extractor_version)
+          DO UPDATE SET
+            approved_scope_key = excluded.approved_scope_key,
+            local_item_id = excluded.local_item_id,
+            name = excluded.name,
+            mime_type = excluded.mime_type,
+            size_bytes = excluded.size_bytes,
+            policy_decision = CASE WHEN ? THEN excluded.policy_decision
+              ELSE extraction_jobs.policy_decision END,
+            status = CASE WHEN ? THEN excluded.status ELSE extraction_jobs.status END,
+            priority = MAX(extraction_jobs.priority, excluded.priority),
+            max_bytes_per_file = excluded.max_bytes_per_file,
+            attempts = CASE WHEN ? THEN 0 ELSE extraction_jobs.attempts END,
+            leased_by_hash = CASE WHEN ? THEN NULL ELSE extraction_jobs.leased_by_hash END,
+            leased_until = CASE WHEN ? THEN NULL ELSE extraction_jobs.leased_until END,
+            lease_token = CASE WHEN ? THEN NULL ELSE extraction_jobs.lease_token END,
+            lease_grant_ordinal = CASE WHEN ? THEN NULL
+              ELSE extraction_jobs.lease_grant_ordinal END,
+            last_error_hash = CASE WHEN ? THEN NULL ELSE extraction_jobs.last_error_hash END,
+            last_error_kind = CASE WHEN ? THEN NULL ELSE extraction_jobs.last_error_kind END,
+            next_retry_at = CASE WHEN ? THEN NULL ELSE extraction_jobs.next_retry_at END,
+            temp_bytes_cleaned = CASE WHEN ? THEN 1 ELSE extraction_jobs.temp_bytes_cleaned END,
+            updated_at = excluded.updated_at
+        `).run(jobId, ref.corpusId, ref.provider, ref.accountScope, ref.approvedScopeKey, ref.providerItemId, ref.localItemId, ref.sourceVersion ?? "", ref.contentHash ?? "", name, ref.mimeType ?? null, ref.sizeBytes ?? null, extractorKind, extractorVersion, policyDecision, status, priority, maxBytesPerFile ?? null, now, now, policyDecisionSupplied, reset, reset, reset, reset, reset, reset, reset, reset, reset, reset);
+        if (status === "skipped_too_large" && !existing) {
+          this.db.query("UPDATE extraction_jobs SET last_error_kind = 'source_too_large' WHERE job_id = ?").run(jobId);
+        }
+        if (identityReread) {
+          this.db.query(`UPDATE extraction_jobs
+            SET janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1
+            WHERE job_id = ?`).run(jobId);
+        }
+        if (forceExisting) {
+          jobsForced += 1;
+        } else if (existing) {
+          jobsExisting += 1;
+        } else if (status === "skipped_too_large") {
+          jobsSkippedTooLarge += 1;
+        } else {
+          jobsQueued += 1;
+        }
+        jobRefs.push({
+          jobId,
+          status: forceExisting ? status : jobStatus(existing?.status) ?? status
+        });
+      }
+    }).immediate();
+    return { jobsQueued, jobsExisting, jobsForced, jobsSkippedTooLarge, jobRefs };
+  }
+  lease(request) {
+    this.assertWritable("lease");
+    const lane = requireLaneKey(request);
+    const workerId = requireBoundedString(request.workerId, "workerId");
+    const limit = clampInteger(request.limit ?? DEFAULT_EXTRACTION_LEASE_LIMIT, 1, MAX_EXTRACTION_LEASE_LIMIT);
+    const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
+    const now = nowIso3();
+    const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+    const leaseToken = randomUUID23();
+    const workerHash = hashString6(workerId);
+    const claimed = [];
+    this.db.transaction(() => {
+      this.db.query(`
+        UPDATE extraction_jobs
+        SET status = 'failed_terminal',
+            last_error_kind = ?,
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            next_retry_at = NULL,
+            updated_at = ?
+        WHERE corpus_id = ?
+          AND provider = ?
+          AND account_scope = ?
+          AND approved_scope_key = ?
+          AND status = 'leased'
+          AND leased_until IS NOT NULL
+          AND leased_until < ?
+          AND attempts >= ?
+      `).run(EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND, now, lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, now, MAX_EXTRACTION_RETRY_ATTEMPTS);
+      for (const row of this.leaseCandidateRows(lane, request, now, limit)) {
+        const claimGrant = this.mintClaimGrant();
+        const claim = this.db.query(`
+          UPDATE extraction_jobs
+          SET status = 'leased',
+              attempts = CASE
+                WHEN last_error_kind = ? THEN 1
+                ELSE attempts + 1
+              END,
+              -- The marker is a one-claim grant, so the claim that takes it
+              -- clears it. Left in place it re-grants on every later reclaim
+              -- and the retry budget never advances past 1.
+              last_error_kind = CASE
+                WHEN last_error_kind = ? THEN NULL
+                ELSE last_error_kind
+              END,
+              leased_by_hash = ?,
+              leased_until = ?,
+              lease_token = ?,
+              lease_grant_ordinal = ?,
+              updated_at = ?
+          WHERE job_id = ?
+            AND corpus_id = ?
+            AND provider = ?
+            AND account_scope = ?
+            AND approved_scope_key = ?
+            AND (
+              status = 'queued'
+              OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until < ?)
+              OR (status = 'failed_retryable' AND (next_retry_at IS NULL OR next_retry_at <= ?))
+            )
+        `).run(RECYCLED_ERROR_KIND, RECYCLED_ERROR_KIND, workerHash, leaseExpiresAt, leaseToken, claimGrant.ordinal, now, row.job_id, lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, now, now);
+        if (claim.changes > 0)
+          claimed.push({ row, grant: claimGrant });
+      }
+    })();
+    return {
+      corpusId: lane.corpusId,
+      provider: lane.provider,
+      accountScope: lane.accountScope,
+      scopeKeyHash: hashString6(lane.approvedScopeKey),
+      workerIdHash: workerHash,
+      leasedJobs: claimed.map(({ row, grant }) => ({
+        jobId: row.job_id,
+        ref: refFromRow(row),
+        extractorKind: row.extractor_kind,
+        extractorVersion: row.extractor_version,
+        policyDecision: row.policy_decision,
+        ...row.max_bytes_per_file === null ? {} : { maxBytesPerFile: row.max_bytes_per_file },
+        attempts: row.last_error_kind === RECYCLED_ERROR_KIND ? 1 : row.attempts + 1,
+        leaseExpiresAt,
+        leaseToken,
+        grantAuthority: grant.authority,
+        grantOrdinal: grant.ordinal
+      }))
+    };
+  }
+  mintClaimGrant() {
+    const row = this.db.query(`
+      UPDATE extraction_claim_grants
+      SET last_ordinal = MAX(last_ordinal + 1, ?)
+      WHERE grant_id = 1
+      RETURNING authority_id, last_ordinal
+    `).get(Date.now());
+    if (!row)
+      throw new Error("Extraction job store claim grant sequence is missing.");
+    return { authority: row.authority_id, ordinal: row.last_ordinal };
+  }
+  claimGrantAuthority() {
+    if (this.grantAuthorityId === undefined) {
+      const row = this.db.query("SELECT authority_id FROM extraction_claim_grants WHERE grant_id = 1").get();
+      if (!row)
+        throw new Error("Extraction job store claim grant sequence is missing.");
+      this.grantAuthorityId = row.authority_id;
+    }
+    return this.grantAuthorityId;
+  }
+  record(request) {
+    this.assertWritable("record");
+    const jobId = requireKeyPart(request.jobId, "jobId");
+    const status = requireTerminalStatus(request.status);
+    const errorKind = request.errorKind === undefined ? undefined : requireToken3(request.errorKind, "errorKind");
+    const errorHash = request.errorHash === undefined ? undefined : requireHash2(request.errorHash);
+    const tempBytesCleaned = request.tempBytesCleaned !== false;
+    const now = nowIso3();
+    return this.db.transaction(() => {
+      const row = this.jobRow(jobId);
+      if (!row)
+        throw new Error("Extraction record references an unknown job.");
+      if (row.status !== "leased")
+        throw new Error("Extraction record requires a leased job.");
+      if (request.workerId !== undefined && row.leased_by_hash !== null && row.leased_by_hash !== hashString6(requireBoundedString(request.workerId, "workerId"))) {
+        throw new Error("Extraction record worker does not hold the job lease.");
+      }
+      if (request.leaseToken !== undefined && row.lease_token !== request.leaseToken) {
+        throw new Error("Extraction record worker does not hold the job lease.");
+      }
+      const effectiveStatus = status === "failed_retryable" && row.attempts >= MAX_EXTRACTION_RETRY_ATTEMPTS ? "failed_terminal" : status;
+      const nextRetryAt = nextRetryTimestamp(effectiveStatus, row.attempts, now);
+      this.db.query(`
+        UPDATE extraction_jobs
+        SET status = ?,
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            last_error_kind = ?,
+            last_error_hash = ?,
+            next_retry_at = ?,
+            temp_bytes_cleaned = ?,
+            updated_at = ?
+        WHERE job_id = ?
+      `).run(effectiveStatus, errorKind ?? null, errorHash ?? null, nextRetryAt, tempBytesCleaned ? 1 : 0, now, jobId);
+      const artifactsRecorded = this.replaceArtifacts(row, request.derivations, now);
+      return {
+        jobId,
+        status: effectiveStatus,
+        attempts: row.attempts,
+        ...nextRetryAt === null ? {} : { nextRetryAt },
+        artifactsRecorded
+      };
+    })();
+  }
+  releaseLeasesWithoutAttempt(request) {
+    this.assertWritable("lease release");
+    const leaseToken = requireBoundedString(request.leaseToken, "leaseToken");
+    const jobIds = [...new Set(request.jobIds.map((jobId) => jobId?.trim()).filter(Boolean))];
+    if (jobIds.length === 0)
+      return { releasedJobs: 0 };
+    const workerHash = request.workerId === undefined ? null : hashString6(requireBoundedString(request.workerId, "workerId"));
+    const now = nowIso3();
+    let released = 0;
+    this.db.transaction(() => {
+      const update = this.db.query(`
+        UPDATE extraction_jobs
+        SET status = 'queued',
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+            updated_at = ?
+        WHERE job_id = ?
+          AND status = 'leased'
+          AND lease_token = ?
+          AND (? IS NULL OR leased_by_hash IS NULL OR leased_by_hash = ?)
+      `);
+      for (const jobId of jobIds) {
+        released += update.run(now, jobId, leaseToken, workerHash, workerHash).changes;
+      }
+    })();
+    return { releasedJobs: released };
+  }
+  recycleLeases(request) {
+    this.assertWritable("lease recycle");
+    const lane = requireLaneKey(request);
+    const prefix = requireToken3(request.extractorKindPrefix, "extractorKindPrefix");
+    const limit = clampInteger(request.limit ?? DEFAULT_RECYCLE_LIMIT, 1, MAX_RECYCLE_LIMIT);
+    const staleOnly = request.staleOnly === true;
+    const dryRun = request.dryRun === true;
+    const now = nowIso3();
+    let matched = [];
+    this.db.transaction(() => {
+      const params = [
+        lane.corpusId,
+        lane.provider,
+        lane.accountScope,
+        lane.approvedScopeKey,
+        prefix.length,
+        prefix
+      ];
+      if (staleOnly)
+        params.push(now);
+      params.push(limit);
+      matched = this.db.query(`
+        SELECT job_id
+        FROM extraction_jobs
+        WHERE corpus_id = ?
+          AND provider = ?
+          AND account_scope = ?
+          AND approved_scope_key = ?
+          AND status = 'leased'
+          AND substr(extractor_kind, 1, ?) = ?
+          ${staleOnly ? "AND leased_until IS NOT NULL AND leased_until <= ?" : ""}
+        ORDER BY updated_at ASC, job_id ASC
+        LIMIT ?
+      `).all(...params);
+      if (dryRun || matched.length === 0)
+        return;
+      const update = this.db.query(`
+        UPDATE extraction_jobs
+        SET status = 'queued',
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            last_error_kind = ?,
+            next_retry_at = NULL,
+            updated_at = ?
+        WHERE job_id = ?
+      `);
+      for (const row of matched)
+        update.run(RECYCLED_ERROR_KIND, now, row.job_id);
+    })();
+    return {
+      extractorKindPrefix: prefix,
+      matchedJobs: matched.length,
+      jobsRequeued: dryRun ? 0 : matched.length,
+      dryRun,
+      staleOnly
+    };
+  }
+  janitorRequeue(request) {
+    this.assertWritable("janitor requeue");
+    const lane = requireLaneKey(request);
+    const reason = requireReason(request.reason);
+    const limit = clampInteger(request.limit ?? DEFAULT_JANITOR_LIMIT, 1, MAX_JANITOR_LIMIT);
+    const dryRun = request.dryRun === true;
+    if (request.mode === "terminal_reclassification" && request.targetExtractorKind !== undefined) {
+      return this.janitorEscalate(lane, request, reason, limit, dryRun);
+    }
+    const lastErrorKind = request.lastErrorKind === undefined ? undefined : requireToken3(request.lastErrorKind, "lastErrorKind");
+    const extractorKind = request.extractorKind === undefined ? undefined : requireToken3(request.extractorKind, "extractorKind");
+    const extractorKindPrefix = request.extractorKindPrefix === undefined ? undefined : requireToken3(request.extractorKindPrefix, "extractorKindPrefix");
+    if (request.mode === "terminal_reclassification" && (!extractorKind || !lastErrorKind)) {
+      throw new TypeError("Terminal reclassification requires both extractorKind and lastErrorKind.");
+    }
+    const networkOverride = request.allowNetworkTerminalRequeueAfterPriorJanitor === true && lastErrorKind !== undefined && NETWORK_ERROR_KINDS.has(lastErrorKind);
+    const now = nowIso3();
+    let matched = [];
+    let skippedAttemptBudget = 0;
+    let skippedAlreadyJanitorRequeued = 0;
+    this.db.transaction(() => {
+      const filters = [
+        "corpus_id = ?",
+        "provider = ?",
+        "account_scope = ?",
+        "approved_scope_key = ?"
+      ];
+      const params = [
+        lane.corpusId,
+        lane.provider,
+        lane.accountScope,
+        lane.approvedScopeKey
+      ];
+      if (request.mode === "expired_retryable") {
+        filters.push("status = 'failed_retryable'");
+        filters.push("(next_retry_at IS NULL OR next_retry_at <= ?)");
+        params.push(now);
+        if (extractorKindPrefix) {
+          filters.push("substr(extractor_kind, 1, ?) = ?");
+          params.push(extractorKindPrefix.length, extractorKindPrefix);
+        }
+      } else {
+        filters.push("status = 'failed_terminal'");
+        filters.push("extractor_kind = ?");
+        filters.push("COALESCE(last_error_kind, ?) = ?");
+        params.push(extractorKind, lastErrorKind, lastErrorKind);
+        if (!networkOverride) {
+          filters.push("COALESCE(janitor_terminal_requeue_count, 0) < 1");
+        }
+      }
+      matched = this.db.query(`
+        SELECT job_id, attempts
+        FROM extraction_jobs
+        WHERE ${filters.join(" AND ")}
+        ORDER BY updated_at ASC, job_id ASC
+        LIMIT ?
+      `).all(...params, limit);
+      if (request.mode === "terminal_reclassification" && !networkOverride) {
+        const skipped = this.db.query(`
+          SELECT COUNT(*) AS count
+          FROM extraction_jobs
+          WHERE corpus_id = ?
+            AND provider = ?
+            AND account_scope = ?
+            AND approved_scope_key = ?
+            AND status = 'failed_terminal'
+            AND extractor_kind = ?
+            AND COALESCE(last_error_kind, ?) = ?
+            AND COALESCE(janitor_terminal_requeue_count, 0) >= 1
+        `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind, lastErrorKind, lastErrorKind);
+        skippedAlreadyJanitorRequeued = skipped.count;
+      }
+      const eligible = request.mode === "expired_retryable" ? matched.filter((row) => row.attempts < MAX_EXTRACTION_RETRY_ATTEMPTS) : matched;
+      skippedAttemptBudget = matched.length - eligible.length;
+      if (dryRun || eligible.length === 0)
+        return;
+      const terminal = request.mode === "terminal_reclassification" ? 1 : 0;
+      const stampedErrorKind = request.mode === "terminal_reclassification" ? JANITOR_TERMINAL_ERROR_KIND : JANITOR_RETRYABLE_ERROR_KIND;
+      const update = this.db.query(`
+        UPDATE extraction_jobs
+        SET status = 'queued',
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            last_error_kind = ?,
+            next_retry_at = NULL,
+            janitor_requeue_count = COALESCE(janitor_requeue_count, 0) + 1,
+            janitor_terminal_requeue_count = CASE
+              WHEN ? THEN COALESCE(janitor_terminal_requeue_count, 0) + 1
+              ELSE COALESCE(janitor_terminal_requeue_count, 0)
+            END,
+            janitor_requeued_at = ?,
+            janitor_requeue_reason = ?,
+            updated_at = ?
+        WHERE job_id = ?
+      `);
+      for (const row of eligible)
+        update.run(stampedErrorKind, terminal, now, reason, now, row.job_id);
+    })();
+    return {
+      mode: request.mode,
+      matchedJobs: matched.length,
+      jobsRequeued: dryRun ? 0 : Math.max(0, matched.length - skippedAttemptBudget),
+      jobsEscalated: 0,
+      skippedAttemptBudget,
+      skippedAlreadyJanitorRequeued,
+      skippedPolicyExcluded: 0,
+      skippedEscalationBudget: 0,
+      skippedTargetExists: 0,
+      networkGuardOverrideUsed: networkOverride,
+      dryRun,
+      reason
+    };
+  }
+  unreadJobCount(request) {
+    const { sql, params } = this.unreadJobsQuery(request);
+    const row = this.db.query(`SELECT COUNT(*) AS count FROM extraction_jobs j WHERE ${sql}`).get(...params);
+    return row.count;
+  }
+  requeueUnread(request) {
+    this.assertWritable("unread requeue");
+    const reason = requireReason(request.reason);
+    const limit = clampInteger(request.limit ?? DEFAULT_JANITOR_LIMIT, 1, MAX_JANITOR_LIMIT);
+    const { sql, params } = this.unreadJobsQuery(request);
+    const now = nowIso3();
+    let matched = [];
+    const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken3(warning, "notReadyWarning"));
+    const pendingSql = notReady.length > 0 ? `EXISTS (
+      SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
+      WHERE a.job_id = j.job_id AND w.value IN (${notReady.map(() => "?").join(", ")})
+    )` : "0";
+    let requeued = 0;
+    this.db.transaction(() => {
+      matched = this.db.query(`
+        SELECT j.job_id, ${pendingSql} AS not_ready FROM extraction_jobs j
+        WHERE ${sql}
+        ORDER BY j.updated_at ASC, j.job_id ASC
+        LIMIT ?
+      `).all(...notReady, ...params, limit);
+      const update = this.db.query(`
+        UPDATE extraction_jobs
+        SET status = 'queued',
+            attempts = 0,
+            leased_by_hash = NULL,
+            leased_until = NULL,
+            lease_token = NULL,
+            lease_grant_ordinal = NULL,
+            last_error_kind = ?,
+            next_retry_at = NULL,
+            janitor_requeue_count = COALESCE(janitor_requeue_count, 0) + 1,
+            janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + ?,
+            janitor_requeued_at = ?,
+            janitor_requeue_reason = ?,
+            updated_at = ?
+        WHERE job_id = ?
+          AND status IN ('metadata_only', 'indexed', 'failed_terminal')
+      `);
+      for (const row of matched) {
+        requeued += update.run(JANITOR_TERMINAL_ERROR_KIND, row.not_ready ? 0 : 1, now, reason, now, row.job_id).changes;
+      }
+    })();
+    return { matchedJobs: matched.length, jobsRequeued: requeued };
+  }
+  hasWorkWaitingForReader(request) {
+    const lane = requireLaneKey(request);
+    const extractorKind = requireToken3(request.extractorKind, "extractorKind");
+    const pending = this.db.query(`
+      SELECT 1 AS hit FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status IN ('queued', 'leased', 'failed_retryable')
+        AND extractor_kind = ?
+      LIMIT 1
+    `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind);
+    if (pending)
+      return true;
+    const { sql, params } = this.unreadJobsQuery(request);
+    return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
+  }
+  itemExtractionState(item) {
+    const rows = this.db.query(`
+      SELECT DISTINCT status FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+    `).all(item.provider, item.accountScope, item.providerItemId);
+    if (rows.length === 0)
+      return "none";
+    const statuses = new Set(rows.map((row) => row.status));
+    if (statuses.has("indexed"))
+      return "settled";
+    return statuses.has("queued") || statuses.has("leased") || statuses.has("failed_retryable") ? "active" : "settled";
+  }
+  itemExtractionOutcome(item, options = {}) {
+    const inConversation = Boolean(item.providerConversationId) && item.localItemId !== undefined;
+    const all = this.db.query(`
+      SELECT job_id, status, last_error_kind, policy_decision, source_version FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?${inConversation ? " AND local_item_id = ?" : ""}
+      ORDER BY updated_at DESC, job_id DESC
+    `).all(item.provider, item.accountScope, item.providerItemId, ...inConversation ? [item.localItemId] : []);
+    const current3 = all[0]?.source_version ?? null;
+    const rows = all.filter((row2) => (row2.source_version ?? null) === current3);
+    if (rows.length === 0)
+      return options.whenNoJob;
+    const indexed = rows.find((row2) => row2.status === "indexed");
+    if (!indexed && rows.some((row2) => row2.status === "queued" || row2.status === "leased" || row2.status === "failed_retryable"))
+      return;
+    const row = indexed ?? rows[0];
+    if (!row)
+      return;
+    const warnings = this.db.query(`
+      SELECT DISTINCT w.value AS warning FROM extraction_artifacts a, json_each(a.warnings_json) w
+      WHERE a.job_id = ? AND a.warnings_json IS NOT NULL ORDER BY w.value
+    `).all(row.job_id);
+    return {
+      status: row.status,
+      ...row.last_error_kind ? { lastErrorKind: row.last_error_kind } : {},
+      warnings: warnings.map((row2) => row2.warning),
+      policyDecision: row.policy_decision
+    };
+  }
+  unreadJobsQuery(request) {
+    const lane = requireLaneKey(request);
+    const extractorKind = requireToken3(request.extractorKind, "extractorKind");
+    const warnings = request.warnings.map((warning) => requireToken3(warning, "warning"));
+    const kinds = request.terminalErrorKinds.map((kind) => requireToken3(kind, "terminalErrorKind"));
+    const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken3(warning, "notReadyWarning"));
+    const clauses = [];
+    const params = [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind];
+    const hasWarning = (values) => `EXISTS (
+        SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
+        WHERE a.job_id = j.job_id AND a.warnings_json IS NOT NULL
+          AND w.value IN (${values.map(() => "?").join(", ")})
+      )`;
+    const onceGuard = "COALESCE(j.janitor_terminal_requeue_count, 0) < 1";
+    if (warnings.length > 0) {
+      clauses.push(`(j.status IN ('metadata_only', 'indexed') AND ${hasWarning(warnings)} AND (${onceGuard}${notReady.length > 0 ? ` OR ${hasWarning(notReady)}` : ""}))`);
+      params.push(...warnings, ...notReady);
+    }
+    if (kinds.length > 0) {
+      clauses.push(`(j.status = 'failed_terminal' AND ${onceGuard} AND j.last_error_kind IN (${kinds.map(() => "?").join(", ")}))`);
+      params.push(...kinds);
+    }
+    const sql = `j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ?
+      AND j.extractor_kind = ?
+      AND ${clauses.length > 0 ? `(${clauses.join(" OR ")})` : "0"}`;
+    return { sql, params };
+  }
+  get(jobId) {
+    const row = this.jobRow(requireKeyPart(jobId, "jobId"));
+    if (!row)
+      return;
+    const record = recordFromRow2(row);
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_reads'").get())
+      return record;
+    const read = this.db.query("SELECT requester, question_id FROM on_demand_reads WHERE job_id = ?").get(row.job_id);
+    return read ? { ...record, reason: "on_demand", requester: read.requester, ...read.question_id ? { questionId: read.question_id } : {} } : record;
+  }
+  holdsExtractionClaim(claim) {
+    const row = this.jobRow(requireKeyPart(claim.jobId, "jobId"));
+    if (!row)
+      return false;
+    return row.status === "leased" && row.lease_token !== null && row.lease_token === requireBoundedString(claim.leaseToken, "leaseToken") && row.lease_grant_ordinal !== null && row.lease_grant_ordinal === claim.grantOrdinal && claim.grantAuthority === this.claimGrantAuthority();
+  }
+  counts(lane) {
+    const key2 = requireLaneKey(lane);
+    const rows = this.db.query(`
+      SELECT status, extractor_kind, COUNT(*) AS jobs
+      FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+      GROUP BY status, extractor_kind
+      ORDER BY status ASC, extractor_kind ASC
+    `).all(key2.corpusId, key2.provider, key2.accountScope, key2.approvedScopeKey);
+    return rows.flatMap((row) => {
+      const status = jobStatus(row.status);
+      return status ? [{ status, extractorKind: row.extractor_kind, jobs: row.jobs }] : [];
+    });
+  }
+  jobOwners() {
+    const rows = this.db.query("SELECT DISTINCT corpus_id, account_scope FROM extraction_jobs").all();
+    return rows.map((row) => ({ corpusId: row.corpus_id, accountScope: row.account_scope }));
+  }
+  nextRetryAt(lane, now = new Date) {
+    const key2 = requireLaneKey(lane);
+    const row = this.db.query(`
+      SELECT MIN(next_retry_at) AS next_retry_at
+      FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND status = 'failed_retryable'
+        AND next_retry_at IS NOT NULL
+        AND next_retry_at > ?
+    `).get(key2.corpusId, key2.provider, key2.accountScope, key2.approvedScopeKey, now.toISOString());
+    return row?.next_retry_at ?? undefined;
+  }
+  scopedReadiness(lanes, options = {}) {
+    const steps = this.scopedReadinessSteps(lanes, options);
+    let step = steps.next();
+    while (!step.done)
+      step = steps.next();
+    return step.value;
+  }
+  async scopedReadinessInTurns(lanes, options) {
+    const steps = this.scopedReadinessSteps(lanes, options);
+    let step = steps.next();
+    while (!step.done) {
+      await options.turn();
+      step = steps.next();
+    }
+    return step.value;
+  }
+  *scopedReadinessSteps(lanes, options) {
+    const uniqueLanes = new Map;
+    for (const lane of lanes) {
+      const key2 = requireLaneKey(lane);
+      uniqueLanes.set(JSON.stringify(key2), key2);
+    }
+    const select = this.db.query(`
+      SELECT * FROM extraction_jobs
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+    `);
+    const selectUnroutable = unroutableItemsTableExists(this.db) && this.db.query(`
+      SELECT u.* FROM extraction_unroutable_items u
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
+          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
+            AND j.source_version IS u.source_version)
+    `);
+    const unsupportedByItem = new Map;
+    const byJobId = new Map;
+    for (const lane of uniqueLanes.values()) {
+      const rows2 = select.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey);
+      for (const row of rows2)
+        byJobId.set(row.job_id, row);
+      const unroutable = selectUnroutable ? selectUnroutable.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey) : [];
+      for (const row of unroutable) {
+        unsupportedByItem.set(JSON.stringify([row.corpus_id, row.local_item_id]), refFromRow(row));
+      }
+      yield;
+    }
+    const allRows = [...byJobId.values()];
+    let rows = allRows;
+    if (options.currentItems) {
+      const current3 = [];
+      for (let start = 0;start < allRows.length; start += SCOPED_READINESS_CURRENT_SLICE) {
+        if (start > 0)
+          yield;
+        const slice = allRows.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
+        const answers = options.currentItems(slice.map(refFromRow));
+        for (let index = 0;index < slice.length; index += 1)
+          current3.push(answers[index] === true);
+      }
+      rows = allRows.filter((_row, index) => current3[index] === true);
+      yield;
+    } else if (options.currentItem) {
+      const currentItem = options.currentItem;
+      rows = allRows.filter((row) => currentItem(refFromRow(row)));
+    }
+    const unsupportedRefs = [...unsupportedByItem.values()];
+    let unsupportedKindItems = 0;
+    let picturesNotReadHereItems = 0;
+    for (let start = 0;start < unsupportedRefs.length; start += SCOPED_READINESS_CURRENT_SLICE) {
+      const slice = unsupportedRefs.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
+      const answers = options.currentItems ? options.currentItems(slice) : slice.map((ref) => options.currentItem?.(ref) ?? true);
+      for (let index = 0;index < slice.length; index += 1) {
+        if (answers[index] !== true)
+          continue;
+        if (slice[index].mimeType?.startsWith("image/"))
+          picturesNotReadHereItems += 1;
+        else
+          unsupportedKindItems += 1;
+      }
+      yield;
+    }
+    const byItem = new Map;
+    for (const row of rows) {
+      const existing = byItem.get(row.local_item_id);
+      if (existing)
+        existing.push(row);
+      else
+        byItem.set(row.local_item_id, [row]);
+    }
+    let blockedByPolicyItems = 0;
+    let metadataOnlyExpectedItems = 0;
+    const unreadableCandidates = [];
+    const settledFailedItems = new Set;
+    for (const [itemId, itemRows] of byItem) {
+      if (itemRows.some((row) => row.status === "indexed"))
+        continue;
+      const settledFailed = itemRows.some((row) => row.status === "failed_terminal") && !itemRows.some((row) => row.status === "queued" || row.status === "leased" || row.status === "failed_retryable" || terminalHasRetryPath(row, itemRows, options.terminalRetryPaths ?? []));
+      if (settledFailed)
+        settledFailedItems.add(itemId);
+      if (itemRows.some((row) => row.status === "blocked_policy")) {
+        blockedByPolicyItems += 1;
+      } else if (itemRows.some((row) => row.status === "metadata_only" || row.status === "skipped_unsupported")) {
+        metadataOnlyExpectedItems += 1;
+      } else if (settledFailed || itemRows.some((row) => row.status === "skipped_too_large") && !itemRows.some((row) => ["queued", "leased", "failed_retryable"].includes(row.status))) {
+        const candidate = unreadableCandidate(itemRows);
+        if (candidate)
+          unreadableCandidates.push(candidate);
+      }
+    }
+    const unreadable = settleUnreadable(unreadableCandidates, options.classifyUnreadable);
+    blockedByPolicyItems += unreadable.blocked;
+    const unreadableItems = unreadable.items.length;
+    options.onUnreadable?.(unreadable.items);
+    const now = (options.now ?? new Date).toISOString();
+    const count = (status) => rows.filter((row) => row.status === status).length;
+    const failedRows = rows.filter((row) => row.status === "failed_retryable" || row.status === "failed_terminal");
+    const failedActionableJobs = failedRows.filter((row) => !((byItem.get(row.local_item_id)?.some((candidate) => candidate.status === "indexed") ?? false) || settledFailedItems.has(row.local_item_id))).length;
+    const retryableDueRows = rows.filter((row) => row.status === "failed_retryable" && (row.next_retry_at === null || row.next_retry_at <= now));
+    const actionableRows = rows.filter((row) => row.status === "queued" || row.status === "failed_retryable" && (row.next_retry_at === null || row.next_retry_at <= now));
+    const terminalRows = rows.filter((row) => row.status === "indexed" || row.status === "metadata_only" || row.status === "skipped_unsupported" || row.status === "skipped_too_large" || row.status === "blocked_policy" || row.status === "failed_terminal");
+    const oldestActionableAt = actionableRows.map((row) => row.created_at).sort()[0];
+    const newestTerminalProgressAt = terminalRows.map((row) => row.updated_at).sort().at(-1);
+    return {
+      blockedByPolicyItems,
+      metadataOnlyExpectedItems,
+      queuedJobs: count("queued"),
+      leasedJobs: count("leased"),
+      failedRetryableJobs: count("failed_retryable"),
+      failedTerminalJobs: count("failed_terminal"),
+      failedActionableJobs,
+      unreadableItems,
+      unsupportedKindItems,
+      picturesNotReadHereItems,
+      retryableDueJobs: retryableDueRows.length,
+      ...oldestActionableAt ? { oldestActionableAt } : {},
+      ...newestTerminalProgressAt ? { newestTerminalProgressAt } : {}
+    };
+  }
+  corpusReadiness(corpusId, now = new Date, options = {}) {
+    const corpus = requireKeyPart(corpusId, "corpusId");
+    const unsupported = unroutableItemsTableExists(this.db) ? this.db.query(`
+        SELECT
+          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 0 ELSE 1 END) AS items,
+          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 1 ELSE 0 END) AS pictures
+        FROM extraction_unroutable_items u
+        WHERE corpus_id = ? AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
+          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
+            AND j.source_version IS u.source_version)
+      `).get(corpus) : { items: 0, pictures: 0 };
+    const itemRetry = terminalRetryPathSql("x", options.terminalRetryPaths ?? []);
+    const pendingRetry = terminalRetryPathSql("pending", options.terminalRetryPaths ?? []);
+    const items = this.db.query(`
+      WITH item_state AS (
+        SELECT
+          MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
+          MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
+          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported')
+              THEN 1 ELSE 0 END) AS metadata_only_jobs,
+          MAX(CASE WHEN status IN ('failed_terminal', 'skipped_too_large') THEN 1 ELSE 0 END) AS terminal_failed_jobs,
+          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
+              THEN 1 ELSE 0 END) AS in_flight_jobs
+        FROM extraction_jobs x
+        WHERE corpus_id = ?
+        GROUP BY local_item_id
+      )
+      SELECT
+        SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 1 THEN 1 ELSE 0 END) AS blocked_items,
+        SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 1
+            THEN 1 ELSE 0 END) AS metadata_only_items
+      FROM item_state
+    `).get(...itemRetry.params, corpus);
+    const failedRows = this.db.query(`
+      WITH item_state AS (
+        SELECT
+          local_item_id,
+          MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
+          MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
+          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported')
+              THEN 1 ELSE 0 END) AS metadata_only_jobs,
+          MAX(CASE WHEN status IN ('failed_terminal', 'skipped_too_large') THEN 1 ELSE 0 END) AS terminal_failed_jobs,
+          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
+              THEN 1 ELSE 0 END) AS in_flight_jobs,
+          MAX(CASE WHEN status IN ('failed_terminal', 'skipped_too_large') THEN updated_at END) AS failed_at
+        FROM extraction_jobs x
+        WHERE corpus_id = ?
+        GROUP BY local_item_id
+      )
+      SELECT j.*
+      FROM item_state s
+      JOIN extraction_jobs j
+        ON j.corpus_id = ? AND j.local_item_id = s.local_item_id
+        AND j.status IN ('failed_terminal', 'skipped_too_large') AND j.updated_at = s.failed_at
+      WHERE s.indexed_jobs = 0 AND s.blocked_jobs = 0 AND s.metadata_only_jobs = 0
+        AND s.terminal_failed_jobs = 1 AND s.in_flight_jobs = 0
+    `).all(...itemRetry.params, corpus, corpus);
+    const seen = new Set;
+    const candidates = [];
+    for (const row of failedRows) {
+      if (seen.has(row.local_item_id))
+        continue;
+      seen.add(row.local_item_id);
+      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at, ...row.status === "skipped_too_large" ? { errorKind: "source_too_large" } : row.last_error_kind ? { errorKind: row.last_error_kind } : {} });
+    }
+    const unreadable = settleUnreadable(candidates, options.classifyUnreadable);
+    options.onUnreadable?.(unreadable.items);
+    const jobs = this.db.query(`
+      SELECT
+        SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_jobs,
+        SUM(CASE WHEN status = 'leased' THEN 1 ELSE 0 END) AS leased_jobs,
+        SUM(CASE WHEN status = 'failed_retryable' THEN 1 ELSE 0 END) AS failed_retryable_jobs,
+        SUM(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS failed_terminal_jobs,
+        SUM(CASE WHEN status = 'failed_retryable'
+          AND (next_retry_at IS NULL OR next_retry_at <= ?) THEN 1 ELSE 0 END) AS retryable_due_jobs,
+        MIN(CASE WHEN status = 'queued'
+          OR (status = 'failed_retryable' AND (next_retry_at IS NULL OR next_retry_at <= ?))
+          THEN created_at END) AS oldest_actionable_at,
+        MAX(CASE WHEN status IN (
+          'indexed', 'metadata_only', 'skipped_unsupported', 'skipped_too_large',
+          'blocked_policy', 'failed_terminal'
+        ) THEN updated_at END) AS newest_terminal_progress_at,
+        SUM(CASE
+          WHEN status IN ('failed_retryable', 'failed_terminal')
+            AND NOT EXISTS (
+              SELECT 1 FROM extraction_jobs superseding
+              WHERE superseding.corpus_id = j.corpus_id
+                AND superseding.local_item_id = j.local_item_id
+                AND superseding.job_id <> j.job_id
+                AND superseding.status = 'indexed'
+            )
+            AND NOT (
+              EXISTS (
+                SELECT 1 FROM extraction_jobs settled
+                WHERE settled.corpus_id = j.corpus_id
+                  AND settled.local_item_id = j.local_item_id
+                  AND settled.status = 'failed_terminal'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM extraction_jobs pending
+                WHERE pending.corpus_id = j.corpus_id
+                  AND pending.local_item_id = j.local_item_id
+                  AND (pending.status IN ('queued', 'leased', 'failed_retryable') OR ${pendingRetry.sql})
+              )
+            )
+          THEN 1 ELSE 0 END) AS failed_actionable_jobs
+      FROM extraction_jobs j
+      WHERE corpus_id = ?
+    `).get(now.toISOString(), now.toISOString(), ...pendingRetry.params, corpus);
+    const count = (value) => Math.max(0, Math.trunc(value ?? 0));
+    const jobCount = (key2) => count(typeof jobs?.[key2] === "number" ? jobs[key2] : undefined);
+    return {
+      blockedByPolicyItems: count(items?.blocked_items) + unreadable.blocked,
+      metadataOnlyExpectedItems: count(items?.metadata_only_items),
+      queuedJobs: jobCount("queued_jobs"),
+      leasedJobs: jobCount("leased_jobs"),
+      failedRetryableJobs: jobCount("failed_retryable_jobs"),
+      failedTerminalJobs: jobCount("failed_terminal_jobs"),
+      failedActionableJobs: jobCount("failed_actionable_jobs"),
+      unreadableItems: unreadable.items.length,
+      unsupportedKindItems: count(unsupported.items),
+      picturesNotReadHereItems: count(unsupported.pictures),
+      retryableDueJobs: jobCount("retryable_due_jobs"),
+      ...typeof jobs?.oldest_actionable_at === "string" ? { oldestActionableAt: jobs.oldest_actionable_at } : {},
+      ...typeof jobs?.newest_terminal_progress_at === "string" ? { newestTerminalProgressAt: jobs.newest_terminal_progress_at } : {}
+    };
+  }
+  artifacts(corpusId, localItemId) {
+    const rows = this.db.query(`
+      SELECT *
+      FROM extraction_artifacts
+      WHERE corpus_id = ? AND local_item_id = ?
+      ORDER BY artifact_index ASC
+    `).all(requireKeyPart(corpusId, "corpusId"), requireBoundedString(localItemId, "localItemId"));
+    return rows.map((row) => artifactFromRow(row));
+  }
+  janitorEscalate(lane, request, reason, limit, dryRun) {
+    const extractorKind = requireToken3(request.extractorKind ?? "", "extractorKind");
+    const lastErrorKind = requireToken3(request.lastErrorKind ?? "", "lastErrorKind");
+    const targetKind = requireToken3(request.targetExtractorKind ?? "", "targetExtractorKind");
+    const targetVersion = requireKeyPart(request.targetExtractorVersion ?? "", "targetExtractorVersion");
+    const escalationBudget = clampInteger(request.escalationBudget ?? limit, 0, limit);
+    const now = nowIso3();
+    let matched = [];
+    let escalated = 0;
+    let skippedPolicyExcluded = 0;
+    let skippedEscalationBudget = 0;
+    let skippedTargetExists = 0;
+    this.db.transaction(() => {
+      matched = this.db.query(`
+        SELECT
+          j.*,
+          EXISTS (
+            SELECT 1
+            FROM extraction_jobs target
+            WHERE target.corpus_id = j.corpus_id
+              AND target.provider = j.provider
+              AND target.account_scope = j.account_scope
+              AND target.provider_item_id = j.provider_item_id
+              AND target.source_version IS j.source_version
+              AND target.content_hash IS j.content_hash
+              AND target.extractor_kind = ?
+              AND target.extractor_version = ?
+          ) AS target_job_exists
+        FROM extraction_jobs j
+        WHERE j.corpus_id = ?
+          AND j.provider = ?
+          AND j.account_scope = ?
+          AND j.approved_scope_key = ?
+          AND j.status = 'failed_terminal'
+          AND j.extractor_kind = ?
+          AND COALESCE(j.last_error_kind, ?) = ?
+        ORDER BY j.updated_at ASC, j.job_id ASC
+        LIMIT ?
+      `).all(targetKind, targetVersion, lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind, lastErrorKind, lastErrorKind, limit);
+      const policyAllowed = matched.filter((row) => row.policy_decision !== "blocked_sensitive" && row.policy_decision !== "metadata_only");
+      skippedPolicyExcluded = matched.length - policyAllowed.length;
+      const targetMissing = policyAllowed.filter((row) => row.target_job_exists !== 1);
+      skippedTargetExists = policyAllowed.length - targetMissing.length;
+      const rowsToEscalate = targetMissing.slice(0, escalationBudget);
+      skippedEscalationBudget = targetMissing.length - rowsToEscalate.length;
+      if (dryRun)
+        return;
+      const insert = this.db.query(`
+        INSERT INTO extraction_jobs (
+          job_id, corpus_id, provider, account_scope, approved_scope_key,
+          provider_item_id, local_item_id, source_version, content_hash,
+          name, mime_type, size_bytes, extractor_kind, extractor_version,
+          policy_decision, status, priority, max_bytes_per_file, attempts,
+          janitor_requeue_reason, temp_bytes_cleaned, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?, 1, ?, ?)
+      `);
+      const markSource = this.db.query(`
+        UPDATE extraction_jobs
+        SET janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1,
+            janitor_requeued_at = ?,
+            janitor_requeue_reason = ?,
+            updated_at = ?
+        WHERE job_id = ?
+      `);
+      for (const row of rowsToEscalate) {
+        insert.run(makeJobId(), row.corpus_id, row.provider, row.account_scope, row.approved_scope_key, row.provider_item_id, row.local_item_id, row.source_version, row.content_hash, row.name, row.mime_type, row.size_bytes, targetKind, targetVersion, row.policy_decision, row.priority, row.max_bytes_per_file, reason, now, now);
+        markSource.run(now, reason, now, row.job_id);
+        escalated += 1;
+      }
+    })();
+    return {
+      mode: "terminal_reclassification",
+      matchedJobs: matched.length,
+      jobsRequeued: 0,
+      jobsEscalated: escalated,
+      skippedAttemptBudget: 0,
+      skippedAlreadyJanitorRequeued: skippedTargetExists,
+      skippedPolicyExcluded,
+      skippedEscalationBudget,
+      skippedTargetExists,
+      networkGuardOverrideUsed: false,
+      dryRun,
+      reason
+    };
+  }
+  leaseCandidateRows(lane, request, now, limit) {
+    const filters = [];
+    const params = [
+      lane.corpusId,
+      lane.provider,
+      lane.accountScope,
+      lane.approvedScopeKey,
+      now,
+      now
+    ];
+    if (request.extractorKind !== undefined) {
+      filters.push("extractor_kind = ?");
+      params.push(requireToken3(request.extractorKind, "extractorKind"));
+    }
+    if (request.extractorVersion !== undefined) {
+      filters.push("extractor_version = ?");
+      params.push(requireKeyPart(request.extractorVersion, "extractorVersion"));
+    }
+    if (request.providerItemIds !== undefined && request.providerItemIds.length > 0) {
+      filters.push(`provider_item_id IN (${request.providerItemIds.map(() => "?").join(", ")})`);
+      params.push(...request.providerItemIds.map((id) => requireBoundedString(id, "providerItemId")));
+    }
+    params.push(limit);
+    const filterSql = filters.length > 0 ? `
+        AND ${filters.join(`
+        AND `)}` : "";
+    return this.db.query(`
+      SELECT *
+      FROM extraction_jobs
+      WHERE corpus_id = ?
+        AND provider = ?
+        AND account_scope = ?
+        AND approved_scope_key = ?
+        AND (
+          status = 'queued'
+          OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until < ?)
+          OR (status = 'failed_retryable' AND (next_retry_at IS NULL OR next_retry_at <= ?))
+        )${filterSql}
+      ORDER BY priority DESC, updated_at ASC, job_id ASC
+      LIMIT ?
+    `).all(...params);
+  }
+  replaceArtifacts(row, derivations, now) {
+    if (derivations === undefined)
+      return 0;
+    this.db.query("DELETE FROM extraction_artifacts WHERE corpus_id = ? AND local_item_id = ?").run(row.corpus_id, row.local_item_id);
+    if (derivations.length === 0)
+      return 0;
+    const item = {
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      localItemId: row.local_item_id
+    };
+    if (itemNameRedacted(this.db, item))
+      return 0;
+    const insert = this.db.query(`
+      INSERT INTO extraction_artifacts (
+        corpus_id, local_item_id, artifact_index, job_id, extractor_kind,
+        extractor_version, artifact_kind, structural_ref_json, confidence,
+        warnings_json, chars, derived_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    derivations.forEach((derivation, index) => {
+      insert.run(row.corpus_id, row.local_item_id, index, row.job_id, row.extractor_kind, row.extractor_version, derivation.artifactKind, derivation.structuralRef === undefined ? null : JSON.stringify(derivation.structuralRef), derivation.confidence ?? null, derivation.warnings === undefined ? null : JSON.stringify([...derivation.warnings]), requireSafeInteger(derivation.chars, "chars"), now);
+    });
+    return derivations.length;
+  }
+  existingJob(ref, extractorKind, extractorVersion) {
+    const row = this.db.query(`
+      SELECT *
+      FROM extraction_jobs
+      WHERE corpus_id = ?
+        AND provider = ?
+        AND account_scope = ?
+        AND provider_item_id = ?
+        AND source_version = ?
+        AND content_hash = ?
+        AND extractor_kind = ?
+        AND extractor_version = ?
+      LIMIT 1
+    `).get(ref.corpusId, ref.provider, ref.accountScope, ref.providerItemId, ref.sourceVersion ?? "", ref.contentHash ?? "", extractorKind, extractorVersion);
+    return row ?? undefined;
+  }
+  jobRow(jobId) {
+    const row = this.db.query("SELECT * FROM extraction_jobs WHERE job_id = ? LIMIT 1").get(jobId);
+    return row ?? undefined;
+  }
+  assertWritable(operation) {
+    if (this.readonly) {
+      throw new Error(`Extraction job store is read-only; ${operation} is not permitted.`);
+    }
+  }
+}
+function fileExtractionJobMigrations() {
+  return [{
+    version: 1,
+    name: "create_extraction_jobs",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS extraction_jobs (
+          job_id TEXT PRIMARY KEY,
+          corpus_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          account_scope TEXT NOT NULL,
+          approved_scope_key TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          local_item_id TEXT NOT NULL,
+          source_version TEXT,
+          content_hash TEXT,
+          name TEXT,
+          mime_type TEXT,
+          size_bytes INTEGER,
+          extractor_kind TEXT NOT NULL,
+          extractor_version TEXT NOT NULL,
+          policy_decision TEXT NOT NULL,
+          status TEXT NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 0,
+          max_bytes_per_file INTEGER,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          leased_by_hash TEXT,
+          leased_until TEXT,
+          last_error_hash TEXT,
+          last_error_kind TEXT,
+          next_retry_at TEXT,
+          janitor_requeue_count INTEGER NOT NULL DEFAULT 0,
+          janitor_terminal_requeue_count INTEGER NOT NULL DEFAULT 0,
+          janitor_requeued_at TEXT,
+          janitor_requeue_reason TEXT,
+          temp_bytes_cleaned INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(corpus_id, provider, account_scope, provider_item_id,
+                 source_version, content_hash, extractor_kind, extractor_version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_lane
+          ON extraction_jobs(corpus_id, provider, account_scope, approved_scope_key,
+                             status, priority, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_item
+          ON extraction_jobs(corpus_id, local_item_id, status);
+
+        CREATE TABLE IF NOT EXISTS extraction_artifacts (
+          corpus_id TEXT NOT NULL,
+          local_item_id TEXT NOT NULL,
+          artifact_index INTEGER NOT NULL,
+          job_id TEXT NOT NULL,
+          extractor_kind TEXT NOT NULL,
+          extractor_version TEXT NOT NULL,
+          artifact_kind TEXT NOT NULL,
+          structural_ref_json TEXT,
+          confidence REAL,
+          warnings_json TEXT,
+          chars INTEGER NOT NULL DEFAULT 0,
+          derived_at TEXT NOT NULL,
+          PRIMARY KEY (corpus_id, local_item_id, artifact_index)
+        );
+        CREATE INDEX IF NOT EXISTS idx_extraction_artifacts_job ON extraction_artifacts(job_id);
+      `);
+    }
+  }, {
+    version: 2,
+    name: "add_lease_token",
+    up(db) {
+      db.exec("ALTER TABLE extraction_jobs ADD COLUMN lease_token TEXT;");
+    }
+  }, {
+    version: 3,
+    name: "add_claim_grant_sequence",
+    up(db) {
+      db.exec(`
+        ALTER TABLE extraction_jobs ADD COLUMN lease_grant_ordinal INTEGER;
+        CREATE TABLE IF NOT EXISTS extraction_claim_grants (
+          grant_id INTEGER PRIMARY KEY CHECK (grant_id = 1),
+          authority_id TEXT NOT NULL,
+          last_ordinal INTEGER NOT NULL
+        );
+      `);
+      db.query(`
+        INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
+        VALUES (1, ?, 0)
+      `).run(randomUUID23());
+    }
+  }, {
+    version: 4,
+    name: "add_secret_item_redactions",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ${SECRET_ITEM_REDACTIONS_TABLE} (
+          provider TEXT NOT NULL,
+          account_scope TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          local_item_id TEXT NOT NULL DEFAULT '',
+          redacted_at TEXT NOT NULL,
+          PRIMARY KEY (provider, account_scope, provider_item_id, local_item_id)
+        );
+      `);
+    }
+  }, {
+    version: 5,
+    name: "add_secret_item_redaction_claims",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (
+          provider TEXT NOT NULL,
+          account_scope TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          claimant TEXT NOT NULL,
+          claimed_at TEXT NOT NULL,
+          PRIMARY KEY (provider, account_scope, provider_item_id, claimant)
+        );
+        CREATE TABLE IF NOT EXISTS ${SECRET_RESTORED_REREADS_TABLE} (
+          job_id TEXT PRIMARY KEY
+        );
+      `);
+    }
+  }, {
+    version: 6,
+    name: "add_extraction_jobs_identity_index",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_identity
+          ON extraction_jobs(provider, account_scope, provider_item_id, status);
+      `);
+    }
+  }, {
+    version: 7,
+    name: "owe_reread_to_names_only_refusals",
+    up(db) {
+      const columns = db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all();
+      if (!columns.some((column) => column.name === "reason")) {
+        db.exec(`ALTER TABLE ${SECRET_RESTORED_REREADS_TABLE} ADD COLUMN reason TEXT;`);
+      }
+      db.exec(`
+        INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+        SELECT job_id, '${REREAD_AFTER_PLACEMENT}' FROM extraction_jobs
+        WHERE status = 'metadata_only' AND last_error_kind = 'store_item_metadata_only';
+      `);
+    }
+  }];
+}
+function createUnroutableItemsTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extraction_unroutable_items (
+      corpus_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      account_scope TEXT NOT NULL,
+      approved_scope_key TEXT NOT NULL,
+      local_item_id TEXT NOT NULL,
+      provider_item_id TEXT NOT NULL,
+      source_version TEXT,
+      content_hash TEXT,
+      mime_type TEXT,
+      seen_at TEXT NOT NULL,
+      PRIMARY KEY (corpus_id, local_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_extraction_unroutable_lane
+      ON extraction_unroutable_items(corpus_id, provider, account_scope, approved_scope_key);
+  `);
+}
+function unroutableItemsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_unroutable_items'`).get() !== null;
+}
+function nextRetryTimestamp(status, attempts, now) {
+  if (status !== "failed_retryable")
+    return null;
+  const delaySeconds = Math.min(MAX_EXTRACTION_RETRY_BACKOFF_SECONDS, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS * Math.max(1, attempts));
+  return new Date(new Date(now).getTime() + delaySeconds * 1000).toISOString();
+}
+function refFromRow(row) {
+  return {
+    corpusId: row.corpus_id,
+    provider: row.provider,
+    accountScope: row.account_scope,
+    approvedScopeKey: row.approved_scope_key,
+    providerItemId: row.provider_item_id,
+    localItemId: row.local_item_id,
+    ...row.source_version ? { sourceVersion: row.source_version } : {},
+    ...row.content_hash ? { contentHash: row.content_hash } : {},
+    ...row.name ? { name: row.name } : {},
+    ...row.mime_type ? { mimeType: row.mime_type } : {},
+    ...row.size_bytes == null ? {} : { sizeBytes: row.size_bytes }
+  };
+}
+function recordFromRow2(row) {
+  return {
+    jobId: row.job_id,
+    ref: refFromRow(row),
+    extractorKind: row.extractor_kind,
+    extractorVersion: row.extractor_version,
+    policyDecision: row.policy_decision,
+    status: jobStatus(row.status) ?? "queued",
+    priority: row.priority,
+    attempts: row.attempts,
+    ...row.max_bytes_per_file === null ? {} : { maxBytesPerFile: row.max_bytes_per_file },
+    ...row.leased_by_hash ? { leasedByHash: row.leased_by_hash } : {},
+    ...row.leased_until ? { leasedUntil: row.leased_until } : {},
+    ...row.last_error_kind ? { lastErrorKind: row.last_error_kind } : {},
+    ...row.last_error_hash ? { lastErrorHash: row.last_error_hash } : {},
+    ...row.next_retry_at ? { nextRetryAt: row.next_retry_at } : {},
+    janitorRequeueCount: row.janitor_requeue_count,
+    janitorTerminalRequeueCount: row.janitor_terminal_requeue_count,
+    ...row.janitor_requeued_at ? { janitorRequeuedAt: row.janitor_requeued_at } : {},
+    ...row.janitor_requeue_reason ? { janitorRequeueReason: row.janitor_requeue_reason } : {},
+    tempBytesCleaned: row.temp_bytes_cleaned === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+function artifactFromRow(row) {
+  const structuralRef = parseJsonObject4(row.structural_ref_json);
+  const warnings = parseJsonStringArray(row.warnings_json);
+  return {
+    corpusId: row.corpus_id,
+    localItemId: row.local_item_id,
+    artifactIndex: row.artifact_index,
+    jobId: row.job_id,
+    extractorKind: row.extractor_kind,
+    extractorVersion: row.extractor_version,
+    derivation: {
+      artifactKind: row.artifact_kind,
+      ...structuralRef ? { structuralRef } : {},
+      ...row.confidence === null ? {} : { confidence: row.confidence },
+      ...warnings ? { warnings } : {},
+      chars: row.chars
+    },
+    derivedAt: row.derived_at
+  };
+}
+function parseJsonObject4(value) {
+  if (value === null)
+    return;
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return;
+    return parsed;
+  } catch {
+    return;
+  }
+}
+function parseJsonStringArray(value) {
+  if (value === null)
+    return;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string"))
+      return;
+    return parsed;
+  } catch {
+    return;
+  }
+}
+function jobStatus(value) {
+  if (value === undefined)
+    return;
+  if (value === "queued" || value === "leased")
+    return value;
+  return TERMINAL_STATUSES.has(value) ? value : undefined;
+}
+function requireItemRef(ref) {
+  const normalized = {
+    corpusId: requireKeyPart(ref.corpusId, "corpusId"),
+    provider: requireKeyPart(ref.provider, "provider"),
+    accountScope: requireBoundedString(ref.accountScope, "accountScope"),
+    approvedScopeKey: requireBoundedString(ref.approvedScopeKey, "approvedScopeKey"),
+    providerItemId: requireBoundedString(ref.providerItemId, "providerItemId"),
+    localItemId: requireBoundedString(ref.localItemId, "localItemId"),
+    ...ref.sourceVersion === undefined ? {} : { sourceVersion: requireBoundedString(ref.sourceVersion, "sourceVersion") },
+    ...ref.contentHash === undefined ? {} : { contentHash: requireBoundedString(ref.contentHash, "contentHash") },
+    ...ref.name === undefined ? {} : { name: requireBoundedString(ref.name, "name") },
+    ...ref.mimeType === undefined ? {} : { mimeType: requireBoundedString(ref.mimeType, "mimeType") },
+    ...ref.sizeBytes === undefined ? {} : { sizeBytes: requireSafeInteger(ref.sizeBytes, "sizeBytes") }
+  };
+  return normalized;
+}
+function requireLaneKey(lane) {
+  return {
+    corpusId: requireKeyPart(lane.corpusId, "corpusId"),
+    provider: requireKeyPart(lane.provider, "provider"),
+    accountScope: requireBoundedString(lane.accountScope, "accountScope"),
+    approvedScopeKey: requireBoundedString(lane.approvedScopeKey, "approvedScopeKey")
+  };
+}
+function requireKeyPart(value, field) {
+  if (typeof value !== "string" || !SAFE_KEY_PART.test(value)) {
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe identifier.`);
+  }
+  return value;
+}
+function requireToken3(value, field) {
+  if (typeof value !== "string" || !SAFE_TOKEN2.test(value)) {
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe categorical token.`);
+  }
+  return value;
+}
+function requireHash2(value) {
+  if (typeof value !== "string" || !SAFE_HASH2.test(value)) {
+    throw new TypeError("Extraction job errorHash must be a lowercase hexadecimal digest.");
+  }
+  return value;
+}
+function requireBoundedString(value, field) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 1024) {
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a bounded non-empty string.`);
+  }
+  return value;
+}
+function requireReason(value) {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > MAX_REASON_LENGTH) {
+    throw new TypeError("Extraction janitor reason must be a bounded non-empty string.");
+  }
+  return value.trim();
+}
+function requirePolicyDecision(value) {
+  if (!POLICY_DECISIONS.has(value)) {
+    throw new TypeError("Extraction job policyDecision is not a recognised decision.");
+  }
+  return value;
+}
+function requireTerminalStatus(value) {
+  if (!TERMINAL_STATUSES.has(value)) {
+    throw new TypeError("Extraction record status must be a terminal job status.");
+  }
+  return value;
+}
+function requireSafeInteger(value, field) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a non-negative safe integer.`);
+  }
+  return value;
+}
+function requirePositiveSafeInteger(value, field) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a positive safe integer.`);
+  }
+  return value;
+}
+function clampInteger(value, min, max2) {
+  if (!Number.isSafeInteger(value)) {
+    throw new TypeError("Extraction job limit must be a safe integer.");
+  }
+  return Math.min(max2, Math.max(min, value));
+}
+function makeJobId() {
+  return `fx_${randomUUID23()}`;
+}
+function hashString6(value) {
+  return createHash64("sha256").update(value).digest("hex");
+}
+function nowIso3() {
+  return new Date().toISOString();
+}
+function terminalHasRetryPath(row, itemRows, paths) {
+  if (row.status !== "failed_terminal")
+    return false;
+  return paths.some((path) => {
+    if (row.extractor_kind !== path.extractorKind)
+      return false;
+    if (path.escalateToExtractorKind !== undefined) {
+      if (row.last_error_kind !== null && !path.lastErrorKinds.includes(row.last_error_kind))
+        return false;
+      return !itemRows.some((candidate) => candidate.extractor_kind === path.escalateToExtractorKind);
+    }
+    return row.last_error_kind !== null && path.lastErrorKinds.includes(row.last_error_kind) && (row.janitor_terminal_requeue_count ?? 0) < 1;
+  });
+}
+function terminalRetryPathSql(alias, paths) {
+  const clauses = [];
+  const params = [];
+  for (const path of paths) {
+    const kinds = path.lastErrorKinds.map((kind) => requireToken3(kind, "lastErrorKind"));
+    if (kinds.length === 0)
+      continue;
+    const kindList = kinds.map(() => "?").join(", ");
+    if (path.escalateToExtractorKind !== undefined) {
+      clauses.push(`(${alias}.extractor_kind = ? AND (${alias}.last_error_kind IS NULL OR ${alias}.last_error_kind IN (${kindList}))
+        AND NOT EXISTS (
+          SELECT 1 FROM extraction_jobs target
+          WHERE target.corpus_id = ${alias}.corpus_id
+            AND target.local_item_id = ${alias}.local_item_id
+            AND target.extractor_kind = ?
+        ))`);
+      params.push(requireToken3(path.extractorKind, "extractorKind"), ...kinds, requireToken3(path.escalateToExtractorKind, "extractorKind"));
+    } else {
+      clauses.push(`(${alias}.extractor_kind = ? AND ${alias}.last_error_kind IN (${kindList})
+        AND COALESCE(${alias}.janitor_terminal_requeue_count, 0) < 1)`);
+      params.push(requireToken3(path.extractorKind, "extractorKind"), ...kinds);
+    }
+  }
+  if (clauses.length === 0)
+    return { sql: "0", params };
+  return { sql: `(${alias}.status = 'failed_terminal' AND (${clauses.join(" OR ")}))`, params };
+}
+var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 7, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", AMBIGUOUS_IDENTITY_ERROR_KIND = "store_identity_ambiguous", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART, SAFE_HASH2, POLICY_DECISIONS, TERMINAL_STATUSES, SCOPED_READINESS_CURRENT_SLICE = 2000, ExtractionJobFieldError;
+var init_job_store = __esm(() => {
+  init_sqlite_migrations();
+  init_store_write_guard();
+  init_job_names();
+  NETWORK_ERROR_KINDS = new Set([
+    "network_unreachable",
+    "network_socket_closed"
+  ]);
+  SAFE_TOKEN2 = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
+  SAFE_KEY_PART = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+  SAFE_HASH2 = /^[a-f0-9]{16,128}$/;
+  POLICY_DECISIONS = new Set([
+    "index_allowed",
+    "index_redacted",
+    "metadata_only",
+    "blocked_sensitive",
+    "needs_review"
+  ]);
+  TERMINAL_STATUSES = new Set([
+    "indexed",
+    "metadata_only",
+    "skipped_unsupported",
+    "skipped_too_large",
+    "blocked_policy",
+    "failed_retryable",
+    "failed_terminal"
+  ]);
+  ExtractionJobFieldError = class ExtractionJobFieldError extends TypeError {
+    field;
+    constructor(field, message2) {
+      super(message2);
+      this.name = "ExtractionJobFieldError";
+      this.field = field;
+    }
+  };
+});
+
+// src/workers/file-extraction/size-limit-stops.ts
+import { existsSync as existsSync60 } from "node:fs";
+function refreshSourceSizeStop(jobs, policy, now = new Date) {
+  const held = jobs.sizeHeldJobs(policy.providers);
+  if (!held.length) {
+    reporter.clear(policy.id, policy.subject);
+    return;
+  }
+  const limit = held.reduce((max2, job) => Math.max(max2, Math.min(job.maxBytes ?? Infinity, sourceSizeBytes(policy, job.ref, now))), 0);
+  const sizes = held.flatMap((job) => job.ref.sizeBytes === undefined ? [] : [job.ref.sizeBytes]);
+  reporter.report({
+    id: policy.id,
+    subject: policy.subject,
+    since: now.toISOString(),
+    limit,
+    used: sizes.length ? sizes.reduce((max2, size) => Math.max(max2, size), 0) : null,
+    reason: "source_too_large",
+    waiting: { items: new Set(held.map((job) => sizeHeldItemKey(job.ref))).size },
+    toContinue: { raiseTo: Math.min(policy.ceilingBytes, sizes.reduce((max2, size) => Math.max(max2, size), limit + 1)) }
+  });
+}
+function raiseSourceSizeLimit(id, to, keep, now) {
+  const policy = SOURCE_SIZE_LIMITS.find((policy2) => policy2.id === id);
+  if (!policy)
+    throw new OperationError("invalid_params", "This limit has no Raise action.");
+  if (to > policy.ceilingBytes)
+    throw new OperationError("invalid_params", `The memory safety ceiling is ${policy.ceilingBytes} bytes (${policy.ceilingBytes / 1024 / 1024} MiB).`);
+  const path = defaultFileExtractionJobsDbPath();
+  if (!existsSync60(path))
+    throw new OperationError("invalid_params", "The held-file queue is unavailable.");
+  const jobs = new LocalFileExtractionJobStore(path);
+  try {
+    const held = jobs.sizeHeldJobs(policy.providers);
+    const current3 = held.reduce((max2, job) => Math.max(max2, Math.min(job.maxBytes ?? Infinity, sourceSizeBytes(policy, job.ref, now))), 0);
+    if (to <= current3)
+      throw new OperationError("invalid_params", `--to must be greater than the current limit of ${current3} bytes.`);
+    if (!held.length)
+      throw new OperationError("invalid_params", "No files are held for size any more.");
+    const ceiling = held.reduce((max2, job) => Math.max(max2, sourceSizeCeiling(policy, job.ref.mimeType)), 0);
+    if (to > ceiling)
+      throw new OperationError("invalid_params", `The memory safety ceiling is ${ceiling} bytes (${ceiling / 1024 / 1024} MiB).`);
+    saveOwnerLimitOverride(policy.id, to, keep, now, undefined, held.map((job) => sizeHeldItemKey(job.ref)));
+    resumeGrantedSizeHeld(jobs, policy, now);
+    refreshSourceSizeStop(jobs, policy, now);
+  } finally {
+    jobs.close();
+  }
+}
+function resumeGrantedSizeHeld(jobs, policy, now = new Date) {
+  const byAmount = new Map;
+  for (const job of jobs.sizeHeldJobs(policy.providers)) {
+    const grant = readOwnerLimitOverride(policy.id, now, undefined, sizeHeldItemKey(job.ref));
+    if (grant === undefined)
+      continue;
+    const to = sourceSizeBytes(policy, job.ref, now);
+    if (to === job.maxBytes && (job.ref.sizeBytes === undefined || job.ref.sizeBytes > to))
+      continue;
+    const ids = byAmount.get(to) ?? [];
+    ids.push(job.jobId);
+    byAmount.set(to, ids);
+  }
+  for (const [to, ids] of byAmount)
+    jobs.requeueSizeHeld(ids, to);
+}
+var reporter;
+var init_size_limit_stops = __esm(() => {
+  init_source_size_limits();
+  init_owner_limit_settings();
+  init_limit_stops();
+  init_operation_error();
+  init_job_store();
+  reporter = createLimitStopReporter();
+});
+
 // src/workers/file-extraction/on-demand-read.ts
-import { createHash as createHash63, randomUUID as randomUUID23 } from "node:crypto";
+import { createHash as createHash65, randomUUID as randomUUID24 } from "node:crypto";
 async function requestOnDemandRead(request, context2) {
   if (!["owner", "remote_app", "analyst"].includes(request.requester))
     return { state: "refused", reason: "invalid_requester" };
@@ -93571,12 +95437,12 @@ async function requestOnDemandRead(request, context2) {
     return { state: "refused", reason: "item_not_found" };
   return context2.jobs.enqueueOnDemandRead({
     ...request,
-    questionId: request.questionId?.trim() || randomUUID23(),
+    questionId: request.questionId?.trim() || randomUUID24(),
     itemRef: { corpusId: ref.corpusId, providerItemId: ref.providerItemId }
   }, target2.job, target2.grant, context2.limits);
 }
 async function itemReadOnDemand(read, corpusId, providerItemId) {
-  const questionId = `item-read-${createHash63("sha256").update(JSON.stringify([corpusId, providerItemId])).digest("hex").slice(0, 32)}`;
+  const questionId = `item-read-${createHash65("sha256").update(JSON.stringify([corpusId, providerItemId])).digest("hex").slice(0, 32)}`;
   const outcome = await read({ itemRef: { corpusId, providerItemId }, requester: "remote_app", questionId }).catch(() => {
     return;
   });
@@ -93589,9 +95455,9 @@ async function itemReadOnDemand(read, corpusId, providerItemId) {
 var init_on_demand_read = () => {};
 
 // src/workers/file-extraction/spool.ts
-import { createHash as createHash64 } from "node:crypto";
-import { chmodSync as chmodSync23, existsSync as existsSync60, mkdirSync as mkdirSync40, readdirSync as readdirSync12, rmSync as rmSync20, rmdirSync as rmdirSync5, statSync as statSync28 } from "node:fs";
-import { dirname as dirname67, isAbsolute as isAbsolute25, join as join74, relative as relative9, sep as sep13 } from "node:path";
+import { createHash as createHash66 } from "node:crypto";
+import { chmodSync as chmodSync24, existsSync as existsSync61, mkdirSync as mkdirSync41, readdirSync as readdirSync12, rmSync as rmSync20, rmdirSync as rmdirSync5, statSync as statSync28 } from "node:fs";
+import { dirname as dirname68, isAbsolute as isAbsolute25, join as join74, relative as relative9, sep as sep13 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
   return join74(root, corpusFolder(owner.corpusId), accountFolder2(owner.accountScope));
 }
@@ -93617,7 +95483,7 @@ function filesUnder(path) {
   }
 }
 function forgetExtractionSpool(root, scope, options = {}) {
-  if (!existsSync60(root))
+  if (!existsSync61(root))
     return 0;
   const dryRun = options.dryRun === true;
   let removed = 0;
@@ -93625,7 +95491,7 @@ function forgetExtractionSpool(root, scope, options = {}) {
     const corpusDir = join74(root, corpusFolder(corpusId));
     const targets = scope.accountScopes === undefined ? [corpusDir] : [...new Set(scope.accountScopes)].map((accountScope) => join74(corpusDir, accountFolder2(accountScope)));
     for (const target2 of targets) {
-      if (!existsSync60(target2))
+      if (!existsSync61(target2))
         continue;
       removed += filesUnder(target2);
       if (!dryRun)
@@ -93668,9 +95534,9 @@ function prepareExtractionSpool(dir, options = {}) {
   const now = options.now ?? Date.now;
   const running = options.processRunning ?? processIsRunning2;
   try {
-    if (!existsSync60(dir))
+    if (!existsSync61(dir))
       return dir;
-    chmodSync23(dir, 448);
+    chmodSync24(dir, 448);
     let owners;
     const ownersWithJobs = () => {
       if (owners !== undefined)
@@ -93749,7 +95615,7 @@ function prepareExtractionSpool(dir, options = {}) {
 }
 function discardExtractionSpoolFile(path, ownerDir) {
   rmSync20(path, { force: true });
-  for (const dir of [ownerDir, dirname67(ownerDir)]) {
+  for (const dir of [ownerDir, dirname68(ownerDir)]) {
     try {
       rmdirSync5(dir);
     } catch {
@@ -93759,7 +95625,7 @@ function discardExtractionSpoolFile(path, ownerDir) {
 }
 function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
   if (anchor === undefined) {
-    mkdirSync40(ownerDir, { recursive: true, mode: 448 });
+    mkdirSync41(ownerDir, { recursive: true, mode: 448 });
     return;
   }
   const levels = relative9(anchor, ownerDir);
@@ -93778,14 +95644,14 @@ function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
   for (const level of levels.split(sep13)) {
     path = join74(path, level);
     try {
-      mkdirSync40(path, { mode: 448 });
+      mkdirSync41(path, { mode: 448 });
     } catch (error) {
       if (error.code !== "EEXIST")
         throw error;
     }
   }
 }
-var EXTRACTION_SPOOL_STALE_MS, digest3 = (value) => createHash64("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest3(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest3(accountScope)}`;
+var EXTRACTION_SPOOL_STALE_MS, digest3 = (value) => createHash66("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest3(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest3(accountScope)}`;
 var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
@@ -93986,7 +95852,7 @@ class DropboxExtractionSource {
       throw await downloadFailure(response);
     const declaredSize = parsePositiveInteger2(response.headers.get("content-length") ?? undefined);
     if (maxBytes !== undefined && declaredSize !== undefined && declaredSize > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_too_large", { sizeBytes: declaredSize });
     }
     let bytes;
     try {
@@ -93997,7 +95863,7 @@ class DropboxExtractionSource {
       throw error;
     }
     if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
     }
     const contentType = response.headers.get("content-type");
     return {
@@ -94066,14 +95932,14 @@ async function readVerifiedCandidate(input) {
   if (!fileStat.isFile())
     return;
   if (input.maxBytes !== undefined && fileStat.size > input.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
+    throw new FileExtractionSourceError("source_too_large", { sizeBytes: fileStat.size });
   }
   if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
     return;
   }
   const bytes = new Uint8Array(await readFile5(input.candidatePath));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
+    throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
   }
   if (computeDropboxContentHash(bytes) !== input.contentHash)
     return;
@@ -94335,7 +96201,7 @@ async function readItemToFile(connector, localItemId, options) {
     throw refusalFor(item);
   const bytes = content.kind === "bytes" ? content.bytes : new TextEncoder().encode(content.text);
   if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
+    throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
   }
   const path = join75(options.spoolDir, extractionSpoolFileName());
   const served = () => options.stillServed?.() ?? true;
@@ -94375,7 +96241,7 @@ function deferredBytesAnswerFor(stored) {
 }
 function refusalFor(item) {
   if (item.metadata["contentTooLarge"] === true)
-    return new FileExtractionSourceError("source_too_large");
+    return new FileExtractionSourceError("source_too_large", typeof item.metadata["sizeBytes"] === "number" ? { sizeBytes: item.metadata["sizeBytes"] } : {});
   if (item.metadata["scopeContentDenied"] === true)
     return new FileExtractionSourceError("source_permission_denied");
   return new FileExtractionSourceError("source_content_unavailable");
@@ -94393,7 +96259,7 @@ function createConnectorFileExtractionSource(options) {
   const corpusId = requireText(options.corpusId, "Connector extraction source corpus id");
   const provider = requireText(options.provider, "Connector extraction source provider");
   const laneFor = (row) => lanes.find((lane) => lane.matches === undefined || lane.matches(row));
-  const refFromRow = (row, lane) => {
+  const refFromRow2 = (row, lane) => {
     const split = splitScopedLocalItemId(row.localItemId);
     const accountScope = row.accountScope ?? split?.accountScope;
     const providerItemId = row.providerItemId ?? split?.providerItemId;
@@ -94439,7 +96305,7 @@ function createConnectorFileExtractionSource(options) {
         const lane = laneFor(row);
         if (!lane || !active.includes(lane))
           continue;
-        const ref = refFromRow(row, lane);
+        const ref = refFromRow2(row, lane);
         if (ref)
           candidates.push(ref);
       }
@@ -94457,7 +96323,7 @@ function createConnectorFileExtractionSource(options) {
       const bytes = content.kind === "bytes" ? content.bytes : new TextEncoder().encode(content.text);
       const mimeType = typeFor(ref, content.kind === "bytes" ? content.mimeType : item.mimeType);
       if (fetchOptions.maxBytes !== undefined && bytes.byteLength > fetchOptions.maxBytes) {
-        throw new FileExtractionSourceError("source_too_large");
+        throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
       }
       return { bytes, ...mimeType ? { mimeType } : {}, sizeBytes: bytes.byteLength };
     },
@@ -94497,7 +96363,7 @@ function createConnectorFileExtractionSource(options) {
       throw new FileExtractionSourceError(answer.refusal);
     const stated = answer?.sizeBytes ?? ref.sizeBytes;
     if (maxBytes !== undefined && stated !== undefined && stated > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_too_large", { sizeBytes: stated });
     }
     return { connector, ...answer ? { deferred: answer } : {} };
   }
@@ -95126,9 +96992,9 @@ var init_reaction_index = __esm(() => {
 });
 
 // src/workers/whatsapp/spool-index.ts
-import { Database as Database19 } from "bun:sqlite";
+import { Database as Database20 } from "bun:sqlite";
 import { randomBytes as randomBytes15 } from "node:crypto";
-import { chmodSync as chmodSync24, existsSync as existsSync61 } from "node:fs";
+import { chmodSync as chmodSync25, existsSync as existsSync62 } from "node:fs";
 import { join as join78 } from "node:path";
 function comparePlaces(a, b) {
   if (a.file !== b.file)
@@ -95142,13 +97008,13 @@ class WhatsAppSpoolIndex {
     this.db = db;
   }
   static open(spoolDir) {
-    if (!existsSync61(spoolDir))
+    if (!existsSync62(spoolDir))
       return;
     const path = join78(spoolDir, WHATSAPP_SPOOL_INDEX_FILE);
     let db;
     try {
-      db = new Database19(path, { create: true });
-      chmodSync24(path, 384);
+      db = new Database20(path, { create: true });
+      chmodSync25(path, 384);
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
       const version = db.query("PRAGMA user_version").get().user_version;
       if (version !== SCHEMA) {
@@ -95392,8 +97258,8 @@ var init_spool_index = __esm(() => {
 });
 
 // src/workers/whatsapp/spool-resets.ts
-import { Database as Database20 } from "bun:sqlite";
-import { chmodSync as chmodSync25 } from "node:fs";
+import { Database as Database21 } from "bun:sqlite";
+import { chmodSync as chmodSync26 } from "node:fs";
 import { join as join79 } from "node:path";
 
 class WhatsAppSpoolResets {
@@ -95405,8 +97271,8 @@ class WhatsAppSpoolResets {
     const path = join79(spoolDir, WHATSAPP_SPOOL_RESET_FILE);
     let db;
     try {
-      db = new Database20(path, { create: true });
-      chmodSync25(path, 384);
+      db = new Database21(path, { create: true });
+      chmodSync26(path, 384);
       db.exec(`
         PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -95458,7 +97324,7 @@ var WHATSAPP_SPOOL_RESET_FILE = "spool-reset.sqlite";
 var init_spool_resets = () => {};
 
 // src/workers/whatsapp/match-keys.ts
-import { createHash as createHash65 } from "node:crypto";
+import { createHash as createHash67 } from "node:crypto";
 function nameKey(name) {
   return name.normalize("NFKC").replace(/[‎‏‪-‮⁦-⁩]/gu, "").replace(/\s+/gu, " ").trim().toLowerCase();
 }
@@ -95468,7 +97334,7 @@ function textKey(text3) {
 `).trim();
 }
 function keyDigest(...parts) {
-  return createHash65("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
+  return createHash67("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
 }
 function timeSlot(ms, precision) {
   return precision === "second" ? `s${Math.floor(ms / 1000)}` : `m${Math.floor(ms / 60000)}`;
@@ -95774,9 +97640,9 @@ var init_spool_reader = __esm(() => {
 
 // src/workers/whatsapp/live-connector.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { createHash as createHash66 } from "node:crypto";
-import { closeSync as closeSync25, existsSync as existsSync62, fsyncSync as fsyncSync4, lstatSync as lstatSync32, openSync as openSync25, readFileSync as readFileSync49, readdirSync as readdirSync13, realpathSync as realpathSync15, rmSync as rmSync24, statSync as statSync31 } from "node:fs";
-import { basename as basename14, dirname as dirname68, isAbsolute as isAbsolute27, join as join81, relative as relative13 } from "node:path";
+import { createHash as createHash68 } from "node:crypto";
+import { closeSync as closeSync25, existsSync as existsSync63, fsyncSync as fsyncSync4, lstatSync as lstatSync32, openSync as openSync25, readFileSync as readFileSync49, readdirSync as readdirSync13, realpathSync as realpathSync15, rmSync as rmSync24, statSync as statSync31 } from "node:fs";
+import { basename as basename14, dirname as dirname69, isAbsolute as isAbsolute27, join as join81, relative as relative13 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
     malformedLines: 0,
@@ -95796,7 +97662,7 @@ function createWhatsAppLiveSourceConnector(options) {
   const passByteBudget = normalizePositiveInteger2(options.passByteBudget, DEFAULT_PASS_BYTE_BUDGET, Number.MAX_SAFE_INTEGER);
   const maxRecordBytes = normalizePositiveInteger2(options.maxRecordBytes, WHATSAPP_SPOOL_MAX_RECORD_BYTES, Number.MAX_SAFE_INTEGER);
   const authenticate = async () => {
-    if (!existsSync62(spoolDir) || !statSync31(spoolDir).isDirectory()) {
+    if (!existsSync63(spoolDir) || !statSync31(spoolDir).isDirectory()) {
       throw new Error(`WhatsApp live spool directory ${spoolDir} does not exist. ` + "Start the olympus-whatsapp-bridge daemon (tools/whatsapp-bridge) first.");
     }
   };
@@ -95807,7 +97673,7 @@ function createWhatsAppLiveSourceConnector(options) {
       const located = index?.newestMessage(providerItemId, chatJid);
       const indexed = located ? readMessageAt(spoolDir, located.file, located.offset) : undefined;
       if (index && indexed && indexed.id === providerItemId && (chatJid === undefined || sameWhatsAppChat(indexed.chatJid, chatJid))) {
-        return rawItemFromSpoolMessage(indexed, account, nowIso3(), boundedReactionsForTarget(index.reactionsFor(providerItemId), indexed.chatJid));
+        return rawItemFromSpoolMessage(indexed, account, nowIso4(), boundedReactionsForTarget(index.reactionsFor(providerItemId), indexed.chatJid));
       }
     } finally {
       index?.close();
@@ -95831,7 +97697,7 @@ function createWhatsAppLiveSourceConnector(options) {
       throw new Error(`WhatsApp live spool message ${localItemId} was not found under ${spoolDir}.`);
     }
     const reactions = boundedReactionsForTarget(reactionIndex.build().entriesFor(providerItemId), match.chatJid);
-    return rawItemFromSpoolMessage(match, account, nowIso3(), reactions);
+    return rawItemFromSpoolMessage(match, account, nowIso4(), reactions);
   };
   const builder = createRecordBuilder(account, fetchItem, authenticate, options.readChild);
   const input = {
@@ -95892,7 +97758,7 @@ function createRecordBuilder(account, fetchItem, authenticate, readChild) {
     },
     compareVersions: compareWhatsAppVersions,
     build: (record, wanted) => {
-      const fetchedAt = nowIso3();
+      const fetchedAt = nowIso4();
       const items = [];
       const own3 = rawItemFromSpoolMessage(record, account, fetchedAt, record.reactions);
       if (wanted.has(own3.identity.localItemId))
@@ -95917,7 +97783,7 @@ function createRecordBuilder(account, fetchItem, authenticate, readChild) {
         mimeType,
         content: { kind: "bytes", mimeType, bytes },
         metadata: Object.freeze({}),
-        fetchedAt: nowIso3()
+        fetchedAt: nowIso4()
       };
     },
     classificationSignals: whatsAppClassificationSignals,
@@ -96032,7 +97898,7 @@ function readWhatsAppLiveCaptureState(spoolDir) {
 }
 async function* liveRecords(spoolDir, options) {
   let position = positionFromCursor(options.cursor);
-  if (!existsSync62(spoolDir))
+  if (!existsSync63(spoolDir))
     return;
   const resets = WhatsAppSpoolResets.open(spoolDir);
   const index = WhatsAppSpoolIndex.open(spoolDir);
@@ -96670,7 +98536,7 @@ function whatsAppMediaFileStem(chatJid, id) {
     const device = user.indexOf(":");
     normalized = `${device === -1 ? user : user.slice(0, device)}@${jid.slice(at + 1)}`;
   }
-  const digest4 = createHash66("sha256").update(`${normalized}\x00${id}`).digest("hex").slice(0, 16);
+  const digest4 = createHash68("sha256").update(`${normalized}\x00${id}`).digest("hex").slice(0, 16);
   let readable = [...id].map((char) => /^[A-Za-z0-9._-]$/u.test(char) ? char : "_").join("");
   if (readable === "")
     readable = "message";
@@ -96688,7 +98554,7 @@ function whatsAppBootNonce() {
   } catch {
     id = "";
   }
-  currentBootNonce = id === "" ? "00000000" : createHash66("sha256").update(id).digest("hex").slice(0, 8);
+  currentBootNonce = id === "" ? "00000000" : createHash68("sha256").update(id).digest("hex").slice(0, 8);
   return currentBootNonce;
 }
 function processAlive3(pid) {
@@ -96759,7 +98625,7 @@ function removeTemp(path) {
   fsyncFolderOf(path);
 }
 function fsyncFolderOf(path) {
-  const fd2 = openSync25(dirname68(path), "r");
+  const fd2 = openSync25(dirname69(path), "r");
   try {
     fsyncSync4(fd2);
   } finally {
@@ -96914,7 +98780,7 @@ function optionalStringRecord(value) {
   }
   return entries.length === 0 ? undefined : Object.fromEntries(entries);
 }
-function nowIso3() {
+function nowIso4() {
   return new Date().toISOString();
 }
 var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, WHATSAPP_MEDIA_WAITING_STATUS = "waiting_for_disk", CHILD_MEDIA_TYPES, WHATSAPP_FETCHED_MEDIA_TYPES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR2, LEGACY_CURSOR, MEDIA_TEMP, OLDER_MEDIA_TEMP, MEDIA_TEMP_MAX_AGE_MS, MEDIA_TEMP_DEPTH = 2, currentBootNonce;
@@ -96940,13 +98806,13 @@ var init_live_connector = __esm(() => {
 });
 
 // src/workers/whatsapp/media-fetch.ts
-import { Database as Database21 } from "bun:sqlite";
-import { createHash as createHash67 } from "node:crypto";
+import { Database as Database22 } from "bun:sqlite";
+import { createHash as createHash69 } from "node:crypto";
 import {
-  chmodSync as chmodSync26,
+  chmodSync as chmodSync27,
   closeSync as closeSync26,
   fsyncSync as fsyncSync5,
-  mkdirSync as mkdirSync41,
+  mkdirSync as mkdirSync42,
   openSync as openSync26,
   readFileSync as readFileSync50,
   readdirSync as readdirSync14,
@@ -96957,7 +98823,7 @@ import {
   writeSync as writeSync7
 } from "node:fs";
 import { createConnection } from "node:net";
-import { dirname as dirname69, join as join82 } from "node:path";
+import { dirname as dirname70, join as join82 } from "node:path";
 async function runWhatsAppMediaFetch(options) {
   const result = { received: 0, filled: 0, dropped: 0, waitingForDisk: false };
   const { state, folder } = options;
@@ -96965,7 +98831,7 @@ async function runWhatsAppMediaFetch(options) {
     state.note(media);
   for (const saved of options.findings.savedMedia)
     state.saved(saved.chatJid, saved.id, saved.version);
-  mkdirSync41(folder, { recursive: true, mode: 448 });
+  mkdirSync42(folder, { recursive: true, mode: 448 });
   const space = options.space ?? volumeSpace;
   for (const name of listNames(folder))
     if (name.endsWith(PART_SUFFIX))
@@ -97181,8 +99047,8 @@ class WhatsAppMediaFetchState {
   }
   static open(spoolDir) {
     const path = join82(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE);
-    const db = new Database21(path, { create: true });
-    chmodSync26(path, 384);
+    const db = new Database22(path, { create: true });
+    chmodSync27(path, 384);
     db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
     db.run(`CREATE TABLE IF NOT EXISTS media (
       key TEXT PRIMARY KEY,
@@ -97232,7 +99098,7 @@ class WhatsAppMediaFetchState {
   }
 }
 function versionDigestOf(version) {
-  return createHash67("sha256").update(version, "utf8").digest("hex").slice(0, 16);
+  return createHash69("sha256").update(version, "utf8").digest("hex").slice(0, 16);
 }
 function rowKey(stem, version) {
   return `${stem}@${versionDigestOf(version)}`;
@@ -97481,7 +99347,7 @@ function removeDurably(path) {
       throw error;
     return;
   }
-  fsyncFolder(dirname69(path));
+  fsyncFolder(dirname70(path));
 }
 var WHATSAPP_MEDIA_FETCH_STATE_FILE = "media-fetch.sqlite", WHATSAPP_MEDIA_FETCH_INPUT_ID = "whatsapp-media-fetch", WHATSAPP_MEDIA_SOCKET_POINTER = "media-download.json", PART_SUFFIX = ".part", DISK_FLOOR_MIN_BYTES, DISK_FLOOR_SHARE = 20, CALL_STALL_MS = 120000, ANSWER_HEAD_MAX_BYTES, FETCHED_MEDIA_SECRET_FINDING = "fetched_media_parent_secret", EXTENSIONS2;
 var init_media_fetch = __esm(() => {
@@ -97982,1703 +99848,6 @@ var init_extraction_factory = __esm(() => {
   init_child_media();
   init_extraction_source2();
   init_store_sync();
-});
-
-// src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync27, mkdirSync as mkdirSync42 } from "node:fs";
-import { createHash as createHash68, randomUUID as randomUUID24 } from "node:crypto";
-import { dirname as dirname70 } from "node:path";
-import { Database as Database22 } from "bun:sqlite";
-function settleUnreadable(candidates, classify2) {
-  const items = [];
-  let blocked = 0;
-  for (const candidate of candidates) {
-    let verdict = "unreadable";
-    if (classify2) {
-      try {
-        verdict = classify2(candidate);
-      } catch {
-        verdict = "blocked_policy";
-      }
-    }
-    if (verdict === "blocked_policy")
-      blocked += 1;
-    else if (verdict === "unreadable")
-      items.push(candidate);
-  }
-  items.sort((a, b) => a.failedAt === b.failedAt ? a.ref.localItemId.localeCompare(b.ref.localItemId) : a.failedAt < b.failedAt ? 1 : -1);
-  return { items, blocked };
-}
-function unreadableCandidate(itemRows) {
-  let newest;
-  for (const row of itemRows) {
-    if (row.status !== "failed_terminal")
-      continue;
-    if (!newest || row.updated_at > newest.updated_at)
-      newest = row;
-  }
-  return newest ? { ref: refFromRow(newest), failedAt: newest.updated_at, ...newest.last_error_kind ? { errorKind: newest.last_error_kind } : {} } : undefined;
-}
-
-class LocalFileExtractionJobStore {
-  dbPath;
-  readonly;
-  db;
-  grantAuthorityId;
-  unregisterPath;
-  constructor(dbPath = defaultFileExtractionJobsDbPath(), options = {}) {
-    this.dbPath = dbPath;
-    this.readonly = options.readonly === true;
-    const inMemory = dbPath === ":memory:";
-    if (!this.readonly)
-      assertWritableStoreOpenAllowed("extraction job store", dbPath);
-    if (!inMemory && !this.readonly) {
-      mkdirSync42(dirname70(dbPath), { recursive: true, mode: 448 });
-    }
-    this.db = this.readonly ? new Database22(dbPath, { readonly: true }) : new Database22(dbPath, { create: true });
-    if (!inMemory && !this.readonly)
-      chmodSync27(dbPath, 384);
-    const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
-    if (this.readonly) {
-      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
-    } else {
-      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;`);
-    }
-    assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
-    if (!this.readonly) {
-      runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
-      this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_reads (
-        corpus_id TEXT NOT NULL, provider_item_id TEXT NOT NULL, job_id TEXT PRIMARY KEY REFERENCES extraction_jobs(job_id) ON DELETE CASCADE,
-        reason TEXT NOT NULL DEFAULT 'on_demand', requester TEXT NOT NULL, question_id TEXT,
-        reserved_bytes INTEGER NOT NULL, created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS on_demand_question ON on_demand_reads(question_id);
-      CREATE INDEX IF NOT EXISTS on_demand_item ON on_demand_reads(corpus_id, provider_item_id);
-      CREATE TABLE IF NOT EXISTS on_demand_waiting (
-        question_id TEXT NOT NULL, corpus_id TEXT NOT NULL, provider_item_id TEXT NOT NULL,
-        PRIMARY KEY(question_id, corpus_id, provider_item_id)
-      );`);
-      createUnroutableItemsTable(this.db);
-      this.unregisterPath = registerExtractionJobsDbPath(dbPath);
-    }
-  }
-  close() {
-    this.unregisterPath?.();
-    closeSqliteStore(this.db);
-  }
-  invalidateUnsettledForCorpus(corpusId) {
-    this.assertWritable("scope queue invalidation");
-    const id = requireBoundedString(corpusId, "corpusId");
-    return this.db.transaction(() => {
-      this.db.query("DELETE FROM extraction_unroutable_items WHERE corpus_id = ?").run(id);
-      return this.db.query(`
-        DELETE FROM extraction_jobs
-        WHERE corpus_id = ? AND status IN ('queued', 'leased')
-      `).run(id).changes;
-    }).immediate();
-  }
-  recordUnroutable(refs) {
-    this.assertWritable("record unroutable items");
-    const now = nowIso4();
-    const insert = this.db.query(`
-      INSERT INTO extraction_unroutable_items (
-        corpus_id, provider, account_scope, approved_scope_key, local_item_id,
-        provider_item_id, source_version, content_hash, mime_type, seen_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(corpus_id, local_item_id) DO UPDATE SET
-        provider = excluded.provider,
-        account_scope = excluded.account_scope,
-        approved_scope_key = excluded.approved_scope_key,
-        provider_item_id = excluded.provider_item_id,
-        source_version = excluded.source_version,
-        content_hash = excluded.content_hash,
-        mime_type = excluded.mime_type,
-        seen_at = excluded.seen_at
-    `);
-    this.db.transaction(() => {
-      for (const rawRef of refs) {
-        const ref = requireItemRef(rawRef);
-        insert.run(ref.corpusId, ref.provider, ref.accountScope, ref.approvedScopeKey, ref.localItemId, ref.providerItemId, ref.sourceVersion ?? null, ref.contentHash ?? null, ref.mimeType ?? null, now);
-      }
-    }).immediate();
-  }
-  enqueueOnDemandRead(request, job, grant, limits2 = { files: 3, bytes: 25 * 1024 * 1024 }) {
-    this.assertWritable("on_demand");
-    if (!Number.isSafeInteger(limits2.files) || limits2.files < 1 || !Number.isSafeInteger(limits2.bytes) || limits2.bytes < 1) {
-      throw new TypeError("Invalid on-demand limits.");
-    }
-    if (job.refs.length !== 1)
-      throw new TypeError("On-demand reads require one ref.");
-    return this.db.transaction(() => {
-      const previous = this.db.query(`SELECT j.status, j.source_version FROM on_demand_reads r
-        JOIN extraction_jobs j ON j.job_id = r.job_id
-        WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId);
-      if (previous && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? "")) {
-        if (previous.status === "leased" || previous.status === "indexed")
-          return { state: "reading", etaSeconds: 60 };
-        if (previous.status === "queued" || previous.status === "failed_retryable")
-          return { state: "queued", etaSeconds: 60 };
-        const ownerRetry = request.requester === "owner" && previous.status === "skipped_too_large";
-        if (!ownerRetry)
-          return { state: "refused", reason: "read_failed" };
-      }
-      const size = job.refs[0].sizeBytes;
-      const used = this.db.query(`SELECT COUNT(*) AS files, COALESCE(SUM(reserved_bytes), 0) AS bytes
-        FROM on_demand_reads WHERE question_id = ? AND requester != 'owner'`).get(request.questionId ?? null);
-      const bytes = size ?? Math.max(0, limits2.bytes - used.bytes);
-      if (request.requester !== "owner" && (used.files >= limits2.files || bytes < 1 || used.bytes + bytes > limits2.bytes)) {
-        this.db.query(`INSERT OR IGNORE INTO on_demand_waiting VALUES (?, ?, ?)`).run(request.questionId ?? "", request.itemRef.corpusId, request.itemRef.providerItemId);
-        const waiting = this.db.query("SELECT COUNT(*) AS n FROM on_demand_waiting WHERE question_id = ?").get(request.questionId ?? "");
-        return { state: "capped", reason: {
-          id: "on_demand_reads_per_question",
-          limit: limits2,
-          used,
-          waiting_names_count: waiting.n,
-          resumes: "never"
-        } };
-      }
-      grant();
-      this.db.query("DELETE FROM on_demand_waiting WHERE corpus_id = ? AND provider_item_id = ?").run(request.itemRef.corpusId, request.itemRef.providerItemId);
-      const queued = this.enqueue({
-        ...job,
-        force: true,
-        priority: 100,
-        ...request.requester !== "owner" ? { maxBytesPerFile: Math.max(1, bytes) } : {}
-      });
-      const ref = queued.jobRefs[0];
-      this.db.query(`INSERT INTO on_demand_reads
-        (corpus_id, provider_item_id, job_id, requester, question_id, reserved_bytes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(job_id) DO UPDATE SET requester = excluded.requester, question_id = excluded.question_id,
-          reserved_bytes = excluded.reserved_bytes, created_at = excluded.created_at`).run(request.itemRef.corpusId, request.itemRef.providerItemId, ref.jobId, request.requester, request.questionId ?? null, bytes, nowIso4());
-      return { state: "queued", etaSeconds: 60 };
-    }).immediate();
-  }
-  pendingOnDemandReads() {
-    return this.db.query(`SELECT j.* FROM on_demand_reads r CROSS JOIN extraction_jobs j ON j.job_id = r.job_id
-      WHERE j.status = 'queued' OR (j.status = 'failed_retryable' AND (j.next_retry_at IS NULL OR j.next_retry_at <= ?))
-        OR (j.status = 'leased' AND j.leased_until <= ?) ORDER BY r.rowid LIMIT 100`).all(nowIso4(), nowIso4()).map((row) => recordFromRow2(row).ref);
-  }
-  onDemandSettledLanes() {
-    return this.db.query(`SELECT DISTINCT j.corpus_id, j.provider, j.account_scope, j.approved_scope_key
-      FROM on_demand_reads r CROSS JOIN extraction_jobs j ON j.job_id = r.job_id
-      WHERE j.status NOT IN ('queued', 'leased', 'failed_retryable', 'indexed') LIMIT 100`).all().map((row) => ({
-      corpusId: row.corpus_id,
-      provider: row.provider,
-      accountScope: row.account_scope,
-      approvedScopeKey: row.approved_scope_key
-    }));
-  }
-  recordOnDemandFetchedBytes(jobId, bytes) {
-    this.db.query("UPDATE on_demand_reads SET reserved_bytes = ? WHERE job_id = ?").run(bytes, jobId);
-  }
-  onDemandJob(jobId) {
-    return this.db.query("SELECT 1 FROM on_demand_reads WHERE job_id = ?").get(jobId) !== null;
-  }
-  enqueue(request) {
-    this.assertWritable("enqueue");
-    const extractorKind = requireToken3(request.extractorKind, "extractorKind");
-    const extractorVersion = requireKeyPart(request.extractorVersion, "extractorVersion");
-    const policyDecision = requirePolicyDecision(request.policyDecision ?? "index_allowed");
-    const policyDecisionSupplied = request.policyDecision === undefined ? 0 : 1;
-    const priority = request.priority === undefined ? 0 : requireSafeInteger(request.priority, "priority");
-    const maxBytesPerFile = request.maxBytesPerFile === undefined ? undefined : requirePositiveSafeInteger(request.maxBytesPerFile, "maxBytesPerFile");
-    const force = request.force === true;
-    const now = nowIso4();
-    let jobsQueued = 0;
-    let jobsExisting = 0;
-    let jobsForced = 0;
-    let jobsSkippedTooLarge = 0;
-    const jobRefs = [];
-    this.db.transaction(() => {
-      for (const rawRef of request.refs) {
-        const ref = requireItemRef(rawRef);
-        this.db.query("DELETE FROM extraction_unroutable_items WHERE corpus_id = ? AND local_item_id = ?").run(ref.corpusId, ref.localItemId);
-        const status = maxBytesPerFile !== undefined && ref.sizeBytes !== undefined && ref.sizeBytes > maxBytesPerFile ? "skipped_too_large" : "queued";
-        const existing = this.existingJob(ref, extractorKind, extractorVersion);
-        const jobId = existing?.job_id ?? makeJobId();
-        const redacted = itemNameRedacted(this.db, ref);
-        const name = redacted ? null : ref.name ?? null;
-        const reread = !redacted && existing !== undefined && existing !== null && status === "queued" && takeRestoredReread(this.db, existing.job_id);
-        const identityReread = !redacted && status === "queued" && existing !== undefined && existing !== null && existing.status === "failed_terminal" && existing.last_error_kind === AMBIGUOUS_IDENTITY_ERROR_KIND && (existing.janitor_terminal_requeue_count ?? 0) < 1;
-        const forceExisting = Boolean(existing) && (force || reread || identityReread) && status === "queued";
-        const reset = forceExisting ? 1 : 0;
-        this.db.query(`
-          INSERT INTO extraction_jobs (
-            job_id, corpus_id, provider, account_scope, approved_scope_key,
-            provider_item_id, local_item_id, source_version, content_hash,
-            name, mime_type, size_bytes, extractor_kind, extractor_version,
-            policy_decision, status, priority, max_bytes_per_file, attempts,
-            temp_bytes_cleaned, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
-          ON CONFLICT(corpus_id, provider, account_scope, provider_item_id,
-                      source_version, content_hash, extractor_kind, extractor_version)
-          DO UPDATE SET
-            approved_scope_key = excluded.approved_scope_key,
-            local_item_id = excluded.local_item_id,
-            name = excluded.name,
-            mime_type = excluded.mime_type,
-            size_bytes = excluded.size_bytes,
-            policy_decision = CASE WHEN ? THEN excluded.policy_decision
-              ELSE extraction_jobs.policy_decision END,
-            status = CASE WHEN ? THEN excluded.status ELSE extraction_jobs.status END,
-            priority = MAX(extraction_jobs.priority, excluded.priority),
-            max_bytes_per_file = excluded.max_bytes_per_file,
-            attempts = CASE WHEN ? THEN 0 ELSE extraction_jobs.attempts END,
-            leased_by_hash = CASE WHEN ? THEN NULL ELSE extraction_jobs.leased_by_hash END,
-            leased_until = CASE WHEN ? THEN NULL ELSE extraction_jobs.leased_until END,
-            lease_token = CASE WHEN ? THEN NULL ELSE extraction_jobs.lease_token END,
-            lease_grant_ordinal = CASE WHEN ? THEN NULL
-              ELSE extraction_jobs.lease_grant_ordinal END,
-            last_error_hash = CASE WHEN ? THEN NULL ELSE extraction_jobs.last_error_hash END,
-            last_error_kind = CASE WHEN ? THEN NULL ELSE extraction_jobs.last_error_kind END,
-            next_retry_at = CASE WHEN ? THEN NULL ELSE extraction_jobs.next_retry_at END,
-            temp_bytes_cleaned = CASE WHEN ? THEN 1 ELSE extraction_jobs.temp_bytes_cleaned END,
-            updated_at = excluded.updated_at
-        `).run(jobId, ref.corpusId, ref.provider, ref.accountScope, ref.approvedScopeKey, ref.providerItemId, ref.localItemId, ref.sourceVersion ?? "", ref.contentHash ?? "", name, ref.mimeType ?? null, ref.sizeBytes ?? null, extractorKind, extractorVersion, policyDecision, status, priority, maxBytesPerFile ?? null, now, now, policyDecisionSupplied, reset, reset, reset, reset, reset, reset, reset, reset, reset, reset);
-        if (identityReread) {
-          this.db.query(`UPDATE extraction_jobs
-            SET janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1
-            WHERE job_id = ?`).run(jobId);
-        }
-        if (forceExisting) {
-          jobsForced += 1;
-        } else if (existing) {
-          jobsExisting += 1;
-        } else if (status === "skipped_too_large") {
-          jobsSkippedTooLarge += 1;
-        } else {
-          jobsQueued += 1;
-        }
-        jobRefs.push({
-          jobId,
-          status: forceExisting ? status : jobStatus(existing?.status) ?? status
-        });
-      }
-    }).immediate();
-    return { jobsQueued, jobsExisting, jobsForced, jobsSkippedTooLarge, jobRefs };
-  }
-  lease(request) {
-    this.assertWritable("lease");
-    const lane = requireLaneKey(request);
-    const workerId = requireBoundedString(request.workerId, "workerId");
-    const limit = clampInteger(request.limit ?? DEFAULT_EXTRACTION_LEASE_LIMIT, 1, MAX_EXTRACTION_LEASE_LIMIT);
-    const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
-    const now = nowIso4();
-    const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const leaseToken = randomUUID24();
-    const workerHash = hashString6(workerId);
-    const claimed = [];
-    this.db.transaction(() => {
-      this.db.query(`
-        UPDATE extraction_jobs
-        SET status = 'failed_terminal',
-            last_error_kind = ?,
-            leased_by_hash = NULL,
-            leased_until = NULL,
-            lease_token = NULL,
-            lease_grant_ordinal = NULL,
-            next_retry_at = NULL,
-            updated_at = ?
-        WHERE corpus_id = ?
-          AND provider = ?
-          AND account_scope = ?
-          AND approved_scope_key = ?
-          AND status = 'leased'
-          AND leased_until IS NOT NULL
-          AND leased_until < ?
-          AND attempts >= ?
-      `).run(EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND, now, lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, now, MAX_EXTRACTION_RETRY_ATTEMPTS);
-      for (const row of this.leaseCandidateRows(lane, request, now, limit)) {
-        const claimGrant = this.mintClaimGrant();
-        const claim = this.db.query(`
-          UPDATE extraction_jobs
-          SET status = 'leased',
-              attempts = CASE
-                WHEN last_error_kind = ? THEN 1
-                ELSE attempts + 1
-              END,
-              -- The marker is a one-claim grant, so the claim that takes it
-              -- clears it. Left in place it re-grants on every later reclaim
-              -- and the retry budget never advances past 1.
-              last_error_kind = CASE
-                WHEN last_error_kind = ? THEN NULL
-                ELSE last_error_kind
-              END,
-              leased_by_hash = ?,
-              leased_until = ?,
-              lease_token = ?,
-              lease_grant_ordinal = ?,
-              updated_at = ?
-          WHERE job_id = ?
-            AND corpus_id = ?
-            AND provider = ?
-            AND account_scope = ?
-            AND approved_scope_key = ?
-            AND (
-              status = 'queued'
-              OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until < ?)
-              OR (status = 'failed_retryable' AND (next_retry_at IS NULL OR next_retry_at <= ?))
-            )
-        `).run(RECYCLED_ERROR_KIND, RECYCLED_ERROR_KIND, workerHash, leaseExpiresAt, leaseToken, claimGrant.ordinal, now, row.job_id, lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, now, now);
-        if (claim.changes > 0)
-          claimed.push({ row, grant: claimGrant });
-      }
-    })();
-    return {
-      corpusId: lane.corpusId,
-      provider: lane.provider,
-      accountScope: lane.accountScope,
-      scopeKeyHash: hashString6(lane.approvedScopeKey),
-      workerIdHash: workerHash,
-      leasedJobs: claimed.map(({ row, grant }) => ({
-        jobId: row.job_id,
-        ref: refFromRow(row),
-        extractorKind: row.extractor_kind,
-        extractorVersion: row.extractor_version,
-        policyDecision: row.policy_decision,
-        ...row.max_bytes_per_file === null ? {} : { maxBytesPerFile: row.max_bytes_per_file },
-        attempts: row.last_error_kind === RECYCLED_ERROR_KIND ? 1 : row.attempts + 1,
-        leaseExpiresAt,
-        leaseToken,
-        grantAuthority: grant.authority,
-        grantOrdinal: grant.ordinal
-      }))
-    };
-  }
-  mintClaimGrant() {
-    const row = this.db.query(`
-      UPDATE extraction_claim_grants
-      SET last_ordinal = MAX(last_ordinal + 1, ?)
-      WHERE grant_id = 1
-      RETURNING authority_id, last_ordinal
-    `).get(Date.now());
-    if (!row)
-      throw new Error("Extraction job store claim grant sequence is missing.");
-    return { authority: row.authority_id, ordinal: row.last_ordinal };
-  }
-  claimGrantAuthority() {
-    if (this.grantAuthorityId === undefined) {
-      const row = this.db.query("SELECT authority_id FROM extraction_claim_grants WHERE grant_id = 1").get();
-      if (!row)
-        throw new Error("Extraction job store claim grant sequence is missing.");
-      this.grantAuthorityId = row.authority_id;
-    }
-    return this.grantAuthorityId;
-  }
-  record(request) {
-    this.assertWritable("record");
-    const jobId = requireKeyPart(request.jobId, "jobId");
-    const status = requireTerminalStatus(request.status);
-    const errorKind = request.errorKind === undefined ? undefined : requireToken3(request.errorKind, "errorKind");
-    const errorHash = request.errorHash === undefined ? undefined : requireHash2(request.errorHash);
-    const tempBytesCleaned = request.tempBytesCleaned !== false;
-    const now = nowIso4();
-    return this.db.transaction(() => {
-      const row = this.jobRow(jobId);
-      if (!row)
-        throw new Error("Extraction record references an unknown job.");
-      if (row.status !== "leased")
-        throw new Error("Extraction record requires a leased job.");
-      if (request.workerId !== undefined && row.leased_by_hash !== null && row.leased_by_hash !== hashString6(requireBoundedString(request.workerId, "workerId"))) {
-        throw new Error("Extraction record worker does not hold the job lease.");
-      }
-      if (request.leaseToken !== undefined && row.lease_token !== request.leaseToken) {
-        throw new Error("Extraction record worker does not hold the job lease.");
-      }
-      const effectiveStatus = status === "failed_retryable" && row.attempts >= MAX_EXTRACTION_RETRY_ATTEMPTS ? "failed_terminal" : status;
-      const nextRetryAt = nextRetryTimestamp(effectiveStatus, row.attempts, now);
-      this.db.query(`
-        UPDATE extraction_jobs
-        SET status = ?,
-            leased_by_hash = NULL,
-            leased_until = NULL,
-            lease_token = NULL,
-            lease_grant_ordinal = NULL,
-            last_error_kind = ?,
-            last_error_hash = ?,
-            next_retry_at = ?,
-            temp_bytes_cleaned = ?,
-            updated_at = ?
-        WHERE job_id = ?
-      `).run(effectiveStatus, errorKind ?? null, errorHash ?? null, nextRetryAt, tempBytesCleaned ? 1 : 0, now, jobId);
-      const artifactsRecorded = this.replaceArtifacts(row, request.derivations, now);
-      return {
-        jobId,
-        status: effectiveStatus,
-        attempts: row.attempts,
-        ...nextRetryAt === null ? {} : { nextRetryAt },
-        artifactsRecorded
-      };
-    })();
-  }
-  releaseLeasesWithoutAttempt(request) {
-    this.assertWritable("lease release");
-    const leaseToken = requireBoundedString(request.leaseToken, "leaseToken");
-    const jobIds = [...new Set(request.jobIds.map((jobId) => jobId?.trim()).filter(Boolean))];
-    if (jobIds.length === 0)
-      return { releasedJobs: 0 };
-    const workerHash = request.workerId === undefined ? null : hashString6(requireBoundedString(request.workerId, "workerId"));
-    const now = nowIso4();
-    let released = 0;
-    this.db.transaction(() => {
-      const update = this.db.query(`
-        UPDATE extraction_jobs
-        SET status = 'queued',
-            leased_by_hash = NULL,
-            leased_until = NULL,
-            lease_token = NULL,
-            lease_grant_ordinal = NULL,
-            attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
-            updated_at = ?
-        WHERE job_id = ?
-          AND status = 'leased'
-          AND lease_token = ?
-          AND (? IS NULL OR leased_by_hash IS NULL OR leased_by_hash = ?)
-      `);
-      for (const jobId of jobIds) {
-        released += update.run(now, jobId, leaseToken, workerHash, workerHash).changes;
-      }
-    })();
-    return { releasedJobs: released };
-  }
-  recycleLeases(request) {
-    this.assertWritable("lease recycle");
-    const lane = requireLaneKey(request);
-    const prefix = requireToken3(request.extractorKindPrefix, "extractorKindPrefix");
-    const limit = clampInteger(request.limit ?? DEFAULT_RECYCLE_LIMIT, 1, MAX_RECYCLE_LIMIT);
-    const staleOnly = request.staleOnly === true;
-    const dryRun = request.dryRun === true;
-    const now = nowIso4();
-    let matched = [];
-    this.db.transaction(() => {
-      const params = [
-        lane.corpusId,
-        lane.provider,
-        lane.accountScope,
-        lane.approvedScopeKey,
-        prefix.length,
-        prefix
-      ];
-      if (staleOnly)
-        params.push(now);
-      params.push(limit);
-      matched = this.db.query(`
-        SELECT job_id
-        FROM extraction_jobs
-        WHERE corpus_id = ?
-          AND provider = ?
-          AND account_scope = ?
-          AND approved_scope_key = ?
-          AND status = 'leased'
-          AND substr(extractor_kind, 1, ?) = ?
-          ${staleOnly ? "AND leased_until IS NOT NULL AND leased_until <= ?" : ""}
-        ORDER BY updated_at ASC, job_id ASC
-        LIMIT ?
-      `).all(...params);
-      if (dryRun || matched.length === 0)
-        return;
-      const update = this.db.query(`
-        UPDATE extraction_jobs
-        SET status = 'queued',
-            leased_by_hash = NULL,
-            leased_until = NULL,
-            lease_token = NULL,
-            lease_grant_ordinal = NULL,
-            last_error_kind = ?,
-            next_retry_at = NULL,
-            updated_at = ?
-        WHERE job_id = ?
-      `);
-      for (const row of matched)
-        update.run(RECYCLED_ERROR_KIND, now, row.job_id);
-    })();
-    return {
-      extractorKindPrefix: prefix,
-      matchedJobs: matched.length,
-      jobsRequeued: dryRun ? 0 : matched.length,
-      dryRun,
-      staleOnly
-    };
-  }
-  janitorRequeue(request) {
-    this.assertWritable("janitor requeue");
-    const lane = requireLaneKey(request);
-    const reason = requireReason(request.reason);
-    const limit = clampInteger(request.limit ?? DEFAULT_JANITOR_LIMIT, 1, MAX_JANITOR_LIMIT);
-    const dryRun = request.dryRun === true;
-    if (request.mode === "terminal_reclassification" && request.targetExtractorKind !== undefined) {
-      return this.janitorEscalate(lane, request, reason, limit, dryRun);
-    }
-    const lastErrorKind = request.lastErrorKind === undefined ? undefined : requireToken3(request.lastErrorKind, "lastErrorKind");
-    const extractorKind = request.extractorKind === undefined ? undefined : requireToken3(request.extractorKind, "extractorKind");
-    const extractorKindPrefix = request.extractorKindPrefix === undefined ? undefined : requireToken3(request.extractorKindPrefix, "extractorKindPrefix");
-    if (request.mode === "terminal_reclassification" && (!extractorKind || !lastErrorKind)) {
-      throw new TypeError("Terminal reclassification requires both extractorKind and lastErrorKind.");
-    }
-    const networkOverride = request.allowNetworkTerminalRequeueAfterPriorJanitor === true && lastErrorKind !== undefined && NETWORK_ERROR_KINDS.has(lastErrorKind);
-    const now = nowIso4();
-    let matched = [];
-    let skippedAttemptBudget = 0;
-    let skippedAlreadyJanitorRequeued = 0;
-    this.db.transaction(() => {
-      const filters = [
-        "corpus_id = ?",
-        "provider = ?",
-        "account_scope = ?",
-        "approved_scope_key = ?"
-      ];
-      const params = [
-        lane.corpusId,
-        lane.provider,
-        lane.accountScope,
-        lane.approvedScopeKey
-      ];
-      if (request.mode === "expired_retryable") {
-        filters.push("status = 'failed_retryable'");
-        filters.push("(next_retry_at IS NULL OR next_retry_at <= ?)");
-        params.push(now);
-        if (extractorKindPrefix) {
-          filters.push("substr(extractor_kind, 1, ?) = ?");
-          params.push(extractorKindPrefix.length, extractorKindPrefix);
-        }
-      } else {
-        filters.push("status = 'failed_terminal'");
-        filters.push("extractor_kind = ?");
-        filters.push("COALESCE(last_error_kind, ?) = ?");
-        params.push(extractorKind, lastErrorKind, lastErrorKind);
-        if (!networkOverride) {
-          filters.push("COALESCE(janitor_terminal_requeue_count, 0) < 1");
-        }
-      }
-      matched = this.db.query(`
-        SELECT job_id, attempts
-        FROM extraction_jobs
-        WHERE ${filters.join(" AND ")}
-        ORDER BY updated_at ASC, job_id ASC
-        LIMIT ?
-      `).all(...params, limit);
-      if (request.mode === "terminal_reclassification" && !networkOverride) {
-        const skipped = this.db.query(`
-          SELECT COUNT(*) AS count
-          FROM extraction_jobs
-          WHERE corpus_id = ?
-            AND provider = ?
-            AND account_scope = ?
-            AND approved_scope_key = ?
-            AND status = 'failed_terminal'
-            AND extractor_kind = ?
-            AND COALESCE(last_error_kind, ?) = ?
-            AND COALESCE(janitor_terminal_requeue_count, 0) >= 1
-        `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind, lastErrorKind, lastErrorKind);
-        skippedAlreadyJanitorRequeued = skipped.count;
-      }
-      const eligible = request.mode === "expired_retryable" ? matched.filter((row) => row.attempts < MAX_EXTRACTION_RETRY_ATTEMPTS) : matched;
-      skippedAttemptBudget = matched.length - eligible.length;
-      if (dryRun || eligible.length === 0)
-        return;
-      const terminal = request.mode === "terminal_reclassification" ? 1 : 0;
-      const stampedErrorKind = request.mode === "terminal_reclassification" ? JANITOR_TERMINAL_ERROR_KIND : JANITOR_RETRYABLE_ERROR_KIND;
-      const update = this.db.query(`
-        UPDATE extraction_jobs
-        SET status = 'queued',
-            leased_by_hash = NULL,
-            leased_until = NULL,
-            lease_token = NULL,
-            lease_grant_ordinal = NULL,
-            last_error_kind = ?,
-            next_retry_at = NULL,
-            janitor_requeue_count = COALESCE(janitor_requeue_count, 0) + 1,
-            janitor_terminal_requeue_count = CASE
-              WHEN ? THEN COALESCE(janitor_terminal_requeue_count, 0) + 1
-              ELSE COALESCE(janitor_terminal_requeue_count, 0)
-            END,
-            janitor_requeued_at = ?,
-            janitor_requeue_reason = ?,
-            updated_at = ?
-        WHERE job_id = ?
-      `);
-      for (const row of eligible)
-        update.run(stampedErrorKind, terminal, now, reason, now, row.job_id);
-    })();
-    return {
-      mode: request.mode,
-      matchedJobs: matched.length,
-      jobsRequeued: dryRun ? 0 : Math.max(0, matched.length - skippedAttemptBudget),
-      jobsEscalated: 0,
-      skippedAttemptBudget,
-      skippedAlreadyJanitorRequeued,
-      skippedPolicyExcluded: 0,
-      skippedEscalationBudget: 0,
-      skippedTargetExists: 0,
-      networkGuardOverrideUsed: networkOverride,
-      dryRun,
-      reason
-    };
-  }
-  unreadJobCount(request) {
-    const { sql, params } = this.unreadJobsQuery(request);
-    const row = this.db.query(`SELECT COUNT(*) AS count FROM extraction_jobs j WHERE ${sql}`).get(...params);
-    return row.count;
-  }
-  requeueUnread(request) {
-    this.assertWritable("unread requeue");
-    const reason = requireReason(request.reason);
-    const limit = clampInteger(request.limit ?? DEFAULT_JANITOR_LIMIT, 1, MAX_JANITOR_LIMIT);
-    const { sql, params } = this.unreadJobsQuery(request);
-    const now = nowIso4();
-    let matched = [];
-    const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken3(warning, "notReadyWarning"));
-    const pendingSql = notReady.length > 0 ? `EXISTS (
-      SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
-      WHERE a.job_id = j.job_id AND w.value IN (${notReady.map(() => "?").join(", ")})
-    )` : "0";
-    let requeued = 0;
-    this.db.transaction(() => {
-      matched = this.db.query(`
-        SELECT j.job_id, ${pendingSql} AS not_ready FROM extraction_jobs j
-        WHERE ${sql}
-        ORDER BY j.updated_at ASC, j.job_id ASC
-        LIMIT ?
-      `).all(...notReady, ...params, limit);
-      const update = this.db.query(`
-        UPDATE extraction_jobs
-        SET status = 'queued',
-            attempts = 0,
-            leased_by_hash = NULL,
-            leased_until = NULL,
-            lease_token = NULL,
-            lease_grant_ordinal = NULL,
-            last_error_kind = ?,
-            next_retry_at = NULL,
-            janitor_requeue_count = COALESCE(janitor_requeue_count, 0) + 1,
-            janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + ?,
-            janitor_requeued_at = ?,
-            janitor_requeue_reason = ?,
-            updated_at = ?
-        WHERE job_id = ?
-          AND status IN ('metadata_only', 'indexed', 'failed_terminal')
-      `);
-      for (const row of matched) {
-        requeued += update.run(JANITOR_TERMINAL_ERROR_KIND, row.not_ready ? 0 : 1, now, reason, now, row.job_id).changes;
-      }
-    })();
-    return { matchedJobs: matched.length, jobsRequeued: requeued };
-  }
-  hasWorkWaitingForReader(request) {
-    const lane = requireLaneKey(request);
-    const extractorKind = requireToken3(request.extractorKind, "extractorKind");
-    const pending = this.db.query(`
-      SELECT 1 AS hit FROM extraction_jobs
-      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
-        AND status IN ('queued', 'leased', 'failed_retryable')
-        AND extractor_kind = ?
-      LIMIT 1
-    `).get(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind);
-    if (pending)
-      return true;
-    const { sql, params } = this.unreadJobsQuery(request);
-    return this.db.query(`SELECT 1 AS hit FROM extraction_jobs j WHERE ${sql} LIMIT 1`).get(...params) !== null;
-  }
-  itemExtractionState(item) {
-    const rows = this.db.query(`
-      SELECT DISTINCT status FROM extraction_jobs
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-    `).all(item.provider, item.accountScope, item.providerItemId);
-    if (rows.length === 0)
-      return "none";
-    const statuses = new Set(rows.map((row) => row.status));
-    if (statuses.has("indexed"))
-      return "settled";
-    return statuses.has("queued") || statuses.has("leased") || statuses.has("failed_retryable") ? "active" : "settled";
-  }
-  itemExtractionOutcome(item, options = {}) {
-    const inConversation = Boolean(item.providerConversationId) && item.localItemId !== undefined;
-    const all = this.db.query(`
-      SELECT job_id, status, last_error_kind, policy_decision, source_version FROM extraction_jobs
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?${inConversation ? " AND local_item_id = ?" : ""}
-      ORDER BY updated_at DESC, job_id DESC
-    `).all(item.provider, item.accountScope, item.providerItemId, ...inConversation ? [item.localItemId] : []);
-    const current3 = all[0]?.source_version ?? null;
-    const rows = all.filter((row2) => (row2.source_version ?? null) === current3);
-    if (rows.length === 0)
-      return options.whenNoJob;
-    const indexed = rows.find((row2) => row2.status === "indexed");
-    if (!indexed && rows.some((row2) => row2.status === "queued" || row2.status === "leased" || row2.status === "failed_retryable"))
-      return;
-    const row = indexed ?? rows[0];
-    if (!row)
-      return;
-    const warnings = this.db.query(`
-      SELECT DISTINCT w.value AS warning FROM extraction_artifacts a, json_each(a.warnings_json) w
-      WHERE a.job_id = ? AND a.warnings_json IS NOT NULL ORDER BY w.value
-    `).all(row.job_id);
-    return {
-      status: row.status,
-      ...row.last_error_kind ? { lastErrorKind: row.last_error_kind } : {},
-      warnings: warnings.map((row2) => row2.warning),
-      policyDecision: row.policy_decision
-    };
-  }
-  unreadJobsQuery(request) {
-    const lane = requireLaneKey(request);
-    const extractorKind = requireToken3(request.extractorKind, "extractorKind");
-    const warnings = request.warnings.map((warning) => requireToken3(warning, "warning"));
-    const kinds = request.terminalErrorKinds.map((kind) => requireToken3(kind, "terminalErrorKind"));
-    const notReady = (request.notReadyWarnings ?? []).map((warning) => requireToken3(warning, "notReadyWarning"));
-    const clauses = [];
-    const params = [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind];
-    const hasWarning = (values) => `EXISTS (
-        SELECT 1 FROM extraction_artifacts a, json_each(a.warnings_json) w
-        WHERE a.job_id = j.job_id AND a.warnings_json IS NOT NULL
-          AND w.value IN (${values.map(() => "?").join(", ")})
-      )`;
-    const onceGuard = "COALESCE(j.janitor_terminal_requeue_count, 0) < 1";
-    if (warnings.length > 0) {
-      clauses.push(`(j.status IN ('metadata_only', 'indexed') AND ${hasWarning(warnings)} AND (${onceGuard}${notReady.length > 0 ? ` OR ${hasWarning(notReady)}` : ""}))`);
-      params.push(...warnings, ...notReady);
-    }
-    if (kinds.length > 0) {
-      clauses.push(`(j.status = 'failed_terminal' AND ${onceGuard} AND j.last_error_kind IN (${kinds.map(() => "?").join(", ")}))`);
-      params.push(...kinds);
-    }
-    const sql = `j.corpus_id = ? AND j.provider = ? AND j.account_scope = ? AND j.approved_scope_key = ?
-      AND j.extractor_kind = ?
-      AND ${clauses.length > 0 ? `(${clauses.join(" OR ")})` : "0"}`;
-    return { sql, params };
-  }
-  get(jobId) {
-    const row = this.jobRow(requireKeyPart(jobId, "jobId"));
-    if (!row)
-      return;
-    const record = recordFromRow2(row);
-    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_reads'").get())
-      return record;
-    const read = this.db.query("SELECT requester, question_id FROM on_demand_reads WHERE job_id = ?").get(row.job_id);
-    return read ? { ...record, reason: "on_demand", requester: read.requester, ...read.question_id ? { questionId: read.question_id } : {} } : record;
-  }
-  holdsExtractionClaim(claim) {
-    const row = this.jobRow(requireKeyPart(claim.jobId, "jobId"));
-    if (!row)
-      return false;
-    return row.status === "leased" && row.lease_token !== null && row.lease_token === requireBoundedString(claim.leaseToken, "leaseToken") && row.lease_grant_ordinal !== null && row.lease_grant_ordinal === claim.grantOrdinal && claim.grantAuthority === this.claimGrantAuthority();
-  }
-  counts(lane) {
-    const key2 = requireLaneKey(lane);
-    const rows = this.db.query(`
-      SELECT status, extractor_kind, COUNT(*) AS jobs
-      FROM extraction_jobs
-      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
-      GROUP BY status, extractor_kind
-      ORDER BY status ASC, extractor_kind ASC
-    `).all(key2.corpusId, key2.provider, key2.accountScope, key2.approvedScopeKey);
-    return rows.flatMap((row) => {
-      const status = jobStatus(row.status);
-      return status ? [{ status, extractorKind: row.extractor_kind, jobs: row.jobs }] : [];
-    });
-  }
-  jobOwners() {
-    const rows = this.db.query("SELECT DISTINCT corpus_id, account_scope FROM extraction_jobs").all();
-    return rows.map((row) => ({ corpusId: row.corpus_id, accountScope: row.account_scope }));
-  }
-  nextRetryAt(lane, now = new Date) {
-    const key2 = requireLaneKey(lane);
-    const row = this.db.query(`
-      SELECT MIN(next_retry_at) AS next_retry_at
-      FROM extraction_jobs
-      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
-        AND status = 'failed_retryable'
-        AND next_retry_at IS NOT NULL
-        AND next_retry_at > ?
-    `).get(key2.corpusId, key2.provider, key2.accountScope, key2.approvedScopeKey, now.toISOString());
-    return row?.next_retry_at ?? undefined;
-  }
-  scopedReadiness(lanes, options = {}) {
-    const steps = this.scopedReadinessSteps(lanes, options);
-    let step = steps.next();
-    while (!step.done)
-      step = steps.next();
-    return step.value;
-  }
-  async scopedReadinessInTurns(lanes, options) {
-    const steps = this.scopedReadinessSteps(lanes, options);
-    let step = steps.next();
-    while (!step.done) {
-      await options.turn();
-      step = steps.next();
-    }
-    return step.value;
-  }
-  *scopedReadinessSteps(lanes, options) {
-    const uniqueLanes = new Map;
-    for (const lane of lanes) {
-      const key2 = requireLaneKey(lane);
-      uniqueLanes.set(JSON.stringify(key2), key2);
-    }
-    const select = this.db.query(`
-      SELECT * FROM extraction_jobs
-      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
-    `);
-    const selectUnroutable = unroutableItemsTableExists(this.db) && this.db.query(`
-      SELECT u.* FROM extraction_unroutable_items u
-      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
-        AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
-          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
-            AND j.source_version IS u.source_version)
-    `);
-    const unsupportedByItem = new Map;
-    const byJobId = new Map;
-    for (const lane of uniqueLanes.values()) {
-      const rows2 = select.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey);
-      for (const row of rows2)
-        byJobId.set(row.job_id, row);
-      const unroutable = selectUnroutable ? selectUnroutable.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey) : [];
-      for (const row of unroutable) {
-        unsupportedByItem.set(JSON.stringify([row.corpus_id, row.local_item_id]), refFromRow(row));
-      }
-      yield;
-    }
-    const allRows = [...byJobId.values()];
-    let rows = allRows;
-    if (options.currentItems) {
-      const current3 = [];
-      for (let start = 0;start < allRows.length; start += SCOPED_READINESS_CURRENT_SLICE) {
-        if (start > 0)
-          yield;
-        const slice = allRows.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
-        const answers = options.currentItems(slice.map(refFromRow));
-        for (let index = 0;index < slice.length; index += 1)
-          current3.push(answers[index] === true);
-      }
-      rows = allRows.filter((_row, index) => current3[index] === true);
-      yield;
-    } else if (options.currentItem) {
-      const currentItem = options.currentItem;
-      rows = allRows.filter((row) => currentItem(refFromRow(row)));
-    }
-    const unsupportedRefs = [...unsupportedByItem.values()];
-    let unsupportedKindItems = 0;
-    let picturesNotReadHereItems = 0;
-    for (let start = 0;start < unsupportedRefs.length; start += SCOPED_READINESS_CURRENT_SLICE) {
-      const slice = unsupportedRefs.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
-      const answers = options.currentItems ? options.currentItems(slice) : slice.map((ref) => options.currentItem?.(ref) ?? true);
-      for (let index = 0;index < slice.length; index += 1) {
-        if (answers[index] !== true)
-          continue;
-        if (slice[index].mimeType?.startsWith("image/"))
-          picturesNotReadHereItems += 1;
-        else
-          unsupportedKindItems += 1;
-      }
-      yield;
-    }
-    const byItem = new Map;
-    for (const row of rows) {
-      const existing = byItem.get(row.local_item_id);
-      if (existing)
-        existing.push(row);
-      else
-        byItem.set(row.local_item_id, [row]);
-    }
-    let blockedByPolicyItems = 0;
-    let metadataOnlyExpectedItems = 0;
-    const unreadableCandidates = [];
-    const settledFailedItems = new Set;
-    for (const [itemId, itemRows] of byItem) {
-      if (itemRows.some((row) => row.status === "indexed"))
-        continue;
-      const settledFailed = itemRows.some((row) => row.status === "failed_terminal") && !itemRows.some((row) => row.status === "queued" || row.status === "leased" || row.status === "failed_retryable" || terminalHasRetryPath(row, itemRows, options.terminalRetryPaths ?? []));
-      if (settledFailed)
-        settledFailedItems.add(itemId);
-      if (itemRows.some((row) => row.status === "blocked_policy")) {
-        blockedByPolicyItems += 1;
-      } else if (itemRows.some((row) => row.status === "metadata_only" || row.status === "skipped_unsupported" || row.status === "skipped_too_large")) {
-        metadataOnlyExpectedItems += 1;
-      } else if (settledFailed) {
-        const candidate = unreadableCandidate(itemRows);
-        if (candidate)
-          unreadableCandidates.push(candidate);
-      }
-    }
-    const unreadable = settleUnreadable(unreadableCandidates, options.classifyUnreadable);
-    blockedByPolicyItems += unreadable.blocked;
-    const unreadableItems = unreadable.items.length;
-    options.onUnreadable?.(unreadable.items);
-    const now = (options.now ?? new Date).toISOString();
-    const count = (status) => rows.filter((row) => row.status === status).length;
-    const failedRows = rows.filter((row) => row.status === "failed_retryable" || row.status === "failed_terminal");
-    const failedActionableJobs = failedRows.filter((row) => !((byItem.get(row.local_item_id)?.some((candidate) => candidate.status === "indexed") ?? false) || settledFailedItems.has(row.local_item_id))).length;
-    const retryableDueRows = rows.filter((row) => row.status === "failed_retryable" && (row.next_retry_at === null || row.next_retry_at <= now));
-    const actionableRows = rows.filter((row) => row.status === "queued" || row.status === "failed_retryable" && (row.next_retry_at === null || row.next_retry_at <= now));
-    const terminalRows = rows.filter((row) => row.status === "indexed" || row.status === "metadata_only" || row.status === "skipped_unsupported" || row.status === "skipped_too_large" || row.status === "blocked_policy" || row.status === "failed_terminal");
-    const oldestActionableAt = actionableRows.map((row) => row.created_at).sort()[0];
-    const newestTerminalProgressAt = terminalRows.map((row) => row.updated_at).sort().at(-1);
-    return {
-      blockedByPolicyItems,
-      metadataOnlyExpectedItems,
-      queuedJobs: count("queued"),
-      leasedJobs: count("leased"),
-      failedRetryableJobs: count("failed_retryable"),
-      failedTerminalJobs: count("failed_terminal"),
-      failedActionableJobs,
-      unreadableItems,
-      unsupportedKindItems,
-      picturesNotReadHereItems,
-      retryableDueJobs: retryableDueRows.length,
-      ...oldestActionableAt ? { oldestActionableAt } : {},
-      ...newestTerminalProgressAt ? { newestTerminalProgressAt } : {}
-    };
-  }
-  corpusReadiness(corpusId, now = new Date, options = {}) {
-    const corpus = requireKeyPart(corpusId, "corpusId");
-    const unsupported = unroutableItemsTableExists(this.db) ? this.db.query(`
-        SELECT
-          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 0 ELSE 1 END) AS items,
-          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 1 ELSE 0 END) AS pictures
-        FROM extraction_unroutable_items u
-        WHERE corpus_id = ? AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
-          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
-            AND j.source_version IS u.source_version)
-      `).get(corpus) : { items: 0, pictures: 0 };
-    const itemRetry = terminalRetryPathSql("x", options.terminalRetryPaths ?? []);
-    const pendingRetry = terminalRetryPathSql("pending", options.terminalRetryPaths ?? []);
-    const items = this.db.query(`
-      WITH item_state AS (
-        SELECT
-          MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
-          MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
-          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported', 'skipped_too_large')
-              THEN 1 ELSE 0 END) AS metadata_only_jobs,
-          MAX(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS terminal_failed_jobs,
-          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
-              THEN 1 ELSE 0 END) AS in_flight_jobs
-        FROM extraction_jobs x
-        WHERE corpus_id = ?
-        GROUP BY local_item_id
-      )
-      SELECT
-        SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 1 THEN 1 ELSE 0 END) AS blocked_items,
-        SUM(CASE WHEN indexed_jobs = 0 AND blocked_jobs = 0 AND metadata_only_jobs = 1
-            THEN 1 ELSE 0 END) AS metadata_only_items
-      FROM item_state
-    `).get(...itemRetry.params, corpus);
-    const failedRows = this.db.query(`
-      WITH item_state AS (
-        SELECT
-          local_item_id,
-          MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
-          MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
-          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported', 'skipped_too_large')
-              THEN 1 ELSE 0 END) AS metadata_only_jobs,
-          MAX(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS terminal_failed_jobs,
-          MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
-              THEN 1 ELSE 0 END) AS in_flight_jobs,
-          MAX(CASE WHEN status = 'failed_terminal' THEN updated_at END) AS failed_at
-        FROM extraction_jobs x
-        WHERE corpus_id = ?
-        GROUP BY local_item_id
-      )
-      SELECT j.*
-      FROM item_state s
-      JOIN extraction_jobs j
-        ON j.corpus_id = ? AND j.local_item_id = s.local_item_id
-        AND j.status = 'failed_terminal' AND j.updated_at = s.failed_at
-      WHERE s.indexed_jobs = 0 AND s.blocked_jobs = 0 AND s.metadata_only_jobs = 0
-        AND s.terminal_failed_jobs = 1 AND s.in_flight_jobs = 0
-    `).all(...itemRetry.params, corpus, corpus);
-    const seen = new Set;
-    const candidates = [];
-    for (const row of failedRows) {
-      if (seen.has(row.local_item_id))
-        continue;
-      seen.add(row.local_item_id);
-      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at, ...row.last_error_kind ? { errorKind: row.last_error_kind } : {} });
-    }
-    const unreadable = settleUnreadable(candidates, options.classifyUnreadable);
-    options.onUnreadable?.(unreadable.items);
-    const jobs = this.db.query(`
-      SELECT
-        SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_jobs,
-        SUM(CASE WHEN status = 'leased' THEN 1 ELSE 0 END) AS leased_jobs,
-        SUM(CASE WHEN status = 'failed_retryable' THEN 1 ELSE 0 END) AS failed_retryable_jobs,
-        SUM(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS failed_terminal_jobs,
-        SUM(CASE WHEN status = 'failed_retryable'
-          AND (next_retry_at IS NULL OR next_retry_at <= ?) THEN 1 ELSE 0 END) AS retryable_due_jobs,
-        MIN(CASE WHEN status = 'queued'
-          OR (status = 'failed_retryable' AND (next_retry_at IS NULL OR next_retry_at <= ?))
-          THEN created_at END) AS oldest_actionable_at,
-        MAX(CASE WHEN status IN (
-          'indexed', 'metadata_only', 'skipped_unsupported', 'skipped_too_large',
-          'blocked_policy', 'failed_terminal'
-        ) THEN updated_at END) AS newest_terminal_progress_at,
-        SUM(CASE
-          WHEN status IN ('failed_retryable', 'failed_terminal')
-            AND NOT EXISTS (
-              SELECT 1 FROM extraction_jobs superseding
-              WHERE superseding.corpus_id = j.corpus_id
-                AND superseding.local_item_id = j.local_item_id
-                AND superseding.job_id <> j.job_id
-                AND superseding.status = 'indexed'
-            )
-            AND NOT (
-              EXISTS (
-                SELECT 1 FROM extraction_jobs settled
-                WHERE settled.corpus_id = j.corpus_id
-                  AND settled.local_item_id = j.local_item_id
-                  AND settled.status = 'failed_terminal'
-              )
-              AND NOT EXISTS (
-                SELECT 1 FROM extraction_jobs pending
-                WHERE pending.corpus_id = j.corpus_id
-                  AND pending.local_item_id = j.local_item_id
-                  AND (pending.status IN ('queued', 'leased', 'failed_retryable') OR ${pendingRetry.sql})
-              )
-            )
-          THEN 1 ELSE 0 END) AS failed_actionable_jobs
-      FROM extraction_jobs j
-      WHERE corpus_id = ?
-    `).get(now.toISOString(), now.toISOString(), ...pendingRetry.params, corpus);
-    const count = (value) => Math.max(0, Math.trunc(value ?? 0));
-    const jobCount = (key2) => count(typeof jobs?.[key2] === "number" ? jobs[key2] : undefined);
-    return {
-      blockedByPolicyItems: count(items?.blocked_items) + unreadable.blocked,
-      metadataOnlyExpectedItems: count(items?.metadata_only_items),
-      queuedJobs: jobCount("queued_jobs"),
-      leasedJobs: jobCount("leased_jobs"),
-      failedRetryableJobs: jobCount("failed_retryable_jobs"),
-      failedTerminalJobs: jobCount("failed_terminal_jobs"),
-      failedActionableJobs: jobCount("failed_actionable_jobs"),
-      unreadableItems: unreadable.items.length,
-      unsupportedKindItems: count(unsupported.items),
-      picturesNotReadHereItems: count(unsupported.pictures),
-      retryableDueJobs: jobCount("retryable_due_jobs"),
-      ...typeof jobs?.oldest_actionable_at === "string" ? { oldestActionableAt: jobs.oldest_actionable_at } : {},
-      ...typeof jobs?.newest_terminal_progress_at === "string" ? { newestTerminalProgressAt: jobs.newest_terminal_progress_at } : {}
-    };
-  }
-  artifacts(corpusId, localItemId) {
-    const rows = this.db.query(`
-      SELECT *
-      FROM extraction_artifacts
-      WHERE corpus_id = ? AND local_item_id = ?
-      ORDER BY artifact_index ASC
-    `).all(requireKeyPart(corpusId, "corpusId"), requireBoundedString(localItemId, "localItemId"));
-    return rows.map((row) => artifactFromRow(row));
-  }
-  janitorEscalate(lane, request, reason, limit, dryRun) {
-    const extractorKind = requireToken3(request.extractorKind ?? "", "extractorKind");
-    const lastErrorKind = requireToken3(request.lastErrorKind ?? "", "lastErrorKind");
-    const targetKind = requireToken3(request.targetExtractorKind ?? "", "targetExtractorKind");
-    const targetVersion = requireKeyPart(request.targetExtractorVersion ?? "", "targetExtractorVersion");
-    const escalationBudget = clampInteger(request.escalationBudget ?? limit, 0, limit);
-    const now = nowIso4();
-    let matched = [];
-    let escalated = 0;
-    let skippedPolicyExcluded = 0;
-    let skippedEscalationBudget = 0;
-    let skippedTargetExists = 0;
-    this.db.transaction(() => {
-      matched = this.db.query(`
-        SELECT
-          j.*,
-          EXISTS (
-            SELECT 1
-            FROM extraction_jobs target
-            WHERE target.corpus_id = j.corpus_id
-              AND target.provider = j.provider
-              AND target.account_scope = j.account_scope
-              AND target.provider_item_id = j.provider_item_id
-              AND target.source_version IS j.source_version
-              AND target.content_hash IS j.content_hash
-              AND target.extractor_kind = ?
-              AND target.extractor_version = ?
-          ) AS target_job_exists
-        FROM extraction_jobs j
-        WHERE j.corpus_id = ?
-          AND j.provider = ?
-          AND j.account_scope = ?
-          AND j.approved_scope_key = ?
-          AND j.status = 'failed_terminal'
-          AND j.extractor_kind = ?
-          AND COALESCE(j.last_error_kind, ?) = ?
-        ORDER BY j.updated_at ASC, j.job_id ASC
-        LIMIT ?
-      `).all(targetKind, targetVersion, lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey, extractorKind, lastErrorKind, lastErrorKind, limit);
-      const policyAllowed = matched.filter((row) => row.policy_decision !== "blocked_sensitive" && row.policy_decision !== "metadata_only");
-      skippedPolicyExcluded = matched.length - policyAllowed.length;
-      const targetMissing = policyAllowed.filter((row) => row.target_job_exists !== 1);
-      skippedTargetExists = policyAllowed.length - targetMissing.length;
-      const rowsToEscalate = targetMissing.slice(0, escalationBudget);
-      skippedEscalationBudget = targetMissing.length - rowsToEscalate.length;
-      if (dryRun)
-        return;
-      const insert = this.db.query(`
-        INSERT INTO extraction_jobs (
-          job_id, corpus_id, provider, account_scope, approved_scope_key,
-          provider_item_id, local_item_id, source_version, content_hash,
-          name, mime_type, size_bytes, extractor_kind, extractor_version,
-          policy_decision, status, priority, max_bytes_per_file, attempts,
-          janitor_requeue_reason, temp_bytes_cleaned, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?, 1, ?, ?)
-      `);
-      const markSource = this.db.query(`
-        UPDATE extraction_jobs
-        SET janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1,
-            janitor_requeued_at = ?,
-            janitor_requeue_reason = ?,
-            updated_at = ?
-        WHERE job_id = ?
-      `);
-      for (const row of rowsToEscalate) {
-        insert.run(makeJobId(), row.corpus_id, row.provider, row.account_scope, row.approved_scope_key, row.provider_item_id, row.local_item_id, row.source_version, row.content_hash, row.name, row.mime_type, row.size_bytes, targetKind, targetVersion, row.policy_decision, row.priority, row.max_bytes_per_file, reason, now, now);
-        markSource.run(now, reason, now, row.job_id);
-        escalated += 1;
-      }
-    })();
-    return {
-      mode: "terminal_reclassification",
-      matchedJobs: matched.length,
-      jobsRequeued: 0,
-      jobsEscalated: escalated,
-      skippedAttemptBudget: 0,
-      skippedAlreadyJanitorRequeued: skippedTargetExists,
-      skippedPolicyExcluded,
-      skippedEscalationBudget,
-      skippedTargetExists,
-      networkGuardOverrideUsed: false,
-      dryRun,
-      reason
-    };
-  }
-  leaseCandidateRows(lane, request, now, limit) {
-    const filters = [];
-    const params = [
-      lane.corpusId,
-      lane.provider,
-      lane.accountScope,
-      lane.approvedScopeKey,
-      now,
-      now
-    ];
-    if (request.extractorKind !== undefined) {
-      filters.push("extractor_kind = ?");
-      params.push(requireToken3(request.extractorKind, "extractorKind"));
-    }
-    if (request.extractorVersion !== undefined) {
-      filters.push("extractor_version = ?");
-      params.push(requireKeyPart(request.extractorVersion, "extractorVersion"));
-    }
-    if (request.providerItemIds !== undefined && request.providerItemIds.length > 0) {
-      filters.push(`provider_item_id IN (${request.providerItemIds.map(() => "?").join(", ")})`);
-      params.push(...request.providerItemIds.map((id) => requireBoundedString(id, "providerItemId")));
-    }
-    params.push(limit);
-    const filterSql = filters.length > 0 ? `
-        AND ${filters.join(`
-        AND `)}` : "";
-    return this.db.query(`
-      SELECT *
-      FROM extraction_jobs
-      WHERE corpus_id = ?
-        AND provider = ?
-        AND account_scope = ?
-        AND approved_scope_key = ?
-        AND (
-          status = 'queued'
-          OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until < ?)
-          OR (status = 'failed_retryable' AND (next_retry_at IS NULL OR next_retry_at <= ?))
-        )${filterSql}
-      ORDER BY priority DESC, updated_at ASC, job_id ASC
-      LIMIT ?
-    `).all(...params);
-  }
-  replaceArtifacts(row, derivations, now) {
-    if (derivations === undefined)
-      return 0;
-    this.db.query("DELETE FROM extraction_artifacts WHERE corpus_id = ? AND local_item_id = ?").run(row.corpus_id, row.local_item_id);
-    if (derivations.length === 0)
-      return 0;
-    const item = {
-      provider: row.provider,
-      accountScope: row.account_scope,
-      providerItemId: row.provider_item_id,
-      localItemId: row.local_item_id
-    };
-    if (itemNameRedacted(this.db, item))
-      return 0;
-    const insert = this.db.query(`
-      INSERT INTO extraction_artifacts (
-        corpus_id, local_item_id, artifact_index, job_id, extractor_kind,
-        extractor_version, artifact_kind, structural_ref_json, confidence,
-        warnings_json, chars, derived_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    derivations.forEach((derivation, index) => {
-      insert.run(row.corpus_id, row.local_item_id, index, row.job_id, row.extractor_kind, row.extractor_version, derivation.artifactKind, derivation.structuralRef === undefined ? null : JSON.stringify(derivation.structuralRef), derivation.confidence ?? null, derivation.warnings === undefined ? null : JSON.stringify([...derivation.warnings]), requireSafeInteger(derivation.chars, "chars"), now);
-    });
-    return derivations.length;
-  }
-  existingJob(ref, extractorKind, extractorVersion) {
-    const row = this.db.query(`
-      SELECT *
-      FROM extraction_jobs
-      WHERE corpus_id = ?
-        AND provider = ?
-        AND account_scope = ?
-        AND provider_item_id = ?
-        AND source_version = ?
-        AND content_hash = ?
-        AND extractor_kind = ?
-        AND extractor_version = ?
-      LIMIT 1
-    `).get(ref.corpusId, ref.provider, ref.accountScope, ref.providerItemId, ref.sourceVersion ?? "", ref.contentHash ?? "", extractorKind, extractorVersion);
-    return row ?? undefined;
-  }
-  jobRow(jobId) {
-    const row = this.db.query("SELECT * FROM extraction_jobs WHERE job_id = ? LIMIT 1").get(jobId);
-    return row ?? undefined;
-  }
-  assertWritable(operation) {
-    if (this.readonly) {
-      throw new Error(`Extraction job store is read-only; ${operation} is not permitted.`);
-    }
-  }
-}
-function fileExtractionJobMigrations() {
-  return [{
-    version: 1,
-    name: "create_extraction_jobs",
-    up(db) {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS extraction_jobs (
-          job_id TEXT PRIMARY KEY,
-          corpus_id TEXT NOT NULL,
-          provider TEXT NOT NULL,
-          account_scope TEXT NOT NULL,
-          approved_scope_key TEXT NOT NULL,
-          provider_item_id TEXT NOT NULL,
-          local_item_id TEXT NOT NULL,
-          source_version TEXT,
-          content_hash TEXT,
-          name TEXT,
-          mime_type TEXT,
-          size_bytes INTEGER,
-          extractor_kind TEXT NOT NULL,
-          extractor_version TEXT NOT NULL,
-          policy_decision TEXT NOT NULL,
-          status TEXT NOT NULL,
-          priority INTEGER NOT NULL DEFAULT 0,
-          max_bytes_per_file INTEGER,
-          attempts INTEGER NOT NULL DEFAULT 0,
-          leased_by_hash TEXT,
-          leased_until TEXT,
-          last_error_hash TEXT,
-          last_error_kind TEXT,
-          next_retry_at TEXT,
-          janitor_requeue_count INTEGER NOT NULL DEFAULT 0,
-          janitor_terminal_requeue_count INTEGER NOT NULL DEFAULT 0,
-          janitor_requeued_at TEXT,
-          janitor_requeue_reason TEXT,
-          temp_bytes_cleaned INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          UNIQUE(corpus_id, provider, account_scope, provider_item_id,
-                 source_version, content_hash, extractor_kind, extractor_version)
-        );
-        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_lane
-          ON extraction_jobs(corpus_id, provider, account_scope, approved_scope_key,
-                             status, priority, updated_at);
-        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_item
-          ON extraction_jobs(corpus_id, local_item_id, status);
-
-        CREATE TABLE IF NOT EXISTS extraction_artifacts (
-          corpus_id TEXT NOT NULL,
-          local_item_id TEXT NOT NULL,
-          artifact_index INTEGER NOT NULL,
-          job_id TEXT NOT NULL,
-          extractor_kind TEXT NOT NULL,
-          extractor_version TEXT NOT NULL,
-          artifact_kind TEXT NOT NULL,
-          structural_ref_json TEXT,
-          confidence REAL,
-          warnings_json TEXT,
-          chars INTEGER NOT NULL DEFAULT 0,
-          derived_at TEXT NOT NULL,
-          PRIMARY KEY (corpus_id, local_item_id, artifact_index)
-        );
-        CREATE INDEX IF NOT EXISTS idx_extraction_artifacts_job ON extraction_artifacts(job_id);
-      `);
-    }
-  }, {
-    version: 2,
-    name: "add_lease_token",
-    up(db) {
-      db.exec("ALTER TABLE extraction_jobs ADD COLUMN lease_token TEXT;");
-    }
-  }, {
-    version: 3,
-    name: "add_claim_grant_sequence",
-    up(db) {
-      db.exec(`
-        ALTER TABLE extraction_jobs ADD COLUMN lease_grant_ordinal INTEGER;
-        CREATE TABLE IF NOT EXISTS extraction_claim_grants (
-          grant_id INTEGER PRIMARY KEY CHECK (grant_id = 1),
-          authority_id TEXT NOT NULL,
-          last_ordinal INTEGER NOT NULL
-        );
-      `);
-      db.query(`
-        INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
-        VALUES (1, ?, 0)
-      `).run(randomUUID24());
-    }
-  }, {
-    version: 4,
-    name: "add_secret_item_redactions",
-    up(db) {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS ${SECRET_ITEM_REDACTIONS_TABLE} (
-          provider TEXT NOT NULL,
-          account_scope TEXT NOT NULL,
-          provider_item_id TEXT NOT NULL,
-          local_item_id TEXT NOT NULL DEFAULT '',
-          redacted_at TEXT NOT NULL,
-          PRIMARY KEY (provider, account_scope, provider_item_id, local_item_id)
-        );
-      `);
-    }
-  }, {
-    version: 5,
-    name: "add_secret_item_redaction_claims",
-    up(db) {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (
-          provider TEXT NOT NULL,
-          account_scope TEXT NOT NULL,
-          provider_item_id TEXT NOT NULL,
-          claimant TEXT NOT NULL,
-          claimed_at TEXT NOT NULL,
-          PRIMARY KEY (provider, account_scope, provider_item_id, claimant)
-        );
-        CREATE TABLE IF NOT EXISTS ${SECRET_RESTORED_REREADS_TABLE} (
-          job_id TEXT PRIMARY KEY
-        );
-      `);
-    }
-  }, {
-    version: 6,
-    name: "add_extraction_jobs_identity_index",
-    up(db) {
-      db.exec(`
-        CREATE INDEX IF NOT EXISTS idx_extraction_jobs_identity
-          ON extraction_jobs(provider, account_scope, provider_item_id, status);
-      `);
-    }
-  }, {
-    version: 7,
-    name: "owe_reread_to_names_only_refusals",
-    up(db) {
-      const columns = db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all();
-      if (!columns.some((column) => column.name === "reason")) {
-        db.exec(`ALTER TABLE ${SECRET_RESTORED_REREADS_TABLE} ADD COLUMN reason TEXT;`);
-      }
-      db.exec(`
-        INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
-        SELECT job_id, '${REREAD_AFTER_PLACEMENT}' FROM extraction_jobs
-        WHERE status = 'metadata_only' AND last_error_kind = 'store_item_metadata_only';
-      `);
-    }
-  }];
-}
-function createUnroutableItemsTable(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS extraction_unroutable_items (
-      corpus_id TEXT NOT NULL,
-      provider TEXT NOT NULL,
-      account_scope TEXT NOT NULL,
-      approved_scope_key TEXT NOT NULL,
-      local_item_id TEXT NOT NULL,
-      provider_item_id TEXT NOT NULL,
-      source_version TEXT,
-      content_hash TEXT,
-      mime_type TEXT,
-      seen_at TEXT NOT NULL,
-      PRIMARY KEY (corpus_id, local_item_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_extraction_unroutable_lane
-      ON extraction_unroutable_items(corpus_id, provider, account_scope, approved_scope_key);
-  `);
-}
-function unroutableItemsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_unroutable_items'`).get() !== null;
-}
-function nextRetryTimestamp(status, attempts, now) {
-  if (status !== "failed_retryable")
-    return null;
-  const delaySeconds = Math.min(MAX_EXTRACTION_RETRY_BACKOFF_SECONDS, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS * Math.max(1, attempts));
-  return new Date(new Date(now).getTime() + delaySeconds * 1000).toISOString();
-}
-function refFromRow(row) {
-  return {
-    corpusId: row.corpus_id,
-    provider: row.provider,
-    accountScope: row.account_scope,
-    approvedScopeKey: row.approved_scope_key,
-    providerItemId: row.provider_item_id,
-    localItemId: row.local_item_id,
-    ...row.source_version ? { sourceVersion: row.source_version } : {},
-    ...row.content_hash ? { contentHash: row.content_hash } : {},
-    ...row.name ? { name: row.name } : {},
-    ...row.mime_type ? { mimeType: row.mime_type } : {},
-    ...row.size_bytes == null ? {} : { sizeBytes: row.size_bytes }
-  };
-}
-function recordFromRow2(row) {
-  return {
-    jobId: row.job_id,
-    ref: refFromRow(row),
-    extractorKind: row.extractor_kind,
-    extractorVersion: row.extractor_version,
-    policyDecision: row.policy_decision,
-    status: jobStatus(row.status) ?? "queued",
-    priority: row.priority,
-    attempts: row.attempts,
-    ...row.max_bytes_per_file === null ? {} : { maxBytesPerFile: row.max_bytes_per_file },
-    ...row.leased_by_hash ? { leasedByHash: row.leased_by_hash } : {},
-    ...row.leased_until ? { leasedUntil: row.leased_until } : {},
-    ...row.last_error_kind ? { lastErrorKind: row.last_error_kind } : {},
-    ...row.last_error_hash ? { lastErrorHash: row.last_error_hash } : {},
-    ...row.next_retry_at ? { nextRetryAt: row.next_retry_at } : {},
-    janitorRequeueCount: row.janitor_requeue_count,
-    janitorTerminalRequeueCount: row.janitor_terminal_requeue_count,
-    ...row.janitor_requeued_at ? { janitorRequeuedAt: row.janitor_requeued_at } : {},
-    ...row.janitor_requeue_reason ? { janitorRequeueReason: row.janitor_requeue_reason } : {},
-    tempBytesCleaned: row.temp_bytes_cleaned === 1,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at
-  };
-}
-function artifactFromRow(row) {
-  const structuralRef = parseJsonObject4(row.structural_ref_json);
-  const warnings = parseJsonStringArray(row.warnings_json);
-  return {
-    corpusId: row.corpus_id,
-    localItemId: row.local_item_id,
-    artifactIndex: row.artifact_index,
-    jobId: row.job_id,
-    extractorKind: row.extractor_kind,
-    extractorVersion: row.extractor_version,
-    derivation: {
-      artifactKind: row.artifact_kind,
-      ...structuralRef ? { structuralRef } : {},
-      ...row.confidence === null ? {} : { confidence: row.confidence },
-      ...warnings ? { warnings } : {},
-      chars: row.chars
-    },
-    derivedAt: row.derived_at
-  };
-}
-function parseJsonObject4(value) {
-  if (value === null)
-    return;
-  try {
-    const parsed = JSON.parse(value);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      return;
-    return parsed;
-  } catch {
-    return;
-  }
-}
-function parseJsonStringArray(value) {
-  if (value === null)
-    return;
-  try {
-    const parsed = JSON.parse(value);
-    if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string"))
-      return;
-    return parsed;
-  } catch {
-    return;
-  }
-}
-function jobStatus(value) {
-  if (value === undefined)
-    return;
-  if (value === "queued" || value === "leased")
-    return value;
-  return TERMINAL_STATUSES.has(value) ? value : undefined;
-}
-function requireItemRef(ref) {
-  const normalized = {
-    corpusId: requireKeyPart(ref.corpusId, "corpusId"),
-    provider: requireKeyPart(ref.provider, "provider"),
-    accountScope: requireBoundedString(ref.accountScope, "accountScope"),
-    approvedScopeKey: requireBoundedString(ref.approvedScopeKey, "approvedScopeKey"),
-    providerItemId: requireBoundedString(ref.providerItemId, "providerItemId"),
-    localItemId: requireBoundedString(ref.localItemId, "localItemId"),
-    ...ref.sourceVersion === undefined ? {} : { sourceVersion: requireBoundedString(ref.sourceVersion, "sourceVersion") },
-    ...ref.contentHash === undefined ? {} : { contentHash: requireBoundedString(ref.contentHash, "contentHash") },
-    ...ref.name === undefined ? {} : { name: requireBoundedString(ref.name, "name") },
-    ...ref.mimeType === undefined ? {} : { mimeType: requireBoundedString(ref.mimeType, "mimeType") },
-    ...ref.sizeBytes === undefined ? {} : { sizeBytes: requireSafeInteger(ref.sizeBytes, "sizeBytes") }
-  };
-  return normalized;
-}
-function requireLaneKey(lane) {
-  return {
-    corpusId: requireKeyPart(lane.corpusId, "corpusId"),
-    provider: requireKeyPart(lane.provider, "provider"),
-    accountScope: requireBoundedString(lane.accountScope, "accountScope"),
-    approvedScopeKey: requireBoundedString(lane.approvedScopeKey, "approvedScopeKey")
-  };
-}
-function requireKeyPart(value, field) {
-  if (typeof value !== "string" || !SAFE_KEY_PART.test(value)) {
-    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe identifier.`);
-  }
-  return value;
-}
-function requireToken3(value, field) {
-  if (typeof value !== "string" || !SAFE_TOKEN2.test(value)) {
-    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a safe categorical token.`);
-  }
-  return value;
-}
-function requireHash2(value) {
-  if (typeof value !== "string" || !SAFE_HASH2.test(value)) {
-    throw new TypeError("Extraction job errorHash must be a lowercase hexadecimal digest.");
-  }
-  return value;
-}
-function requireBoundedString(value, field) {
-  if (typeof value !== "string" || value.length === 0 || value.length > 1024) {
-    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a bounded non-empty string.`);
-  }
-  return value;
-}
-function requireReason(value) {
-  if (typeof value !== "string" || value.trim().length === 0 || value.length > MAX_REASON_LENGTH) {
-    throw new TypeError("Extraction janitor reason must be a bounded non-empty string.");
-  }
-  return value.trim();
-}
-function requirePolicyDecision(value) {
-  if (!POLICY_DECISIONS.has(value)) {
-    throw new TypeError("Extraction job policyDecision is not a recognised decision.");
-  }
-  return value;
-}
-function requireTerminalStatus(value) {
-  if (!TERMINAL_STATUSES.has(value)) {
-    throw new TypeError("Extraction record status must be a terminal job status.");
-  }
-  return value;
-}
-function requireSafeInteger(value, field) {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a non-negative safe integer.`);
-  }
-  return value;
-}
-function requirePositiveSafeInteger(value, field) {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new ExtractionJobFieldError(field, `Extraction job ${field} must be a positive safe integer.`);
-  }
-  return value;
-}
-function clampInteger(value, min, max2) {
-  if (!Number.isSafeInteger(value)) {
-    throw new TypeError("Extraction job limit must be a safe integer.");
-  }
-  return Math.min(max2, Math.max(min, value));
-}
-function makeJobId() {
-  return `fx_${randomUUID24()}`;
-}
-function hashString6(value) {
-  return createHash68("sha256").update(value).digest("hex");
-}
-function nowIso4() {
-  return new Date().toISOString();
-}
-function terminalHasRetryPath(row, itemRows, paths) {
-  if (row.status !== "failed_terminal")
-    return false;
-  return paths.some((path) => {
-    if (row.extractor_kind !== path.extractorKind)
-      return false;
-    if (path.escalateToExtractorKind !== undefined) {
-      if (row.last_error_kind !== null && !path.lastErrorKinds.includes(row.last_error_kind))
-        return false;
-      return !itemRows.some((candidate) => candidate.extractor_kind === path.escalateToExtractorKind);
-    }
-    return row.last_error_kind !== null && path.lastErrorKinds.includes(row.last_error_kind) && (row.janitor_terminal_requeue_count ?? 0) < 1;
-  });
-}
-function terminalRetryPathSql(alias, paths) {
-  const clauses = [];
-  const params = [];
-  for (const path of paths) {
-    const kinds = path.lastErrorKinds.map((kind) => requireToken3(kind, "lastErrorKind"));
-    if (kinds.length === 0)
-      continue;
-    const kindList = kinds.map(() => "?").join(", ");
-    if (path.escalateToExtractorKind !== undefined) {
-      clauses.push(`(${alias}.extractor_kind = ? AND (${alias}.last_error_kind IS NULL OR ${alias}.last_error_kind IN (${kindList}))
-        AND NOT EXISTS (
-          SELECT 1 FROM extraction_jobs target
-          WHERE target.corpus_id = ${alias}.corpus_id
-            AND target.local_item_id = ${alias}.local_item_id
-            AND target.extractor_kind = ?
-        ))`);
-      params.push(requireToken3(path.extractorKind, "extractorKind"), ...kinds, requireToken3(path.escalateToExtractorKind, "extractorKind"));
-    } else {
-      clauses.push(`(${alias}.extractor_kind = ? AND ${alias}.last_error_kind IN (${kindList})
-        AND COALESCE(${alias}.janitor_terminal_requeue_count, 0) < 1)`);
-      params.push(requireToken3(path.extractorKind, "extractorKind"), ...kinds);
-    }
-  }
-  if (clauses.length === 0)
-    return { sql: "0", params };
-  return { sql: `(${alias}.status = 'failed_terminal' AND (${clauses.join(" OR ")}))`, params };
-}
-var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 7, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", AMBIGUOUS_IDENTITY_ERROR_KIND = "store_identity_ambiguous", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART, SAFE_HASH2, POLICY_DECISIONS, TERMINAL_STATUSES, SCOPED_READINESS_CURRENT_SLICE = 2000, ExtractionJobFieldError;
-var init_job_store = __esm(() => {
-  init_sqlite_migrations();
-  init_store_write_guard();
-  init_job_names();
-  NETWORK_ERROR_KINDS = new Set([
-    "network_unreachable",
-    "network_socket_closed"
-  ]);
-  SAFE_TOKEN2 = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
-  SAFE_KEY_PART = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
-  SAFE_HASH2 = /^[a-f0-9]{16,128}$/;
-  POLICY_DECISIONS = new Set([
-    "index_allowed",
-    "index_redacted",
-    "metadata_only",
-    "blocked_sensitive",
-    "needs_review"
-  ]);
-  TERMINAL_STATUSES = new Set([
-    "indexed",
-    "metadata_only",
-    "skipped_unsupported",
-    "skipped_too_large",
-    "blocked_policy",
-    "failed_retryable",
-    "failed_terminal"
-  ]);
-  ExtractionJobFieldError = class ExtractionJobFieldError extends TypeError {
-    field;
-    constructor(field, message2) {
-      super(message2);
-      this.name = "ExtractionJobFieldError";
-      this.field = field;
-    }
-  };
 });
 
 // src/workers/file-extraction/extractors/bounded-text.ts
@@ -102834,10 +103003,10 @@ var init_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync63 } from "node:fs";
+import { existsSync as existsSync64 } from "node:fs";
 import { dirname as dirname72, join as join86 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync63) {
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync64) {
   let directory = dirname72(fileURLToPath9(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
     const candidate = join86(directory, APPLE_VISION_OCR_SCRIPT);
@@ -104354,7 +104523,7 @@ var init_remote_vlm = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/off-thread.ts
 import { Worker as Worker2 } from "node:worker_threads";
-import { existsSync as existsSync64 } from "node:fs";
+import { existsSync as existsSync65 } from "node:fs";
 import { dirname as dirname73, join as join90 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
 function modelThreadHandleId() {
@@ -104459,7 +104628,7 @@ function modelWorkerPath() {
   const here = dirname73(fileURLToPath10(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
     const path = join90(here, name);
-    if (existsSync64(path))
+    if (existsSync65(path))
       return path;
   }
   throw new Error("The built-in model worker is not installed.");
@@ -104481,11 +104650,11 @@ var init_off_thread = () => {};
 // src/workers/source-index/built-in-reasoning/install.ts
 import { isMainThread as isMainThread2 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
-import { createHash as createHash69, randomUUID as randomUUID25 } from "node:crypto";
+import { createHash as createHash70, randomUUID as randomUUID25 } from "node:crypto";
 import {
   closeSync as closeSync27,
   createReadStream as createReadStream3,
-  existsSync as existsSync65,
+  existsSync as existsSync66,
   mkdirSync as mkdirSync43,
   openSync as openSync27,
   readFileSync as readFileSync51,
@@ -104576,9 +104745,9 @@ async function installPinnedModel(options) {
   const noun = paths.noun;
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform2 = options.platform ?? currentPlatform2();
-  const reporter = new ProgressReporter2(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
+  const reporter2 = new ProgressReporter2(paths.statusPath, bundle.modelId, noun, options.now, options.onProgress);
   const files = bundle.files.map((file) => ({ file, path: join91(paths.modelDir, file.name) }));
-  const filesPresent = () => files.every(({ path }) => existsSync65(path));
+  const filesPresent = () => files.every(({ path }) => existsSync66(path));
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS2,
@@ -104601,9 +104770,9 @@ async function installPinnedModel(options) {
   };
   const verifyAll = async () => {
     for (const { file, path } of files)
-      await verifyPinnedFile(path, file, noun, reporter, timing.verifyTimeoutMs);
+      await verifyPinnedFile(path, file, noun, reporter2, timing.verifyTimeoutMs);
   };
-  const finished = () => reporter.set("ready", `${capitalize(noun)} ready`, 100);
+  const finished = () => reporter2.set("ready", `${capitalize(noun)} ready`, 100);
   try {
     const archive = runtimeArchiveFor(platform2, runtime);
     if (!archive) {
@@ -104641,22 +104810,22 @@ async function installPinnedModel(options) {
       if (filesPresent() && runtimeInstalled2(paths.runtimeDir, archive))
         return;
       const fetchImpl = options.fetchImpl ?? fetch;
-      const missing = files.filter(({ path }) => !existsSync65(path));
+      const missing = files.filter(({ path }) => !existsSync66(path));
       const needRuntime = !runtimeInstalled2(paths.runtimeDir, archive);
       const missingBytes = missing.reduce((total, { file, path }) => total + Math.max(0, file.bytes - fileSize(`${path}.partial`)), 0);
       assertSpaceFor(paths.root, space, missingBytes + (needRuntime ? archive.bytes * RUNTIME_UNPACK_FACTOR : 0));
-      reporter.begin(missing.reduce((total, { file }) => total + file.bytes, 0) + (needRuntime ? archive.bytes : 0));
+      reporter2.begin(missing.reduce((total, { file }) => total + file.bytes, 0) + (needRuntime ? archive.bytes : 0));
       if (needRuntime) {
         await stage("runtime", () => withInstallLock2(paths.runtimeLockPath, lockWaitMs, lockRefreshMs, noun, async () => {
           if (runtimeInstalled2(paths.runtimeDir, archive))
             return;
-          await installRuntime2(fetchImpl, paths.runtimeDir, archive, reporter, options.extractArchive ?? extractWithTar, timing.downloadStallMs, space);
+          await installRuntime2(fetchImpl, paths.runtimeDir, archive, reporter2, options.extractArchive ?? extractWithTar, timing.downloadStallMs, space);
         }));
       }
       if (missing.length > 0) {
         ensureDirectory2(paths.modelDir);
         for (const { file, path } of missing) {
-          await stage("download", () => downloadVerified2(fetchImpl, file.url, path, file.bytes, file.sha256, reporter, `Downloading the ${noun} (${bundle.displayName})`, timing.downloadStallMs, space));
+          await stage("download", () => downloadVerified2(fetchImpl, file.url, path, file.bytes, file.sha256, reporter2, `Downloading the ${noun} (${bundle.displayName})`, timing.downloadStallMs, space));
         }
       }
     }));
@@ -104668,7 +104837,7 @@ async function installPinnedModel(options) {
     return installed2();
   } catch (error) {
     const failure = error instanceof BuiltInReasoningInstallError ? error : new BuiltInReasoningInstallError("disk_write_failed", error instanceof Error ? error.message : String(error));
-    reporter.fail(failure.reason, failure.message, failure.shortfall);
+    reporter2.fail(failure.reason, failure.message, failure.shortfall);
     throw failure;
   }
 }
@@ -104722,11 +104891,11 @@ function reportBuiltInReasoningState(options, state, failure) {
   }, state, failure);
 }
 function reportPinnedModelState(target2, state, failure) {
-  const reporter = new ProgressReporter2(target2.statusPath, target2.modelId, target2.noun, target2.now, target2.onProgress);
+  const reporter2 = new ProgressReporter2(target2.statusPath, target2.modelId, target2.noun, target2.now, target2.onProgress);
   if (state === "failed" && failure)
-    reporter.fail(failure.reason, failure.message);
+    reporter2.fail(failure.reason, failure.message);
   else
-    reporter.set(state, state === "ready" ? `${capitalize(target2.noun)} ready` : `Starting the ${target2.noun}`, 100);
+    reporter2.set(state, state === "ready" ? `${capitalize(target2.noun)} ready` : `Starting the ${target2.noun}`, 100);
 }
 function findServerBinary(runtimeDir) {
   const marker = readRuntimeMarker(runtimeDir);
@@ -104734,15 +104903,15 @@ function findServerBinary(runtimeDir) {
     return join91(runtimeDir, marker.serverPath);
   throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server is not installed.");
 }
-async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
+async function verifyPinnedFile(path, file, noun, reporter2, timeoutMs) {
   const key2 = `${path}:${file.sha256}`;
   verifiedThisProcess2 ??= new Set;
   if (verifiedThisProcess2.has(key2))
     return;
   const size = statSync33(path).size;
   const label = `Checking the ${noun}`;
-  reporter.verifying(label, 0, file.bytes);
-  const digest4 = size === file.bytes ? await sha256File2(path, timeoutMs, (done) => reporter.verifying(label, done, file.bytes)) : undefined;
+  reporter2.verifying(label, 0, file.bytes);
+  const digest4 = size === file.bytes ? await sha256File2(path, timeoutMs, (done) => reporter2.verifying(label, done, file.bytes)) : undefined;
   if (digest4 !== file.sha256) {
     rmSync26(path, { force: true });
     throw new BuiltInReasoningInstallError("checksum_mismatch", `${file.name} did not match its pinned checksum and was removed; it will download again.`);
@@ -104758,15 +104927,15 @@ function readRuntimeMarker(runtimeDir) {
 }
 function runtimeInstalled2(runtimeDir, archive) {
   const marker = readRuntimeMarker(runtimeDir);
-  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync65(join91(runtimeDir, marker.serverPath));
+  return marker !== undefined && marker.sha256 === archive.sha256 && existsSync66(join91(runtimeDir, marker.serverPath));
 }
-async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
+async function installRuntime2(fetchImpl, runtimeDir, archive, reporter2, extract, stallMs, space) {
   const staging = `${runtimeDir}.staging-${randomUUID25()}`;
   ensureDirectory2(staging);
   try {
     const archivePath = join91(staging, archive.name);
-    await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
-    reporter.set("verifying", "Unpacking the built-in model server");
+    await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter2, "Downloading the built-in model server", stallMs, space);
+    reporter2.set("verifying", "Unpacking the built-in model server");
     try {
       await extract(archivePath, staging);
     } catch (error) {
@@ -104845,7 +105014,7 @@ function locateFile(root, name, depth = 0, prefix = "") {
   }
   return;
 }
-async function downloadVerified2(fetchImpl, url, target2, expectedBytes, expectedSha256, reporter, label, stallMs, space) {
+async function downloadVerified2(fetchImpl, url, target2, expectedBytes, expectedSha256, reporter2, label, stallMs, space) {
   await downloadPinnedFile({
     fetchImpl,
     url,
@@ -104862,8 +105031,8 @@ async function downloadVerified2(fetchImpl, url, target2, expectedBytes, expecte
     error: (reason, message2) => new BuiltInReasoningInstallError(reason, message2),
     diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname74(target2)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
     write: space.write,
-    onStart: () => reporter.set("downloading", label),
-    onProgress: (bytes) => reporter.advance(bytes, label)
+    onStart: () => reporter2.set("downloading", label),
+    onProgress: (bytes) => reporter2.advance(bytes, label)
   });
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
@@ -104892,7 +105061,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
   });
 }
 async function sha256File2(path, timeoutMs, onProgress) {
-  const hash = createHash69("sha256");
+  const hash = createHash70("sha256");
   await hashInto(path, hash, timeoutMs, onProgress);
   return hash.digest("hex");
 }
@@ -105823,7 +105992,7 @@ var init_audio_wav = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
-import { existsSync as existsSync66 } from "node:fs";
+import { existsSync as existsSync67 } from "node:fs";
 import { mkdtemp as mkdtemp7, readFile as readFile9, rm as rm8 } from "node:fs/promises";
 import { tmpdir as tmpdir10, totalmem } from "node:os";
 import { join as join94 } from "node:path";
@@ -105891,7 +106060,7 @@ function createBuiltInTranscriber(options = {}) {
   const filesOnDisk = options.filesOnDisk ?? (() => {
     try {
       const layout = builtInTranscriptionLayout(model, env, options.installOptions?.runtime, platform2);
-      return model.files.every((file) => existsSync66(join94(layout.modelDir, file.name)));
+      return model.files.every((file) => existsSync67(join94(layout.modelDir, file.name)));
     } catch {
       return false;
     }
@@ -106444,9 +106613,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer6 } from "node:buffer";
-import { createHash as createHash70 } from "node:crypto";
+import { createHash as createHash71 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash70("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash71("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -107208,7 +107377,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash71 } from "node:crypto";
+import { createHash as createHash72 } from "node:crypto";
 import { dirname as dirname75 } from "node:path";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
@@ -107375,6 +107544,7 @@ function createFileExtractionRunner(options) {
     },
     async plan(request) {
       const corpus = requireCorpus(request.corpusId);
+      corpus.sizeStops?.resume(now());
       const source = await resolveSource(corpus);
       const page2 = await source.listCandidates({
         limit: request.limit,
@@ -107413,12 +107583,15 @@ function createFileExtractionRunner(options) {
           logPlanRefusal(request.corpusId, extractor?.kind ?? "unrouted", PLAN_REFUSED_ROUTING_FAILED, 1, error);
           continue;
         }
-        const key2 = `${extractor.kind}\x00${version}`;
+        const sourceMax = corpus.sizeLimit && (!corpus.sizeLimit.bytesOnly || extractor.input.kind !== "file") ? sourceSizeBytes(corpus.sizeLimit, ref, now()) : undefined;
+        const requestedMax = request.maxBytesPerFile === undefined ? sourceMax : sourceMax === undefined ? request.maxBytesPerFile : Math.min(request.maxBytesPerFile, sourceMax);
+        const maxBytes = boundedByReader(requestedMax, extractor);
+        const key2 = `${extractor.kind}\x00${version}\x00${maxBytes}`;
         const bucket = byKind.get(key2);
         if (bucket)
           bucket.refs.push(ref);
         else
-          byKind.set(key2, { kind: extractor.kind, version, refs: [ref] });
+          byKind.set(key2, { kind: extractor.kind, version, maxBytes, refs: [ref] });
       }
       if (unroutableRefs.length > 0) {
         try {
@@ -107431,8 +107604,7 @@ function createFileExtractionRunner(options) {
       let jobsExisting = 0;
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
-      for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
-        const maxBytesPerFile = boundedByReader(request.maxBytesPerFile, registry.get(extractorKind));
+      for (const { kind: extractorKind, version: extractorVersion, maxBytes: maxBytesPerFile, refs } of byKind.values()) {
         const enqueue = (bucketRefs) => jobs.enqueue({
           refs: bucketRefs,
           extractorKind,
@@ -107482,6 +107654,7 @@ function createFileExtractionRunner(options) {
           prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
         }
       }
+      corpus.sizeStops?.refresh(now());
       const jobsRefused = [...refused.values()].reduce((total, count) => total + count, 0);
       return {
         kind: "file_extraction_plan",
@@ -107504,6 +107677,7 @@ function createFileExtractionRunner(options) {
     },
     async run(request) {
       const corpus = requireCorpus(request.corpusId);
+      corpus.sizeStops?.resume(now());
       const lane = {
         corpusId: request.corpusId,
         provider: request.provider,
@@ -107589,6 +107763,7 @@ function createFileExtractionRunner(options) {
           leaseToken: abandoned[0].leaseToken
         });
       }
+      corpus.sizeStops?.refresh(now());
       const nextRetryAt = jobs.nextRetryAt(lane, now());
       return {
         kind: "file_extraction_run",
@@ -107701,7 +107876,8 @@ async function settleOneJobHeld(input, staged) {
     } catch (error) {
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
     }
-    const maxBytes = boundedByReader(job.maxBytesPerFile, extractor);
+    const sourceMax = corpus.sizeLimit && (!corpus.sizeLimit.bytesOnly || extractor.input.kind !== "file") ? sourceSizeBytes(corpus.sizeLimit, job.ref, input.now()) : undefined;
+    const maxBytes = boundedByReader(sourceMax === undefined ? job.maxBytesPerFile : Math.min(sourceMax, job.maxBytesPerFile ?? sourceMax), extractor);
     const fetchStarted = Date.now();
     try {
       if (extractor.input.kind === "file" && source.fetchFile && input.spoolDir !== undefined) {
@@ -107714,11 +107890,17 @@ async function settleOneJobHeld(input, staged) {
       } else {
         fetched = await source.fetch(job.ref, { ...maxBytes !== undefined ? { maxBytes } : {} });
         if (maxBytes !== undefined && fetched.bytes.byteLength > maxBytes) {
+          input.jobs.recordSizeRefusal(job.jobId, job.leaseToken, { sizeBytes: fetched.bytes.byteLength, maxBytes });
           return { status: "skipped_too_large", errorKind: "source_too_large" };
         }
       }
     } catch (error) {
       if (isFileExtractionSourceError(error)) {
+        if (error.errorKind === "source_too_large")
+          input.jobs.recordSizeRefusal(job.jobId, job.leaseToken, {
+            ...error.sizeBytes !== undefined && Number.isSafeInteger(error.sizeBytes) && error.sizeBytes >= 0 ? { sizeBytes: error.sizeBytes } : {},
+            ...maxBytes !== undefined ? { maxBytes } : {}
+          });
         return {
           status: error.settleAs,
           errorKind: error.errorKind,
@@ -107961,7 +108143,7 @@ function retryable(errorKind, error) {
 }
 function hashError(error) {
   const detail = error instanceof Error ? `${error.name}:${error.message}` : String(error);
-  return createHash71("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash72("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error) {
   const message2 = error instanceof Error ? error.message : "";
@@ -108097,7 +108279,7 @@ function logPlanRefusal(corpusId, extractorKind, reason, count, error) {
   console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${corpusId} extractor_kind=${extractorKind} ` + `reason_kind=${reason}${field} candidates=${count} reason=${boundedLogErrorMessage(error)}`);
 }
 function hashToken(value) {
-  return createHash71("sha256").update(value).digest("hex");
+  return createHash72("sha256").update(value).digest("hex");
 }
 function isScopeApprovalRefusal(error) {
   return error instanceof OperationError && error.code === "source_index_policy_violation";
@@ -108109,7 +108291,7 @@ async function drainPdfExtraction(input) {
     const result = {
       corpusId: lane.corpusId,
       provider: lane.provider,
-      scopeKeyHash: createHash71("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
+      scopeKeyHash: createHash72("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
       candidatesRequeued: 0,
       jobsProcessed: 0,
       jobsIndexed: 0,
@@ -108200,6 +108382,7 @@ function withMediaTypeFromName(ref) {
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", PLAN_REFUSED_UNROUTABLE_RECORD = "unroutable_record_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
+  init_source_size_limits();
   init_control_path_headroom();
   init_media_cache();
   init_operation_error();
@@ -108771,7 +108954,7 @@ var init_tiered_extraction = __esm(() => {
 });
 
 // src/workers/engine/runtime/file-extraction-runtime.ts
-import { existsSync as existsSync67 } from "node:fs";
+import { existsSync as existsSync68 } from "node:fs";
 function createRefreshableFileExtractionRuntime(options) {
   const first = options.build();
   if (!first)
@@ -108835,7 +109018,7 @@ function createFileExtractionRuntime(options) {
     ...options.extraSourceFactories ?? []
   ]);
   const jobsDbPath = options.jobsDbPath ?? defaultFileExtractionJobsDbPath(env);
-  if (readOnly && !existsSync67(jobsDbPath))
+  if (readOnly && !existsSync68(jobsDbPath))
     return;
   const jobs = new LocalFileExtractionJobStore(jobsDbPath, readOnly ? { readonly: true } : {});
   const preparedSpools = new Map;
@@ -108895,7 +109078,16 @@ function createFileExtractionRuntime(options) {
       storePath: store.dbPath
     }, env);
     const spoolDir = prepareSpool(placement.root);
+    const sizeLimit = sourceSizeLimitForProvider(config.provider);
+    if (sizeLimit && !readOnly) {
+      resumeGrantedSizeHeld(jobs, sizeLimit);
+      refreshSourceSizeStop(jobs, sizeLimit);
+    }
     corpora.push({
+      ...sizeLimit ? { sizeLimit, ...!readOnly ? { sizeStops: {
+        resume: (now) => resumeGrantedSizeHeld(jobs, sizeLimit, now),
+        refresh: (now) => refreshSourceSizeStop(jobs, sizeLimit, now)
+      } } : {} } : {},
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
       ...spoolDir ? { spoolDir } : {},
@@ -108988,7 +109180,7 @@ function createFileExtractionRuntime(options) {
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
   const reclassificationRules = defaultTerminalReclassificationRules(registry);
   const sharedSpool = extractionSpoolRoot(env);
-  if (existsSync67(sharedSpool))
+  if (existsSync68(sharedSpool))
     prepareSpool(sharedSpool);
   const runner = createFileExtractionRunner({
     jobs,
@@ -109335,6 +109527,8 @@ function optionalString9(value) {
 }
 var FILE_EXTRACTION_ENABLED_ENV = "OLYMPUS_FILE_EXTRACTION_ENABLED", FILE_EXTRACTION_CORPORA_ENV = "OLYMPUS_FILE_EXTRACTION_CORPORA_JSON", FILE_EXTRACTION_WORKER_ID_ENV = "OLYMPUS_FILE_EXTRACTION_WORKER_ID", FILE_EXTRACTION_SYNC_CONNECTOR_ID = "file-extraction-factory", DROPBOX_SCOPE_ACCOUNT;
 var init_file_extraction_runtime = __esm(() => {
+  init_source_size_limits();
+  init_size_limit_stops();
   init_on_demand_read();
   init_credential_broker();
   init_types();
@@ -109466,7 +109660,7 @@ function telegramMediaConnector(input) {
       throw new FileExtractionSourceError("source_item_not_found");
     }
     if (maxBytes !== undefined && size > maxBytes)
-      throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_too_large", { sizeBytes: size });
     return path;
   };
   const read = async (localItemId, options) => {
@@ -109484,7 +109678,7 @@ function telegramMediaConnector(input) {
       throw new FileExtractionSourceError("source_item_not_found");
     }
     if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes)
-      throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
     return item(localItemId, new Uint8Array(bytes));
   };
   return {
@@ -109543,7 +109737,7 @@ var init_media_extraction = __esm(() => {
 });
 
 // src/workers/telegram-messages/store-sync.ts
-import { existsSync as existsSync68, readdirSync as readdirSync17, rmSync as rmSync28 } from "node:fs";
+import { existsSync as existsSync69, readdirSync as readdirSync17, rmSync as rmSync28 } from "node:fs";
 import { join as join97 } from "node:path";
 function createTelegramConnectorStores(env = process.env) {
   const account = { sourceId: TELEGRAM_MESSAGES_SOURCE_ID };
@@ -109610,7 +109804,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
           return true;
         const file = cursorFile(position);
         const recorded = tierSet.ledger.readMeta(`${TELEGRAM_SPOOL_FILE_META_PREFIX}${file}`);
-        return recorded === undefined || !existsSync68(join97(spoolDir, file)) || sameSpoolFile(recorded, join97(spoolDir, file));
+        return recorded === undefined || !existsSync69(join97(spoolDir, file)) || sameSpoolFile(recorded, join97(spoolDir, file));
       };
       const laneCursors = {
         internal: sanitizeTelegramCaptureCursor(options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor),
@@ -109940,7 +110134,7 @@ var init_gmail_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-live-sync.ts
-import { createHash as createHash72 } from "node:crypto";
+import { createHash as createHash73 } from "node:crypto";
 function gmailLaneSyncOptions(ownerRules = []) {
   return {
     fetchContent: true,
@@ -110293,7 +110487,7 @@ function scopedTraversal(connector, connectorId, assertScopeCurrent) {
 function gmailCursorConnectorId(account, scope) {
   if (!scope)
     return GMAIL_PROVIDER;
-  const digest4 = createHash72("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const digest4 = createHash73("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest4}`;
 }
 function encodeCheckpoint(envelope) {
@@ -110389,7 +110583,7 @@ function taskOutcome2(input) {
   };
 }
 function gmailReceiptDigest(receipt) {
-  return createHash72("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash73("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError2(error) {
   if (error instanceof TypeError)
@@ -110457,7 +110651,7 @@ var init_drive_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/drive-live-sync.ts
-import { createHash as createHash73 } from "node:crypto";
+import { createHash as createHash74 } from "node:crypto";
 function createGoogleDriveLaneTierSet(options) {
   return createLaneTieredStoreSet({
     ...options,
@@ -110615,7 +110809,7 @@ function scopedTraversal2(connector, connectorId) {
 function googleDriveCursorConnectorId(account, scope) {
   if (!scope)
     return GOOGLE_DRIVE_PROVIDER;
-  const digest4 = createHash73("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const digest4 = createHash74("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest4}`;
 }
 function googleDriveScopedCheckpoint(cursor, connectorId) {
@@ -110704,7 +110898,7 @@ function taskOutcome3(input) {
   };
 }
 function googleDriveReceiptDigest(receipt) {
-  return createHash73("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash74("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError3(error) {
   if (error instanceof TypeError)
@@ -110756,7 +110950,7 @@ __export(exports_source_ingestion_ledger, {
   buildSourceIngestionLedgerSnapshot: () => buildSourceIngestionLedgerSnapshot,
   SqliteSourceIngestionLedgerStore: () => SqliteSourceIngestionLedgerStore
 });
-import { existsSync as existsSync69, mkdirSync as mkdirSync44 } from "node:fs";
+import { existsSync as existsSync70, mkdirSync as mkdirSync44 } from "node:fs";
 import { dirname as dirname76 } from "node:path";
 import { Database as Database23 } from "bun:sqlite";
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
@@ -110977,7 +111171,7 @@ async function collectLocalSourceIngestionLedger(options = {}) {
     return owner ? { sourceId: owner } : storageAccountForCorpus(store, archiveImportCorpora());
   };
   for (const store of localConnectorStores(env)) {
-    if (!existsSync69(store.dbPath))
+    if (!existsSync70(store.dbPath))
       continue;
     const gated = store.family === "file";
     const matcher = driveCorpusIds.has(store.corpusId) ? driveExclusions : sharedExclusions;
@@ -111707,7 +111901,7 @@ var init_source_ingestion_ledger = __esm(() => {
 });
 
 // src/workers/source-index/status.ts
-import { existsSync as existsSync70 } from "node:fs";
+import { existsSync as existsSync71 } from "node:fs";
 function authorCoverageStatus(store) {
   try {
     const rows = store.authorCoverage();
@@ -111968,7 +112162,7 @@ function secretLocationCount(store) {
   if (store.trustDomain !== "secure_local" || store.dbPath === ":memory:")
     return;
   const path = secretLocationsPathForStore(store.dbPath);
-  if (!existsSync70(path))
+  if (!existsSync71(path))
     return;
   let index;
   try {
@@ -112391,7 +112585,7 @@ __export(exports_source_dashboard, {
   DASHBOARD_ARCHIVES_IMPORTING_LABEL: () => DASHBOARD_ARCHIVES_IMPORTING_LABEL,
   CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT: () => CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT
 });
-import { existsSync as existsSync71, mkdirSync as mkdirSync45 } from "node:fs";
+import { existsSync as existsSync72, mkdirSync as mkdirSync45 } from "node:fs";
 import { dirname as dirname77 } from "node:path";
 import { Database as Database24 } from "bun:sqlite";
 function dashboardSchedulerTaskFailing(task) {
@@ -112494,7 +112688,7 @@ function dashboardCardsFor(sourceIds) {
   return DASHBOARD_SUPPORTED_SOURCES.filter((card) => sourceIds.includes(card.source_id) || card.corpus_source_ids.some((id) => sourceIds.includes(id)));
 }
 function forgetSourceDashboardRows(dbPath, scope, options = {}) {
-  if (!existsSync71(dbPath))
+  if (!existsSync72(dbPath))
     return 0;
   const cards = dashboardCardsFor(scope.sourceIds);
   const sourceIds = [...new Set([
@@ -114975,14 +115169,14 @@ var init_source_dashboard = __esm(() => {
 });
 
 // src/workers/source-scheduler-state.ts
-import { chmodSync as chmodSync28, existsSync as existsSync72, mkdirSync as mkdirSync46 } from "node:fs";
+import { chmodSync as chmodSync28, existsSync as existsSync73, mkdirSync as mkdirSync46 } from "node:fs";
 import { dirname as dirname78 } from "node:path";
 import { Database as Database25 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
   return sharedDataPath("source-scheduler", env);
 }
 function forgetSourceSchedulerState(dbPath, scope, options = {}) {
-  if (!existsSync72(dbPath))
+  if (!existsSync73(dbPath))
     return 0;
   const dryRun = options.dryRun === true;
   const keys = [["source_id", scope.sourceIds], ["corpus_id", scope.corpusIds]];
@@ -115602,7 +115796,7 @@ var init_source_scheduler_state = __esm(() => {
 });
 
 // src/workers/classification/judge-check.ts
-import { existsSync as existsSync73, mkdirSync as mkdirSync47, readFileSync as readFileSync54 } from "node:fs";
+import { existsSync as existsSync74, mkdirSync as mkdirSync47, readFileSync as readFileSync54 } from "node:fs";
 import { dirname as dirname79 } from "node:path";
 function judgeCheckPath(env = process.env) {
   return defaultOwnerConfigPath("judge-check.json", env);
@@ -115635,7 +115829,7 @@ function createJudgeCheck(options) {
   const path = options.path ?? judgeCheckPath(options.env);
   const random = options.random ?? Math.random;
   const read = () => {
-    if (!existsSync73(path))
+    if (!existsSync74(path))
       return { v: 1 };
     try {
       const parsed = JSON.parse(readFileSync54(path, "utf8"));
@@ -115824,7 +116018,7 @@ function itemScope(itemId) {
   }
 }
 function forgetJudgeCheckItems(path, scopes, { dryRun = false } = {}) {
-  if (scopes.length === 0 || !existsSync73(path))
+  if (scopes.length === 0 || !existsSync74(path))
     return 0;
   let state;
   try {
@@ -115880,8 +116074,8 @@ var init_judge_check = __esm(() => {
 
 // src/workers/classification/judge-second-round.ts
 import { Database as Database26 } from "bun:sqlite";
-import { createHash as createHash74 } from "node:crypto";
-import { chmodSync as chmodSync29, existsSync as existsSync74, readFileSync as readFileSync55, rmSync as rmSync29 } from "node:fs";
+import { createHash as createHash75 } from "node:crypto";
+import { chmodSync as chmodSync29, existsSync as existsSync75, readFileSync as readFileSync55, rmSync as rmSync29 } from "node:fs";
 import { dirname as dirname80, join as join101, sep as sep17 } from "node:path";
 function judgeObservationsPath(env) {
   return join101(dirname80(resolveClassificationLedgerPath(env)), "judge-observed.json");
@@ -115904,7 +116098,7 @@ class SecondRoundConfirmed {
     this.db.run("CREATE TABLE IF NOT EXISTS confirmed (digest TEXT PRIMARY KEY)");
   }
   static digest(request) {
-    return createHash74("sha256").update(`${request.system}
+    return createHash75("sha256").update(`${request.system}
 ${request.prompt}`).digest("hex");
   }
   has(digest4) {
@@ -116018,7 +116212,7 @@ function secondRoundJudge(local, venice, counts = { asked: 0, released: 0, kept:
   } };
 }
 function forgetSecondRoundCursors(statePath, source, options = {}) {
-  if (!existsSync74(statePath))
+  if (!existsSync75(statePath))
     return 0;
   let state;
   try {
@@ -116061,7 +116255,7 @@ class SecondRoundSweep {
   }
   read() {
     try {
-      if (!existsSync74(this.options.statePath))
+      if (!existsSync75(this.options.statePath))
         return { v: 1, cursors: {} };
       const state = JSON.parse(readFileSync55(this.options.statePath, "utf8"));
       return state?.v === 1 && state.cursors && typeof state.cursors === "object" ? state : { v: 1, cursors: {} };
@@ -116124,7 +116318,7 @@ var init_judge_second_round = __esm(() => {
 });
 
 // src/workers/classification/tier-migration-reports.ts
-import { existsSync as existsSync75, readdirSync as readdirSync18, readFileSync as readFileSync56 } from "node:fs";
+import { existsSync as existsSync76, readdirSync as readdirSync18, readFileSync as readFileSync56 } from "node:fs";
 import { join as join102 } from "node:path";
 function tierMigrationDir(env) {
   return env[TIER_MIGRATION_DIR_ENV]?.trim() || sharedDataPath("tier-migration", env);
@@ -116136,7 +116330,7 @@ function tierMigrationStatePath(env) {
   return join102(tierMigrationDir(env), "state.json");
 }
 function forgetTierMigrationReports(reportDir, sourceIds, options = {}) {
-  if (!existsSync75(reportDir))
+  if (!existsSync76(reportDir))
     return 0;
   let forgotten = 0;
   for (const name of readdirSync18(reportDir).filter((entry) => entry.endsWith(".json")).sort()) {
@@ -116162,7 +116356,7 @@ function forgetTierMigrationReports(reportDir, sourceIds, options = {}) {
   return forgotten;
 }
 function forgetTierMigrationSelectors(statePath, sourceIds, options = {}) {
-  if (!existsSync75(statePath))
+  if (!existsSync76(statePath))
     return 0;
   let state;
   try {
@@ -116689,7 +116883,7 @@ var init_tier_rules = __esm(() => {
 });
 
 // src/workers/classification/privacy-profile.ts
-import { createHash as createHash75 } from "node:crypto";
+import { createHash as createHash76 } from "node:crypto";
 import { mkdirSync as mkdirSync49 } from "node:fs";
 import { dirname as dirname82 } from "node:path";
 function defaultPrivacyProfilePath(env = process.env) {
@@ -116831,7 +117025,7 @@ function privacyRuleToTierRule(rule) {
 }
 function privacyRuleId(rule) {
   const matched = rule.kind === "sender" ? rule.value ?? "" : rule.key ?? "";
-  const digest4 = createHash75("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
+  const digest4 = createHash76("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
   return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest4}`;
 }
 function writePrivacyProfile(update, options = {}) {
@@ -117147,13 +117341,13 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync31, copyFileSync, existsSync as existsSync76, lstatSync as lstatSync35, mkdirSync as mkdirSync50, readFileSync as readFileSync57 } from "node:fs";
+import { chmodSync as chmodSync31, copyFileSync, existsSync as existsSync77, lstatSync as lstatSync35, mkdirSync as mkdirSync50, readFileSync as readFileSync57 } from "node:fs";
 import { dirname as dirname83 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync76(path)) {
+  if (!existsSync77(path)) {
     return {
       path,
       present: false,
@@ -117202,7 +117396,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync76(path)) {
+  if (existsSync77(path)) {
     const stat5 = lstatSync35(path);
     if (stat5.isSymbolicLink() || !stat5.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -117251,12 +117445,12 @@ var init_source_dispositions = __esm(() => {
 
 // src/data-lifecycle.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { createHash as createHash76, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash77, randomUUID as randomUUID26 } from "node:crypto";
 import {
   chmodSync as chmodSync32,
   closeSync as closeSync28,
   copyFileSync as copyFileSync2,
-  existsSync as existsSync77,
+  existsSync as existsSync78,
   fsyncSync as fsyncSync6,
   lstatSync as lstatSync36,
   mkdirSync as mkdirSync51,
@@ -117378,7 +117572,7 @@ function exportOlympusData(options) {
         ["tier_sniffer", tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID],
         ["secret_locations", secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID]
       ]) {
-        if (!existsSync77(path))
+        if (!existsSync78(path))
           continue;
         const at = artifacts.length;
         exportSqliteStore({ sqlitePath: path, destinationRoot: sourceRoot, exportRoot: destination, sourceId: source.sourceId, role: "tier_sidecar", expectedStoreId: storeId, files, skipped: skipped2, artifacts });
@@ -117402,7 +117596,7 @@ function exportOlympusData(options) {
     if (folder) {
       for (const name of ACCOUNT_FOLDER_UNEXPORTED) {
         const path = join103(folder, name);
-        if (existsSync77(path) && !skipped2.includes(path))
+        if (existsSync78(path) && !skipped2.includes(path))
           skipped2.push(path);
       }
     }
@@ -117417,7 +117611,7 @@ function exportOlympusData(options) {
         ...files2.raw,
         ...files2.rawDatabases.map((database) => database.path)
       ].filter((path2) => path2 !== undefined)) {
-        if (existsSync77(path))
+        if (existsSync78(path))
           skipped2.push(path);
       }
     }
@@ -117425,7 +117619,7 @@ function exportOlympusData(options) {
   if (options.sourceId === undefined) {
     const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
     for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath), waitingPrivateQuestionsDbPath(connectionsPath), appReleaseLogDbPath(connectionsPath), connectionRequestsPath(connectionsPath)]) {
-      if (existsSync77(path))
+      if (existsSync78(path))
         skipped2.push(path);
     }
   }
@@ -117499,7 +117693,7 @@ function exportReferencedMedia(refs, destination, durabilityBoundary, files, art
   const mediaRoot = join103(destination, EXPORT_MEDIA_DIR);
   makeDurableDirectory(mediaRoot, durabilityBoundary);
   for (const [sha2566, { path, sourceId }] of refs) {
-    if (!isMediaCachePath(path, sha2566) || !existsSync77(path)) {
+    if (!isMediaCachePath(path, sha2566) || !existsSync78(path)) {
       counts.missing += 1;
       continue;
     }
@@ -117641,7 +117835,7 @@ function deleteAllOlympusData(options) {
   assertRawStateTargetsContained(targets, options, undefined);
   assertSourcesFolderTargetsUnlinked(targets, options);
   for (const target2 of targets) {
-    if (existsSync77(target2.path))
+    if (existsSync78(target2.path))
       assertDeleteTargetSafe(target2);
   }
   const removesDaemon = options.dryRun !== true && targets.some((target2) => target2.path === MAC_ENGINE_DAEMON_PLIST);
@@ -117654,7 +117848,7 @@ function deleteAllOlympusData(options) {
   const removed = [];
   const missing = [];
   for (const target2 of targets) {
-    if (!existsSync77(target2.path)) {
+    if (!existsSync78(target2.path)) {
       if (removesDaemon && target2.path === MAC_ENGINE_DAEMON_PLIST) {
         removed.push(target2.path);
         continue;
@@ -117681,15 +117875,15 @@ function planAccountRemoval(account, context2, options = {}) {
   assertRawStateTargetsContained(targets, context2, account);
   assertSourcesFolderTargetsUnlinked(targets, context2);
   for (const target2 of targets) {
-    if (existsSync77(target2.path))
+    if (existsSync78(target2.path))
       assertDeleteTargetSafe(target2);
   }
   if (options.atBoot !== true)
     readSourceMedia(account.sourceId, account.files.stores, envForContext(context2));
   return {
     targets,
-    present: targets.filter((target2) => existsSync77(target2.path)).map((target2) => target2.path),
-    missing: targets.filter((target2) => !existsSync77(target2.path)).map((target2) => target2.path),
+    present: targets.filter((target2) => existsSync78(target2.path)).map((target2) => target2.path),
+    missing: targets.filter((target2) => !existsSync78(target2.path)).map((target2) => target2.path),
     registryPath: sourceRegistryPath(envForContext(context2))
   };
 }
@@ -117699,14 +117893,14 @@ function removeAccount(account, plan, context2, options) {
   const media = readSourceMedia(account.sourceId, account.files.stores, env, { skipUnreadable: options.atBoot === true });
   assertSourcesFolderTargetsUnlinked(plan.targets, context2);
   for (const target2 of plan.targets) {
-    if (target2.kind === "account_folder" && existsSync77(target2.path))
+    if (target2.kind === "account_folder" && existsSync78(target2.path))
       assertDeleteTargetSafe(target2);
   }
   const removed = [];
   const missing = [];
   const folders = plan.targets.filter((target2) => target2.kind === "account_folder").map((target2) => resolve22(target2.path));
   for (const target2 of plan.targets) {
-    if (!existsSync77(target2.path)) {
+    if (!existsSync78(target2.path)) {
       missing.push(target2.path);
       continue;
     }
@@ -117863,7 +118057,7 @@ function readTierLedgerIds(storePaths) {
     if (storePath === ":memory:")
       continue;
     const ledgerPath = tierLedgerPathForStore(storePath);
-    if (!existsSync77(ledgerPath))
+    if (!existsSync78(ledgerPath))
       continue;
     let db;
     try {
@@ -118055,7 +118249,7 @@ function allDeleteTargets(context2) {
 function rmTargetKeepingOwnerLock(target2, lockPath) {
   const lock = canonicalPath2(lockPath);
   const root = canonicalPath2(target2.path);
-  if (!target2.allowRecursive || !isStrictlyInside(lock, root) || !existsSync77(lockPath)) {
+  if (!target2.allowRecursive || !isStrictlyInside(lock, root) || !existsSync78(lockPath)) {
     rmSync30(target2.path, { recursive: target2.allowRecursive, force: true });
     return;
   }
@@ -118085,7 +118279,7 @@ function mediaCacheDeleteTargets(context2) {
 function readSourceMedia(sourceId, storePaths, env, options = {}) {
   const held = [];
   for (const storePath of storePaths) {
-    if (storePath === ":memory:" || !existsSync77(storePath))
+    if (storePath === ":memory:" || !existsSync78(storePath))
       continue;
     if (!looksLikeSqlite(storePath))
       continue;
@@ -118126,7 +118320,7 @@ function releaseSourceMedia(held, dryRun) {
       if (!isMediaCachePath(row.media_path, row.media_sha256))
         continue;
       if (dryRun) {
-        if (existsSync77(row.media_path))
+        if (existsSync78(row.media_path))
           released.push(row.media_path);
       } else {
         const removedByIdentity = storeHolder !== undefined && releaseMediaCacheFile(row.media_path, row.media_sha256, storeHolder);
@@ -118293,7 +118487,7 @@ function requireAccount5(sourceId, context2) {
 }
 function exportSqliteStore(options) {
   const { sqlitePath, destinationRoot, exportRoot, sourceId, role, expectedStoreId, files, skipped: skipped2, artifacts } = options;
-  if (!existsSync77(sqlitePath)) {
+  if (!existsSync78(sqlitePath)) {
     for (const path of sqliteWithSidecars(sqlitePath))
       skipped2.push(path);
     return;
@@ -118378,7 +118572,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   };
 }
 function sha256File3(path) {
-  const hash = createHash76("sha256");
+  const hash = createHash77("sha256");
   const descriptor = openSync28(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
@@ -118414,7 +118608,7 @@ function sqliteWithSidecars(sqlitePath) {
   return [sqlitePath, `${sqlitePath}-wal`, `${sqlitePath}-shm`];
 }
 function copySanitizedJsonIfPresent(source, destination, files, skipped2) {
-  if (!existsSync77(source)) {
+  if (!existsSync78(source)) {
     skipped2.push(source);
     return false;
   }
@@ -118427,7 +118621,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped2) {
 function exportDurabilityBoundary(destination) {
   let current3 = dirname84(resolve22(destination));
   for (;; ) {
-    if (existsSync77(current3))
+    if (existsSync78(current3))
       return current3;
     const parent = dirname84(current3);
     if (parent === current3)
@@ -118496,7 +118690,7 @@ function containsPrivateKeyBlock(value) {
   return /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value);
 }
 function globExisting(root, pattern) {
-  if (!existsSync77(root))
+  if (!existsSync78(root))
     return [];
   return readdirSync19(root).map((entry) => join103(root, entry)).filter((path) => {
     const name = basename15(path);
@@ -120458,7 +120652,7 @@ var init_app_release_agent = __esm(() => {
 });
 
 // src/core/first-run-privacy.ts
-import { existsSync as existsSync78, readFileSync as readFileSync59 } from "node:fs";
+import { existsSync as existsSync79, readFileSync as readFileSync59 } from "node:fs";
 import { dirname as dirname85, join as join104 } from "node:path";
 function createPendingPrivacyPolicy() {
   const config = loadSovereigntyPreset("no-sensitive");
@@ -120499,7 +120693,7 @@ function readComputerUseState(policyPath) {
 function seedComputerUseState(policyPath) {
   const path = computerUseStatePath(policyPath);
   ensurePrivateRootDirectorySync(dirname85(path));
-  if (!existsSync78(path))
+  if (!existsSync79(path))
     writePrivateFileAtomicSync(path, JSON.stringify({ schema: "olympus.computer-use.v1", choice: null }) + `
 `);
 }
@@ -120832,7 +121026,7 @@ var init_update_check = __esm(() => {
 
 // src/core/engine-children.ts
 import { spawnSync as spawnSync12 } from "node:child_process";
-import { existsSync as existsSync79, mkdirSync as mkdirSync52, readFileSync as readFileSync61 } from "node:fs";
+import { existsSync as existsSync80, mkdirSync as mkdirSync52, readFileSync as readFileSync61 } from "node:fs";
 import { dirname as dirname86, join as join106 } from "node:path";
 function engineChildrenPath(env = process.env) {
   return join106(olympusDataDir(env), "engine", "children.json");
@@ -120887,7 +121081,7 @@ function reapRecordedEngineChildren(path, deps = {}) {
   const result = { stopped: [], skipped: [] };
   const record = readEngineChildren(path);
   if (!record) {
-    if (existsSync79(path))
+    if (existsSync80(path))
       removeRecord(path);
     return result;
   }
@@ -121055,7 +121249,7 @@ function writeRecord2(path, file) {
 }
 function removeRecord(path) {
   try {
-    if (existsSync79(path))
+    if (existsSync80(path))
       removeFileDurablySync(path);
   } catch {}
 }
@@ -121091,7 +121285,7 @@ __export(exports_managed_tools, {
   MANAGED_TOOL_ORDER: () => MANAGED_TOOL_ORDER
 });
 import { execFile as execFile2 } from "node:child_process";
-import { createHash as createHash77, randomUUID as randomUUID27 } from "node:crypto";
+import { createHash as createHash78, randomUUID as randomUUID27 } from "node:crypto";
 import {
   accessSync as accessSync9,
   constants as constants13,
@@ -121537,7 +121731,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
   }
 }
 function fileSha256(path) {
-  return createHash77("sha256").update(readFileSync62(path)).digest("hex");
+  return createHash78("sha256").update(readFileSync62(path)).digest("hex");
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
@@ -121589,7 +121783,7 @@ async function downloadTo(path, asset, options, onBytes, tool, label) {
     });
     throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
   }
-  const hash = createHash77("sha256");
+  const hash = createHash78("sha256");
   const file = await open4(path, "wx", 384);
   let received = 0;
   let lastReport = 0;
@@ -123336,7 +123530,7 @@ __export(exports_zkapi_confinement_linux, {
 import { execFile as execFile3 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile as readFile11, stat as fileStat } from "node:fs/promises";
-import { createHash as createHash78 } from "node:crypto";
+import { createHash as createHash79 } from "node:crypto";
 import { lstatSync as lstatSync38, readFileSync as readFileSync64, readlinkSync as readlinkSync2, readdirSync as readdirSync22, realpathSync as realpathSync18 } from "node:fs";
 import { dirname as dirname88, join as join109 } from "node:path";
 function record(value) {
@@ -123513,7 +123707,7 @@ async function launcherPath(env) {
           break;
         current3 = dirname88(current3);
       }
-      if (!lstatSync38(path).isFile() || createHash78("sha256").update(await readFile11(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+      if (!lstatSync38(path).isFile() || createHash79("sha256").update(await readFile11(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
@@ -123524,7 +123718,7 @@ async function launcherIdentity(path) {
   const info = await fileStat(path);
   if (!info.isFile())
     throw new Error("not a launcher");
-  const hash = createHash78("sha256").update(await readFile11(path)).digest("hex");
+  const hash = createHash79("sha256").update(await readFile11(path)).digest("hex");
   return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
 }
 function linuxZkapiConfinement(deps = {}) {
@@ -123730,8 +123924,8 @@ __export(exports_consult_transport_zkapi, {
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn7, execFileSync as execFileSync4 } from "node:child_process";
-import { createHash as createHash79, randomUUID as randomUUID28 } from "node:crypto";
-import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync29, constants as constants14, existsSync as existsSync80, mkdirSync as mkdirSync54, mkdtempSync as mkdtempSync4, readdirSync as readdirSync23, readFileSync as readFileSync65, readlinkSync as readlinkSync3, realpathSync as realpathSync19, rmSync as rmSync33, statSync as statSync36, writeFileSync as writeFileSync17 } from "node:fs";
+import { createHash as createHash80, randomUUID as randomUUID28 } from "node:crypto";
+import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync29, constants as constants14, existsSync as existsSync81, mkdirSync as mkdirSync54, mkdtempSync as mkdtempSync4, readdirSync as readdirSync23, readFileSync as readFileSync65, readlinkSync as readlinkSync3, realpathSync as realpathSync19, rmSync as rmSync33, statSync as statSync36, writeFileSync as writeFileSync17 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir31, tmpdir as tmpdir12 } from "node:os";
 import { delimiter as delimiter7, dirname as dirname89, isAbsolute as isAbsolute32, join as join110, resolve as resolvePath } from "node:path";
@@ -123939,7 +124133,7 @@ function defaultZkapiConfinement(host = {}) {
   const platform2 = host.platform ?? process.platform;
   if (platform2 === "linux")
     return linuxZkapiConfinement(host);
-  if (platform2 === "darwin" && (host.sandboxAvailable ?? existsSync80("/usr/bin/sandbox-exec"))) {
+  if (platform2 === "darwin" && (host.sandboxAvailable ?? existsSync81("/usr/bin/sandbox-exec"))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
       level,
@@ -123986,7 +124180,7 @@ function utcDay(now) {
   return now.toISOString().slice(0, 10);
 }
 function readState8(path) {
-  if (!existsSync80(path))
+  if (!existsSync81(path))
     return;
   const parsed = JSON.parse(readFileSync65(path, "utf8"));
   if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
@@ -124019,7 +124213,7 @@ function zkapiWalletDirectory(env) {
   }
 }
 function zkapiFenceScope(input) {
-  return createHash79("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+  return createHash80("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
 }
 function abandonZkapiFence(path, scope, now) {
   let found = false;
@@ -126095,8 +126289,8 @@ __export(exports_engine_service, {
   ENGINE_BUILD_ENV: () => ENGINE_BUILD_ENV
 });
 import { spawn as spawn8, spawnSync as spawnSync13 } from "node:child_process";
-import { createHash as createHash80, randomBytes as randomBytes19 } from "node:crypto";
-import { existsSync as existsSync81, lstatSync as lstatSync39, readdirSync as readdirSync24, readFileSync as readFileSync66, renameSync as renameSync17, rmSync as rmSync34, statSync as statSync37 } from "node:fs";
+import { createHash as createHash81, randomBytes as randomBytes19 } from "node:crypto";
+import { existsSync as existsSync82, lstatSync as lstatSync39, readdirSync as readdirSync24, readFileSync as readFileSync66, renameSync as renameSync17, rmSync as rmSync34, statSync as statSync37 } from "node:fs";
 import { homedir as homedir32, platform as osPlatform3 } from "node:os";
 import { basename as basename16, dirname as dirname90, isAbsolute as isAbsolute33, join as join111, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
@@ -126182,7 +126376,7 @@ function engineBuildIdentity(packageRoot) {
     if (typeof manifest.version === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(manifest.version))
       version = manifest.version;
   } catch {}
-  const hash = createHash80("sha256");
+  const hash = createHash81("sha256");
   for (const name of BUILD_DIGEST_FILES) {
     try {
       const bytes = readFileSync66(join111(packageRoot, "dist", name));
@@ -126280,7 +126474,7 @@ function defaultEngineConfig() {
   };
 }
 function readEngineConfig(path) {
-  if (!existsSync81(path))
+  if (!existsSync82(path))
     return;
   let parsed;
   try {
@@ -126357,7 +126551,7 @@ function preflightMaintenance(options) {
   const paths = engineServicePaths(options);
   if (paths.linux) {
     preflightLinuxEngineLayout(paths.linux);
-    return existsSync81(paths.linux.receiptPath);
+    return existsSync82(paths.linux.receiptPath);
   }
   assertDarwin(options.platform);
   preflightEnginePaths(absolute2(options.homeDir ?? homedir32(), "home directory"), paths);
@@ -126418,7 +126612,7 @@ function installEngineUnderFence(options = {}) {
     assertDaemonProgramUnchanged(paths, program);
   const warnings = engineConflictWarnings(homeDir, "darwin");
   const privacyState = resolveInstallationPrivacyState({ homeDir, paths, env: options.env ?? process.env });
-  const sovereigntyBlocker = existsSync81(paths.sovereigntyPath) || privacyState.state === "not_installed" ? undefined : privacyState.reason ?? "An existing privacy policy is preserved.";
+  const sovereigntyBlocker = existsSync82(paths.sovereigntyPath) || privacyState.state === "not_installed" ? undefined : privacyState.reason ?? "An existing privacy policy is preserved.";
   const base = {
     ok: true,
     label: paths.label,
@@ -126437,7 +126631,7 @@ function installEngineUnderFence(options = {}) {
       wrote_plist: false,
       wrote_config: false,
       wrote_worker_env: false,
-      sovereignty: existsSync81(paths.sovereigntyPath) ? { action: "present", path: paths.sovereigntyPath } : sovereigntyBlocker ? { action: "skipped", path: paths.sovereigntyPath, reason: sovereigntyBlocker } : { action: "would_seed", path: paths.sovereigntyPath, preset: STANDALONE_SOVEREIGNTY_PRESET },
+      sovereignty: existsSync82(paths.sovereigntyPath) ? { action: "present", path: paths.sovereigntyPath } : sovereigntyBlocker ? { action: "skipped", path: paths.sovereigntyPath, reason: sovereigntyBlocker } : { action: "would_seed", path: paths.sovereigntyPath, preset: STANDALONE_SOVEREIGNTY_PRESET },
       action: "dry_run"
     };
   }
@@ -126658,7 +126852,7 @@ async function verifyEngine(options = {}) {
   if (normalizedPlatform(options.platform) !== "linux")
     assertDarwin(options.platform);
   const paths = engineServicePaths(options);
-  if (!existsSync81(paths.plistPath)) {
+  if (!existsSync82(paths.plistPath)) {
     throw new OperationError("config_error", "The engine is not installed.", "Run olympus engine install.");
   }
   const expectedBuild = expectedEngineBuild(options);
@@ -126711,7 +126905,7 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     let problem;
     try {
       assertManagedPathParentsSync(homeDir, dir, label);
-      const stat6 = existsSync81(dir) || isSymlink(dir) ? lstatSync39(dir) : undefined;
+      const stat6 = existsSync82(dir) || isSymlink(dir) ? lstatSync39(dir) : undefined;
       if (stat6 && (stat6.isSymbolicLink() || !stat6.isDirectory()))
         problem = `${dir} is not a real folder (a symbolic link or a file).`;
       else if (stat6 && ownerUid !== undefined && stat6.uid !== ownerUid)
@@ -126736,7 +126930,7 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     } catch (error) {
       throw new OperationError("config_error", `Olympus cannot install here: ${error instanceof Error ? error.message : String(error)}`, `Olympus keeps ${label} files in real directories it can lock down. Replace the symbolic link or file at that path with a directory (or remove it), then run olympus engine install again. Nothing was changed.`);
     }
-    if (!existsSync81(path))
+    if (!existsSync82(path))
       continue;
     const stat6 = lstatSync39(path);
     if (!stat6.isFile() || stat6.isSymbolicLink()) {
@@ -126757,7 +126951,7 @@ function runningBuildDiffers(statusPath, build) {
   }
 }
 function seedEngineSovereignty(path) {
-  if (existsSync81(path))
+  if (existsSync82(path))
     return;
   writeSovereigntyConfigFile({ config: createPendingPrivacyPolicy(), path });
   return STANDALONE_SOVEREIGNTY_PRESET;
@@ -126765,18 +126959,18 @@ function seedEngineSovereignty(path) {
 function resolveInstallationPrivacyState(input = {}) {
   const env = { ...input.env ?? process.env, HOME: input.homeDir ?? input.env?.HOME ?? homedir32() };
   const paths = input.paths ?? engineServicePaths({ env });
-  if (existsSync81(paths.sovereigntyPath)) {
+  if (existsSync82(paths.sovereigntyPath)) {
     const policy = validateSovereigntyConfig(JSON.parse(readFileSync66(paths.sovereigntyPath, "utf8")));
     return { state: isPendingPrivacyPolicy(policy) ? "pending" : "configured" };
   }
-  if (existsSync81(paths.configPath) || existsSync81(paths.plistPath))
+  if (existsSync82(paths.configPath) || existsSync82(paths.plistPath))
     return {
       state: "configured",
       reason: "An existing engine installation has no policy file; its current policy is preserved."
     };
   const platform2 = paths.linux ? "linux" : "darwin";
   const worker = workerServicePaths(platform2, env.HOME, env);
-  if (existsSync81(worker.unitPath)) {
+  if (existsSync82(worker.unitPath)) {
     const workerEnv = environmentWithWorkerSetupEnv({ env, workerEnvPath: worker.envPath });
     const config = loadConfig(workerEnv);
     const policy = loadSovereigntyEngine({
@@ -126796,7 +126990,7 @@ function resolveInstallationPrivacyState(input = {}) {
 }
 function engineSovereigntySeedBlocker(input) {
   try {
-    if (existsSync81(input.workerEnvPath)) {
+    if (existsSync82(input.workerEnvPath)) {
       const key2 = ENV_POLICY_KEY.exec(readFileSync66(input.workerEnvPath, "utf8"))?.[1];
       if (key2)
         return `${input.workerEnvPath} already sets ${key2}, which chooses this worker's models and privacy routes.`;
@@ -126805,10 +126999,10 @@ function engineSovereigntySeedBlocker(input) {
     return `${input.workerEnvPath} could not be read to check for an existing policy.`;
   }
   const legacy = workerServicePaths(input.platform ?? (process.platform === "linux" ? "linux" : "darwin"), input.homeDir, input.env).unitPath;
-  if (existsSync81(legacy))
+  if (existsSync82(legacy))
     return `the worker service from olympus worker install (${legacy}) already runs Olympus with its own environment.`;
   const openclawConfig = openClawConfigPath(input.homeDir, input.env ?? process.env);
-  if (existsSync81(openclawConfig)) {
+  if (existsSync82(openclawConfig)) {
     let text3;
     try {
       text3 = readFileSync66(openclawConfig, "utf8");
@@ -126831,7 +127025,7 @@ function openClawConfigHasOlympus(text3, stateDir) {
       return false;
     const installed2 = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, "olympus"));
     const loaded = Array.isArray(plugins?.load?.paths) && plugins.load.paths.some((path) => typeof path === "string" && /olympus/i.test(path));
-    return installed2 || loaded || existsSync81(join111(stateDir, "extensions", "olympus"));
+    return installed2 || loaded || existsSync82(join111(stateDir, "extensions", "olympus"));
   } catch {
     return /["']?\bolympus\b["']?\s*:/.test(text3);
   }
@@ -126853,7 +127047,7 @@ function uninstallEngineUnderFence(options = {}) {
   if (paths.engineManager === "daemon" && launchctlLoaded(exec, serviceTarget(options.uid)))
     mustSucceed(exec("launchctl", ["bootout", serviceTarget(options.uid)]), "stop the login engine");
   let removed = false;
-  if (existsSync81(agentPath)) {
+  if (existsSync82(agentPath)) {
     const stat6 = lstatSync39(agentPath);
     if (!stat6.isFile() || stat6.isSymbolicLink()) {
       throw new OperationError("config_error", `${paths.plistPath} is not a regular file; remove it by hand.`);
@@ -126884,7 +127078,7 @@ function engineKeptItems(paths) {
     { path: paths.modelsDir, what: "downloaded built-in models", bytes: directoryBytes(paths.modelsDir) },
     { path: paths.remoteAccessDir, what: "this Mac's relay registration and keys; ChatGPT stays linked until you disconnect it or delete this data" }
   ];
-  return candidates.filter((item) => existsSync81(item.path));
+  return candidates.filter((item) => existsSync82(item.path));
 }
 function directoryBytes(path, budget = { entries: 20000 }) {
   let total = 0;
@@ -126938,7 +127132,7 @@ function startEngine(options = {}) {
   assertDarwin(options.platform);
   const homeDir = absolute2(options.homeDir ?? homedir32(), "home directory");
   const paths = engineServicePaths({ ...options, homeDir, platform: "darwin" });
-  if (!existsSync81(paths.plistPath)) {
+  if (!existsSync82(paths.plistPath)) {
     throw new OperationError("config_error", "The engine is not installed.", "Run olympus engine install.");
   }
   const exec = options.exec ?? defaultExec2;
@@ -127160,14 +127354,14 @@ function installedProgram(plistPath) {
 function inspectEngine(options = {}) {
   const homeDir = absolute2(options.homeDir ?? homedir32(), "home directory");
   const paths = engineServicePaths(options);
-  const installed2 = existsSync81(paths.plistPath);
+  const installed2 = existsSync82(paths.plistPath);
   const base = {
     ...paths.engineManager ? { manager: paths.engineManager } : {},
     label: paths.label,
     installed: installed2,
     plist_path: paths.plistPath,
     config_path: paths.configPath,
-    config_present: existsSync81(paths.configPath),
+    config_present: existsSync82(paths.configPath),
     log_path: paths.logPath,
     error_log_path: paths.errorLogPath
   };
@@ -127263,7 +127457,7 @@ function engineConflictWarnings(homeDir, platform2 = process.platform, env = pro
   const warnings = [];
   const linux = platform2 === "linux";
   const legacy = workerServicePaths(linux ? "linux" : "darwin", homeDir, env).unitPath;
-  if (existsSync81(legacy)) {
+  if (existsSync82(legacy)) {
     warnings.push(`The worker ${linux ? "user service" : "LaunchAgent"} from olympus worker install is present (${legacy}); ${linux ? "it competes for the owner socket" : "it serves the same port"}. Run olympus worker uninstall so the engine owns the worker.`);
   }
   return warnings;
@@ -127322,7 +127516,7 @@ function defaultExec2(command, args) {
   };
 }
 function writeIfChanged(path, text3) {
-  if (existsSync81(path)) {
+  if (existsSync82(path)) {
     const stat6 = lstatSync39(path);
     if (!stat6.isFile() || stat6.isSymbolicLink()) {
       throw new OperationError("config_error", `${path} is not a regular file; remove it by hand.`);
@@ -127557,9 +127751,9 @@ function requestMacServerMode(enable, options = {}) {
 }
 async function runMacServerModeChange(enable, options = {}) {
   const paths = engineServicePaths(options);
-  const desktopAgent = !enable && existsSync81(serverModeAgentPath(paths));
+  const desktopAgent = !enable && existsSync82(serverModeAgentPath(paths));
   const since = (options.health?.now ?? Date.now)();
-  const needsHandoff = paths.engineManager === "daemon" !== enable || enable && existsSync81(enginePaths(options.homeDir ?? homedir32()).plistPath);
+  const needsHandoff = paths.engineManager === "daemon" !== enable || enable && existsSync82(enginePaths(options.homeDir ?? homedir32()).plistPath);
   try {
     if (desktopAgent)
       writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, message: "Your Mac will ask for an administrator’s password. Olympus will reconnect here when the change is finished." }));
@@ -127583,7 +127777,7 @@ function macComputerSetupView() {
   if (process.platform !== "darwin" || process.env.OLYMPUS_ENGINE_HOST !== "1")
     return {};
   const paths = engineServicePaths();
-  if (!existsSync81(paths.plistPath))
+  if (!existsSync82(paths.plistPath))
     return {};
   return { engine_server_mode: macServerModeView(), computer_use_pending: readComputerUseState(paths.sovereigntyPath)?.choice === null };
 }
@@ -127629,11 +127823,11 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync14 } from "node:child_process";
-import { chmodSync as chmodSync36, closeSync as closeSync30, constants as constants15, copyFileSync as copyFileSync3, existsSync as existsSync82, fstatSync as fstatSync6, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync40, linkSync as linkSync3, mkdirSync as mkdirSync55, openSync as openSync29, readFileSync as readFileSync67, readlinkSync as readlinkSync4, readdirSync as readdirSync25, realpathSync as realpathSync20, renameSync as renameSync18, rmSync as rmSync35, rmdirSync as rmdirSync7, statSync as statSync38, symlinkSync as symlinkSync2, writeFileSync as writeFileSync18 } from "node:fs";
+import { chmodSync as chmodSync36, closeSync as closeSync30, constants as constants15, copyFileSync as copyFileSync3, existsSync as existsSync83, fstatSync as fstatSync6, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync40, linkSync as linkSync3, mkdirSync as mkdirSync55, openSync as openSync29, readFileSync as readFileSync67, readlinkSync as readlinkSync4, readdirSync as readdirSync25, realpathSync as realpathSync20, renameSync as renameSync18, rmSync as rmSync35, rmdirSync as rmdirSync7, statSync as statSync38, symlinkSync as symlinkSync2, writeFileSync as writeFileSync18 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename17, dirname as dirname91, join as join112, relative as relative16, resolve as resolve23, sep as sep20 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
-import { randomBytes as randomBytes20, createHash as createHash81, randomUUID as randomUUID29 } from "node:crypto";
+import { randomBytes as randomBytes20, createHash as createHash82, randomUUID as randomUUID29 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync14(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -127770,7 +127964,7 @@ function preflightSystemdEngine(l, exec = linuxEngineExec, uid = process.getuid(
 }
 function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
   assertLinuxManagedPath(path);
-  if (!existsSync82(path))
+  if (!existsSync83(path))
     return;
   const fd2 = openSync29(path, constants15.O_RDWR | constants15.O_NOFOLLOW);
   try {
@@ -127784,7 +127978,7 @@ function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
       assertLinuxManagedPath(dest);
       if (i2 === retained)
         rmSync35(dest, { force: true });
-      else if (existsSync82(dest))
+      else if (existsSync83(dest))
         renameSync18(dest, `${path}.${i2 + 1}`);
     }
     copyFileSync3(path, `${path}.1`, constants15.COPYFILE_EXCL);
@@ -127860,7 +128054,7 @@ function kernelFlock() {
   if (flockSymbols)
     return flockSymbols;
   const { dlopen, FFIType } = runtimeRequire4("bun:ffi");
-  const libc = ["/usr/lib/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6", "/lib64/libc.so.6"].find(existsSync82) ?? "libc.so.6";
+  const libc = ["/usr/lib/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6", "/lib64/libc.so.6"].find(existsSync83) ?? "libc.so.6";
   const library2 = dlopen(libc, {
     flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
     fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 }
@@ -127986,7 +128180,7 @@ function hashFile(path) {
   const info = lstatSync40(path);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
     throw new Error(`${path} must be a singly-linked regular file.`);
-  return createHash81("sha256").update(readFileSync67(path)).digest("hex");
+  return createHash82("sha256").update(readFileSync67(path)).digest("hex");
 }
 function linuxMachineArtifactDigest(path, kind) {
   if (kind === "file")
@@ -127995,13 +128189,13 @@ function linuxMachineArtifactDigest(path, kind) {
     const info = lstatSync40(path);
     if (!info.isSymbolicLink())
       throw new Error(`${path} is not a symbolic link.`);
-    return createHash81("sha256").update(readlinkSync4(path)).digest("hex");
+    return createHash82("sha256").update(readlinkSync4(path)).digest("hex");
   }
   const root = resolve23(path);
   const rootInfo = lstatSync40(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
     throw new Error(`${path} is not a real directory tree.`);
-  const hash = createHash81("sha256");
+  const hash = createHash82("sha256");
   const walk = (dir) => {
     for (const name of readdirSync25(dir).sort()) {
       const full = join112(dir, name);
@@ -128083,18 +128277,18 @@ function durableProgram(layout, source, transaction, options) {
   syncCopiedFile(runtime);
   syncDirectorySync(runtimeDir);
   syncDirectorySync(staging);
-  const custodyToken = createHash81("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
+  const custodyToken = createHash82("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
   writePrivateFileAtomicSync(join112(staging, ".olympus-generation.json"), `${JSON.stringify({ schema: "olympus.engine.generation.v1", token: custodyToken, build: source.build ?? null })}
 `);
   syncDirectorySync(staging);
   const digest4 = linuxMachineArtifactDigest(staging, "tree");
   const generation = join112(generations, digest4);
   transaction.generationPath = generation;
-  transaction.generationCreated = !existsSync82(generation);
+  transaction.generationCreated = !existsSync83(generation);
   transaction.generationArtifact = treeMachineArtifact(staging, generation);
   writeInstallTransaction(layout, transaction);
   lifecycleCheckpoint(options, "generation_identity_published");
-  if (existsSync82(generation)) {
+  if (existsSync83(generation)) {
     if (linuxMachineArtifactDigest(generation, "tree") !== digest4)
       throw new Error(`Existing engine generation ${generation} failed identity verification.`);
     rmSync35(staging, { recursive: true });
@@ -128181,7 +128375,7 @@ function createInstallTransaction(input) {
   const files = {};
   let index = 0;
   for (const path of transactionManagedFiles(input.layout)) {
-    const text3 = existsSync82(path) ? readFileSync67(path) : null;
+    const text3 = existsSync83(path) ? readFileSync67(path) : null;
     const mode = text3 === null ? 384 : lstatSync40(path).mode & 511;
     files[path] = writeSnapshot(backupDir, index++, text3, mode);
   }
@@ -128202,7 +128396,7 @@ function createInstallTransaction(input) {
       enabledRuntime: input.enabledRuntime,
       files,
       receipt,
-      absentCreatedFiles: transactionCreatedFiles(input.layout).filter((path) => !existsSync82(path))
+      absentCreatedFiles: transactionCreatedFiles(input.layout).filter((path) => !existsSync83(path))
     }
   };
 }
@@ -128212,7 +128406,7 @@ function writeInstallTransaction(layout, transaction) {
 }
 function readInstallTransaction(layout) {
   const path = transactionPath(layout);
-  if (!existsSync82(path))
+  if (!existsSync83(path))
     return;
   assertLinuxManagedPath(path);
   if ((lstatSync40(path).mode & 511) !== 384)
@@ -128234,7 +128428,7 @@ function readInstallTransaction(layout) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value2.phase === "qualified" || value2.phase === "recovered") {
-    if (existsSync82(backupDir)) {
+    if (existsSync83(backupDir)) {
       const terminalBackup = lstatSync40(backupDir);
       if (!terminalBackup.isDirectory() || terminalBackup.isSymbolicLink() || terminalBackup.uid !== process.getuid() || (terminalBackup.mode & 63) !== 0 || terminalBackup.dev !== value2.backupDevice || terminalBackup.ino !== value2.backupInode)
         throw new Error("The terminal Linux recovery backup root changed; cleanup refused.");
@@ -128282,7 +128476,7 @@ function restoreOptionalFile(path, snapshot) {
   }
 }
 function removeOwnedDirectory(path, device, inode) {
-  if (!existsSync82(path))
+  if (!existsSync83(path))
     return;
   if (device === undefined || inode === undefined)
     throw new Error(`Missing custody identity for ${path}; it was retained.`);
@@ -128295,7 +128489,7 @@ function removeOwnedDirectory(path, device, inode) {
 }
 function cleanupTransactionTrees(transaction) {
   removeOwnedDirectory(transaction.stagingPath, transaction.stagingDevice, transaction.stagingInode);
-  if (transaction.generationCreated && transaction.generationPath && existsSync82(transaction.generationPath)) {
+  if (transaction.generationCreated && transaction.generationPath && existsSync83(transaction.generationPath)) {
     if (!transaction.generationArtifact)
       throw new Error("Missing generation custody identity; it was retained.");
     assertTreeArtifactCustody(transaction.generationPath, transaction.generationArtifact);
@@ -128453,9 +128647,9 @@ function migrateLegacySettings(layout, transaction, options) {
   if (!files.length && !legacyReader)
     return;
   const snapshots = {};
-  const tracked = [...files, ...LEGACY_LINUX_POLICY_FILES.filter((name) => !files.includes(name) && !existsSync82(legacySettingTarget(layout, name)))];
+  const tracked = [...files, ...LEGACY_LINUX_POLICY_FILES.filter((name) => !files.includes(name) && !existsSync83(legacySettingTarget(layout, name)))];
   for (const [index, name] of tracked.entries()) {
-    const source = join112(layout.home, ".olympus", name), present = existsSync82(source);
+    const source = join112(layout.home, ".olympus", name), present = existsSync83(source);
     snapshots[name] = writeSnapshot(transaction.backupDir, 1e4 + index, present ? readFileSync67(source) : null, present ? lstatSync40(source).mode & 511 : 384);
   }
   transaction.legacySettings = snapshots;
@@ -128528,10 +128722,10 @@ function restoreLegacySettings(layout, transaction) {
       const source = join112(layout.home, ".olympus", name), target2 = legacySettingTarget(layout, name);
       assertLinuxManagedPath(source);
       assertLinuxManagedPath(target2);
-      const sourceChanged = existsSync82(source) && hashFile(source) !== original.sha256;
-      if (sourceChanged && existsSync82(target2) && hashFile(target2) !== original.sha256 && hashFile(source) !== hashFile(target2))
+      const sourceChanged = existsSync83(source) && hashFile(source) !== original.sha256;
+      if (sourceChanged && existsSync83(target2) && hashFile(target2) !== original.sha256 && hashFile(source) !== hashFile(target2))
         throw new Error(`Conflicting settings edits at ${source} and ${target2}; retained for recovery.`);
-      const bytes = sourceChanged ? readFileSync67(source) : existsSync82(target2) ? readFileSync67(target2) : snapshotBytes(original);
+      const bytes = sourceChanged ? readFileSync67(source) : existsSync83(target2) ? readFileSync67(target2) : snapshotBytes(original);
       snapshots[name] = writeSnapshot(transaction.backupDir, 20000 + index, bytes, 384);
     }
     transaction.legacyRestoreSettings = snapshots;
@@ -128542,7 +128736,7 @@ function restoreLegacySettings(layout, transaction) {
     const source = join112(layout.home, ".olympus", name), target2 = legacySettingTarget(layout, name);
     for (const path of [source, target2]) {
       assertLinuxManagedPath(path);
-      if (existsSync82(path) && ![snapshot.sha256, transaction.legacySettings[name].sha256].includes(hashFile(path)))
+      if (existsSync83(path) && ![snapshot.sha256, transaction.legacySettings[name].sha256].includes(hashFile(path)))
         throw new Error(`Migrated settings changed at ${path}; retained for recovery.`);
     }
   }
@@ -128643,11 +128837,11 @@ function refreshMachineArtifacts(layout, _includeTransaction = true) {
     ...receipt.ownedUnitLinks.map((path) => ({ path, kind: "symlink" }))
   ];
   const generations = join112(layout.packageDir, "generations");
-  if (existsSync82(generations)) {
+  if (existsSync83(generations)) {
     for (const name of readdirSync25(generations).sort())
       candidates.push({ path: join112(generations, name), kind: "tree" });
   }
-  const machineArtifacts = candidates.filter(({ path }) => existsSync82(path)).map(({ path, kind }) => {
+  const machineArtifacts = candidates.filter(({ path }) => existsSync83(path)).map(({ path, kind }) => {
     if (kind === "tree")
       return treeMachineArtifact(path);
     return { path, kind, sha256: linuxMachineArtifactDigest(path, kind) };
@@ -128712,7 +128906,7 @@ exec ${shellQuote3(program.runtimePath)} --no-env-file ${shellQuote3(program.ent
   syncDirectorySync(dirname91(layout.launcherPath));
 }
 function assertInstalled(l) {
-  if (readLinuxEngineReceipt(l.receiptPath)?.installationState !== "installed" || !existsSync82(l.unitPath))
+  if (readLinuxEngineReceipt(l.receiptPath)?.installationState !== "installed" || !existsSync83(l.unitPath))
     throw new Error("The engine is not installed. Run olympus engine install.");
   preflightLinuxEngineLayout(l);
 }
@@ -128742,12 +128936,12 @@ function removeReleasedWorkerSocket2(layout, before, after, options) {
   const childrenPath = engineServicePaths({ ...options, platform: "linux" }).childrenPath;
   const recorded = readEngineChildren(childrenPath);
   const table = processTable(options);
-  if (existsSync82(childrenPath) && (!recorded || !table || recorded.children.some((child2) => table.some((process2) => process2.pgid === child2.pgid)))) {
+  if (existsSync83(childrenPath) && (!recorded || !table || recorded.children.some((child2) => table.some((process2) => process2.pgid === child2.pgid)))) {
     throw new Error("Recorded engine process custody is live or unknown; the worker socket was retained.");
   }
   if ((options.workerStopped ?? workerSocketListenerStopped)(layout.workerSocketPath) !== true)
     throw new Error("The worker socket is still listening or its status is unknown; the path was retained.");
-  if (!existsSync82(layout.workerSocketPath))
+  if (!existsSync83(layout.workerSocketPath))
     return;
   removeReleasedWorkerSocket({ platform: "linux", env: linuxEngineEnvironment(layout) }, { previousWorkerReleased: true });
 }
@@ -128780,7 +128974,7 @@ function installLinuxEngine(options) {
     assertKnown(before);
     const privacyState = resolveInstallationPrivacyState({ homeDir: l.home, paths, env: options.env ?? process.env });
     if (options.dryRun)
-      return { ...base, wrote_plist: false, wrote_config: false, wrote_worker_env: false, sovereignty: { action: existsSync82(l.sovereigntyPath) ? "present" : privacyState.state === "not_installed" ? "would_seed" : "skipped", path: l.sovereigntyPath, ...privacyState.reason ? { reason: privacyState.reason } : {} }, action: "dry_run" };
+      return { ...base, wrote_plist: false, wrote_config: false, wrote_worker_env: false, sovereignty: { action: existsSync83(l.sovereigntyPath) ? "present" : privacyState.state === "not_installed" ? "would_seed" : "skipped", path: l.sovereigntyPath, ...privacyState.reason ? { reason: privacyState.reason } : {} }, action: "dry_run" };
     requireLinuxApprovalTransport(source);
     const existingReceipt = readLinuxEngineReceipt(l.receiptPath);
     const observedLinger = readEngineLinger(exec, options.uid);
@@ -128793,7 +128987,7 @@ function installLinuxEngine(options) {
     ensureEngineLinger(exec, options.uid, options.userName, options.notice);
     lifecycleCheckpoint(options, "linger_enabled");
     for (const parent of new Set([dirname91(l.stateDir), dirname91(l.cacheDir)])) {
-      if (existsSync82(parent))
+      if (existsSync83(parent))
         continue;
       createLinuxPrivateDirectory(dirname91(parent));
       mkdirSync55(parent, { mode: 448 });
@@ -128841,16 +129035,16 @@ function installLinuxEngine(options) {
       selectLinuxSecretBackend({ encryptedFilePath: l.secretsPath, keyFilePath: l.secretsKeyPath, backendFilePath: join112(l.configDir, "secret-backend.json") }, (options.env ?? process.env).OLYMPUS_SECRET_STORE_BACKEND?.trim() || "auto");
       for (const path of [paths.logPath, paths.errorLogPath]) {
         assertLinuxManagedPath(path);
-        if (!existsSync82(path))
+        if (!existsSync83(path))
           writePrivateFileAtomicSync(path, "");
       }
       const oldUnit = optionalText(l.unitPath), oldProgram = currentProgram(l);
       if (oldUnit && oldProgram && oldProgram.build !== program.build)
         writePrivateFileAtomicSync(join112(l.stateDir, "service-previous.json"), JSON.stringify({ program: oldProgram, unit: oldUnit, config: readFileSync67(l.configPath, "utf8") }));
-      const existingWithoutPolicy = !existsSync82(l.sovereigntyPath) && (existingReceipt?.installationState === "installed" || privacyState.state !== "not_installed");
+      const existingWithoutPolicy = !existsSync83(l.sovereigntyPath) && (existingReceipt?.installationState === "installed" || privacyState.state !== "not_installed");
       const config = reconcileEngineConfig(l.configPath), seeded = existingWithoutPolicy ? undefined : seedEngineSovereignty(l.sovereigntyPath);
       let wroteEnv = false;
-      if (!existsSync82(l.workerEnvPath)) {
+      if (!existsSync83(l.workerEnvPath)) {
         writePrivateFileAtomicSync(l.workerEnvPath, `OLYMPUS_WORKER_AUTH_TOKEN='${randomBytes20(32).toString("base64url")}'
 OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
 `);
@@ -128909,7 +129103,7 @@ function assertTreeArtifactCustody(path, artifact) {
 function pruneOldGenerations(layout) {
   const keep = new Set([currentProgram(layout)?.workingDirectory, previousProgram(layout)?.workingDirectory].filter((path) => Boolean(path)).map((path) => dirname91(path)));
   const generations = join112(layout.packageDir, "generations");
-  if (!existsSync82(generations))
+  if (!existsSync83(generations))
     return;
   const receipt = readLinuxEngineReceipt(layout.receiptPath);
   for (const name of readdirSync25(generations)) {
@@ -129097,7 +129291,7 @@ function uninstallLinuxEngine(options) {
       if (removeFileDurablySync(path))
         deletedPaths.add(path);
     }
-    const desktopPaths = Object.values(linuxDesktopEntryPaths(l)).filter((path) => existsSync82(path));
+    const desktopPaths = Object.values(linuxDesktopEntryPaths(l)).filter((path) => existsSync83(path));
     removeLinuxDesktopEntry(l, exec);
     for (const path of desktopPaths)
       deletedPaths.add(path);
@@ -129140,7 +129334,7 @@ async function rollbackLinuxEngine(options) {
       throw new Error("The current service generation is unknown; rollback refused.");
     for (const p of [previous.program.runtimePath, previous.program.entryPath, current3.runtimePath, current3.entryPath])
       assertLinuxManagedPath(p);
-    if (!previous.program.runtimeDigest || createHash81("sha256").update(readFileSync67(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
+    if (!previous.program.runtimeDigest || createHash82("sha256").update(readFileSync67(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
       throw new Error("The previous Bun runtime has changed; rollback refused.");
     if (engineBuildIdentity(previous.program.workingDirectory) !== previous.program.build)
       throw new Error("The previous package has changed; rollback refused.");
@@ -129228,9 +129422,9 @@ function linuxEngineCustody(l, facts, options = {}) {
     return "unknown";
   const childrenPath = join112(l.dataDir, "engine/children.json");
   const record2 = readEngineChildren(childrenPath);
-  if (existsSync82(childrenPath) && (!record2 || record2.children.length > 0))
+  if (existsSync83(childrenPath) && (!record2 || record2.children.length > 0))
     return "unknown";
-  if (!existsSync82(l.receiptPath) && !existsSync82(l.unitPath))
+  if (!existsSync83(l.receiptPath) && !existsSync83(l.unitPath))
     return "none";
   return (options.workerStopped ?? workerSocketListenerStopped)(l.workerSocketPath) === true ? "none" : "unknown";
 }
@@ -129263,7 +129457,7 @@ var init_version = __esm(() => {
 });
 
 // src/core/setup-preflight.ts
-import { existsSync as existsSync83 } from "node:fs";
+import { existsSync as existsSync84 } from "node:fs";
 async function setupPreflight(options) {
   const inputEnv = options.env ?? (options.homeDir ? { HOME: options.homeDir } : process.env);
   const env = environmentWithWorkerSetupEnv({
@@ -129271,7 +129465,7 @@ async function setupPreflight(options) {
     ...options.homeDir ? { homeDir: options.homeDir } : {},
     ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
   });
-  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync83(workerSetupEnvPath(options));
+  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync84(workerSetupEnvPath(options));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   let secretStore = options.secretStore;
   const getSecretStore = () => secretStore ??= createDefaultSecretStore({
@@ -129369,7 +129563,7 @@ var init_setup_preflight = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash82 } from "node:crypto";
+import { createHash as createHash83 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -129381,7 +129575,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash82("sha256").update(material, "utf8").digest("hex");
+  return createHash83("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -129580,8 +129774,8 @@ var init_credential_degradation = __esm(() => {
 });
 
 // src/core/consult-gate.ts
-import { createHash as createHash83 } from "node:crypto";
-import { existsSync as existsSync84, readFileSync as readFileSync69, statSync as statSync39 } from "node:fs";
+import { createHash as createHash84 } from "node:crypto";
+import { existsSync as existsSync85, readFileSync as readFileSync69, statSync as statSync39 } from "node:fs";
 import { homedir as homedir33 } from "node:os";
 import { basename as basename18, dirname as dirname93, join as join114 } from "node:path";
 import { fileURLToPath as fileURLToPath12 } from "node:url";
@@ -130089,12 +130283,12 @@ function requestedPackNotLoaded(options) {
 }
 function verifiedPackFile(path, sha2566) {
   try {
-    if (!existsSync84(path))
+    if (!existsSync85(path))
       return "missing";
     if (statSync39(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync69(path);
-    return createHash83("sha256").update(gz).digest("hex") === sha2566 ? gz : "hash_mismatch";
+    return createHash84("sha256").update(gz).digest("hex") === sha2566 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
@@ -130118,7 +130312,7 @@ function readPack(path, sha2566) {
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname93(fileURLToPath12(moduleUrl));
   const root = basename18(here) === "core" && basename18(dirname93(here)) === "src" ? dirname93(dirname93(here)) : basename18(here) === "dist" ? dirname93(here) : undefined;
-  return root !== undefined && existsSync84(join114(root, ...VOCABULARY_DIR)) ? root : undefined;
+  return root !== undefined && existsSync85(join114(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -130186,7 +130380,7 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join114(userDir, "manifest.json");
-    if (!existsSync84(path) || statSync39(path).size > 1024 * 1024)
+    if (!existsSync85(path) || statSync39(path).size > 1024 * 1024)
       return [];
     const manifest2 = JSON.parse(readFileSync69(path, "utf8"));
     if (!manifest2 || typeof manifest2 !== "object" || Array.isArray(manifest2))
@@ -133019,7 +133213,7 @@ var init_consult_settings = __esm(() => {
 
 // src/core/doctor.ts
 import { spawnSync as spawnSync15 } from "node:child_process";
-import { existsSync as existsSync85, readFileSync as readFileSync70 } from "node:fs";
+import { existsSync as existsSync86, readFileSync as readFileSync70 } from "node:fs";
 import { join as join116 } from "node:path";
 import { homedir as homedir34 } from "node:os";
 function installedPluginVersion() {
@@ -133035,7 +133229,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const paths = engineServicePaths({ homeDir: home2, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home2 });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home2, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync85(workerServicePaths(process.platform, home2).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync86(workerServicePaths(process.platform, home2).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home2, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -133137,7 +133331,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync85(configPath))
+  if (configPath === undefined || !existsSync86(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -134423,7 +134617,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync85(join116(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync86(join116(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync15(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -134480,7 +134674,7 @@ var init_doctor = __esm(() => {
 });
 
 // src/core/ocr-readiness.ts
-import { existsSync as existsSync86, readFileSync as readFileSync71 } from "node:fs";
+import { existsSync as existsSync87, readFileSync as readFileSync71 } from "node:fs";
 function osReleaseValue2(text3, key2) {
   for (const line2 of text3.split(`
 `)) {
@@ -134533,7 +134727,7 @@ function ocrInstallRemedy(input) {
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
 function visionReady(platform2, preference) {
-  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync86(APPLE_VISION_OSASCRIPT);
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync87(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
   if (input.preference === "tesseract")
@@ -136985,8 +137179,8 @@ var init_installed_sniffer_runtime = __esm(() => {
 });
 
 // src/workers/classification/tier-migration.ts
-import { createHash as createHash86 } from "node:crypto";
-import { chmodSync as chmodSync38, existsSync as existsSync90, mkdirSync as mkdirSync57, readFileSync as readFileSync75, renameSync as renameSync20, writeFileSync as writeFileSync20 } from "node:fs";
+import { createHash as createHash87 } from "node:crypto";
+import { chmodSync as chmodSync38, existsSync as existsSync91, mkdirSync as mkdirSync57, readFileSync as readFileSync75, renameSync as renameSync20, writeFileSync as writeFileSync20 } from "node:fs";
 import { dirname as dirname95, join as join120 } from "node:path";
 function domainTier(domain) {
   return domain === "public_safe" ? "public" : domain === "internal" ? "private" : "secure";
@@ -136995,7 +137189,7 @@ function resolveTierMigrationPaths(env, embeddingLedgerPath) {
   return { statePath: tierMigrationStatePath(env), reportDir: tierMigrationReportDir(env), embeddingLedgerPath };
 }
 function readTierMigrationState(statePath) {
-  if (!existsSync90(statePath))
+  if (!existsSync91(statePath))
     return { schemaVersion: TIER_MIGRATION_STATE_SCHEMA_VERSION, plans: [] };
   const parsed = JSON.parse(readFileSync75(statePath, "utf8"));
   if (parsed.schemaVersion !== TIER_MIGRATION_STATE_SCHEMA_VERSION || !Array.isArray(parsed.plans)) {
@@ -137031,7 +137225,7 @@ function findPlan(statePath, planId) {
   return plan;
 }
 function sha2567(text3) {
-  return createHash86("sha256").update(text3, "utf8").digest("hex");
+  return createHash87("sha256").update(text3, "utf8").digest("hex");
 }
 function tierMigrationBatchKey(selector) {
   return sha2567(`tier-migration-batch\x00${normalizeSelector(selector)}`).slice(0, 32);
@@ -138578,7 +138772,7 @@ var init_lane = __esm(() => {
 });
 
 // src/workers/classification/tier-migration-lanes.ts
-import { existsSync as existsSync91 } from "node:fs";
+import { existsSync as existsSync92 } from "node:fs";
 function installedTierMigrationLaneSpecs(env = process.env) {
   return [
     {
@@ -138707,7 +138901,7 @@ function openTierMigrationLanes(specs, options) {
   try {
     for (const spec of specs) {
       const legs = Object.entries(spec.legs);
-      if (!legs.some(([, leg]) => leg.dbPath !== ":memory:" && existsSync91(leg.dbPath)))
+      if (!legs.some(([, leg]) => leg.dbPath !== ":memory:" && existsSync92(leg.dbPath)))
         continue;
       const secure = spec.legs.secure_local;
       const account = { sourceId: spec.sourceId };
@@ -138795,7 +138989,7 @@ __export(exports_tier_migration_cli, {
   runTierMigrateCommand: () => runTierMigrateCommand,
   TIER_MIGRATE_USAGE: () => TIER_MIGRATE_USAGE
 });
-import { createHash as createHash87 } from "node:crypto";
+import { createHash as createHash88 } from "node:crypto";
 async function runTierMigrateCommand(args, context2 = {}) {
   const [command2, ...rest] = args;
   const flags = parseFlags(rest);
@@ -138964,7 +139158,7 @@ async function withLanes(context2, env, mode, inputs, run) {
 }
 async function installedInputs(env, options) {
   const rules = loadOwnerTierRules({ env, allowMissing: true });
-  const rulesDigest = createHash87("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
+  const rulesDigest = createHash88("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
   const revision = `map:${TIER_MAP_REVISION};rules:${rules.length > 0 ? rulesDigest : "none"}`;
   const base = {
     ...rules.length > 0 ? { rules } : {},
@@ -139136,7 +139330,7 @@ __export(exports_tier_cli, {
   TIER_CLI_USAGE: () => TIER_CLI_USAGE
 });
 import { Database as Database28 } from "bun:sqlite";
-import { existsSync as existsSync92 } from "node:fs";
+import { existsSync as existsSync93 } from "node:fs";
 function tierCommandOpensStores(args) {
   return args[0] === "set" || args[0] === "explain" || args[0] === "recheck" || args[0] === "migrate";
 }
@@ -139169,7 +139363,7 @@ async function runTierCommand(args, context2 = {}) {
 }
 function knownStorePaths(context2) {
   const paths = context2.storePaths ?? lifecycleStorePaths(context2);
-  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync92(path));
+  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync93(path));
 }
 function matchStore2(dbPath, needle) {
   const db = new Database28(dbPath, { readonly: true });
@@ -139252,12 +139446,12 @@ function locateMatched(needle, context2) {
   const ledgerPaths = new Set;
   for (const dbPath of stores) {
     const path = tierLedgerPathForStore(dbPath);
-    if (existsSync92(path))
+    if (existsSync93(path))
       ledgerPaths.add(path);
   }
   const boundIds = new Map;
   for (const match of matches2) {
-    if (!match.bound || !existsSync92(match.bound.path))
+    if (!match.bound || !existsSync93(match.bound.path))
       continue;
     ledgerPaths.add(match.bound.path);
     boundIds.set(match.bound.path, match.bound.id);
@@ -139294,7 +139488,7 @@ function knownTierLedgers(context2 = {}) {
   const ledgers = new Map;
   for (const dbPath of knownStorePaths(context2)) {
     const own3 = tierLedgerPathForStore(dbPath);
-    if (existsSync92(own3) && !ledgers.has(own3))
+    if (existsSync93(own3) && !ledgers.has(own3))
       ledgers.set(own3, undefined);
     let bound;
     const db = new Database28(dbPath, { readonly: true });
@@ -139306,7 +139500,7 @@ function knownTierLedgers(context2 = {}) {
     } finally {
       closeSqliteStore(db, { checkpoint: false });
     }
-    if (bound && existsSync92(bound.path))
+    if (bound && existsSync93(bound.path))
       ledgers.set(bound.path, bound.id);
   }
   return [...ledgers].map(([path, boundLedgerId]) => ({ path, ...boundLedgerId ? { boundLedgerId } : {} }));
@@ -139435,7 +139629,7 @@ function runTierExplain(args, context2 = {}) {
     }), item.boundLedgerId, true);
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn = [];
-    if (existsSync92(snifferPath)) {
+    if (existsSync93(snifferPath)) {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath, ...writableStoreOpensForbidden() ? { readOnly: true } : {} });
       try {
         waitingOn = ["metadata", "content"].filter((pass) => sniffer.questionFor(item.identity, pass) !== undefined);
@@ -139533,10 +139727,10 @@ function knownLedgerPaths(context2) {
   const found = new Map;
   for (const dbPath of knownStorePaths(context2)) {
     const own3 = tierLedgerPathForStore(dbPath);
-    if (existsSync92(own3) && !found.has(own3))
+    if (existsSync93(own3) && !found.has(own3))
       found.set(own3, undefined);
     const bound = boundLedgerOf(dbPath);
-    if (bound && existsSync92(bound.path))
+    if (bound && existsSync93(bound.path))
       found.set(bound.path, bound.id);
   }
   return [...found].map(([path, id]) => ({ path, ...id ? { id } : {} }));
@@ -139574,7 +139768,7 @@ function runTierRules(args, context2 = {}) {
   if (command2 === "list") {
     const path = resolveTierRulesPath({ env });
     const mailScopeRules = mailScopeTierRules(env);
-    if (!existsSync92(path)) {
+    if (!existsSync93(path)) {
       return { path, rules: [], mailScopeRules, note: "No tier rules file yet; add one with olympus tier rules add." };
     }
     const validation = validateTierRulesFile({ env });
@@ -139852,7 +140046,7 @@ var init_gmail_import_allowance = __esm(() => {
 });
 
 // src/core/provider-credit-status.ts
-import { existsSync as existsSync93, mkdirSync as mkdirSync58, readFileSync as readFileSync76, unlinkSync as unlinkSync4 } from "node:fs";
+import { existsSync as existsSync94, mkdirSync as mkdirSync58, readFileSync as readFileSync76, unlinkSync as unlinkSync4 } from "node:fs";
 import { dirname as dirname96 } from "node:path";
 async function fetchVeniceCreditStatus(options = {}) {
   const env = options.env ?? process.env;
@@ -140229,7 +140423,7 @@ function reconcileProviderPauseFile(path, report, stops) {
     stops?.clear("venice.credit", path);
     return "cleared";
   }
-  if (report.status === "ok" && report.can_consume === true && !existsSync93(path))
+  if (report.status === "ok" && report.can_consume === true && !existsSync94(path))
     stops?.clear("venice.credit", path);
   return "left";
 }
@@ -140290,7 +140484,7 @@ function startVeniceCreditRecovery(options) {
   };
 }
 function isVeniceProviderPauseFile(path) {
-  if (!existsSync93(path))
+  if (!existsSync94(path))
     return false;
   try {
     const raw = JSON.parse(readFileSync76(path, "utf8"));
@@ -140309,7 +140503,7 @@ var init_provider_credit_status = __esm(() => {
 });
 
 // src/core/owner-limit-state.ts
-import { existsSync as existsSync94 } from "node:fs";
+import { existsSync as existsSync95 } from "node:fs";
 function withOwnerLimitStore(use, dbPath = defaultSourceSchedulerStateDbPath()) {
   const store = new LocalSourceSchedulerStateStore(dbPath);
   try {
@@ -140322,7 +140516,7 @@ function recordOwnerLimitStop(stop) {
   withOwnerLimitStore((store) => store.reportLimitStop(stop));
 }
 function clearOwnerLimitStop(id, subject) {
-  if (!existsSync94(defaultSourceSchedulerStateDbPath()))
+  if (!existsSync95(defaultSourceSchedulerStateDbPath()))
     return;
   withOwnerLimitStore((store) => store.clearLimitStop(id, subject));
   invalidateLimitStop(id, subject);
@@ -140405,7 +140599,7 @@ var init_judge_boost = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { createHash as createHash88 } from "node:crypto";
+import { createHash as createHash89 } from "node:crypto";
 import { mkdirSync as mkdirSync59, readFileSync as readFileSync77 } from "node:fs";
 import { dirname as dirname97 } from "node:path";
 
@@ -140503,7 +140697,7 @@ function slotWaitOf(error) {
 }
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash88("sha256").update(own3).digest("base64");
+  const key2 = createHash89("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -141100,11 +141294,14 @@ async function ownerLimits2(params, deps = {}) {
     throw new OperationError("invalid_params", providerWaitMessage(stop.id, stop.resumesAt) ?? "This stop resumes on its own.");
   if (registration.continue === "raise") {
     const integer = registration.unit !== "usd";
-    const minimum = Math.max(stop.limit ?? 0, stop.used ?? 0);
-    if (typeof params.to !== "number" || !Number.isFinite(params.to) || integer && !Number.isSafeInteger(params.to) || params.to <= minimum || params.to < (stop.toContinue?.raiseTo ?? 0))
-      throw new OperationError("invalid_params", "--to must cover the next step and be greater than the current limit and usage, in the reported unit.");
+    const size = isSizeLimitKey(stop.id);
+    const minimum = size ? stop.limit ?? 0 : Math.max(stop.limit ?? 0, stop.used ?? 0);
+    if (typeof params.to !== "number" || !Number.isFinite(params.to) || integer && !Number.isSafeInteger(params.to) || params.to <= minimum || !size && params.to < (stop.toContinue?.raiseTo ?? 0))
+      throw new OperationError("invalid_params", size ? "--to must be a whole number greater than the current file size limit, in bytes." : "--to must cover the next step and be greater than the current limit and usage, in the reported unit.");
     const keys = { "judge.daily_calls": "judge.dailyCalls", "zkapi.daily_requests": "zkapi.dailyRequests", "zkapi.daily_spend": "zkapi.dailySpend", "gmail.import_allowance": "gmail.dailyRequests" };
-    if (stop.id === "judge.spend_cap") {
+    if (size) {
+      raiseSourceSizeLimit(stop.id, params.to, params.keep === true, now);
+    } else if (stop.id === "judge.spend_cap") {
       new JudgeSpending(stop.subject).raise(params.to);
     } else if (keys[stop.id]) {
       if (stop.id === "gmail.import_allowance" && params.to < GMAIL_IMPORT_MIN_DAILY_BUDGET)
@@ -141112,7 +141309,8 @@ async function ownerLimits2(params, deps = {}) {
       saveOwnerLimitOverride(keys[stop.id], params.to, params.keep === true, now);
     } else
       throw new OperationError("invalid_params", "This limit has no Raise action.");
-    clearOwnerLimitStop(stop.id, stop.subject);
+    if (!size)
+      clearOwnerLimitStop(stop.id, stop.subject);
     deps.wake?.(stop.id);
     return {
       ok: true,
@@ -141122,7 +141320,7 @@ async function ownerLimits2(params, deps = {}) {
       to: params.to,
       unit: registration.unit,
       keep: params.keep === true,
-      status_message: stop.id === "judge.spend_cap" ? "Spending cap raised. Judging can continue." : params.keep === true ? "Limit raised for good. Work can continue." : "Limit raised for this UTC day. Work can continue."
+      status_message: stop.id === "judge.spend_cap" ? "Spending cap raised. Judging can continue." : size ? `File size limit raised ${params.keep === true ? "for good" : "for the held files"}. Files within the new limit are queued.` : params.keep === true ? "Limit raised for good. Work can continue." : "Limit raised for this UTC day. Work can continue."
     };
   }
   if (registration.continue === "refill" && stop.id === "judge.payment") {
@@ -141155,6 +141353,7 @@ async function ownerLimits2(params, deps = {}) {
   throw new OperationError("invalid_params", "This stop has no continuation available on this surface.");
 }
 var init_owner_limits = __esm(() => {
+  init_size_limit_stops();
   init_provider_rate_limits();
   init_consult_transport_zkapi();
   init_judge_spending();
@@ -141170,7 +141369,7 @@ var init_owner_limits = __esm(() => {
 });
 
 // src/data-restore.ts
-import { closeSync as closeSync33, copyFileSync as copyFileSync4, existsSync as existsSync95, fsyncSync as fsyncSync9, openSync as openSync32, readFileSync as readFileSync78, renameSync as renameSync21, rmSync as rmSync37, statSync as statSync41, chmodSync as chmodSync39 } from "node:fs";
+import { closeSync as closeSync33, copyFileSync as copyFileSync4, existsSync as existsSync96, fsyncSync as fsyncSync9, openSync as openSync32, readFileSync as readFileSync78, renameSync as renameSync21, rmSync as rmSync37, statSync as statSync41, chmodSync as chmodSync39 } from "node:fs";
 import { dirname as dirname98, join as join121, resolve as resolve24 } from "node:path";
 import { randomUUID as randomUUID32 } from "node:crypto";
 import { Database as Database29 } from "bun:sqlite";
@@ -141273,7 +141472,7 @@ function restoreOlympusData(options) {
   if (manifest2.version < 3 || !sawJudgments) {
     notes.push("This backup has no privacy judgments, so Olympus judges the restored items again.");
   }
-  const holds2 = (path) => existsSync95(path) && statSync41(path).size > 0;
+  const holds2 = (path) => existsSync96(path) && statSync41(path).size > 0;
   const restoredSources = [...new Set(plan.filter((entry) => entry.kind !== "owner_settings").map((entry) => entry.sourceId))];
   const occupiedSources = restoredSources.filter((sourceId) => storesOf(sourceId).some((store) => [
     store,
@@ -141286,7 +141485,7 @@ function restoreOlympusData(options) {
     throw new OperationError("invalid_params", `This computer already holds Olympus data for ${sources.join(", ")}, so nothing was restored.`, "Restore onto a fresh install, or delete that data first with olympus data delete --source <id>.");
   }
   for (const entry of plan) {
-    if (entry.kind === "owner_settings" && !entry.merge && existsSync95(entry.to))
+    if (entry.kind === "owner_settings" && !entry.merge && existsSync96(entry.to))
       entry.keptAs = `${entry.to}.before-restore`;
   }
   const sourceIds = [...new Set(plan.filter((entry) => entry.kind === "store").map((entry) => entry.sourceId))];
@@ -141310,7 +141509,7 @@ function restoreOlympusData(options) {
     for (const entry of plan) {
       if (entry.kind !== "media")
         continue;
-      if (!existsSync95(entry.to))
+      if (!existsSync96(entry.to))
         copyPrivate(join121(input, entry.from), entry.to);
       pictures.set(entry.to.split("/").pop().slice(0, -".jpg".length), entry.to);
     }
@@ -141587,8 +141786,8 @@ var init_data_restore = __esm(() => {
 });
 
 // src/data-backup.ts
-import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash89, createHmac as createHmac5, randomBytes as randomBytes21, randomUUID as randomUUID33, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
-import { closeSync as closeSync34, existsSync as existsSync96, lstatSync as lstatSync44, mkdirSync as mkdirSync60, openSync as openSync33, readdirSync as readdirSync27, readSync as readSync12, renameSync as renameSync22, rmSync as rmSync38, statSync as statSync42, unlinkSync as unlinkSync5, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync10 } from "node:fs";
+import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash90, createHmac as createHmac5, randomBytes as randomBytes21, randomUUID as randomUUID33, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { closeSync as closeSync34, existsSync as existsSync97, lstatSync as lstatSync44, mkdirSync as mkdirSync60, openSync as openSync33, readdirSync as readdirSync27, readSync as readSync12, renameSync as renameSync22, rmSync as rmSync38, statSync as statSync42, unlinkSync as unlinkSync5, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync10 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename20, dirname as dirname99, join as join122, resolve as resolve25, sep as sep21 } from "node:path";
 function normalizePassphrase(passphrase) {
@@ -141707,7 +141906,7 @@ class BodyWriter {
       this.cipher = createCipheriv2("aes-256-gcm", key2, nonce, { authTagLength: TAG_BYTES });
       this.cipher.setAAD(header);
     } else {
-      this.hash = createHash89("sha256").update(header);
+      this.hash = createHash90("sha256").update(header);
     }
   }
   async write(plain) {
@@ -141735,7 +141934,7 @@ async function writeBackupFile(options) {
   const folder = resolve25(options.folder);
   mkdirSync60(folder, { recursive: true });
   let name = backupFileName(now);
-  for (let n = 2;existsSync96(join122(folder, name)); n += 1)
+  for (let n = 2;existsSync97(join122(folder, name)); n += 1)
     name = backupFileName(now).replace(BACKUP_FILE_EXTENSION, `-${n}${BACKUP_FILE_EXTENSION}`);
   const target2 = join122(folder, name);
   const staging = join122(folder, `.${name}.${randomUUID33()}.partial`);
@@ -141994,10 +142193,10 @@ function openBackupFile(options) {
     decipher = createDecipheriv2("aes-256-gcm", key2, nonce, { authTagLength: TAG_BYTES });
     decipher.setAAD(headerBytes);
   } else {
-    hash = createHash89("sha256").update(headerBytes);
+    hash = createHash90("sha256").update(headerBytes);
   }
   const into = resolve25(options.into);
-  if (existsSync96(into))
+  if (existsSync97(into))
     throw new OperationError("invalid_params", `${into} already exists.`);
   mkdirSync60(into, { recursive: true, mode: 448 });
   chmodSync40(into, 448);
@@ -142116,7 +142315,7 @@ function restoreOlympusBackup(options) {
     ...options.homeDir ? { homeDir: options.homeDir } : {},
     ...options.env ? { env: options.env } : {}
   };
-  if (!existsSync96(input))
+  if (!existsSync97(input))
     throw new OperationError("invalid_params", `${input} does not exist.`);
   if (statSync42(input).isDirectory())
     return restoreOlympusData({ input, ...options.dryRun ? { dryRun: true } : {}, ...context2 });
@@ -142250,7 +142449,7 @@ var init_settings_proposal = __esm(() => {
 });
 
 // src/core/engine-brief.ts
-import { existsSync as existsSync98, readFileSync as readFileSync80 } from "node:fs";
+import { existsSync as existsSync99, readFileSync as readFileSync80 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
 function engineBriefFromViewModel(view3) {
   const items = Array.isArray(view3.needsYou) ? view3.needsYou : [];
@@ -142361,7 +142560,7 @@ async function readEngineBrief(deps) {
 }
 function startingGraceOver(path, agentPid, now) {
   try {
-    if (!existsSync98(path))
+    if (!existsSync99(path))
       return false;
     const status = JSON.parse(readFileSync80(path, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || typeof status.started_at !== "string")
@@ -157905,7 +158104,7 @@ __export(exports_source_answer_jobs, {
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS: () => SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS
 });
-import { createHash as createHash90, randomBytes as randomBytes23, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+import { createHash as createHash91, randomBytes as randomBytes23, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
   limits;
@@ -158414,8 +158613,8 @@ class SourceAnswerJobRegistry {
   }
 }
 function sameOwner(a, b) {
-  const left = createHash90("sha256").update(a).digest();
-  const right = createHash90("sha256").update(b).digest();
+  const left = createHash91("sha256").update(a).digest();
+  const right = createHash91("sha256").update(b).digest();
   return timingSafeEqual7(left, right);
 }
 function callerAbortError(message2) {
@@ -159715,7 +159914,7 @@ var init_engine_host = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash91, createPublicKey, randomBytes as randomBytes24, sign, verify } from "node:crypto";
+import { createHash as createHash92, createPublicKey, randomBytes as randomBytes24, sign, verify } from "node:crypto";
 function parseSurfacesMessage(message2) {
   if (message2.type !== "surfaces" || message2.v !== 1 || !Array.isArray(message2.entries))
     return;
@@ -159767,7 +159966,7 @@ function base32(data2) {
   return out;
 }
 function installIdForPublicKey(spkiDer) {
-  return base32(createHash91("sha256").update(spkiDer).digest().subarray(0, 20));
+  return base32(createHash92("sha256").update(spkiDer).digest().subarray(0, 20));
 }
 function spkiOf(key2) {
   return key2.export({ format: "der", type: "spki" });
@@ -159781,7 +159980,7 @@ function signInstallMessage(privateKey, kind, nonce, installId, relayHost, schem
   return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost, scheme), privateKey));
 }
 function powDigest(nonce, installId, relayHost, counter) {
-  return createHash91("sha256").update(`${POW_DOMAIN}
+  return createHash92("sha256").update(`${POW_DOMAIN}
 ${nonce}
 ${installId}
 ${relayHost.toLowerCase()}
@@ -159884,7 +160083,7 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync41, existsSync as existsSync101, lstatSync as lstatSync46, mkdirSync as mkdirSync64, readFileSync as readFileSync86, renameSync as renameSync24, writeFileSync as writeFileSync22 } from "node:fs";
+import { chmodSync as chmodSync41, existsSync as existsSync102, lstatSync as lstatSync46, mkdirSync as mkdirSync64, readFileSync as readFileSync86, renameSync as renameSync24, writeFileSync as writeFileSync22 } from "node:fs";
 import { join as join128 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync64(stateDir, { recursive: true, mode: 448 });
@@ -159906,7 +160105,7 @@ function writePrivateFile(path, contents) {
 function loadOrCreateIdentity(stateDir) {
   const path = join128(ensureStateDir(stateDir), "install-key.pem");
   let privateKey;
-  if (existsSync101(path)) {
+  if (existsSync102(path)) {
     privateKey = createPrivateKey(readFileSync86(path));
   } else {
     privateKey = generateKeyPairSync("ed25519").privateKey;
@@ -163977,7 +164176,7 @@ var init_built_in_reranker_manifest = __esm(() => {
 
 // src/workers/source-index/built-in-reranker.ts
 import { availableParallelism as availableParallelism3 } from "node:os";
-import { existsSync as existsSync102, readFileSync as readFileSync87 } from "node:fs";
+import { existsSync as existsSync103, readFileSync as readFileSync87 } from "node:fs";
 import { isAbsolute as isAbsolute37, join as join129 } from "node:path";
 function createCrossEncoderReranker(options) {
   const maxPairTokens = options.maxPairTokens ?? MAX_PAIR_TOKENS;
@@ -164044,7 +164243,7 @@ function builtInRerankerFromEnv(options = {}) {
   const modelPath = join129(modelDir, "model.onnx");
   const vocabularyPath = join129(modelDir, "vocab.txt");
   const tokenizerPath = join129(modelDir, "tokenizer.json");
-  if (!existsSync102(modelPath) || !existsSync102(vocabularyPath) && !existsSync102(tokenizerPath))
+  if (!existsSync103(modelPath) || !existsSync103(vocabularyPath) && !existsSync103(tokenizerPath))
     return;
   const runtimeDir = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim() || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
   const runtime = options.runtime ?? onnxRuntimeFromDirectory(runtimeDir);
@@ -164055,7 +164254,7 @@ function builtInRerankerFromEnv(options = {}) {
   return createCrossEncoderReranker({
     id: `cross-encoder:${modelDir.split(/[\\/]/).filter(Boolean).pop() ?? "model"}`,
     session: () => runtime.createSession(modelPath, { threads: threads2 }),
-    tokenizer: existsSync102(vocabularyPath) ? new WordPieceTokenizer(readFileSync87(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync87(tokenizerPath, "utf8")),
+    tokenizer: existsSync103(vocabularyPath) ? new WordPieceTokenizer(readFileSync87(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync87(tokenizerPath, "utf8")),
     ...poolSize !== undefined ? { poolSize } : {},
     ...maxPairTokens !== undefined ? { maxPairTokens } : {}
   });
@@ -164077,7 +164276,7 @@ var init_built_in_reranker = __esm(() => {
 
 // src/workers/classification/judge-pacing.ts
 import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
-import { createHash as createHash92 } from "node:crypto";
+import { createHash as createHash93 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
   if (raw === null || raw.trim() === "")
@@ -164174,7 +164373,7 @@ var JUDGE_SAMPLING, JUDGE_PROMPT_CACHE_KEY, DEFAULT_VENICE_JUDGE_CONCURRENT_CALL
 var init_judge_pacing = __esm(() => {
   init_sniffer();
   JUDGE_SAMPLING = Object.freeze({ temperature: 0, seed: 883 });
-  JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash92("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
+  JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash93("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
   realClock = {
     now: () => Date.now(),
     sleep: (ms, signal) => new Promise((resolve27, reject) => {
@@ -164596,7 +164795,7 @@ var init_local_model_discovery = __esm(() => {
 });
 
 // src/workers/messaging-spool-wake.ts
-import { existsSync as existsSync103, watch } from "node:fs";
+import { existsSync as existsSync104, watch } from "node:fs";
 import { dirname as dirname104, resolve as resolve27 } from "node:path";
 function createSpoolChangeSubscription(spoolDir, options = {}) {
   const target2 = resolve27(spoolDir);
@@ -164629,7 +164828,7 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
         watcher.close();
       watchers = [];
       let parent = dirname104(target2);
-      while (!existsSync103(parent) && dirname104(parent) !== parent)
+      while (!existsSync104(parent) && dirname104(parent) !== parent)
         parent = dirname104(parent);
       const next = target2.slice(parent.length + (parent === "/" ? 0 : 1)).split("/")[0];
       try {
@@ -164641,7 +164840,7 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
         });
         watcher.on("error", retry);
         watchers.push(watcher);
-        if (existsSync103(target2)) {
+        if (existsSync104(target2)) {
           const spool = watchDir(target2, { persistent: false }, (_event, name) => {
             if (name == null || name.toString().endsWith(".jsonl"))
               wake();
@@ -166058,7 +166257,7 @@ var init_local_private_answers = __esm(() => {
 });
 
 // src/core/release-signing.ts
-import { createHash as createHash93, createPublicKey as createPublicKey3, verify as verify2 } from "node:crypto";
+import { createHash as createHash94, createPublicKey as createPublicKey3, verify as verify2 } from "node:crypto";
 function releaseManifestUrl(installerUrl) {
   return `${installerUrl}.release.json`;
 }
@@ -166066,7 +166265,7 @@ function releasePlatformFor(platform2) {
   return platform2 === "darwin" ? "darwin-arm64" : platform2 === "linux" ? "linux-x64" : undefined;
 }
 function sha256Hex(bytes) {
-  return createHash93("sha256").update(bytes).digest("hex");
+  return createHash94("sha256").update(bytes).digest("hex");
 }
 function releasePublicKey(...given) {
   const pem = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
@@ -166206,7 +166405,7 @@ var init_release_signing = __esm(() => {
 // src/core/self-update.ts
 import { spawn as spawn11 } from "node:child_process";
 import { randomBytes as randomBytes27 } from "node:crypto";
-import { chmodSync as chmodSync42, existsSync as existsSync104, mkdirSync as mkdirSync65, readdirSync as readdirSync28, readFileSync as readFileSync88, rmSync as rmSync41 } from "node:fs";
+import { chmodSync as chmodSync42, existsSync as existsSync105, mkdirSync as mkdirSync65, readdirSync as readdirSync28, readFileSync as readFileSync88, rmSync as rmSync41 } from "node:fs";
 import { join as join130 } from "node:path";
 function linuxSelfUpdateRunArgs(runner, runDir, layoutEnv2) {
   return [
@@ -166400,7 +166599,7 @@ function createSelfUpdater(options) {
       if (!target2 || !newerVersion(target2.version, options.runningVersion))
         return { ok: false, refusal: "no_update" };
       try {
-        for (const name of existsSync104(options.stateDir) ? readdirSync28(options.stateDir) : []) {
+        for (const name of existsSync105(options.stateDir) ? readdirSync28(options.stateDir) : []) {
           if (name.startsWith("run-"))
             rmSync41(join130(options.stateDir, name), { recursive: true, force: true });
         }
@@ -167890,7 +168089,7 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync105,
+  existsSync as existsSync106,
   mkdirSync as mkdirSync67,
   readFileSync as readFileSync91,
   renameSync as renameSync25,
@@ -168073,7 +168272,7 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync105(path))
+  if (!existsSync106(path))
     return;
   let payload2;
   try {
@@ -168571,9 +168770,9 @@ var fixedIdentity;
 var init_computer_identity = () => {};
 
 // src/workers/dashboard/session-marker.ts
-import { createHash as createHash94 } from "node:crypto";
+import { createHash as createHash95 } from "node:crypto";
 function dashboardSessionMarker(csrfToken) {
-  return createHash94("sha256").update("olympus-dashboard-session-marker\x00").update(csrfToken).digest("hex").slice(0, 24);
+  return createHash95("sha256").update("olympus-dashboard-session-marker\x00").update(csrfToken).digest("hex").slice(0, 24);
 }
 var init_session_marker = () => {};
 
@@ -171408,7 +171607,7 @@ dialog.msgdialog > .messaging-card { margin: 0; border: 0; border-radius: 12px; 
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash95 } from "node:crypto";
+import { createHash as createHash96 } from "node:crypto";
 function escapeHtml(value2) {
   return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -171459,7 +171658,7 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash95("sha256").update(normalised).digest("hex");
+  return createHash96("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
@@ -181275,7 +181474,7 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync106, mkdirSync as mkdirSync68, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync46, statfsSync as statfsSync6, utimesSync as utimesSync2 } from "node:fs";
+import { existsSync as existsSync107, mkdirSync as mkdirSync68, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync46, statfsSync as statfsSync6, utimesSync as utimesSync2 } from "node:fs";
 import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep22, join as join134, resolve as resolve28 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -181496,7 +181695,7 @@ function createArchiveUploads(options) {
         await handle.close().catch(() => {
           return;
         });
-      if (created && existsSync106(target2))
+      if (created && existsSync107(target2))
         rmSync43(target2, { force: true });
       found.paths.delete(key2);
       found.partials.delete(key2);
@@ -181545,7 +181744,7 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID2.test(uploadId))
         return false;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync106(options.root) ? join134(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync107(options.root) ? join134(stagingRoot(), uploadId) : undefined);
       if (!dir)
         return false;
       if (keep?.(dir)) {
@@ -181592,14 +181791,14 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID2.test(uploadId))
         return;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync106(options.root) ? join134(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync107(options.root) ? join134(stagingRoot(), uploadId) : undefined);
       if (!dir || keep?.(dir))
         return;
       sessions.delete(uploadId);
       rmSync43(dir, { recursive: true, force: true });
     },
     sweep(needed) {
-      if (!rootPath && !existsSync106(options.root))
+      if (!rootPath && !existsSync107(options.root))
         return;
       let root;
       try {
@@ -182897,7 +183096,7 @@ var init_write_routes = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash96 } from "node:crypto";
+import { createHash as createHash97 } from "node:crypto";
 import { readFileSync as readFileSync92 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir42 } from "node:os";
@@ -183390,7 +183589,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2568(value2) {
-  return createHash96("sha256").update(value2, "utf8").digest("hex");
+  return createHash97("sha256").update(value2, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -187250,9 +187449,9 @@ __export(exports_dashboard_resource, {
   DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
   DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
 });
-import { createHash as createHash97 } from "node:crypto";
+import { createHash as createHash98 } from "node:crypto";
 function versionedResourceUri(base, html3) {
-  return `${base}?v=${createHash97("sha256").update(html3).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash98("sha256").update(html3).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -187304,9 +187503,9 @@ var init_locations = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash98 } from "node:crypto";
+import { createHash as createHash99 } from "node:crypto";
 import { execFileSync as execFileSync6 } from "node:child_process";
-import { existsSync as existsSync107, lstatSync as lstatSync49, readFileSync as readFileSync93, readdirSync as readdirSync30, realpathSync as realpathSync22 } from "node:fs";
+import { existsSync as existsSync108, lstatSync as lstatSync49, readFileSync as readFileSync93, readdirSync as readdirSync30, realpathSync as realpathSync22 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 
 class VolumeResolver {
@@ -187468,7 +187667,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash98("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash99("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -187493,7 +187692,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync107(dir))
+    if (!existsSync108(dir))
       return result;
     for (const name of readdirSync30(dir)) {
       try {
@@ -187591,7 +187790,7 @@ var init_volume_identity = __esm(() => {
 });
 
 // src/workers/backup-service.ts
-import { existsSync as existsSync108, mkdirSync as mkdirSync69, readFileSync as readFileSync94, readdirSync as readdirSync31, rmSync as rmSync44, statSync as statSync47 } from "node:fs";
+import { existsSync as existsSync109, mkdirSync as mkdirSync69, readFileSync as readFileSync94, readdirSync as readdirSync31, rmSync as rmSync44, statSync as statSync47 } from "node:fs";
 import { dirname as dirname107, join as join135 } from "node:path";
 function defaultBackupServicePaths(env = process.env) {
   return {
@@ -187807,7 +188006,7 @@ function createBackupService(options) {
       } catch {
         throw new OperationError("invalid_params", "That backup file is no longer there. Choose it again.");
       }
-      if (existsSync108(join135(options.paths.staging, PENDING_RESTORE)))
+      if (existsSync109(join135(options.paths.staging, PENDING_RESTORE)))
         return status();
       const staging = backupStagingDir(options.env);
       try {
@@ -188145,7 +188344,7 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync109, mkdirSync as mkdirSync70, opendirSync, readFileSync as readFileSync95 } from "node:fs";
+import { existsSync as existsSync110, mkdirSync as mkdirSync70, opendirSync, readFileSync as readFileSync95 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname108, join as join136 } from "node:path";
 function folderAccessMemoryPath() {
@@ -188372,7 +188571,7 @@ class MacPermissions {
     if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync109(this.memoryPath)) {
+    if (this.memoryPath && existsSync110(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync95(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -188424,7 +188623,7 @@ var init_mac_permissions = __esm(() => {
 
 // src/workers/local-files/mac-settings.ts
 import { spawn as spawn14 } from "node:child_process";
-import { existsSync as existsSync110 } from "node:fs";
+import { existsSync as existsSync111 } from "node:fs";
 import { homedir as homedir44 } from "node:os";
 import { join as join137 } from "node:path";
 function helperAppPathForHome(home2 = homedir44()) {
@@ -188435,7 +188634,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn14(command2, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync110)(helper))
+  if ((deps.exists ?? existsSync111)(helper))
     run2("/usr/bin/open", ["-R", helper]);
   run2("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -189222,7 +189421,7 @@ var init_locator_result_projector2 = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash99 } from "node:crypto";
+import { createHash as createHash100 } from "node:crypto";
 function parseStructuredChatScope(value2) {
   const parts = value2.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -189250,7 +189449,7 @@ function unresolvedChatTitleResolution(value2) {
   };
 }
 function safeDigest(value2) {
-  return createHash99("sha256").update(value2).digest("hex");
+  return createHash100("sha256").update(value2).digest("hex");
 }
 function conversationTitleTerms(value2) {
   const seen = new Set;
@@ -192457,7 +192656,7 @@ var init_session = __esm(() => {
 });
 
 // src/workers/archive-import/notes/note.ts
-import { createHash as createHash100 } from "node:crypto";
+import { createHash as createHash101 } from "node:crypto";
 function isRecord12(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
@@ -192511,7 +192710,7 @@ function cleanTags(tags) {
   return out;
 }
 function sha2569(value2) {
-  return createHash100("sha256").update(value2).digest("hex");
+  return createHash101("sha256").update(value2).digest("hex");
 }
 function buildNoteItem(input, draft, place, savedAt) {
   const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
@@ -192884,7 +193083,7 @@ var init_listing = __esm(() => {
 });
 
 // src/workers/evernote/connector.ts
-import { createHash as createHash101 } from "node:crypto";
+import { createHash as createHash102 } from "node:crypto";
 function evernoteDeletionCap(storedNotes) {
   return Math.max(EVERNOTE_DELETION_FLOOR, Math.ceil(storedNotes * EVERNOTE_DELETION_SHARE));
 }
@@ -192991,7 +193190,7 @@ function createEvernoteSourceConnector(options) {
         ...createdAt ? { createdAt } : {},
         ...updatedAt ? { updatedAt } : {},
         attachmentCount: resources.length,
-        contentHash: createHash101("sha256").update(text5).digest("hex")
+        contentHash: createHash102("sha256").update(text5).digest("hex")
       }),
       fetchedAt: now().toISOString()
     };
@@ -193284,7 +193483,7 @@ function createEvernoteSourceConnector(options) {
       bytes.set(chunk, at);
       at += chunk.byteLength;
     }
-    if (createHash101("md5").update(bytes).digest("hex") !== hash)
+    if (createHash102("md5").update(bytes).digest("hex") !== hash)
       throw new FileExtractionSourceError("source_content_unavailable");
     allowed();
     const mimeType = fileMimeTypeFromBytes(bytes) ?? "application/octet-stream";
@@ -193325,7 +193524,7 @@ function createEvernoteSourceConnector(options) {
     lastOutcome: () => outcome
   };
 }
-var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest4 = (value2) => createHash101("sha256").update(value2).digest("hex").slice(0, 16), record7 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
+var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest4 = (value2) => createHash102("sha256").update(value2).digest("hex").slice(0, 16), record7 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
 var init_connector5 = __esm(() => {
   init_file_extraction_source();
   init_file_mime();
@@ -193371,7 +193570,7 @@ __export(exports_live_sync, {
   EVERNOTE_HANDLE: () => EVERNOTE_HANDLE,
   EVERNOTE_ACCOUNT_ROLE: () => EVERNOTE_ACCOUNT_ROLE
 });
-import { existsSync as existsSync111, mkdirSync as mkdirSync71, readFileSync as readFileSync96 } from "node:fs";
+import { existsSync as existsSync112, mkdirSync as mkdirSync71, readFileSync as readFileSync96 } from "node:fs";
 import { dirname as dirname109 } from "node:path";
 function evernoteExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), EVERNOTE_SOURCE_ID, {
@@ -193424,7 +193623,7 @@ function createEvernoteTierLane(options = {}) {
   return { set: set2, ledger, secure, internal };
 }
 function readPassFile(path) {
-  if (!existsSync111(path))
+  if (!existsSync112(path))
     return { version: 1, status: {} };
   try {
     const parsed = JSON.parse(readFileSync96(path, "utf8"));
@@ -193443,7 +193642,7 @@ function writePassFile(path, file2) {
 }
 function evernotePassStatus(env = process.env) {
   const path = resolvedRawPath(EVERNOTE_SOURCE_ID, "evernote-pass.json", env);
-  if (!existsSync111(path))
+  if (!existsSync112(path))
     return;
   return readPassFile(path).status;
 }
@@ -193685,7 +193884,7 @@ function createEvernoteLiveSync(options) {
     bindNotebookChoice: (choice) => {
       boundChoice = choice;
     },
-    status: () => existsSync111(passPath) ? readPassFile(passPath).status : undefined,
+    status: () => existsSync112(passPath) ? readPassFile(passPath).status : undefined,
     lastStoreRunCompletedAt: () => lastCompletedAt
   };
 }
@@ -193719,7 +193918,7 @@ var init_live_sync3 = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-oauth-attempts.ts
-import { randomBytes as randomBytes31, timingSafeEqual as timingSafeEqual9, createHash as createHash102 } from "node:crypto";
+import { randomBytes as randomBytes31, timingSafeEqual as timingSafeEqual9, createHash as createHash103 } from "node:crypto";
 function createDashboardOAuthCallbackRateLimiter() {
   const buckets = new Map;
   return (key2, now) => {
@@ -193790,7 +193989,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual9(createHash102("sha256").update(expected).digest(), createHash102("sha256").update(state).digest());
+  return timingSafeEqual9(createHash103("sha256").update(expected).digest(), createHash103("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -195299,12 +195498,12 @@ p.small a { color: var(--accent); }
 var init_consent_page = () => {};
 
 // src/core/google-pilot-client.ts
-import { createHash as createHash103 } from "node:crypto";
+import { createHash as createHash104 } from "node:crypto";
 function isRetiredGooglePilotClientId(clientId) {
   const trimmed2 = clientId?.trim();
   if (!trimmed2)
     return false;
-  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash103("sha256").update(trimmed2).digest("hex"));
+  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash104("sha256").update(trimmed2).digest("hex"));
 }
 function resolveGooglePilotClientId(packaged, shipped) {
   const substituted = packaged.trim();
@@ -195520,10 +195719,10 @@ var init_dashboard_oauth_clients = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-oauth-pages.ts
-import { createHash as createHash104 } from "node:crypto";
+import { createHash as createHash105 } from "node:crypto";
 function dashboardPanelOpener(request) {
   const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return csrf ? `session:${createHash104("sha256").update(csrf).digest("base64url")}` : "bearer";
+  return csrf ? `session:${createHash105("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url2, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -199370,7 +199569,7 @@ var init_query_planner = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync112, readFileSync as readFileSync100 } from "node:fs";
+import { existsSync as existsSync113, readFileSync as readFileSync100 } from "node:fs";
 import { dirname as dirname113, join as join143 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
@@ -199457,7 +199656,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync112(snapshotPath))
+    if (!existsSync113(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -199587,7 +199786,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate2 = join143(dir, "node_modules");
-    if (!existsSync112(join143(candidate2, "@parcel", "watcher")))
+    if (!existsSync113(join143(candidate2, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire8(join143(dirname113(candidate2), "package.json"));
@@ -199629,7 +199828,7 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash105, randomUUID as randomUUID37 } from "node:crypto";
+import { createHash as createHash106, randomUUID as randomUUID37 } from "node:crypto";
 import { realpathSync as realpathSync24, rmSync as rmSync45, readdirSync as readdirSync33 } from "node:fs";
 import { join as join144, posix as posix4 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
@@ -199644,7 +199843,7 @@ function nameAsOnDisk(scopeRoot, rel) {
   return dir;
 }
 function localFilesItemId(scopePath) {
-  return `f1.${createHash105("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
+  return `f1.${createHash106("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
 }
 function identityFor(scopePath, version2) {
   const providerItemId = localFilesItemId(scopePath);
@@ -199700,7 +199899,8 @@ function createLocalFilesSourceConnector(options) {
   const root = normalizeScopePath(options.root);
   const now = options.now ?? (() => new Date);
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE2;
-  const maxFetchBytes = options.maxFetchBytes ?? DEFAULT_MAX_FETCH_BYTES2;
+  const sizePolicy = sourceSizeLimitForProvider("local_files");
+  const configuredMaxFetchBytes = options.maxFetchBytes ?? sizePolicy.defaultBytes;
   const batchSize = options.deletedDescendantBatch ?? DELETED_DESCENDANT_BATCH;
   const resolveRoot = () => {
     const configured = realPathOfScopePath(options.volumes, root);
@@ -200080,6 +200280,13 @@ function createLocalFilesSourceConnector(options) {
       return this.fetchItemWithin(localItemId, {});
     },
     async fetchItemWithin(localItemId, fetchOptions) {
+      const maxFetchBytes = sourceSizeBytes(sizePolicy, {
+        provider: LOCAL_FILES_PROVIDER,
+        accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+        localItemId,
+        providerItemId: localItemId.slice(localItemId.indexOf(":") + 1),
+        ...fetchOptions.expectedVersion ? { sourceVersion: fetchOptions.expectedVersion } : {}
+      }, now(), configuredMaxFetchBytes);
       const identity2 = {
         ...identityFor("/"),
         providerItemId: localItemId.slice(localItemId.indexOf(":") + 1),
@@ -200113,6 +200320,7 @@ function createLocalFilesSourceConnector(options) {
         throw new FileExtractionSourceError("source_unavailable");
       }
       const rel = scopePath === holder.scopePath ? "" : scopePath.slice(holder.scopePath === "/" ? 1 : holder.scopePath.length + 1);
+      let readRel = rel;
       try {
         const expected = parseVersion(fetchOptions.expectedVersion);
         const readOptions = {
@@ -200128,6 +200336,7 @@ function createLocalFilesSourceConnector(options) {
           const actual = nameAsOnDisk(scopeRoot, rel);
           if (actual === undefined || actual === rel)
             throw error2;
+          readRel = actual;
           bytes = scopeRoot.readFile(actual, readOptions);
         }
         const mimeType = fileMimeTypeFromName(scopePath.slice(scopePath.lastIndexOf("/") + 1));
@@ -200142,8 +200351,13 @@ function createLocalFilesSourceConnector(options) {
         if (!(error2 instanceof ScopeSafeError))
           throw new FileExtractionSourceError("source_unavailable");
         switch (error2.code) {
-          case "too_large":
-            return refused3({ contentTooLarge: true, maxFetchBytes });
+          case "too_large": {
+            let sizeBytes;
+            try {
+              sizeBytes = scopeRoot.statRelative(readRel).size;
+            } catch {}
+            return refused3({ contentTooLarge: true, maxFetchBytes, ...sizeBytes === undefined ? {} : { sizeBytes } });
+          }
           case "not_regular":
             return refused3({ contentUnavailable: true });
           case "permission":
@@ -200164,8 +200378,9 @@ function createLocalFilesSourceConnector(options) {
     }
   };
 }
-var LOCAL_FILES_CURSOR_PREFIX = "lf1:", LOCAL_FILES_POLL_CURSOR, DEFAULT_MAX_FETCH_BYTES2 = 64000000, DEFAULT_PAGE_SIZE2 = 500, DELETED_DESCENDANT_BATCH = 2000, DELETED_DESCENDANT_MAX_BATCHES = 200, MAX_FOLDER_KEYS = 32, MAX_EVENT_PATHS = 200000, ABSENCE_SCAN_LIMIT = 250000, LocalFilesRootMissingError, LocalFilesRootPermissionError, LocalFilesHistoryResetError;
+var LOCAL_FILES_CURSOR_PREFIX = "lf1:", LOCAL_FILES_POLL_CURSOR, DEFAULT_PAGE_SIZE2 = 500, DELETED_DESCENDANT_BATCH = 2000, DELETED_DESCENDANT_MAX_BATCHES = 200, MAX_FOLDER_KEYS = 32, MAX_EVENT_PATHS = 200000, ABSENCE_SCAN_LIMIT = 250000, LocalFilesRootMissingError, LocalFilesRootPermissionError, LocalFilesHistoryResetError;
 var init_connector6 = __esm(() => {
+  init_source_size_limits();
   init_file_extraction_source();
   init_file_mime();
   init_scope_safe_fs();
@@ -200201,7 +200416,7 @@ var init_connector6 = __esm(() => {
 });
 
 // src/workers/local-files/provider-store-sync.ts
-import { createHash as createHash106 } from "node:crypto";
+import { createHash as createHash107 } from "node:crypto";
 function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   const prefix = `${LOCAL_FILES_POLICY_SOURCE}:`;
   if (!approvedScopeKey.startsWith(prefix))
@@ -200211,7 +200426,7 @@ function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   return root;
 }
 function localFilesConnectorIdForScope(approvedScopeKey, scope) {
-  const hash = createHash106("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const hash = createHash107("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `local.files.${hash}`;
 }
 function localFilesStoreView(tierSet) {
@@ -200366,7 +200581,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash106("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash107("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: scopedCheckpoint(sync.cursor, connectorId)
       };
@@ -200678,7 +200893,7 @@ var init_whatsapp = __esm(() => {
 
 // src/workers/local-pacing.ts
 import { execFile as execFile4, spawn as spawn15 } from "node:child_process";
-import { existsSync as existsSync113, readdirSync as readdirSync34, readFileSync as readFileSync101 } from "node:fs";
+import { existsSync as existsSync114, readdirSync as readdirSync34, readFileSync as readFileSync101 } from "node:fs";
 import { join as join145 } from "node:path";
 function embedsOnThisComputer(provider) {
   try {
@@ -200724,7 +200939,7 @@ function parseLogindIdleSeconds(text5, nowMs) {
 }
 function readLinuxPower(root = "/sys/class/power_supply") {
   try {
-    if (!existsSync113(root))
+    if (!existsSync114(root))
       return "no_battery";
     let battery = false;
     let online;
@@ -200975,7 +201190,7 @@ var init_local_pacing = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash107 } from "node:crypto";
+import { createHash as createHash108 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -202073,7 +202288,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash107("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash108("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -202863,7 +203078,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value2) {
-  return createHash107("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash108("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -208412,9 +208627,9 @@ var init_postal_mime = __esm(() => {
 });
 
 // src/workers/archive-import/mbox/parse.ts
-import { createHash as createHash108 } from "node:crypto";
+import { createHash as createHash109 } from "node:crypto";
 function sha25610(value2) {
-  return createHash108("sha256").update(value2).digest("hex");
+  return createHash109("sha256").update(value2).digest("hex");
 }
 function headerValue(email2, key2) {
   const value2 = email2.headers.find((header2) => header2.key === key2)?.value?.trim();
@@ -209467,9 +209682,9 @@ var init_place = __esm(() => {
 });
 
 // src/workers/archive-import/whatsapp/connector.ts
-import { createHash as createHash109 } from "node:crypto";
+import { createHash as createHash110 } from "node:crypto";
 function sha25611(value2) {
-  return createHash109("sha256").update(value2).digest("hex");
+  return createHash110("sha256").update(value2).digest("hex");
 }
 function stoppedFrom2(error2, relPath) {
   if (error2 instanceof WhatsAppFormatError) {
@@ -211788,9 +212003,9 @@ var init_xml_stream = __esm(() => {
 });
 
 // src/workers/archive-import/evernote/connector.ts
-import { createHash as createHash110 } from "node:crypto";
+import { createHash as createHash111 } from "node:crypto";
 function sha25612(value2) {
-  return createHash110("sha256").update(value2).digest("hex");
+  return createHash111("sha256").update(value2).digest("hex");
 }
 function enexTime(value2) {
   const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value2 ?? "");
@@ -211867,7 +212082,7 @@ function decodeBase64Range(reader, start, end, cap) {
   return bytes;
 }
 function md5OfBase64Range(reader, start, end) {
-  const hash2 = createHash110("md5");
+  const hash2 = createHash111("md5");
   decodeBase64Chunks(reader, start, end, Number.MAX_SAFE_INTEGER, (chunk) => hash2.update(chunk));
   return hash2.digest("hex");
 }
@@ -212750,7 +212965,7 @@ var init_start = __esm(() => {
 });
 
 // src/workers/archive-import/runtime.ts
-import { existsSync as existsSync114 } from "node:fs";
+import { existsSync as existsSync115 } from "node:fs";
 function createArchiveImportRuntime(options = {}) {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
@@ -212796,7 +213011,7 @@ function createArchiveImportRuntime(options = {}) {
     }
   };
   const hasData = (family) => {
-    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync114(path)))
+    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync115(path)))
       return true;
     try {
       return state.list().some((record8) => record8.family === family);
@@ -212813,7 +213028,7 @@ function createArchiveImportRuntime(options = {}) {
     existingLanes: () => families.filter(hasData).map((family) => lane(family)),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
-      return existsSync114(path) ? openWaitingPrivateQuestionStore(path) : undefined;
+      return existsSync115(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
@@ -213168,7 +213383,7 @@ var init_agent = __esm(() => {
 });
 
 // src/workers/archive-import/removal.ts
-import { existsSync as existsSync115 } from "node:fs";
+import { existsSync as existsSync116 } from "node:fs";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record8) => {
     if (record8.status === "removing" || record8.target)
@@ -213202,7 +213417,7 @@ function deleteWaitingAnswers(options, input) {
 }
 function deleteJudgeQuestions(lane, provider, accountScope) {
   const path = tierSnifferPathForLedger(lane.ledger.dbPath);
-  if (path !== ":memory:" && !existsSync115(path))
+  if (path !== ":memory:" && !existsSync116(path))
     return 0;
   const sniffer = openTierSniffer({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: path });
   try {
@@ -214462,7 +214677,7 @@ var init_extraction_runtime = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash111 } from "node:crypto";
+import { createHash as createHash112 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -214488,7 +214703,7 @@ function receiptOf(record8, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash111("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash112("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -216031,7 +216246,7 @@ var init_gmail_status_scope = __esm(() => {
 });
 
 // src/workers/evernote/runtime.ts
-import { existsSync as existsSync116 } from "node:fs";
+import { existsSync as existsSync117 } from "node:fs";
 function createEvernoteRuntime(options) {
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date);
@@ -216050,7 +216265,7 @@ function createEvernoteRuntime(options) {
   const existingLane = () => {
     if (lane)
       return lane;
-    if (!existsSync116(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
+    if (!existsSync117(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
       return;
     const opened = openLane();
     for (const leg of [opened.secure, opened.internal])
@@ -217499,11 +217714,11 @@ var init_export_zone = __esm(() => {
 });
 
 // src/workers/whatsapp/archive-input.ts
-import { createHash as createHash112 } from "node:crypto";
-import { existsSync as existsSync117 } from "node:fs";
+import { createHash as createHash113 } from "node:crypto";
+import { existsSync as existsSync118 } from "node:fs";
 import { posix as posix8 } from "node:path";
 function hash2(value2) {
-  return createHash112("sha256").update(value2).digest("hex").slice(0, 24);
+  return createHash113("sha256").update(value2).digest("hex").slice(0, 24);
 }
 function encodeCursor4(state, inner) {
   return `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(state)).toString("base64url")}~${inner ?? ""}`;
@@ -217590,7 +217805,7 @@ function createWhatsAppExportInput(options) {
     records(listing = {}) {
       return async function* () {
         const decoded2 = decodeCursor3(listing.cursor);
-        if (existsSync117(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
+        if (existsSync118(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
           yield { records: [], ...listing.cursor !== undefined ? { nextCursor: listing.cursor } : {}, done: false };
           return;
         }
@@ -218406,7 +218621,7 @@ var init_gmail_attachment_extraction = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash113 } from "node:crypto";
+import { createHash as createHash114 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -218442,7 +218657,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash113("sha256").update(`${accessToken}
+    const key2 = createHash114("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -218500,7 +218715,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash113("sha256").update(session.token).digest("hex");
+    const key2 = createHash114("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -218754,7 +218969,7 @@ var init_installed_tier_classification = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database30 } from "bun:sqlite";
-import { existsSync as existsSync118, rmSync as rmSync46 } from "node:fs";
+import { existsSync as existsSync119, rmSync as rmSync46 } from "node:fs";
 function unrefTimer(timer) {
   timer?.unref?.();
 }
@@ -218993,7 +219208,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync118(path);
+      const hasQueue = existsSync119(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -219395,14 +219610,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync118(bound)) {
+        if (bound && bound !== ":memory:" && existsSync119(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync118(own3))
+      if (existsSync119(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -220166,9 +220381,9 @@ function moveFailureName(error2) {
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
 function checkpointRetiredLedger(path) {
-  if (!existsSync118(`${path}-wal`))
+  if (!existsSync119(`${path}-wal`))
     return true;
-  if (!existsSync118(path))
+  if (!existsSync119(path))
     return false;
   let db;
   try {
@@ -221027,7 +221242,7 @@ var init_front_scheduler = __esm(() => {
 });
 
 // src/workers/engine-split/front-history.ts
-import { existsSync as existsSync119 } from "node:fs";
+import { existsSync as existsSync120 } from "node:fs";
 function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()) {
   assertWritableStoreOpenAllowed("dashboard history", path);
   return new SqliteSourceDashboardHistory(path);
@@ -221049,7 +221264,7 @@ function createFrontDashboardHistory(input) {
   let reader;
   let lastSent = Number.NEGATIVE_INFINITY;
   const read = () => {
-    if (!reader && existsSync119(input.path)) {
+    if (!reader && existsSync120(input.path)) {
       try {
         reader = openReadOnlyDashboardHistory(input.path);
       } catch {
@@ -222083,7 +222298,7 @@ var init_source_account_migration = __esm(() => {
 });
 
 // src/workers/engine/runtime/boot-storage.ts
-import { existsSync as existsSync120 } from "node:fs";
+import { existsSync as existsSync121 } from "node:fs";
 function reportRehomedChatOverrides(lane, result) {
   if (result.rehomed === 0 && result.orphaned === 0)
     return;
@@ -222091,7 +222306,7 @@ function reportRehomedChatOverrides(lane, result) {
 }
 function openPeopleIndexOrUndefined(options = {}) {
   const dbPath = peopleIndexPath(process.env);
-  if (options.readOnly && !existsSync120(dbPath))
+  if (options.readOnly && !existsSync121(dbPath))
     return;
   try {
     return new LocalPeopleIndex({ dbPath, ...options.readOnly ? { readOnly: true } : {} });
@@ -223992,7 +224207,7 @@ var init_private_analysts = __esm(() => {
 });
 
 // src/workers/engine/runtime/connector-mounts.ts
-import { existsSync as existsSync121 } from "node:fs";
+import { existsSync as existsSync122 } from "node:fs";
 import { isAbsolute as isAbsolute41 } from "node:path";
 function createConnectorStoreMountDiscovery(raw, options) {
   const retryBaseMs = 5000;
@@ -224027,7 +224242,7 @@ function createConnectorStoreMountDiscovery(raw, options) {
     const absent = [];
     for (const declaration of candidates2) {
       const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
-      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync121(declaration.dbPath)))
+      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync122(declaration.dbPath)))
         ready.push(declaration);
       else
         absent.push(declaration);
@@ -224111,7 +224326,7 @@ function mountConnectorStoreDeclarations(declarations, options) {
         throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
       if (collidingStore)
         assertConnectorStoreMountIdentity(declaration, collidingStore);
-      if (options.existingOnly && !collidingStore && !existsSync121(declaration.dbPath))
+      if (options.existingOnly && !collidingStore && !existsSync122(declaration.dbPath))
         continue;
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
@@ -224323,7 +224538,7 @@ var init_answer_scope = __esm(() => {
 });
 
 // src/workers/engine/runtime/ingestion-dispositions.ts
-import { existsSync as existsSync122 } from "node:fs";
+import { existsSync as existsSync123 } from "node:fs";
 function storedExclusionDebtReader(handles) {
   let walked;
   return () => {
@@ -224354,7 +224569,7 @@ function openIngestionDispositionsRuntime(env = process.env, options = {}) {
     try {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
-      const present = stores.filter((store) => existsSync122(store.dbPath));
+      const present = stores.filter((store) => existsSync123(store.dbPath));
       let openedAll = false;
       const openStores = () => {
         if (openedAll)
@@ -241025,8 +241240,8 @@ __export(exports_remote_mcp, {
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
   DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
-import { createHash as createHash114 } from "node:crypto";
-import { existsSync as existsSync123 } from "node:fs";
+import { createHash as createHash115 } from "node:crypto";
+import { existsSync as existsSync124 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
 }
@@ -241074,7 +241289,7 @@ function createRemoteMcpHandler(options) {
       trace.app = verification.connection.displayName;
       const bearer = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization")?.trim() ?? "")?.[1];
       if (bearer)
-        trace.credential = requestCredentialTag(createHash114("sha256").update(bearer).digest());
+        trace.credential = requestCredentialTag(createHash115("sha256").update(bearer).digest());
       const response = await serveAuthenticated(request, verification, surface, trace);
       if (!trace.relayed)
         return response;
@@ -241152,7 +241367,7 @@ function remoteMcpLogLine(trace, status, ms) {
     calls: trace.calls ?? [],
     status,
     ms: Math.round(ms),
-    ...trace.connection ? { connection: createHash114("sha256").update(`olympus-remote-log
+    ...trace.connection ? { connection: createHash115("sha256").update(`olympus-remote-log
 ${trace.connection}`).digest("hex").slice(0, 8) } : {},
     ...trace.failed ? { failed: true } : {}
   });
@@ -241262,7 +241477,7 @@ function lazyRemoteConnectionStore(resolvePath4, open7) {
     if (store)
       return store;
     const dbPath = resolvePath4();
-    if (!options.create && !existsSync123(dbPath))
+    if (!options.create && !existsSync124(dbPath))
       return;
     store = open7(dbPath);
     return store;
@@ -241571,7 +241786,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash115, randomBytes as randomBytes35, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
+import { createHash as createHash116, randomBytes as randomBytes35, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -241945,7 +242160,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash115("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash116("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -242221,7 +242436,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual11(a, b);
 }
 function sha25613(value2) {
-  return createHash115("sha256").update(value2).digest("hex");
+  return createHash116("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target2 = new URL(redirectUri);
@@ -244542,7 +244757,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash116 } from "node:crypto";
+import { createHash as createHash117 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -244559,7 +244774,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text7 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text7, etag: `"${createHash116("sha256").update(text7).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text7, etag: `"${createHash117("sha256").update(text7).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -244973,7 +245188,7 @@ __export(exports_setup_backend, {
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
 import { readFileSync as readFileSync103 } from "node:fs";
-import { createHash as createHash117 } from "node:crypto";
+import { createHash as createHash118 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -245000,7 +245215,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest5 = createHash117("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest5 = createHash118("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest5.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -245008,7 +245223,7 @@ function createChatGptSetupBackend(options) {
   const privacySettings = () => {
     const current4 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync103(options.sovereignty.path, "utf8"))) : policy;
     policy = current4;
-    const policyRevision = createHash117("sha256").update(JSON.stringify(current4)).digest("hex").slice(0, 16);
+    const policyRevision = createHash118("sha256").update(JSON.stringify(current4)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current4))
       return {
         configured: false,
@@ -246742,7 +246957,7 @@ __export(exports_server2, {
 });
 import { release as release2, totalmem as totalmem4 } from "node:os";
 import { execFile as execFile5 } from "node:child_process";
-import { existsSync as existsSync124, readFileSync as readFileSync105 } from "node:fs";
+import { existsSync as existsSync125, readFileSync as readFileSync105 } from "node:fs";
 import { dirname as dirname118, join as join148 } from "node:path";
 async function startWorkerWithLaunch(launch) {
   workerLaunch = { ...launch };
@@ -247160,7 +247375,7 @@ async function main() {
   };
   const sourceHasStores = (sourceId) => accountStoreNames(sourceId).some((domain) => {
     const path = resolvedStorePath(sourceId, domain, process.env);
-    return existsSync124(path) || existsSync124(tieredStoreSetLedgerPath(path)) || existsSync124(secretLocationsPathForStore(path));
+    return existsSync125(path) || existsSync125(tieredStoreSetLedgerPath(path)) || existsSync125(secretLocationsPathForStore(path));
   });
   const tierLedgerProblems = new Map;
   const sourceTierLedgerReady = (sourceId) => {
@@ -249868,6 +250083,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           tierSniffer?.resumeCloudLimit();
         } else
           tierSniffer?.wake();
+        if (id === "dropbox.max_file_bytes" || id === "local_files.max_file_bytes" || id === "telegram.media_quota")
+          sourceScheduler?.wakeTasksOfKind("extract");
         if (id === "gmail.import_allowance")
           sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.archiveImports).catch((error2) => console.warn("Gmail import resume failed:", error2 instanceof Error ? error2.name : "unknown"));
       }
@@ -252096,7 +252313,7 @@ init_messaging_pairing();
 init_messaging_capture();
 init_config();
 import { randomBytes as randomBytes38 } from "node:crypto";
-import { existsSync as existsSync125, readFileSync as readFileSync106, openSync as openSync35, closeSync as closeSync36, writeSync as writeSync10 } from "node:fs";
+import { existsSync as existsSync126, readFileSync as readFileSync106, openSync as openSync35, closeSync as closeSync36, writeSync as writeSync10 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve32 } from "node:path";
@@ -252546,21 +252763,21 @@ init_worker_cli_launcher();
 init_worker_transport();
 init_atomic_file();
 init_boot_progress();
-import { createHash as createHash85 } from "node:crypto";
+import { createHash as createHash86 } from "node:crypto";
 import { spawnSync as spawnSync17 } from "node:child_process";
-import { existsSync as existsSync89, lstatSync as lstatSync43, mkdirSync as mkdirSync56, readFileSync as readFileSync74 } from "node:fs";
+import { existsSync as existsSync90, lstatSync as lstatSync43, mkdirSync as mkdirSync56, readFileSync as readFileSync74 } from "node:fs";
 import { homedir as homedir35, platform as osPlatform4 } from "node:os";
 import { dirname as dirname94, isAbsolute as isAbsolute35, join as join119 } from "node:path";
 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash84, randomUUID as randomUUID30 } from "node:crypto";
+import { createHash as createHash85, randomUUID as randomUUID30 } from "node:crypto";
 import { spawnSync as spawnSync16 } from "node:child_process";
 import {
   chmodSync as chmodSync37,
   closeSync as closeSync32,
-  existsSync as existsSync87,
+  existsSync as existsSync88,
   fsyncSync as fsyncSync8,
   lstatSync as lstatSync41,
   mkdtempSync as mkdtempSync5,
@@ -252583,7 +252800,7 @@ function prepareWorkerUpgradeArtifact(options) {
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
-  const artifactSha256 = createHash84("sha256").update(artifactBytes).digest("hex");
+  const artifactSha256 = createHash85("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync5(join117(tmpdir13(), ".olympus-artifact-snapshot-"));
   const artifactPath = join117(snapshotDir, "artifact.tgz");
   const descriptor = openSync31(artifactPath, "wx", 384);
@@ -252623,7 +252840,7 @@ function prepareWorkerUpgradeArtifact(options) {
 `);
       makeVersionTreeReadOnly(staging);
       syncVersionTree(staging);
-      if (existsSync87(workingDirectory)) {
+      if (existsSync88(workingDirectory)) {
         assertManagedVersionRoot(workingDirectory, artifactSha256);
         const expectedDigest = versionTreeDigest(staging);
         const existingMode = lstatSync41(workingDirectory).mode & 511;
@@ -252636,13 +252853,13 @@ function prepareWorkerUpgradeArtifact(options) {
       publishVersionTree(staging, workingDirectory, versionsDir);
       return { artifactSha256, packageVersion, workingDirectory };
     } catch (error) {
-      if (existsSync87(staging))
+      if (existsSync88(staging))
         removeStagingTree(staging);
       if (error instanceof OperationError)
         throw error;
       throw new OperationError("config_error", "Could not prepare the Olympus upgrade artifact.", error instanceof Error ? error.message : undefined);
     } finally {
-      if (options.dryRun && existsSync87(staging))
+      if (options.dryRun && existsSync88(staging))
         rmSync36(staging, { recursive: true, force: true });
     }
   } finally {
@@ -252833,7 +253050,7 @@ function syncVersionTree(root) {
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest4 = createHash84("sha256");
+  const digest4 = createHash85("sha256");
   hashVersionTree(root, "", digest4);
   return digest4.digest("hex");
 }
@@ -252859,7 +253076,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let replacedPath;
   let published = false;
   try {
-    if (existsSync87(workingDirectory)) {
+    if (existsSync88(workingDirectory)) {
       replacedPath = join117(versionsDir, `.olympus-replaced-${basename19(workingDirectory)}-${randomUUID30()}`);
       renameSync19(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
@@ -252871,9 +253088,9 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
     syncDirectory2(versionsDir);
   } catch (error) {
     try {
-      if (published && existsSync87(workingDirectory))
+      if (published && existsSync88(workingDirectory))
         removeStagingTree(workingDirectory);
-      if (replacedPath && existsSync87(replacedPath) && !existsSync87(workingDirectory)) {
+      if (replacedPath && existsSync88(replacedPath) && !existsSync88(workingDirectory)) {
         renameSync19(replacedPath, workingDirectory);
       }
       syncDirectory2(versionsDir);
@@ -252884,7 +253101,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
     }
     throw error;
   }
-  if (replacedPath && existsSync87(replacedPath)) {
+  if (replacedPath && existsSync88(replacedPath)) {
     removeStagingTree(replacedPath);
     syncDirectory2(versionsDir);
   }
@@ -252903,7 +253120,7 @@ init_atomic_file();
 init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID31 } from "node:crypto";
-import { existsSync as existsSync88, linkSync as linkSync4, lstatSync as lstatSync42, readFileSync as readFileSync73 } from "node:fs";
+import { existsSync as existsSync89, linkSync as linkSync4, lstatSync as lstatSync42, readFileSync as readFileSync73 } from "node:fs";
 import { join as join118 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
   const dir = join118(homeDir, ".local", "state", "olympus", "lifecycle");
@@ -252933,7 +253150,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         release: () => releaseLifecycleMutationLock(lockPath, owner2.nonce)
       };
     } catch (error) {
-      if (existsSync88(candidate))
+      if (existsSync89(candidate))
         removeFileDurablySync(candidate);
       if (!isAlreadyExists(error))
         throw error;
@@ -252946,7 +253163,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         }
         removeFileDurablySync(lockPath);
         const staleCandidate = join118(dir, `mutation-owner-${current3.nonce}.tmp`);
-        if (existsSync88(staleCandidate))
+        if (existsSync89(staleCandidate))
           removeFileDurablySync(staleCandidate);
       }, {
         acquireTimeoutMs: 1000,
@@ -253485,7 +253702,7 @@ function readTransaction(options) {
   const homeDir = validateHomeDir(options.homeDir ?? homedir35());
   const paths = transactionPaths(homeDir);
   assertTransactionParentSafety(homeDir, paths);
-  if (!existsSync89(paths.transaction))
+  if (!existsSync90(paths.transaction))
     return;
   assertRegularFile2(paths.transaction, "lifecycle transaction");
   let value2;
@@ -253515,14 +253732,14 @@ function clearTransaction(options) {
   const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir35()));
   assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir35()), paths);
   for (const path of [paths.unitBackup, paths.envBackup, paths.launcherBackup, paths.transaction]) {
-    if (!existsSync89(path))
+    if (!existsSync90(path))
       continue;
     assertRegularFile2(path, "lifecycle transaction artifact");
     removeFileDurablySync(path);
   }
 }
 function readManagedFileSnapshot(path) {
-  if (!existsSync89(path)) {
+  if (!existsSync90(path)) {
     return;
   }
   assertRegularFile2(path, "managed lifecycle file");
@@ -253530,7 +253747,7 @@ function readManagedFileSnapshot(path) {
 }
 function writeSnapshotBackup(path, text3) {
   if (text3 === undefined) {
-    if (existsSync89(path)) {
+    if (existsSync90(path)) {
       assertRegularFile2(path, "lifecycle backup");
       removeFileDurablySync(path);
     }
@@ -253540,7 +253757,7 @@ function writeSnapshotBackup(path, text3) {
 }
 function restoreManagedFile(homeDir, path, backupPath, previousPresent, expectedDigest) {
   if (!previousPresent) {
-    if (existsSync89(path)) {
+    if (existsSync90(path)) {
       assertRegularFile2(path, "managed lifecycle file");
       removeFileDurablySync(path);
     }
@@ -253691,7 +253908,7 @@ function workerReadinessPort(options) {
   if (options.port !== undefined)
     return validateWorkerReadinessPort(options.port);
   const envPath = options.envPath ?? workerServicePaths(options.platform ?? "linux", options.homeDir).envPath;
-  if (!existsSync89(envPath))
+  if (!existsSync90(envPath))
     return 8010;
   assertRegularFile2(envPath, "worker environment");
   const line2 = /^OLYMPUS_EMAIL_SOURCE_PORT=(.*)$/m.exec(readFileSync74(envPath, "utf8"))?.[1];
@@ -253814,7 +254031,7 @@ function assertRegularFile2(path, label) {
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
 function sha2566(value2) {
-  return createHash85("sha256").update(value2).digest("hex");
+  return createHash86("sha256").update(value2).digest("hex");
 }
 
 // src/cli.ts
@@ -253995,7 +254212,7 @@ init_olympus_layout();
 init_first_run_privacy();
 init_privacy_language();
 init_messaging_runtime();
-import { existsSync as existsSync97, readFileSync as readFileSync79 } from "node:fs";
+import { existsSync as existsSync98, readFileSync as readFileSync79 } from "node:fs";
 import { randomBytes as randomBytes22 } from "node:crypto";
 import { spawnSync as spawnSync18 } from "node:child_process";
 import { homedir as homedir36 } from "node:os";
@@ -254099,7 +254316,7 @@ async function runSetupWizard(options) {
     managedWorker = installManagedWorkerFiles(workerOptions(options, workerToken));
   } else {
     let pending = false;
-    if (existsSync97(sovereigntyPath2)) {
+    if (existsSync98(sovereigntyPath2)) {
       try {
         pending = isPendingPrivacyPolicy(JSON.parse(readFileSync79(sovereigntyPath2, "utf8")));
       } catch {}
@@ -254306,7 +254523,7 @@ init_engine_brief();
 init_engine_service();
 import { spawn as spawn9 } from "node:child_process";
 import { createInterface as createInterface2 } from "node:readline";
-import { existsSync as existsSync100, readFileSync as readFileSync81 } from "node:fs";
+import { existsSync as existsSync101, readFileSync as readFileSync81 } from "node:fs";
 import { homedir as homedir39 } from "node:os";
 import { dirname as dirname101, join as join124 } from "node:path";
 
@@ -254315,7 +254532,7 @@ init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync19 } from "node:child_process";
-import { existsSync as existsSync99, lstatSync as lstatSync45, mkdirSync as mkdirSync61, mkdtempSync as mkdtempSync6, renameSync as renameSync23, rmSync as rmSync39 } from "node:fs";
+import { existsSync as existsSync100, lstatSync as lstatSync45, mkdirSync as mkdirSync61, mkdtempSync as mkdtempSync6, renameSync as renameSync23, rmSync as rmSync39 } from "node:fs";
 import { homedir as homedir38 } from "node:os";
 import { join as join123, resolve as resolve26 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
@@ -254354,7 +254571,7 @@ function installEngineHelper(options = {}) {
     let candidate;
     if (options.from !== undefined) {
       candidate = resolve26(options.from);
-      if (!existsSync99(join123(candidate, "Contents", "Info.plist"))) {
+      if (!existsSync100(join123(candidate, "Contents", "Info.plist"))) {
         throw new OperationError("invalid_params", `${candidate} is not an app bundle.`);
       }
     } else {
@@ -254364,7 +254581,7 @@ function installEngineHelper(options = {}) {
       }
       const root = options.packageRoot ?? olympusPackageRoot();
       const script2 = join123(root, "scripts", "build-macos-helper.sh");
-      if (!existsSync99(script2) || !existsSync99(join123(root, "native", "macos-engine-host", "main.c"))) {
+      if (!existsSync100(script2) || !existsSync100(join123(root, "native", "macos-engine-host", "main.c"))) {
         throw new OperationError("config_error", "This install does not include the helper app source.", "Pass --from <signed app>, or build from an Olympus source checkout.");
       }
       const result = run(options.exec, script2, ["--out", staging], { ...process.env, ...env, [MACOS_SIGNING_IDENTITY_ENV]: identity2 });
@@ -254395,10 +254612,10 @@ function installEngineHelper(options = {}) {
       throw new OperationError("config_error", `The helper app is signed by team ${details.teamId ?? "none"}, not the expected team.`);
     }
     const executable = join123(candidate, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE);
-    if (!existsSync99(executable)) {
+    if (!existsSync100(executable)) {
       throw new OperationError("config_error", `The helper app has no ${ENGINE_HELPER_EXECUTABLE} program.`);
     }
-    const replaced = existsSync99(target2);
+    const replaced = existsSync100(target2);
     if (replaced && lstatSync45(target2).isSymbolicLink()) {
       throw new OperationError("config_error", `${target2} is a link; remove it and run this again.`);
     }
@@ -254432,7 +254649,7 @@ function installEngineHelper(options = {}) {
       replaced
     };
   } finally {
-    if (existsSync99(target2) || !existsSync99(aside))
+    if (existsSync100(target2) || !existsSync100(aside))
       rmSync39(staging, { recursive: true, force: true });
   }
 }
@@ -254516,7 +254733,7 @@ async function runEngineCommand(args, deps = {}) {
       ...options
     });
     const paths = engineServicePaths({ ...service, homeDir: deps.homeDir ?? homedir39() });
-    if (!existsSync100(paths.plistPath)) {
+    if (!existsSync101(paths.plistPath)) {
       return { ...helper, engine: "not_installed", next: "Run olympus engine install; the engine will start through the Olympus helper app." };
     }
     const current3 = installedProgram(paths.plistPath);
@@ -256323,7 +256540,7 @@ function parseXReconcileRecoveryArgs(args) {
 }
 function runXReconcileRecovery(options) {
   const stateDbPath = options.stateDbPath ?? resolvedRawPath("x.bookmarks", "x-reconcile.sqlite");
-  if (stateDbPath !== ":memory:" && !existsSync125(stateDbPath)) {
+  if (stateDbPath !== ":memory:" && !existsSync126(stateDbPath)) {
     if (!options.execute)
       return xBookmarksRecoveryStatusWithoutState();
     throw new Error("X reconciliation has no staged run to recover.");
@@ -256532,7 +256749,7 @@ function engineRunsWorkerHere(options) {
   if (platform3 !== "darwin" && platform3 !== "linux")
     return false;
   const env = options.homeDir ? { HOME: options.homeDir } : process.env;
-  return existsSync125(engineServicePaths({ env, platform: platform3 }).plistPath);
+  return existsSync126(engineServicePaths({ env, platform: platform3 }).plistPath);
 }
 function linuxDesktopOpenHandler(action, options) {
   if ((options.platform ?? process.platform) !== "linux")
@@ -257445,7 +257662,7 @@ function runConnectionsCommand(args, env = process.env) {
       throw new OperationError("invalid_params", "Usage: olympus connections requests");
     const dbPath = resolveRemoteConnectionsDbPathForCli(env);
     let apps = [];
-    if (existsSync125(dbPath)) {
+    if (existsSync126(dbPath)) {
       let store2;
       try {
         store2 = openRemoteConnectionStore(dbPath);

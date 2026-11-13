@@ -1,3 +1,5 @@
+import { sourceSizeLimitForProvider } from '../../../core/source-size-limits.ts';
+import { refreshSourceSizeStop, resumeGrantedSizeHeld } from '../../file-extraction/size-limit-stops.ts';
 import { requestOnDemandRead, type RequestOnDemandRead } from '../../file-extraction/on-demand-read.ts';
 /**
  * Wiring for the source-neutral extraction factory.
@@ -409,7 +411,13 @@ export function createFileExtractionRuntime(
       storePath: store.dbPath,
     }, env);
     const spoolDir = prepareSpool(placement.root);
+    const sizeLimit = sourceSizeLimitForProvider(config.provider);
+    if (sizeLimit && !readOnly) { resumeGrantedSizeHeld(jobs, sizeLimit); refreshSourceSizeStop(jobs, sizeLimit); }
     corpora.push({
+      ...(sizeLimit ? { sizeLimit, ...(!readOnly ? { sizeStops: {
+        resume: (now: Date) => resumeGrantedSizeHeld(jobs, sizeLimit, now),
+        refresh: (now: Date) => refreshSourceSizeStop(jobs, sizeLimit, now),
+      } } : {}) } : {}),
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
       ...(spoolDir ? { spoolDir } : {}),
