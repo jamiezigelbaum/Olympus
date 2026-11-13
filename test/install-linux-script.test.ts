@@ -72,7 +72,13 @@ if [ "$2" = install ]; then
   [ -z "$FAKE_INSTALL_FAIL" ] || { echo 'Upgrade failed; previous version restored and healthy.' >&2; exit 1; }
   [ -z "$FAKE_BLOCK" ] || { echo blocked >> '${log}'; while [ ! -f '${root}/release-child' ]; do sleep 0.05; done; }
 fi
-if [ "$2" = status ]; then printf '{"ok":%s}\n' "\${FAKE_HEALTH:-true}"; fi
+if [ "$2" = status ]; then
+  if [ -n "$FAKE_HEALTH_AFTER" ]; then
+    n=$(cat '${root}/status-reads' 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > '${root}/status-reads'
+    [ "$n" -gt "$FAKE_HEALTH_AFTER" ] || { printf '{"ok":false}\n'; exit 1; }
+  fi
+  printf '{"ok":%s}\n' "\${FAKE_HEALTH:-true}"
+fi
 if [ "$2" = uninstall ]; then
   [ -z "$FAKE_UNINSTALL_FAIL" ] || { echo 'Unknown custody; nothing removed.' >&2; exit 1; }
 fi
@@ -416,10 +422,18 @@ test('tampered extracted Bun is not executed, even with an intact archive', () =
   expect(h.calls()).toBe('');
 }, 30_000);
 
+test('an engine that answers healthy a few seconds late still installs, and the wait is said', () => {
+  const h = fixture();
+  const r = h.run({ FAKE_HEALTH_AFTER: '1' });
+  expect({ status: r.status, err: r.stderr }).toEqual({ status: 0, err: '' });
+  expect(r.stdout).toContain('The engine answered healthy after about 3 s.');
+  expect(r.stdout).toContain('Installed for your user');
+}, 30_000);
+
 test('unknown health and failed install never report success', () => {
   for (const env of [{ FAKE_HEALTH: 'false' }, { FAKE_INSTALL_FAIL: '1' }]) {
     const h = fixture();
-    const r = h.run(env as Record<string, string>);
+    const r = h.run({ ...env, OLYMPUS_INSTALL_STATUS_WAIT_S: '3' } as Record<string, string>);
     expect(r.status).not.toBe(0);
     expect(r.stdout).not.toContain('Installed for your user');
     if ('FAKE_INSTALL_FAIL' in env) expect(r.stderr).toContain('previous version restored and healthy');

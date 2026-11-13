@@ -76,7 +76,8 @@ describe('the engine split boots as two processes', () => {
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
     const health = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     expect(health.status).toBe(200);
-    await health.body?.cancel();
+    // The front reports its background, so an upgrade or rollback never calls a crash-looping background healthy (#1563 review).
+    expect(await health.json()).toMatchObject({ reachable: true, engine_background: 'ready' });
     // Source watches are the background's: a create is answered by its route, not refused.
     const watch = await workerFetch(`http://127.0.0.1:${port}/v1/source/watch/create`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
     expect(watch.status).not.toBe(503);
@@ -103,6 +104,14 @@ describe('the engine split boots as two processes', () => {
 
     const snapshot = await waitFor(() => readEngineStatusSnapshot(engineStatusSnapshotPath(env)));
     expect(snapshot.snapshot.judge).toBeDefined();
+
+    // With the background gone the front still answers, and says so.
+    const backgroundChild = children[1]!;
+    backgroundChild.kill('SIGKILL');
+    await backgroundChild.exited;
+    const alone = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect(alone.status).toBe(200);
+    expect(await alone.json()).toMatchObject({ engine_background: 'unreachable' });
   }, 120_000);
 
   test('with a connected source, the front reads its stores read-only and serves them', async () => {

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Should I use a private AI service or run AI locally? - Olympus guides</title>
+  <meta name="description" content="Private cloud AI services versus local models: what each protects, what it costs you in quality and hardware, and when a mix of both makes sense.">
+  <link rel="canonical" href="https://olympusplugin.ai/guides/private-ai-service-or-local-ai/">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
+  <link rel="stylesheet" href="/style.css?v=1.0.0">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>Should I use a private AI service or run AI locally?</h1>
+      <p class="lede">Run AI locally when the data must never leave your computer and a smaller model is good enough. Use a private cloud service when you need stronger answers and trust its no-logging promise. For your own mail and files, a mix often works best: keep the data local and send only what is safe to the best model.</p>
+
+      <h2>The trade-offs</h2>
+      <table>
+        <thead><tr><th></th><th>Local model</th><th>Private cloud service</th></tr></thead>
+        <tbody>
+          <tr><th>Where your text goes</th><td>Nowhere: it stays on your computer</td><td>To the service, under its own retention rules</td></tr>
+          <tr><th>Answer quality</th><td>Behind the best cloud models</td><td>Often uses strong open or frontier models</td></tr>
+          <tr><th>Hardware</th><td>Needs memory and a recent chip</td><td>Any device</td></tr>
+          <tr><th>Examples</th><td>Ollama, LM Studio, Jan</td><td>Proton Lumo, Venice, Duck.ai</td></tr>
+        </tbody>
+      </table>
+      <p>Neither protects you if you paste the wrong document into the wrong place. And a private chat service knows your own mail and files only through what you upload or connect, which it then receives.</p>
+
+      <h2>Using both with Olympus</h2>
+      <p>Olympus keeps your mail, files and messages on your computer and answers from Private items with a small model there, sized to your computer's memory. Personal items can go to ChatGPT, Claude or another assistant you connect. For harder private questions you can connect Venice, which then receives the passages that match, if your settings allow it. Separately, zkAPI can send a frontier model a question Olympus has stripped of identifying details, without your documents, through Tor by default; the question's own content can still identify you. Both are off by default. See the <a href="/privacy/">privacy policy</a> for what each choice sends.</p>
+      <p class="meta">Updated 10 November 2026.</p>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/guides/">Guides</a></li>
+      <li><a href="/help/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>

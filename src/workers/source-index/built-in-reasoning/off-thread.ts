@@ -1,25 +1,39 @@
-// The request-serving thread only sends small lifecycle messages. Downloads,
-// checksums, filesystem work and spawning/loading the native server run in the
-// sibling worker, shared by every built-in model. Status files remain the
+// The request-serving thread sends model operations as messages. Downloads,
+// checksums, filesystem work, tokenizers and native session/helper starts run
+// in the sibling worker, shared by every built-in model. Status files remain the
 // dashboard's authority, including while this thread is busy installing.
 import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { BuiltInReasoningStatus, PinnedModelInstallerOptions } from './install.ts';
+import type { BuiltInEmbeddingInstallerOptions, BuiltInEmbeddingStatus, InstalledBuiltInEmbedding } from '../built-in-embedding/assets.ts';
+import type { BuiltInEmbeddingModelSpec } from '../built-in-embedding/manifest.ts';
+import type { SourceEmbeddingInput, SourceEmbeddingTaskType } from '../embeddings.ts';
+import type { EvidenceRerankRequest } from '../../../core/evidence-reranker.ts';
+import type { LiteRtDevice, LiteRtEmbedderOptions, LiteRtEmbedItem } from '../built-in-embedding/litert-runtime.ts';
 import type { LlamaServerLaunch } from './server.ts';
 
 export type ModelThreadRequest =
   | { kind: 'install'; options: PinnedModelInstallerOptions }
   | { kind: 'start'; handle: number; launch: LlamaServerLaunch; env?: Record<string, string | undefined> | undefined; stopGraceMs?: number | undefined; killWaitMs?: number | undefined; immediateKill?: boolean | undefined }
   | { kind: 'touch' | 'stop'; handle: number }
+  | { kind: 'embedding-install'; options: BuiltInEmbeddingInstallerOptions }
+  | { kind: 'embedding-load'; handle: number; installed: InstalledBuiltInEmbedding; model: BuiltInEmbeddingModelSpec; env: Record<string, string | undefined>; threads: number }
+  | { kind: 'embedding-run'; handle: number; inputs: SourceEmbeddingInput[]; taskType: SourceEmbeddingTaskType; priority: boolean }
+  | { kind: 'reranker-load'; handle: number; env: Record<string, string | undefined> }
+  | { kind: 'reranker-run'; handle: number; request: Omit<EvidenceRerankRequest, 'signal'> }
+  | { kind: 'litert-start'; handle: number; options: LiteRtEmbedderOptions }
+  | { kind: 'litert-run'; handle: number; items: readonly LiteRtEmbedItem[] }
+  | { kind: 'litert-release'; handle: number }
   | { kind: 'shutdown' };
-export interface ModelThreadFailure { name: string; message: string; reason?: string | undefined; shortfall?: unknown }
+export interface ModelThreadFailure { name: string; message: string; reason?: string | undefined; shortfall?: unknown; indexes?: readonly number[] | undefined; device?: LiteRtDevice | undefined; vision?: boolean | undefined }
 export type ModelThreadReply = {
   id: number;
   result?: unknown;
   error?: ModelThreadFailure;
   progress?: BuiltInReasoningStatus;
+  embeddingProgress?: BuiltInEmbeddingStatus;
   log?: string;
   handle?: number;
   pid?: number | undefined;
@@ -36,6 +50,7 @@ export class ModelThread {
   private pending = new Map<number, {
     resolve: (result: unknown) => void; reject: (error: Error) => void;
     progress?: ((status: BuiltInReasoningStatus) => void) | undefined; log?: ((line: string) => void) | undefined;
+    embeddingProgress?: ((status: BuiltInEmbeddingStatus) => void) | undefined;
     cleanup: () => void;
   }>();
   readonly pids = new Map<number, number>();
@@ -57,6 +72,7 @@ export class ModelThread {
       }
       const pending = this.pending.get(reply.id);
       if (!pending) return;
+      if (reply.embeddingProgress) { pending.embeddingProgress?.(reply.embeddingProgress); return; }
       if (reply.progress) { pending.progress?.(reply.progress); return; }
       if (reply.log !== undefined) { pending.log?.(reply.log); return; }
       this.pending.delete(reply.id);
@@ -80,6 +96,7 @@ export class ModelThread {
 
   call<T>(request: ModelThreadRequest, options: {
     signal?: AbortSignal | undefined; timeoutMs?: number;
+    embeddingProgress?: ((status: BuiltInEmbeddingStatus) => void) | undefined;
     progress?: ((status: BuiltInReasoningStatus) => void) | undefined; log?: ((line: string) => void) | undefined;
   } = {}): Promise<T> {
     if (options.signal?.aborted) return Promise.reject(cancelled());
@@ -95,7 +112,7 @@ export class ModelThread {
       }, options.timeoutMs ?? 2 * 60 * 60_000);
       const cleanup = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); };
       options.signal?.addEventListener('abort', abort, { once: true });
-      this.pending.set(id, { resolve: result => resolve(result as T), reject, cleanup, progress: options.progress, log: options.log });
+      this.pending.set(id, { resolve: result => resolve(result as T), reject, cleanup, progress: options.progress, log: options.log, embeddingProgress: options.embeddingProgress });
       this.worker.ref();
       try { this.worker.postMessage({ id, request }); }
       catch (error) {

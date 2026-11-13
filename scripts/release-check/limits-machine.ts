@@ -6,6 +6,18 @@ import type { Machine } from './machine.ts';
 import type { LimitsMachine } from './fresh-limits.ts';
 
 const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+/** A failure whose message is safe for the report: fixed text and a step name, never machine output. */
+export class LimitsReason extends Error {}
+const PROBE_STEP = /^[a-z]+(?:-[a-z]+)*(?:\.[a-z]+(?:-[a-z]+)*)?(?: \((?:CLI exit \d{1,3}|CLI timed out)\))?$/;
+/** Names where the probe stopped, from its one-line `{ failed }` reply; anything else stays unnamed. */
+export function probeFailure(result: { code: number; stdout: string; timedOut: boolean }): LimitsReason {
+  if (result.timedOut) return new LimitsReason('limits probe timed out');
+  if (result.code === 97) return new LimitsReason('limits probe found no Olympus runtime to run under');
+  let step: unknown;
+  try { step = JSON.parse(result.stdout.trim().split('\n').pop() ?? '').failed; } catch { /* no reply: unnamed */ }
+  return new LimitsReason(typeof step === 'string' && PROBE_STEP.test(step) ? `limits probe failed at ${step}`
+    : `limits probe failed before it answered (exit ${result.code})`);
+}
 export async function openLimitsMachine(machine: Machine, transport: Machine = machine): Promise<LimitsMachine> {
   if (!machine.disposable || !transport.disposable) throw new Error('limits requires driver provision');
   const work = mkdtempSync(join(tmpdir(), 'olympus-limits-'));
@@ -14,10 +26,10 @@ export async function openLimitsMachine(machine: Machine, transport: Machine = m
   const call = async (command: string): Promise<any> => {
     const result = await machine.exec(`set -euo pipefail
 rc_bun=$(command -v bun 2>/dev/null || { ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun "$HOME/Library/Application Support/Olympus/runtime/bun" 2>/dev/null || true; } | tail -1)
-[ -n "$rc_bun" ]
+[ -n "$rc_bun" ] || exit 97
 printf '%s' ${quote(JSON.stringify({ command, scratch }))} | "$rc_bun" --no-env-file ${quote(remote)}`, { timeoutMs: 240_000 });
-    // Neither stdout nor stderr belongs in a report: the machine may print credentials or paths on failure.
-    if (result.code !== 0 || result.timedOut) throw new Error('limits probe failed');
+    // Neither stderr nor free stdout belongs in a report: the machine may print credentials or paths on failure.
+    if (result.code !== 0 || result.timedOut) throw probeFailure(result);
     return JSON.parse(result.stdout);
   };
   try {

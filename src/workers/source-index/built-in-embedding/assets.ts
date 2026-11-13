@@ -1,3 +1,5 @@
+import { isMainThread } from 'node:worker_threads';
+import { modelThread } from '../built-in-reasoning/off-thread.ts';
 import { downloadPinnedFile } from '../pinned-download.ts';
 import { sharedDataPath } from '../../../core/olympus-layout.ts';
 // Fetches, verifies and installs the built-in embedding model and its runtime
@@ -242,6 +244,19 @@ export function reportBuiltInEmbeddingVision(
 export async function installBuiltInEmbedding(
   options: BuiltInEmbeddingInstallerOptions = {},
 ): Promise<InstalledBuiltInEmbedding> {
+  // Production installs carry data and a progress listener. Archive inflation,
+  // checksums and recursive replacement belong beside the other model installs.
+  const { onProgress, ...serializable } = options;
+  if (isMainThread && !Object.values(serializable).some(value => typeof value === 'function')) {
+    try {
+      return await modelThread().call<InstalledBuiltInEmbedding>({
+        kind: 'embedding-install', options: { ...serializable, env: options.env ?? process.env },
+      }, { embeddingProgress: onProgress });
+    } catch (error) {
+      const failure = error as Error & { reason?: BuiltInEmbeddingFailureReason };
+      throw new BuiltInEmbeddingInstallError(failure.reason ?? 'runtime_load_failed', failure.message);
+    }
+  }
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
   const platform = options.platform ?? currentPlatform();

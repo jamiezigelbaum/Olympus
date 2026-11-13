@@ -1,3 +1,5 @@
+import { judgeMoney, judgeCount, judgeDuration, judgeHours } from '../judge-format.ts';
+export { judgeMoney, judgeCount, judgeDuration } from '../judge-format.ts';
 import { dashboardPeopleRow } from './people.ts';
 import { judgeArchiveEstimate, judgeChoiceUsesVenice, judgeDefaultCapDollars, JUDGE_PRICE_DATE, LOCAL_JUDGE_MEASUREMENT, VENICE_JUDGE_ESTIMATE, type JudgeChoice, type JudgeObserved, type JudgeSpendingStatus } from '../../classification/judge-spending.ts';
 import { BACKUP_COPY, BACKUP_SECTION_CSS, DASHBOARD_SETTINGS_BACKUP_ID, renderBackupSection } from '../backup-section.ts';
@@ -72,7 +74,7 @@ import {
   dashboardSetupLead,
 } from '../vocabulary.ts';
 
-export interface DashboardJudgeSetup extends JudgeSpendingStatus { cloudModel: string | null; cloudAvailable: boolean; observed?: JudgeObserved }
+export interface DashboardJudgeSetup extends JudgeSpendingStatus { chosen?: boolean; cloudModel: string | null; cloudAvailable: boolean; observed?: JudgeObserved }
 export interface DashboardPageOptions {
   judgeSetup?: DashboardJudgeSetup;
   /** Settings › Back up and restore (backup-section.ts); only for the unlocked local session. */
@@ -220,7 +222,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
     `<section id="private-routing"><h3 class="sect">${escapeHtml(S.answeredTitle)}</h3><p class="pnote">${escapeHtml(S.answeredIntro)}</p>`
       + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml(mode.id)}"><div class="smain"><b>${escapeHtml(mode.label)}</b>${mode.id === 'local-first' ? ` <span class="pnote">· ${escapeHtml(S.recommended)}</span>` : ''}</div><div class="sact"><a class="btn" href="${escapeHtml(home)}">${escapeHtml(S.change)}</a></div></div>` : '')
       + renderModelSetupBlocker(view.model_setup)
-      + `<div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup, { heading: false })}</div>`
+      + `<div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup, { heading: false, judgeSetup: options?.judgeSetup })}</div>`
       + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + '</section>',
     renderZkapiPrivacy(options, token),
     view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
@@ -877,24 +879,4 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
     <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: ${measured ? `measured from its own recent sorting, ${judgeCount(estimate.measuredPerMinute!)} items a minute while it sorts.` : `not measured here yet, so the range is from an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ.`} Times assume this computer sorts about 8 hours a night. ${held} Venice${status.cloudModel ? ` (${escapeHtml(status.cloudModel)})` : ''}: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
-}
-
-/** Whole cents; an amount under a cent says so instead of showing $0.00. */
-export function judgeMoney(dollars: number | null | undefined, bare = false): string {
-  if (dollars === null || dollars === undefined) return 'Cost unavailable';
-  const text = dollars > 0 && dollars < 0.005 ? 'less than $0.01' : dollars.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return bare ? text : `About ${text}`;
-}
-function judgeHours(n: number): string { return n.toLocaleString('en-US', { maximumFractionDigits: 1 }); }
-function judgeCount(n: number): string {
-  const rounded = n >= 1_000 ? Math.round(n / 100) * 100 : n >= 100 ? Math.round(n / 10) * 10 : Math.round(n);
-  return rounded.toLocaleString('en-US');
-}
-/** "About 25 minutes", "About 5 hours", or nights of 8 hours for local sorting. */
-function judgeDuration(hours: number): string {
-  const minutes = Math.max(1, Math.round(hours * 60));
-  if (minutes < 60) return `About ${minutes} minute${minutes === 1 ? '' : 's'}`;
-  if (hours < 8) return `About ${judgeHours(hours)} hour${judgeHours(hours) === '1' ? '' : 's'}`;
-  const nights = Math.round(hours / 8);
-  return `About ${nights} night${nights === 1 ? '' : 's'} (${Math.round(hours)} hours)`;
 }

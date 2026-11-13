@@ -1,4 +1,7 @@
 /** Fresh-user canary. All lifecycle commands run on the machine; no provider credentials leave it. */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Machine } from './machine.ts';
 import type { CheckResult } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type EngineMcp, type LiveSourceSpec } from './live-accounts.ts';
@@ -8,6 +11,7 @@ import type { OnDemandTimingResult } from './on-demand-timing.ts';
 import { runFreshLimits, type FreshLimitsOptions, type LimitsResult } from './fresh-limits.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../../src/workers/answer-model-required.ts';
 import { FIRST_RUN_PRIVACY_REQUIRED_TEXT } from '../../src/workers/first-run-privacy-gate.ts';
+import localFirst from '../../config/sovereignty/presets/local-first.json';
 
 export const FRESH_LEG = 'canary-test-omarchy-fresh';
 export const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -56,6 +60,28 @@ export function validateFreshSources(sources: LiveSourceSpec[]): LiveSourceSpec[
   });
 }
 
+/**
+ * The ports of the model servers the recommended preset expects a person to run. The built-in model covers for one only when
+ * nothing listens there, so a leftover server on such a port keeps a fresh install's sources locked (olympus-ops#221).
+ */
+export const LOCAL_FIRST_PORTS: readonly number[] = Object.values(localFirst.modelProfiles as Record<string, { provider: string; baseUrl?: string }>)
+  .filter((profile) => profile.provider === 'local-openai-compatible' && profile.baseUrl)
+  .map((profile) => new URL(profile.baseUrl!))
+  .filter((url) => url.hostname === '127.0.0.1' || url.hostname === 'localhost')
+  .map((url) => Number(url.port || (url.protocol === 'https:' ? 443 : 80)));
+
+/** Each held port, with the program and user holding it, from `ss -Hltnp` lines; empty when every port is free. */
+export function heldPorts(ssOutput: string, ports: readonly number[]): string[] {
+  const held: string[] = [];
+  for (const port of ports) {
+    const line = ssOutput.split('\n').find((row) => new RegExp(`[:\\]]${port}\\s`).test(row));
+    if (!line) continue;
+    const program = /users:\(\("([^"]+)",pid=(\d+)/.exec(line);
+    held.push(`127.0.0.1:${port} is held by ${program ? `${program[1]} (pid ${program[2]})` : 'a process ss could not name'}`);
+  }
+  return held;
+}
+
 const ROOT = '"$HOME/.olympus-canary/fresh-run"';
 export const FRESH_BRIDGE_PID = '/home/olyfresh/.olympus-canary/owner-bridge.pid';
 export const SOCKET_READY = 'curl -fsS --max-time 2 --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock" http://127.0.0.1:8010/v1/health > /dev/null';
@@ -95,6 +121,8 @@ export interface FreshOptions {
   limits?: FreshLimitsOptions;
   /** Unit-test seam. Every production fresh install runs limits. */
   limitsStage?: typeof runFreshLimits;
+  /** The test Venice key (olympus-ops#211), given to the install on stdin before the walkthrough; never logged or reported. */
+  veniceKey?: string;
   /** Current harness bundle, copied to the fresh user's home for the existing owner-bridge command. */
   bridgeAgent?: string;
   /** Test seam: real implementation uses only dashboard controls and persisted reads. */
@@ -128,6 +156,13 @@ export async function runFreshInstall(machine: Machine, options: FreshOptions): 
     if (interrupted && id !== 'restore-zig') throw new Error('run interrupted');
     checks.push({ id: `fresh.${id}`, title: id, status: 'pass', detail: detail ?? 'persisted effect verified', ms: Date.now() - start });
   };
+  // A check whose failure is recorded without ending the leg, because nothing after it depends on it.
+  const recorded = async (id: string, action: () => Promise<void | string>): Promise<void> => {
+    try { await checked(id, action); } catch (error) {
+      if (interrupted) throw error;
+      checks.push({ id: `fresh.${id}`, title: id, status: 'fail', detail: `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
+    }
+  };
   const exec = async (script: string, timeoutMs = 120_000): Promise<string> => {
     if (interrupted && current !== 'restore-zig') throw new Error('run interrupted');
     const result = await machine.exec(`set -euo pipefail\n${script}`, { timeoutMs });
@@ -136,6 +171,20 @@ export async function runFreshInstall(machine: Machine, options: FreshOptions): 
     return result.stdout;
   };
   try {
+    // A fresh machine has nothing on the ports the recommended preset reaches for; a leftover there is the machine's fault, said at once.
+    await checked('machine-clear', async () => {
+      const result = await machine.exec(`sudo -n ss -Hltnp 2>/dev/null || ss -Hltnp`, { timeoutMs: 30_000 });
+      if (result.code !== 0) throw new Error(`could not list listening ports (exit ${result.code})`);
+      let held = heldPorts(result.stdout, LOCAL_FIRST_PORTS);
+      // Name the unit that keeps it running, so the owner knows what to move (a test unit, olympus-ops#221).
+      held = await Promise.all(held.map(async (line) => {
+        const pid = /\(pid (\d+)\)/.exec(line)?.[1];
+        const unit = pid ? (await machine.exec(`ps -o unit= -p ${pid}`, { timeoutMs: 10_000 }).catch(() => undefined))?.stdout.trim() : undefined;
+        return unit && /^[\w@.-]+$/.test(unit) ? `${line}, unit ${unit}` : line;
+      }));
+      if (held.length > 0) throw new Error(`${held.join('; ')}: the local-first preset's model server port must be free on a fresh machine, or the built-in model never covers for it`);
+      return `${LOCAL_FIRST_PORTS.map((port) => `127.0.0.1:${port}`).join(', ')} free`;
+    });
     await checked('install', async () => {
       await exec(`umask 077
 [ "$(id -un)" = zig ]
@@ -183,8 +232,7 @@ done; exit 1`), 200_000);
     });
     // Nothing has chosen an answer model yet, so Ask must stay callable and explain setup instead of answering (#1370).
     // A failure here is recorded without stopping the leg: nothing after it depends on it.
-    try {
-      await checked('ask-without-model', async () => {
+    await recorded('ask-without-model', async () => {
         // Listing is checked on its own: the call returns the setup text before dispatch, so a call alone can't prove it.
         const listed = await engine!.listTools?.();
         if (!listed) throw new Error('the engine connection cannot list tools');
@@ -195,12 +243,32 @@ done; exit 1`), 200_000);
         if (!result.ok) throw new Error(`source_answer failed instead of explaining setup: ${result.error ?? 'no detail'}`);
         if (result.text.trim() !== ANSWER_MODEL_REQUIRED_TEXT) throw new Error('source_answer did not return the setup text');
         return 'source_answer listed; setup text returned, no answer run';
+    });
+    // With the test Venice key, the walkthrough's "Who checks privacy?" step can save Venice (#1634); without it, it saves this computer.
+    if (options.veniceKey !== undefined) {
+      await checked('venice-key', async () => {
+        if (!options.veniceKey) throw new Error('the Venice key command returned nothing');
+        // The driver carries only the script on stdin, so the key travels as a file through put: 0600 here, on the machine
+        // and in the fresh user's home, read by olympus connect venice --api-key-stdin and removed at once on every side.
+        const local = mkdtempSync(join(tmpdir(), 'rc-venice-'));
+        try {
+          writeFileSync(join(local, 'key'), `${options.veniceKey}\n`, { mode: 0o600 });
+          await machine.put(join(local, 'key'), '/home/zig/.olympus-canary/fresh-run/venice-key');
+        } finally { rmSync(local, { recursive: true, force: true }); }
+        try {
+          await exec(`chmod 600 ${ROOT}/venice-key
+sudo -n install -o olyfresh -g "$(id -gn olyfresh)" -m 600 ${ROOT}/venice-key /home/olyfresh/.olympus-canary/venice-key
+rm -f ${ROOT}/venice-key
+${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.olympus-canary/venice-key" > /dev/null 2>&1; rc=$?; rm -f "$HOME/.olympus-canary/venice-key"; exit $rc')}`, 60_000);
+        } catch (error) {
+          await machine.exec(`rm -f ${ROOT}/venice-key; sudo -n rm -f /home/olyfresh/.olympus-canary/venice-key`, { timeoutMs: 30_000 }).catch(() => undefined);
+          throw new Error(`the test Venice key was not saved: ${error instanceof Error ? error.message : 'unexpected failure'}`);
+        }
+        return 'test Venice key saved through olympus connect venice --api-key-stdin';
       });
-    } catch (error) {
-      if (interrupted) throw error;
-      checks.push({ id: 'fresh.ask-without-model', title: 'ask-without-model', status: 'fail', detail: `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
     }
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9334'); });
+    // Includes the explicit Venice judge choice when first run offers it.
     await checked('privacy-choice', () => dashboard!.privacyChoice());
     for (const source of sources) {
       await checked(`${source.id}.connect`, () => dashboard!.connect(source));
@@ -224,8 +292,9 @@ done; exit 1`), 200_000);
     // A pass keeps the matched item's title out of the report; a failure or skip keeps its reason (counts, refresh
     // times, source labels), which run 6 needed and the old one-line summary threw away.
     checks.push(...(await runLiveAccounts(engine!, { sources, ...(options.sleep ? { sleep, pollMs: 1 } : {}) })).map(c => ({ ...c, detail: c.status === 'pass' ? 'engine status/search verified' : redactFreshDetail(c.detail ?? 'no detail') })));
+    // Answer and scope checks are recorded without ending the leg: the read-on-demand timing after them needs neither.
     for (const source of sources) {
-      await checked(`${source.id}.answer`, async () => {
+      await recorded(`${source.id}.answer`, async () => {
         const answer = await ask(engine!, source.known!.question, sleep);
         const a = answer.structured as any;
         const text = typeof a?.answer === 'string' ? a.answer.toLowerCase() : '';
@@ -237,7 +306,7 @@ done; exit 1`), 200_000);
           throw new Error(`known question was not answered with expected facts and a source citation (${why})`);
         }
       });
-      await checked(`${source.id}.scope-absence`, async () => {
+      await recorded(`${source.id}.scope-absence`, async () => {
         const answer = await ask(engine!, source.fresh!.outside.question, sleep);
         const search = await engine!.call('olympus_search', { question: source.fresh!.outside.question, limit: 100 });
         if (!scopeAbsent(source, answer, search)) throw new Error('outside-scope item leaked, or answer/search could not be verified');

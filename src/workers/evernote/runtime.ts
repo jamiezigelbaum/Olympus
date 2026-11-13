@@ -8,6 +8,7 @@
  * previous connection left), so an install that never connects Evernote
  * creates no file.
  */
+import { createProviderRateLimitReporter, SOURCE_RATE_LIMITED } from '../../core/provider-rate-limits.ts';
 import { existsSync } from 'node:fs';
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { OlympusConfig } from '../../core/config.ts';
@@ -42,6 +43,8 @@ import {
 } from './live-sync.ts';
 
 /** The roster's key for Evernote's attachments (its corpora are the Evernote stores). */
+const providerStops = createProviderRateLimitReporter('evernote');
+
 export const EVERNOTE_ATTACHMENT_EXTRACTION_PROVIDER = 'evernote.attachments';
 export const EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY = 'evernote.attachments:extraction';
 const EVERNOTE_ATTACHMENT_PLAN_LIMIT = 200;
@@ -64,6 +67,7 @@ export interface EvernoteRuntimeOptions {
   downloadHosts?: readonly string[];
   downloadFetch?: typeof fetch;
   pacer?: McpCallPacer;
+  now?: () => Date;
 }
 
 export interface EvernoteRuntime {
@@ -92,6 +96,7 @@ export interface EvernoteRuntime {
 
 export function createEvernoteRuntime(options: EvernoteRuntimeOptions): EvernoteRuntime {
   const env = options.env ?? process.env;
+  const now = options.now ?? (() => new Date());
   let lane: EvernoteTierLane | undefined;
   const openLane = (): EvernoteTierLane => {
     if (lane) return lane;
@@ -124,6 +129,7 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
         handle,
         registryPath: options.registryPath,
         env,
+        now,
         ...(options.serverUrl ? { serverUrl: options.serverUrl } : {}),
         ...(options.fetch ? { fetch: options.fetch } : {}),
         ...(options.downloadHosts ? { downloadHosts: options.downloadHosts } : {}),
@@ -191,11 +197,15 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
               counts: { ...receipt.counts },
               // Slowed by the provider part way: the unread notes wait for the retry, not the next hour.
               ...(receipt.counts.pass_complete === 0 && stopped?.kind === 'rate_limited'
-                ? { retryAt: { at: new Date(Date.now() + EVERNOTE_RATE_LIMIT_RETRY_MS).toISOString(), degradedReason: 'rate_limited' } }
+                ? { retryAt: { at: stopped.resumesAt ?? new Date(now().getTime() + EVERNOTE_RATE_LIMIT_RETRY_MS).toISOString(), degradedReason: 'evernote.rate_limit' } }
                 : {}),
             };
           } catch (error) {
-            throw evernoteSchedulerFailure(error);
+            const failure = evernoteSchedulerFailure(error, now(), sync.status()?.last_error?.resumesAt);
+            if (isMcpSourceError(error, 'rate_limited') && failure instanceof SourceSchedulerTaskFailure && failure.retryAt) {
+              return { status: 'idle', counts: {}, retryAt: failure.retryAt };
+            }
+            throw failure;
           }
         },
       };
@@ -240,12 +250,15 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
 const AUTH_KINDS: ReadonlySet<string> = new Set(['auth_missing', 'auth_expired', 'auth_revoked']);
 
 /** A pass that changed nothing, as the scheduler records it: the provider's kind, and a retry time when it slowed us. */
-export function evernoteSchedulerFailure(error: unknown): unknown {
+export function evernoteSchedulerFailure(error: unknown, now = new Date(), providerResumesAt?: string): unknown {
+  const retryAt = isMcpSourceError(error, 'rate_limited')
+    ? providerResumesAt ?? new Date(now.getTime() + (error.retryAfterMs ?? EVERNOTE_RATE_LIMIT_RETRY_MS)).toISOString() : undefined;
+  if (retryAt) providerStops.report(retryAt, now);
   if (isMcpSourceError(error)) {
     return new SourceSchedulerTaskFailure(error.message, {
       errorKind: AUTH_KINDS.has(error.kind) ? 'credential_missing' : `evernote_${error.kind}`,
       ...(error.kind === 'rate_limited'
-        ? { retryAt: { at: new Date(Date.now() + (error.retryAfterMs ?? EVERNOTE_RATE_LIMIT_RETRY_MS)).toISOString(), degradedReason: 'rate_limited' } }
+        ? { retryAt: { at: retryAt!, degradedReason: 'evernote.rate_limit' } }
         : {}),
     });
   }
@@ -262,7 +275,7 @@ const PASS_ERROR_KIND: Readonly<Partial<Record<McpSourceErrorKind | 'listing_inc
   auth_missing: 'auth',
   auth_expired: 'auth',
   auth_revoked: 'auth',
-  rate_limited: 'rate_limited',
+  rate_limited: SOURCE_RATE_LIMITED,
   listing_incomplete: 'listing_incomplete',
   account_changed: 'account_changed',
   permission_missing: 'unavailable',
@@ -285,3 +298,8 @@ export function evernoteDashboardPass(status: EvernotePassStatus | undefined): D
     ...(errorKind && status.last_error ? { error: { kind: errorKind, at: status.last_error.at } } : {}),
   };
 }
+
+// limit-retry: retry:pass:retryAt_at -> evernote.rate_limit
+
+// limit-retry: retry:evernoteSchedulerFailure:retryAt -> evernote.rate_limit
+// limit-retry: retry:evernoteSchedulerFailure:retryAt_at -> evernote.rate_limit

@@ -14,7 +14,7 @@ import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-
 import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitPackToPromptBytes, type AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
 import { analystPromptFixture } from './helpers/analyst-prompt-fixture.ts';
 import {
-  buildEvalPack,
+  buildEvalPack as buildEvalPackDetail,
   createEvalDropboxLanes,
   evalAnswerRepeat,
   evalAnswerStageAudit,
@@ -38,6 +38,22 @@ import { join } from 'node:path';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { BuiltInSourceEmbeddingProvider } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import { reportBuiltInEmbeddingState } from '../src/workers/source-index/built-in-embedding/assets.ts';
+// The Coverage line, wherever the prompt puts it (the compact prompt asks
+// its question again after it, #1590).
+const coverageLine = (prompt: string): string => prompt.split('\n').find((line) => line.startsWith('Coverage —')) ?? '';
+
+/**
+ * The eval's pack, which must hold evidence: an empty one fails here with the
+ * search's own counts (lanes, skips, drops), not later as a crash on
+ * candidates[0] (#1571, seen only under CI load).
+ */
+async function buildEvalPack(...args: Parameters<typeof buildEvalPackDetail>) {
+  const detail = await buildEvalPackDetail(...args);
+  if (detail.pack.candidates.length === 0) {
+    throw new Error(`the eval pack came back empty: ${JSON.stringify(evalRetrievalAudit(detail))}`);
+  }
+  return detail;
+}
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -112,7 +128,7 @@ describe('the real eval report says why a pack is empty (#1233)', () => {
     });
     expect(marked.packCandidateSources.slice(1).every((seat) => seat.expectedItem === undefined)).toBe(true);
 
-    const empty = evalRetrievalAudit(await buildEvalPack({
+    const empty = evalRetrievalAudit(await buildEvalPackDetail({
       question: 'zebra quartz harmonica', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
     }));
     expect(empty).toMatchObject({ packCandidates: 0, policyDeniedCandidates: 0, unreadCandidates: 0 });
@@ -171,6 +187,45 @@ describe('the real eval report says where an expected value was lost (#1234)', (
     const glued = evalAnswerStageAudit({ expectedAnswerContains: ['4182'] }, pack, answer('The total is 4182USD.'), answer('The total is 4182USD.')).expected[0]!;
     expect(glued).toMatchObject({ inAnalystAnswer: false, answerTokenShape: '9999aaa' });
     expect(glued.packTokenShape).toBeUndefined();
+  });
+
+  test('with draft tracing on, says whether the first draft and the audit prompt held each value (#1590)', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+    const { pack } = await buildEvalPack({
+      question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
+    });
+    const answer = (text: string): AnalystResult => ({ answer: text, citations: [], unanswered: [], sufficient: true } as unknown as AnalystResult);
+    const question = { expectedAnswerContains: ['4182', 'March'] };
+    // The main prompt holds both values; the audit prompt only one. The draft
+    // said both; the audit's answer replaced it and kept one.
+    const mainPrompt = 'Evidence 1: total is 4182 dollars, due in March';
+    const auditPrompt = 'Question: x\nDraft JSON:\n{"answer":"4182 in March"}\nAudit evidence:\nEvidence 1: total is 4182 dollars';
+    // The model fenced its JSON, as models do; the draft is read as the Analyst reads it.
+    const draft = '```json\n' + JSON.stringify({ answer: 'The total is 4182 dollars, due in March.', citations: [] }) + '\n```';
+    const auditOutput = JSON.stringify({ answer: 'The total is 4182 dollars.', citations: [] });
+    const audited = evalAnswerStageAudit(question, pack, answer('The total is 4182 dollars.'), answer('The total is 4182 dollars.'),
+      [mainPrompt, auditPrompt], ['m', 'm'], undefined, { completions: [draft, auditOutput] });
+    expect(audited.auditReplacedDraft).toBe(true);
+    expect(audited.expected.map((value) => value.draftAudit)).toEqual([
+      { inFirstPrompt: true, inFirstDraft: true, inAuditPrompt: true },
+      { inFirstPrompt: true, inFirstDraft: true, inAuditPrompt: false },
+    ]);
+    // A value only in the draft's citations is not in its answer, and an audit
+    // that keeps the draft's answer did not replace it.
+    const citedOnly = JSON.stringify({ answer: 'The total is 4182 dollars.', citations: [{ index: 1, claim: 'due in March' }] });
+    const kept = evalAnswerStageAudit(question, pack, answer('The total is 4182 dollars.'), answer('The total is 4182 dollars.'),
+      [mainPrompt, auditPrompt], ['m', 'm'], undefined, { completions: [citedOnly, auditOutput] });
+    expect(kept.auditReplacedDraft).toBe(false);
+    expect(kept.expected[1]!.draftAudit).toMatchObject({ inFirstDraft: false });
+    // Booleans only: no draft text in the report.
+    expect(JSON.stringify(audited)).not.toContain('due in March');
+    // Off (no completions) or no audit call: no draft fields.
+    const off = evalAnswerStageAudit(question, pack, answer('x'), answer('x'), [mainPrompt, auditPrompt]);
+    expect(off.auditReplacedDraft).toBeUndefined();
+    expect(off.expected[0]!.draftAudit).toBeUndefined();
+    const single = evalAnswerStageAudit(question, pack, answer('x'), answer('x'), [mainPrompt], ['m'], undefined, { completions: [draft] });
+    expect(single.auditReplacedDraft).toBeUndefined();
   });
 
   test('a value only in a locator, a fact or a table counts as in the pack (#1239 review)', async () => {
@@ -482,7 +537,7 @@ describe('the real eval matches what Ask sends a local Analyst (rerun 20)', () =
       (_pack, seats) => kept.push(seats), () => 2, () => gapIndexes).analyze(pack, { localOnly: true });
     expect(calls[1]).toEqual(calls[0]);
     expect(kept[0]).toEqual(fitted.candidates.map((candidate) => pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
-    expect(calls[1]![0]!.prompt.split('\n').at(-1)).toStartWith('Coverage — searched:');
+    expect(coverageLine(calls[1]![0]!.prompt)).toStartWith('Coverage — searched:');
   });
 
   test('the pack is fitted to the local prompt budget, and the seats sent are recorded', async () => {
@@ -735,7 +790,7 @@ describe('evalPromptLayout', () => {
       } }, { evidenceFormat });
       await analyst.analyze(sent, options);
       const measured = evalPromptLayout(sent, options, evidenceFormat);
-      expect(measured.coverageBytes).toBe(Buffer.byteLength(calls[0]!.prompt.split('\n').at(-1)!));
+      expect(measured.coverageBytes).toBe(Buffer.byteLength(coverageLine(calls[0]!.prompt)));
       expect(measured.extractionGapCount).toBe(2);
     }
     expect(layout.promptBytes).toBe(analystPromptBytes(sent, options));

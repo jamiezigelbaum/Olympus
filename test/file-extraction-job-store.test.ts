@@ -1208,14 +1208,14 @@ describe('extraction job store: corpus readiness', () => {
 
     expect(store.corpusReadiness(LANE.corpusId)).toMatchObject({
       blockedByPolicyItems: 1,
-      metadataOnlyExpectedItems: 2,
+      metadataOnlyExpectedItems: 1,
       queuedJobs: 1,
       leasedJobs: 0,
       failedRetryableJobs: 0,
       failedTerminalJobs: 2,
       // 'broken' has nothing left to try: it is unreadable, not homework.
       failedActionableJobs: 0,
-      unreadableItems: 1,
+      unreadableItems: 2,
       retryableDueJobs: 0,
     });
     // Another corpus's jobs are not this corpus's readiness.

@@ -1,3 +1,4 @@
+import { sourceSizeBytes, type SourceSizeLimit } from '../../core/source-size-limits.ts';
 /**
  * B11b — the batch loop: lease, fetch, extract, gate, record, sink.
  *
@@ -260,6 +261,12 @@ class ExtractionEgressRefusedError extends Error {
  */
 export interface ExtractionRunnerCorpus {
   corpusId: string;
+  sizeLimit?: SourceSizeLimit;
+  /**
+   * Store operations belong to the worker composition root. The shared
+   * runner is also loaded by Node and never opens a store or installs hooks.
+   */
+  sizeStops?: { resume(now: Date): void; refresh(now: Date): void };
   trustDomain: SourceTrustDomain;
   source: FileExtractionSource | (() => FileExtractionSource | Promise<FileExtractionSource>);
   sink: ExtractionSink;
@@ -694,6 +701,7 @@ export function createFileExtractionRunner(
      */
     async plan(request: ExtractionPlanRequest): Promise<ExtractionPlanResult> {
       const corpus = requireCorpus(request.corpusId);
+      corpus.sizeStops?.resume(now());
       const source = await resolveSource(corpus);
       const page = await source.listCandidates({
         limit: request.limit,
@@ -705,7 +713,7 @@ export function createFileExtractionRunner(
       // Keyed by kind and the version a job for this media type is queued
       // under (Extractor.versionFor), so a media-scoped version only re-reads
       // that media type.
-      const byKind = new Map<string, { kind: string; version: string; refs: ExtractionItemRef[] }>();
+      const byKind = new Map<string, { kind: string; version: string; maxBytes: number | undefined; refs: ExtractionItemRef[] }>();
       const unroutableRefs: ExtractionItemRef[] = [];
       let jobsUnroutable = 0;
       let jobsSkippedImageNotPrivate = 0;
@@ -737,10 +745,14 @@ export function createFileExtractionRunner(
           logPlanRefusal(request.corpusId, extractor?.kind ?? 'unrouted', PLAN_REFUSED_ROUTING_FAILED, 1, error);
           continue;
         }
-        const key = `${extractor.kind}\u0000${version}`;
+        const sourceMax = corpus.sizeLimit && (!corpus.sizeLimit.bytesOnly || extractor.input.kind !== 'file')
+          ? sourceSizeBytes(corpus.sizeLimit, ref, now()) : undefined;
+        const requestedMax = request.maxBytesPerFile === undefined ? sourceMax : sourceMax === undefined ? request.maxBytesPerFile : Math.min(request.maxBytesPerFile, sourceMax);
+        const maxBytes = boundedByReader(requestedMax, extractor);
+        const key = `${extractor.kind}\u0000${version}\u0000${maxBytes}`;
         const bucket = byKind.get(key);
         if (bucket) bucket.refs.push(ref);
-        else byKind.set(key, { kind: extractor.kind, version, refs: [ref] });
+        else byKind.set(key, { kind: extractor.kind, version, maxBytes, refs: [ref] });
       }
 
       if (unroutableRefs.length > 0) {
@@ -756,10 +768,9 @@ export function createFileExtractionRunner(
       let jobsExisting = 0;
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
-      for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
+      for (const { kind: extractorKind, version: extractorVersion, maxBytes: maxBytesPerFile, refs } of byKind.values()) {
         // A bytes reader's own bound applies to every source: an item whose stated size is over it
         // is queued as too large and never read, whatever the lane asked for.
-        const maxBytesPerFile = boundedByReader(request.maxBytesPerFile, registry.get(extractorKind));
         const enqueue = (bucketRefs: readonly ExtractionItemRef[]): ReturnType<typeof jobs.enqueue> => jobs.enqueue({
           refs: bucketRefs,
           extractorKind,
@@ -820,6 +831,7 @@ export function createFileExtractionRunner(
           prepareReadersWithWaitingWork({ queuedKinds: new Set([extractorKind]) });
         }
       }
+      corpus.sizeStops?.refresh(now());
       const jobsRefused = [...refused.values()].reduce((total, count) => total + count, 0);
 
       return {
@@ -851,6 +863,7 @@ export function createFileExtractionRunner(
 
     async run(request: ExtractionRunRequest): Promise<ExtractionRunResult> {
       const corpus = requireCorpus(request.corpusId);
+      corpus.sizeStops?.resume(now());
       const lane: ExtractionLaneKey = {
         corpusId: request.corpusId,
         provider: request.provider,
@@ -966,6 +979,7 @@ export function createFileExtractionRunner(
           leaseToken: abandoned[0]!.leaseToken,
         });
       }
+      corpus.sizeStops?.refresh(now());
       const nextRetryAt = jobs.nextRetryAt(lane, now());
 
       return {
@@ -1150,7 +1164,10 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
     }
     // The reader's own bound and the job's, whichever is smaller; a source enforces it while reading.
-    const maxBytes = boundedByReader(job.maxBytesPerFile, extractor);
+    const sourceMax = corpus.sizeLimit && (!corpus.sizeLimit.bytesOnly || extractor.input.kind !== 'file')
+      ? sourceSizeBytes(corpus.sizeLimit, job.ref, input.now()) : undefined;
+    const maxBytes = boundedByReader(sourceMax === undefined ? job.maxBytesPerFile
+      : Math.min(sourceMax, job.maxBytesPerFile ?? sourceMax), extractor);
     const fetchStarted = Date.now();
     try {
       if (extractor.input.kind === 'file' && source.fetchFile && input.spoolDir !== undefined) {
@@ -1164,6 +1181,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
         fetched = await source.fetch(job.ref, { ...(maxBytes !== undefined ? { maxBytes } : {}) });
         // Defence in depth: a source that ignored the bound still cannot hand a reader more than it allows.
         if (maxBytes !== undefined && fetched.bytes.byteLength > maxBytes) {
+          input.jobs.recordSizeRefusal(job.jobId, job.leaseToken, { sizeBytes: fetched.bytes.byteLength, maxBytes });
           return { status: 'skipped_too_large', errorKind: 'source_too_large' };
         }
       }
@@ -1172,6 +1190,10 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
       // re-derived here from a status code this module never saw. That is the
       // whole reason the seam carries a precomputed disposition.
       if (isFileExtractionSourceError(error)) {
+        if (error.errorKind === 'source_too_large') input.jobs.recordSizeRefusal(job.jobId, job.leaseToken, {
+          ...(error.sizeBytes !== undefined && Number.isSafeInteger(error.sizeBytes) && error.sizeBytes >= 0 ? { sizeBytes: error.sizeBytes } : {}),
+          ...(maxBytes !== undefined ? { maxBytes } : {}),
+        });
         return {
           status: error.settleAs,
           errorKind: error.errorKind,

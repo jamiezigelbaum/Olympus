@@ -182,6 +182,13 @@ local Dropbox index and a reachable Argus lane:
    wrong in the full pack means the other seats distract it; wrong alone means
    it misreads that document as extracted. It follows
    `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS` when set.
+   To tell an audit that drops a value from a draft that never had it, set
+   `OLYMPUS_EVAL_TRACE_DRAFT_AUDIT=on`. When the graded answer had an audit
+   call, each expected value gets `draftAudit`: whether it is in the first
+   call's prompt, in that call's draft answer and in the audit call's
+   evidence (its quote of the draft left out). `auditReplacedDraft` says
+   whether the audit's answer differs from the draft's. Booleans only; the
+   draft text stays in memory.
    Every answer stage also reports `promptLayout`, which shows where the bytes
    of the prompt the Analyst was sent went. It holds the text every prompt
    carries (system rules, question, coverage), each sent seat's header (name,
@@ -220,6 +227,57 @@ local Dropbox index and a reachable Argus lane:
 `buildEvidencePack` → Analyst on Argus/Delphi → the same release gate the live
 `source_answer` path uses — so the privacy dimension grades real gate decisions,
 not a stub. Exit code 0 means the instantiated set passed.
+
+## Capture candidate pools and replay seating
+
+On the eval machine, capture while running the real questions as usual:
+
+```sh
+OLYMPUS_SOURCE_RERANKER=built-in \
+OLYMPUS_SOURCE_RERANKER_MODEL_DIR=/path/to/installed/reranker \
+bun eval/run-real.ts /path/to/questions.json --capture-pool /tmp/olympus-pools --capture-depth 30
+bun eval/replay-pool.ts /tmp/olympus-pools --store-depth 5,10,30 --pool-size 30,100,400 --keep 5
+```
+
+`OLYMPUS_EVAL_CAPTURE_POOL_DIR` also enables capture. Depth defaults to 30;
+without a capture directory the ordinary eval behavior is unchanged. A requested
+built-in reranker must have its model/tokenizer/runtime files installed and
+load successfully; capture fails clearly otherwise. Each question's ordinary
+answer and grading still run. Informational passes do not overwrite captures.
+
+One JSON file per question records query-run ordinals, store/candidate/item ids,
+store ranks and relevance, adapter/reranker scores, numeric recency and leader
+signals, visibility/policy eligibility, and expected-document/paragraph booleans
+(including alternates). It stores no question/query text, titles, item text,
+quotes or hints. Keep these id-bearing files private on the eval machine.
+Scoring covers the first 400 seated candidates at most; larger captures record
+`scoringTruncated: true`, and retain extra candidates without scores. Temporal
+questions preserve the product's recency seating and skip reranking.
+
+Replay calls the same pure seating and expansion-fusion functions as live
+retrieval. Smaller depths use captured list prefixes: **store rankings must be
+prefix-stable**. It replays the recorded query runs and scores; it cannot predict
+new planner runs, changed passages, or fresh visibility decisions. `--temporal
+as-captured` is the default (`on`/`off` can override seating). `--keep` defaults
+to the captured runner maxResults, before Analyst prompt fitting. Use a fresh
+directory for each capture configuration.
+
+Capture also groups items whose read passages are near duplicates (5-word
+shingle Jaccard of 0.85 or more between every pair in a group; only hashed
+shingles are kept, never text).
+`--max-per-dup-group 1,2` adds variants that keep at most that many items of a
+group in the pool. A collapse drops the extra copies and seats again with the
+same pool budget, so later candidates take the freed seats; only items whose content the capture read can be grouped,
+so a candidate past the captured pool counts as unique. The uncollapsed variant
+stays first, as the baseline. Captures from before groups (version 2) refuse a
+collapse variant.
+
+Tables report each expected document and paragraph's pool rank (before reranking)
+and pack seat (after reranking), totals, and paired wins/losses against the first
+variant with an exact two-sided sign-flip p-value over discordant expected
+entries. Ties do not enter that test. Scored candidates lead; equal scores and
+unscored candidates retain seating order. Add `--json` for machine-readable
+results. The depth and pool-size lists form a Cartesian product, in input order.
 
 ## Where this plugs into the gate
 
@@ -375,6 +433,13 @@ Linux descriptor checks run as stores mount and at completion, checking the
 live default data folder and each repeatable `--forbid-root`. Platforms without
 `/proc/self/fd` require explicit `--allow-no-fd-check`. Keep model assets outside
 forbidden data folders, or point the existing model settings at copied assets.
+The eval's own read-only probes wait up to 10 s on a busy file, as the product's
+read-only opens do, so two eval rows can share one copy. A store or ledger the run
+still cannot open fails it with `EVAL_STORE_UNREADABLE`: the message names which
+open failed, SQLite's code, extended errno and path-free message, and how many
+other processes hold the copy open (Linux). `--allow-unreadable-stores` runs
+without them and records the same facts in `skippedStores`. The passage eval's
+summary line starts with `storesOpened` and `storesSkipped`.
 The existing built-in embedding selection, `OLYMPUS_SOURCE_RERANKER*` settings,
 `OLYMPUS_EVAL_MAX_RESULTS`, and `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` apply.
 `--max-chars-per-candidate` overrides the last setting. The local Analyst lane's

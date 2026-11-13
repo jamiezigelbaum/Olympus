@@ -11,12 +11,14 @@
 
 /**
  * Documents (text, PDF, office files) read whole. Generous, so a large
- * ordinary document is read, while a huge file cannot exhaust memory.
+ * ordinary document is read, while a huge file cannot exhaust memory. This
+ * is a hard memory ceiling: a source-size Raise may never increase it.
  */
 export const DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
 
 /**
  * A reader of still images alone: a phone photo is a few megabytes, and the
  * image preparation (`image-prepare.ts`) takes this same bound as its own.
+ * This hard decoder ceiling also survives every source-size Raise.
  */
 export const IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;

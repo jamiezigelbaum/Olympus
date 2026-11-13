@@ -205,6 +205,14 @@ describe('CLI tool surface', () => {
     ]);
   });
 
+  test('a fatal error prints its hint: a failed upgrade says which stores it put back (gate7, 13 Nov)', () => {
+    const error = new OperationError('config_error', 'The upgraded Olympus worker did not answer its loopback readiness probe.', 'Stores put back as they were before the update: olympus_tier_ledger. The previous version is running and answered its health check.');
+    expect(formatCliFatalError(error)).toEqual([
+      'Error [config_error]: The upgraded Olympus worker did not answer its loopback readiness probe.',
+      'Fix: Stores put back as they were before the update: olympus_tier_ledger. The previous version is running and answered its health check.',
+    ]);
+  });
+
   test('operator errors preserve typed credential contention and retry guidance', () => {
     const error = new CredentialBrokerError(
       'credential_refresh_busy',

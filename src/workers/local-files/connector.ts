@@ -1,3 +1,4 @@
+import { sourceSizeBytes, sourceSizeLimitForProvider } from '../../core/source-size-limits.ts';
 /**
  * Contract 1 (SourceConnector) for files on this computer.
  *
@@ -50,7 +51,6 @@ export const LOCAL_FILES_CURSOR_PREFIX = 'lf1:';
 /** The cursor of a pass that left no change snapshot: the next pass walks again. */
 export const LOCAL_FILES_POLL_CURSOR = `${LOCAL_FILES_CURSOR_PREFIX}poll`;
 
-const DEFAULT_MAX_FETCH_BYTES = 64_000_000;
 const DEFAULT_PAGE_SIZE = 500;
 const DELETED_DESCENDANT_BATCH = 2_000;
 const DELETED_DESCENDANT_MAX_BATCHES = 200;
@@ -230,7 +230,8 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
   const root = normalizeScopePath(options.root);
   const now = options.now ?? (() => new Date());
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
-  const maxFetchBytes = options.maxFetchBytes ?? DEFAULT_MAX_FETCH_BYTES;
+  const sizePolicy = sourceSizeLimitForProvider('local_files')!;
+  const configuredMaxFetchBytes = options.maxFetchBytes ?? sizePolicy.defaultBytes;
   const batchSize = options.deletedDescendantBatch ?? DELETED_DESCENDANT_BATCH;
 
   const resolveRoot = (): { real: string; walkRoot: ScopeRoot } => {
@@ -682,6 +683,11 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
     },
 
     async fetchItemWithin(localItemId, fetchOptions): Promise<RawItem> {
+      const maxFetchBytes = sourceSizeBytes(sizePolicy, {
+        provider: LOCAL_FILES_PROVIDER, accountScope: LOCAL_FILES_ACCOUNT_SCOPE, localItemId,
+        providerItemId: localItemId.slice(localItemId.indexOf(':') + 1),
+        ...(fetchOptions.expectedVersion ? { sourceVersion: fetchOptions.expectedVersion } : {}),
+      }, now(), configuredMaxFetchBytes);
       const identity: SourceItemIdentity = {
         ...identityFor('/'),
         providerItemId: localItemId.slice(localItemId.indexOf(':') + 1),
@@ -714,6 +720,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
         throw new FileExtractionSourceError('source_unavailable');
       }
       const rel = scopePath === holder.scopePath ? '' : scopePath.slice(holder.scopePath === '/' ? 1 : holder.scopePath.length + 1);
+      let readRel = rel;
       try {
         const expected = parseVersion(fetchOptions.expectedVersion);
         const readOptions = {
@@ -729,6 +736,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
           if (!(error instanceof ScopeSafeError) || error.code !== 'not_found' || !/[^\u0000-\u007f]/.test(rel)) throw error;
           const actual = nameAsOnDisk(scopeRoot, rel);
           if (actual === undefined || actual === rel) throw error;
+          readRel = actual;
           bytes = scopeRoot.readFile(actual, readOptions);
         }
         const mimeType = fileMimeTypeFromName(scopePath.slice(scopePath.lastIndexOf('/') + 1));
@@ -742,7 +750,11 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
       } catch (error) {
         if (!(error instanceof ScopeSafeError)) throw new FileExtractionSourceError('source_unavailable');
         switch (error.code) {
-          case 'too_large': return refused({ contentTooLarge: true, maxFetchBytes });
+          case 'too_large': {
+            let sizeBytes: number | undefined;
+            try { sizeBytes = scopeRoot.statRelative(readRel).size; } catch { /* A file may disappear after the refusal. */ }
+            return refused({ contentTooLarge: true, maxFetchBytes, ...(sizeBytes === undefined ? {} : { sizeBytes }) });
+          }
           case 'not_regular': return refused({ contentUnavailable: true });
           case 'permission': throw new FileExtractionSourceError('source_permission_denied');
           default: throw new FileExtractionSourceError('source_unavailable');

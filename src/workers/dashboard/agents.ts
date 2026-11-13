@@ -407,8 +407,12 @@ function instructionsStep(agent: AgentChoice, inStep: boolean): string {
   const skill = agent.id === 'claude' || agent.id === 'local'
     ? `<span class="hint">The Olympus skill is the folder ${escapeHtml(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ''))} inside the plugin folder.</span>`
     : '';
-  return inStep ? `${body}${skill}` : `<p>${body}</p>${skill}`;
+  const tip = agent.id === 'claude' ? `<span class="hint">${escapeHtml(CLAUDE_NO_TOOLS_TIP)}</span>` : '';
+  return inStep ? `${body}${skill}${tip}` : `<p>${body}</p>${skill}${tip}`;
 }
+
+/** Claude sometimes starts a chat without asking Olympus for its tools (#1266); this is the fix that works. */
+const CLAUDE_NO_TOOLS_TIP = 'If Claude says Olympus has no tools, Claude did not ask Olympus for them. In that chat, turn Olympus off and on in the tools menu under the message box, then ask again.';
 
 function copyBox(id: string, text: string, label: string, primary = false): string {
   // Sentences wrap between words; addresses and snippets may break anywhere.

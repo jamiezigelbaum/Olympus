@@ -43,6 +43,13 @@ export const VENICE_JUDGE_ESTIMATE = { date: '2026-11-06', itemsPerMinute: 190, 
 export const SECOND_ROUND_HELD_ASSUMPTION = 0.16;
 /** What this install measured itself (judge-second-round.ts); absent until there are enough samples. */
 export interface JudgeObserved { localItemsPerMinute?: number; heldFraction?: number }
+/** First run: prefer Venice if 1,000 local checks take over an hour.
+ * Observations already withhold the rate until OBSERVED_MIN_CALLS; once
+ * measured here it takes precedence over the runtime's GPU capability. */
+export function judgeLocalIsSlow(observed: JudgeObserved, archive: { gpu: boolean } | undefined): boolean {
+  const rate = observed.localItemsPerMinute;
+  return rate !== undefined ? 1_000 / rate > 60 : archive?.gpu === false;
+}
 export function judgeArchiveEstimate(count: number, model: string, observed: JudgeObserved = {}) {
   const items = Math.max(0, Math.trunc(count));
   const shortHours = items / LOCAL_JUDGE_MEASUREMENT.shortPerMinute / 60;

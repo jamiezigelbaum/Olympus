@@ -186,6 +186,23 @@ export function reportBootStep(env: LayoutEnv, event: BootStepEvent, now: () => 
   }
 }
 
+/**
+ * Runs one long, silent step of a store's update that comes after its
+ * migration commits (a check that reads every row). It reads as part of the
+ * update, a long step, so the waits do not take a check that is still
+ * reading for a stalled boot: on a slow disk the connector store's checks ran
+ * past the five-minute stall limit and the supervisor replaced a background
+ * that was still working (the gate7 forced leg, 2026-11-13).
+ */
+export function duringStoreUpdateStep<T>(env: LayoutEnv, storeId: string, step: () => T): T {
+  reportBootStep(env, { phase: 'migrating', storeId });
+  try {
+    return step();
+  } finally {
+    reportBootStep(env, { phase: 'starting', storeId });
+  }
+}
+
 function write(target: ProgressFile, nowMs: number, force: boolean): void {
   if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS) return;
   try {
@@ -227,6 +244,31 @@ function readProgressFile(path: string): BootProgress | undefined {
  */
 export function bootInProgress(env: LayoutEnv = process.env, now: number = Date.now()): boolean {
   return bootProgressIsLive(readBootProgress(env), now);
+}
+
+/** How long a worker that finished its boot may go without answering before a supervisor gives up on it. */
+export const BOOT_READY_ANSWER_GRACE_MS = 15 * 60 * 1000;
+
+/**
+ * Whether the worker at `pid` is still starting for a supervisor's readiness
+ * wait: its boot work is under way, or it finished its boot (it serves) and
+ * is alive but has not answered yet. A worker that has just become ready runs
+ * its first work at once, and a synchronous step there (a store's backup
+ * before its schema update, an embed batch) holds its event loop for a minute
+ * or more, so the probe times out against a worker that is busy, not dead.
+ * Without this the supervisor replaced it (gate7 success leg on c013270b,
+ * 13 Nov: a 70 s sniffer backup and a 33 s embed block, twice).
+ */
+export function workerStillStarting(
+  env: LayoutEnv,
+  pid: number | undefined,
+  now: number = Date.now(),
+  alive: (pid: number) => boolean = processAlive,
+): boolean {
+  const progress = readBootProgress(env);
+  if (bootProgressIsLive(progress, now, alive)) return true;
+  return progress?.phase === 'done' && pid !== undefined && progress.pid === pid && alive(pid)
+    && now - Date.parse(progress.updatedAt) < BOOT_READY_ANSWER_GRACE_MS;
 }
 
 export function bootProgressIsLive(
@@ -290,17 +332,44 @@ export function retiredStateBackupPath(path: string): string {
 export function retireStatePath(env: LayoutEnv, storeId: string, path: string): boolean {
   if (!existsSync(path)) return false;
   const backup = retiredStateBackupPath(path);
-  if (existsSync(backup)) {
-    // An earlier retire's copy is the older state and stands.
-    rmSync(path, { recursive: true, force: true });
-    return false;
-  }
+  // A copy an earlier start left is older than the state here, which a
+  // version that still used it wrote since: the newer state is the one kept.
+  rmSync(backup, { recursive: true, force: true });
   recordSchemaBackup(env, { storeId, dbPath: path, backupPath: backup });
-  renameSync(path, backup);
-  // The restore and the commit pick their copies by time: this one is from now.
+  // The restore and the commit pick their copies by time, so the time is set
+  // before the move, which keeps it: no moment where the copy is aside but
+  // looks older than the upgrade (#1563 review).
   const now = new Date();
-  utimesSync(backup, now, now);
+  utimesSync(path, now, now);
+  renameSync(path, backup);
   return true;
+}
+
+/**
+ * Removes the part-way copies of `backup` that a killed backup left
+ * (`<backup>.<pid>.partial` and its SQLite sidecars) when that process is
+ * gone. A live process's copy is its own (#1563: a background killed mid-backup
+ * left 33 MB behind, and its successor wrote a second copy beside it).
+ */
+export function removeAbandonedBackupCopies(backup: string): number {
+  const prefix = `${basename(backup)}.`;
+  let names: string[];
+  try {
+    names = readdirSync(dirname(backup));
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const match = /^(\d+)\.partial(?:-journal|-wal|-shm)?$/.exec(name.slice(prefix.length));
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || processAlive(pid)) continue;
+    rmSync(join(dirname(backup), name), { force: true });
+    removed += 1;
+  }
+  return removed;
 }
 
 /** Every pre-update copy of the store at `dbPath` on disk, a copy a crash left part way included. */
@@ -361,17 +430,21 @@ function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
 
 /**
  * Puts back every store backed up at or after `sinceMs`: the backup replaces
- * its database, and the database's -wal and -shm go. Returns the store ids
- * restored. The worker must be stopped first.
+ * its database, and the database's -wal, -shm and -journal go. A -journal
+ * left by a process stopped inside a transaction belongs to the file being
+ * replaced: SQLite would roll it back into the restored copy, which is not
+ * the file it was written for. Returns the store ids restored. The worker
+ * must be stopped first, so every part-way copy a stopped process left is
+ * removed too (the gate7 forced leg, 2026-11-13, left both behind).
  */
 export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): string[] {
   const restored: string[] = [];
   for (const entry of backupsSince(env, sinceMs)) {
-    rmSync(`${entry.dbPath}-wal`, { force: true });
-    rmSync(`${entry.dbPath}-shm`, { force: true });
+    for (const suffix of ['-wal', '-shm', '-journal']) rmSync(`${entry.dbPath}${suffix}`, { force: true });
     renameSync(entry.backupPath, entry.dbPath);
     restored.push(entry.storeId);
   }
+  removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return restored;
 }
@@ -380,8 +453,13 @@ export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): stri
 export function removeSchemaBackupsSince(env: LayoutEnv, sinceMs: number): number {
   const removed = backupsSince(env, sinceMs);
   for (const entry of removed) rmSync(entry.backupPath, { recursive: true, force: true });
+  removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return removed.length;
+}
+
+function removeAbandonedCopiesOfRecorded(env: LayoutEnv): void {
+  for (const backup of new Set(schemaBackups(env).map((entry) => entry.backupPath))) removeAbandonedBackupCopies(backup);
 }
 
 /**
