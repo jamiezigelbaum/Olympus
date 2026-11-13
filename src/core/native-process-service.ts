@@ -713,11 +713,6 @@ async function waitForChildReadiness<TSettings extends NativeProcessStartSetting
   let deadline = Date.now() + input.startupTimeoutMs;
   const acceptsCleanExit = !input.restartOnCleanExit;
   for (;;) {
-    if (Date.now() >= deadline) {
-      if (!startupStillInProgress(input.settings, input.child)) break;
-      deadline = Date.now() + input.startupTimeoutMs;
-      console.log(`[native-process] startup still in progress past ${Math.round(input.startupTimeoutMs / 1000)} s; waiting`);
-    }
     if (!input.isCurrent(input.lifetime)) throw new NativeProcessServiceStoppedError();
     if (input.spawnFailed()) throw new Error('Child exited during startup.');
     if (childExited(input.child)) {
@@ -736,6 +731,15 @@ async function waitForChildReadiness<TSettings extends NativeProcessStartSetting
         throw new Error('Child exited during startup.');
       }
       return 'ready';
+    }
+    // The deadline is read after a probe, never before one: a child that
+    // finished its boot during the last wait reads as no longer in progress
+    // and, without this probe, as timed out while it is ready (the gate7
+    // forced leg, 2026-11-13).
+    if (Date.now() >= deadline) {
+      if (!startupStillInProgress(input.settings, input.child)) break;
+      deadline = Date.now() + input.startupTimeoutMs;
+      console.log(`[native-process] startup still in progress past ${Math.round(input.startupTimeoutMs / 1000)} s; waiting`);
     }
     await delay(input.readinessPollMs);
   }

@@ -6480,12 +6480,6 @@ async function waitForChildReadiness(input) {
   let deadline = Date.now() + input.startupTimeoutMs;
   const acceptsCleanExit = !input.restartOnCleanExit;
   for (;; ) {
-    if (Date.now() >= deadline) {
-      if (!startupStillInProgress(input.settings, input.child))
-        break;
-      deadline = Date.now() + input.startupTimeoutMs;
-      console.log(`[native-process] startup still in progress past ${Math.round(input.startupTimeoutMs / 1000)} s; waiting`);
-    }
     if (!input.isCurrent(input.lifetime))
       throw new NativeProcessServiceStoppedError;
     if (input.spawnFailed())
@@ -6507,6 +6501,12 @@ async function waitForChildReadiness(input) {
         throw new Error("Child exited during startup.");
       }
       return "ready";
+    }
+    if (Date.now() >= deadline) {
+      if (!startupStillInProgress(input.settings, input.child))
+        break;
+      deadline = Date.now() + input.startupTimeoutMs;
+      console.log(`[native-process] startup still in progress past ${Math.round(input.startupTimeoutMs / 1000)} s; waiting`);
     }
     await delay(input.readinessPollMs);
   }
