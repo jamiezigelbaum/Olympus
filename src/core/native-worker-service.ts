@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { bootInProgress } from './boot-progress.ts';
+import { workerStillStarting } from './boot-progress.ts';
 import { quoteCliArgument, readWorkerCliLauncher, renderWorkerCliLauncher, workerCliLauncherPath, writeWorkerCliLauncher } from './worker-cli-launcher.ts';
 import { WORKER_DATA_OWNER_BUSY_EXIT_CODE } from './data-owner-lock.ts';
 import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
@@ -255,7 +255,7 @@ async function prepareWorkerStart(
     endpointOccupied,
     startupFailure: child => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE
       ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
-    startupInProgress: () => bootInProgress(settings.env),
+    startupInProgress: (child) => workerStillStarting(settings.env, child.pid),
     readinessProbe: () => authenticatedReadinessProbe(
       worker.fetchWorker,
       settings.readinessUrl,
@@ -572,7 +572,7 @@ export function engineBackgroundLaunch(input: {
     endpointOccupied: false,
     startupFailure: child => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE
       ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
-    startupInProgress: () => bootInProgress(input.env),
+    startupInProgress: (child) => workerStillStarting(input.env, child.pid),
     async readinessProbe(child) {
       const ready = await probeEngineBackground(fetchBackground, input.authToken, input.instanceId, input.probeTimeoutMs);
       if (ready) input.onReady?.(child);
