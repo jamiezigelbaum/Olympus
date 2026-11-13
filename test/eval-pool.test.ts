@@ -271,4 +271,15 @@ test('near-duplicate passages share a group in the capture, and replay can keep 
   // A capture made before groups were recorded cannot answer a collapse variant.
   expect(() => replayPool({ ...capture, version: 2 }, { storeDepth: 3, poolSize: 400, keep: 2, maxPerDupGroup: 1 })).toThrow('near-duplicate groups');
   expect(parseReplayArgs(['/tmp/c', '--max-per-dup-group', '1,2']).maxPerDupGroups).toEqual([1, 2]);
+  // A collapse that removes nothing keeps the baseline's seats, strength allocation included (Codex on #1623).
+  const unique: typeof capture = { ...capture, strengthAllocation: true, runs: capture.runs.map(run => ({ ...run, lanes: run.lanes.map(lane => ({ ...lane, items: lane.items.map(({ dupGroup: _g, ...rest }) => rest) })) })) };
+  for (const poolSize of [1, 2, 3, 4, 5]) {
+    const plain = replayPool(unique, { storeDepth: 3, poolSize, keep: 2 }).pool.map(i => i.providerItemId);
+    expect(replayPool(unique, { storeDepth: 3, poolSize, keep: 2, maxPerDupGroup: 1 }).pool.map(i => i.providerItemId)).toEqual(plain);
+  }
+  // A collapse frees a seat for the next candidate the budget would seat.
+  for (const poolSize of [2, 3, 4]) {
+    const kept = replayPool(capture, { storeDepth: 3, poolSize, keep: 2, maxPerDupGroup: 1 }).pool;
+    expect(kept.length).toBe(Math.min(poolSize, 2));
+  }
 });

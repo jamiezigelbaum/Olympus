@@ -83,34 +83,48 @@ export function replayPool(capture: PoolCapture, variant: ReplayVariant): Replay
   }
   if (variant.storeDepth > capture.storeDepth) throw new Error(`Requested depth ${variant.storeDepth} exceeds captured depth ${capture.storeDepth} for ${capture.questionId}.`);
   const temporalIntent = variant.temporalIntent ?? capture.temporalIntent;
-  const collapse = variant.maxPerDupGroup !== undefined;
-  const metadata = new Map<SourceIndexRoutedSearchHit, ReplayItem>();
-  const runs = capture.runs.map(run => seatRoutedLanes(run.lanes.map(lane => ({
-    name: lane.corpusId,
-    ...(lane.relevance ? { relevance: lane.relevance } : {}),
-    items: laneAtDepth(lane.items, variant.storeDepth).map(item => {
-      const sourceItem = { family: 'file' as const, provider: 'offline', accountScope: 'offline', providerItemId: item.providerItemId, localItemId: item.localItemId };
-      const kinds: ('keyword_first' | 'name')[] = [];
-      if (item.keywordFirst) kinds.push('keyword_first');
-      if (item.nameLeader) kinds.push('name');
-      const hit: SourceIndexRoutedSearchHit = {
-        corpusId: lane.corpusId, trustDomain: lane.trustDomain, sourceItem, candidateId: item.candidateId, rawExposed: false,
-        ...(item.adapterScore !== undefined ? { score: item.adapterScore } : {}),
-        ...(kinds.length ? { keywordLeader: { kinds, conceptShare: item.conceptShare ?? 0 } } : {}),
-        ...(item.newestInStore !== undefined ? { newestInStore: item.newestInStore, provenance: { sourceItem, citation: { authoredAt: new Date(item.authoredAtMs ?? 0).toISOString() } } } : {}),
-      };
-      metadata.set(hit, { ...item, corpusId: lane.corpusId });
-      return hit;
-    }),
-  })), {
-    // A collapse seats past the pool so later candidates take the seats it frees.
-    maxResults: collapse ? Number.MAX_SAFE_INTEGER : variant.poolSize,
-    ...(capture.strengthAllocation ? { poolAllocation: { storeDepth: variant.storeDepth } } : {}),
-    temporalIntent,
-  }).hits);
-  const seated = runs.length === 1 ? runs[0]! : seatRoutedQueryRuns(runs, collapse ? Number.MAX_SAFE_INTEGER : variant.poolSize, temporalIntent).hits;
-  const eligible = seated.map(hit => metadata.get(hit)!).filter(item => item.packEligible);
-  const pool = collapse ? collapseNearDuplicates(eligible, variant.maxPerDupGroup!).slice(0, variant.poolSize) : eligible;
+  const itemKey = (corpusId: string, item: CapturedItem) => `${corpusId}\u0000${item.candidateId}`;
+  // One seating of the captured lanes at this variant, without the excluded items.
+  const seat = (excluded: ReadonlySet<string>): ReplayItem[] => {
+    const metadata = new Map<SourceIndexRoutedSearchHit, ReplayItem>();
+    const runs = capture.runs.map(run => seatRoutedLanes(run.lanes.map(lane => ({
+      name: lane.corpusId,
+      ...(lane.relevance ? { relevance: lane.relevance } : {}),
+      items: laneAtDepth(lane.items, variant.storeDepth).filter(item => !excluded.has(itemKey(lane.corpusId, item))).map(item => {
+        const sourceItem = { family: 'file' as const, provider: 'offline', accountScope: 'offline', providerItemId: item.providerItemId, localItemId: item.localItemId };
+        const kinds: ('keyword_first' | 'name')[] = [];
+        if (item.keywordFirst) kinds.push('keyword_first');
+        if (item.nameLeader) kinds.push('name');
+        const hit: SourceIndexRoutedSearchHit = {
+          corpusId: lane.corpusId, trustDomain: lane.trustDomain, sourceItem, candidateId: item.candidateId, rawExposed: false,
+          ...(item.adapterScore !== undefined ? { score: item.adapterScore } : {}),
+          ...(kinds.length ? { keywordLeader: { kinds, conceptShare: item.conceptShare ?? 0 } } : {}),
+          ...(item.newestInStore !== undefined ? { newestInStore: item.newestInStore, provenance: { sourceItem, citation: { authoredAt: new Date(item.authoredAtMs ?? 0).toISOString() } } } : {}),
+        };
+        metadata.set(hit, { ...item, corpusId: lane.corpusId });
+        return hit;
+      }),
+    })), {
+      maxResults: variant.poolSize,
+      ...(capture.strengthAllocation ? { poolAllocation: { storeDepth: variant.storeDepth } } : {}),
+      temporalIntent,
+    }).hits);
+    const seated = runs.length === 1 ? runs[0]! : seatRoutedQueryRuns(runs, variant.poolSize, temporalIntent).hits;
+    return seated.map(hit => metadata.get(hit)!).filter(item => item.packEligible);
+  };
+  // A collapse removes the extra copies before the pool is budgeted, so the
+  // seats they free go to whatever the same budget seats next, and a collapse
+  // that removes nothing keeps the baseline's seats (Codex on #1623). Each
+  // round drops the extra copies the last seating held and seats again.
+  const excluded = new Set<string>();
+  let pool = seat(excluded);
+  while (variant.maxPerDupGroup !== undefined) {
+    const kept = new Set(collapseNearDuplicates(pool, variant.maxPerDupGroup));
+    const extra = pool.filter(item => !kept.has(item));
+    if (!extra.length) break;
+    for (const item of extra) excluded.add(itemKey(item.corpusId, item));
+    pool = seat(excluded);
+  }
   // Only valid, applied scores reorder a pool. Failed/timed-out scoring keeps
   // the exact seating order. Ties and unscored items retain that order too.
   const ordered = capture.rerankOutcome === 'applied' ? pool.map((item, index) => ({ item, index })).sort((left, right) => {
