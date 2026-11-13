@@ -42,6 +42,24 @@ and Venice Qwen3 Embedding 8B uses 4096. Unknown/custom models still
 require a verified dimension; the complete custom-settings CLI is a follow-up.
 Do not edit generated worker files or disguise a custom model as a shipped one.
 
+The built-in reranker is on by default at 16 GB of memory and above (16 GiB
+measured RAM), once installed. It downloads with the embedding model: one
+extra download of about 136 MB, with a shared ONNX runtime installed if needed.
+Scoring runs only on this computer. Answers use the fused keyword and vector
+order until the reranker is installed, and continue using that order if
+scoring fails. The model is released after 10 idle minutes and loads again
+on the next score.
+
+Set `OLYMPUS_SOURCE_RERANKER=off` to disable it, or
+`OLYMPUS_SOURCE_RERANKER=built-in` to enable it below 16 GiB. An explicit
+`built-in` setting can use `OLYMPUS_SOURCE_RERANKER_MODEL_DIR` for a different
+model directory; otherwise it uses
+`<built-in embedding root>/reranker/mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6/`.
+Missing model or tokenizer files leave reranking off, with no wait or error.
+`OLYMPUS_SOURCE_RERANKER_POOL` overrides the default pool of 24 candidates;
+`OLYMPUS_SOURCE_RERANKER_MAX_TOKENS` overrides the default 256 tokens per pair
+(up to 512).
+
 The preset prerequisites are:
 
 | Preset | Required before first source answer |

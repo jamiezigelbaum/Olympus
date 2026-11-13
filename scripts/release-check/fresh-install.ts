@@ -84,6 +84,8 @@ export function heldPorts(ssOutput: string, ports: readonly number[]): string[] 
 
 const ROOT = '"$HOME/.olympus-canary/fresh-run"';
 export const FRESH_BRIDGE_PID = '/home/olyfresh/.olympus-canary/owner-bridge.pid';
+// The engine's health, read as the fresh user. Only its reranker counts and install state reach the report.
+const HEALTH_READ = 'curl -fsS --max-time 5 --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock" http://127.0.0.1:8010/v1/health';
 export const SOCKET_READY = 'curl -fsS --max-time 2 --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock" http://127.0.0.1:8010/v1/health > /dev/null';
 /** A machine-side lease survives runner disconnects. EXIT/HUP/INT/TERM and expiry all restore zig. */
 export const GUARD = `set -euo pipefail
@@ -230,6 +232,34 @@ for i in $(seq 1 180); do
 done; exit 1`), 200_000);
       try { engine = await (options.engine ?? openEngineMcp)(fresh); } catch { throw new Error('engine MCP connection failed'); }
     });
+    // The reranker turns itself on once its own ONNX pack and model land; a LiteRT install never ships that pack (#1583).
+    // It downloads from boot, so wait for it first: this holds even when a later step stops the leg, and the answers
+    // then show whether it ranks. Off below 16 GiB RAM, where health leaves it out.
+    let rerankerOn = false;
+    current = 'reranker-ready';
+    const rerankStart = Date.now();
+    const rerankHealth = async () => JSON.parse(await exec(asFresh(HEALTH_READ), 30_000)) as {
+      rerank_outcomes?: { applied?: number; failed?: number; timed_out?: number };
+      reranker_install?: { state?: string; reason?: string; percent?: number };
+    };
+    let health = await rerankHealth();
+    if (!health.rerank_outcomes) {
+      checks.push({ id: 'fresh.reranker-ready', title: 'reranker-ready', status: 'skip', detail: 'reranker off on this machine (below 16 GiB RAM, or turned off)', ms: Date.now() - rerankStart });
+    } else {
+      await checked('reranker-ready', async () => {
+        const deadline = Date.now() + 900_000;
+        while (health.reranker_install?.state !== 'ready') {
+          const install = health.reranker_install;
+          if (install?.state === 'failed') throw new Error(`reranker install failed: ${install.reason ?? 'no reason'}`);
+          if (Date.now() >= deadline) throw new Error(`reranker install not ready within 15 minutes (${install?.state ?? 'no state'}, ${install?.percent ?? 0}%)`);
+          if (interrupted) throw new Error('run interrupted');
+          await sleep(5000);
+          health = await rerankHealth();
+        }
+        rerankerOn = true;
+        return 'runtime pack and model installed';
+      });
+    }
     // Nothing has chosen an answer model yet, so Ask must stay callable and explain setup instead of answering (#1370).
     // A failure here is recorded without stopping the leg: nothing after it depends on it.
     await recorded('ask-without-model', async () => {
@@ -310,6 +340,14 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
         const answer = await ask(engine!, source.fresh!.outside.question, sleep);
         const search = await engine!.call('olympus_search', { question: source.fresh!.outside.question, limit: 100 });
         if (!scopeAbsent(source, answer, search)) throw new Error('outside-scope item leaked, or answer/search could not be verified');
+      });
+    }
+    if (rerankerOn) {
+      await checked('reranker-applied', async () => {
+        const counts = (await rerankHealth()).rerank_outcomes ?? {};
+        const summary = `applied ${counts.applied ?? 0}, failed ${counts.failed ?? 0}, timed out ${counts.timed_out ?? 0}`;
+        if (!((counts.applied ?? 0) > 0) || (counts.failed ?? 0) > 0) throw new Error(`reranker did not rank the answers cleanly (${summary})`);
+        return summary;
       });
     }
     if (options.onDemandTiming) {

@@ -19,6 +19,7 @@ export type ModelThreadRequest =
   | { kind: 'start'; handle: number; launch: LlamaServerLaunch; env?: Record<string, string | undefined> | undefined; stopGraceMs?: number | undefined; killWaitMs?: number | undefined; immediateKill?: boolean | undefined }
   | { kind: 'touch' | 'stop'; handle: number }
   | { kind: 'embedding-install'; options: BuiltInEmbeddingInstallerOptions }
+  | { kind: 'reranker-install'; options: BuiltInEmbeddingInstallerOptions }
   | { kind: 'embedding-load'; handle: number; installed: InstalledBuiltInEmbedding; model: BuiltInEmbeddingModelSpec; env: Record<string, string | undefined>; threads: number }
   | { kind: 'embedding-run'; handle: number; inputs: SourceEmbeddingInput[]; taskType: SourceEmbeddingTaskType; priority: boolean }
   | { kind: 'reranker-load'; handle: number; env: Record<string, string | undefined> }

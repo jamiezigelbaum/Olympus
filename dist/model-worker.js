@@ -447,6 +447,22 @@ function resolveBun() {
   throw new Error("The built-in search model needs Bun, and none was found.");
 }
 
+// src/workers/source-index/built-in-reranker-manifest.ts
+function candidate(modelId, repository, revision, modelFile, modelBytes, modelSha256, tokenizerFile, tokenizerBytes, tokenizerSha256) {
+  const base = `https://huggingface.co/${repository}/resolve/${revision}`;
+  return {
+    modelId,
+    repository,
+    revision,
+    license: "Apache-2.0",
+    maxTokens: 512,
+    model: { name: "model.onnx", url: `${base}/${modelFile}`, bytes: modelBytes, sha256: modelSha256 },
+    tokenizer: { name: tokenizerFile, url: `${base}/${tokenizerFile}`, bytes: tokenizerBytes, sha256: tokenizerSha256 }
+  };
+}
+var MS_MARCO_MINILM_L6_V2 = candidate("ms-marco-MiniLM-L6-v2-fp32-233902d", "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "onnx/model.onnx", 91011230, "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a", "vocab.txt", 231508, "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3");
+var MMARCO_MMINILMV2_L12_H384_V1 = candidate("mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "onnx/model_qint8_arm64.onnx", 118620017, "1825907d6c1a9001ff78124780bbde20a614a8c3df3b63409cf3c72c6fe5c8b4", "tokenizer.json", 17082660, "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626");
+
 // src/workers/source-index/built-in-embedding/assets.ts
 import { isMainThread as isMainThread3 } from "node:worker_threads";
 
@@ -750,9 +766,9 @@ function acquireFileLeaseSync(targetPath, options) {
 function openSqlite(path) {
   if (typeof globalThis.Bun !== "undefined") {
     const { Database } = runtimeRequire("bun:sqlite");
-    const connection = new Database(path);
-    connection.exec("PRAGMA busy_timeout = 0");
-    return connection;
+    const connection2 = new Database(path);
+    connection2.exec("PRAGMA busy_timeout = 0");
+    return connection2;
   }
   const { DatabaseSync } = runtimeRequire("node:sqlite");
   const connection = new DatabaseSync(path);
@@ -1218,8 +1234,8 @@ class ControlPathHeadroom {
     this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
     this.restMs = options.restMs ?? CONTROL_PATH_REST_MS;
     this.now = options.now ?? (() => performance.now());
-    this.turn = options.turn ?? ((ms) => new Promise((resolve) => {
-      setTimeout(resolve, ms);
+    this.turn = options.turn ?? ((ms) => new Promise((resolve4) => {
+      setTimeout(resolve4, ms);
     }));
     this.log = options.log ?? ((line) => console.error(line));
     this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
@@ -1440,7 +1456,7 @@ async function downloadPinnedFile(options) {
         controller.abort();
       }
       if (retry)
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * 2 ** (retries - 1)));
+        await new Promise((resolve4) => setTimeout(resolve4, RETRY_DELAY_MS * 2 ** (retries - 1)));
     }
     close();
     if (received !== expectedBytes || hash.digest(encoding) !== options.digest) {
@@ -1670,9 +1686,9 @@ var LOCAL_FILE_HEADER = 67324752;
 function readZipEntry(archive, name) {
   const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
   let end = -1;
-  for (let offset = archive.length - 22;offset >= Math.max(0, archive.length - 22 - 65535); offset -= 1) {
-    if (view.getUint32(offset, true) === END_OF_CENTRAL_DIRECTORY) {
-      end = offset;
+  for (let offset2 = archive.length - 22;offset2 >= Math.max(0, archive.length - 22 - 65535); offset2 -= 1) {
+    if (view.getUint32(offset2, true) === END_OF_CENTRAL_DIRECTORY) {
+      end = offset2;
       break;
     }
   }
@@ -1724,8 +1740,8 @@ var DOWNLOAD_STALL_MS = 2 * 60000;
 
 class BuiltInEmbeddingInstallError extends Error {
   reason;
-  constructor(reason, message) {
-    super(message);
+  constructor(reason, message2) {
+    super(message2);
     this.name = "BuiltInEmbeddingInstallError";
     this.reason = reason;
   }
@@ -1807,6 +1823,54 @@ async function installBuiltInEmbedding(options = {}) {
       throw new BuiltInEmbeddingInstallError(failure.reason ?? "runtime_load_failed", failure.message);
     }
   }
+  return installEmbeddingAssets(options);
+}
+async function installBuiltInReranker(options = {}) {
+  const { onProgress, ...serializable } = options;
+  if (isMainThread3 && !Object.values(serializable).some((value) => typeof value === "function")) {
+    await modelThread().call({ kind: "reranker-install", options: { ...serializable, env: options.env ?? process.env } }, { embeddingProgress: onProgress }).catch((error) => failRerankerInstall(rerankerReporter(options), error));
+    return;
+  }
+  const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
+  const paths = builtInEmbeddingPaths(options.env, options.model);
+  const reporter = rerankerReporter(options);
+  try {
+    ensureDirectory(paths.root);
+    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+      const dir = join7(paths.root, "reranker", model.modelId);
+      ensureDirectory(dir);
+      const files = [model.model, model.tokenizer];
+      const pending = files.filter((file) => !existsSync6(join7(dir, file.name)));
+      const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
+      const platform = options.platform ?? currentPlatform();
+      const runtimeDir = builtInEmbeddingPaths(options.env, ARCTIC_EMBED_M_V1_5, runtime, platform).runtimeDir;
+      const packages = [runtime.common, runtime.runtime];
+      const needsRuntime = !options.skipRuntime && !runtimeInstalled(runtimeDir, packages);
+      if (needsRuntime && !runtime.platforms.includes(platform)) {
+        throw new BuiltInEmbeddingInstallError("unsupported_platform", `The built-in reranker does not run on ${platform}.`);
+      }
+      reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0) + (needsRuntime ? packages.reduce((sum, pack) => sum + pack.bytes, 0) : 0));
+      for (const file of pending) {
+        await downloadVerified(options.fetchImpl ?? fetch, file.url, join7(dir, file.name), file.bytes, { kind: "sha256", expected: file.sha256 }, reporter, "Downloading the built-in reranker", options.downloadStallMs ?? DOWNLOAD_STALL_MS);
+      }
+      if (needsRuntime) {
+        await installRuntime(options.fetchImpl ?? fetch, runtimeDir, packages, platform, reporter, options.downloadStallMs ?? DOWNLOAD_STALL_MS);
+      }
+      await verifyModelFiles(dir, files, reporter, false);
+      reporter.set("ready", "Built-in reranker installed", 100);
+    });
+  } catch (error) {
+    failRerankerInstall(reporter, error);
+  }
+}
+function rerankerReporter(options) {
+  const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
+  return new ProgressReporter(join7(builtInEmbeddingPaths(options.env, options.model).root, "reranker-status.json"), model.modelId, options.now, options.onProgress);
+}
+function failRerankerInstall(reporter, error) {
+  reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : "disk_write_failed", `Built-in reranker could not be installed; the next start will retry. ${error instanceof Error ? error.message : String(error)}`);
+}
+async function installEmbeddingAssets(options) {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
   const platform = options.platform ?? currentPlatform();
@@ -1964,12 +2028,12 @@ function installComplete(paths, modelFiles, runtimePackages) {
   return modelFiles.every((file) => existsSync6(join7(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
 }
 var verifiedThisProcess;
-async function verifyModelFiles(dir, files, reporter) {
+async function verifyModelFiles(dir, files, reporter, useCache = true) {
   for (const file of files) {
     const path = join7(dir, file.name);
     const key = `${path}:${file.sha256}`;
     verifiedThisProcess ??= new Set;
-    if (verifiedThisProcess.has(key))
+    if (useCache && verifiedThisProcess.has(key))
       continue;
     const size = statSync3(path).size;
     const digest = size === file.bytes ? await sha256File(path) : undefined;
@@ -1982,6 +2046,9 @@ async function verifyModelFiles(dir, files, reporter) {
   reporter.touch();
 }
 var RUNTIME_MARKER = "olympus-runtime.json";
+function builtInOnnxRuntimeInstalled(runtimeDir, runtime = ONNX_RUNTIME_PACK) {
+  return runtimeInstalled(runtimeDir, [runtime.common, runtime.runtime]);
+}
 function runtimeInstalled(runtimeDir, packages) {
   try {
     const marker = JSON.parse(readFileSync4(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
@@ -2050,7 +2117,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     stallMs,
     verifyTimeoutMs: 10 * 60000,
     keepPartial: false,
-    error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
+    error: (reason, message2) => new BuiltInEmbeddingInstallError(reason, message2),
     onStart: () => reporter.set("downloading", label),
     onProgress: (bytes) => reporter.advance(bytes, label)
   });
@@ -2063,7 +2130,7 @@ function integrityAlgorithm(integrity) {
   return algorithm;
 }
 function sha256File(path, timeoutMs = 10 * 60000) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve4, reject) => {
     const hash = createHash2("sha256");
     let settled = false;
     const stream = createReadStream2(path);
@@ -2076,7 +2143,7 @@ function sha256File(path, timeoutMs = 10 * 60000) {
         stream.destroy();
         reject(error);
       } else {
-        resolve(hash.digest("hex"));
+        resolve4(hash.digest("hex"));
       }
     };
     const timer = setTimeout(() => finish(new BuiltInEmbeddingInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -2091,7 +2158,7 @@ async function withInstallLock(lockPath, waitMs, run) {
     if (Date.now() > deadline) {
       throw new BuiltInEmbeddingInstallError("download_failed", "Another Olympus process is still installing the built-in search model.");
     }
-    await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+    await new Promise((resolve4) => setTimeout(resolve4, LOCK_POLL_MS));
   }
   try {
     await run();
@@ -2191,12 +2258,12 @@ class ProgressReporter {
     if (this.status.state === "downloading")
       this.set("verifying", "Checking the built-in search model", 99);
   }
-  fail(reason, message) {
+  fail(reason, message2) {
     this.status = {
       ...this.status,
       state: "failed",
       label: "The built-in search model could not be installed",
-      failure: { reason, message }
+      failure: { reason, message: message2 }
     };
     this.emit(true);
   }
@@ -2228,8 +2295,8 @@ import { dirname as dirname11, join as join11 } from "node:path";
 class OperationError extends Error {
   code;
   suggestion;
-  constructor(code, message, suggestion) {
-    super(message);
+  constructor(code, message2, suggestion) {
+    super(message2);
     this.name = "OperationError";
     this.code = code;
     this.suggestion = suggestion;
@@ -2928,8 +2995,8 @@ function isMediaCachePath(path, sha256, dir) {
   if (dir !== undefined && dirname9(path) !== resolve4(dir))
     return false;
   try {
-    const stat = lstatSync3(path);
-    if (!stat.isFile())
+    const stat2 = lstatSync3(path);
+    if (!stat2.isFile())
       return false;
   } catch {}
   return true;
@@ -3035,12 +3102,12 @@ function readOwnerConfigFile(path) {
   }
   return { status: "ok", text, stamp };
 }
-function stampOf(stat) {
-  return `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+function stampOf(stat2) {
+  return `${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
 }
-function ownedByThisUser(stat) {
+function ownedByThisUser(stat2) {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-  return uid === undefined || stat.uid === uid;
+  return uid === undefined || stat2.uid === uid;
 }
 
 // src/core/zkapi-consult-settings.ts
@@ -3096,8 +3163,8 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   }
   let stamp;
   try {
-    const stat = statSync6(path);
-    stamp = `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    const stat2 = statSync6(path);
+    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
   } catch (error) {
     if (error.code === "ENOENT") {
       policyFile.seen = `${path}:absent`;
@@ -3208,8 +3275,8 @@ async function defaultLookupAll(hostname) {
 
 class ZkapiDaemonEndpointRefusal extends OperationError {
   reason;
-  constructor(reason, message, policyPath) {
-    super("config_error", message, refusalSuggestion(reason, policyPath));
+  constructor(reason, message2, policyPath) {
+    super("config_error", message2, refusalSuggestion(reason, policyPath));
     this.name = "ZkapiDaemonEndpointRefusal";
     this.reason = reason;
   }
@@ -3315,9 +3382,9 @@ function isRedirectResponse(response) {
 }
 function discardBody(response) {
   try {
-    const cancelled = response.body?.cancel();
-    if (cancelled && typeof cancelled.catch === "function") {
-      cancelled.catch(() => {
+    const cancelled2 = response.body?.cancel();
+    if (cancelled2 && typeof cancelled2.catch === "function") {
+      cancelled2.catch(() => {
         return;
       });
     }
@@ -3388,8 +3455,8 @@ class TransientSourceEmbeddingError extends OperationError {
   reason;
   modelStarting;
   constructor(provider, reason, attempts, budgetMs = 0, options = {}) {
-    const { message, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
-    super("source_index_error", message, suggestion);
+    const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
+    super("source_index_error", message2, suggestion);
     this.name = "TransientSourceEmbeddingError";
     this.reason = reason;
     this.modelStarting = options.modelStarting === true;
@@ -3426,8 +3493,8 @@ class RemoteLiteRtEmbedder {
   async embed(items) {
     const previous = this.slot;
     let unlock;
-    this.slot = new Promise((resolve) => {
-      unlock = resolve;
+    this.slot = new Promise((resolve5) => {
+      unlock = resolve5;
     });
     await previous;
     try {
@@ -3459,7 +3526,7 @@ class RemoteLiteRtEmbedder {
         const bytes = Buffer.from(response.vectors, "base64");
         if (bytes.length !== items.length * identity.dimension * 4)
           throw new Error("Invalid remote vector length.");
-        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
+        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_2, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
         if (vectors.some((vector) => vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0))) {
           throw new Error("Invalid remote vector values.");
         }
@@ -3994,7 +4061,7 @@ class BuiltInSourceEmbeddingProvider {
   async withSlot(taskType, run) {
     if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
       if (this.prioritySlotBusy)
-        await new Promise((resolve) => this.priorityWaiting.push(resolve));
+        await new Promise((resolve5) => this.priorityWaiting.push(resolve5));
       else
         this.prioritySlotBusy = true;
       try {
@@ -4008,7 +4075,7 @@ class BuiltInSourceEmbeddingProvider {
       }
     }
     if (this.slotBusy) {
-      await new Promise((resolve) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve));
+      await new Promise((resolve5) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve5));
     } else {
       this.slotBusy = true;
     }
@@ -4265,9 +4332,9 @@ class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
 function builtInEmbeddingOperationError(error) {
   if (error instanceof OperationError)
     return error;
-  const message = error instanceof Error ? error.message : String(error);
+  const message2 = error instanceof Error ? error.message : String(error);
   const reason = error instanceof BuiltInEmbeddingInstallError ? error.reason : undefined;
-  return new OperationError("source_index_error", message, reason === "unsupported_platform" ? "Choose another embedding provider for this machine in the model settings." : reason === "download_failed" ? "Check the internet connection; Olympus tries the download again automatically." : reason === "disk_write_failed" ? "Free some disk space; Olympus tries again automatically." : "Olympus removes the bad file and downloads it again automatically.");
+  return new OperationError("source_index_error", message2, reason === "unsupported_platform" ? "Choose another embedding provider for this machine in the model settings." : reason === "download_failed" ? "Check the internet connection; Olympus tries the download again automatically." : reason === "disk_write_failed" ? "Free some disk space; Olympus tries again automatically." : "Olympus removes the bad file and downloads it again automatically.");
 }
 function planBatches(windows) {
   const ordered = [...windows].sort((left, right) => right.ids.length - left.ids.length);
@@ -4318,7 +4385,7 @@ function resolveThreads(explicit, env) {
 
 // src/workers/source-index/built-in-reranker.ts
 import { isMainThread as isMainThread5 } from "node:worker_threads";
-import { availableParallelism as availableParallelism2 } from "node:os";
+import { availableParallelism as availableParallelism2, totalmem } from "node:os";
 import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
 import { isAbsolute as isAbsolute8, join as join12 } from "node:path";
 
@@ -4647,7 +4714,7 @@ var parse_character_class = (regex, start, ascii_fold, apply_ascii_fold = true, 
         }
         throw new SyntaxError(`Empty character class at index ${start}`);
       }
-      const contains_complex_set = operands.some((candidate) => candidate.contains_complex_set);
+      const contains_complex_set = operands.some((candidate2) => candidate2.contains_complex_set);
       if (negated && operands.length > 1 && contains_nested_negated_complex_set) {
         throw new SyntaxError(`Unsupported outer-negated character-class intersection with a nested negated class containing a Unicode property, POSIX class, or shorthand at index ${start}`);
       }
@@ -6676,22 +6743,6 @@ class JsonPairTokenizer {
   }
 }
 
-// src/workers/source-index/built-in-reranker-manifest.ts
-function candidate(modelId, repository, revision, modelFile, modelBytes, modelSha256, tokenizerFile, tokenizerBytes, tokenizerSha256) {
-  const base = `https://huggingface.co/${repository}/resolve/${revision}`;
-  return {
-    modelId,
-    repository,
-    revision,
-    license: "Apache-2.0",
-    maxTokens: 512,
-    model: { name: "model.onnx", url: `${base}/${modelFile}`, bytes: modelBytes, sha256: modelSha256 },
-    tokenizer: { name: tokenizerFile, url: `${base}/${tokenizerFile}`, bytes: tokenizerBytes, sha256: tokenizerSha256 }
-  };
-}
-var MS_MARCO_MINILM_L6_V2 = candidate("ms-marco-MiniLM-L6-v2-fp32-233902d", "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "onnx/model.onnx", 91011230, "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a", "vocab.txt", 231508, "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3");
-var MMARCO_MMINILMV2_L12_H384_V1 = candidate("mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "onnx/model_qint8_arm64.onnx", 118620017, "1825907d6c1a9001ff78124780bbde20a614a8c3df3b63409cf3c72c6fe5c8b4", "tokenizer.json", 17082660, "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626");
-
 // src/workers/source-index/built-in-reranker.ts
 var SOURCE_RERANKER_ENV = "OLYMPUS_SOURCE_RERANKER";
 var SOURCE_RERANKER_MODEL_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_MODEL_DIR";
@@ -6701,11 +6752,48 @@ var SOURCE_RERANKER_RUNTIME_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR"
 var SOURCE_RERANKER_MAX_TOKENS_ENV = "OLYMPUS_SOURCE_RERANKER_MAX_TOKENS";
 var MAX_PAIR_TOKENS = 512;
 var BATCH_SIZE = 8;
+var DEFAULT_PAIR_TOKENS = 256;
+var IDLE_RELEASE_MS = 10 * 60000;
+var DEFAULT_ON_MIN_MEMORY_BYTES = 16 * 1024 ** 3;
 function createCrossEncoderReranker(options) {
-  const maxPairTokens = options.maxPairTokens ?? MAX_PAIR_TOKENS;
+  const maxPairTokens = options.maxPairTokens ?? DEFAULT_PAIR_TOKENS;
   const batchSize = Math.max(1, options.batchSize ?? BATCH_SIZE);
+  const timers = options.timers ?? {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (handle) => clearTimeout(handle)
+  };
   let loading;
-  const session = () => {
+  let releasing;
+  let active = 0;
+  let lastActivity = timers.now();
+  let idleTimer;
+  const cancelIdle = () => {
+    if (idleTimer !== undefined)
+      timers.clearTimeout(idleTimer);
+    idleTimer = undefined;
+  };
+  const armIdle = () => {
+    cancelIdle();
+    if (active || !loading || releasing)
+      return;
+    idleTimer = timers.setTimeout(() => {
+      idleTimer = undefined;
+      if (active || !loading)
+        return;
+      const previous = loading;
+      loading = undefined;
+      releasing = previous.then((model) => model.release?.()).catch(() => {
+        return;
+      }).finally(() => {
+        releasing = undefined;
+      });
+    }, Math.max(0, IDLE_RELEASE_MS - (timers.now() - lastActivity)));
+    idleTimer?.unref?.();
+  };
+  const session = async () => {
+    if (releasing)
+      await releasing;
     loading ??= options.session().catch((error) => {
       loading = undefined;
       throw error;
@@ -6717,49 +6805,76 @@ function createCrossEncoderReranker(options) {
     localOnly: true,
     poolSize: options.poolSize ?? DEFAULT_RERANK_POOL_SIZE,
     async prepare() {
-      await session();
+      active++;
+      cancelIdle();
+      lastActivity = timers.now();
+      try {
+        await session();
+      } finally {
+        active--;
+        armIdle();
+      }
     },
     async score(request) {
-      const model = await session();
-      const scores = [];
-      for (let start = 0;start < request.passages.length; start += batchSize) {
-        if (request.signal.aborted)
-          throw new Error("Reranking was abandoned.");
-        const pairs = request.passages.slice(start, start + batchSize).map((passage) => options.tokenizer.encodePair(request.query, passage, maxPairTokens));
-        const sequenceLength = Math.max(...pairs.map((pair) => pair.ids.length));
-        const size = pairs.length * sequenceLength;
-        const inputIds = new BigInt64Array(size).fill(BigInt(options.tokenizer.padId));
-        const attentionMask = new BigInt64Array(size);
-        const tokenTypeIds = new BigInt64Array(size);
-        pairs.forEach((pair, row) => {
-          pair.ids.forEach((id, column) => {
-            const at = row * sequenceLength + column;
-            inputIds[at] = BigInt(id);
-            attentionMask[at] = 1n;
-            tokenTypeIds[at] = BigInt(pair.typeIds[column]);
+      active++;
+      cancelIdle();
+      lastActivity = timers.now();
+      try {
+        const model = await session();
+        const scores = [];
+        for (let start = 0;start < request.passages.length; start += batchSize) {
+          if (request.signal.aborted)
+            throw new Error("Reranking was abandoned.");
+          const pairs = request.passages.slice(start, start + batchSize).map((passage) => options.tokenizer.encodePair(request.query, passage, maxPairTokens));
+          const sequenceLength = Math.max(...pairs.map((pair) => pair.ids.length));
+          const size = pairs.length * sequenceLength;
+          const inputIds = new BigInt64Array(size).fill(BigInt(options.tokenizer.padId));
+          const attentionMask = new BigInt64Array(size);
+          const tokenTypeIds = new BigInt64Array(size);
+          pairs.forEach((pair, row) => {
+            pair.ids.forEach((id, column) => {
+              const at = row * sequenceLength + column;
+              inputIds[at] = BigInt(id);
+              attentionMask[at] = 1n;
+              tokenTypeIds[at] = BigInt(pair.typeIds[column]);
+            });
           });
-        });
-        const output = await model.run({ inputIds, attentionMask, tokenTypeIds, batchSize: pairs.length, sequenceLength });
-        if (output.dims.length !== 2 || output.dims[0] !== pairs.length || output.dims[1] !== 1) {
-          throw new Error("The reranker model returned an unexpected output.");
+          const output = await model.run({ inputIds, attentionMask, tokenTypeIds, batchSize: pairs.length, sequenceLength });
+          if (output.dims.length !== 2 || output.dims[0] !== pairs.length || output.dims[1] !== 1) {
+            throw new Error("The reranker model returned an unexpected output.");
+          }
+          scores.push(...output.data);
         }
-        scores.push(...output.data);
+        return scores;
+      } finally {
+        active--;
+        armIdle();
       }
-      return scores;
     }
   };
 }
+function builtInRerankerMayRun(env = process.env, memory = totalmem) {
+  const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
+  if (mode === "built-in")
+    return true;
+  return mode === undefined && memory() >= DEFAULT_ON_MIN_MEMORY_BYTES;
+}
 function builtInRerankerFromEnv(options = {}) {
   const env = options.env ?? process.env;
-  if (env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() !== "built-in")
+  if (!builtInRerankerMayRun(env, options.totalmem))
     return;
-  const modelDir = env[SOURCE_RERANKER_MODEL_DIR_ENV]?.trim();
+  const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
+  const modelDir = (mode === "built-in" ? env[SOURCE_RERANKER_MODEL_DIR_ENV]?.trim() : undefined) || join12(builtInEmbeddingPaths(env).root, "reranker", MMARCO_MMINILMV2_L12_H384_V1.modelId);
   if (!modelDir || !isAbsolute8(modelDir))
     return;
   const modelPath = join12(modelDir, "model.onnx");
   const vocabularyPath = join12(modelDir, "vocab.txt");
   const tokenizerPath = join12(modelDir, "tokenizer.json");
   if (!existsSync8(modelPath) || !existsSync8(vocabularyPath) && !existsSync8(tokenizerPath))
+    return;
+  const runtimeOverride = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim();
+  const runtimeDir = runtimeOverride || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
+  if (!options.runtime && !runtimeOverride && !builtInOnnxRuntimeInstalled(runtimeDir))
     return;
   if (isMainThread5 && !options.runtime) {
     const handle = modelThreadHandleId();
@@ -6781,7 +6896,6 @@ function builtInRerankerFromEnv(options = {}) {
       }
     };
   }
-  const runtimeDir = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim() || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
   const runtime = options.runtime ?? onnxRuntimeFromDirectory(runtimeDir);
   const threads = positiveInteger2(env[SOURCE_RERANKER_THREADS_ENV]) ?? Math.max(1, Math.min(4, Math.floor(availableParallelism2() / 2)));
   const poolSize = positiveInteger2(env[SOURCE_RERANKER_POOL_ENV]);
@@ -6948,8 +7062,8 @@ var SERVER_BINARY = "llama-server";
 class BuiltInReasoningInstallError extends Error {
   reason;
   shortfall;
-  constructor(reason, message, shortfall) {
-    super(message);
+  constructor(reason, message2, shortfall) {
+    super(message2);
     this.name = "BuiltInReasoningInstallError";
     this.reason = reason;
     this.shortfall = shortfall;
@@ -7202,7 +7316,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
   }
 }
 function extractWithTar(archivePath, targetDir) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = spawn2("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr?.on("data", (chunk) => {
@@ -7220,7 +7334,7 @@ function extractWithTar(archivePath, targetDir) {
     child.on("close", (status, signal) => {
       clearTimeout(timer);
       if (status === 0)
-        resolve();
+        resolve5();
       else
         reject(new Error(stderr.trim() || `tar exited with ${status ?? signal}`));
     });
@@ -7234,10 +7348,10 @@ function locateFile(root, name, depth = 0, prefix = "") {
     return;
   }
   if (entries.includes(name)) {
-    const relative = prefix ? `${prefix}/${name}` : name;
+    const relative4 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync7(join13(root, relative)).isFile())
-        return relative;
+      if (statSync7(join13(root, relative4)).isFile())
+        return relative4;
     } catch {}
   }
   if (depth >= 2)
@@ -7270,7 +7384,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     stallMs,
     verifyTimeoutMs: VERIFY_TIMEOUT_MS,
     keepPartial: true,
-    error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
+    error: (reason, message2) => new BuiltInReasoningInstallError(reason, message2),
     diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname12(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
     write: space.write,
     onStart: () => reporter.set("downloading", label),
@@ -7278,7 +7392,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   });
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve5, reject) => {
     let done = 0;
     let settled = false;
     const stream = createReadStream3(path);
@@ -7291,7 +7405,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         stream.destroy();
         reject(error);
       } else {
-        resolve();
+        resolve5();
       }
     };
     const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -7316,7 +7430,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
     }
-    await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS2));
+    await new Promise((resolve5) => setTimeout(resolve5, LOCK_POLL_MS2));
   }
   const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
   refresh.unref?.();
@@ -7433,12 +7547,12 @@ class ProgressReporter2 {
     this.status = { ...rest, state, label, percent };
     this.emit(true);
   }
-  fail(reason, message, shortfall) {
+  fail(reason, message2, shortfall) {
     this.status = {
       ...this.status,
       state: "failed",
       label: reason === "insufficient_space" ? `Waiting for free disk space to download the ${this.noun}` : `The ${this.noun} could not be installed`,
-      failure: { reason, message, ...shortfall ?? {} }
+      failure: { reason, message: message2, ...shortfall ?? {} }
     };
     this.emit(true);
   }
@@ -7468,22 +7582,22 @@ import { createServer } from "node:net";
 import { availableParallelism as availableParallelism3, setPriority, tmpdir } from "node:os";
 import { join as join14 } from "node:path";
 class LlamaServerStartError extends Error {
-  constructor(message) {
-    super(message);
+  constructor(message2) {
+    super(message2);
     this.name = "LlamaServerStartError";
   }
 }
 
 class LlamaServerStillExitingError extends LlamaServerStartError {
-  constructor(message) {
-    super(message);
+  constructor(message2) {
+    super(message2);
     this.name = "LlamaServerStillExitingError";
   }
 }
 
 class LlamaServerStopError extends Error {
-  constructor(message) {
-    super(message);
+  constructor(message2) {
+    super(message2);
     this.name = "LlamaServerStopError";
   }
 }
@@ -7751,7 +7865,7 @@ function createLlamaServerHandle(launch, options = {}) {
       if (Date.now() > deadline) {
         fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
-      await new Promise((resolve) => setTimeout(resolve, HEALTH_POLL_MS));
+      await new Promise((resolve5) => setTimeout(resolve5, HEALTH_POLL_MS));
     }
     if (current !== spawned || spawned.exited) {
       throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
@@ -7771,9 +7885,9 @@ function createLlamaServerHandle(launch, options = {}) {
         return endpoint;
       const callerGeneration = generation;
       while (starting?.controller.signal.aborted) {
-        const cancelled = starting;
+        const cancelled2 = starting;
         try {
-          await abortable(cancelled.promise.then(() => {
+          await abortable(cancelled2.promise.then(() => {
             return;
           }, () => {
             return;
@@ -7783,39 +7897,39 @@ function createLlamaServerHandle(launch, options = {}) {
         }
         if (generation !== callerGeneration)
           throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
-        if (starting === cancelled)
+        if (starting === cancelled2)
           starting = undefined;
         if (endpoint && current && !current.exited)
           return endpoint;
       }
       if (!starting) {
         const controller = new AbortController;
-        const shared = {
+        const shared3 = {
           controller,
           waiters: 0,
           promise: start(generation, controller.signal).finally(() => {
-            if (starting === shared)
+            if (starting === shared3)
               starting = undefined;
           })
         };
-        shared.promise.catch(() => {
+        shared3.promise.catch(() => {
           return;
         });
-        starting = shared;
+        starting = shared3;
       }
-      const shared = starting;
+      const shared2 = starting;
       if (!signal) {
-        shared.waiters = Number.POSITIVE_INFINITY;
-        return shared.promise;
+        shared2.waiters = Number.POSITIVE_INFINITY;
+        return shared2.promise;
       }
-      shared.waiters += 1;
+      shared2.waiters += 1;
       try {
-        return await abortable(shared.promise, signal);
+        return await abortable(shared2.promise, signal);
       } catch (error) {
         if (signal.aborted) {
-          shared.waiters -= 1;
-          if (shared.waiters <= 0)
-            shared.controller.abort(signal.reason);
+          shared2.waiters -= 1;
+          if (shared2.waiters <= 0)
+            shared2.controller.abort(signal.reason);
           throw callerCancelled(signal.reason);
         }
         throw error;
@@ -7862,11 +7976,11 @@ function trackServerProcess(child, tokenDir, onExit) {
     waitExit(timeoutMs) {
       if (exited)
         return Promise.resolve(true);
-      return new Promise((resolve) => {
+      return new Promise((resolve5) => {
         const settle = (value) => {
           clearTimeout(timer);
           exitWaiters.delete(onExited);
-          resolve(value);
+          resolve5(value);
         };
         const onExited = () => settle(true);
         const timer = setTimeout(() => settle(false), timeoutMs);
@@ -7909,12 +8023,12 @@ function abortable(promise, signal) {
     return promise;
   if (signal.aborted)
     return Promise.reject(signal.reason);
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve5, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then((value) => {
       signal.removeEventListener("abort", onAbort);
-      resolve(value);
+      resolve5(value);
     }, (error) => {
       signal.removeEventListener("abort", onAbort);
       reject(error);
@@ -7951,14 +8065,14 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
   }
 }
 function freeLoopbackPort() {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve5, reject) => {
     const server = createServer();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => port > 0 ? resolve(port) : reject(new LlamaServerStartError("No free loopback port.")));
+      server.close(() => port > 0 ? resolve5(port) : reject(new LlamaServerStartError("No free loopback port.")));
     });
   });
 }
@@ -7980,8 +8094,8 @@ var stopAll = () => Promise.all([
   ...[...liteRtHelpers.values()].map((helper) => helper.release())
 ]);
 var send = (reply) => port.postMessage(reply);
-port.on("message", async (message) => {
-  if (message.shutdown) {
+port.on("message", async (message2) => {
+  if (message2.shutdown) {
     try {
       await stopAll();
     } finally {
@@ -7990,11 +8104,11 @@ port.on("message", async (message) => {
     }
     return;
   }
-  if (message.cancel !== undefined) {
-    controllers.get(message.cancel)?.abort();
+  if (message2.cancel !== undefined) {
+    controllers.get(message2.cancel)?.abort();
     return;
   }
-  const { id, request } = message;
+  const { id, request } = message2;
   const controller = new AbortController;
   controllers.set(id, controller);
   try {
@@ -8020,6 +8134,9 @@ port.on("message", async (message) => {
         break;
       case "embedding-install":
         result = await installBuiltInEmbedding({ ...request.options, onProgress: (embeddingProgress) => send({ id, embeddingProgress }) });
+        break;
+      case "reranker-install":
+        await installBuiltInReranker({ ...request.options, onProgress: (embeddingProgress) => send({ id, embeddingProgress }) });
         break;
       case "embedding-load": {
         const provider = new BuiltInSourceEmbeddingProvider({

@@ -2,7 +2,7 @@
 // LiteRT inference remains in its helper process; the serving thread only sends messages.
 import { parentPort, workerData } from 'node:worker_threads';
 import { startLiteRtEmbedder, type LiteRtEmbedder } from '../built-in-embedding/litert-runtime.ts';
-import { installBuiltInEmbedding } from '../built-in-embedding/assets.ts';
+import { installBuiltInEmbedding, installBuiltInReranker } from '../built-in-embedding/assets.ts';
 import { BuiltInSourceEmbeddingProvider } from '../built-in-embedding/provider.ts';
 import { builtInRerankerFromEnv, type CrossEncoderReranker } from '../built-in-reranker.ts';
 import { withPriorityQueryEmbedding } from '../embeddings.ts';
@@ -53,6 +53,9 @@ port.on('message', async (message: { id: number; request: ModelThreadRequest; ca
         break;
       case 'embedding-install':
         result = await installBuiltInEmbedding({ ...request.options, onProgress: embeddingProgress => send({ id, embeddingProgress }) });
+        break;
+      case 'reranker-install':
+        await installBuiltInReranker({ ...request.options, onProgress: embeddingProgress => send({ id, embeddingProgress }) });
         break;
       case 'embedding-load': {
         const provider = new BuiltInSourceEmbeddingProvider({

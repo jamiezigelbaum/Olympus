@@ -16,7 +16,7 @@ const sources: LiveSourceSpec[] = ['gmail', 'dropbox'].map(id => ({ id, label: i
 const snapshot = (extra: Partial<ConsentSnapshot> = {}): ConsentSnapshot => ({ url: 'https://accounts.google.com/consent', text: 'Advanced Go to Olympus (unsafe) Continue', password: false, accounts: 0, signedOut: false, ...extra });
 const response = (structured: unknown, ok = true) => ({ ok, structured, text: '' });
 
-function rig(failAt?: string, inconclusive = false, listening = '') {
+function rig(failAt?: string, inconclusive = false, listening = '', health: () => object = () => ({ ok: true })) {
   const events: string[] = [];
   // Like a fresh install: no answer model until the privacy choice sets one.
   let modelSet = false;
@@ -33,6 +33,7 @@ function rig(failAt?: string, inconclusive = false, listening = '') {
       if (script.startsWith('ps -o unit=')) return { code: 0, stdout: 'olympus-test-answer-llama.service\n', stderr: '', ms: 0, timedOut: false };
       if (script.includes('rm -f ') && script.includes('/lease')) await step('restore');
       if (script.includes('sh "$HOME/.olympus-canary/install-linux.sh"')) await step('install');
+      if (script.includes('/v1/health') && !script.includes('/dev/null')) return { code: 0, stdout: JSON.stringify(health()), stderr: '', ms: 0, timedOut: false };
       return { code: 0, stdout: '', stderr: '', ms: 0, timedOut: false };
     },
     put: async () => {}, get: async () => {}, upgrade: async () => {},
@@ -114,7 +115,7 @@ describe('fresh install canary', () => {
     expect(canaryVerdict(checks)).toBe('pass');
     expect(FRESH_LEG).toBe('canary-test-omarchy-fresh');
     expect(checks.map(c => c.id)).toEqual([
-      'fresh.machine-clear', 'fresh.install', 'fresh.engine-up', 'fresh.ask-without-model', 'fresh.dashboard-opens', 'fresh.privacy-choice',
+      'fresh.machine-clear', 'fresh.install', 'fresh.engine-up', 'fresh.reranker-ready', 'fresh.ask-without-model', 'fresh.dashboard-opens', 'fresh.privacy-choice',
       ...sources.flatMap(s => ['connect', 'consent', 'callback', 'scope', 'first-items'].map(step => `fresh.${s.id}.${step}`)),
       'live.gmail.status', 'live.dropbox.status', 'live.gmail.known', 'live.dropbox.known',
       'fresh.gmail.answer', 'fresh.gmail.scope-absence', 'fresh.dropbox.answer', 'fresh.dropbox.scope-absence', 'fresh.restore-zig',
@@ -134,6 +135,36 @@ describe('fresh install canary', () => {
       expect(syntax.status).toBe(0);
     }
   }, 30_000);
+  test('a machine with the reranker off reports it skipped and asks nothing more of it', async () => {
+    const r = rig();
+    const { checks } = await runFreshInstall(r.machine, r.options);
+    expect(checks.find(c => c.id === 'fresh.reranker-ready')).toMatchObject({ status: 'skip' });
+    expect(checks.some(c => c.id === 'fresh.reranker-applied')).toBe(false);
+  });
+  test('waits for the reranker install, then requires rerank applied above 0 and failed 0 after the answers', async () => {
+    let polls = 0;
+    let asked = 0;
+    const r = rig(undefined, false, '', () => ({
+      ok: true,
+      rerank_outcomes: { applied: asked, failed: 0, timed_out: 0 },
+      reranker_install: { state: ++polls < 3 ? 'downloading' : 'ready', percent: polls < 3 ? 40 : 100, label: '' },
+    }));
+    const call = r.engine.call;
+    r.engine.call = async (tool, args) => { if (tool === 'source_answer') asked++; return call(tool, args); };
+    const { checks } = await runFreshInstall(r.machine, r.options);
+    expect(checks.find(c => c.id === 'fresh.reranker-ready')).toMatchObject({ status: 'pass' });
+    expect(checks.find(c => c.id === 'fresh.reranker-applied')).toMatchObject({ status: 'pass' });
+    expect(checks.findIndex(c => c.id === 'fresh.reranker-applied')).toBeGreaterThan(checks.findIndex(c => c.id === 'fresh.dropbox.scope-absence'));
+  });
+  for (const [name, health, detail] of [
+    ['a failed install', { rerank_outcomes: { applied: 0, failed: 0, timed_out: 0 }, reranker_install: { state: 'failed', reason: 'download_failed', percent: 10, label: '' } }, 'download_failed'],
+    ['a failed rerank', { rerank_outcomes: { applied: 3, failed: 1, timed_out: 0 }, reranker_install: { state: 'ready', percent: 100, label: '' } }, 'failed 1'],
+  ] as const) test(`${name} fails the reranker check`, async () => {
+    const r = rig(undefined, false, '', () => health);
+    const { checks } = await runFreshInstall(r.machine, r.options);
+    expect(canaryVerdict(checks)).toBe('fail');
+    expect(checks.find(c => c.id.startsWith('fresh.reranker') && c.status === 'fail')?.detail).toContain(detail);
+  });
   for (const splitFails of [false, true]) test(`fresh timing is wired after connect and restores zig (split failure: ${splitFails})`, async () => {
     const r = rig();
     const { browserSeedPlan } = await import('../scripts/release-check/on-demand-seeds.ts');
@@ -258,7 +289,7 @@ describe('fresh install canary', () => {
     const r = rig('gmail.consent', true);
     const { checks } = await runFreshInstall(r.machine, r.options);
     expect(canaryVerdict(checks)).toBe('inconclusive');
-    expect(checks.find(c => c.status === 'skip')?.detail).toContain('renew Google');
+    expect(checks.find(c => c.status === 'skip' && c.id !== 'fresh.reranker-ready')?.detail).toContain('renew Google');
     expect(r.events.at(-1)).toBe('restore');
     expect(r.events).not.toContain('gmail.scope');
   });

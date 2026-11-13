@@ -99,6 +99,8 @@ export interface SourceAnswerLatencyTraceRecord {
     recency_seats: number;
     fits: Array<{ lane: 'local' | 'cloud'; kept_seats: number[]; prompt_bytes?: number }>;
   };
+  // Counts only: a timed_out or failed rerank kept the fused cut (#1583).
+  rerank?: { reranker_id: string; outcome: 'applied' | 'failed' | 'timed_out'; scored: number; kept: number; promoted: number; elapsed_ms: number };
   caller?: OperationCallerWire;
   // Synchronous SQLite the Ask ran on the request thread (#1305).
   main_thread_sql?: SourceAnswerTraceMainThreadSql;
@@ -286,6 +288,18 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
             kept_seats: fit.keptSeats.map((seat) => Math.max(0, Math.floor(seat))),
             ...(fit.promptBytes === undefined ? {} : { prompt_bytes: Math.max(0, Math.floor(fit.promptBytes)) }),
           })),
+        },
+      }
+      : {}),
+    ...(input.trace.rerank
+      ? {
+        rerank: {
+          reranker_id: input.trace.rerank.rerankerId,
+          outcome: input.trace.rerank.outcome,
+          scored: Math.max(0, Math.floor(input.trace.rerank.scored)),
+          kept: Math.max(0, Math.floor(input.trace.rerank.kept)),
+          promoted: Math.max(0, Math.floor(input.trace.rerank.promoted)),
+          elapsed_ms: nonNegativeMs(input.trace.rerank.elapsedMs),
         },
       }
       : {}),

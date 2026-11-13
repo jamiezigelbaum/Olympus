@@ -17,11 +17,14 @@ import {
   BuiltInEmbeddingInstallError,
   builtInEmbeddingPaths,
   installBuiltInEmbedding,
+  installBuiltInReranker,
   readBuiltInEmbeddingStatus,
+  readBuiltInRerankerStatus,
   reportBuiltInEmbeddingState,
   readBuiltInEmbeddingVision,
   type BuiltInEmbeddingStatus,
 } from '../src/workers/source-index/built-in-embedding/assets.ts';
+import { MMARCO_MMINILMV2_L12_H384_V1, type BuiltInRerankerModelSpec } from '../src/workers/source-index/built-in-reranker-manifest.ts';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { calibratedSemanticRelevanceBar } from '../src/workers/connector-store/local-index.ts';
 import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -176,6 +179,7 @@ interface Served {
   runtime: OnnxRuntimePackSpec;
   fetchImpl: typeof fetch;
   requests: string[];
+  reranker: BuiltInRerankerModelSpec;
 }
 
 function servedAssets(options: { corruptModel?: boolean; status?: number } = {}): Served {
@@ -197,6 +201,15 @@ function servedAssets(options: { corruptModel?: boolean; status?: number } = {})
     ['https://registry.test/onnxruntime-node.tgz', runtimeArchive],
     ['https://registry.test/onnxruntime-common.tgz', commonArchive],
   ]);
+  const rerankerBytes = new TextEncoder().encode('fake reranker');
+  const tokenizerBytes = new TextEncoder().encode('fake tokenizer');
+  const reranker = {
+    ...MMARCO_MMINILMV2_L12_H384_V1,
+    model: { name: 'model.onnx', url: 'https://models.test/reranker.onnx', bytes: rerankerBytes.length, sha256: sha256(rerankerBytes) },
+    tokenizer: { name: 'tokenizer.json', url: 'https://models.test/tokenizer.json', bytes: tokenizerBytes.length, sha256: sha256(tokenizerBytes) },
+  };
+  bodies.set(reranker.model.url, rerankerBytes);
+  bodies.set(reranker.tokenizer.url, tokenizerBytes);
   const requests: string[] = [];
   const model: BuiltInEmbeddingModelSpec = {
     ...ARCTIC_EMBED_M_V1_5,
@@ -228,17 +241,80 @@ function servedAssets(options: { corruptModel?: boolean; status?: number } = {})
       },
     }));
   }) as typeof fetch;
-  return { model, runtime, fetchImpl, requests };
+  return { model, runtime, fetchImpl, requests, reranker };
 }
 
 describe('built-in embedding installer', () => {
+  test('installs and rechecks both pinned reranker files, retrying a failed file without failing embedding', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    const served = servedAssets();
+    const progress: BuiltInEmbeddingStatus[] = [];
+    let corrupt = true;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(existsSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'install.lock'))).toBe(true);
+      const response = await served.fetchImpl(input, init);
+      return corrupt && String(input) === served.reranker.tokenizer.url
+        ? new Response('x'.repeat(served.reranker.tokenizer.bytes)) : response;
+    }) as typeof fetch;
+    const options = { env, model: served.model, rerankerModel: served.reranker, skipRuntime: true, fetchImpl,
+      onProgress: (status: BuiltInEmbeddingStatus) => progress.push(status) };
+    const both = async () => { const result = await installBuiltInEmbedding(options); await installBuiltInReranker(options); return result; };
+    const installed = await both();
+    expect(existsSync(installed.modelPath)).toBe(true);
+    const dir = join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker', served.reranker.modelId);
+    expect(sha256(readFileSync(join(dir, 'model.onnx')))).toBe(served.reranker.model.sha256);
+    expect(existsSync(join(dir, 'tokenizer.json'))).toBe(false);
+    expect(progress.some((status) => status.modelId === served.reranker.modelId && status.failure?.reason === 'checksum_mismatch')).toBe(true);
+    expect(readBuiltInEmbeddingStatus(env, served.model).state).not.toBe('failed');
+    corrupt = false;
+    await both();
+    expect(sha256(readFileSync(join(dir, 'tokenizer.json')))).toBe(served.reranker.tokenizer.sha256);
+    const attempts = served.requests.length;
+    await both();
+    expect(served.requests.length).toBe(attempts);
+    // Existing files are also verified, removed on mismatch and retried next install.
+    writeFileSync(join(dir, 'model.onnx'), 'x'.repeat(served.reranker.model.bytes));
+    await both();
+    expect(existsSync(join(dir, 'model.onnx'))).toBe(false);
+    await both();
+    expect(sha256(readFileSync(join(dir, 'model.onnx')))).toBe(served.reranker.model.sha256);
+    expect(existsSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'install.lock'))).toBe(false);
+  });
+
+  test('a production reranker install runs on the model thread and reports there', async () => {
+    // No functions in the options, as the engine passes them: the install runs
+    // on the model thread, whose failure lands in reranker-status.json.
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    await installBuiltInReranker({ env, platform: 'plan9-x64' as never });
+    const status = JSON.parse(readFileSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker-status.json'), 'utf8'));
+    expect(status).toMatchObject({ state: 'failed', failure: { reason: 'unsupported_platform' } });
+  });
+
+  test('a model-thread install that fails before it reports still leaves a failed status', async () => {
+    // A value the worker cannot receive rejects the hand-off before the worker
+    // writes anything; health must not keep showing the previous state.
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir(), UNSENDABLE: Symbol('x') as unknown as string };
+    await installBuiltInReranker({ env });
+    const status = JSON.parse(readFileSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker-status.json'), 'utf8'));
+    expect(status).toMatchObject({ state: 'failed', failure: { reason: 'disk_write_failed' } });
+  });
+
+  test('installs the reranker when the embedding root does not exist yet', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: join(temporaryDir(), 'not-yet', 'created') };
+    const served = servedAssets();
+    await installBuiltInReranker({ env, model: served.model, rerankerModel: served.reranker, skipRuntime: true, fetchImpl: served.fetchImpl });
+    const dir = join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker', served.reranker.modelId);
+    expect(sha256(readFileSync(join(dir, 'model.onnx')))).toBe(served.reranker.model.sha256);
+    expect(existsSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'install.lock'))).toBe(false);
+  });
+
   test('downloads once, verifies every file, unpacks only this platform, and reports progress', async () => {
     const dir = temporaryDir();
     const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: dir };
     const served = servedAssets();
     const progress: BuiltInEmbeddingStatus[] = [];
     const installed = await installBuiltInEmbedding({
-      env, model: served.model, runtime: served.runtime, fetchImpl: served.fetchImpl,
+      env, model: served.model, runtime: served.runtime, rerankerModel: served.reranker, fetchImpl: served.fetchImpl,
       onProgress: (status) => progress.push(status),
     });
 
@@ -246,9 +322,11 @@ describe('built-in embedding installer', () => {
     const runtimeBin = join(installed.runtimeDir, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6');
     expect(readdirSync(runtimeBin)).toEqual([process.platform]);
     expect(existsSync(join(installed.runtimeDir, 'node_modules', 'onnxruntime-common', 'package.json'))).toBe(true);
+    // The optional reranker is not on this path: the embedding model loads without waiting for it.
     expect(served.requests).toHaveLength(4);
+    expect(served.requests.some((url) => url.includes('reranker') || url.includes('tokenizer.json'))).toBe(false);
 
-    const downloading = progress.filter((status) => status.state === 'downloading');
+    const downloading = progress.filter((status) => status.state === 'downloading' && status.modelId === served.model.modelId);
     expect(downloading.length).toBeGreaterThan(4);
     const percents = downloading.map((status) => status.percent);
     expect(percents).toEqual([...percents].sort((left, right) => left - right));
@@ -257,7 +335,7 @@ describe('built-in embedding installer', () => {
     expect(readBuiltInEmbeddingStatus(env, served.model).state).not.toBe('failed');
 
     // Second call: nothing fetched again.
-    await installBuiltInEmbedding({ env, model: served.model, runtime: served.runtime, fetchImpl: served.fetchImpl });
+    await installBuiltInEmbedding({ env, model: served.model, runtime: served.runtime, rerankerModel: served.reranker, fetchImpl: served.fetchImpl });
     expect(served.requests).toHaveLength(4);
     // No partial files or lock left behind.
     expect(readdirSync(join(dir, served.model.modelId)).sort()).toEqual(['model.onnx', 'vocab.txt']);
@@ -843,6 +921,26 @@ function servedLiteRt(options: { corruptWheel?: boolean } = {}) {
 }
 
 describe('built-in embedding installer with a LiteRT model', () => {
+  test('installs the ONNX runtime for the reranker beside a LiteRT embedding install', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    const litert = servedLiteRt();
+    const onnx = servedAssets();
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith('.litertlm') || String(input).endsWith('.whl')
+        ? litert.fetchImpl(input, init) : onnx.fetchImpl(input, init)) as typeof fetch;
+    const options = { env, model: litert.model, liteRtRuntime: litert.pack, runtime: onnx.runtime,
+      rerankerModel: onnx.reranker, fetchImpl };
+    await installBuiltInEmbedding(options);
+    await installBuiltInReranker(options);
+    const runtimeDir = builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5, onnx.runtime).runtimeDir;
+    expect(existsSync(join(runtimeDir, 'node_modules', 'onnxruntime-node', 'package.json'))).toBe(true);
+    expect(existsSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker', onnx.reranker.modelId, 'tokenizer.json'))).toBe(true);
+    const attempts = onnx.requests.length;
+    await installBuiltInEmbedding(options);
+    await installBuiltInReranker(options);
+    expect(onnx.requests.length).toBe(attempts);
+  });
+
   test('downloads the model and takes only the library out of the pinned wheel', async () => {
     const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
     const served = servedLiteRt();
@@ -851,10 +949,10 @@ describe('built-in embedding installer with a LiteRT model', () => {
     expect(readFileSync(installed.libraryPath!, 'utf8')).toBe('native library');
     expect(readdirSync(installed.runtimeDir).sort()).toEqual(['liblitert-lm.dylib', 'olympus-runtime.json']);
     expect(installed.runtimeDir).toBe(builtInEmbeddingPaths(env, served.model).runtimeDir);
-    expect(served.requests.sort()).toEqual(['https://models.test/model.litertlm', 'https://wheels.test/litert.whl']);
-    // Installed once: a second call downloads nothing.
+    expect(served.requests.filter((url) => !url.startsWith('https://huggingface.co/')).sort()).toEqual(['https://models.test/model.litertlm', 'https://wheels.test/litert.whl']);
+    // The embedding stays installed; the optional reranker download retries.
     await installBuiltInEmbedding({ env, model: served.model, liteRtRuntime: served.pack, fetchImpl: served.fetchImpl });
-    expect(served.requests).toHaveLength(2);
+    expect(served.requests.filter((url) => !url.startsWith('https://huggingface.co/'))).toHaveLength(2);
   });
 
   test('a library changed on disk after unpacking is unpacked again from the pinned wheel', async () => {
@@ -1523,3 +1621,12 @@ function buildZip(entries: Array<{ name: string; data: string; deflate: boolean 
   }
   return out;
 }
+
+describe('reranker install status for health', () => {
+  test('not started until an install writes it, then the failure and its reason', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: mkdtempSync(join(tmpdir(), 'olympus-rr-status-')) };
+    expect(readBuiltInRerankerStatus(env).state).toBe('not_started');
+    await installBuiltInReranker({ env, platform: 'plan9-x64' as never, fetchImpl: (async () => new Response('', { status: 500 })) as unknown as typeof fetch });
+    expect(readBuiltInRerankerStatus(env)).toMatchObject({ state: 'failed', failure: { reason: 'unsupported_platform' } });
+  });
+});

@@ -1,3 +1,4 @@
+import { MMARCO_MMINILMV2_L12_H384_V1, type BuiltInRerankerModelSpec } from '../built-in-reranker-manifest.ts';
 import { isMainThread } from 'node:worker_threads';
 import { modelThread } from '../built-in-reasoning/off-thread.ts';
 import { downloadPinnedFile } from '../pinned-download.ts';
@@ -24,6 +25,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
+  ARCTIC_EMBED_M_V1_5,
   BUILT_IN_EMBEDDING_MODEL,
   builtInEmbeddingModelFiles,
   LITERT_RUNTIME_PACK,
@@ -88,6 +90,8 @@ export interface InstalledBuiltInEmbedding {
 export interface BuiltInEmbeddingInstallerOptions {
   env?: Record<string, string | undefined>;
   model?: BuiltInEmbeddingModelSpec;
+  /** Pinned reranker installed alongside either embedding backend. */
+  rerankerModel?: BuiltInRerankerModelSpec;
   runtime?: OnnxRuntimePackSpec;
   liteRtRuntime?: LiteRtRuntimePackSpec;
   /** `${platform}-${arch}`; defaults to this process. */
@@ -185,6 +189,21 @@ export function readBuiltInEmbeddingStatus(
 }
 
 /**
+ * The built-in reranker's install status, for health: the runtime pack or
+ * model downloading, ready, or failed with its reason. Never throws.
+ */
+export function readBuiltInRerankerStatus(
+  env: Record<string, string | undefined> = process.env,
+  model: BuiltInRerankerModelSpec = MMARCO_MMINILMV2_L12_H384_V1,
+): BuiltInEmbeddingStatus {
+  try {
+    const parsed = JSON.parse(readFileSync(join(builtInEmbeddingPaths(env).root, 'reranker-status.json'), 'utf8')) as BuiltInEmbeddingStatus;
+    if (parsed && typeof parsed === 'object' && parsed.modelId === model.modelId) return parsed;
+  } catch { /* not started */ }
+  return { state: 'not_started', modelId: model.modelId, percent: 0, label: 'Built-in reranker not downloaded yet', bytesDone: 0, bytesTotal: 0, updatedAt: new Date(0).toISOString() };
+}
+
+/**
  * Whether the model's image encoder started the last time the model loaded:
  * `ready`, `unavailable` (it started text-only, so no picture can be read), or
  * `unknown` (never loaded, or nothing recorded for this model). Never throws.
@@ -257,6 +276,85 @@ export async function installBuiltInEmbedding(
       throw new BuiltInEmbeddingInstallError(failure.reason ?? 'runtime_load_failed', failure.message);
     }
   }
+  return installEmbeddingAssets(options);
+}
+
+/**
+ * Installs the default built-in reranker (#921) beside the embedding model,
+ * with the same pinned, checked download and the same lock. It is optional,
+ * so it is never on the embedding load path: the engine starts it on its own
+ * at boot. It never throws; a failure is reported in reranker-status.json and
+ * the next start retries it.
+ */
+export async function installBuiltInReranker(
+  options: BuiltInEmbeddingInstallerOptions = {},
+): Promise<void> {
+  // The runtime pack's tar inflate and writes are synchronous: on the serving
+  // thread they stall answers (#1567), so a production install runs on the
+  // model thread, as the embedding install does.
+  const { onProgress, ...serializable } = options;
+  if (isMainThread && !Object.values(serializable).some(value => typeof value === 'function')) {
+    // The worker writes reranker-status.json. If it dies, times out or never
+    // receives the request, it wrote nothing, so the failure is written here.
+    await modelThread().call<void>({ kind: 'reranker-install', options: { ...serializable, env: options.env ?? process.env } },
+      { embeddingProgress: onProgress }).catch(error => failRerankerInstall(rerankerReporter(options), error));
+    return;
+  }
+  const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
+  const paths = builtInEmbeddingPaths(options.env, options.model);
+  const reporter = rerankerReporter(options);
+  try {
+    // The lock lives in the root; an install that never used the built-in
+    // embedding model has no root yet.
+    ensureDirectory(paths.root);
+    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
+      const dir = join(paths.root, 'reranker', model.modelId);
+      ensureDirectory(dir);
+      const files = [model.model, model.tokenizer];
+      const pending = files.filter((file) => !existsSync(join(dir, file.name)));
+      const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
+      const platform = options.platform ?? currentPlatform();
+      const runtimeDir = builtInEmbeddingPaths(options.env, ARCTIC_EMBED_M_V1_5, runtime, platform).runtimeDir;
+      const packages = [runtime.common, runtime.runtime];
+      const needsRuntime = !options.skipRuntime && !runtimeInstalled(runtimeDir, packages);
+      if (needsRuntime && !runtime.platforms.includes(platform)) {
+        throw new BuiltInEmbeddingInstallError('unsupported_platform', `The built-in reranker does not run on ${platform}.`);
+      }
+      reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0)
+        + (needsRuntime ? packages.reduce((sum, pack) => sum + pack.bytes, 0) : 0));
+      for (const file of pending) {
+        await downloadVerified(options.fetchImpl ?? fetch, file.url, join(dir, file.name), file.bytes,
+          { kind: 'sha256', expected: file.sha256 }, reporter, 'Downloading the built-in reranker',
+          options.downloadStallMs ?? DOWNLOAD_STALL_MS);
+      }
+      if (needsRuntime) {
+        await installRuntime(options.fetchImpl ?? fetch, runtimeDir, packages, platform, reporter,
+          options.downloadStallMs ?? DOWNLOAD_STALL_MS);
+      }
+      await verifyModelFiles(dir, files, reporter, false);
+      reporter.set('ready', 'Built-in reranker installed', 100);
+    });
+  } catch (error) {
+    failRerankerInstall(reporter, error);
+  }
+}
+
+// A separate receipt uses the same reporting mechanism without marking a
+// working embedding model failed when this optional download fails.
+function rerankerReporter(options: BuiltInEmbeddingInstallerOptions): ProgressReporter {
+  const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
+  return new ProgressReporter(join(builtInEmbeddingPaths(options.env, options.model).root, 'reranker-status.json'),
+    model.modelId, options.now, options.onProgress);
+}
+
+function failRerankerInstall(reporter: ProgressReporter, error: unknown): void {
+  reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : 'disk_write_failed',
+    `Built-in reranker could not be installed; the next start will retry. ${error instanceof Error ? error.message : String(error)}`);
+}
+
+async function installEmbeddingAssets(
+  options: BuiltInEmbeddingInstallerOptions,
+): Promise<InstalledBuiltInEmbedding> {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
   const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
   const platform = options.platform ?? currentPlatform();
@@ -473,12 +571,13 @@ async function verifyModelFiles(
   dir: string,
   files: readonly PinnedDownload[],
   reporter: ProgressReporter,
+  useCache = true,
 ): Promise<void> {
   for (const file of files) {
     const path = join(dir, file.name);
     const key = `${path}:${file.sha256}`;
     verifiedThisProcess ??= new Set<string>();
-    if (verifiedThisProcess.has(key)) continue;
+    if (useCache && verifiedThisProcess.has(key)) continue;
     const size = statSync(path).size;
     const digest = size === file.bytes ? await sha256File(path) : undefined;
     if (digest !== file.sha256) {
@@ -500,6 +599,14 @@ const RUNTIME_MARKER = 'olympus-runtime.json';
 
 interface RuntimeMarker {
   packages: Array<{ name: string; integrity: string }>;
+}
+
+/**
+ * Whether the pinned ONNX runtime the built-in reranker loads is installed.
+ * An install whose embedder runs on LiteRT never installs it on its own.
+ */
+export function builtInOnnxRuntimeInstalled(runtimeDir: string, runtime: OnnxRuntimePackSpec = ONNX_RUNTIME_PACK): boolean {
+  return runtimeInstalled(runtimeDir, [runtime.common, runtime.runtime]);
 }
 
 function runtimeInstalled(runtimeDir: string, packages: readonly PinnedNpmPackage[]): boolean {

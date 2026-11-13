@@ -1,3 +1,4 @@
+import type { EvidenceRerankAudit } from '../../core/evidence-reranker.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
@@ -184,6 +185,8 @@ export interface SourceAnswerTraceSnapshot {
   releaseDecision?: string;
   mainThreadSql: SourceAnswerTraceMainThreadSql;
   evidenceSeats?: SourceAnswerTraceEvidenceSeats;
+  // Counts only: whether the reranker ran for this answer and what it did.
+  rerank?: EvidenceRerankAudit;
 }
 
 interface MutableTrace extends SourceAnswerTraceSnapshot {
@@ -566,6 +569,11 @@ export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['
   });
 }
 
+export function recordSourceAnswerRerank(audit: EvidenceRerankAudit | undefined): void {
+  const trace = currentSourceAnswerTrace();
+  if (trace && audit) trace.rerank = { ...audit };
+}
+
 export function recordSourceAnswerResidualAnalystOrphan(): void {
   const trace = currentSourceAnswerTrace();
   if (trace) trace.residualAnalystOrphanCount += 1;
@@ -634,6 +642,7 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
         },
       }
       : {}),
+    ...(trace.rerank ? { rerank: { ...trace.rerank } } : {}),
   };
 }
 

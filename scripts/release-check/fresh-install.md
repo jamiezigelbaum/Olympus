@@ -132,7 +132,13 @@ The report uses the existing canary v1 JSON/HTML layout under `<out>/<run-id>`,
 with leg `canary-test-omarchy-fresh`. Checks name install, engine, dashboard,
 the first-run privacy choice (Local models with Venice fallback, Recommended),
 each source's connect/consent/callback/scope/first items, known answers and scope
-absence, and restoration. Exit codes remain 0 pass, 1 product failure, 2 invalid
+absence, and restoration. On a machine with 16 GiB RAM or more the reranker
+turns itself on: right after the engine starts, `reranker-ready` waits up to 15 minutes
+for health's `reranker_install` to reach `ready` (its own ONNX pack and model;
+a LiteRT install never ships that pack), and after the answers
+`reranker-applied` requires `rerank_outcomes` applied above 0 and failed 0.
+Below 16 GiB, or with the reranker turned off, `reranker-ready` is a skip and
+the applied check does not run. Exit codes remain 0 pass, 1 product failure, 2 invalid
 invocation, 3 inconclusive. Password, verification, signed-out and ambiguous
 account pages identify which browser sign-in to renew. No consent screenshots,
 OAuth URLs, ordinary account answers, cookies or tokens are included in the fresh report.

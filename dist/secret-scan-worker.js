@@ -45,11 +45,11 @@ var fromCodePoint = (_a = String.fromCodePoint) !== null && _a !== undefined ? _
   return output;
 };
 function replaceCodePoint(codePoint) {
-  var _a;
+  var _a2;
   if (codePoint >= 55296 && codePoint <= 57343 || codePoint > 1114111) {
     return 65533;
   }
-  return (_a = decodeMap.get(codePoint)) !== null && _a !== undefined ? _a : codePoint;
+  return (_a2 = decodeMap.get(codePoint)) !== null && _a2 !== undefined ? _a2 : codePoint;
 }
 
 // node_modules/entities/dist/esm/internal/decode-shared.js
@@ -70,28 +70,28 @@ var htmlDecodeTree = /* @__PURE__ */ decodeBase64("QR08ALkAAgH6AYsDNQR2BO0EPgXZB
 
 // node_modules/entities/dist/esm/internal/bin-trie-flags.js
 var BinTrieFlags;
-(function(BinTrieFlags) {
-  BinTrieFlags[BinTrieFlags["VALUE_LENGTH"] = 49152] = "VALUE_LENGTH";
-  BinTrieFlags[BinTrieFlags["FLAG13"] = 8192] = "FLAG13";
-  BinTrieFlags[BinTrieFlags["BRANCH_LENGTH"] = 8064] = "BRANCH_LENGTH";
-  BinTrieFlags[BinTrieFlags["JUMP_TABLE"] = 127] = "JUMP_TABLE";
+(function(BinTrieFlags2) {
+  BinTrieFlags2[BinTrieFlags2["VALUE_LENGTH"] = 49152] = "VALUE_LENGTH";
+  BinTrieFlags2[BinTrieFlags2["FLAG13"] = 8192] = "FLAG13";
+  BinTrieFlags2[BinTrieFlags2["BRANCH_LENGTH"] = 8064] = "BRANCH_LENGTH";
+  BinTrieFlags2[BinTrieFlags2["JUMP_TABLE"] = 127] = "JUMP_TABLE";
 })(BinTrieFlags || (BinTrieFlags = {}));
 
 // node_modules/entities/dist/esm/decode.js
 var CharCodes;
-(function(CharCodes) {
-  CharCodes[CharCodes["NUM"] = 35] = "NUM";
-  CharCodes[CharCodes["SEMI"] = 59] = "SEMI";
-  CharCodes[CharCodes["EQUALS"] = 61] = "EQUALS";
-  CharCodes[CharCodes["ZERO"] = 48] = "ZERO";
-  CharCodes[CharCodes["NINE"] = 57] = "NINE";
-  CharCodes[CharCodes["LOWER_A"] = 97] = "LOWER_A";
-  CharCodes[CharCodes["LOWER_F"] = 102] = "LOWER_F";
-  CharCodes[CharCodes["LOWER_X"] = 120] = "LOWER_X";
-  CharCodes[CharCodes["LOWER_Z"] = 122] = "LOWER_Z";
-  CharCodes[CharCodes["UPPER_A"] = 65] = "UPPER_A";
-  CharCodes[CharCodes["UPPER_F"] = 70] = "UPPER_F";
-  CharCodes[CharCodes["UPPER_Z"] = 90] = "UPPER_Z";
+(function(CharCodes2) {
+  CharCodes2[CharCodes2["NUM"] = 35] = "NUM";
+  CharCodes2[CharCodes2["SEMI"] = 59] = "SEMI";
+  CharCodes2[CharCodes2["EQUALS"] = 61] = "EQUALS";
+  CharCodes2[CharCodes2["ZERO"] = 48] = "ZERO";
+  CharCodes2[CharCodes2["NINE"] = 57] = "NINE";
+  CharCodes2[CharCodes2["LOWER_A"] = 97] = "LOWER_A";
+  CharCodes2[CharCodes2["LOWER_F"] = 102] = "LOWER_F";
+  CharCodes2[CharCodes2["LOWER_X"] = 120] = "LOWER_X";
+  CharCodes2[CharCodes2["LOWER_Z"] = 122] = "LOWER_Z";
+  CharCodes2[CharCodes2["UPPER_A"] = 65] = "UPPER_A";
+  CharCodes2[CharCodes2["UPPER_F"] = 70] = "UPPER_F";
+  CharCodes2[CharCodes2["UPPER_Z"] = 90] = "UPPER_Z";
 })(CharCodes || (CharCodes = {}));
 var TO_LOWER_BIT = 32;
 function isNumber(code) {
@@ -107,18 +107,18 @@ function isEntityInAttributeInvalidEnd(code) {
   return code === CharCodes.EQUALS || isAsciiAlphaNumeric(code);
 }
 var EntityDecoderState;
-(function(EntityDecoderState) {
-  EntityDecoderState[EntityDecoderState["EntityStart"] = 0] = "EntityStart";
-  EntityDecoderState[EntityDecoderState["NumericStart"] = 1] = "NumericStart";
-  EntityDecoderState[EntityDecoderState["NumericDecimal"] = 2] = "NumericDecimal";
-  EntityDecoderState[EntityDecoderState["NumericHex"] = 3] = "NumericHex";
-  EntityDecoderState[EntityDecoderState["NamedEntity"] = 4] = "NamedEntity";
+(function(EntityDecoderState2) {
+  EntityDecoderState2[EntityDecoderState2["EntityStart"] = 0] = "EntityStart";
+  EntityDecoderState2[EntityDecoderState2["NumericStart"] = 1] = "NumericStart";
+  EntityDecoderState2[EntityDecoderState2["NumericDecimal"] = 2] = "NumericDecimal";
+  EntityDecoderState2[EntityDecoderState2["NumericHex"] = 3] = "NumericHex";
+  EntityDecoderState2[EntityDecoderState2["NamedEntity"] = 4] = "NamedEntity";
 })(EntityDecoderState || (EntityDecoderState = {}));
 var DecodingMode;
-(function(DecodingMode) {
-  DecodingMode[DecodingMode["Legacy"] = 0] = "Legacy";
-  DecodingMode[DecodingMode["Strict"] = 1] = "Strict";
-  DecodingMode[DecodingMode["Attribute"] = 2] = "Attribute";
+(function(DecodingMode2) {
+  DecodingMode2[DecodingMode2["Legacy"] = 0] = "Legacy";
+  DecodingMode2[DecodingMode2["Strict"] = 1] = "Strict";
+  DecodingMode2[DecodingMode2["Attribute"] = 2] = "Attribute";
 })(DecodingMode || (DecodingMode = {}));
 
 class EntityDecoder {
@@ -208,9 +208,9 @@ class EntityDecoder {
     return -1;
   }
   emitNumericEntity(lastCp, expectedLength) {
-    var _a;
+    var _a2;
     if (this.consumed <= expectedLength) {
-      (_a = this.errors) === null || _a === undefined || _a.absenceOfDigitsInNumericCharacterReference(this.consumed);
+      (_a2 = this.errors) === null || _a2 === undefined || _a2.absenceOfDigitsInNumericCharacterReference(this.consumed);
       return 0;
     }
     if (lastCp === CharCodes.SEMI) {
@@ -291,11 +291,11 @@ class EntityDecoder {
     return -1;
   }
   emitNotTerminatedNamedEntity() {
-    var _a;
+    var _a2;
     const { result, decodeTree } = this;
     const valueLength = (decodeTree[result] & BinTrieFlags.VALUE_LENGTH) >> 14;
     this.emitNamedEntityData(result, valueLength, this.consumed);
-    (_a = this.errors) === null || _a === undefined || _a.missingSemicolonAfterCharacterReference();
+    (_a2 = this.errors) === null || _a2 === undefined || _a2.missingSemicolonAfterCharacterReference();
     return this.consumed;
   }
   emitNamedEntityData(result, valueLength, consumed) {
@@ -307,7 +307,7 @@ class EntityDecoder {
     return consumed;
   }
   end() {
-    var _a;
+    var _a2;
     switch (this.state) {
       case EntityDecoderState.NamedEntity: {
         return this.result !== 0 && (this.decodeMode !== DecodingMode.Attribute || this.result === this.treeIndex) ? this.emitNotTerminatedNamedEntity() : 0;
@@ -319,7 +319,7 @@ class EntityDecoder {
         return this.emitNumericEntity(0, 3);
       }
       case EntityDecoderState.NumericStart: {
-        (_a = this.errors) === null || _a === undefined || _a.absenceOfDigitsInNumericCharacterReference(this.consumed);
+        (_a2 = this.errors) === null || _a2 === undefined || _a2.absenceOfDigitsInNumericCharacterReference(this.consumed);
         return 0;
       }
       case EntityDecoderState.EntityStart: {
@@ -384,17 +384,17 @@ function decodeHTMLStrict(htmlString) {
 }
 // node_modules/entities/dist/esm/index.js
 var EntityLevel;
-(function(EntityLevel) {
-  EntityLevel[EntityLevel["XML"] = 0] = "XML";
-  EntityLevel[EntityLevel["HTML"] = 1] = "HTML";
+(function(EntityLevel2) {
+  EntityLevel2[EntityLevel2["XML"] = 0] = "XML";
+  EntityLevel2[EntityLevel2["HTML"] = 1] = "HTML";
 })(EntityLevel || (EntityLevel = {}));
 var EncodingMode;
-(function(EncodingMode) {
-  EncodingMode[EncodingMode["UTF8"] = 0] = "UTF8";
-  EncodingMode[EncodingMode["ASCII"] = 1] = "ASCII";
-  EncodingMode[EncodingMode["Extensive"] = 2] = "Extensive";
-  EncodingMode[EncodingMode["Attribute"] = 3] = "Attribute";
-  EncodingMode[EncodingMode["Text"] = 4] = "Text";
+(function(EncodingMode2) {
+  EncodingMode2[EncodingMode2["UTF8"] = 0] = "UTF8";
+  EncodingMode2[EncodingMode2["ASCII"] = 1] = "ASCII";
+  EncodingMode2[EncodingMode2["Extensive"] = 2] = "Extensive";
+  EncodingMode2[EncodingMode2["Attribute"] = 3] = "Attribute";
+  EncodingMode2[EncodingMode2["Text"] = 4] = "Text";
 })(EncodingMode || (EncodingMode = {}));
 
 // src/core/secret-patterns.ts

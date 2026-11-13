@@ -1,6 +1,6 @@
-// Candidate pins from #921, comment 6802284190. No default is selected here:
-// the search lane chooses from the held-out eval. Install either candidate's
-// two files in OLYMPUS_SOURCE_RERANKER_MODEL_DIR using their local names.
+// Pinned candidates from #921. The measured multilingual mMiniLMv2 int8 model
+// is installed with the embedding model under <embedding root>/reranker/<modelId>.
+// Its model.onnx and tokenizer.json total about 136 MB; scoring stays local.
 import type { PinnedDownload } from './built-in-embedding/manifest.ts';
 
 export interface BuiltInRerankerModelSpec {
