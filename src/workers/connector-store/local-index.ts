@@ -1,7 +1,8 @@
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
-import { duringStoreUpdateStep, reportFrontStoreOpened } from '../../core/boot-progress.ts';
+import { reportFrontStoreOpened } from '../../core/boot-progress.ts';
+import { setEngineStep } from '../../core/engine-heartbeat.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
 import { storeOwnerIdleMs, storeReadHasPriority } from '../../core/store-reclaim-admission.ts';
@@ -3597,9 +3598,13 @@ export class LocalConnectorStore {
       // each one's 6 minutes to ready (ops#151, 2026-11-12).
       const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
-      // The checks that read every row are part of the update: the boot's
-      // waits read them as a long step, not a stall (duringStoreUpdateStep).
-      if (migrating) duringStoreUpdateStep(process.env, SQLITE_STORE_ID, () => validateConnectorStoreRows(this.db, `v${versionAtOpen}`));
+      // The checks that read every row are part of the update; the heartbeat
+      // says so while they hold the loop.
+      if (migrating) {
+        setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
+        validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
+        setEngineStep(undefined);
+      }
       if (options.readOnly === true) {
         const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         // Anything newer than this build already failed
@@ -3621,10 +3626,10 @@ export class LocalConnectorStore {
         );`);
         validateConnectorStoreSchema(this.db);
         if (migrating) {
-          duringStoreUpdateStep(process.env, SQLITE_STORE_ID, () => {
-            validateConnectorStoreRows(this.db, 'v15');
-            validateConnectorStoreForeignKeys(this.db);
-          });
+          setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
+          validateConnectorStoreRows(this.db, 'v15');
+          validateConnectorStoreForeignKeys(this.db);
+          setEngineStep(undefined);
         }
       }
       if (options.readOnly !== true) this.createVisibilityJournal();

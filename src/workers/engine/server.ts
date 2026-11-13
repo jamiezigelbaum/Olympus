@@ -459,7 +459,8 @@ import { approveClassifier, resolveClassificationLedgerPath, readClassificationL
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
-import { beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
+import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
+import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import {
@@ -472,7 +473,8 @@ import {
   startEngineBackgroundServer,
   restartAfterFront,
   startEngineBackgroundStatus,
-  waitForEngineBackground,
+  listenWhileStarting,
+  waitForBackgroundBootDone,
   type EngineFront,
 } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
@@ -624,6 +626,12 @@ export async function main(): Promise<void> {
   // The waits on this boot read its progress, not a fixed ceiling (#1494). The
   // front does not own the data root's boot work and never writes that file;
   // it reports its own start, each store it opens a step (#1563).
+  // The heartbeat, from a thread this loop cannot hold: the supervisor and
+  // the upgrade wait read it, never how fast this process answers.
+  if (engineRole !== 'front') {
+    startEngineHeartbeat(process.env, engineRole);
+    setEngineStep('starting');
+  }
   if (engineRole !== 'front') beginBootProgress(process.env);
   else {
     beginFrontProgress(process.env);
@@ -640,6 +648,7 @@ export async function main(): Promise<void> {
   }
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
+  let frontStarting: { stop(): void } | undefined;
   if (engineRole === 'front') {
     // The front does none of the boot work that needs the data root to
     // itself: it waits until the background has done it, and from then on
@@ -647,7 +656,15 @@ export async function main(): Promise<void> {
     const frontToken = workerAuthTokenFromEnv(process.env);
     if (!frontToken) throw new Error('The engine front needs the worker auth token.');
     forbidWritableStoreOpens();
-    await waitForEngineBackground({ socketPath: engineSocketPath!, authToken: frontToken });
+    // It listens at once and says it is starting; it opens stores on the
+    // background's receipt that its boot work is done, never on how fast the
+    // background answers (gate7 success leg on 893087f5, 13 Nov).
+    frontStarting = listenWhileStarting({
+      env: process.env,
+      hostname: resolveEmailSourceBindHostFromEnv(process.env),
+      port: parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010'),
+    });
+    await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
   }
@@ -6043,6 +6060,8 @@ export async function main(): Promise<void> {
     ? async (request: Request): Promise<Response> => (await frontRoutes(request)) ?? worker.fetch(request)
     : worker.fetch;
   inProcessFetch = frontWorkerFetch;
+  // The front's "starting" answer gives way to its own server here.
+  frontStarting?.stop();
   if (listens && releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
   const socketPath = listens ? prepareWorkerSocket() : undefined;
   const serverOptions = {
@@ -6168,7 +6187,7 @@ export async function main(): Promise<void> {
   }
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
-  if (engineRole === 'single') finishBootProgress();
+  if (engineRole === 'single') { finishBootProgress(); setEngineStep(undefined); }
   if (engineFront) finishFrontProgress();
   if (listens) {
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and
@@ -6404,7 +6423,7 @@ export async function main(): Promise<void> {
             if (!modelReloadInstalled || !workerRestartsItself(workerLaunch, process.env)) return { reloaded: target, restarting: false };
             if (frontPid === undefined) return { reloaded: target, restarting: requestModelReload() };
             // Fenced like a delete: no new front passes readiness against this background (a restore runs at its boot).
-            return { reloaded: target, restarting: restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(), log: (line) => console.warn(line) }) };
+            return { reloaded: target, restarting: restartAfterFront({ frontPid, markStopping: () => { commands.markStopping(); withdrawBootProgress(process.env); }, restart: () => requestModelReload(), log: (line) => console.warn(line) }) };
           }
           // A scope approval cancels the unsettled jobs it no longer covers.
           const invalidated = target === 'scope' && fileExtractionRuntime
@@ -6536,10 +6555,11 @@ export async function main(): Promise<void> {
     restartForDelete = (request) => {
       const frontPid = deleteFromFront;
       if (frontPid === undefined) return requestModelReload(request);
-      return restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(request), log: (line) => console.warn(line) });
+      return restartAfterFront({ frontPid, markStopping: () => { commands.markStopping(); withdrawBootProgress(process.env); }, restart: () => requestModelReload(request), log: (line) => console.warn(line) });
     };
     commands.markReady();
     finishBootProgress();
+    setEngineStep(undefined);
     engineBackground = { stop: () => { rssRestart.stop(); status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
   }

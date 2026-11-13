@@ -1,3 +1,4 @@
+import type { EngineHeartbeat } from '../src/core/engine-heartbeat.ts';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -115,7 +116,8 @@ describe('versioned Olympus worker lifecycle', () => {
         installWorkerService({...options,workingDirectory:'/old',authToken:'old-token'});
         if(action==='setup') installManagedWorkerFiles(options);
         else runWorkerLifecycle(action,{...options,...(action==='upgrade'?{artifactPath:createUpgradeArtifact(home,'0.4.9').path}:{})});
-        expect(manager.calls).toContain('systemctl --user restart olympus-worker.service');
+        // An upgrade stops the worker to copy its stores, and the install starts the new version.
+        expect(manager.calls).toContain(action === 'upgrade' ? 'systemctl --user stop olympus-worker.service' : 'systemctl --user restart olympus-worker.service');
         expect(existsSync(transactionPath(home))).toBe(false);
       } finally {makeTreeWritable(home);rmSync(home,{recursive:true,force:true});}
     });
@@ -456,7 +458,9 @@ describe('versioned Olympus worker lifecycle', () => {
       expect(repeated).toMatchObject({ changed: true, readiness: { status: 'ready' } });
       expect(readFileSync(paths.envPath, 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=preserved-token');
       expect(manager.calls.filter((call) => call === 'systemctl --user enable --now olympus-worker.service')).toHaveLength(3);
-      expect(manager.calls.filter((call) => call === 'systemctl --user restart olympus-worker.service')).toHaveLength(3);
+      // The interrupted transaction's rollback restarts the previous version; each upgrade stops it and starts the new one.
+      expect(manager.calls.filter((call) => call === 'systemctl --user restart olympus-worker.service')).toHaveLength(1);
+      expect(manager.calls.filter((call) => call === 'systemctl --user stop olympus-worker.service')).toHaveLength(3);
       expect(existsSync(transactionPath(home))).toBe(false);
     } finally {
       makeTreeWritable(home);
@@ -678,154 +682,83 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
-  test('past its readiness timeout, an upgrade waits while the worker reports boot work, and prints progress (#1494)', () => {
-    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-progress-'));
+  // The upgrade's wait reads the engine's heartbeat, which a thread its busy
+  // loop cannot hold writes: busy is never dead (gate7, 13 Nov). It ends on an
+  // answer, the unit stopping, a crash loop, a heartbeat that has stopped for
+  // a whole window, or the cap.
+  function beat(pid: number, extra: Partial<EngineHeartbeat> = {}): EngineHeartbeat {
+    const at = new Date().toISOString();
+    return { schema: 'olympus.engine-heartbeat.v1', pid, role: 'background', startedAt: at, writtenAt: at, blockedMs: 0, ...extra };
+  }
+
+  test('an engine whose heartbeat beats is waited for past the window, busy or not, with a line saying what it does', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-heartbeat-'));
     const manager = linuxManager('active');
     try {
       const artifact = createUpgradeArtifact(home, '0.4.3');
       installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
-      let probes = 0;
       const lines: string[] = [];
-      const startedAt = new Date(Date.now() - 4 * 60_000).toISOString();
-      const result = runWorkerLifecycle('upgrade', {
-        platform: 'linux', homeDir: home, artifactPath: artifact.path,
-        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
-        readinessTimeoutMs: 0, actionSettlePollMs: 1,
-        bootProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'migrating', storeId: 'tier-ledger', startedAt, updatedAt: startedAt, completedStores: 2 }),
-        progressLine: (line) => lines.push(line),
-        readinessProbe: () => ++probes >= 5,
-      });
-      expect(probes).toBe(5);
-      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
-      expect(lines).toEqual(['Updating your data: 2 stores done, now tier-ledger (4m)']);
-    } finally {
-      makeTreeWritable(home);
-      rmSync(home, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  test('after boot work ends past the readiness timeout, the split front still gets the whole window to answer (#1494)', () => {
-    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-done-'));
-    const manager = linuxManager('active');
-    try {
-      const artifact = createUpgradeArtifact(home, '0.4.3');
-      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
-      const t0 = Date.now();
-      const startedAt = new Date(t0 - 60_000).toISOString();
-      // The background migrates past the 300 ms window, then writes done; the
-      // front mounts its stores and answers 250 ms after that, later than what
-      // was left of a window restarted only when the first one ran out.
-      const doneAt = t0 + 450;
-      const result = runWorkerLifecycle('upgrade', {
-        platform: 'linux', homeDir: home, artifactPath: artifact.path,
-        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
-        readinessTimeoutMs: 300, actionSettlePollMs: 5,
-        bootProgress: () => ({
-          schema: 'olympus.boot-progress.v1', pid: process.pid, startedAt, updatedAt: new Date().toISOString(), completedStores: 2,
-          ...(Date.now() < doneAt ? { phase: 'migrating' as const, storeId: 'tier-ledger' } : { phase: 'done' as const }),
-        }),
-        progressLine: () => {},
-        readinessProbe: () => Date.now() >= doneAt + 250,
-      });
-      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
-    } finally {
-      makeTreeWritable(home);
-      rmSync(home, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  test('a split front still opening stores after the boot work is done is waited for past the window (#1563)', () => {
-    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-front-moving-'));
-    const manager = linuxManager('active');
-    try {
-      const artifact = createUpgradeArtifact(home, '0.4.3');
-      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
-      const t0 = Date.now();
-      const startedAt = new Date(t0).toISOString();
-      // The background's boot work is already done. The front opens a store
-      // every poll and first answers four windows later: rc.4's install gave
-      // up on a front like this one window after done (ops#151, 13 Nov).
-      const readyAt = t0 + 1_200;
-      const lines: string[] = [];
-      let stores = 0;
-      const result = runWorkerLifecycle('upgrade', {
-        platform: 'linux', homeDir: home, artifactPath: artifact.path,
-        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
-        readinessTimeoutMs: 300, actionSettlePollMs: 5,
-        bootProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'done', startedAt, updatedAt: startedAt, completedStores: 3 }),
-        frontProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'starting', startedAt, updatedAt: new Date().toISOString(), completedStores: ++stores }),
-        progressLine: (line) => lines.push(line),
-        readinessProbe: () => Date.now() >= readyAt,
-      });
-      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
-      expect(lines.length).toBeGreaterThan(0);
-      expect(lines[0]).toMatch(/^Starting Olympus: \d+ stores open \(0m\)$/);
-    } finally {
-      makeTreeWritable(home);
-      rmSync(home, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  test('a background that finished its boot during the wait and is busy holds the wait while the front still waits on it (gate7 on 893087f5)', () => {
-    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-busy-'));
-    const manager = linuxManager('active');
-    try {
-      const artifact = createUpgradeArtifact(home, '0.4.3');
-      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
-      // The background's boot ends at once and it answers ready, then holds its
-      // event loop on its first work: the front, still in its wait, has not
-      // moved since it started, and first answers four windows later.
-      const frontAt = new Date(Date.now() - 40 * 60_000).toISOString();
-      let bootDoneAt: string | undefined;
       const readyAt = Date.now() + 1_200;
       const result = runWorkerLifecycle('upgrade', {
         platform: 'linux', homeDir: home, artifactPath: artifact.path,
         bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
-        readinessTimeoutMs: 300, actionSettlePollMs: 5,
-        bootProgress: () => {
-          bootDoneAt ??= new Date().toISOString();
-          return { schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'done', startedAt: bootDoneAt, updatedAt: bootDoneAt, completedStores: 9 };
-        },
-        frontProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'starting', startedAt: frontAt, updatedAt: frontAt, completedStores: 0 }),
-        progressLine: () => {},
+        readinessTimeoutMs: 300, actionSettlePollMs: 5, readinessCapMs: 60_000,
+        heartbeat: () => beat(process.pid, { blockedMs: 86_000, step: 'backing up tier-sniffer', stepSince: new Date(Date.now() - 86_000).toISOString() }),
+        bootProgress: () => undefined, frontProgress: () => undefined,
+        progressLine: (line) => lines.push(line),
         readinessProbe: () => Date.now() >= readyAt,
-        rollbackReadinessProbe: () => true,
       });
       expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
+      expect(lines.some((line) => /^Starting Olympus: backing up tier-sniffer \(8\d s\)$/.test(line))).toBe(true);
     } finally {
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
     }
   }, 30_000);
 
-  test('a supervisor that keeps replacing its background stops holding the wait after three boots, and the upgrade rolls back (gate7, 13 Nov)', () => {
-    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-loop-'));
+  test('an engine whose heartbeat has stopped gets one window, then the upgrade rolls back', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-heartbeat-stopped-'));
     const manager = linuxManager('active');
-    // Live processes standing in for successive backgrounds: each boot is
-    // fresh, so only the count of boots can end the wait.
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      const started = Date.now();
+      expect(() => runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        readinessTimeoutMs: 300, actionSettlePollMs: 5, readinessCapMs: 60_000,
+        heartbeat: () => beat(process.pid, { writtenAt: new Date(Date.now() - 60_000).toISOString() }),
+        bootProgress: () => undefined, frontProgress: () => undefined,
+        progressLine: () => {},
+        readinessProbe: () => false,
+        rollbackReadinessProbe: () => true,
+      })).toThrow('its engine had stopped beating');
+      expect(Date.now() - started).toBeLessThan(10_000);
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('an engine that keeps exiting and being started again is a crash loop: the upgrade rolls back after the fourth process', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-crash-loop-'));
+    const manager = linuxManager('active');
     const backgrounds = Array.from({ length: 6 }, () => Bun.spawn(['sleep', '60'], { stdout: 'ignore', stderr: 'ignore' }));
     try {
       const artifact = createUpgradeArtifact(home, '0.4.3');
       installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
       let polls = 0;
-      const started = Date.now();
       expect(() => runWorkerLifecycle('upgrade', {
         platform: 'linux', homeDir: home, artifactPath: artifact.path,
         bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
-        readinessTimeoutMs: 300, actionSettlePollMs: 5,
-        bootProgress: () => {
-          const at = new Date().toISOString();
-          const pid = backgrounds[Math.min(backgrounds.length - 1, Math.floor(polls++ / 20))]!.pid;
-          return { schema: 'olympus.boot-progress.v1', pid, phase: 'starting', startedAt: at, updatedAt: at, completedStores: 0 };
-        },
-        frontProgress: () => undefined,
+        readinessTimeoutMs: 300, actionSettlePollMs: 5, readinessCapMs: 60_000,
+        heartbeat: () => beat(backgrounds[Math.min(backgrounds.length - 1, Math.floor(polls++ / 20))]!.pid),
+        bootProgress: () => undefined, frontProgress: () => undefined,
         progressLine: () => {},
         readinessProbe: () => false,
         rollbackReadinessProbe: () => true,
-      })).toThrow('did not answer its loopback readiness probe');
-      // Four boots at 20 polls each, then one window: well before the sixth boot.
-      expect(polls).toBeLessThan(120);
-      expect(Date.now() - started).toBeLessThan(10_000);
+      })).toThrow('Its engine kept exiting and being started again.');
+      expect(polls).toBeLessThan(100);
     } finally {
       for (const child of backgrounds) child.kill();
       makeTreeWritable(home);
@@ -833,61 +766,22 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
-  test('a stopped predecessor\'s unfinished boot file does not use up a boot: the third real background is still waited for (Astra on #1600)', () => {
-    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-stale-'));
-    const manager = linuxManager('active');
-    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
-    const backgrounds = Array.from({ length: 3 }, () => Bun.spawn(['sleep', '60'], { stdout: 'ignore', stderr: 'ignore' }));
-    try {
-      const artifact = createUpgradeArtifact(home, '0.4.3');
-      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
-      let polls = 0;
-      const staleAt = new Date(Date.now() - 60_000).toISOString();
-      const result = runWorkerLifecycle('upgrade', {
-        platform: 'linux', homeDir: home, artifactPath: artifact.path,
-        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
-        readinessTimeoutMs: 300, actionSettlePollMs: 5,
-        bootProgress: () => {
-          const poll = polls++;
-          // First the stopped background's file, then three real boots, each past the window.
-          if (poll < 10) return { schema: 'olympus.boot-progress.v1', pid: gone, phase: 'starting', startedAt: staleAt, updatedAt: staleAt, completedStores: 2 };
-          const at = new Date().toISOString();
-          const pid = backgrounds[Math.min(2, Math.floor((poll - 10) / 80))]!.pid;
-          return { schema: 'olympus.boot-progress.v1', pid, phase: 'starting', startedAt: at, updatedAt: at, completedStores: 0 };
-        },
-        frontProgress: () => undefined,
-        progressLine: () => {},
-        // Ready late in the third real boot, past the first window.
-        readinessProbe: () => polls >= 10 + 2 * 80 + 60,
-        rollbackReadinessProbe: () => true,
-      });
-      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
-    } finally {
-      for (const child of backgrounds) child.kill();
-      makeTreeWritable(home);
-      rmSync(home, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  test('a front that has stopped moving gets one window after the boot work, then the upgrade rolls back (#1563)', () => {
-    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-front-stalled-'));
+  test('at the cap the upgrade rolls back and says what the engine said it was doing', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-cap-'));
     const manager = linuxManager('active');
     try {
       const artifact = createUpgradeArtifact(home, '0.4.3');
       installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
-      const stalledAt = new Date(Date.now() - 6 * 60_000).toISOString();
-      const started = Date.now();
       expect(() => runWorkerLifecycle('upgrade', {
         platform: 'linux', homeDir: home, artifactPath: artifact.path,
         bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
-        readinessTimeoutMs: 300, actionSettlePollMs: 5,
-        bootProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'done', startedAt: stalledAt, updatedAt: stalledAt, completedStores: 3 }),
-        frontProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'starting', startedAt: stalledAt, updatedAt: stalledAt, completedStores: 4 }),
+        readinessTimeoutMs: 300, actionSettlePollMs: 5, readinessCapMs: 900,
+        heartbeat: () => beat(process.pid, { step: 'updating tier-ledger', stepSince: new Date().toISOString() }),
+        bootProgress: () => undefined, frontProgress: () => undefined,
         progressLine: () => {},
         readinessProbe: () => false,
         rollbackReadinessProbe: () => true,
-      })).toThrow('did not answer its loopback readiness probe');
-      expect(Date.now() - started).toBeLessThan(5_000);
+      })).toThrow(/It was still working when the wait reached its limit: updating tier-ledger \(\d+ s\)\./);
     } finally {
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
@@ -923,7 +817,7 @@ describe('versioned Olympus worker lifecycle', () => {
           rollbackReadinessProbe: () => true,
         });
       } catch (caught) { error = caught; }
-      expect(String(error)).toContain('did not answer its loopback readiness probe. Its front stopped 7 times while starting (front_store_write). Its service stopped (status failed).');
+      expect(String(error)).toContain('did not answer its loopback readiness probe. Its front stopped 7 times while starting (front_store_write).');
       expect((error as { suggestion?: string }).suggestion).toContain('The previous version is running and answered its health check.');
     } finally {
       makeTreeWritable(home);
@@ -1044,10 +938,12 @@ describe('versioned Olympus worker lifecycle', () => {
       const artifact = createUpgradeArtifact(home, '0.4.3');
       installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
       let stopped = false;
+      let probed = false;
       let atPreviousStart: { version: number; wal: boolean } | undefined;
       const exec: WorkerServiceExec = (command, args) => {
         const call = [command, ...args].join(' ');
-        if (call === 'systemctl --user stop olympus-worker.service') stopped = true;
+        // The rollback's stop, after the new worker ran: not the stop the upgrade makes to copy the stores.
+        if (call === 'systemctl --user stop olympus-worker.service' && probed) stopped = true;
         if (stopped && !atPreviousStart && (call.endsWith('restart olympus-worker.service') || call.endsWith('enable --now olympus-worker.service'))) {
           const db = new Database(dbPath, { readonly: true });
           atPreviousStart = { version: readSqliteSchemaVersion(db, 'tier-ledger'), wal: existsSync(`${dbPath}-wal`) };
@@ -1063,6 +959,7 @@ describe('versioned Olympus worker lifecycle', () => {
           bootProgress: () => undefined,
           rollbackReadinessProbe: () => true,
           readinessProbe: () => {
+            probed = true;
             writeFileSync(workerServicePaths('linux', home).envPath, `${readFileSync(workerServicePaths('linux', home).envPath, 'utf8')}XDG_DATA_HOME=${env.XDG_DATA_HOME}\n`);
             // The new worker updates the store, leaving a -wal, and never answers.
             const db = new Database(dbPath);
@@ -1410,7 +1307,7 @@ describe('versioned Olympus worker lifecycle', () => {
         activationSettleMs: 0,
         readinessTimeoutMs: 0,
         readinessProbe: () => false,
-      })).toThrow('did not answer its loopback readiness probe. It was still running, with no start progress, when the wait ended. Olympus is not running: it was stopped before the upgrade, and the previous version was put back stopped. Run `olympus worker start` to start it.');
+      })).toThrow('did not answer its loopback readiness probe. It was still running, but its engine had stopped beating, when the wait ended. Olympus is not running: it was stopped before the upgrade, and the previous version was put back stopped. Run `olympus worker start` to start it.');
 
       expect(readFileSync(paths.unitPath, 'utf8')).toBe(oldUnit);
       expect(cachedUnit).toBe(oldUnit);
@@ -1507,7 +1404,9 @@ describe('versioned Olympus worker lifecycle', () => {
         ok: true,
         readiness: { status: 'ready', url: `http://127.0.0.1:${server.port}/v1/health` },
       });
-      expect(manager.calls).toContain('systemctl --user restart olympus-worker.service');
+      // Stopped to copy the stores, then started as the new version.
+      const calls = manager.calls;
+      expect(calls.indexOf('systemctl --user stop olympus-worker.service')).toBeLessThan(calls.indexOf('systemctl --user enable --now olympus-worker.service'));
     } finally {
       server.process.kill();
       await server.process.exited;

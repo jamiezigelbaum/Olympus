@@ -1,15 +1,14 @@
-// What the worker is doing while it boots, for the waits that would otherwise
-// give up at a fixed ceiling (#1494): the upgrade's readiness probe, the
-// engine host's startup wait, and the split's front. An upgrade from 1.4.4
-// spent minutes per tier ledger in schema updates and was rolled back while
-// it was still working.
+// What the worker has done of its boot: how many stores it has updated, and
+// when its boot work is done (the split's front opens stores on that receipt).
+// Whether a process is alive is the heartbeat's to say (engine-heartbeat.ts),
+// never this file's: it is written from the engine's own loop, which a long
+// step holds.
 //
 // The file holds store ids and counts only, never a path, a source name or
 // item content. The worker (single, or the split's background) writes it; the
 // front never does, since it does not own the data root's boot work. The
 // front reports its own start in a second file (front-progress), which the
-// upgrade's wait reads too: a front still opening stores after the boot work
-// is done is moving, not hung (#1563).
+// upgrade's wait reads for the errors a failing front exits on (#1563).
 //
 // The store backups each schema update takes are recorded beside it, so a
 // failed upgrade can put them back before the previous version starts.
@@ -45,10 +44,6 @@ export interface BootStepEvent {
   completedStore?: boolean;
 }
 
-/** One long step (a backup, one store's update) can't heartbeat: past this it is hung. */
-export const BOOT_LONG_STEP_BACKSTOP_MS = 6 * 60 * 60 * 1000;
-/** A boot that has not reported anything for this long has stalled. */
-export const BOOT_STALL_MS = 5 * 60 * 1000;
 const WRITE_INTERVAL_MS = 1_000;
 
 // This process's boot: reports count only between beginBootProgress and
@@ -94,9 +89,8 @@ export function finishBootProgress(now: () => number = Date.now): void {
 
 /**
  * The split front's start begins. From here until it listens, each store it
- * opens is a step (reportFrontStoreOpened), so a front that is still mounting
- * a large archive reads as moving, and one that has stopped moving for
- * BOOT_STALL_MS reads as stalled.
+ * opens is a step (reportFrontStoreOpened), and an error it exits on is
+ * counted, so the upgrade's wait can tell a front that keeps failing.
  */
 export function beginFrontProgress(env: LayoutEnv = process.env, now: () => number = Date.now): void {
   // The failures of the starts before this one are carried until a start
@@ -186,23 +180,6 @@ export function reportBootStep(env: LayoutEnv, event: BootStepEvent, now: () => 
   }
 }
 
-/**
- * Runs one long, silent step of a store's update that comes after its
- * migration commits (a check that reads every row). It reads as part of the
- * update, a long step, so the waits do not take a check that is still
- * reading for a stalled boot: on a slow disk the connector store's checks ran
- * past the five-minute stall limit and the supervisor replaced a background
- * that was still working (the gate7 forced leg, 2026-11-13).
- */
-export function duringStoreUpdateStep<T>(env: LayoutEnv, storeId: string, step: () => T): T {
-  reportBootStep(env, { phase: 'migrating', storeId });
-  try {
-    return step();
-  } finally {
-    reportBootStep(env, { phase: 'starting', storeId });
-  }
-}
-
 function write(target: ProgressFile, nowMs: number, force: boolean): void {
   if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS) return;
   try {
@@ -213,6 +190,15 @@ function write(target: ProgressFile, nowMs: number, force: boolean): void {
   } catch {
     // A full or read-only disk: the waits fall back to their ceilings.
   }
+}
+
+/**
+ * Takes back this boot's receipt that its boot work is done: the background
+ * is about to restart (a delete), so no front may open stores on it until the
+ * next boot is done.
+ */
+export function withdrawBootProgress(env: LayoutEnv = process.env): void {
+  try { rmSync(bootProgressPath(env), { force: true }); } catch { /* the front then waits on a dead pid's receipt, which it refuses */ }
 }
 
 export function readBootProgress(env: LayoutEnv = process.env): BootProgress | undefined {
@@ -237,64 +223,6 @@ function readProgressFile(path: string): BootProgress | undefined {
   }
 }
 
-/**
- * Whether a worker is still doing boot work: not done, its process alive, and
- * either in one long step (a backup or a store update) started less than six
- * hours ago, or starting with a report in the last five minutes.
- */
-export function bootInProgress(env: LayoutEnv = process.env, now: number = Date.now()): boolean {
-  return bootProgressIsLive(readBootProgress(env), now);
-}
-
-/** How long a worker that finished its boot may go without answering before a supervisor gives up on it. */
-export const BOOT_READY_ANSWER_GRACE_MS = 15 * 60 * 1000;
-
-/**
- * Whether the worker at `pid` is still starting for a supervisor's readiness
- * wait: its boot work is under way, or it finished its boot (it serves) and
- * is alive but has not answered yet. A worker that has just become ready runs
- * its first work at once, and a synchronous step there (a store's backup
- * before its schema update, an embed batch) holds its event loop for a minute
- * or more, so the probe times out against a worker that is busy, not dead.
- * Without this the supervisor replaced it (gate7 success leg on c013270b,
- * 13 Nov: a 70 s sniffer backup and a 33 s embed block, twice).
- */
-export function workerStillStarting(
-  env: LayoutEnv,
-  pid: number | undefined,
-  now: number = Date.now(),
-  alive: (pid: number) => boolean = processAlive,
-): boolean {
-  const progress = readBootProgress(env);
-  if (bootProgressIsLive(progress, now, alive)) return true;
-  return pid !== undefined && progress?.pid === pid && bootDoneAndAnswering(progress, now, alive);
-}
-
-/**
- * The boot finished, its process is alive, and it is inside the grace for a
- * first answer: busy with its first work, not dead (workerStillStarting).
- */
-export function bootDoneAndAnswering(
-  progress: BootProgress | undefined,
-  now: number = Date.now(),
-  alive: (pid: number) => boolean = processAlive,
-): boolean {
-  return progress?.phase === 'done' && alive(progress.pid)
-    && now - Date.parse(progress.updatedAt) < BOOT_READY_ANSWER_GRACE_MS;
-}
-
-export function bootProgressIsLive(
-  progress: BootProgress | undefined,
-  now: number = Date.now(),
-  alive: (pid: number) => boolean = processAlive,
-): boolean {
-  if (!progress || progress.phase === 'done' || progress.phase === 'failed' || !alive(progress.pid)) return false;
-  if (progress.phase === 'backing_up' || progress.phase === 'migrating') {
-    return now - Date.parse(progress.startedAt) < BOOT_LONG_STEP_BACKSTOP_MS;
-  }
-  return now - Date.parse(progress.updatedAt) < BOOT_STALL_MS;
-}
-
 /** One line for a person waiting: "Updating your data: N stores done, now <storeId> (Xm)". */
 export function bootProgressLine(progress: BootProgress, now: number = Date.now()): string {
   const minutes = Math.max(0, Math.floor((now - Date.parse(progress.startedAt)) / 60_000));
@@ -303,11 +231,6 @@ export function bootProgressLine(progress: BootProgress, now: number = Date.now(
 }
 
 /** One line for a person waiting on the front: "Starting Olympus: N stores open (Xm)". */
-export function frontProgressLine(progress: BootProgress, now: number = Date.now()): string {
-  const minutes = Math.max(0, Math.floor((now - Date.parse(progress.startedAt)) / 60_000));
-  return `Starting Olympus: ${progress.completedStores} ${progress.completedStores === 1 ? 'store' : 'stores'} open (${minutes}m)`;
-}
-
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -389,7 +312,7 @@ export function preSchemaBackupsOf(dbPath: string): string[] {
   const prefix = `${basename(dbPath)}.pre-schema-`;
   try {
     return readdirSync(dirname(dbPath))
-      .filter((name) => name.startsWith(prefix) && /^(?:\d+|retired)\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length)))
+      .filter((name) => name.startsWith(prefix) && /^(?:\d+|retired|upgrade)\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length)))
       .map((name) => join(dirname(dbPath), name));
   } catch {
     return [];

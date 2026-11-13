@@ -12,11 +12,6 @@ import { join } from 'node:path';
 import {
   BOOT_PROGRESS_SCHEMA,
   beginBootProgress,
-  bootInProgress,
-  bootProgressIsLive,
-  duringStoreUpdateStep,
-  workerStillStarting,
-  BOOT_READY_ANSWER_GRACE_MS,
   finishBootProgress,
   readBootProgress,
   reportBootStep,
@@ -53,46 +48,6 @@ function progress(phase: BootProgress['phase'], ages: { startedMs: number; updat
     startedAt: new Date(now - ages.startedMs).toISOString(), updatedAt: new Date(now - ages.updatedMs).toISOString(),
   };
 }
-
-describe('bootInProgress', () => {
-  const now = Date.parse('2026-11-12T12:00:00Z');
-  test('a fresh starting boot is in progress', () => {
-    expect(bootProgressIsLive(progress('starting', { startedMs: 10_000, updatedMs: 1_000 }, now), now)).toBe(true);
-  });
-  test('a starting boot with no report for 5 minutes has stalled', () => {
-    expect(bootProgressIsLive(progress('starting', { startedMs: HOUR, updatedMs: 5 * 60_000 }, now), now)).toBe(false);
-  });
-  test('a store update started 2 hours ago is still in progress', () => {
-    expect(bootProgressIsLive(progress('migrating', { startedMs: 2 * HOUR, updatedMs: 2 * HOUR }, now), now)).toBe(true);
-    expect(bootProgressIsLive(progress('migrating', { startedMs: 7 * HOUR, updatedMs: 7 * HOUR }, now), now)).toBe(false);
-  });
-  test('a dead worker is not in progress', () => {
-    expect(bootProgressIsLive(progress('starting', { startedMs: 0, updatedMs: 0 }, now, 4_000_000), now, () => false)).toBe(false);
-  });
-  test('a finished boot is not in progress', () => {
-    expect(bootProgressIsLive(progress('done', { startedMs: 0, updatedMs: 0 }, now), now)).toBe(false);
-  });
-  test('the worker writes the file; another data root and a boot that ended write nothing', () => {
-    const env = home();
-    beginBootProgress(env);
-    expect(readBootProgress(env)).toMatchObject({ pid: process.pid, phase: 'starting', completedStores: 0 });
-    expect(bootInProgress(env)).toBe(true);
-    reportBootStep(env, { phase: 'migrating', storeId: 'tier-ledger' });
-    reportBootStep(env, { phase: 'starting', storeId: 'tier-ledger', completedStore: true });
-    const other = home();
-    reportBootStep(other, { phase: 'migrating', storeId: 'x' });
-    expect(readBootProgress(other)).toBeUndefined();
-    expect(readBootProgress(env)).toMatchObject({ phase: 'starting', storeId: 'tier-ledger', completedStores: 1 });
-    finishBootProgress();
-    expect(readBootProgress(env)?.phase).toBe('done');
-    expect(bootInProgress(env)).toBe(false);
-    reportBootStep(env, { phase: 'starting', storeId: 'later' });
-    expect(readBootProgress(env)?.phase).toBe('done');
-    const text = readFileSync(join(env.HOME!, '.local', 'share', 'openclaw', 'olympus', 'boot-progress.json'), 'utf8');
-    expect(text).not.toContain(env.HOME!);
-    expect(statSync(join(env.HOME!, '.local', 'share', 'openclaw', 'olympus', 'boot-progress.json')).mode & 0o777).toBe(0o600);
-  });
-});
 
 const MIGRATIONS: SqliteMigration[] = [
   { version: 1, name: 'create', up: (db) => db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, body TEXT)') },
@@ -365,25 +320,6 @@ describe('retired state is moved aside for the upgrade that retires it (#1563 re
   });
 });
 
-describe('a long store update is not a stall', () => {
-  test('while one store updates, silent for longer than the stall limit, the boot stays in progress', () => {
-    const env = home();
-    const { db } = storeAtVersion1(env);
-    beginBootProgress(env);
-    const seen: Array<{ phase: string | undefined; liveAfter10Min: boolean }> = [];
-    // The update writes nothing to the progress file while it runs; ten minutes later it must still read as live.
-    const slow: SqliteMigration = { version: 2, name: 'slow', up: () => {
-      seen.push({ phase: readBootProgress(env)?.phase, liveAfter10Min: bootInProgress(env, Date.now() + 10 * 60_000) });
-    } };
-    runSqliteMigrations(db, 'fixture', [MIGRATIONS[0]!, slow], { env, log: () => {} });
-    db.close();
-    expect(seen).toEqual([{ phase: 'migrating', liveAfter10Min: true }]);
-    // Between stores, the stall rule applies again.
-    expect(readBootProgress(env)?.phase).toBe('starting');
-    expect(bootInProgress(env, Date.now() + 10 * 60_000)).toBe(false);
-  });
-});
-
 describe('the supervisor waits on boot progress', () => {
   async function startWith(inProgress: boolean): Promise<string> {
     const children: ReturnType<typeof spawnProcess>[] = [];
@@ -424,124 +360,6 @@ describe('the supervisor waits on boot progress', () => {
   }, 10_000);
 });
 
-describe('a check that reads every row after an update is not a stall (gate7 forced leg, 2026-11-13)', () => {
-  test('inside the step the boot reads as a long update; after it, the stall rule applies again', () => {
-    const env = home();
-    beginBootProgress(env);
-    const seen = duringStoreUpdateStep(env, 'fixture', () => ({
-      phase: readBootProgress(env)?.phase,
-      liveAfter10Min: bootInProgress(env, Date.now() + 10 * 60_000),
-    }));
-    expect(seen).toEqual({ phase: 'migrating', liveAfter10Min: true });
-    expect(readBootProgress(env)?.phase).toBe('starting');
-    expect(bootInProgress(env, Date.now() + 10 * 60_000)).toBe(false);
-  });
-
-  test('a step that throws still returns the boot to starting', () => {
-    const env = home();
-    beginBootProgress(env);
-    expect(() => duringStoreUpdateStep(env, 'fixture', () => { throw new Error('bad rows'); })).toThrow('bad rows');
-    expect(readBootProgress(env)?.phase).toBe('starting');
-  });
-
-  // A real child holds one silent step for longer than the supervisor's
-  // startup timeout, and the supervisor reads its progress as if ten minutes
-  // had passed since the step began: twice the stall limit.
-  async function superviseSilentStep(asUpdateStep: boolean): Promise<string> {
-    const env = home();
-    const readyFile = join(env.HOME!, 'ready');
-    const module = join(import.meta.dir, '..', 'src', 'core', 'boot-progress.ts');
-    const script = `
-      const { beginBootProgress, duringStoreUpdateStep, reportBootStep } = await import(${JSON.stringify(module)});
-      const { writeFileSync } = await import('node:fs');
-      const env = ${JSON.stringify(env)};
-      beginBootProgress(env);
-      const silent = () => { const end = Date.now() + 3000; while (Date.now() < end) {} };
-      if (${asUpdateStep}) duringStoreUpdateStep(env, 'fixture', silent);
-      else { reportBootStep(env, { phase: 'starting', storeId: 'fixture' }); silent(); }
-      writeFileSync(${JSON.stringify(readyFile)}, '');
-      setInterval(() => {}, 1000);
-    `;
-    const service = createNativeProcessService({
-      id: 'fixture', label: 'fixture', initialConfig: {}, reload: { configPrefixes: [] },
-      readinessPollMs: 20, stopGraceMs: 100, restartDelaysMs: [60_000],
-      async prepareStart() {
-        return {
-          command: process.execPath, args: ['-e', script], env: { PATH: process.env.PATH ?? '' },
-          startupTimeoutMs: 1500, endpointOccupied: false,
-          startupInProgress: () => bootInProgress(env, Date.now() + 10 * 60_000),
-          readinessProbe: async () => existsSync(readyFile),
-        };
-      },
-    });
-    try {
-      await service.start({ logger: { warn() {} }, serviceHealth: { reportFailure() {}, clearFailure() {} } });
-      return 'ready';
-    } catch {
-      return 'timed out';
-    } finally {
-      await service.stop();
-    }
-  }
-
-  test('the supervisor waits out a check longer than its timeout and the stall limit', async () => {
-    expect(await superviseSilentStep(true)).toBe('ready');
-  }, 30_000);
-
-  test('the same silence outside an update step still times out', async () => {
-    expect(await superviseSilentStep(false)).toBe('timed out');
-  }, 30_000);
-});
-
-describe('a worker that finished its boot and is busy is not dead (gate7 success leg on c013270b, 13 Nov)', () => {
-  test('done by this live child counts as starting until the grace runs out; another pid does not', () => {
-    const env = home();
-    beginBootProgress(env);
-    finishBootProgress();
-    expect(workerStillStarting(env, process.pid)).toBe(true);
-    expect(workerStillStarting(env, process.pid + 1_000_000)).toBe(false);
-    expect(workerStillStarting(env, undefined)).toBe(false);
-    expect(workerStillStarting(env, process.pid, Date.now() + BOOT_READY_ANSWER_GRACE_MS + 1)).toBe(false);
-  });
-
-  test('the supervisor waits for a ready child whose first work blocks it past the timeout', async () => {
-    const env = home();
-    const readyFile = join(env.HOME!, 'ready');
-    const module = join(import.meta.dir, '..', 'src', 'core', 'boot-progress.ts');
-    const script = `
-      const { beginBootProgress, finishBootProgress } = await import(${JSON.stringify(module)});
-      const { writeFileSync } = await import('node:fs');
-      beginBootProgress(${JSON.stringify(env)});
-      finishBootProgress();
-      // Its first work after ready holds the event loop, as a store backup does.
-      const end = Date.now() + 3000; while (Date.now() < end) {}
-      writeFileSync(${JSON.stringify(readyFile)}, '');
-      setInterval(() => {}, 1000);
-    `;
-    const service = createNativeProcessService({
-      id: 'fixture', label: 'fixture', initialConfig: {}, reload: { configPrefixes: [] },
-      readinessPollMs: 20, stopGraceMs: 100, restartDelaysMs: [60_000],
-      async prepareStart() {
-        return {
-          command: process.execPath, args: ['-e', script], env: { PATH: process.env.PATH ?? '' },
-          startupTimeoutMs: 1500, endpointOccupied: false,
-          startupInProgress: (child) => workerStillStarting(env, child.pid),
-          readinessProbe: async () => existsSync(readyFile),
-        };
-      },
-    });
-    let outcome = 'ready';
-    try {
-      await service.start({ logger: { warn() {} }, serviceHealth: { reportFailure() {}, clearFailure() {} } });
-    } catch {
-      outcome = 'timed out';
-    } finally {
-      await service.stop();
-    }
-    expect(outcome).toBe('ready');
-  }, 30_000);
-});
-
 describe('the supervisor probes before it gives up', () => {
   test('a child that finished its boot during the last wait is ready, not timed out', async () => {
     const readyAt = Date.now() + 150;
@@ -577,7 +395,10 @@ describe('the worker reports its boot', () => {
     const begin = main.indexOf('beginBootProgress(process.env)');
     expect(begin).toBeGreaterThan(main.indexOf('takeWorkerDataOwnerLock('));
     expect(begin).toBeLessThan(main.indexOf('deleteMarkedAccountsAtBoot('));
-    expect(main.indexOf("if (engineRole === 'single') finishBootProgress()")).toBeGreaterThan(0);
+    expect(main.indexOf("if (engineRole === 'single') { finishBootProgress();")).toBeGreaterThan(0);
+    // The heartbeat starts before the boot's first step, from its own thread.
+    expect(main.indexOf('startEngineHeartbeat(process.env, engineRole)')).toBeGreaterThan(main.indexOf('takeWorkerDataOwnerLock('));
+    expect(main.indexOf('startEngineHeartbeat(process.env, engineRole)')).toBeLessThan(begin);
     expect(main).toContain('commands.markReady();\n    finishBootProgress();');
   });
 });

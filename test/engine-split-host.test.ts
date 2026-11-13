@@ -15,7 +15,9 @@ import {
   type NativeWorkerServiceDefinition,
 } from '../src/core/native-worker-service.ts';
 import { createEngineCommandHandler, EngineCommandLedger, type EngineCommandHandlers } from '../src/workers/engine-split/commands.ts';
-import { waitForEngineBackground } from '../src/workers/engine-split/runtime.ts';
+import { backgroundBootDone, waitForBackgroundBootDone } from '../src/workers/engine-split/runtime.ts';
+import type { BootProgress } from '../src/core/boot-progress.ts';
+import type { EngineHeartbeat } from '../src/core/engine-heartbeat.ts';
 import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 
 const TOKEN = 'engine-split-test-token';
@@ -43,67 +45,29 @@ function background(handlers: EngineCommandHandlers, instanceId = 'background-1'
 }
 
 describe('the host starts the background, then the front', () => {
-  test('the front waits for its background and gives up with a retryable start while it is not ready', async () => {
-    const bg = background({});
-    bg.setReady(false);
+  test('the front opens its stores on the background\'s receipt, never on its answer, and never gives up (gate7 on 893087f5)', async () => {
     const clock = createTestClock();
-    const waiting = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: bg.fetch, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250 });
+    const now = Date.now();
+    const at = new Date(now).toISOString();
+    const heartbeat = { schema: 'olympus.engine-heartbeat.v1' as const, pid: process.pid, role: 'background', startedAt: at, writtenAt: at, blockedMs: 86_000, step: 'backing up tier-sniffer' };
+    let boot: BootProgress | undefined = { schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'backing_up', startedAt: at, updatedAt: at, completedStores: 3 };
+    let beating: EngineHeartbeat | undefined = heartbeat;
+    const waiting = waitForBackgroundBootDone({ env: {}, sleep: clock.sleep, pollMs: 250, read: () => ({ boot, heartbeat: beating && { ...beating, writtenAt: new Date().toISOString() } }) });
     let settled = false;
-    void waiting.then(() => { settled = true; }, () => { settled = true; });
+    void waiting.then(() => { settled = true; });
     await flushMicrotasks();
-    await clock.advance(500);
+    // A long boot, then a done receipt from a process whose heartbeat has stopped: still waiting.
+    await clock.advance(60 * 60_000);
     expect(settled).toBe(false);
-    bg.setReady(true);
+    boot = { ...boot!, phase: 'done' };
+    beating = undefined;
+    await clock.advance(1_000);
+    expect(settled).toBe(false);
+    // Done, and beating while busy (its loop held 86 s): the front goes on.
+    beating = heartbeat;
     await clock.advance(250);
     await waiting;
-  });
-
-  test('past its deadline the front keeps waiting while the background reports boot work (#1494)', async () => {
-    const bg = background({});
-    bg.setReady(false);
-    const clock = createTestClock();
-    let inProgress = true;
-    const waiting = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: bg.fetch, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, inProgress: () => inProgress });
-    let failed = false;
-    void waiting.catch(() => { failed = true; });
-    await flushMicrotasks();
-    await clock.advance(5_000);
-    expect(failed).toBe(false);
-    bg.setReady(true);
-    await clock.advance(250);
-    await waiting;
-    // Without progress, and with nothing accepting its connection, the same wait gives up at its deadline.
-    inProgress = false;
-    const gone = (async () => { throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }); }) as unknown as typeof fetch;
-    const stalled = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: gone, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, inProgress: () => inProgress });
-    const outcome = stalled.then(() => 'ready', () => 'gave up');
-    await flushMicrotasks();
-    await clock.advance(1_500);
-    expect(await outcome).toBe('gave up');
-  });
-
-  test('past its deadline the front keeps waiting for a background that is busy or not ready yet (gate7 VM, 154 s sync)', async () => {
-    const bg = background({});
-    bg.setReady(false);
-    const clock = createTestClock();
-    let busy = false;
-    // A busy background accepts the connection and answers nothing in time: the check runs out of time.
-    const fetchBackground = ((input: RequestInfo | URL, init?: RequestInit) => busy
-      ? Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))
-      : bg.fetch(input, init)) as typeof fetch;
-    const waiting = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: fetchBackground, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, inProgress: () => false });
-    let failed = false;
-    void waiting.catch(() => { failed = true; });
-    await flushMicrotasks();
-    await clock.advance(3_000);
-    expect(failed).toBe(false);
-    busy = true;
-    await clock.advance(10_000);
-    expect(failed).toBe(false);
-    busy = false;
-    bg.setReady(true);
-    await clock.advance(250);
-    await waiting;
+    expect(backgroundBootDone({ boot: { ...boot!, pid: process.pid + 1_000_000 }, heartbeat })).toBe(false);
   });
 
   test('a front worker service does not start while its background is not ready', async () => {

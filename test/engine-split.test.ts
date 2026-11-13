@@ -637,8 +637,8 @@ describe('a model change restarts both processes', () => {
     expect(parseEngineCommandEnvelope({ id: 'command-0081', command: { kind: 'reload', target: 'models', frontPid: 4242 } }).command).toEqual({ kind: 'reload', target: 'models', frontPid: 4242 });
     const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/const reloadModels = engineFront\s*\?\s*frontModelReload\(/);
-    expect(server).toMatch(/if \(target === 'models'\) \{[\s\S]{0,500}?restartAfterFront\(\{ frontPid, markStopping: \(\) => commands\.markStopping\(\), restart: \(\) => requestModelReload\(\)/);
-    expect(server).toMatch(/restartForDelete = [\s\S]{0,300}?restartAfterFront\(\{ frontPid, markStopping: \(\) => commands\.markStopping\(\), restart: \(\) => requestModelReload\(request\)/);
+    expect(server).toMatch(/if \(target === 'models'\) \{[\s\S]{0,500}?restartAfterFront\(\{ frontPid, markStopping: \(\) => \{ commands\.markStopping\(\); withdrawBootProgress\(process\.env\); \}, restart: \(\) => requestModelReload\(\)/);
+    expect(server).toMatch(/restartForDelete = [\s\S]{0,300}?restartAfterFront\(\{ frontPid, markStopping: \(\) => \{ commands\.markStopping\(\); withdrawBootProgress\(process\.env\); \}, restart: \(\) => requestModelReload\(request\)/);
     // After a delete only the front restarts: the background is already on its way.
     expect(server).toMatch(/if \(!restartFrontOnly\(\)\) console\.warn/);
   });

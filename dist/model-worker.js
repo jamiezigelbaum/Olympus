@@ -1063,6 +1063,7 @@ var SHARED_DATA_FILES = {
   "people-index": "people-index.sqlite",
   "boot-progress": "boot-progress.json",
   "front-progress": "front-progress.json",
+  "engine-heartbeat": "engine-heartbeat.json",
   "schema-backups": "schema-backups.jsonl",
   models: "models",
   "built-in-embedding": "models/built-in-embedding",

@@ -93,6 +93,8 @@ export const SHARED_DATA_FILES = {
   'boot-progress': 'boot-progress.json',
   // The split front's own start (core/boot-progress.ts): the upgrade's wait reads it beside boot-progress.
   'front-progress': 'front-progress.json',
+  // The engine's heartbeat, written by a thread its loop cannot hold (core/engine-heartbeat.ts).
+  'engine-heartbeat': 'engine-heartbeat.json',
   'schema-backups': 'schema-backups.jsonl',
   models: 'models',
   'built-in-embedding': 'models/built-in-embedding',

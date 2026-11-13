@@ -12,7 +12,9 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
-import { bootDoneAndAnswering, bootProgressIsLive, bootProgressLine, frontProgressLine, readBootProgress, readFrontProgress, removeSchemaBackupsSince, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
+import { bootProgressLine, readBootProgress, readFrontProgress, removeSchemaBackupsSince, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
+import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, type EngineHeartbeat } from './engine-heartbeat.ts';
+import { copyStoresBeforeUpgrade, olympusStoreBytes } from './upgrade-store-copies.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
 import { OperationError } from './operation-error.ts';
@@ -90,17 +92,9 @@ export interface WorkerLifecycleOptions extends WorkerServiceInstallOptions {
    * is set, otherwise 180000.
    */
   readinessTimeoutMs?: number;
-  /**
-   * The worker's boot progress (core/boot-progress.ts). Past the readiness
-   * timeout the upgrade keeps waiting while the unit is active and this shows
-   * boot work under way. Defaults to the worker's progress file.
-   */
+  /** The worker's boot progress (core/boot-progress.ts), for the progress line's counts. Defaults to its file. */
   bootProgress?: () => BootProgress | undefined;
-  /**
-   * The split front's start progress (core/boot-progress.ts, #1563): while
-   * it moves (a store opened in the last five minutes), the wait goes on.
-   * Defaults to the front's progress file.
-   */
+  /** The split front's start (core/boot-progress.ts, #1563): how often it stopped on an error. Defaults to its file. */
   frontProgress?: () => BootProgress | undefined;
   /**
    * The health probe for the previous worker a failed upgrade puts back.
@@ -118,6 +112,19 @@ export interface WorkerLifecycleOptions extends WorkerServiceInstallOptions {
   rollbackReadinessTimeoutMs?: number;
   /** Where progress lines go while the upgrade waits. Defaults to stderr. */
   progressLine?: (line: string) => void;
+  /**
+   * The engine's heartbeat (core/engine-heartbeat.ts), written by a thread
+   * its busy loop cannot hold. While it beats the wait goes on, up to the
+   * cap. Defaults to the heartbeat file.
+   */
+  heartbeat?: () => EngineHeartbeat | undefined;
+  /**
+   * The longest an upgrade waits on a new version whose heartbeat beats, in
+   * milliseconds. Defaults to 30 minutes plus a minute per GB of stores.
+   */
+  readinessCapMs?: number;
+  /** Whether the upgrade copies the stores before the new version starts. Defaults to true. */
+  copyStores?: boolean;
 }
 
 interface LifecycleTransactionV1 {
@@ -348,10 +355,16 @@ function installOrUpgradeLifecycle(
       };
     }
     updateTransactionPhase(effective, 'activating');
+    // The upgrade copies every store itself, after the previous version has
+    // stopped and before the new one starts: a file copy or clone, not a
+    // VACUUM INTO in the new engine's boot (upgrade-store-copies.ts).
+    const stoppedForCopies = action === 'upgrade' && (before.state === 'active' || before.state === 'transitioning');
+    if (action === 'upgrade') copyStoresForUpgrade(effective, stoppedForCopies);
     const serviceAction = runWorkerServiceAction('install', serviceActionOptions(effective));
     const managedBytesChanged = previousUnitBytes !== readManagedFileSnapshot(preview.unit_path)
       || previousEnvBytes !== readManagedFileSnapshot(preview.env_path);
-    const postInstallRestart = effective.platform === 'linux'
+    // Stopped for the copies, the install started the new version already.
+    const postInstallRestart = effective.platform === 'linux' && !stoppedForCopies
       && (before.state === 'active' || before.state === 'transitioning')
       && (action === 'upgrade' || managedBytesChanged)
       ? runWorkerServiceAction('restart', serviceActionOptions(effective))
@@ -469,10 +482,12 @@ function previousWorkerHealth(
   const outcome = waitForWorkerReadiness(options, port, {
     timeoutMs,
     ...(probe ? { probe } : {}),
-    // The previous version's boot work and front are its own: the files the
-    // failed version left say nothing about it.
-    bootProgress: () => undefined,
+    // The previous version's start is its own: the files the failed version
+    // left say nothing about it, and it writes no heartbeat, so this one
+    // window is its whole start.
+    heartbeat: () => undefined,
     frontProgress: () => undefined,
+    capMs: timeoutMs,
   });
   if (outcome.ready) return { healthy: true };
   const minutes = Math.round(timeoutMs / 60_000);
@@ -755,6 +770,20 @@ function rollbackTransaction(
     reactivated: reactivatePrevious,
     leftStopped: intent.touchServiceManager && !reactivatePrevious && transaction.previous_unit_present,
   };
+}
+
+function copyStoresForUpgrade(
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+  stopFirst: boolean,
+): void {
+  if (options.copyStores === false) return;
+  if (stopFirst) runWorkerServiceAction('stop', serviceActionOptions(options));
+  const progressLine = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
+  const copied = copyStoresBeforeUpgrade(lifecycleEnv(options), {
+    ...(options.bunBin ? { bunBin: options.bunBin } : {}),
+    log: progressLine,
+  });
+  if (copied.stores > 0) progressLine(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);
 }
 
 function removeUpgradeBackups(options: WorkerLifecycleOptions & { homeDir: string }): void {
@@ -1078,7 +1107,7 @@ function qualifyWorkerReadiness(
  */
 function readinessFailureDetail(
   options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
-  outcome: { serviceState: string; front: BootProgress | undefined; lastCheck?: string },
+  outcome: { serviceState: string; front: BootProgress | undefined; lastCheck?: string; ended?: 'cap' | 'crash_loop' | 'stopped_beating'; heartbeat?: EngineHeartbeat },
 ): string {
   const parts: string[] = [];
   if (outcome.lastCheck) parts.push(` Its last health check: ${outcome.lastCheck}.`);
@@ -1090,28 +1119,32 @@ function readinessFailureDetail(
     parts.push(` Its service stopped (status ${outcome.serviceState}).`);
     const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });
     if (logLine) parts.push(` The worker's last log line was: ${logLine}`);
+  } else if (outcome.ended === 'crash_loop' && failures === 0) {
+    parts.push(' Its engine kept exiting and being started again.');
+  } else if (outcome.ended === 'cap') {
+    parts.push(` It was still working when the wait reached its limit${outcome.heartbeat ? `: ${engineHeartbeatLine(outcome.heartbeat)}` : ''}.`);
   } else if (failures === 0) {
-    parts.push(' It was still running, with no start progress, when the wait ended.');
+    parts.push(' It was still running, but its engine had stopped beating, when the wait ended.');
   }
   return parts.join('');
 }
 
 /**
- * A restarted front, or a restarted background, counts as moving this many
- * times in one wait; past that it is crash-looping. Each new process starts
- * its progress file over, so without a count a supervisor that keeps
- * replacing its background holds the wait open with no end and the upgrade
- * never rolls back (the gate7 forced leg, 2026-11-13).
+ * More new engine processes than this in one wait is a crash loop: each exit
+ * was replaced, and the next one exited too.
  */
-const PROGRESS_MAX_STARTS = 3;
+const MAX_PROCESS_STARTS = 3;
+/** The cap on a wait whose engine still beats: 30 minutes, plus a minute per GB of stores. */
+const READINESS_CAP_BASE_MS = 30 * 60_000;
+const READINESS_CAP_PER_GB_MS = 60_000;
 
 /**
- * Wait for `/v1/health` while the unit stays active. The window is
- * `timeoutMs`, and it starts again from every poll that sees the worker
- * moving: boot work under way (#1494), or the split's front opening its
- * stores (#1563). So a front that is still mounting a large archive after the
- * background's boot work is done is waited for, and one that has stopped
- * moving gets one window, as a worker that did no boot work does.
+ * Wait for `/v1/health` while the unit stays active. A slow answer is never
+ * read as a dead engine: the wait goes on while the engine's heartbeat beats
+ * (a thread its busy loop cannot hold writes it), and ends on an answer, the
+ * unit stopping, a crash loop (more than three engine processes, or a front
+ * that stopped three times), a heartbeat that has stopped for a whole window,
+ * or the cap. At the cap it says what the engine says it is doing.
  */
 function waitForWorkerReadiness(
   options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
@@ -1119,10 +1152,11 @@ function waitForWorkerReadiness(
   wait: {
     timeoutMs: number;
     probe?: (url: string) => boolean;
-    bootProgress?: () => BootProgress | undefined;
+    heartbeat?: () => EngineHeartbeat | undefined;
     frontProgress?: () => BootProgress | undefined;
+    capMs?: number;
   },
-): { ready: boolean; url: string; serviceState: string; front: BootProgress | undefined; lastCheck?: string } {
+): { ready: boolean; url: string; serviceState: string; front: BootProgress | undefined; lastCheck?: string; ended?: 'cap' | 'crash_loop' | 'stopped_beating'; heartbeat?: EngineHeartbeat } {
   const url = `http://127.0.0.1:${port}/v1/health`;
   let lastCheck: string | undefined;
   const probe = () => {
@@ -1136,45 +1170,39 @@ function waitForWorkerReadiness(
     'Lifecycle readiness poll interval',
     10_000,
   );
+  const env = lifecycleEnv(options);
   const waitStartedAt = Date.now();
-  const firstDeadline = waitStartedAt + timeoutMs;
-  let deadline = firstDeadline;
-  const readBoot = wait.bootProgress ?? options.bootProgress ?? (() => readBootProgress(lifecycleEnv(options)));
-  const readFront = wait.frontProgress ?? options.frontProgress ?? (() => readFrontProgress(lifecycleEnv(options)));
+  const capMs = Math.max(timeoutMs, wait.capMs ?? options.readinessCapMs ?? defaultReadinessCapMs(env));
+  const cap = waitStartedAt + capMs;
+  let deadline = waitStartedAt + timeoutMs;
+  const readHeartbeat = wait.heartbeat ?? options.heartbeat ?? (() => readEngineHeartbeat(env));
+  const readFront = wait.frontProgress ?? options.frontProgress ?? (() => readFrontProgress(env));
+  const readBoot = options.bootProgress ?? (() => readBootProgress(env));
   const progressLine = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
-  const frontStarts = new Set<number>();
-  const bootStarts = new Set<number>();
+  const processes = new Set<number>();
   let lastLineAt = 0;
   let serviceState = 'active';
+  let ended: 'cap' | 'crash_loop' | 'stopped_beating' | undefined;
+  let heartbeat: EngineHeartbeat | undefined;
   let ready = probe();
   while (!ready) {
     serviceState = inspectWorkerService(serviceActionOptions(options)).state;
     if (serviceState !== 'active') break;
     const now = Date.now();
-    // Read on every poll: the window restarts from the last poll that saw
-    // the worker moving, so the full window begins when it stops.
-    const boot = readBoot();
-    // Only a boot that is live and began during this wait counts: a stopped
-    // predecessor's unfinished file must not use up a slot (Astra on #1600).
-    if (boot && bootProgressIsLive(boot, now) && Date.parse(boot.startedAt) >= waitStartedAt) bootStarts.add(boot.pid);
-    // A boot that finished during this wait and is alive counts too, for the
-    // grace a first answer gets: the split's background answers ready and
-    // then holds its event loop on its first work, and the front, still
-    // waiting on it, has not listened yet (gate7 success leg on 893087f5,
-    // 13 Nov: the wait gave up 3 min after the background's 36 min boot).
-    const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && (bootProgressIsLive(boot, now)
-      || (boot !== undefined && Date.parse(boot.startedAt) >= waitStartedAt && bootDoneAndAnswering(boot, now)));
-    const front = bootMoving ? undefined : readFront();
-    if (front && front.phase !== 'done') frontStarts.add(front.pid);
-    const frontMoving = front !== undefined && frontStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(front, now);
-    if (bootMoving || frontMoving) {
-      if (now >= firstDeadline && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
-        progressLine(frontMoving ? frontProgressLine(front!, now) : bootProgressLine(boot!, now));
-        lastLineAt = now;
-      }
-      deadline = Math.max(deadline, now + timeoutMs);
-    } else if (now >= deadline) {
-      break;
+    heartbeat = readHeartbeat();
+    const beating = engineHeartbeatBeating(heartbeat, { now });
+    if (beating) processes.add(heartbeat!.pid);
+    const front = readFront();
+    const frontFailures = front && Date.parse(front.updatedAt) >= waitStartedAt ? front.failures ?? 0 : 0;
+    if (processes.size > MAX_PROCESS_STARTS || frontFailures >= MAX_PROCESS_STARTS) { ended = 'crash_loop'; break; }
+    if (now >= cap) { ended = 'cap'; break; }
+    if (beating) deadline = Math.max(deadline, now + timeoutMs);
+    else if (now >= deadline) { ended = 'stopped_beating'; break; }
+    if (beating && now >= waitStartedAt + timeoutMs && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
+      const boot = readBoot();
+      const counts = boot && boot.pid === heartbeat!.pid ? `${bootProgressLine(boot, now)}; ` : '';
+      progressLine(`Starting Olympus: ${counts}${engineHeartbeatLine(heartbeat!, now)}`);
+      lastLineAt = now;
     }
     waitForActivationSettle(Math.max(1, Math.min(pollMs, now < deadline ? deadline - now : pollMs)));
     ready = probe();
@@ -1182,7 +1210,18 @@ function waitForWorkerReadiness(
   // Only a front file written during this wait speaks for this start.
   const lastFront = ready ? undefined : readFront();
   const front = lastFront && Date.parse(lastFront.updatedAt) >= waitStartedAt ? lastFront : undefined;
-  return { ready, url, serviceState: ready ? 'active' : serviceState, front, ...(!ready && lastCheck ? { lastCheck } : {}) };
+  return {
+    ready, url, serviceState: ready ? 'active' : serviceState, front,
+    ...(!ready && lastCheck ? { lastCheck } : {}),
+    ...(!ready && ended ? { ended } : {}),
+    ...(!ready && heartbeat ? { heartbeat } : {}),
+  };
+}
+
+function defaultReadinessCapMs(env: Record<string, string | undefined>): number {
+  let gb = 0;
+  try { gb = olympusStoreBytes(env) / 1024 ** 3; } catch { /* unreadable: the base cap */ }
+  return READINESS_CAP_BASE_MS + Math.ceil(gb) * READINESS_CAP_PER_GB_MS;
 }
 
 function workerReadinessPort(options: WorkerLifecycleOptions & { homeDir: string }): number {

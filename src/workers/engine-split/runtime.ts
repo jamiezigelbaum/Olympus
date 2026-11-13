@@ -4,16 +4,17 @@
  * client, owner-busy relay and snapshot reader. Kept here so `main()` only
  * chooses by role (core/engine-split.ts).
  */
-import { bootInProgress } from '../../core/boot-progress.ts';
+import { readBootProgress, type BootProgress } from '../../core/boot-progress.ts';
+import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, type EngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { lstatSync } from 'node:fs';
-import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, engineBackgroundAnswer, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from '../../core/engine-split.ts';
+import { lstatSync, rmSync } from 'node:fs';
+import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, prepareEngineBackgroundSocketDirectory } from '../../core/engine-split.ts';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { removeFileDurablySync } from '../../core/atomic-file.ts';
-import { bindWorkerSocket, createUnixSocketFetch, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
+import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineForwardedKind, type EngineForwardedResponse } from './commands.ts';
@@ -84,32 +85,71 @@ export function startEngineBackgroundStatus(input: {
   });
 }
 
-/** The front waits here, before it opens anything, until the background has done its boot work. */
-export async function waitForEngineBackground(input: {
-  socketPath: string;
-  authToken: string;
-  timeoutMs?: number;
+/**
+ * The background's receipt that its boot work is done: its boot file says
+ * done, written by a process that is alive and whose heartbeat beats. The
+ * file lives in the data root and names its writer's pid; a new background
+ * starts it over before any boot work, and a background about to restart
+ * for a delete withdraws it, so a receipt from an earlier boot is never
+ * taken as current.
+ */
+export function backgroundBootDone(read: { boot: BootProgress | undefined; heartbeat: EngineHeartbeat | undefined }, now: number = Date.now()): boolean {
+  const { boot, heartbeat } = read;
+  return boot?.phase === 'done' && engineHeartbeatBeating(heartbeat, { pid: boot.pid, now });
+}
+
+/**
+ * The front waits here, before it opens anything, until the background's
+ * boot work is done: on its receipt, never on its answer. A background that
+ * is busy (an 86 s first-open backup on the gate7 success leg for 893087f5)
+ * answers late, and the front no longer waits for that. It never gives up: a
+ * background that exits is restarted by its supervisor, and the front opens
+ * its stores once that one's boot is done.
+ */
+export async function waitForBackgroundBootDone(input: {
+  env: Record<string, string | undefined>;
   pollMs?: number;
-  fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
-  now?: () => number;
-  /** Whether the background is still doing boot work; past the deadline the front keeps waiting while it is (#1494). */
-  inProgress?: () => boolean;
+  read?: () => { boot: BootProgress | undefined; heartbeat: EngineHeartbeat | undefined };
 }): Promise<void> {
-  const fetchBackground = input.fetch ?? createUnixSocketFetch(input.socketPath);
-  const now = input.now ?? (() => Date.now());
   const sleep = input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const inProgress = input.inProgress ?? (() => bootInProgress(process.env));
-  const deadline = now() + (input.timeoutMs ?? 120_000);
-  for (;;) {
-    const answer = await engineBackgroundAnswer(fetchBackground, input.authToken, undefined, 1_000);
-    if (answer === 'ready') return;
-    // Past the deadline the front gives up only on a background that is gone.
-    // One that is busy (a long sync held its event loop for 154 s in a VM
-    // upgrade) or still answering "not ready" is waited for: exiting would
-    // only restart the front into the same wait.
-    if (now() >= deadline && answer === 'down' && !inProgress()) throw new Error('The background engine did not become ready; the front is not serving.');
-    await sleep(input.pollMs ?? 250);
+  const read = input.read ?? (() => ({ boot: readBootProgress(input.env), heartbeat: readEngineHeartbeat(input.env) }));
+  while (!backgroundBootDone(read())) await sleep(input.pollMs ?? 250);
+}
+
+/**
+ * What the front answers while it waits for the background's boot: it
+ * listens at once, so the upgrade's wait and the dashboard read a real
+ * answer ("starting", with what the background says it is doing) rather than
+ * a socket that is not there. Stopped just before the front's own server binds.
+ */
+export function listenWhileStarting(input: {
+  env: Record<string, string | undefined>;
+  hostname: string;
+  port: number;
+  log?: (line: string) => void;
+}): { stop(): void } {
+  const answer = () => {
+    const heartbeat = readEngineHeartbeat(input.env);
+    const step = heartbeat && engineHeartbeatBeating(heartbeat) ? engineHeartbeatLine(heartbeat) : 'starting';
+    return Response.json({ reachable: false, status: 'starting', step }, { status: 503, headers: { 'retry-after': '5' } });
+  };
+  try {
+    if (releaseSystemdWorkerSocket()) (input.log ?? console.warn)('[olympus:worker] removed the socket left by the previous worker run');
+    const socketPath = prepareWorkerSocket();
+    const server = socketPath
+      ? bindWorkerSocket(socketPath, () => Bun.serve(workerSocketServe({ unix: socketPath, fetch: answer })))
+      : Bun.serve({ hostname: input.hostname, port: input.port, fetch: answer });
+    return {
+      stop: () => {
+        void server.stop(true);
+        if (socketPath) rmSync(socketPath, { force: true });
+      },
+    };
+  } catch (error) {
+    // Not listening yet is what the front did before: its own server reports a bind failure.
+    (input.log ?? console.warn)(`[engine-split] the front could not answer while starting: ${error instanceof Error ? error.message : String(error)}`);
+    return { stop: () => {} };
   }
 }
 
@@ -120,7 +160,7 @@ export interface EngineFront {
   status(): EngineStatusRead | undefined;
   /** One built-in model completion, run by the background, which holds the model. */
   completeModel(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
-  /** Whether the background answers its ready check now, boot work done (the front's health reports it). */
+  /** Whether the background's boot work is done and its heartbeat beats, busy or not (the front's health reports it). */
   backgroundReady(): Promise<boolean>;
   stop(): void;
 }
@@ -170,7 +210,8 @@ export function createEngineFront(input: {
   const poll = setInterval(() => { status(); }, 2_000);
   poll.unref?.();
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
-  const backgroundReady = () => probeEngineBackground(fetchBackground, input.authToken, undefined, 1_000);
+  // Busy is not unreachable: the background's receipt and heartbeat say it is up.
+  const backgroundReady = async () => backgroundBootDone({ boot: readBootProgress(input.env), heartbeat: readEngineHeartbeat(input.env) });
   return { client, ownerBusy: relay, status, completeModel, backgroundReady, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 

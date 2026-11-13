@@ -2,6 +2,8 @@ import type { Database } from 'bun:sqlite';
 import { chmodSync, closeSync, existsSync, openSync, renameSync, rmSync, statfsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { preSchemaBackupPath, recordSchemaBackup, removeAbandonedBackupCopies, reportBootStep, type BootStepEvent } from './boot-progress.ts';
+import { setEngineStep } from './engine-heartbeat.ts';
+import { upgradeCopyExists } from './upgrade-store-copies.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
 
@@ -120,10 +122,15 @@ export function runSqliteMigrations(
     // store's (limit-stops in source-scheduler.sqlite) changes that file
     // too: it is copied as well, so a rollback takes the new tables out
     // (gate7 forced leg on c013270b, 13 Nov).
-    const backupMs = storeOnDisk(db) && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId))
+    // The upgrade already copied the whole file after the previous version
+    // stopped (upgrade-store-copies.ts): no second copy, and none on this loop.
+    const upgradeCopied = storeOnDisk(db) && upgradeCopyExists(db.filename);
+    const backupMs = storeOnDisk(db) && !upgradeCopied
+      && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId))
       ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes)
       : undefined;
     report({ phase: 'migrating', storeId });
+    setEngineStep(`updating ${storeId}`);
     const migrateStarted = performance.now();
     // Another process may open the same file at the same moment (the CLI and
     // the worker). Take the write lock before reading the version again, and
@@ -146,9 +153,10 @@ export function runSqliteMigrations(
       }
     }).immediate();
     const migrateMs = Math.round(performance.now() - migrateStarted);
+    setEngineStep(undefined);
     report({ phase: 'starting', storeId, completedStore: true });
     if (logged && applied.length > 0) {
-      log(`${label}: ${backupMs === undefined ? 'in memory, no backup' : `backed up in ${backupMs} ms`}, migrated in ${migrateMs} ms`);
+      log(`${label}: ${backupMs !== undefined ? `backed up in ${backupMs} ms` : upgradeCopied ? 'copied by the upgrade' : 'in memory, no backup'}, migrated in ${migrateMs} ms`);
     }
   }
 
@@ -209,6 +217,7 @@ function backUpBeforeUpdate(
     );
   }
   report({ phase: 'backing_up', storeId });
+  setEngineStep(`backing up ${storeId}`);
   // Written beside the backup and renamed into place: a backup that exists is whole.
   const partial = `${backup}.${process.pid}.partial`;
   rmSync(partial, { force: true });

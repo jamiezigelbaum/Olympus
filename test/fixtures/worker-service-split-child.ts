@@ -12,12 +12,13 @@
 // BLOCK_AFTER_READY_MS hold the background's only thread in one synchronous
 // call, as a long SQLite backup does: during its boot work (reported as
 // backing_up, as the real one is) and again just after it answers ready.
-// FRONT_WAITS has the front wait for the background as the real front does,
-// then record that it serves.
-import { appendFileSync, rmSync } from 'node:fs';
+// FRONT_WAITS has the front wait for the background's receipt as the real
+// front does, then record that it serves.
+import { appendFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beginBootProgress, finishBootProgress, reportBootStep } from '../../src/core/boot-progress.ts';
-import { waitForEngineBackground } from '../../src/workers/engine-split/runtime.ts';
+import { startEngineHeartbeat } from '../../src/core/engine-heartbeat.ts';
+import { waitForBackgroundBootDone } from '../../src/workers/engine-split/runtime.ts';
 import { runExtractionCommand } from '../../src/workers/file-extraction/extractors/command-runner.ts';
 
 const role = process.env.OLYMPUS_WORKER_ENGINE_ROLE ?? 'single';
@@ -67,10 +68,20 @@ if (role === 'background') {
   const blockBoot = Number(process.env.BLOCK_BOOT_MS ?? 0);
   const blockAfterReady = Number(process.env.BLOCK_AFTER_READY_MS ?? 0);
   if (blockBoot > 0 || blockAfterReady > 0) {
+    // As the real engine does: the heartbeat first, from its own thread.
+    startEngineHeartbeat(process.env, 'background');
     beginBootProgress(process.env);
     if (blockBoot > 0) {
       reportBootStep(process.env, { phase: 'backing_up', storeId: 'stand-in' });
       note('blocked', { ms: blockBoot });
+      // EXIT_DURING_BOOT: the first background dies part way through its boot work.
+      const exitMarker = process.env.EXIT_DURING_BOOT ? `${events}.exited` : undefined;
+      if (exitMarker && !existsSync(exitMarker)) {
+        writeFileSync(exitMarker, '');
+        blockLoop(Math.min(blockBoot, 1_000));
+        note('exit');
+        process.exit(1);
+      }
       blockLoop(blockBoot);
     }
     finishBootProgress();
@@ -94,10 +105,7 @@ if (role === 'background') {
   }
 }
 if (role === 'front' && process.env.FRONT_WAITS) {
-  void waitForEngineBackground({
-    socketPath: process.env.OLYMPUS_ENGINE_BACKGROUND_SOCKET!,
-    authToken: process.env.OLYMPUS_WORKER_AUTH_TOKEN!,
-  }).then(() => note('serving'), (error: unknown) => { note('gave-up', { error: String(error) }); process.exit(1); });
+  void waitForBackgroundBootDone({ env: process.env }).then(() => note('serving'), (error: unknown) => { note('gave-up', { error: String(error) }); process.exit(1); });
 }
 const crashAfter = Number(process.env.CRASH_AFTER_MS ?? 0);
 if (crashAfter > 0) setTimeout(() => process.exit(1), crashAfter);

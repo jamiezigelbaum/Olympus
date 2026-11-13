@@ -266,6 +266,30 @@ the cause).
   interrupted pass is not a failure (#803, PR #1096). The owner-busy
   state for the shared model is re-sent by the front when the background
   comes back.
+- **Health (13 Nov 2026).** A slow answer is never read as a dead
+  process. Every split install failure on large data was one: the
+  background's only thread sat in a long synchronous SQLite call and a
+  wait gave up on it. So:
+  - The background (and a single worker) runs a heartbeat from a Worker
+    thread its loop cannot hold (`src/core/engine-heartbeat.ts`): pid,
+    current step, how long the loop has been held.
+  - The supervisor replaces a child that exits, or one whose heartbeat has
+    stopped. The upgrade's wait ends on an answer, the unit stopping, a
+    crash loop (more than three engine processes, or three front
+    failures), a heartbeat stopped for a whole window, or a cap of 30
+    minutes plus a minute per GB of stores; at the cap it says what the
+    engine says it is doing.
+  - The front listens at once and answers "starting: <step>". It opens
+    its stores on the background's receipt that its boot work is done
+    (the boot file at `done`, from a process whose heartbeat beats),
+    never on how fast the background answers.
+  - `olympus worker upgrade` copies every store itself, after the
+    previous version stops and before the new one starts
+    (`src/core/upgrade-store-copies.ts`): a clone where the disk has one,
+    else a plain copy. The boot then takes no VACUUM INTO copy of its
+    own.
+  - The class is tested with a background that blocks its loop for 60 s
+    at boot and 60 s after ready (`test/worker-service-split.test.ts`).
 
 The writes the front still needs are listed in the next section; each is
 either kept front-owned or becomes one command.
