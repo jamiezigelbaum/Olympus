@@ -29487,6 +29487,9 @@ var PASSTHROUGH_EMAIL_WORKER_ERROR_CODES = new Map([
   ["unsupported_filter", "unsupported_filter"],
   ["invalid_request", "invalid_request"],
   ["invalid_params", "invalid_params"],
+  ["worker_restarting", "email_unreachable"],
+  ["engine_background_unavailable", "email_unreachable"],
+  ["engine_background_failed", "email_error"],
   ["source_index_policy_violation", "source_index_policy_violation"]
 ]);
 var CONSULT_ASK_CLIENT_TIMEOUT_MS = 20 * 60000;
@@ -29923,6 +29926,13 @@ function boundedEmailWorkerErrorMessage(value) {
     return;
   return value;
 }
+function isOwnerLimitsRoute(url) {
+  try {
+    return new URL(url).pathname.endsWith("/limits");
+  } catch {
+    return false;
+  }
+}
 function isSourceIndexSearchRoute(url) {
   try {
     return new URL(url).pathname.endsWith("/source/index/search");
@@ -29938,6 +29948,8 @@ function workerLaneLabel(url) {
   return "Private email lane";
 }
 function isAllowlistedEmailWorkerErrorResponse(status, url) {
+  if ((status === 400 || status === 502 || status === 503) && isOwnerLimitsRoute(url))
+    return true;
   if (status === 400)
     return isSourceIndexSearchRoute(url);
   if (status !== 403)

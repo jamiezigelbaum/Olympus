@@ -46,6 +46,10 @@ const PASSTHROUGH_EMAIL_WORKER_ERROR_CODES: ReadonlyMap<string, OperationErrorCo
   ['invalid_request', 'invalid_request'],
   // olympus_limits refusals (owner-limits.ts) carry no source content.
   ['invalid_params', 'invalid_params'],
+  // The engine split's answers when the background cannot take a forwarded action (engine-split/runtime.ts).
+  ['worker_restarting', 'email_unreachable'],
+  ['engine_background_unavailable', 'email_unreachable'],
+  ['engine_background_failed', 'email_error'],
   ['source_index_policy_violation', 'source_index_policy_violation'],
 ]);
 
@@ -1025,6 +1029,14 @@ function boundedEmailWorkerErrorMessage(value: unknown): string | undefined {
   return value;
 }
 
+function isOwnerLimitsRoute(url: string): boolean {
+  try {
+    return new URL(url).pathname.endsWith('/limits');
+  } catch {
+    return false;
+  }
+}
+
 function isSourceIndexSearchRoute(url: string): boolean {
   try {
     return new URL(url).pathname.endsWith('/source/index/search');
@@ -1044,6 +1056,8 @@ function workerLaneLabel(url: string): string {
 }
 
 function isAllowlistedEmailWorkerErrorResponse(status: number, url: string): boolean {
+  // olympus_limits: a refused Raise, a restarting or busy engine are told in their own words, never as a bare status.
+  if ((status === 400 || status === 502 || status === 503) && isOwnerLimitsRoute(url)) return true;
   if (status === 400) return isSourceIndexSearchRoute(url);
   if (status !== 403) return false;
   try {

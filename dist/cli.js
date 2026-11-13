@@ -119247,6 +119247,13 @@ function boundedEmailWorkerErrorMessage(value) {
     return;
   return value;
 }
+function isOwnerLimitsRoute(url) {
+  try {
+    return new URL(url).pathname.endsWith("/limits");
+  } catch {
+    return false;
+  }
+}
 function isSourceIndexSearchRoute(url) {
   try {
     return new URL(url).pathname.endsWith("/source/index/search");
@@ -119262,6 +119269,8 @@ function workerLaneLabel(url) {
   return "Private email lane";
 }
 function isAllowlistedEmailWorkerErrorResponse(status, url) {
+  if ((status === 400 || status === 502 || status === 503) && isOwnerLimitsRoute(url))
+    return true;
   if (status === 400)
     return isSourceIndexSearchRoute(url);
   if (status !== 403)
@@ -119891,6 +119900,9 @@ var init_email = __esm(() => {
     ["unsupported_filter", "unsupported_filter"],
     ["invalid_request", "invalid_request"],
     ["invalid_params", "invalid_params"],
+    ["worker_restarting", "email_unreachable"],
+    ["engine_background_unavailable", "email_unreachable"],
+    ["engine_background_failed", "email_error"],
     ["source_index_policy_violation", "source_index_policy_violation"]
   ]);
   CONSULT_ASK_CLIENT_TIMEOUT_MS = 20 * 60000;
@@ -229248,6 +229260,7 @@ var init_response_builder = __esm(() => {
     sign_in_failed: "Olympus couldn't open the sign-in page for this source. Try again.",
     source_not_connected: "This source isn't connected, so there is nothing to disconnect.",
     source_busy: "This source is finishing a read. Try again in a moment.",
+    limit_not_continued: "Olympus on the computer is restarting or busy, so this stop was not lifted. It is still open; try again in a moment.",
     sync_unavailable: "Olympus can't check this source from here right now. It keeps checking on its own.",
     disconnect_incomplete: "Olympus couldn't finish disconnecting this source. Try again.",
     delete_needs_disconnect: "Disconnect this source first, then delete its indexed data.",
@@ -230204,7 +230217,14 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
     }
     switch (name) {
       case "olympus_limits": {
-        const result = await findOperationByName("olympus_limits").handler(ctx, args);
+        let result;
+        try {
+          result = await findOperationByName("olympus_limits").handler(ctx, args);
+        } catch (error2) {
+          if (error2 instanceof OperationError && (error2.code === "email_unreachable" || error2.code === "email_error"))
+            throw new ChatGptSurfaceError("limit_not_continued");
+          throw error2;
+        }
         return limitsToolResult(result);
       }
       case DASHBOARD_TOOL_NAME:
@@ -230595,6 +230615,7 @@ var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600
   console.warn(line2);
 }, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS2 = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
+  init_operation_error();
   init_answer_model_required();
   init_mcp_app_client();
   init_app_release_capture();
