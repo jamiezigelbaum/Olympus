@@ -38,7 +38,7 @@ export const DASHBOARD_JSON = `curl -sS --max-time 10 -w '\\n%{http_code}' --uni
 Authorization: Bearer $("$HOME/.local/bin/olympus" dashboard token)
 EOF`;
 
-export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number;
+export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number; modelWaitMs?: number; modelStallMs?: number;
   bridge?: { agentPath: string; pidFile: string; logTemplate: string } } = {}): Promise<FreshDashboard & TimingDashboard> {
   const { host, port } = parseCdpEndpoint(endpoint);
   let tunnel: Tunnel | undefined;
@@ -141,15 +141,28 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     // that source's Connect. A build that still lists unconnected sources as rows uses the row's Connect.
     const startConnect = async (s: LiveSourceSpec) => {
       const tile = sourcePick(s);
-      const picked = await panel<boolean>(`(() => {const tile=document.querySelector(${JSON.stringify(tile)}); if(!tile)return false; const d=tile.closest('dialog'); if(d && !d.open) document.querySelector('[data-dialog-open="add-source"]')?.click(); tile.click(); return true;})()`, Boolean);
-      if (!picked) return sourceAction(s, '^Connect$');
+      const pick = () => panel<boolean>(`(() => {const tile=document.querySelector(${JSON.stringify(tile)}); if(!tile)return false; const d=tile.closest('dialog'); if(d && !d.open) document.querySelector('[data-dialog-open="add-source"]')?.click(); tile.click(); return true;})()`, Boolean);
+      if (!await pick()) return sourceAction(s, '^Connect$');
       const setup = `[...document.querySelectorAll('[data-source-setup]')].find(e=>e.getAttribute('data-source-setup').startsWith(${JSON.stringify(`${s.id}.`)}))`;
-      try {
-        await click(`(()=>{const setup=${setup}; return setup ? [...setup.querySelectorAll('button')].find(e=>/^Connect$/.test(e.textContent.trim())) : null;})()`);
-      } catch (error) {
-        // Say what holds the button (for example models still downloading), from the product's own copy.
-        const held = await panel<string>(`(()=>{const setup=${setup}; return setup?.querySelector('.blocked')?.textContent?.trim() || '';})()`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
-        throw new Error(held ? `${s.label} Connect is held: ${held}` : `${s.label} Connect did not appear in the Add a source sheet`);
+      const press = () => panel<boolean>(`(() => { const setup=${setup}; const e=setup ? [...setup.querySelectorAll('button')].find(e=>/^Connect$/.test(e.textContent.trim())) : null; if(!e || e.disabled || !(${visible})(e)) return false; e.click(); return true; })()`, Boolean);
+      const heldBy = () => panel<string>(`(()=>{const setup=${setup}; return setup?.querySelector('.blocked')?.textContent?.trim() || '';})()`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
+      // A fresh install locks Connect until its private models are ready (a multi-GB download). Wait while the
+      // product's own progress text keeps changing; fail with that text once it stops moving or the bound passes.
+      const deadline = Date.now() + (timings.modelWaitMs ?? 30 * 60_000);
+      const stallMs = timings.modelStallMs ?? 5 * 60_000;
+      let held: string | undefined;
+      let movedAt = Date.now();
+      let reloadedAt = Date.now();
+      for (;;) {
+        if (await press()) return;
+        const now = await heldBy();
+        if (now !== held) { held = now; movedAt = Date.now(); }
+        if (!held && Date.now() - movedAt > (timings.timeoutMs ?? 90_000)) throw new Error(`${s.label} Connect did not appear in the Add a source sheet`);
+        if (held && Date.now() - movedAt > stallMs) throw new Error(`${s.label} Connect is held with no progress for ${Math.round(stallMs / 60_000)} min: ${held}`);
+        if (Date.now() >= deadline) throw new Error(`${s.label} Connect is still held: ${held ?? 'no reason shown'}`);
+        await sleep(timings.pollMs ?? 1000);
+        // Reopen the sheet now and then so the held text is the dashboard's latest.
+        if (Date.now() - reloadedAt > 60_000) { reloadedAt = Date.now(); await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`); await pick(); }
       }
     };
     const folderRow = (name: string) => `(()=>{
