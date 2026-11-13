@@ -151,6 +151,13 @@ export async function runFreshInstall(machine: Machine, options: FreshOptions): 
     if (interrupted && id !== 'restore-zig') throw new Error('run interrupted');
     checks.push({ id: `fresh.${id}`, title: id, status: 'pass', detail: detail ?? 'persisted effect verified', ms: Date.now() - start });
   };
+  // A check whose failure is recorded without ending the leg, because nothing after it depends on it.
+  const recorded = async (id: string, action: () => Promise<void | string>): Promise<void> => {
+    try { await checked(id, action); } catch (error) {
+      if (interrupted) throw error;
+      checks.push({ id: `fresh.${id}`, title: id, status: 'fail', detail: `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
+    }
+  };
   const exec = async (script: string, timeoutMs = 120_000): Promise<string> => {
     if (interrupted && current !== 'restore-zig') throw new Error('run interrupted');
     const result = await machine.exec(`set -euo pipefail\n${script}`, { timeoutMs });
@@ -220,8 +227,7 @@ done; exit 1`), 200_000);
     });
     // Nothing has chosen an answer model yet, so Ask must stay callable and explain setup instead of answering (#1370).
     // A failure here is recorded without stopping the leg: nothing after it depends on it.
-    try {
-      await checked('ask-without-model', async () => {
+    await recorded('ask-without-model', async () => {
         // Listing is checked on its own: the call returns the setup text before dispatch, so a call alone can't prove it.
         const listed = await engine!.listTools?.();
         if (!listed) throw new Error('the engine connection cannot list tools');
@@ -232,11 +238,7 @@ done; exit 1`), 200_000);
         if (!result.ok) throw new Error(`source_answer failed instead of explaining setup: ${result.error ?? 'no detail'}`);
         if (result.text.trim() !== ANSWER_MODEL_REQUIRED_TEXT) throw new Error('source_answer did not return the setup text');
         return 'source_answer listed; setup text returned, no answer run';
-      });
-    } catch (error) {
-      if (interrupted) throw error;
-      checks.push({ id: 'fresh.ask-without-model', title: 'ask-without-model', status: 'fail', detail: `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
-    }
+    });
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9334'); });
     await checked('privacy-choice', () => dashboard!.privacyChoice());
     for (const source of sources) {
@@ -261,8 +263,9 @@ done; exit 1`), 200_000);
     // A pass keeps the matched item's title out of the report; a failure or skip keeps its reason (counts, refresh
     // times, source labels), which run 6 needed and the old one-line summary threw away.
     checks.push(...(await runLiveAccounts(engine!, { sources, ...(options.sleep ? { sleep, pollMs: 1 } : {}) })).map(c => ({ ...c, detail: c.status === 'pass' ? 'engine status/search verified' : redactFreshDetail(c.detail ?? 'no detail') })));
+    // Answer and scope checks are recorded without ending the leg: the read-on-demand timing after them needs neither.
     for (const source of sources) {
-      await checked(`${source.id}.answer`, async () => {
+      await recorded(`${source.id}.answer`, async () => {
         const answer = await ask(engine!, source.known!.question, sleep);
         const a = answer.structured as any;
         const text = typeof a?.answer === 'string' ? a.answer.toLowerCase() : '';
@@ -274,7 +277,7 @@ done; exit 1`), 200_000);
           throw new Error(`known question was not answered with expected facts and a source citation (${why})`);
         }
       });
-      await checked(`${source.id}.scope-absence`, async () => {
+      await recorded(`${source.id}.scope-absence`, async () => {
         const answer = await ask(engine!, source.fresh!.outside.question, sleep);
         const search = await engine!.call('olympus_search', { question: source.fresh!.outside.question, limit: 100 });
         if (!scopeAbsent(source, answer, search)) throw new Error('outside-scope item leaked, or answer/search could not be verified');
