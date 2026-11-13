@@ -6498,7 +6498,8 @@ export async function main(): Promise<void> {
   // The plugin's credit monitor runs in Node and writes only the marker; the marker check reports it here.
   const configuredCreditMarkers = (): string[] => [olympusConfig.worker.creditMonitor.pauseFile,
     process.env.OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE].filter((path): path is string => !!path);
-  const stopCreditRecovery = startVeniceCreditRecovery({
+  // The split's front stays a reader: recovery writes the scheduler store, so only the writer runs it.
+  const stopCreditRecovery = engineFront ? () => {} : startVeniceCreditRecovery({
     paths: () => [...new Set([...openVeniceCreditPausePaths(), ...configuredCreditMarkers()])],
     markers: configuredCreditMarkers,
     stops: ownerLimitStopHooks,

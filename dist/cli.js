@@ -250697,7 +250697,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     olympusConfig.worker.creditMonitor.pauseFile,
     process.env.OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE
   ].filter((path) => !!path);
-  const stopCreditRecovery = startVeniceCreditRecovery({
+  const stopCreditRecovery = engineFront ? () => {} : startVeniceCreditRecovery({
     paths: () => [...new Set([...openVeniceCreditPausePaths(), ...configuredCreditMarkers()])],
     markers: configuredCreditMarkers,
     stops: ownerLimitStopHooks,
