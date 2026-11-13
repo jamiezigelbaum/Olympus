@@ -329,6 +329,7 @@ export function createReadwiseSourceConnector(
         return (options.fetch ?? fetch)(url, init);
       };
       client = new ReadwiseApiClient({
+        now,
         token: session.token,
         fetch: guardedFetch,
         ...(options.apiV2BaseUrl ? { apiV2BaseUrl: options.apiV2BaseUrl } : {}),

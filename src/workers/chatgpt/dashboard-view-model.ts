@@ -292,10 +292,9 @@ export function buildChatGptDashboardViewModel(
     // Olympus parked it on its own daily budget or a provider's rate limit,
     // or a sync is retrying on its own (#1044): nothing for the owner to do,
     // so not Needs you; a parked source shows its wait under In progress.
-    const wait = selfWait(definition, scrubbed, now);
     const stopped = stops.some((stop) => limitStopSubjects(stop).includes(definition.source_id));
     if (!connecting && !credentials && imports.length === 0 && (status === 'Needs you' || status === 'Failing')
-      && ownerHasNothingToDo(scrubbed, stopped || wait !== undefined, degraded)) {
+      && ownerHasNothingToDo(scrubbed, stopped, degraded)) {
       status = 'Working';
     }
     // Whether this worker can sync the source at all: the raw card's own
@@ -303,7 +302,7 @@ export function buildChatGptDashboardViewModel(
     const sync = connecting || status === 'Off' || card.sync_now_available !== true
       ? undefined
       : syncFix(definition, scrubbed, status, card.connection.action.kind, degraded, progress);
-    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts, sync, wait };
+    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts, sync };
   });
 
   // One list (owner, 2026-10-09): sources that need the owner first, then
@@ -316,7 +315,7 @@ export function buildChatGptDashboardViewModel(
     .sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index)
     .map(({ entry }) => entry);
 
-  const waits: DashboardSourceWait[] = rows.flatMap(({ wait }) => (wait ? [wait] : []));
+  const waits: DashboardSourceWait[] = [];
   for (const stop of stops) {
     const registered = limits.find((entry) => entry.id === stop.id);
     if (!registered) continue;
@@ -472,33 +471,6 @@ function withProviderRejection(card: DashboardSourceCard): DashboardSourceCard {
   if (schedule.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason)) return card;
   if (!CONNECTED_STATES.has(card.connection.state)) return card;
   return { ...card, connection: { ...card.connection, state: 'reauth_required', label: 'reauth required' } };
-}
-
-/**
- * Whose API budget a parked source waits on, by source: the provider's own
- * name, not the source's ("X", not "X bookmarks").
- */
-const WAIT_API_NAMES: Readonly<Record<string, string>> = {
-  'x.bookmarks': 'X',
-  'gmail.email': 'Gmail',
-  'google_drive.docs': 'Google Drive',
-  'readwise.library': 'Readwise',
-};
-
-/**
- * Provider rate-limit waits still come from scheduler state. Budget waits
- * come only from the owning store's limit-stop records. Only while connected.
- */
-function selfWait(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard, now: Date): DashboardSourceWait | undefined {
-  const reason = card.schedule?.degraded_reason;
-  if (reason === undefined || !dashboardOperatorPaused(card) || !CONNECTED_STATES.has(card.connection.state)) return undefined;
-  const label = definition.label;
-  const api = WAIT_API_NAMES[definition.source_id] ?? label;
-  if (reason === 'provider_rate_limit') {
-    const next = isoOrUndefined(card.schedule?.next_run_at);
-    return { sourceId: definition.source_id, label, reason: 'rate_limit', api, ...(next && Date.parse(next) > now.getTime() ? { resumesAt: next } : {}) };
-  }
-  return undefined;
 }
 
 /**

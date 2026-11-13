@@ -65305,8 +65305,67 @@ var init_scheduler_markers = __esm(() => {
     "head_api_request_reserve_guard",
     "head_resource_read_reserve_guard",
     "head_cost_reserve_guard",
-    "provider_rate_limit"
+    "provider_rate_limit",
+    "x.rate_limit",
+    "evernote.rate_limit",
+    "readwise.rate_limit"
   ]);
+});
+
+// src/core/provider-rate-limits.ts
+function providerRetryTime(value, now, fallbackMs) {
+  const seconds = value?.trim() ? Number(value) : NaN;
+  const timestamp = Number.isFinite(seconds) ? seconds >= 0 ? now.getTime() + seconds * 1000 : NaN : Date.parse(value ?? "");
+  const retry = new Date(timestamp);
+  return Number.isFinite(retry.getTime()) ? retry.toISOString() : new Date(now.getTime() + fallbackMs).toISOString();
+}
+function createProviderRateLimitReporter(provider) {
+  return reporters[provider] ??= buildProviderRateLimitReporter(provider);
+}
+function buildProviderRateLimitReporter(provider) {
+  const registration = PROVIDERS[provider];
+  const stops = createLimitStopReporter();
+  let resumesAt;
+  return {
+    report(at, now, amounts) {
+      if (!Number.isFinite(Date.parse(at)) || Date.parse(at) - now.getTime() <= 60000)
+        return;
+      resumesAt = at;
+      stops.report({
+        id: registration.id,
+        subject: registration.subject,
+        since: now.toISOString(),
+        resumesAt: at,
+        limit: amounts?.limit ?? null,
+        used: amounts?.used ?? null
+      });
+    },
+    success() {
+      stops.clear(registration.id, registration.subject);
+      resumesAt = undefined;
+    },
+    resume(now) {
+      if (resumesAt && Date.parse(resumesAt) <= now.getTime())
+        this.success();
+    }
+  };
+}
+function providerWaitMessage(id, resumesAt) {
+  const provider = Object.values(PROVIDERS).find((provider2) => provider2.id === id);
+  return provider && resumesAt ? `${provider.name} sets this wait; it resumes at ${resumesAt} on its own.` : undefined;
+}
+var PROVIDERS, SOURCE_RATE_LIMITED = "rate_limited", X_PROVIDER_RATE_LIMIT = "provider_rate_limit", reporters;
+var init_provider_rate_limits = __esm(() => {
+  init_limit_stops();
+  registerLimit({ id: "x.rate_limit", kind: "requests", scope: "source", label: "X is limiting requests", unit: "requests", continue: "none" });
+  registerLimit({ id: "evernote.rate_limit", kind: "requests", scope: "source", label: "Evernote is limiting requests", unit: "requests", continue: "none" });
+  registerLimit({ id: "readwise.rate_limit", kind: "requests", scope: "source", label: "Readwise is limiting requests", unit: "requests", continue: "none" });
+  PROVIDERS = {
+    x: { id: "x.rate_limit", subject: "x.bookmarks", name: "X" },
+    evernote: { id: "evernote.rate_limit", subject: "evernote.notes", name: "Evernote" },
+    readwise: { id: "readwise.rate_limit", subject: "readwise.library", name: "Readwise" }
+  };
+  reporters = {};
 });
 
 // src/workers/dashboard/source-failure.ts
@@ -65321,7 +65380,7 @@ function sourceFailureKind(errorKind, degradedReason) {
     if (exact)
       return exact;
     if (OPERATOR_PAUSED_SCHEDULER_MARKERS.has(value) || value.endsWith("_request_guard") || value.endsWith("_clock_regression")) {
-      return value === "provider_rate_limit" ? "rate_limited" : "daily_limit";
+      return "daily_limit";
     }
     if (value.endsWith("_ledger_busy"))
       return "busy_here";
@@ -65371,6 +65430,7 @@ function systemSupportReport(input) {
 }
 var SOURCE_FAILURE_KINDS, KIND_SET, EXACT, SUPPORT_SOURCES, SUPPORT_STATES, SUPPORT_NEEDS;
 var init_source_failure = __esm(() => {
+  init_provider_rate_limits();
   init_scheduler_markers();
   SOURCE_FAILURE_KINDS = [
     "sign_in",
@@ -65396,8 +65456,11 @@ var init_source_failure = __esm(() => {
     sqlite_busy: "busy_here",
     network: "network",
     timeout: "timeout",
-    rate_limited: "rate_limited",
-    provider_rate_limit: "rate_limited",
+    rate_limited: SOURCE_RATE_LIMITED,
+    provider_rate_limit: SOURCE_RATE_LIMITED,
+    "x.rate_limit": SOURCE_RATE_LIMITED,
+    "evernote.rate_limit": SOURCE_RATE_LIMITED,
+    "readwise.rate_limit": SOURCE_RATE_LIMITED,
     temporary: "provider_busy",
     api_request_guard: "provider_refused",
     embedding_backend_unavailable: "search_model_unavailable",
@@ -70959,12 +71022,15 @@ var init_corpora = __esm(() => {
 
 // src/workers/readwise/api.ts
 class ReadwiseApiClient {
+  providerStops = createProviderRateLimitReporter("readwise");
+  now;
   token;
   fetchImpl;
   apiV2BaseUrl;
   readerApiV3BaseUrl;
   timeoutMs;
   constructor(options) {
+    this.now = options.now ?? (() => new Date);
     const token = options.token.trim();
     if (!token)
       throw new Error("Readwise API token is required.");
@@ -71084,7 +71150,8 @@ class ReadwiseApiClient {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const url = new URL(path, options.baseUrl).toString();
-      return await this.fetchImpl(url, {
+      this.providerStops.resume(this.now());
+      const response = await this.fetchImpl(url, {
         method: "GET",
         headers: {
           Accept: "application/json",
@@ -71092,6 +71159,16 @@ class ReadwiseApiClient {
         },
         signal: controller.signal
       });
+      if (response.status === 429) {
+        const now = this.now();
+        const error = await errorFromResponse(response, "Readwise request");
+        error.resumesAt = providerRetryTime(error.retryAfter, now, 60000);
+        this.providerStops.report(error.resumesAt, now);
+        throw error;
+      }
+      if (response.ok)
+        this.providerStops.success();
+      return response;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw new ReadwiseApiError("Readwise API request timed out.");
@@ -71164,9 +71241,11 @@ async function errorFromResponse(response, context2) {
 }
 var READWISE_API_V2_BASE_URL = "https://readwise.io/api/v2/", READWISE_READER_API_V3_BASE_URL = "https://readwise.io/api/v3/", DEFAULT_TIMEOUT_MS = 30000, ReadwiseApiError;
 var init_api = __esm(() => {
+  init_provider_rate_limits();
   ReadwiseApiError = class ReadwiseApiError extends Error {
     status;
     retryAfter;
+    resumesAt;
     constructor(message2, options = {}) {
       super(message2);
       if (options.status !== undefined)
@@ -71332,6 +71411,7 @@ function createReadwiseSourceConnector(options) {
         return (options.fetch ?? fetch)(url, init);
       };
       client = new ReadwiseApiClient({
+        now,
         token: session.token,
         fetch: guardedFetch,
         ...options.apiV2BaseUrl ? { apiV2BaseUrl: options.apiV2BaseUrl } : {},
@@ -84336,6 +84416,7 @@ class LocalXBookmarksApiUsageStore {
   reserveRequest(input) {
     const account = requireAccount4(input.account);
     const now = validDate4(input.now ?? new Date);
+    providerStops.resume(now);
     const utcDay = utcDayFrom(now);
     const requestedMaxResources = boundedResourceCount(input.requestedMaxResources);
     const minimumResources = boundedResourceCount(input.minimumResources ?? requestedMaxResources);
@@ -84352,7 +84433,8 @@ class LocalXBookmarksApiUsageStore {
       const pendingRequests = this.pendingRequestCount(account, utcDay);
       const retryAt = nextUtcDay3(now);
       if (rateLimitBlocks(row, input.config, now, routine && input.preserveHeadReserve === true)) {
-        throw new XApiUsageGuardError("provider_rate_limit", row.rate_limit_reset_at);
+        providerStops.report(row.rate_limit_reset_at, now, { limit: row.rate_limit_limit, used: row.rate_limit_limit !== null && row.rate_limit_remaining !== null ? Math.max(0, row.rate_limit_limit - row.rate_limit_remaining) : null });
+        throw new XApiUsageGuardError(X_PROVIDER_RATE_LIMIT, row.rate_limit_reset_at);
       }
       if (routine && row.api_requests + pendingRequests + 1 > input.config.dailyApiRequestBudget) {
         throw new XApiUsageGuardError("daily_api_request_guard", retryAt, { limit: input.config.dailyApiRequestBudget, used: row.api_requests + pendingRequests });
@@ -84404,6 +84486,7 @@ class LocalXBookmarksApiUsageStore {
   }
   markRequestDispatched(input) {
     const now = validDate4(input.now ?? new Date);
+    providerStops.resume(now);
     this.db.transaction(() => {
       this.reapExpiredReservations(now, input.config);
       const reservation = this.reservationRow(input.reservation.reservationId);
@@ -84421,7 +84504,8 @@ class LocalXBookmarksApiUsageStore {
       const retryAt = nextUtcDay3(now);
       const routine = xApiInvocationProvenance(reservation.provenance) === "scheduled";
       if (rateLimitBlocks(row, input.config, now, routine && input.preserveHeadReserve === true)) {
-        throw new XApiUsageGuardError("provider_rate_limit", row.rate_limit_reset_at);
+        providerStops.report(row.rate_limit_reset_at, now, { limit: row.rate_limit_limit, used: row.rate_limit_limit !== null && row.rate_limit_remaining !== null ? Math.max(0, row.rate_limit_limit - row.rate_limit_remaining) : null });
+        throw new XApiUsageGuardError(X_PROVIDER_RATE_LIMIT, row.rate_limit_reset_at);
       }
       if (routine && row.api_requests + pendingRequests + 1 > input.config.dailyApiRequestBudget) {
         throw new XApiUsageGuardError("daily_api_request_guard", retryAt, { limit: input.config.dailyApiRequestBudget, used: row.api_requests + pendingRequests });
@@ -84504,9 +84588,11 @@ class LocalXBookmarksApiUsageStore {
       `).run(input.resourceIds.length, billableResources, billableResources * input.config.estimatedUnitCostMicrousd, input.rateLimit?.limit ?? null, input.rateLimit?.remaining ?? null, input.rateLimit?.resetAt ?? null, now.toISOString(), reservation.account_id, reservation.utc_day);
       this.deleteReservation(reservation.reservation_id);
     })();
+    providerStops.success();
   }
   settleFailure(input) {
     const now = validDate4(input.now ?? new Date);
+    providerStops.resume(now);
     this.db.transaction(() => {
       const reservation = this.reservationRow(input.reservation.reservationId);
       if (!reservation)
@@ -84882,7 +84968,7 @@ function usageGuard(row, reserved, pendingRequests, config, now) {
   const nextDay = nextUtcDay3(now);
   const degradedRetry = new Date(now.getTime() + config.degradedIntervalMs).toISOString();
   if (rateLimitBlocks(row, config, now)) {
-    return { state: "approaching", degraded_reason: "provider_rate_limit", retry_at: row.rate_limit_reset_at };
+    return { state: "approaching", degraded_reason: X_PROVIDER_RATE_LIMIT, retry_at: row.rate_limit_reset_at };
   }
   if (row.api_requests + pendingRequests >= config.dailyApiRequestBudget) {
     return { state: "exhausted", degraded_reason: "daily_api_request_guard", retry_at: nextDay };
@@ -85016,11 +85102,13 @@ function positiveNumberEnv(value, fallback) {
     throw new TypeError("X live-sync numeric configuration must be positive.");
   return parsed;
 }
-var X_BOOKMARKS_HEAD_INTERVAL_MS, X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_FOLDER_PROVIDER_OUTAGE_WARNING = "x_reconcile_folder_provider_outage_inventory_carried_forward", X_BOOKMARKS_WINDOW_REMOVAL_DEBT_STALE_CADENCE_FACTOR = 4, X_BOOKMARKS_API_USAGE_STORE_ID = "x-bookmarks-api-usage", X_BOOKMARKS_API_USAGE_SCHEMA_VERSION = 11, X_BOOKMARKS_HEAD_MAX_LADDER_PAGES = 50, MICRO_USD_PER_USD = 1e6, EMPTY_SHA256, MAX_ACCOUNT_LENGTH3 = 256, MAX_REQUEST_RESOURCES = 1000, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, XApiUsageGuardError, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
+var providerStops, X_BOOKMARKS_HEAD_INTERVAL_MS, X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_FOLDER_PROVIDER_OUTAGE_WARNING = "x_reconcile_folder_provider_outage_inventory_carried_forward", X_BOOKMARKS_WINDOW_REMOVAL_DEBT_STALE_CADENCE_FACTOR = 4, X_BOOKMARKS_API_USAGE_STORE_ID = "x-bookmarks-api-usage", X_BOOKMARKS_API_USAGE_SCHEMA_VERSION = 11, X_BOOKMARKS_HEAD_MAX_LADDER_PAGES = 50, MICRO_USD_PER_USD = 1e6, EMPTY_SHA256, MAX_ACCOUNT_LENGTH3 = 256, MAX_REQUEST_RESOURCES = 1000, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, XApiUsageGuardError, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
 var init_live_control2 = __esm(() => {
+  init_provider_rate_limits();
   init_olympus_layout();
   init_sqlite_migrations();
   init_connector();
+  providerStops = createProviderRateLimitReporter("x");
   X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
   X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60000;
   X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
@@ -85188,7 +85276,7 @@ async function acquireIncremental(client, checkpoint, usage, account, config, cl
     const ladderIndex = deferralStanding ? 0 : Math.min(headPageSizesUsed.length, config.headPageSizeLadder.length - 1);
     const maxResults = Math.min(config.headPageSizeLadder[ladderIndex], catchupItemLimit - posts.length);
     let providerPageSize = 0;
-    const page2 = await guardedPage(usage, account, config, clock3(), maxResults, false, provenance, config.richResourceExpansionMultiplier, (reservedMaxResults) => {
+    const page2 = await guardedPage(usage, account, config, clock3, maxResults, false, provenance, config.richResourceExpansionMultiplier, (reservedMaxResults) => {
       providerPageSize = reservedMaxResults;
       return client.fetchBookmarks({
         maxResults: reservedMaxResults,
@@ -85260,6 +85348,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
             ...progress.globalNextToken ? { expectedToken: progress.globalNextToken } : {},
             config,
             now: clock3(),
+            clock: clock3,
             provenance,
             maxResults,
             resourceExpansionMultiplier: config.richResourceExpansionMultiplier,
@@ -85319,6 +85408,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
             ...progress.globalVerifyNextToken ? { expectedToken: progress.globalVerifyNextToken } : {},
             config,
             now: clock3(),
+            clock: clock3,
             provenance,
             maxResults,
             resourceExpansionMultiplier: 1,
@@ -85368,7 +85458,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
         assertPageCapacity(progress.folderPages, config.reconcileMaxPagesPerScope, "folder_pages");
         const maxResults = availablePageSize(config.reconcileMaxFolders, progress.foldersStaged, "folders", config.reconcilePageSize);
         let providerPageSize2 = 0;
-        const page3 = await boundedFolderProviderPage(() => guardedPage(usage, account, config, clock3(), maxResults, true, provenance, 1, (reservedMaxResults) => {
+        const page3 = await boundedFolderProviderPage(() => guardedPage(usage, account, config, clock3, maxResults, true, provenance, 1, (reservedMaxResults) => {
           stateStore.recordProviderPageRequest(account, reservedMaxResults);
           apiRequests += 1;
           providerPageSize2 = reservedMaxResults;
@@ -85396,7 +85486,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
       }
       assertPageCapacity(progress.membershipPages, config.reconcileMaxPagesPerScope, "membership_pages");
       let providerPageSize = 0;
-      const page2 = await boundedFolderProviderPage(() => guardedPage(usage, account, config, clock3(), config.reconcilePageSize, true, provenance, config.richResourceExpansionMultiplier, (reservedMaxResults) => {
+      const page2 = await boundedFolderProviderPage(() => guardedPage(usage, account, config, clock3, config.reconcilePageSize, true, provenance, config.richResourceExpansionMultiplier, (reservedMaxResults) => {
         stateStore.recordProviderPageRequest(account, reservedMaxResults);
         apiRequests += 1;
         providerPageSize = reservedMaxResults;
@@ -85499,7 +85589,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
           errorKind: "provider_rate_limited",
           message: "X bookmarks provider rate limit reached.",
           retryAt: error.rateLimit?.resetAt ?? new Date(clock3().getTime() + config.degradedIntervalMs).toISOString(),
-          degradedReason: "provider_rate_limit",
+          degradedReason: X_PROVIDER_RATE_LIMIT,
           warnings: [...openedWarnings, "x_reconcile_progress_staged_restart_safe"]
         });
       }
@@ -85634,7 +85724,8 @@ function acquisition(posts, complete, changed, checkpoint, apiRequests, warnings
     }
   };
 }
-async function guardedPage(usage, account, config, now, maxResources, preserveHeadReserve, provenance, resourceExpansionMultiplier, call, resourceIds, bubbleProviderErrors = false) {
+async function guardedPage(usage, account, config, clock3, maxResources, preserveHeadReserve, provenance, resourceExpansionMultiplier, call, resourceIds, bubbleProviderErrors = false) {
+  const now = clock3();
   let reservation;
   try {
     reservation = usage.reserveRequest({
@@ -85680,17 +85771,21 @@ async function guardedPage(usage, account, config, now, maxResources, preserveHe
       config,
       now
     });
-    if (bubbleProviderErrors && error instanceof XApiError)
-      throw error;
     if (error instanceof XApiError && error.status === 429) {
+      const stoppedAt = clock3();
+      providerStops2.report(error.rateLimit?.resetAt ?? new Date(stoppedAt.getTime() + config.degradedIntervalMs).toISOString(), stoppedAt, { limit: error.rateLimit?.limit, used: error.rateLimit?.limit !== undefined && error.rateLimit.remaining !== undefined ? Math.max(0, error.rateLimit.limit - error.rateLimit.remaining) : null });
+      if (bubbleProviderErrors)
+        throw error;
       throw new XBookmarksLiveSyncError({
         errorKind: "provider_rate_limited",
         message: "X bookmarks provider rate limit reached.",
-        retryAt: error.rateLimit?.resetAt ?? new Date(now.getTime() + config.degradedIntervalMs).toISOString(),
-        degradedReason: "provider_rate_limit",
+        retryAt: error.rateLimit?.resetAt ?? new Date(stoppedAt.getTime() + config.degradedIntervalMs).toISOString(),
+        degradedReason: X_PROVIDER_RATE_LIMIT,
         providerStatus: error.status
       });
     }
+    if (bubbleProviderErrors && error instanceof XApiError)
+      throw error;
     if (error instanceof XApiError && (error.status === undefined || error.status >= 500)) {
       throw new XBookmarksLiveSyncError({
         errorKind: "provider_temporary",
@@ -85705,7 +85800,7 @@ async function guardedReconcilePostPage(input) {
   let requestedSize = input.maxResults;
   while (true) {
     let providerPageSize = 0;
-    const page2 = await guardedPage(input.usage, input.account, input.config, input.now, requestedSize, true, input.provenance, input.resourceExpansionMultiplier, (reservedMaxResults) => {
+    const page2 = await guardedPage(input.usage, input.account, input.config, input.clock, requestedSize, true, input.provenance, input.resourceExpansionMultiplier, (reservedMaxResults) => {
       providerPageSize = reservedMaxResults;
       input.stateStore.recordProviderPageRequest(input.account, reservedMaxResults);
       input.onRequest();
@@ -85946,8 +86041,9 @@ function validDate5(value) {
     throw new TypeError("X connector attemptedAt must be valid.");
   return value;
 }
-var X_BOOKMARKS_FOLDER_PROVIDER_MAX_ATTEMPTS = 3, XBookmarksLiveSyncError, X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
+var X_BOOKMARKS_FOLDER_PROVIDER_MAX_ATTEMPTS = 3, providerStops2, XBookmarksLiveSyncError, X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
 var init_api_connector = __esm(() => {
+  init_provider_rate_limits();
   init_source_placement();
   init_credential_broker();
   init_grant_fence();
@@ -85956,6 +86052,7 @@ var init_api_connector = __esm(() => {
   init_live_control2();
   init_reconcile_state();
   init_grant_fence();
+  providerStops2 = createProviderRateLimitReporter("x");
   XBookmarksLiveSyncError = class XBookmarksLiveSyncError extends Error {
     errorKind;
     retryAt;
@@ -87185,6 +87282,7 @@ function createXBookmarksContentRecoveryHandler(options) {
   }));
   const now = options.now ?? (() => new Date);
   const stops = createLimitStopReporter();
+  const providerStops3 = createProviderRateLimitReporter("x");
   const reportGuard = (error, items) => {
     const limit = DAILY_LIMITS.get(error.guardKind);
     if (!limit)
@@ -87236,6 +87334,7 @@ function createXBookmarksContentRecoveryHandler(options) {
         return writeReceipt(receiptPath, buildReceipt("deferred", counts));
       }
       const attemptedAt = validDate7(now());
+      providerStops3.resume(attemptedAt);
       const multiplier = config.richResourceExpansionMultiplier;
       let reservation;
       try {
@@ -87321,7 +87420,13 @@ function createXBookmarksContentRecoveryHandler(options) {
         });
         counts.provider_failures = 1;
         counts.items_deferred += requestedCandidates.length;
-        const retryAt = recoveryRetryAt(error, config, dispatchAt);
+        const stoppedAt = validDate7(now());
+        const retryAt = recoveryRetryAt(error, config, stoppedAt);
+        if (error instanceof XApiError && error.status === 429 && retryAt)
+          providerStops3.report(retryAt, stoppedAt, {
+            limit: rateLimit?.limit,
+            used: rateLimit?.limit !== undefined && rateLimit.remaining !== undefined ? Math.max(0, rateLimit.limit - rateLimit.remaining) : null
+          });
         return writeReceipt(receiptPath, buildReceipt(retryAt ? "deferred" : "failed", counts, retryAt));
       }
       try {
@@ -87533,6 +87638,7 @@ function validDate7(value) {
 }
 var X_CONTENT_RECOVERY_LIMIT_SUBJECT, RECOVERY_CONNECTOR_ID = "x_bookmarks_content_recovery", MAX_RECOVERY_ITEMS = 100;
 var init_content_recovery = __esm(() => {
+  init_provider_rate_limits();
   init_scheduler_limit_stops();
   init_limit_stops();
   init_types();
@@ -140956,6 +141062,8 @@ async function ownerLimits2(params, deps = {}) {
   const registration = { ...registrations.find((limit) => limit.id === stop.id), ...stop.continue ? { continue: stop.continue } : {} };
   if (registration.continue !== "raise" && (params.to !== undefined || params.keep !== undefined))
     throw new OperationError("invalid_params", "--to and --keep apply only to Raise.");
+  if (registration.continue === "none")
+    throw new OperationError("invalid_params", providerWaitMessage(stop.id, stop.resumesAt) ?? "This stop resumes on its own.");
   if (registration.continue === "raise") {
     const integer = registration.unit !== "usd";
     const minimum = Math.max(stop.limit ?? 0, stop.used ?? 0);
@@ -141013,6 +141121,7 @@ async function ownerLimits2(params, deps = {}) {
   throw new OperationError("invalid_params", "This stop has no continuation available on this surface.");
 }
 var init_owner_limits = __esm(() => {
+  init_provider_rate_limits();
   init_consult_transport_zkapi();
   init_judge_spending();
   init_gmail_import_allowance();
@@ -192241,9 +192350,13 @@ class McpSourceSession {
   async paced(work) {
     await this.pacer.turn();
     try {
-      return await work();
+      const result = await work();
+      this.options.onSuccess?.();
+      return result;
     } catch (error2) {
       const kind = errorKind(error2);
+      if (kind === "rate" || kind === "rate_limited")
+        this.options.onRateLimit?.(error2 instanceof McpSourceError ? error2.retryAfterMs ?? 15 * 60000 : 15 * 60000);
       if (error2 instanceof McpSourceError)
         throw error2;
       throw new McpSourceError(kind === "rate" ? "rate_limited" : kind ?? "server_error", { cause: error2 });
@@ -192264,6 +192377,10 @@ class McpSourceSession {
         result = await work();
       } catch (error2) {
         const kind = errorKind(error2);
+        if (kind === "rate_limited" && error2 instanceof McpSourceError) {
+          this.options.onRateLimit?.(error2.retryAfterMs ?? 15 * 60000);
+          throw error2;
+        }
         if (kind !== "rate") {
           if (error2 instanceof McpSourceError)
             throw error2;
@@ -192281,11 +192398,15 @@ class McpSourceSession {
             throw new McpSourceError("permission_missing");
         }
       }
-      if (!limited)
+      if (!limited) {
+        this.options.onSuccess?.();
         return result;
+      }
       const wait = backoffMs * attempt;
-      if (attempt > retries)
+      if (attempt > retries) {
+        this.options.onRateLimit?.(wait);
         throw new McpSourceError("rate_limited", { retryAfterMs: wait });
+      }
       this.rateLimitRetries += 1;
       this.pacer.backoff(wait);
     }
@@ -193337,7 +193458,29 @@ function createEvernoteLiveSync(options) {
     ...options.fetch ? { fetch: options.fetch } : {},
     now
   });
-  const authorizedFetch = mcpAuthorizedFetch(tokens, serverUrl, options.fetch);
+  const providerStops3 = createProviderRateLimitReporter("evernote");
+  let resumesAt;
+  const reportRateLimit = (retryAfterMs2) => {
+    resumesAt ??= new Date(now().getTime() + retryAfterMs2).toISOString();
+    providerStops3.report(resumesAt, now());
+  };
+  const authorized = mcpAuthorizedFetch(tokens, serverUrl, options.fetch);
+  const authorizedFetch = async (url2, init) => {
+    providerStops3.resume(now());
+    const response = await authorized(url2, init);
+    if (response.status === 429) {
+      resumesAt = providerRetryTime(response.headers.get("retry-after") ?? undefined, now(), 15 * 60000);
+      providerStops3.report(resumesAt, now());
+      const retryAfterMs2 = Date.parse(resumesAt) - now().getTime();
+      if (retryAfterMs2 > 60000) {
+        await response.body?.cancel().catch(() => {
+          return;
+        });
+        throw new McpSourceError("rate_limited", { retryAfterMs: retryAfterMs2 });
+      }
+    }
+    return response;
+  };
   const accountScope = options.handle.accountRole ?? EVERNOTE_ACCOUNT_ROLE;
   let shouldContinue = () => true;
   let notebookChoice = () => "ingest";
@@ -193353,6 +193496,11 @@ function createEvernoteLiveSync(options) {
     readTools: EVERNOTE_READ_TOOLS,
     callBudget: purpose === "pass" ? options.callBudget ?? EVERNOTE_PASS_CALL_BUDGET : purpose === "notebooks" ? NOTEBOOKS_CALL_BUDGET : ATTACHMENT_CALL_BUDGET,
     fetch: authorizedFetch,
+    onSuccess: () => {
+      providerStops3.success();
+      resumesAt = undefined;
+    },
+    onRateLimit: reportRateLimit,
     ...options.pacer ? { pacer: options.pacer } : {},
     ...purpose === "pass" ? { shouldContinue: () => shouldContinue() } : {}
   });
@@ -193393,7 +193541,7 @@ function createEvernoteLiveSync(options) {
     const name = error2?.name;
     const kind = isMcpSourceError(error2) ? error2.kind : name === "EvernoteListingIncomplete" ? "listing_incomplete" : name === "EvernoteAccountChanged" ? "account_changed" : "pass_failed";
     const state = isMcpSourceError(error2) ? MCP_SOURCE_DASHBOARD_STATE[error2.kind] : "provider_error";
-    writePassFile(passPath, { ...file2, status: { ...file2.status, last_error: { kind, state, at: now().toISOString() } } });
+    writePassFile(passPath, { ...file2, status: { ...file2.status, last_error: { kind, state, at: now().toISOString(), ...kind === "rate_limited" && resumesAt ? { resumesAt } : {} } } });
     if (isMcpSourceError(error2) && AUTH_KINDS.has(error2.kind))
       markConnectedHandleReauthRequired(options.handle.handle, options.registryPath, now());
     throw error2;
@@ -193435,7 +193583,7 @@ function createEvernoteLiveSync(options) {
         status: {
           last_completed_at: completedAt,
           counts: outcome.counts,
-          ...outcome.stoppedBy ? { last_error: { kind: outcome.stoppedBy, state: MCP_SOURCE_DASHBOARD_STATE[outcome.stoppedBy], at: completedAt } } : {}
+          ...outcome.stoppedBy ? { last_error: { kind: outcome.stoppedBy, state: MCP_SOURCE_DASHBOARD_STATE[outcome.stoppedBy], at: completedAt, ...outcome.stoppedBy === "rate_limited" && resumesAt ? { resumesAt } : {} } } : {}
         }
       });
       lastCompletedAt = completedAt;
@@ -193510,6 +193658,7 @@ function createEvernoteLiveSync(options) {
 var EVERNOTE_SECURE_CORPUS_ID = "secure_local.evernote.notes", EVERNOTE_INTERNAL_CORPUS_ID = "internal.evernote.notes", EVERNOTE_TIER_CORPUS_IDS, EVERNOTE_HANDLE = "evernote.personal", EVERNOTE_ACCOUNT_ROLE = "personal", EVERNOTE_SYNC_CAPABILITY = "evernote.notes.sync", EVERNOTE_PASS_RECEIPT_KIND = "evernote_connector_store_pass_receipt", evernoteCredentialKey = (accountRole = EVERNOTE_ACCOUNT_ROLE) => `evernote.${accountRole}.mcp_credential`, ATTACHMENT_CALL_BUDGET = 4, NOTEBOOKS_CALL_BUDGET = 400, EVERNOTE_NOTEBOOK_LIST_TTL_MS, EVERNOTE_ENFORCEABLE_EXCLUSION_CRITERIA, DISPOSITION_RANK, EVERNOTE_STORE_PLACEMENT, AUTH_KINDS;
 var init_live_sync3 = __esm(() => {
   init_atomic_file();
+  init_provider_rate_limits();
   init_errors3();
   init_oauth();
   init_session();
@@ -202426,6 +202575,9 @@ function readwiseStoreProgress(outcome) {
   };
 }
 function readwiseSchedulerFailure(error2) {
+  if (error2 instanceof ReadwiseApiError && error2.status === 429 && error2.resumesAt) {
+    return new SourceSchedulerTaskDeferral("Readwise is limiting requests.", { at: error2.resumesAt, degradedReason: "readwise.rate_limit" });
+  }
   if (!(error2 instanceof ReadwiseRequestBudgetError))
     return error2;
   return new SourceSchedulerTaskDeferral(error2.message, {
@@ -202716,7 +202868,7 @@ function safeSchedulerErrorKind(error2) {
   if (/timeout/i.test(message2))
     return "timeout";
   if (/rate.?limit|too many requests/i.test(message2))
-    return "rate_limited";
+    return SOURCE_RATE_LIMITED;
   if (/network|connection|ECONN/i.test(message2))
     return "network";
   if (/temporar|try again/i.test(message2))
@@ -202740,7 +202892,7 @@ function mapExplicitSchedulerErrorKind(value2) {
   if (/timeout/i.test(value2))
     return "timeout";
   if (/rate.?limit|too many requests/i.test(value2))
-    return "rate_limited";
+    return SOURCE_RATE_LIMITED;
   if (/network|connection|ECONN/i.test(value2))
     return "network";
   if (/temporar|try again/i.test(value2))
@@ -202799,7 +202951,7 @@ function sanitizeSchedulerWarnings(warnings) {
     if (/timeout/i.test(warning))
       return "timeout";
     if (/rate.?limit|too many requests/i.test(warning))
-      return "rate_limited";
+      return SOURCE_RATE_LIMITED;
     if (/network|connection|ECONN/i.test(warning))
       return "network";
     return "task_warning";
@@ -202819,6 +202971,8 @@ function accountFromApprovedScope(scope) {
 }
 var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
+  init_provider_rate_limits();
+  init_api();
   init_config();
   init_control_path_headroom();
   init_operation_error();
@@ -202915,7 +203069,10 @@ var init_source_scheduler = __esm(() => {
   SCHEDULER_PARK_REASONS = new Set([
     ...UTC_DAY_SCOPED_DEGRADED_REASONS,
     "provider_rate_limit",
-    "provider_rate_limited"
+    "provider_rate_limited",
+    "x.rate_limit",
+    "evernote.rate_limit",
+    "readwise.rate_limit"
   ]);
   LOCAL_FILES_SCHEDULER_WARNINGS = [
     "local_files_unreadable_folders",
@@ -215843,6 +216000,7 @@ var init_gmail_status_scope = __esm(() => {
 import { existsSync as existsSync116 } from "node:fs";
 function createEvernoteRuntime(options) {
   const env = options.env ?? process.env;
+  const now = options.now ?? (() => new Date);
   let lane;
   const openLane = () => {
     if (lane)
@@ -215879,6 +216037,7 @@ function createEvernoteRuntime(options) {
         handle,
         registryPath: options.registryPath,
         env,
+        now,
         ...options.serverUrl ? { serverUrl: options.serverUrl } : {},
         ...options.fetch ? { fetch: options.fetch } : {},
         ...options.downloadHosts ? { downloadHosts: options.downloadHosts } : {},
@@ -215938,10 +216097,14 @@ function createEvernoteRuntime(options) {
             return {
               status: receipt.status,
               counts: { ...receipt.counts },
-              ...receipt.counts.pass_complete === 0 && stopped?.kind === "rate_limited" ? { retryAt: { at: new Date(Date.now() + EVERNOTE_RATE_LIMIT_RETRY_MS).toISOString(), degradedReason: "rate_limited" } } : {}
+              ...receipt.counts.pass_complete === 0 && stopped?.kind === "rate_limited" ? { retryAt: { at: stopped.resumesAt ?? new Date(now().getTime() + EVERNOTE_RATE_LIMIT_RETRY_MS).toISOString(), degradedReason: "evernote.rate_limit" } } : {}
             };
           } catch (error2) {
-            throw evernoteSchedulerFailure(error2);
+            const failure2 = evernoteSchedulerFailure(error2, now(), sync.status()?.last_error?.resumesAt);
+            if (isMcpSourceError(error2, "rate_limited") && failure2 instanceof SourceSchedulerTaskFailure && failure2.retryAt) {
+              return { status: "idle", counts: {}, retryAt: failure2.retryAt };
+            }
+            throw failure2;
           }
         }
       };
@@ -215982,11 +216145,14 @@ function createEvernoteRuntime(options) {
     dashboardPass: () => evernoteDashboardPass(live2?.sync.status() ?? evernotePassStatus(env))
   };
 }
-function evernoteSchedulerFailure(error2) {
+function evernoteSchedulerFailure(error2, now = new Date, providerResumesAt) {
+  const retryAt = isMcpSourceError(error2, "rate_limited") ? providerResumesAt ?? new Date(now.getTime() + (error2.retryAfterMs ?? EVERNOTE_RATE_LIMIT_RETRY_MS)).toISOString() : undefined;
+  if (retryAt)
+    providerStops3.report(retryAt, now);
   if (isMcpSourceError(error2)) {
     return new SourceSchedulerTaskFailure(error2.message, {
       errorKind: AUTH_KINDS2.has(error2.kind) ? "credential_missing" : `evernote_${error2.kind}`,
-      ...error2.kind === "rate_limited" ? { retryAt: { at: new Date(Date.now() + (error2.retryAfterMs ?? EVERNOTE_RATE_LIMIT_RETRY_MS)).toISOString(), degradedReason: "rate_limited" } } : {}
+      ...error2.kind === "rate_limited" ? { retryAt: { at: retryAt, degradedReason: "evernote.rate_limit" } } : {}
     });
   }
   if (error2?.name === "EvernoteAccountChanged") {
@@ -216010,21 +216176,23 @@ function evernoteDashboardPass(status) {
     ...errorKind2 && status.last_error ? { error: { kind: errorKind2, at: status.last_error.at } } : {}
   };
 }
-var EVERNOTE_ATTACHMENT_EXTRACTION_PROVIDER = "evernote.attachments", EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY = "evernote.attachments:extraction", EVERNOTE_ATTACHMENT_PLAN_LIMIT = 200, EVERNOTE_ATTACHMENT_BATCH_SIZE = 10, EVERNOTE_RATE_LIMIT_RETRY_MS, AUTH_KINDS2, PASS_ERROR_KIND;
+var providerStops3, EVERNOTE_ATTACHMENT_EXTRACTION_PROVIDER = "evernote.attachments", EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY = "evernote.attachments:extraction", EVERNOTE_ATTACHMENT_PLAN_LIMIT = 200, EVERNOTE_ATTACHMENT_BATCH_SIZE = 10, EVERNOTE_RATE_LIMIT_RETRY_MS, AUTH_KINDS2, PASS_ERROR_KIND;
 var init_runtime3 = __esm(() => {
+  init_provider_rate_limits();
   init_errors3();
   init_child_extraction_runtime();
   init_source_scheduler();
   init_source_placement();
   init_connector5();
   init_live_sync3();
+  providerStops3 = createProviderRateLimitReporter("evernote");
   EVERNOTE_RATE_LIMIT_RETRY_MS = 15 * 60000;
   AUTH_KINDS2 = new Set(["auth_missing", "auth_expired", "auth_revoked"]);
   PASS_ERROR_KIND = {
     auth_missing: "auth",
     auth_expired: "auth",
     auth_revoked: "auth",
-    rate_limited: "rate_limited",
+    rate_limited: SOURCE_RATE_LIMITED,
     listing_incomplete: "listing_incomplete",
     account_changed: "account_changed",
     permission_missing: "unavailable",
@@ -224947,19 +225115,18 @@ function buildChatGptDashboardViewModel(view4, options = {}) {
     else if (!connecting && !credentials && (status === "Needs you" || status === "Failing") && progress2 && progress2.stage !== "done" && !progress2.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress2).fix)) {
       status = "Working";
     }
-    const wait = selfWait(definition, scrubbed, now);
     const stopped = stops.some((stop) => limitStopSubjects(stop).includes(definition.source_id));
-    if (!connecting && !credentials && imports.length === 0 && (status === "Needs you" || status === "Failing") && ownerHasNothingToDo(scrubbed, stopped || wait !== undefined, degraded)) {
+    if (!connecting && !credentials && imports.length === 0 && (status === "Needs you" || status === "Failing") && ownerHasNothingToDo(scrubbed, stopped, degraded)) {
       status = "Working";
     }
     const sync = connecting || status === "Off" || card.sync_now_available !== true ? undefined : syncFix(definition, scrubbed, status, card.connection.action.kind, degraded, progress2);
-    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress: progress2, counts: measured?.counts, sync, wait };
+    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress: progress2, counts: measured?.counts, sync };
   });
   const sources = rows.map(({ definition, card, status, actionKind, connecting, progress: progress2, sync }, index) => ({
     entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now, sync, options.remote !== undefined),
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
-  const waits = rows.flatMap(({ wait }) => wait ? [wait] : []);
+  const waits = [];
   for (const stop of stops) {
     const registered3 = limits2.find((entry) => entry.id === stop.id);
     if (!registered3)
@@ -225083,18 +225250,6 @@ function withProviderRejection(card) {
   if (!CONNECTED_STATES2.has(card.connection.state))
     return card;
   return { ...card, connection: { ...card.connection, state: "reauth_required", label: "reauth required" } };
-}
-function selfWait(definition, card, now) {
-  const reason = card.schedule?.degraded_reason;
-  if (reason === undefined || !dashboardOperatorPaused(card) || !CONNECTED_STATES2.has(card.connection.state))
-    return;
-  const label = definition.label;
-  const api2 = WAIT_API_NAMES[definition.source_id] ?? label;
-  if (reason === "provider_rate_limit") {
-    const next = isoOrUndefined(card.schedule?.next_run_at);
-    return { sourceId: definition.source_id, label, reason: "rate_limit", api: api2, ...next && Date.parse(next) > now.getTime() ? { resumesAt: next } : {} };
-  }
-  return;
 }
 function ownerHasNothingToDo(card, waiting, degraded) {
   const parts = dashboardAttentionParts(card, degraded ? { degradedCredentials: degraded } : undefined);
@@ -225853,7 +226008,7 @@ function isoOrUndefined(value2) {
 function isoOrNow(value2, now) {
   return isoOrUndefined(value2) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, ARCHIVES_IMPORTED, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES2, WAIT_API_NAMES, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, IMPORT_UNREADABLE_REASONS, LIVE_PASS_ERROR_KINDS, CAPTURE_STATES, CAPTURE_SUPERVISOR_STATES, CAPTURE_SUPERVISOR_REASONS, MANUAL_SYNC_OUTCOMES;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, ARCHIVES_IMPORTED, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES2, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, IMPORT_UNREADABLE_REASONS, LIVE_PASS_ERROR_KINDS, CAPTURE_STATES, CAPTURE_SUPERVISOR_STATES, CAPTURE_SUPERVISOR_REASONS, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_source_failure();
   init_limit_stops();
@@ -225915,12 +226070,6 @@ var init_dashboard_view_model = __esm(() => {
   KNOWN_REFUSAL_CODES = new Set(["access_denied", "redirect_uri_mismatch", "invalid_redirect_uri", "redirect_uri_not_registered"]);
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
   CONNECTED_STATES2 = new Set(["connected", "syncing", "synced", "waiting_for_first_sync"]);
-  WAIT_API_NAMES = {
-    "x.bookmarks": "X",
-    "gmail.email": "Gmail",
-    "google_drive.docs": "Google Drive",
-    "readwise.library": "Readwise"
-  };
   STAGE_FOR_PHASE = {
     metadata_sync: "listing",
     extraction: "reading",

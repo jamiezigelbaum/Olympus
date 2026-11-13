@@ -415,7 +415,7 @@ describe('the scheduler source', () => {
   test('a rate-limited pass retries later; a refused sign-in is a credential failure', () => {
     const limited = evernoteSchedulerFailure(new McpSourceError('rate_limited', { retryAfterMs: 60_000 }));
     expect(limited).toBeInstanceOf(SourceSchedulerTaskFailure);
-    expect((limited as SourceSchedulerTaskFailure).retryAt?.degradedReason).toBe('rate_limited');
+    expect((limited as SourceSchedulerTaskFailure).retryAt?.degradedReason).toBe('evernote.rate_limit');
     const revoked = evernoteSchedulerFailure(new McpSourceError('auth_revoked'));
     expect((revoked as SourceSchedulerTaskFailure).errorKind).toBe('credential_missing');
   });
