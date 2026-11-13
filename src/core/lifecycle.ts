@@ -1194,7 +1194,8 @@ function defaultWorkerReadinessProbe(url: string, bunBin: string | undefined): b
       ? `  const response = await fetch(url, { unix: ${JSON.stringify(socket)}, redirect: 'error', signal: AbortSignal.timeout(3000) });`
       : "  const response = await fetch(url, { signal: AbortSignal.timeout(3000) });",
     "  const value = response.ok ? await response.json() : undefined;",
-    "  if (!response.ok || !value || value.reachable !== true) process.exit(1);",
+    // A split engine's front answers on its own: its background must be up too.
+    "  if (!response.ok || !value || value.reachable !== true || value.engine_background === 'unreachable') process.exit(1);",
     "} catch { process.exit(1); }",
   ].join('\n');
   const result = spawnSync(executable, ['-e', script, url], {

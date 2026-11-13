@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn as spawnProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -22,6 +22,8 @@ import {
   removeAllSchemaBackups,
   removeSchemaBackupsSince,
   restoreSchemaBackupsSince,
+  retiredStateBackupPath,
+  retireStatePath,
   type BootProgress,
   type BootStepEvent,
 } from '../src/core/boot-progress.ts';
@@ -231,6 +233,37 @@ describe('schema updates back up the store first', () => {
     const restored = new Database(path, { readonly: true });
     expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
     restored.close();
+  });
+});
+
+describe('retired state is moved aside for the upgrade that retires it (#1563 review)', () => {
+  test('state last written long ago is still put back by a failed upgrade', () => {
+    const env = home();
+    const path = join(env.HOME!, 'retired.sqlite');
+    writeFileSync(path, 'old rows');
+    const longAgo = new Date(Date.now() - 30 * 24 * HOUR);
+    utimesSync(path, longAgo, longAgo);
+    const since = Date.now() - 1;
+    expect(retireStatePath(env, 'retired', path)).toBe(true);
+    // The move keeps the time it was given just before, so the copy counts as this upgrade's.
+    expect(statSync(retiredStateBackupPath(path)).mtimeMs).toBeGreaterThanOrEqual(since);
+    expect(restoreSchemaBackupsSince(env, since)).toEqual(['retired']);
+    expect(readFileSync(path, 'utf8')).toBe('old rows');
+  });
+
+  test('a copy an earlier start left gives way to the newer state, which a failed upgrade puts back', () => {
+    const env = home();
+    const path = join(env.HOME!, 'retired.sqlite');
+    const backup = retiredStateBackupPath(path);
+    writeFileSync(backup, 'older copy');
+    const longAgo = new Date(Date.now() - 30 * 24 * HOUR);
+    utimesSync(backup, longAgo, longAgo);
+    writeFileSync(path, 'newer rows');
+    const since = Date.now() - 1;
+    expect(retireStatePath(env, 'retired', path)).toBe(true);
+    expect(readFileSync(backup, 'utf8')).toBe('newer rows');
+    expect(restoreSchemaBackupsSince(env, since)).toEqual(['retired']);
+    expect(readFileSync(path, 'utf8')).toBe('newer rows');
   });
 });
 

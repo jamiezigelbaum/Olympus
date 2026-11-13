@@ -19607,14 +19607,11 @@ function retireStatePath(env, storeId, path) {
   if (!existsSync19(path))
     return false;
   const backup = retiredStateBackupPath(path);
-  if (existsSync19(backup)) {
-    rmSync8(path, { recursive: true, force: true });
-    return false;
-  }
+  rmSync8(backup, { recursive: true, force: true });
   recordSchemaBackup(env, { storeId, dbPath: path, backupPath: backup });
-  renameSync4(path, backup);
   const now = new Date;
-  utimesSync(backup, now, now);
+  utimesSync(path, now, now);
+  renameSync4(path, backup);
   return true;
 }
 function preSchemaBackupsOf(dbPath) {
@@ -220543,7 +220540,8 @@ function createEngineFront(input) {
   }, 2000);
   poll.unref?.();
   const completeModel = (request) => completeModelInBackground(fetchBackground, input.authToken, request);
-  return { client, ownerBusy: relay, status, completeModel, stop: () => {
+  const backgroundReady = () => probeEngineBackground(fetchBackground, input.authToken, undefined, 1000);
+  return { client, ownerBusy: relay, status, completeModel, backgroundReady, stop: () => {
     clearInterval(poll);
     relay?.stop();
   } };
@@ -250904,8 +250902,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   serverOptions.fetch = async (request, server2) => {
     const response = await fetchWithTierLedgerStatus(request, server2);
     const path = new URL(request.url).pathname;
-    if ((path === "/v1/health" || path === "/health") && response?.ok && tierLedgerProblems.size) {
-      return Response.json({ ...await response.json(), privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) }, { status: response.status, headers: response.headers });
+    if ((path === "/v1/health" || path === "/health") && response?.ok && (tierLedgerProblems.size || engineFront)) {
+      return Response.json({
+        ...await response.json(),
+        ...tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {},
+        ...engineFront ? { engine_background: await engineFront.backgroundReady() ? "ready" : "unreachable" } : {}
+      }, { status: response.status, headers: response.headers });
     }
     return response;
   };
@@ -253680,7 +253682,7 @@ function defaultWorkerReadinessProbe(url, bunBin) {
     "try {",
     socket ? `  const response = await fetch(url, { unix: ${JSON.stringify(socket)}, redirect: 'error', signal: AbortSignal.timeout(3000) });` : "  const response = await fetch(url, { signal: AbortSignal.timeout(3000) });",
     "  const value = response.ok ? await response.json() : undefined;",
-    "  if (!response.ok || !value || value.reachable !== true) process.exit(1);",
+    "  if (!response.ok || !value || value.reachable !== true || value.engine_background === 'unreachable') process.exit(1);",
     "} catch { process.exit(1); }"
   ].join(`
 `);
