@@ -410,6 +410,32 @@ describe('remote output allowlists, per operation and result family', () => {
     expectSchemaValid('source_index_status', output);
   });
 
+  test('status says what search waits for: the privacy check and a degraded corpus, in closed words (#1616)', () => {
+    const status = statusFixture();
+    status.corpora[0]!.retrieval = { declared_mode: 'hybrid', servable_mode: 'keyword', state: 'degraded', reason: 'embedding_provider_unavailable' } as unknown as typeof status.corpora[0]['retrieval'];
+    (status as Record<string, unknown>).tier_classification = {
+      checking_items: 104, remaining_questions: 90, pending_items: 101, summary: 'TIER_SUMMARY_LEAK',
+      awaiting_owner_approval: false, waiting_reason: 'no_model', waiting_label: 'LABEL_LEAK', waiting_since: '2026-11-13T09:05:00.000Z',
+    };
+    const output = remoteOperationOutput('source_index_status', status);
+    expect(output.privacy_check).toEqual({ waiting_items: 101, waiting_for: 'no_model' });
+    expect((output.corpora as Array<Record<string, unknown>>)[0]!.retrieval).toEqual({ mode: 'keyword', state: 'degraded', reason: 'embedding_provider_unavailable' });
+    expect(JSON.stringify(output)).not.toContain('LEAK');
+    expectSchemaValid('source_index_status', output);
+
+    // An approval the owner has not given is named too, and a code outside the closed set is dropped, never passed on.
+    (status as Record<string, unknown>).tier_classification = { checking_items: 5, remaining_questions: 5, pending_items: 5, summary: '', awaiting_owner_approval: true };
+    expect(remoteOperationOutput('source_index_status', status).privacy_check).toEqual({ waiting_items: 5, waiting_for: 'awaiting_owner_approval' });
+    (status as Record<string, unknown>).tier_classification = { checking_items: 5, remaining_questions: 5, pending_items: 5, summary: '', awaiting_owner_approval: false, waiting_reason: 'REASON_LEAK' };
+    expect(remoteOperationOutput('source_index_status', status).privacy_check).toEqual({ waiting_items: 5 });
+    // A spent daily call budget is named by its registered limit id.
+    (status as Record<string, unknown>).tier_classification = { checking_items: 5, remaining_questions: 5, pending_items: 5, summary: '', awaiting_owner_approval: false, waiting_reason: 'daily_budget' };
+    expect(remoteOperationOutput('source_index_status', status).privacy_check).toEqual({ waiting_items: 5, waiting_for: 'judge.daily_calls' });
+    // Nothing waiting: no privacy_check at all.
+    (status as Record<string, unknown>).tier_classification = { checking_items: 0, remaining_questions: 0, pending_items: 0, summary: '', awaiting_owner_approval: false };
+    expect(remoteOperationOutput('source_index_status', status)).not.toHaveProperty('privacy_check');
+  });
+
   test('a corpus is named as the dashboard and search results name it (test-mac, 2026-10-29)', () => {
     const labels = (remoteOperationOutput('source_index_status', {
       kind: 'source_index_status',

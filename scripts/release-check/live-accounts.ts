@@ -122,7 +122,7 @@ export interface CorpusRow {
   corpus_id: string;
   label: string;
   configured: boolean;
-  retrieval?: { mode: string; state: string };
+  retrieval?: { mode: string; state: string; reason?: string };
   last_refresh?: { status: string; completed_at?: string };
   counts?: { indexed_items: number };
 }
@@ -130,6 +130,17 @@ export interface CorpusRow {
 export function corpusRows(structured: unknown): CorpusRow[] {
   const rows = (structured as { corpora?: unknown } | null)?.corpora;
   return Array.isArray(rows) ? rows.filter((row): row is CorpusRow => typeof row?.label === 'string' && typeof row?.corpus_id === 'string') : [];
+}
+
+/** What the remote status says new items wait for (core/remote-result.ts privacy_check). */
+export interface PrivacyCheckRow {
+  waiting_items: number;
+  waiting_for?: string;
+}
+
+export function privacyCheckOf(structured: unknown): PrivacyCheckRow | undefined {
+  const row = (structured as { privacy_check?: Partial<PrivacyCheckRow> } | null)?.privacy_check;
+  return typeof row?.waiting_items === 'number' ? { waiting_items: row.waiting_items, ...(typeof row.waiting_for === 'string' ? { waiting_for: row.waiting_for } : {}) } : undefined;
 }
 
 export function evidenceOf(structured: unknown): SearchEvidence[] {
@@ -143,7 +154,7 @@ export function evidenceOf(structured: unknown): SearchEvidence[] {
  * is not a success: with no recent success the source fails, and with none at all yet the check is inconclusive.
  * Cached items beside a recent failure are not syncing, so a failure newer than the last success fails, as degraded search does.
  */
-export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], now = Date.now()): CheckResult {
+export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], now = Date.now(), privacy?: PrivacyCheckRow): CheckResult {
   const id = `live.${spec.id}.status`;
   const title = `${spec.label}: connected and syncing`;
   const own = rows.filter((row) => fold(row.label) === fold(spec.label) && row.configured);
@@ -166,8 +177,11 @@ export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], no
   if (now - Date.parse(success.completed_at!) > maxAgeH * 3_600_000) return { id, title, status: 'fail', detail: `${said}: the last successful one was more than ${maxAgeH} h ago${running ? ' (one is running now)' : ''}` };
   const failedSince = newest !== undefined && newest !== success && newest.status === 'failed';
   // An empty corpus has nothing to embed, so the engine calls its search degraded for good; only one that holds items counts.
-  const degraded = own.some((row) => row.retrieval?.state === 'degraded' && (row.counts?.indexed_items ?? 0) > 0);
-  return { id, title, status: degraded || failedSince ? 'fail' : 'pass', detail: `${said}${running ? '; a refresh is running' : ''}${failedSince ? `; it failed after the last success (${success.completed_at})` : ''}${degraded ? '; search is degraded' : ''}` };
+  const degradedRow = own.find((row) => row.retrieval?.state === 'degraded' && (row.counts?.indexed_items ?? 0) > 0);
+  const degraded = degradedRow ? `; search is degraded${degradedRow.retrieval?.reason ? ` (${degradedRow.retrieval.reason})` : ''}` : '';
+  // What the engine says search waits for, so a failure names its cause (#1616).
+  const waiting = privacy ? `; ${privacy.waiting_items} item(s) wait for the privacy check${privacy.waiting_for ? ` (${privacy.waiting_for})` : ''}` : '';
+  return { id, title, status: degradedRow || failedSince ? 'fail' : 'pass', detail: `${said}${running ? '; a refresh is running' : ''}${failedSince ? `; it failed after the last success (${success.completed_at})` : ''}${degraded}${waiting}` };
 }
 
 /** The search found an item of this source holding every needle. */
@@ -177,7 +191,9 @@ export function searchCheck(id: string, title: string, label: string, needles: r
   const own = evidence.filter((item) => fold(item.source) === fold(label));
   const hit = own.find((item) => needles.every((needle) => fold(`${item.title} ${item.excerpt}`).includes(fold(needle))));
   if (hit) return { id, title, status: 'pass', detail: `"${hit.title.slice(0, 80)}", labelled ${label}` };
-  return { id, title, status: 'fail', detail: `${evidence.length} item(s) came back, ${own.length} labelled ${label}, none holding all ${needles.length} expected string(s)${evidence.length ? `; sources: ${[...new Set(evidence.map((item) => item.source))].join(', ')}` : ''}` };
+  const notes = (search.structured as { notes?: unknown } | null)?.notes;
+  const said = Array.isArray(notes) ? notes.filter((note): note is string => typeof note === 'string').join(' ').slice(0, 400) : '';
+  return { id, title, status: 'fail', detail: `${evidence.length} item(s) came back, ${own.length} labelled ${label}, none holding all ${needles.length} expected string(s)${evidence.length ? `; sources: ${[...new Set(evidence.map((item) => item.source))].join(', ')}` : ''}${said ? `; notes: ${said}` : ''}` };
 }
 
 export interface LiveAccountsOptions {
@@ -202,7 +218,7 @@ export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOp
   const status = await engine.call('source_index_status', {});
   const rows = status.ok ? corpusRows(status.structured) : [];
   for (const spec of options.sources) {
-    checks.push(status.ok ? { ...statusCheck(spec, rows), ms: Date.now() - started } : { id: `live.${spec.id}.status`, title: `${spec.label}: connected and syncing`, status: 'fail', detail: `source_index_status failed: ${status.error ?? 'no answer'}` });
+    checks.push(status.ok ? { ...statusCheck(spec, rows, Date.now(), privacyCheckOf(status.structured)), ms: Date.now() - started } : { id: `live.${spec.id}.status`, title: `${spec.label}: connected and syncing`, status: 'fail', detail: `source_index_status failed: ${status.error ?? 'no answer'}` });
   }
   for (const spec of options.sources) {
     if (!spec.known) continue;

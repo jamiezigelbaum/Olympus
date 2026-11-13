@@ -35474,6 +35474,7 @@ function sourceIndexStatusOutput(raw) {
     const retrieval = asRecord7(corpus.retrieval);
     const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
     const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
+    const reason = state === "degraded" ? oneOf(retrieval?.reason, RETRIEVAL_REASONS) : undefined;
     const refresh = asRecord7(corpus.last_refresh);
     const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
     const completedAt = iso(refresh?.completed_at);
@@ -35484,7 +35485,7 @@ function sourceIndexStatusOutput(raw) {
       label: sourceLabel(corpus.provider, corpus.family),
       ...trustDomain ? { trust_domain: trustDomain } : {},
       configured: corpus.configured === true,
-      ...mode && state ? { retrieval: { mode, state } } : {},
+      ...mode && state ? { retrieval: { mode, state, ...reason ? { reason } : {} } } : {},
       ...refreshStatus ? { last_refresh: { status: refreshStatus, ...completedAt ? { completed_at: completedAt } : {} } } : {},
       ...counts ? {
         counts: {
@@ -35495,7 +35496,16 @@ function sourceIndexStatusOutput(raw) {
       } : {}
     });
   }
-  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora };
+  const privacyCheck = privacyCheckOutput(record.tier_classification);
+  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora, ...privacyCheck ? { privacy_check: privacyCheck } : {} };
+}
+function privacyCheckOutput(raw) {
+  const backlog = asRecord7(raw);
+  const waiting = wholeNumber(backlog?.pending_items);
+  if (!backlog || waiting === 0)
+    return;
+  const reason = backlog.awaiting_owner_approval === true ? "awaiting_owner_approval" : typeof backlog.waiting_reason === "string" && Object.hasOwn(PRIVACY_CHECK_WAITS, backlog.waiting_reason) ? PRIVACY_CHECK_WAITS[backlog.waiting_reason] : undefined;
+  return { waiting_items: waiting, ...reason ? { waiting_for: reason } : {} };
 }
 function remoteRetryAfterSeconds(body) {
   if (!body || typeof body !== "object")
@@ -35595,7 +35605,7 @@ function dateOnly(value) {
 function asRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_source_item_read();
   init_app_release_capture();
@@ -35729,6 +35739,24 @@ var init_remote_result = __esm(() => {
   TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
   RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
   RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+  RETRIEVAL_REASONS = Object.freeze([
+    "embedding_provider_unavailable",
+    "embedding_provider_not_allowed",
+    "no_current_embedding_artifacts",
+    "embedding_epoch_stale"
+  ]);
+  PRIVACY_CHECK_WAITS = Object.freeze({
+    yielding_to_answers: "yielding_to_answers",
+    breaker_open: "breaker_open",
+    pass_running: "pass_running",
+    pass_stuck: "pass_stuck",
+    awaiting_owner_approval: "awaiting_owner_approval",
+    no_model: "no_model",
+    daily_budget: "judge.daily_calls",
+    cloud_stopped: "cloud_stopped",
+    model_not_answering: "model_not_answering",
+    failed: "failed"
+  });
   NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
   CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
   OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
@@ -35916,7 +35944,8 @@ var init_remote_result = __esm(() => {
               required: ["mode", "state"],
               properties: {
                 mode: { enum: [...RETRIEVAL_MODES] },
-                state: { enum: [...RETRIEVAL_STATES] }
+                state: { enum: [...RETRIEVAL_STATES] },
+                reason: { enum: [...RETRIEVAL_REASONS], description: "Why a degraded corpus searches by keyword only." }
               }
             },
             last_refresh: {
@@ -35939,6 +35968,16 @@ var init_remote_result = __esm(() => {
               }
             }
           }
+        }
+      },
+      privacy_check: {
+        type: "object",
+        additionalProperties: false,
+        required: ["waiting_items"],
+        description: "New items not searchable yet because they wait for the privacy check, and what the check waits for.",
+        properties: {
+          waiting_items: { type: "integer", minimum: 1 },
+          waiting_for: { enum: [...new Set(Object.values(PRIVACY_CHECK_WAITS))] }
         }
       }
     }
@@ -249481,6 +249520,7 @@ ${key2}`;
       return backlog ? {
         checking_items: backlog.checkingItems,
         remaining_questions: backlog.remainingQuestions,
+        pending_items: backlog.pendingItems + backlog.lowerMovesQueued,
         summary: backlog.summary,
         awaiting_owner_approval: backlog.awaitingOwnerApproval,
         ...backlog.waiting ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since } : {}
