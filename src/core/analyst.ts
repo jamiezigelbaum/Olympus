@@ -1521,6 +1521,12 @@ function clampAnswer(answer: string, maxAnswerChars?: number): string {
   return space > 0 ? `${cut.slice(0, space).replace(/[\s,;:]+$/u, '')}…` : cut;
 }
 
+// The answer field of one model call's output, read as the Analyst reads it;
+// undefined when it does not parse.
+export function analystOutputAnswer(text: string): string | undefined {
+  return parseAnalystModelOutput(text)?.answer;
+}
+
 function parseAnalystModelOutput(text: string): ParsedModelOutput | null {
   const stripped = stripCodeFences(text);
   const start = stripped.indexOf('{');

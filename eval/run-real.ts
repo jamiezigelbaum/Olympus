@@ -38,7 +38,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
+import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystOutputAnswer, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
   DEFAULT_VENICE_ANALYST_MODEL,
@@ -878,16 +878,6 @@ function auditNoteFields(prompts: readonly string[] | undefined): { auditNamedAm
   return audit === undefined ? {} : { auditNamedAmounts: auditNamedAmountCount(audit)!, auditPromptBytes: new TextEncoder().encode(audit).length };
 }
 
-// The draft's answer field when the model wrote the JSON it was asked for,
-// else its whole text.
-function draftAnswerText(completion: string): string {
-  try {
-    const parsed: unknown = JSON.parse(completion);
-    if (parsed && typeof parsed === 'object' && typeof (parsed as { answer?: unknown }).answer === 'string') return (parsed as { answer: string }).answer;
-  } catch { /* not JSON: use the text */ }
-  return completion;
-}
-
 export function evalAnswerStageAudit(
   question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
   pack: EvidencePack,
@@ -915,7 +905,13 @@ export function evalAnswerStageAudit(
   const analystOwn = analystResult ?? releasedResult;
   // Only when the first call was audited: its draft, and the two prompts.
   const traced = draftTrace && analystPrompts && analystPrompts.length >= 2 && draftTrace.completions.length >= 1
-    ? { firstPrompt: analystPrompts[0]!, auditPrompt: analystPromptWithoutDraft(analystPrompts[1]!), draft: draftAnswerText(draftTrace.completions[0]!) }
+    ? {
+      firstPrompt: analystPrompts[0]!,
+      auditPrompt: analystPromptWithoutDraft(analystPrompts[1]!),
+      // Read as the Analyst reads them; an audit that does not parse keeps the draft.
+      draft: analystOutputAnswer(draftTrace.completions[0]!) ?? '',
+      audited: draftTrace.completions[1] === undefined ? undefined : analystOutputAnswer(draftTrace.completions[1]),
+    }
     : undefined;
   // A citation names its seat by the candidate's own provenance, else by the item.
   const citationSeats = analystOwn.citations.map((citation) => {
@@ -964,7 +960,7 @@ export function evalAnswerStageAudit(
     ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
     ...auditNoteFields(analystPrompts),
     ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
-    ...(traced ? { auditReplacedDraft: traced.draft.trim() !== analystOwn.answer.trim() } : {}),
+    ...(traced ? { auditReplacedDraft: traced.audited !== undefined && traced.audited.trim() !== traced.draft.trim() } : {}),
     expected: (question.expectedAnswerContains ?? []).map((value) => ({
       inPack: answerContainsExpectedValue(value, packText).matched,
       inPackAsSubstring: acceptableForms(value).some((form) => packText.toLowerCase().includes(form)),

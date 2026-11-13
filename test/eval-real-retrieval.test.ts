@@ -185,14 +185,23 @@ describe('the real eval report says where an expected value was lost (#1234)', (
     // said both; the audit's answer replaced it and kept one.
     const mainPrompt = 'Evidence 1: total is 4182 dollars, due in March';
     const auditPrompt = 'Question: x\nDraft JSON:\n{"answer":"4182 in March"}\nAudit evidence:\nEvidence 1: total is 4182 dollars';
-    const draft = JSON.stringify({ answer: 'The total is 4182 dollars, due in March.', citations: [] });
+    // The model fenced its JSON, as models do; the draft is read as the Analyst reads it.
+    const draft = '```json\n' + JSON.stringify({ answer: 'The total is 4182 dollars, due in March.', citations: [] }) + '\n```';
+    const auditOutput = JSON.stringify({ answer: 'The total is 4182 dollars.', citations: [] });
     const audited = evalAnswerStageAudit(question, pack, answer('The total is 4182 dollars.'), answer('The total is 4182 dollars.'),
-      [mainPrompt, auditPrompt], ['m', 'm'], undefined, { completions: [draft, '{}'] });
+      [mainPrompt, auditPrompt], ['m', 'm'], undefined, { completions: [draft, auditOutput] });
     expect(audited.auditReplacedDraft).toBe(true);
     expect(audited.expected.map((value) => value.draftAudit)).toEqual([
       { inFirstPrompt: true, inFirstDraft: true, inAuditPrompt: true },
       { inFirstPrompt: true, inFirstDraft: true, inAuditPrompt: false },
     ]);
+    // A value only in the draft's citations is not in its answer, and an audit
+    // that keeps the draft's answer did not replace it.
+    const citedOnly = JSON.stringify({ answer: 'The total is 4182 dollars.', citations: [{ index: 1, claim: 'due in March' }] });
+    const kept = evalAnswerStageAudit(question, pack, answer('The total is 4182 dollars.'), answer('The total is 4182 dollars.'),
+      [mainPrompt, auditPrompt], ['m', 'm'], undefined, { completions: [citedOnly, auditOutput] });
+    expect(kept.auditReplacedDraft).toBe(false);
+    expect(kept.expected[1]!.draftAudit).toMatchObject({ inFirstDraft: false });
     // Booleans only: no draft text in the report.
     expect(JSON.stringify(audited)).not.toContain('due in March');
     // Off (no completions) or no audit call: no draft fields.
