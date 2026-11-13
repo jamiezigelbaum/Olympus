@@ -3,8 +3,8 @@ import { RELAY_SURFACES_PATH } from '../core/remote-access.ts';
 import { isLoopbackAddress, requestPeerAddress, requestFromOwnerSocket } from '../core/request-peer.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
 
-const MESSAGE = 'Choose how Olympus may answer with Private items before source data can leave this computer. Open Olympus on the computer or use olympus_privacy_get.';
-const refusal = () => ({ content: [{ type: 'text', text: MESSAGE }], structuredContent: { error: 'privacy_choice_required' }, isError: true });
+export const FIRST_RUN_PRIVACY_REQUIRED_TEXT = 'Choose how Olympus may answer with Private items before source data can leave this computer. Open Olympus on the computer or use olympus_privacy_get.';
+const refusal = () => ({ content: [{ type: 'text', text: FIRST_RUN_PRIVACY_REQUIRED_TEXT }], structuredContent: { error: 'privacy_choice_required' }, isError: true });
 
 /**
  * One source-neutral gate around every external worker surface (MCP, OpenAPI,
@@ -47,7 +47,7 @@ export function withFirstRunPrivacyGate(
     }
     if ((path === '/mcp' || path === '/openai/mcp') && request.method === 'POST') {
       const body = await readBoundedRequestText(request, undefined, { deadlineMs: 5_000 });
-      if (!body.ok) return Response.json({ error: { code: 'privacy_choice_required', message: MESSAGE } }, { status: 403 });
+      if (!body.ok) return Response.json({ error: { code: 'privacy_choice_required', message: FIRST_RUN_PRIVACY_REQUIRED_TEXT } }, { status: 403 });
       // Read once with a cap; teeing an unread body can hang cancellation.
       const forward = () => handler(new Request(request.url, { method: request.method,
         headers: request.headers, body: body.text, signal: request.signal }));
@@ -62,6 +62,6 @@ export function withFirstRunPrivacyGate(
         }
       }
     }
-    return Response.json({ error: { code: 'privacy_choice_required', message: MESSAGE } }, { status: 403 });
+    return Response.json({ error: { code: 'privacy_choice_required', message: FIRST_RUN_PRIVACY_REQUIRED_TEXT } }, { status: 403 });
   };
 }

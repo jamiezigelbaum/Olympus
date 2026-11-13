@@ -6,6 +6,7 @@ import { openFreshDashboard, type FreshDashboard } from './fresh-dashboard.ts';
 import { runFreshOnDemand, type FreshTimingOptions } from './fresh-on-demand.ts';
 import type { OnDemandTimingResult } from './on-demand-timing.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../../src/workers/answer-model-required.ts';
+import { FIRST_RUN_PRIVACY_REQUIRED_TEXT } from '../../src/workers/first-run-privacy-gate.ts';
 
 export const FRESH_LEG = 'canary-test-omarchy-fresh';
 export const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -184,6 +185,8 @@ done; exit 1`), 200_000);
         if (!listed) throw new Error('the engine connection cannot list tools');
         if (!listed.includes('source_answer')) throw new Error('source_answer is not in tools/list');
         const result = await engine!.call('source_answer', { question: 'Is an answer model set up?' });
+        // Before the privacy choice, every outside surface explains that step first; that is setup text too.
+        if (!result.ok && result.error?.trim() === FIRST_RUN_PRIVACY_REQUIRED_TEXT) return 'source_answer listed; privacy-choice setup text returned, no answer run';
         if (!result.ok) throw new Error(`source_answer failed instead of explaining setup: ${result.error ?? 'no detail'}`);
         if (result.text.trim() !== ANSWER_MODEL_REQUIRED_TEXT) throw new Error('source_answer did not return the setup text');
         return 'source_answer listed; setup text returned, no answer run';

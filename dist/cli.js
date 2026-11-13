@@ -162457,7 +162457,7 @@ function withFirstRunPrivacyGate(handler, options) {
     if ((path === "/mcp" || path === "/openai/mcp") && request.method === "POST") {
       const body = await readBoundedRequestText(request, undefined, { deadlineMs: 5000 });
       if (!body.ok)
-        return Response.json({ error: { code: "privacy_choice_required", message: MESSAGE } }, { status: 403 });
+        return Response.json({ error: { code: "privacy_choice_required", message: FIRST_RUN_PRIVACY_REQUIRED_TEXT } }, { status: 403 });
       const forward = () => handler(new Request(request.url, {
         method: request.method,
         headers: request.headers,
@@ -162480,10 +162480,10 @@ function withFirstRunPrivacyGate(handler, options) {
         }
       }
     }
-    return Response.json({ error: { code: "privacy_choice_required", message: MESSAGE } }, { status: 403 });
+    return Response.json({ error: { code: "privacy_choice_required", message: FIRST_RUN_PRIVACY_REQUIRED_TEXT } }, { status: 403 });
   };
 }
-var MESSAGE = "Choose how Olympus may answer with Private items before source data can leave this computer. Open Olympus on the computer or use olympus_privacy_get.", refusal2 = () => ({ content: [{ type: "text", text: MESSAGE }], structuredContent: { error: "privacy_choice_required" }, isError: true });
+var FIRST_RUN_PRIVACY_REQUIRED_TEXT = "Choose how Olympus may answer with Private items before source data can leave this computer. Open Olympus on the computer or use olympus_privacy_get.", refusal2 = () => ({ content: [{ type: "text", text: FIRST_RUN_PRIVACY_REQUIRED_TEXT }], structuredContent: { error: "privacy_choice_required" }, isError: true });
 var init_first_run_privacy_gate = __esm(() => {
   init_connection_requests();
   init_remote_access();

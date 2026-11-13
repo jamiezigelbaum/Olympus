@@ -10,6 +10,7 @@ import { parseCdpEndpoint, type FreshDashboard } from '../scripts/release-check/
 import type { LiveSourceSpec, EngineMcp } from '../scripts/release-check/live-accounts.ts';
 import type { Machine } from '../scripts/release-check/machine.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../src/workers/answer-model-required.ts';
+import { FIRST_RUN_PRIVACY_REQUIRED_TEXT } from '../src/workers/first-run-privacy-gate.ts';
 
 const sources: LiveSourceSpec[] = ['gmail', 'dropbox'].map(id => ({ id, label: id === 'gmail' ? 'Gmail' : 'Dropbox', known: { question: `${id} inside?`, expect: ['inside fact'] }, fresh: { scope: 'Canary', outside: { question: `${id} outside?`, expect: ['outside-unique-fact', 'outside-unique-title'] } } }));
 const snapshot = (extra: Partial<ConsentSnapshot> = {}): ConsentSnapshot => ({ url: 'https://accounts.google.com/consent', text: 'Advanced Go to Olympus (unsafe) Continue', password: false, accounts: 0, signedOut: false, ...extra });
@@ -131,6 +132,17 @@ describe('fresh install canary', () => {
     expect(JSON.stringify(checks)).not.toContain('private words');
     expect(checks.map(c => c.id)).toContain('fresh.dropbox.first-items');
     expect(checks.at(-1)?.id).toBe('fresh.restore-zig');
+  });
+  test('before the privacy choice, Ask explaining that step counts as setup text; any other refusal fails', async () => {
+    for (const [error, status] of [[FIRST_RUN_PRIVACY_REQUIRED_TEXT, 'pass'], ['engine unavailable', 'fail']] as const) {
+      const r = rig();
+      const { checks } = await runFreshInstall(r.machine, { ...r.options, engine: async () => ({
+        call: async () => ({ ok: false, structured: null, text: '', error }),
+        listTools: async () => ['source_answer'],
+        close: async () => {},
+      }) });
+      expect(checks.find(c => c.id === 'fresh.ask-without-model')?.status).toBe(status);
+    }
   });
   test('Ask without a model must also be listed, not only callable', async () => {
     const r = rig();

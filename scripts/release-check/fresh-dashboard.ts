@@ -165,9 +165,10 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
       await until(async () => navigated.get(session) === navigation.loaderId, 'dashboard navigation did not commit');
       return true;
     };
-    const reload = async (path = '/dashboard', ready = `!!document.querySelector('.source-name')`) => {
-      if (!await navigate(path)) throw new Error('dashboard navigation failed');
-      await until(async () => !!await panel<boolean>(ready, Boolean), 'dashboard reload failed');
+    // Home with no source yet shows only its status card, so either marker means the page drew.
+    const reload = async (path = '/dashboard', ready = `!!document.querySelector('.source-name, [data-home-status]')`) => {
+      if (!await navigate(path)) throw new Error(`dashboard navigation to ${path} failed`);
+      await until(async () => !!await panel<boolean>(ready, Boolean), `dashboard reload of ${path} failed`);
     };
     const timingSource = (folder: SeedFolder): LiveSourceSpec => ({ id: folder.source, label: folder.source === 'dropbox' ? 'Dropbox' : 'Google Drive' });
     const openTimingFolder = async (folder: SeedFolder) => {
