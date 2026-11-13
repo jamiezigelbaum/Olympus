@@ -14,7 +14,7 @@ import { createOwnerTierItems, getOwnerTierItem, type OwnerTierItemsContext } fr
 import { createJudgeCheck } from '../classification/judge-check.ts';
 import { prepareBuiltInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, judgeSpendingPath } from '../classification/judge-spending.ts';
-import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, reopenSecondRoundAfterStop, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } from '../classification/judge-pacing.ts';
 import { type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
@@ -4791,7 +4791,10 @@ export async function main(): Promise<void> {
       },
       credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
       wake: (id) => {
-        if (id === 'judge.spend_cap' || id === 'judge.payment') tierSniffer?.resumeCloudLimit();
+        if (id === 'judge.spend_cap' || id === 'judge.payment') {
+          reopenSecondRoundAfterStop(judgeSpending.status().choice, judgeSecondRoundStatePath(process.env));
+          tierSniffer?.resumeCloudLimit();
+        }
         else tierSniffer?.wake();
         if (id === 'gmail.import_allowance') void sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.archiveImports).catch(error => console.warn('Gmail import resume failed:', error instanceof Error ? error.name : 'unknown'));
       },

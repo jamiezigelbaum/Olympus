@@ -205,6 +205,11 @@ export function forgetSecondRoundCursors(
  * Private before this round began. Never throws; a set that cannot be read is
  * tried again next tick.
  */
+/** Lifting a judge cap or payment stop re-asks what the double-check skipped while stopped, as judge setup does. */
+export function reopenSecondRoundAfterStop(choice: string, statePath: string): void {
+  if (choice === 'local-then-venice') SecondRoundSweep.reset(statePath);
+}
+
 export class SecondRoundSweep {
   constructor(private readonly options: {
     statePath: string;

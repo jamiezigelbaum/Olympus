@@ -115812,6 +115812,10 @@ function forgetSecondRoundCursors(statePath, source, options = {}) {
 `);
   return forgotten;
 }
+function reopenSecondRoundAfterStop(choice, statePath) {
+  if (choice === "local-then-venice")
+    SecondRoundSweep.reset(statePath);
+}
 
 class SecondRoundSweep {
   options;
@@ -249544,9 +249548,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       },
       credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
       wake: (id) => {
-        if (id === "judge.spend_cap" || id === "judge.payment")
+        if (id === "judge.spend_cap" || id === "judge.payment") {
+          reopenSecondRoundAfterStop(judgeSpending.status().choice, judgeSecondRoundStatePath(process.env));
           tierSniffer?.resumeCloudLimit();
-        else
+        } else
           tierSniffer?.wake();
         if (id === "gmail.import_allowance")
           sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.archiveImports).catch((error2) => console.warn("Gmail import resume failed:", error2 instanceof Error ? error2.name : "unknown"));
