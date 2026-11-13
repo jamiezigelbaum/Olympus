@@ -10322,7 +10322,7 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
     const logged = currentVersion > 0;
     if (logged)
       log(`${label}: updating`);
-    const backupMs = storeOnDisk(db) && (currentVersion > 0 || holdsOtherTables(db)) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
+    const backupMs = storeOnDisk(db) && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId)) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
     report({ phase: "migrating", storeId });
     const migrateStarted = performance.now();
     db.transaction(() => {
@@ -10351,9 +10351,11 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
     pending: applied
   };
 }
-function holdsOtherTables(db) {
-  return db.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'
-    AND name NOT LIKE 'sqlite_%' AND name != '${SQLITE_SCHEMA_VERSION_TABLE}'`).get().n > 0;
+function holdsOtherVersionedStore(db, storeId) {
+  if (!schemaVersionTableExists(db))
+    return false;
+  return db.query(`SELECT COUNT(*) AS n FROM ${SQLITE_SCHEMA_VERSION_TABLE}
+    WHERE store_id != ? AND version > 0`).get(storeId).n > 0;
 }
 function storeOnDisk(db) {
   const file = db.filename;

@@ -120,7 +120,7 @@ export function runSqliteMigrations(
     // store's (limit-stops in source-scheduler.sqlite) changes that file
     // too: it is copied as well, so a rollback takes the new tables out
     // (gate7 forced leg on c013270b, 13 Nov).
-    const backupMs = storeOnDisk(db) && (currentVersion > 0 || holdsOtherTables(db))
+    const backupMs = storeOnDisk(db) && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId))
       ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes)
       : undefined;
     report({ phase: 'migrating', storeId });
@@ -162,9 +162,15 @@ export function runSqliteMigrations(
   };
 }
 
-function holdsOtherTables(db: Database): boolean {
-  return (db.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'
-    AND name NOT LIKE 'sqlite_%' AND name != '${SQLITE_SCHEMA_VERSION_TABLE}'`).get() as { n: number }).n > 0;
+/**
+ * The file already holds another versioned store: a store joining it at
+ * version 0 changes a file a rollback must put back as it was. A file whose
+ * tables predate versioning, or a new file, needs no copy.
+ */
+function holdsOtherVersionedStore(db: Database, storeId: string): boolean {
+  if (!schemaVersionTableExists(db)) return false;
+  return (db.query(`SELECT COUNT(*) AS n FROM ${SQLITE_SCHEMA_VERSION_TABLE}
+    WHERE store_id != ? AND version > 0`).get(storeId) as { n: number }).n > 0;
 }
 
 function storeOnDisk(db: Database): boolean {
