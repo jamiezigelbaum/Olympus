@@ -542,7 +542,7 @@ describe('a ledger replaced between the id check and the open is not used', () =
     const replaced = replaceAfterNextIdRead(folderLedger);
     const internal = openReadOnly(folderPath(w, 'internal'), 'internal', w.env);
     try {
-      const service = new TierSnifferService({ stores: () => [internal] } as never);
+      const service = new TierSnifferService({ stores: () => [internal], installed: { setReleaseWindowResolver() {} } } as never);
       const inner = service as unknown as { ledgerPaths(): string[]; ledgerAt(path: string): TierLedger };
       expect(inner.ledgerPaths()).toContain(folderLedger);
       expect(replaced.swapped()).toBe(true);
@@ -567,7 +567,7 @@ describe('the readers that look for a bound ledger by path', () => {
     renameIntoAccountFolder(w);
     const internal = openReadOnly(folderPath(w, 'internal'), 'internal', w.env);
     try {
-      const service = new TierSnifferService({ stores: () => [internal] } as never);
+      const service = new TierSnifferService({ stores: () => [internal], installed: { setReleaseWindowResolver() {} } } as never);
       const ledgers = (service as unknown as { ledgerPaths(): string[] }).ledgerPaths();
       expect(ledgers).toContain(tierLedgerPathForStore(folderPath(w, 'secure_local')));
       expect(ledgers).toContain(tierLedgerPathForStore(folderPath(w, 'internal')));

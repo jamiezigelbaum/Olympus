@@ -306,7 +306,6 @@ export function parseSourceIngestionPolicy(rawPolicy: unknown, label = 'source i
 
 export function dropboxPolicyApprovedScopeKeys(policy: SourceIngestionPolicy): string[] {
   return policy.roots
-    .filter((root) => root.default_action !== 'on_demand')
     .map((root) => root.approved_scope_key);
 }
 
@@ -318,7 +317,7 @@ export function dropboxPolicyFullExtractionScopeKeys(policy: SourceIngestionPoli
 
 export function dropboxPolicyExcludedPathPrefixes(policy: SourceIngestionPolicy): string[] {
   return policy.rules
-    .filter((rule) => rule.action !== 'full_extract')
+    .filter((rule) => rule.action === 'metadata_only')
     .flatMap((rule) => rule.match.path_prefixes ?? [])
     .map((path) => path.toLowerCase());
 }

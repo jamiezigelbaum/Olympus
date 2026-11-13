@@ -12,11 +12,12 @@ import type { ConnectorStoreSearchFilters, LocalConnectorStore } from './local-i
  */
 export function connectorStoreExtractionCandidateReader(
   store: Pick<LocalConnectorStore, 'extractionCandidates'>,
-  filters?: ConnectorStoreSearchFilters,
+  filters?: ConnectorStoreSearchFilters | (() => ConnectorStoreSearchFilters | undefined),
 ): ExtractionCandidateReader {
   return {
     extractionCandidates(options) {
-      const page = store.extractionCandidates({ ...options, ...(filters ? { filters } : {}) });
+      const currentFilters = typeof filters === 'function' ? filters() : filters;
+      const page = store.extractionCandidates({ ...options, ...(currentFilters ? { filters: currentFilters } : {}) });
       return {
         candidates: page.candidates.map((candidate) => ({
           localItemId: candidate.identity.localItemId,

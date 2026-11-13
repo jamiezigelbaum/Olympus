@@ -1,3 +1,5 @@
+import { SourceScheduler } from '../src/workers/source-scheduler.ts';
+import { createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -238,4 +240,20 @@ describe('limit stops', () => {
       expect(next?.resumesAt).toBe('2026-11-14T00:00:00.000Z');
     } finally { store.close(); }
   });
+});
+
+test('scheduler status carries owning-store stops through the front snapshot, without front writes', () => {
+  const store = new LocalSourceSchedulerStateStore(databasePath());
+  const now = new Date('2026-11-12T13:00:00.000Z');
+  const key = { sourceId: 'x.bookmarks', corpusId: 'internal.x.bookmarks', taskId: 'pull' };
+  try {
+    store.recordSuccess({ ...key, completedAt: now.toISOString(), resultStatus: 'idle', degradedReason: 'daily_cost_guard' });
+    const scheduler = new SourceScheduler({ enabled: true, tickMs: 1000, errorBackoffMs: 1000, maxTransientRetries: 0, sources: [], stateStore: store });
+    const front = createFrontScheduler({ client: { post: async () => { throw new Error('read must not post'); } },
+      snapshot: () => ({ stale: false, snapshot: { scheduler: scheduler.status(now) } } as import('../src/workers/engine-split/snapshot.ts').EngineStatusRead) });
+    expect(front.status().limit_stops).toEqual(store.openLimitStops(now));
+    expect(front.status().limit_stops).toHaveLength(1);
+    store.recordSuccess({ ...key, completedAt: now.toISOString(), resultStatus: 'idle' });
+    expect(front.status().limit_stops).toEqual([]);
+  } finally { store.close(); }
 });

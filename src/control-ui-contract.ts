@@ -115,7 +115,7 @@ export interface OlympusFolderScopeBrowseResult {
 
 export type OlympusDashboardOAuthSource = 'gmail' | 'google-drive' | 'dropbox' | 'x';
 export type OlympusDashboardApiKeySource = 'gemini' | 'venice' | 'readwise';
-export type OlympusSourceDispositionState = 'ingest' | 'metadata_only' | 'exclude';
+export type OlympusSourceDispositionState = 'ingest' | 'metadata_only' | 'on_demand' | 'exclude';
 
 /** What a form on the computer's local pages submits (browser-controller.ts). */
 export type OlympusDashboardControlParams =

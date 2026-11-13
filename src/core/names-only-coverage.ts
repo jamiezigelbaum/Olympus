@@ -10,7 +10,19 @@
 export function namesOnlyCoverageNote(count: number): string {
   return count === 1
     ? '1 match is in a folder set to Names only, so Olympus has its name but not its contents. '
-      + 'Switch that folder to Full in the folder picker to let Olympus read it.'
+      + 'Use Read this file for one file, or switch that folder to Full in the folder picker.'
     : `${count} matches are in folders set to Names only, so Olympus has their names but not their contents. `
-      + 'Switch those folders to Full in the folder picker to let Olympus read them.';
+      + 'Use Read this file for one file, or switch those folders to Full in the folder picker.';
+}
+
+export function onDemandReadingCoverageNote(count: number): string {
+  return `Reading ${count} ${count === 1 ? 'file' : 'files'} for this question. Ask again in about a minute.`;
+}
+
+export function onDemandCappedCoverageNote(): string {
+  return 'The read-on-demand limit for this question was reached. Other matches are still names only; use Read this file to read more.';
+}
+
+export function onDemandFailedCoverageNote(count: number): string {
+  return `Could not start reading ${count} ${count === 1 ? 'file' : 'files'} for this question. Try Read this file in the dashboard.`;
 }

@@ -43,7 +43,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 15;
+export const TIER_LEDGER_SCHEMA_VERSION = 16;
 export const RETIRED_EMBEDDING_CLEARANCE_REASON = 'content:sniffer:retired_embedding_clearance:undecided';
 
 /** A scrub's start: the revision it took and the item's generation then. */
@@ -1967,11 +1967,7 @@ export class TierLedger {
       SELECT override_json FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).get(...idParams(identity)) as { override_json: string } | null;
-    if (!row) return undefined;
-    const parsed = JSON.parse(row.override_json) as ItemTierOverride;
-    if (parsed.kind === 'tier' && TIER_KEYS.includes(parsed.tier)) return parsed;
-    if (parsed.kind === 'not_secret') return parsed;
-    return undefined;
+    return row ? overrideFromJson(row.override_json) : undefined;
   }
 
   /**
@@ -2329,6 +2325,14 @@ export class TierLedger {
       .all(prefix, `${prefix}\uffff`, options.after ?? '', options.limit ?? -1) as Array<{ key: string; value: string }>;
   }
 
+  /** Background cleanup retries lock contention on its next slice, without stalling an Ask. */
+  withoutBusyWait<T>(work: () => T): T {
+    const previous = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+    this.db.exec('PRAGMA busy_timeout = 0');
+    try { return work(); }
+    finally { this.db.exec(`PRAGMA busy_timeout = ${previous}`); }
+  }
+
   /** Hold the ledger write lock across a synchronous cross-store cleanup.
    * The generation check and deletions cannot race a new routing decision.
    */
@@ -2392,12 +2396,17 @@ export class TierLedger {
     const after = options.after
       ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
       : [];
-    const rows = this.db.query(`SELECT * FROM tier_items i
-      WHERE ${after.length ? '(i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?) AND' : ''}
-        EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-          AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-          AND c.copy_state = 'superseded')
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`)
+    // Driven from the superseded copies' own index, so a page costs its rows,
+    // not a walk over every item between two sparse leftovers. The join sits
+    // before the limit: an archive removal keeps superseded copies after their
+    // item row is gone, and those must not use up a page and end the sweep.
+    const rows = this.db.query(`SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
+      JOIN tier_items i ON i.provider = c.provider AND i.account_scope = c.account_scope
+        AND i.conversation_key = c.conversation_key AND i.provider_item_id = c.provider_item_id
+      WHERE c.copy_state = 'superseded'
+        ${after.length ? 'AND (c.provider, c.account_scope, c.conversation_key, c.provider_item_id) > (?, ?, ?, ?)' : ''}
+      GROUP BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id
+      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?`)
       .all(...after, Math.max(1, Math.min(options.limit, 500))) as TierItemRow[];
     return rows.map(recordFromRow);
   }
@@ -2854,7 +2863,7 @@ export class TierLedger {
    */
   itemStatesForMany(
     identities: readonly TierLedgerIdentity[],
-  ): Map<string, { record: TierLedgerRecord; copies: TierCopy[] }> {
+  ): Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }> {
     return this.readSteps(this.itemStatesSteps(identities));
   }
 
@@ -2862,8 +2871,8 @@ export class TierLedger {
   // must not make the Ask read every governed item on the request thread.
   *itemStatesSteps(
     identities: readonly TierLedgerIdentity[],
-  ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[] }>, unknown> {
-    const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[] }>();
+  ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>, unknown> {
+    const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>();
     const list = uniqueIdentities(identities);
     for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
       const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
@@ -2880,6 +2889,18 @@ export class TierLedger {
         params, mode: 'all',
       }) as TierCopyRow[];
       for (const row of copies) result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+      // The owner's override, read in the same batch: a release check weighs an
+      // override whose queued placement has not settled yet.
+      const overrides = (yield {
+        sql: `SELECT provider, account_scope, conversation_key, provider_item_id, override_json FROM tier_overrides
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+        params, mode: 'all',
+      }) as Array<TierIdentityRow & { override_json: string }>;
+      for (const row of overrides) {
+        const state = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+        const override = overrideFromJson(row.override_json);
+        if (state && override) state.override = override;
+      }
     }
     return result;
   }
@@ -5639,7 +5660,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 15,
       name: 'moved_migration_identity',
       up(db) {
         // The bounded automatic-copy sweep probes by identity across plans.
@@ -5648,5 +5669,25 @@ function tierLedgerMigrations(): SqliteMigration[] {
           WHERE status = 'moved';`);
       },
     },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'superseded_copy_walk',
+      up(db) {
+        // The superseded-copy sweep pages identities that still hold a
+        // superseded copy. Walking tier_items for them read most of the
+        // ledger once those copies grew sparse (several seconds a page on
+        // Sparta, olympus-ops#151); this partial index holds only them.
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_copies_superseded_walk
+          ON tier_copies (provider, account_scope, conversation_key, provider_item_id)
+          WHERE copy_state = 'superseded';`);
+      },
+    },
   ];
+}
+
+function overrideFromJson(json: string): ItemTierOverride | undefined {
+  const parsed = JSON.parse(json) as ItemTierOverride;
+  if (parsed.kind === 'tier' && TIER_KEYS.includes(parsed.tier)) return parsed;
+  if (parsed.kind === 'not_secret') return parsed;
+  return undefined;
 }

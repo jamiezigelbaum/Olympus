@@ -49,7 +49,7 @@ const mcpUrl = (address: string, port: number) => `http://${isIP(address) === 6 
 
 export function createPrivateAgentListeners(options: {
   connections: () => RemoteConnectionStore | undefined;
-  mcp: Pick<RemoteMcpHandlerOptions, 'makeOperationContext' | 'search' | 'anonymousAnswersEnabled'>;
+  mcp: Pick<RemoteMcpHandlerOptions, 'makeOperationContext' | 'search' | 'anonymousAnswersEnabled' | 'onRequestLog'>;
   privacyPending: () => boolean;
   addresses?: () => string[];
   port?: number;
@@ -77,6 +77,7 @@ export function createPrivateAgentListeners(options: {
       // Select fields explicitly: runtime objects may also carry publicUrls
       // or the relay's ChatGPT selector. Neither belongs on these listeners.
       makeOperationContext: options.mcp.makeOperationContext,
+      ...(options.mcp.onRequestLog ? { onRequestLog: options.mcp.onRequestLog } : {}),
       ...(options.mcp.search ? { search: options.mcp.search } : {}),
       ...(options.mcp.anonymousAnswersEnabled ? { anonymousAnswersEnabled: options.mcp.anonymousAnswersEnabled } : {}),
       connections: options.connections, connectionRoute: route,

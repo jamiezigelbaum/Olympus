@@ -24,7 +24,7 @@
  *
  * The tool list is the `remote` operation surface (the Hermes list:
  * source_answer, source_answer_result, source_index_status and
- * ask_anonymously), plus the evidence search `olympus_search` when the worker
+ * ask_anonymously), a connection-bound Personal item read, plus the evidence search `olympus_search` when the worker
  * supplies one (workers/remote-search.ts), which also hides source_answer
  * while no answer model is set up and, for every connection but a demo grant,
  * settles the connection's Private part (core/remote-private-part.ts) so a
@@ -33,7 +33,9 @@
  * The connection's identity is set as the caller by the worker, never taken
  * from the client, and lands on the answer's audit ledger entry.
  */
+import { RemoteReadHandleStore } from '../core/remote-read-handles.ts';
 import { createHash } from 'node:crypto';
+import { requestCredentialTag } from '../core/connection-requests.ts';
 import { existsSync } from 'node:fs';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { OlympusConfig } from '../core/config.ts';
@@ -69,6 +71,9 @@ export const REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
 
 export interface RemoteMcpHandlerOptions {
+  /** Clock for process-local read handles (30 minute lifetime). */
+  readHandleNow?: () => number;
+  onRequestLog?: (entry: import('../../connect-relay/shared/request-log.ts').RequestLogEntry, app?: string, relayed?: boolean) => void;
   /**
    * Opened lazily so an unreadable store never blocks worker boot. Returns
    * undefined when no connection database exists yet: an install that never
@@ -155,13 +160,21 @@ export function withRemoteMcpRoute(
 }
 
 export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (request: Request) => Promise<Response> {
+  const readHandles = new RemoteReadHandleStore(options.readHandleNow ? { now: options.readHandleNow } : {});
   const isRelayed = options.isRelayed ?? isRelayedRequest;
   const log = options.log ?? ((line: string) => console.log(line));
   return async (request: Request): Promise<Response> => {
     const started = performance.now();
     const trace: RemoteMcpTrace = { surface: remoteMcpSurface(request) ?? 'default', relayed: isRelayed(request) };
     const response = await handle(request, trace);
-    log(remoteMcpLogLine(trace, response.status, performance.now() - started));
+    const line = remoteMcpLogLine(trace, response.status, performance.now() - started);
+    log(line);
+    const recorded = JSON.parse(line) as { at: string; ms: number };
+    try {
+      options.onRequestLog?.({ at: recorded.at, surface: trace.surface, calls: (trace.calls ?? []).join(','), status: response.status, ms: Math.max(0, recorded.ms),
+        ...(trace.credential ? { credential: trace.credential } : {}),
+      }, trace.app, trace.relayed);
+    } catch { /* Observing a request cannot change its response. */ }
     return response;
   };
 
@@ -171,6 +184,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       const verification = authenticateRemoteRequest(request, options, surface);
       if (!verification.ok) return verification.response;
       trace.connection = verification.connection.id;
+      trace.app = verification.connection.displayName;
+      const bearer = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1];
+      if (bearer) trace.credential = requestCredentialTag(createHash('sha256').update(bearer).digest());
       const response = await serveAuthenticated(request, verification, surface, trace);
       // Only the relay reads the mark; a direct caller never sees it.
       if (!trace.relayed) return response;
@@ -220,6 +236,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
     const selected = appSurface(request, verification.connection, surface);
+    // The engine wires evidence search when its source lanes are available.
+    // Operation-only hosts keep their existing listing until they can mint handles.
+    const readScope = options.search ? readHandles.forConnection(verification.connection.id) : undefined;
     const urls = currentRemotePublicUrls(options.publicUrls);
     const chatgpt = selected !== 'remote' && options.chatgpt
       ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true,
@@ -245,8 +264,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
           signal: request.signal,
           // The owner's list of what each AI app received (a demo grant's too: it is what left).
           caller,
+          ...(readScope ? { issueReadHandle: readScope.issueReadHandle } : {}),
         })
-        : undefined)), authorized);
+        : undefined)), authorized, readScope);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
@@ -264,6 +284,8 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
 
 /** What one remote MCP request was, for its log line; filled in as it is served. */
 interface RemoteMcpTrace {
+  credential?: string;
+  app?: string;
   surface: McpSurface;
   relayed: boolean;
   connection?: string;

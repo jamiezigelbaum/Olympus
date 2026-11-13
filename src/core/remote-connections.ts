@@ -92,6 +92,8 @@ export interface RemoteConnectionStore {
    */
   create(displayName: string, options?: { provider?: RemoteConnectionProvider; installId?: string; route?: RemoteConnectionRoute }): CreatedRemoteConnection;
   list(): RemoteConnectionRecord[];
+  /** Local diagnostics: known access-token digests, never raw tokens. */
+  requestLogCredentials(): Array<{ tokenHash: Uint8Array; displayName: string }>;
   revoke(id: string): RemoteConnectionRecord;
   verifyToken(token: string, route?: RemoteConnectionRoute): RemoteConnectionVerification;
   /** OAuth grants, tokens, registered clients and pairing codes (same database). */
@@ -262,6 +264,15 @@ export function openRemoteConnectionStore(
     list(): RemoteConnectionRecord[] {
       return (db.query('SELECT * FROM remote_connections ORDER BY created_at, id').all() as ConnectionRow[])
         .map(toRecord);
+    },
+
+    requestLogCredentials() {
+      const rows = db.query(`
+        SELECT t.token_hash, c.display_name FROM remote_oauth_tokens t
+        JOIN remote_connections c ON c.id = t.connection_id WHERE t.kind = 'access'
+        UNION ALL SELECT token_hash, display_name FROM remote_connections WHERE kind = 'bearer'
+      `).all() as Array<{ token_hash: Uint8Array; display_name: string }>;
+      return rows.map(row => ({ tokenHash: row.token_hash, displayName: row.display_name }));
     },
 
     revoke(id: string): RemoteConnectionRecord {

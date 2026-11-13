@@ -2436,7 +2436,7 @@
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "description": "One ingestion disposition. Names items by folder path prefix, by folder identity, or by a media criterion, for the sources listed. At least one of path_prefixes, folder_ids, or media is required. mode decides what happens to a matching item: exclude (never ingested) or metadata_only (indexed by title, path and date, content never read). Example: {\"id\": \"spirituality\", \"mode\": \"metadata_only\", \"sources\": [\"dropbox.personal\"], \"path_prefixes\": [\"/3 Resources/Spirituality\"], \"reason\": \"index_titles_only\"}",
+                  "description": "One ingestion disposition. Names items by folder path prefix, by folder identity, or by a media criterion, for the sources listed. At least one of path_prefixes, folder_ids, or media is required. mode decides what happens to a matching item: exclude (never ingested) metadata_only (names only), or on_demand (names with individual files readable on request). Example: {\"id\": \"spirituality\", \"mode\": \"metadata_only\", \"sources\": [\"dropbox.personal\"], \"path_prefixes\": [\"/3 Resources/Spirituality\"], \"reason\": \"index_titles_only\"}",
                   "required": [
                     "id"
                   ],
@@ -2449,7 +2449,8 @@
                       "type": "string",
                       "enum": [
                         "exclude",
-                        "metadata_only"
+                        "metadata_only",
+                        "on_demand"
                       ],
                       "description": "What happens to a matching item. exclude is the default and is what every rule written without this field means: never ingested, and removed by the purge if already stored. metadata_only admits the item with its title, path and timestamps and never reads its content: no extraction, no chunks, no embeddings, and an honest coverage gap naming this rule. Content already stored for such an item is removed by the metadata-only strip, which keeps the item row. An unrecognized value is refused when configuration is read, never defaulted."
                     },
@@ -2850,8 +2851,8 @@
           },
           "claudeAppEnabled": {
             "type": "boolean",
-            "default": false,
-            "description": "Show the Olympus dashboard and private answer panels inside Claude on the web and desktop. Claude's phone apps show answers as text. Leave off to give Claude only the answer tools. Restart Olympus after changing this setting."
+            "default": true,
+            "description": "Show the Olympus dashboard and private answer panels inside Claude on the web and desktop. Claude's phone apps show answers as text. Turn off to give Claude only the answer tools. Restart Olympus after changing this setting."
           },
           "demoConsent": {
             "type": "object",
@@ -2933,6 +2934,7 @@
       "argus_complete",
       "source_answer",
       "source_index_status",
+      "source_item_read",
       "source_index_search",
       "source_watch_create",
       "source_watches",

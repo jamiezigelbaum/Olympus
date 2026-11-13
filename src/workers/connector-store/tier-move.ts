@@ -720,16 +720,28 @@ function finishVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove)
   return result;
 }
 
+/** 8,192 chunks / 32,768 768-float vectors: p99 5.45 ms, peak 12.18 ms per step on tmpfs WAL/FULL. */
+export const SUPERSEDED_PRUNE_STEP_ROWS = 128;
+
 /**
  * Remove a pruned superseded copy from its store: text, chunks, vectors and
  * names go, then the row is tombstoned (as a withdrawal, with no version
  * stamped), so no list, search or Secrets sweep finds a names-free stub of it.
- * Safe to repeat. Returns the chunks removed.
+ * Safe to repeat. The bounded form returns completion; the ordinary form returns chunks removed.
  */
+export function pruneSupersededStoreCopy(
+  store: NonNullable<ReturnType<TieredStoreSet['store']>>, identity: TierLedgerIdentity,
+  options: { bounded: true },
+): boolean;
+export function pruneSupersededStoreCopy(
+  store: NonNullable<ReturnType<TieredStoreSet['store']>>, identity: TierLedgerIdentity,
+): number;
 export function pruneSupersededStoreCopy(
   store: NonNullable<ReturnType<TieredStoreSet['store']>>,
   identity: TierLedgerIdentity,
-): number {
+  options?: { bounded: true },
+): number | boolean {
+  if (options?.bounded) return store.pruneSupersededCopyStep(identity, { rowLimit: SUPERSEDED_PRUNE_STEP_ROWS, connectorId: TIER_MOVE_CONNECTOR_ID });
   const chunks = store.stripCopyContent(identity, { keepMetadata: false });
   const row = store.exportItemCopy(identity)?.identity;
   if (row) {

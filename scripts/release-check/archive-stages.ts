@@ -16,7 +16,7 @@ import {
   type FixtureRole, type LegFixture,
 } from './archive-fixtures.ts';
 import {
-  ALL_SOURCES_PATH, ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed, unpairJourney,
+  ALL_SOURCES_PATH, ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, COUNT_HEAL_WAIT_MS, agentImportJourney, approveRequestSteps, besideLiveJourney, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed, unpairJourney,
   shownPath, startViewOf, statusViewOf, stoppedJourney,
   type BesideLiveObservation, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
   type SearchView, type SeedLiveObservation, type StatusView, type StoreView,
@@ -116,6 +116,20 @@ async function rowNow(host: ArchiveHost, driver: JourneyDriver, fileName: string
   return counted ?? last;
 }
 
+/**
+ * A row still "Counting…" after rowNow's wait fails its check, but whether the count heals by itself tells a tally that is
+ * late apart from one that is stuck (run 43285790545: a WhatsApp row was still counting 45 s after it read Imported).
+ * The ms until the row showed its count, or null when it never did within COUNT_HEAL_WAIT_MS.
+ */
+async function countHealMs(host: ArchiveHost, driver: JourneyDriver, fileName: string): Promise<number | null> {
+  const started = host.now();
+  const healed = await until(host, async () => {
+    const row = rowNamed(await readPanel(driver), fileName);
+    return row && !row.text.includes(A.counting) ? row : undefined;
+  }, COUNT_HEAL_WAIT_MS, 1_000);
+  return healed ? host.now() - started : null;
+}
+
 const stepMs = (trace: JourneyTrace, startsWith: string): { ok: boolean; ms: number } => {
   const step = trace.steps.find((candidate) => candidate.name.startsWith(startsWith));
   return { ok: step?.ok === true, ms: step?.ms ?? 0 };
@@ -180,6 +194,7 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
         host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
         // The row as the journey left it (See what was not read open, when the fixture has gaps).
         obs.row = await rowNow(host, driver, fx.fileName);
+        if (obs.row?.text.includes(A.counting)) obs.countHealMs = await countHealMs(host, driver, fx.fileName);
         const status = await statusNow(host, fx.token, 30_000);
         if (status) {
           obs.status = status;

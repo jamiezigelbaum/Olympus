@@ -1,3 +1,5 @@
+import { provedContent, provedReleaseCheck } from './helpers/scripted-search-release.ts';
+import { createReleaseManifestSink, runWithReleaseManifestSink } from '../src/core/release-manifest.ts';
 // Private material is searched by default when policy approves Argus for it.
 //
 // source_answer used to leave secure_local out unless the caller opted in, so
@@ -173,9 +175,15 @@ describe('a private analyst outage never costs an ordinary answer', () => {
       analystOverrides: { 'venice-private': failing() },
       secureDerivativeDefault: 'approval',
     });
-    const result = await world.handler.answer({ question: 'What was my LDL?' });
+    const sink = createReleaseManifestSink();
+    const result = await runWithReleaseManifestSink(sink, () => world.handler.answer({ question: 'What was my LDL?' }));
     expect(result.audit.answer_synthesis.analyst_backend).toBe('cloud');
     expect(result.audit.answer_synthesis.private_context_used).toBe(false);
+    // The failed Private leg read nothing the answer used: its inputs stay out
+    // of the manifest, so a remote release check does not hold the fallback.
+    const inputs = sink.manifests.flatMap((manifest) => manifest.inputs);
+    expect(inputs.length).toBeGreaterThan(0);
+    expect(inputs.some((input) => input.corpusId === SECURE)).toBe(false);
     expect(result.opsec.release_decision.decision).toBe('allow');
     expect(result.opsec.release_decision.reasons).not.toContain('secure_local_context_uncited_requires_approval');
     expect(result.answer).toContain('Your notes mention an LDL question.');
@@ -425,7 +433,11 @@ function answerWorld(preset: Preset, options: {
   const fallbackLocal = recordingAnalyst([]);
   const handler = createAnalystSourceIndexAnswerHandler({
     analyst: fallbackLocal,
-    lanes: options.lanes ?? (() => lanes(options.secureTitle)),
+    lanes: () => {
+      const built = (options.lanes ?? (() => lanes(options.secureTitle)))();
+      return { ...built, contentProviders: provedContent(built.contentProviders) };
+    },
+    releaseCheck: provedReleaseCheck,
     ...(options.secureDerivativeDefault ? { secureDerivativeDefault: options.secureDerivativeDefault } : {}),
     ...(options.secureAnalystPoolLastLegTimeoutMs !== undefined
       ? { secureAnalystPool: { lastLegTimeoutMs: options.secureAnalystPoolLastLegTimeoutMs } }

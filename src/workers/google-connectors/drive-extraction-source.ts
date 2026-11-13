@@ -60,11 +60,12 @@ export const GOOGLE_DRIVE_EXTRACTION_MIME_TYPES: readonly string[] = Object.free
 export const GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY = 'google_drive.docs';
 
 /**
- * The one provider call this source makes. Narrow on purpose: this source has
+ * The provider reads this source makes. Narrow on purpose: this source has
  * no business listing files, and a port that could would invite it to.
  */
 export interface GoogleDriveFileBytesClient {
   downloadFileBytes(fileId: string, maxBytes?: number): Promise<GoogleDriveFileBytes>;
+  exportGoogleDocText(fileId: string, maxBytes: number): Promise<string>;
 }
 
 export interface GoogleDriveExtractionSourceOptions {
@@ -133,6 +134,14 @@ export class GoogleDriveExtractionSource implements FileExtractionSource {
     if (!fileId) throw new FileExtractionSourceError('source_item_not_found');
     const maxBytes = options.maxBytes ?? this.maxBytes;
     try {
+      if (this.onDemandReadFormat(ref)) {
+        // The connector export path truncates by characters. Ask for one
+        // extra, then enforce the byte bound rather than indexing a prefix.
+        const text = await this.client.exportGoogleDocText(fileId, maxBytes === undefined ? Number.MAX_SAFE_INTEGER : maxBytes + 1);
+        const bytes = new TextEncoder().encode(text);
+        if (maxBytes !== undefined && bytes.byteLength > maxBytes) throw new GoogleDriveContentTooLargeError();
+        return { bytes, mimeType: 'text/plain', sizeBytes: bytes.byteLength };
+      }
       const result = await this.client.downloadFileBytes(fileId, maxBytes);
       return {
         bytes: result.bytes,
@@ -142,6 +151,10 @@ export class GoogleDriveExtractionSource implements FileExtractionSource {
     } catch (error) {
       throw driveFetchFailure(error);
     }
+  }
+
+  onDemandReadFormat(ref: ExtractionItemRef): { mimeType: string } | undefined {
+    return ref.mimeType === 'application/vnd.google-apps.document' ? { mimeType: 'text/plain' } : undefined;
   }
 
   private refFromRow(row: ExtractionCandidateRow): ExtractionItemRef | undefined {

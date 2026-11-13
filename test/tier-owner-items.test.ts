@@ -1,3 +1,4 @@
+import { laneReleaseCheck } from './helpers/lane-release-check.ts';
 // The owner's one-item privacy change (issue #1060), end to end on a fresh
 // install (the harness of tier-review-fixes-2026-10-02.test.ts): find an item,
 // set it Private -> Personal -> Private, and put it back to the judge. The
@@ -175,6 +176,7 @@ type Install = Awaited<ReturnType<typeof start>>;
 async function search(install: Install, question: string): Promise<string> {
   const raw = await searchReleasedEvidence({
     question,
+    releaseCheck: laneReleaseCheck(install.lane.ledger, () => install.lane.set.openStores()),
     lanes: () => {
       const stores = install.lane.set.openStores();
       return {

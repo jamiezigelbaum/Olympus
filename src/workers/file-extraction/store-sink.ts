@@ -427,6 +427,12 @@ export function createConnectorStoreExtractionSink(
         };
       }
 
+      // An on-demand item's names verdict never authorizes its new text. The
+      // content decision (or pending hold) is durable before any chunk is written.
+      if (options.recordContentTier !== false && store.readOnDemand?.(plan.item.identity.localItemId, plan.item.identity.sourceVersion ?? '')
+        && !store.recordExtractedContentTier(plan.item, request.text, options.tierClassification)) {
+        return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
+      }
       let summary;
       try {
         summary = store.restoreItemRepresentations({

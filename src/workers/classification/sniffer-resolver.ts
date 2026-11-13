@@ -31,6 +31,7 @@ import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import {
   JudgeCloudStopped,
+  CachedTierSniffer,
   SNIFFER_INJECTION_CATEGORY,
   SNIFFER_MAX_ATTEMPTS,
   SNIFFER_PROMPT_VERSION,
@@ -49,7 +50,7 @@ import {
 } from './sniffer.ts';
 import { judgeBoosts, type JudgeBoosts } from './judge-boost.ts';
 import { assertSnifferProfileAllowed, type SnifferLane } from './sniffer-lane.ts';
-import { contentVerdictReusable, snifferSubjectKey } from './sniffer-store.ts';
+import { contentVerdictReusable, snifferSubjectKey, snifferMaterialHash } from './sniffer-store.ts';
 import type {
   SnifferPass,
   SnifferQuestion,
@@ -57,7 +58,7 @@ import type {
   StoredSnifferVerdict,
   TierSnifferStore,
 } from './sniffer-store.ts';
-import { TIER_CLASSIFIER_VERSION, type TierDecision } from './tier-classifier.ts';
+import { TIER_CLASSIFIER_VERSION, type TierDecision, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
 
 /** The UTC daily cap survives restart. Time slices, not call counts, set the pace. */
@@ -80,6 +81,7 @@ const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 const OUTPUT_CHARS_PER_ITEM = 110;
 
 export interface SnifferTarget {
+  onDemandRead?: (question: SnifferQuestion) => boolean;
   ledger: TierLedger;
   sniffer: TierSnifferStore;
   /**
@@ -358,6 +360,52 @@ export async function completeSnifferQuestion(model: AnalystModel, options: {
     snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext },
   };
   return await model.complete(request) as SnifferModelCompletion;
+}
+
+/** Same cache, screens, transport and parser as the background pass; no item queue is overwritten. */
+export async function resolveReleaseWindow(options: {
+  store: TierSnifferStore; lane: SnifferLane; model: AnalystModel;
+  request: TierSnifferRequest; promptVersion: string; ownerContext?: string;
+  signal: AbortSignal; budget: SnifferCallBudget;
+}): Promise<TierSnifferVerdict> {
+  const { request, store, lane, signal } = options;
+  const stillAsk = () => !signal.aborted && request.stillAsk?.() !== false;
+  if (!stillAsk()) return { verdict: 'undecided' };
+  const sniffer = new CachedTierSniffer(store, lane, options.promptVersion);
+  const id = sniffer.id;
+  let verdict = sniffer.cachedVerdict(request);
+  if (verdict.verdict === 'decided' || !request.material || signal.aborted) return verdict;
+  assertSnifferProfileAllowed(lane.profileId, lane.profile);
+  if (await prepareSnifferModel({ model: options.model, signal })) return { verdict: 'undecided' };
+  if (id !== sniffer.id || !stillAsk()) return { verdict: 'undecided' };
+  const material = snifferMaterialForModel(request.material);
+  const key = {
+    materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
+    modelId: snifferCacheModelId(lane), promptVersion: options.promptVersion, mapRevision: request.mapRevision ?? 'none',
+  };
+  for (let attempt = 0; attempt < SNIFFER_MAX_ATTEMPTS && !signal.aborted; attempt++) {
+    if (!stillAsk()) break;
+    if (!options.budget.tryConsume(lane.snifferMode === 'decision')) break;
+    let completion: SnifferModelCompletion;
+    try { completion = await completeSnifferQuestion(options.model, { pass: request.pass, material, ownerContext: options.ownerContext, signal }); }
+    catch { return { verdict: 'undecided' }; }
+    if (signal.aborted) break;
+    const stored = snifferCompletionVerdict(completion);
+    if (stored) store.putVerdict(key, stored, request.subject);
+    else if (attempt === SNIFFER_MAX_ATTEMPTS - 1) {
+      store.putVerdict(key, { tier: 'private', category: 'other', confidence: 0, failSafe: true });
+      return { verdict: 'decided', tier: 'secure', code: 'fail_safe', origin: 'rule', rule: 'fail_safe' };
+    }
+    verdict = sniffer.cachedVerdict(request);
+    if (verdict.verdict === 'decided') return verdict;
+  }
+  return { verdict: 'undecided' };
+}
+
+/** All production sniffer calls carry one item. Share response decoding across dispatchers. */
+function snifferCompletionVerdict(completion: { text: string; decisionVerdict?: SnifferModelCompletion['decisionVerdict'] }): Omit<StoredSnifferVerdict, 'decidedAt'> | undefined {
+  const verdict = completion.decisionVerdict ?? parseSnifferBatchResponse(completion.text, new Set([1])).get(1);
+  return verdict ? { ...verdict, failSafe: completion.decisionVerdict?.failSafe ?? false } : undefined;
 }
 
 export async function runSnifferPass(options: SnifferPassOptions): Promise<SnifferPassReport> {
@@ -759,6 +807,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       } finally {
         turnCallMs = Math.max(0, monotonicNow() - callStarted);
         report.callMs += turnCallMs;
+        const onDemandCount = group.filter((item) => item.question.pass === 'content' && item.target.onDemandRead?.(item.question)).length;
+        if (onDemandCount > 0) console.info(`[olympus:on-demand] step=judge count=${onDemandCount} ms=${Math.max(0, turnCallMs - Math.min(slotWaitMs, turnCallMs))}`);
         // A wait can never be longer than the call that reported it.
         const waited = Math.min(slotWaitMs, turnCallMs);
         report.timing.slotWaitMs += waited;
@@ -767,12 +817,12 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       if (options.signal?.aborted) { report.stoppedBy = 'preempted'; return; }
       consecutiveTransportFailures = 0;
       report.responseChars += text.length;
-      const verdicts = parseSnifferBatchResponse(text, new Set(batch.map((_, index) => index + 1)));
+      const decoded = snifferCompletionVerdict({ text, decisionVerdict });
       for (const [index, group] of batch.entries()) {
-        const verdict = decisionVerdict ?? verdicts.get(index + 1);
+        const verdict = index === 0 ? decoded : undefined;
         const key = keyOf(group[0]!.question);
         if (verdict) {
-          const stored = { ...verdict, failSafe: decisionVerdict?.failSafe ?? false };
+          const stored = verdict;
           group[0]!.target.sniffer.putVerdict(key, stored, group[0]!.question);
           for (const item of group) {
             if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored, group[0]!.question);

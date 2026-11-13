@@ -39,6 +39,7 @@ function fixture() {
   };
   const worker = createEmailSourceWorker({
     ownerTierItems: engine,
+    readOwnerItem: async (itemId) => ({ state: itemId === ITEM_ID ? 'queued' : 'refused', etaSeconds: 60 }),
     sourceDashboard: { sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})) },
   });
   const guarded = withWorkerBearerAuth((request: Request) => worker.fetch(request), { authToken: TOKEN });
@@ -179,6 +180,15 @@ describe('the dashboard\'s routes', () => {
       { itemId: ITEM_ID, choice: 'judge', allowLower: true },
     ]);
     expect((await f.guarded(post('/dashboard/privacy/items/set', session, { item_id: ITEM_ID, tier: 'secrets' }))).status).toBe(400);
+  });
+
+  test('Read this file uses the owner operation only from a local session', async () => {
+    const f = fixture();
+    const session = await localSession(f.guarded);
+    const response = await f.guarded(post('/dashboard/privacy/items/read', session, { item_id: ITEM_ID }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, state: 'queued', etaSeconds: 60 });
+    expect((await f.guarded(post('/dashboard/privacy/items/read', session, {}))).status).toBe(400);
   });
 
   test('Check the judge answers a local session only, and says when it is not set up', async () => {

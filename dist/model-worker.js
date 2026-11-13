@@ -287,7 +287,7 @@ function acquireFileLeaseSync(targetPath, options) {
   const deadline = Date.now() + options.acquireTimeoutMs;
   mkdirSync2(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
-    const lock = tryKernelLock(lockPath);
+    const lock = tryKernelLock(lockPath, options.mode);
     if (lock)
       return new SyncFileLeaseOwner(targetPath, lockPath, lock);
     if (Date.now() >= deadline)
@@ -307,7 +307,7 @@ function openSqlite(path) {
   connection.exec("PRAGMA busy_timeout = 0");
   return connection;
 }
-function tryKernelLock(lockPath) {
+function tryKernelLock(lockPath, mode) {
   if (!existsSync2(lockPath)) {
     try {
       closeSync2(openSync2(lockPath, "wx", 384));
@@ -318,7 +318,7 @@ function tryKernelLock(lockPath) {
   }
   const connection = openSqlite(lockPath);
   try {
-    connection.exec("BEGIN EXCLUSIVE");
+    connection.exec(mode === "shared" ? "BEGIN; SELECT count(*) FROM sqlite_master;" : "BEGIN EXCLUSIVE");
   } catch (error) {
     closeQuietly(connection);
     if (isSqliteBusy(error))
@@ -370,6 +370,7 @@ function lockPathFor(targetPath) {
 }
 function normalizeOptions(options) {
   return {
+    mode: options.mode ?? "exclusive",
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
     pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs)
   };

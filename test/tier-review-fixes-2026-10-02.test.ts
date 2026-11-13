@@ -1,3 +1,4 @@
+import { laneReleaseCheck } from './helpers/lane-release-check.ts';
 // Tier classification review fixes (2026-10-02), end to end on a fresh
 // install (the harness of fresh-install-tiers.test.ts):
 //
@@ -210,6 +211,7 @@ type Install = Awaited<ReturnType<typeof freshInstall>>;
 async function olympusSearch(install: Install, question: string): Promise<string> {
   const raw = await searchReleasedEvidence({
     question,
+    releaseCheck: laneReleaseCheck(install.lane.ledger, () => install.lane.set.openStores()),
     lanes: () => {
       const stores = install.lane.set.openStores();
       return {
@@ -390,7 +392,8 @@ describe('2. a re-judge asks while the item stays where it is', () => {
     // Never hidden: its Personal copy stays current until an approved migration moves it.
     expect(install.lane.ledger.copies(garden).find((copy) => copy.state === 'current' && copy.layers !== 'metadata'))
       .toMatchObject({ corpusId: INTERNAL_CORPUS });
-    expect(await olympusSearch(install, 'orchard')).toContain('pruning plan');
+    // Still listed here, but the release check reads the raise's Private target, so no remote app gets it.
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
   });
 
   test('a newer decision makes an open re-judge question stale (the newer decision stands)', async () => {
