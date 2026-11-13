@@ -57,10 +57,18 @@ export function providerClickExpression(labels: readonly string[]): string {
 /** Visible menu item names, for a failure message: provider UI labels only, never file names. */
 const PROVIDER_CONTROL_NAMES = `[...document.querySelectorAll('[role=menuitem]')].filter(${visible}).map(e => (${CONTROL_NAMES})(e).at(-1)).slice(0, 20)`;
 
+/** Drive lists items as rows in list view and as grid cells or options in grid view. */
+const DRIVE_ITEMS = '[role=row],[role=gridcell],[role=option],tr';
+
+/** What a Drive page showed when the seed folder was not found: counts and flags only. */
+export function drivePageSnapshot(name: string): string {
+  return `(() => ({path: location.pathname, items: document.querySelectorAll(${JSON.stringify(DRIVE_ITEMS)}).length, rows: document.querySelectorAll('[role=row]').length, cells: document.querySelectorAll('[role=gridcell],[role=option]').length, nameShown: (document.body?.innerText || '').includes(${JSON.stringify(name)}), untitledShown: /untitled folder/i.test(document.body?.innerText || ''), dialogs: [...document.querySelectorAll('[role=dialog]')].filter(${visible}).length}))()`;
+}
+
 /** Open the one row named `name` (by tooltip, label, or its visible text, as the listing reads names).
  * Returns 'none' while it is not listed and 'many' when the name is not unique. */
 export function driveFolderRowExpression(name: string): string {
-  return `(() => {const name=${JSON.stringify(name)};const rows=[...document.querySelectorAll('[role=row]')].filter(row=>[row,...row.querySelectorAll('*')].some(e=>[e.getAttribute('data-tooltip'),e.getAttribute('aria-label'),e.getAttribute('data-filename'),e.children.length?null:e.textContent?.trim()].includes(name)));if(rows.length>1)return 'many';if(!rows.length)return 'none';rows[0].dispatchEvent(new MouseEvent('dblclick',{bubbles:true,view:window}));return 'opened';})()`;
+  return `(() => {const name=${JSON.stringify(name)};const named=[...document.querySelectorAll(${JSON.stringify(DRIVE_ITEMS)})].filter(row=>[row,...row.querySelectorAll('*')].some(e=>[e.getAttribute('data-tooltip'),e.getAttribute('aria-label'),e.getAttribute('data-filename'),e.children.length?null:e.textContent?.trim()].includes(name)));const rows=named.filter(row=>!named.some(other=>other!==row&&row.contains(other)));if(rows.length>1)return 'many';if(!rows.length)return 'none';rows[0].dispatchEvent(new MouseEvent('dblclick',{bubbles:true,view:window}));return 'opened';})()`;
 }
 
 export async function openBrowserTimingSeeds(machine: Machine, endpoint: string, sources: readonly TimingSource[] = ['dropbox', 'google_drive']) {
@@ -207,6 +215,7 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
           await click(tab.session, source === 'google_drive' ? ['New folder'] : ['Folder', 'Create folder']);
           await fill(tab.session, '[role=dialog] input[type=text], [role=dialog] input:not([type])', name);
           await click(tab.session, ['Create']);
+          await until(() => evaluate(tab.session, `![...document.querySelectorAll('[role=dialog]')].some(${visible})`), `${source} new folder dialog stayed open after Create`);
           if (source === 'google_drive') {
             // A folder created from a search may not be in the current result yet; rerun that search.
             await driveSearch(tab.session, name);
@@ -219,7 +228,10 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
             await send('Page.navigate', { url: 'https://drive.google.com/drive/u/0/my-drive' }, tab.session);
             opened = await openDriveFolderRow(tab.session, name, 90_000);
           }
-          if (opened !== 'opened') throw new Error(opened === 'many' ? 'duplicate Drive seed folders' : 'Drive seed folder not listed in search or My Drive');
+          if (opened !== 'opened') {
+            const shown = await evaluate<Record<string, unknown>>(tab.session, drivePageSnapshot(name)).catch(() => undefined);
+            throw new Error(`${opened === 'many' ? 'duplicate Drive seed folders' : 'Drive seed folder not listed in search or My Drive'}${shown ? ` (${JSON.stringify(shown)})` : ''}`);
+          }
           await until(() => evaluate(tab.session, `location.pathname.includes('/folders/') && !!document.querySelector('[role=grid]')`), 'Drive seed folder did not open');
         } else {
           await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);

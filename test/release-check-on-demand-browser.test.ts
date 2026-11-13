@@ -145,6 +145,11 @@ describe('fresh read-on-demand without write tokens', () => {
       expect(opened).toBe(1);
       window.document.querySelector('[role=grid]')!.append(window.document.getElementById('seed')!.cloneNode(true));
       expect(run()).toBe('many');
+      // Grid view: the name sits in a cell inside a row; that is one item, not two.
+      window.document.body.innerHTML = `<div role="grid"><div role="row"><div role="gridcell" id="cell"><span>${ON_DEMAND_FOLDER}</span></div></div></div>`;
+      expect(run()).toBe('opened');
+      window.document.body.innerHTML = `<div role="listbox"><div role="option"><span>${ON_DEMAND_FOLDER}</span></div></div>`;
+      expect(run()).toBe('opened');
     } finally { await window.happyDOM.close(); }
   });
 
