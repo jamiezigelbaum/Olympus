@@ -12,7 +12,7 @@ import { openFreshDashboard } from '../scripts/release-check/fresh-dashboard.ts'
 import type { Machine } from '../scripts/release-check/machine.ts';
 
 const REFUSAL = 'Choose this on the computer in an unlocked dashboard.';
-for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge-refused'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : mode === 'unlock' ? 'unlocks on this computer when asked, then saves' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
+for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge-refused', 'judge-unreachable'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : mode === 'unlock' ? 'unlocks on this computer when asked, then saves' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
   const losesSave = mode === 'loses';
   const dir = mkdtempSync(join(tmpdir(), 'fresh-dashboard-'));
   const path = join(dir, 'sovereignty.json');
@@ -63,8 +63,10 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge
       transport: { ...(mode === 'unlock' ? { openLocalControls: async () => { unlocks++; unlocked = true; return true; } } : {}), control: async (params: { action: string; choice: string; cap_dollars?: number }) => {
         calls.push(params.action);
         if (params.action === 'save_judge') {
-          expect(params).toEqual({ action: 'save_judge', choice: judgeChoices.length === 0 ? 'venice' : 'local', cap_dollars: 1 });
+          expect(params).toEqual({ action: 'save_judge', choice: judgeChoices.length === 0 || mode === 'judge-unreachable' ? 'venice' : 'local', cap_dollars: 1 });
           judgeChoices.push(String(params.choice));
+          // The engine is restarting for the answer choice: the request never reaches it.
+          if (mode === 'judge-unreachable' && judgeChoices.length === 1) throw new Error('connection refused');
           if (mode === 'judge-refused' && params.choice === 'venice') return { status: 400, body: { ok: false, error: { message: 'Add your own Venice API key in Keys first.' } } };
           judgeChosen = true;
           return { status: 200, body: { ok: true } };
@@ -129,7 +131,7 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge
   let dashboard: Awaited<ReturnType<typeof openFreshDashboard>> | undefined;
   try {
     // Each wait ends as soon as its condition holds; 300 ms was too short for the unlock round trip on a busy CI runner (#1373).
-    dashboard = await openFreshDashboard(machine, '127.0.0.1:9333', { timeoutMs: 2_000, pollMs: 1 });
+    dashboard = await openFreshDashboard(machine, '127.0.0.1:9333', { timeoutMs: 2_000, pollMs: 1, reachRetryMs: 1 });
     expect(events.indexOf('bridge.start')).toBeLessThan(events.indexOf('navigate'));
     if (mode === 'refused') {
       await expect(dashboard.privacyChoice()).rejects.toThrow(/^first-run privacy choice was not saved: the dashboard said "[^"]+"$/);
@@ -142,6 +144,12 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge
       // Without a Venice key the leg saves this computer instead and says why.
       expect(await dashboard.privacyChoice()).toBe('Local models with Venice fallback (local-first, Recommended) saved and verified after reload; privacy check: This computer (local) saved after Venice was refused: the dashboard said "Add your own Venice API key in Keys first."');
       expect(judgeChoices).toEqual(['venice', 'local']);
+      return;
+    }
+    if (mode === 'judge-unreachable') {
+      // "Could not reach Olympus." while the engine restarts is pressed again, not taken as a refusal.
+      expect(await dashboard.privacyChoice()).toBe('Local models with Venice fallback (local-first, Recommended) saved and verified after reload; privacy check: Venice (venice) saved');
+      expect(judgeChoices).toEqual(['venice', 'venice']);
       return;
     }
     if (losesSave) await expect(dashboard.privacyChoice()).rejects.toThrow('did not persist after reload');
