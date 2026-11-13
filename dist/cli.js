@@ -80990,6 +80990,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const searched = new Set(routed.searchedCorpora);
   const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora.filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));
   const limitStopGaps = [];
+  const sizeNoticeCorpora = new Set;
   const limits2 = registeredLimits();
   const now = (input.now?.() ?? new Date).getTime();
   for (const stop of input.limitStops ?? []) {
@@ -80998,6 +80999,13 @@ async function buildPreparedEvidencePackDetailed(input) {
       continue;
     if (limitStopSubjects(stop).some((subject) => searched.has(subject) || searchedSources.has(subject))) {
       const heldFiles = stop.waiting?.items ?? 0;
+      if (limit.kind === "size") {
+        const subjects = new Set(limitStopSubjects(stop));
+        for (const corpus of defaultSourceCorpusRegistryConfig().corpora) {
+          if (subjects.has(corpus.corpusId) || subjects.has(corpus.sourceId))
+            sizeNoticeCorpora.add(corpus.corpusId);
+        }
+      }
       limitStopGaps.push(limit.kind === "size" ? `${limit.label}: ${heldFiles} ${heldFiles === 1 ? "file" : "files"} held because they are too large; not read. Raise the size limit to continue.` : `${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
     }
   }
@@ -81106,7 +81114,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
     const sizeHeld = content?.sizeHeld === true && content.chunks.length === 0;
-    const gap = sizeHeld ? undefined : extractionGapFor(hit, provider !== undefined, content);
+    const gap = !sizeHeld ? extractionGapFor(hit, provider !== undefined, content) : sizeNoticeCorpora.has(hit.corpusId) ? undefined : `A file (${hit.corpusId}) was located but is too large to read; not read.`;
     candidateExtractionGapIndexes.push(gap ? [extractionGaps.length] : []);
     if (gap)
       extractionGaps.push(gap);

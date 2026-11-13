@@ -567,3 +567,18 @@ test('a size stop preserves missing-provider gaps in the same corpus', async () 
   });
   expect(pack.coverage.extractionGaps.join(' ')).toContain('unrelated-no-provider');
 });
+
+test('a file held by a reader ceiling with no size-stop notice keeps a content-free gap', async () => {
+  const pack = await buildEvidencePack({
+    question: 'records', maxResults: 5, searchContext: allowAll, registry: registry(),
+    adapters: { [INTERNAL]: adapterReturning(['held-secret-title']) },
+    contentProviders: { [INTERNAL]: provider({
+      'held-secret-title': { sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }), chunks: [], sizeHeld: true,
+        locatorUri: '/private/held-secret-path' },
+    }) },
+    limitStops: [],
+  });
+  const gaps = pack.coverage.extractionGaps.join(' ');
+  expect(gaps).toContain('too large to read');
+  expect(gaps).not.toContain('held-secret');
+});
