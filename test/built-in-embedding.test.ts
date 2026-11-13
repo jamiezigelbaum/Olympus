@@ -17,6 +17,7 @@ import {
   BuiltInEmbeddingInstallError,
   builtInEmbeddingPaths,
   installBuiltInEmbedding,
+  installBuiltInReranker,
   readBuiltInEmbeddingStatus,
   reportBuiltInEmbeddingState,
   readBuiltInEmbeddingVision,
@@ -256,7 +257,8 @@ describe('built-in embedding installer', () => {
     }) as typeof fetch;
     const options = { env, model: served.model, rerankerModel: served.reranker, skipRuntime: true, fetchImpl,
       onProgress: (status: BuiltInEmbeddingStatus) => progress.push(status) };
-    const installed = await installBuiltInEmbedding(options);
+    const both = async () => { const result = await installBuiltInEmbedding(options); await installBuiltInReranker(options); return result; };
+    const installed = await both();
     expect(existsSync(installed.modelPath)).toBe(true);
     const dir = join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker', served.reranker.modelId);
     expect(sha256(readFileSync(join(dir, 'model.onnx')))).toBe(served.reranker.model.sha256);
@@ -264,16 +266,16 @@ describe('built-in embedding installer', () => {
     expect(progress.some((status) => status.modelId === served.reranker.modelId && status.failure?.reason === 'checksum_mismatch')).toBe(true);
     expect(readBuiltInEmbeddingStatus(env, served.model).state).not.toBe('failed');
     corrupt = false;
-    await installBuiltInEmbedding(options);
+    await both();
     expect(sha256(readFileSync(join(dir, 'tokenizer.json')))).toBe(served.reranker.tokenizer.sha256);
     const attempts = served.requests.length;
-    await installBuiltInEmbedding(options);
+    await both();
     expect(served.requests.length).toBe(attempts);
     // Existing files are also verified, removed on mismatch and retried next install.
     writeFileSync(join(dir, 'model.onnx'), 'x'.repeat(served.reranker.model.bytes));
-    await installBuiltInEmbedding(options);
+    await both();
     expect(existsSync(join(dir, 'model.onnx'))).toBe(false);
-    await installBuiltInEmbedding(options);
+    await both();
     expect(sha256(readFileSync(join(dir, 'model.onnx')))).toBe(served.reranker.model.sha256);
     expect(existsSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'install.lock'))).toBe(false);
   });
@@ -292,7 +294,9 @@ describe('built-in embedding installer', () => {
     const runtimeBin = join(installed.runtimeDir, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v6');
     expect(readdirSync(runtimeBin)).toEqual([process.platform]);
     expect(existsSync(join(installed.runtimeDir, 'node_modules', 'onnxruntime-common', 'package.json'))).toBe(true);
-    expect(served.requests).toHaveLength(6);
+    // The optional reranker is not on this path: the embedding model loads without waiting for it.
+    expect(served.requests).toHaveLength(4);
+    expect(served.requests.some((url) => url.includes('reranker') || url.includes('tokenizer.json'))).toBe(false);
 
     const downloading = progress.filter((status) => status.state === 'downloading' && status.modelId === served.model.modelId);
     expect(downloading.length).toBeGreaterThan(4);
@@ -304,7 +308,7 @@ describe('built-in embedding installer', () => {
 
     // Second call: nothing fetched again.
     await installBuiltInEmbedding({ env, model: served.model, runtime: served.runtime, rerankerModel: served.reranker, fetchImpl: served.fetchImpl });
-    expect(served.requests).toHaveLength(6);
+    expect(served.requests).toHaveLength(4);
     // No partial files or lock left behind.
     expect(readdirSync(join(dir, served.model.modelId)).sort()).toEqual(['model.onnx', 'vocab.txt']);
     expect(existsSync(join(dir, 'install.lock'))).toBe(false);
@@ -899,11 +903,13 @@ describe('built-in embedding installer with a LiteRT model', () => {
     const options = { env, model: litert.model, liteRtRuntime: litert.pack, runtime: onnx.runtime,
       rerankerModel: onnx.reranker, fetchImpl };
     await installBuiltInEmbedding(options);
+    await installBuiltInReranker(options);
     const runtimeDir = builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5, onnx.runtime).runtimeDir;
     expect(existsSync(join(runtimeDir, 'node_modules', 'onnxruntime-node', 'package.json'))).toBe(true);
     expect(existsSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker', onnx.reranker.modelId, 'tokenizer.json'))).toBe(true);
     const attempts = onnx.requests.length;
     await installBuiltInEmbedding(options);
+    await installBuiltInReranker(options);
     expect(onnx.requests.length).toBe(attempts);
   });
 

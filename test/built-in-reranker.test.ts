@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   builtInRerankerFromEnv,
+  createBuiltInRerankerResolver,
   createCrossEncoderReranker,
   prepareBuiltInRerankerFromEnv,
   SOURCE_RERANKER_ENV,
@@ -165,6 +166,25 @@ describe('default activation and idle release', () => {
     for (const value of ['off', 'other']) expect(builtInRerankerFromEnv({ env: { ...env, OLYMPUS_SOURCE_RERANKER: value }, totalmem: () => 16 * 1024 ** 3 })).toBeUndefined();
     rmSync(join(dir, 'model.onnx'));
     expect(builtInRerankerFromEnv({ env, totalmem: () => 16 * 1024 ** 3 })).toBeUndefined();
+  });
+
+  test('the resolver turns the reranker on once its download lands, without a restart', async () => {
+    const root = modelDirectory();
+    const dir = join(root, 'reranker', MMARCO_MMINILMV2_L12_H384_V1.modelId);
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: root };
+    let prepared = 0;
+    const runtime: EmbeddingRuntime = { createSession: async () => { prepared++; return { run: async (batch) => ({ data: new Float32Array(batch.batchSize), dims: [batch.batchSize, 1] }) }; } };
+    const current = createBuiltInRerankerResolver({ env, totalmem: () => 16 * 1024 ** 3, runtime }, () => undefined);
+    expect(current()).toBeUndefined();
+    mkdirSync(dir, { recursive: true });
+    for (const name of ['model.onnx', 'tokenizer.json']) writeFileSync(join(dir, name), readFileSync(join(root, name)));
+    const found = current();
+    expect(found?.poolSize).toBe(24);
+    expect(current()).toBe(found);
+    await flushMicrotasks();
+    await found!.prepare();
+    expect(prepared).toBe(1);
+    expect(createBuiltInRerankerResolver({ env: { ...env, OLYMPUS_SOURCE_RERANKER: 'off' }, totalmem: () => 16 * 1024 ** 3, runtime })()).toBeUndefined();
   });
 
   function idleFixture() {

@@ -171,14 +171,39 @@ export async function prepareBuiltInRerankerFromEnv(
   return reranker;
 }
 
+/** Whether this install's setting allows the built-in reranker at all (unset, blank or built-in). */
+export function builtInRerankerMayRun(env: Record<string, string | undefined> = process.env): boolean {
+  const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
+  return mode === undefined || mode === 'built-in';
+}
+
+/**
+ * The reranker for a long-running engine: checks again on each call until the
+ * installed files appear (the download runs after the engine starts), then
+ * keeps that one reranker and loads it in the background. Off, or below the
+ * RAM threshold, it stays undefined.
+ */
+export function createBuiltInRerankerResolver(
+  options: BuiltInRerankerFromEnvOptions = {},
+  warn: (message: string) => void = console.warn,
+): () => CrossEncoderReranker | undefined {
+  let found: CrossEncoderReranker | undefined;
+  return () => {
+    if (found) return found;
+    found = builtInRerankerFromEnv(options);
+    void found?.prepare().catch(() => warn('[reranker] Could not load the model; scoring will retry.'));
+    return found;
+  };
+}
+
 /**
  * The installed reranker, or undefined when disabled, below the default RAM
  * threshold, or missing its files. The engine awaits prepare() before serving.
  */
 export function builtInRerankerFromEnv(options: BuiltInRerankerFromEnvOptions = {}): CrossEncoderReranker | undefined {
   const env = options.env ?? process.env;
+  if (!builtInRerankerMayRun(env)) return undefined;
   const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
-  if (mode !== undefined && mode !== 'built-in') return undefined;
   if (mode === undefined && (options.totalmem ?? totalmem)() < DEFAULT_ON_MIN_MEMORY_BYTES) return undefined;
   const modelDir = (mode === 'built-in' ? env[SOURCE_RERANKER_MODEL_DIR_ENV]?.trim() : undefined)
     || join(builtInEmbeddingPaths(env).root, 'reranker', MMARCO_MMINILMV2_L12_H384_V1.modelId);

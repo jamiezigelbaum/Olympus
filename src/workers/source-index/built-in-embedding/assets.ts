@@ -246,7 +246,19 @@ export function reportBuiltInEmbeddingVision(
 export async function installBuiltInEmbedding(
   options: BuiltInEmbeddingInstallerOptions = {},
 ): Promise<InstalledBuiltInEmbedding> {
-  const installed = await installEmbeddingAssets(options);
+  return installEmbeddingAssets(options);
+}
+
+/**
+ * Installs the default built-in reranker (#921) beside the embedding model,
+ * with the same pinned, checked download and the same lock. It is optional,
+ * so it is never on the embedding load path: the engine starts it on its own
+ * at boot. It never throws; a failure is reported in reranker-status.json and
+ * the next start retries it.
+ */
+export async function installBuiltInReranker(
+  options: BuiltInEmbeddingInstallerOptions = {},
+): Promise<void> {
   const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
   const paths = builtInEmbeddingPaths(options.env, options.model);
   // A separate receipt uses the same reporting mechanism without marking a
@@ -282,9 +294,8 @@ export async function installBuiltInEmbedding(
     });
   } catch (error) {
     reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : 'disk_write_failed',
-      `Built-in reranker could not be installed; the next install will retry. ${error instanceof Error ? error.message : String(error)}`);
+      `Built-in reranker could not be installed; the next start will retry. ${error instanceof Error ? error.message : String(error)}`);
   }
-  return installed;
 }
 
 async function installEmbeddingAssets(

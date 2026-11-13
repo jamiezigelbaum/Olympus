@@ -183,7 +183,9 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
   queryPlanner?: (question: string) => Promise<readonly string[]>;
   // Optional local cross-encoder over the fused candidates (core/evidence-reranker.ts),
   // passed through to the EvidencePack builder. Absent = fused order, unchanged.
-  reranker?: EvidenceReranker;
+  // A function is asked per question, so a reranker installed after the
+  // engine started is used without a restart.
+  reranker?: EvidenceReranker | (() => EvidenceReranker | undefined);
   defaultMaxResults?: number;
   maxCharsPerCandidate?: number;
   // Total passage UTF-8 bytes across the evidence pack; see DEFAULT_EVIDENCE_BYTE_BUDGET.
@@ -320,6 +322,7 @@ export function createAnalystSourceIndexAnswerHandler(
     ?? new SecureAnalystPoolState(options.secureAnalystPool);
   return {
     async answer(request: SourceIndexAnswerRequest, local?: Parameters<SourceIndexAnswerHandler['answer']>[1]): Promise<SourceIndexAnswerResult> {
+      const reranker = typeof options.reranker === 'function' ? options.reranker() : options.reranker;
       const startedAt = Date.now();
       const question = request.question?.trim();
       if (!question) {
@@ -448,7 +451,7 @@ export function createAnalystSourceIndexAnswerHandler(
           ...(request.query?.trim() ? { searchQuery: request.query.trim() } : {}),
           ...(request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {}),
           ...(options.queryPlanner ? { queryPlanner: options.queryPlanner } : {}),
-          ...(options.reranker ? { reranker: options.reranker } : {}),
+          ...(reranker ? { reranker } : {}),
           maxResults,
           ...(requestedCorpusIds ? { corpusIds: requestedCorpusIds } : {}),
           searchContext: {

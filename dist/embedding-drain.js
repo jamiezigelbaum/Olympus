@@ -3846,38 +3846,7 @@ function reportBuiltInEmbeddingVision(vision, options = {}) {
   }
 }
 async function installBuiltInEmbedding(options = {}) {
-  const installed = await installEmbeddingAssets(options);
-  const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
-  const paths = builtInEmbeddingPaths(options.env, options.model);
-  const reporter = new ProgressReporter(join10(paths.root, "reranker-status.json"), model.modelId, options.now, options.onProgress);
-  try {
-    await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
-      const dir = join10(paths.root, "reranker", model.modelId);
-      ensureDirectory(dir);
-      const files = [model.model, model.tokenizer];
-      const pending = files.filter((file) => !existsSync6(join10(dir, file.name)));
-      const runtime = options.runtime ?? ONNX_RUNTIME_PACK;
-      const platform = options.platform ?? currentPlatform();
-      const runtimeDir = builtInEmbeddingPaths(options.env, ARCTIC_EMBED_M_V1_5, runtime, platform).runtimeDir;
-      const packages = [runtime.common, runtime.runtime];
-      const needsRuntime = !options.skipRuntime && !runtimeInstalled(runtimeDir, packages);
-      if (needsRuntime && !runtime.platforms.includes(platform)) {
-        throw new BuiltInEmbeddingInstallError("unsupported_platform", `The built-in reranker does not run on ${platform}.`);
-      }
-      reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0) + (needsRuntime ? packages.reduce((sum, pack) => sum + pack.bytes, 0) : 0));
-      for (const file of pending) {
-        await downloadVerified(options.fetchImpl ?? fetch, file.url, join10(dir, file.name), file.bytes, { kind: "sha256", expected: file.sha256 }, reporter, "Downloading the built-in reranker", options.downloadStallMs ?? DOWNLOAD_STALL_MS);
-      }
-      if (needsRuntime) {
-        await installRuntime(options.fetchImpl ?? fetch, runtimeDir, packages, platform, reporter, options.downloadStallMs ?? DOWNLOAD_STALL_MS);
-      }
-      await verifyModelFiles(dir, files, reporter, false);
-      reporter.set("ready", "Built-in reranker installed", 100);
-    });
-  } catch (error) {
-    reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : "disk_write_failed", `Built-in reranker could not be installed; the next install will retry. ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return installed;
+  return installEmbeddingAssets(options);
 }
 async function installEmbeddingAssets(options) {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;

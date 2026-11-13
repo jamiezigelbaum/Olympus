@@ -12,7 +12,7 @@ import { PeopleIndexRefresher } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { createOwnerTierItems, getOwnerTierItem, type OwnerTierItemsContext } from '../classification/tier-owner-items.ts';
 import { createJudgeCheck } from '../classification/judge-check.ts';
-import { prepareBuiltInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
+import { builtInRerankerMayRun, createBuiltInRerankerResolver } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, reopenSecondRoundAfterStop, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } from '../classification/judge-pacing.ts';
@@ -312,7 +312,7 @@ import {
   builtInEmbeddingDashboardState,
   loadedBuiltInEmbedding,
 } from '../source-index/built-in-embedding/provider.ts';
-import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
+import { installBuiltInReranker, readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
 import { LocalWorkPacer, embedsOnThisComputer, systemIdlePowerProbe } from '../local-pacing.ts';
 import { builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
@@ -926,6 +926,9 @@ export async function main(): Promise<void> {
     for (const provider of new Set([internalPolicyEmbeddingProvider, secureLocalPolicyEmbeddingProvider])) {
       if (provider instanceof BuiltInSourceEmbeddingProvider) void provider.warm().catch(() => undefined);
     }
+    // The optional reranker downloads beside the embedding model but never on
+    // its load path; installBuiltInReranker reports its own failures.
+    if (builtInRerankerMayRun(process.env)) void installBuiltInReranker({ env: process.env });
   }
   const readwiseEmbeddingProvider = envPolicyFallback
     ? createCloudSourceIndexEmbeddingProviderFromEnv(
@@ -3336,8 +3339,11 @@ export async function main(): Promise<void> {
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
-      // Uses the installed default at 16 GiB RAM and above; the owner can opt out.
-      const sourceReranker = await prepareBuiltInRerankerFromEnv();
+      // Uses the installed default at 16 GiB RAM and above; the owner can opt
+      // out. Asked per question, so the download finishing after boot turns it
+      // on without a restart.
+      const sourceReranker = createBuiltInRerankerResolver();
+      sourceReranker();
       return createAnalystSourceIndexAnswerHandler({
         requestOnDemandRead: requestFileRead,
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
@@ -3348,7 +3354,7 @@ export async function main(): Promise<void> {
           chunkReleaseOptions,
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
-        ...(sourceReranker ? { reranker: sourceReranker } : {}),
+        reranker: sourceReranker,
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
           const requestedProvider = request.analyst_provider ?? (request.analyst_model ? 'venice' : 'default');

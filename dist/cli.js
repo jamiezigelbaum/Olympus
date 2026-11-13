@@ -15785,7 +15785,9 @@ function reportBuiltInEmbeddingVision(vision, options = {}) {
   }
 }
 async function installBuiltInEmbedding(options = {}) {
-  const installed = await installEmbeddingAssets(options);
+  return installEmbeddingAssets(options);
+}
+async function installBuiltInReranker(options = {}) {
   const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
   const paths = builtInEmbeddingPaths(options.env, options.model);
   const reporter = new ProgressReporter(join26(paths.root, "reranker-status.json"), model.modelId, options.now, options.onProgress);
@@ -15814,9 +15816,8 @@ async function installBuiltInEmbedding(options = {}) {
       reporter.set("ready", "Built-in reranker installed", 100);
     });
   } catch (error) {
-    reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : "disk_write_failed", `Built-in reranker could not be installed; the next install will retry. ${error instanceof Error ? error.message : String(error)}`);
+    reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : "disk_write_failed", `Built-in reranker could not be installed; the next start will retry. ${error instanceof Error ? error.message : String(error)}`);
   }
-  return installed;
 }
 async function installEmbeddingAssets(options) {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;
@@ -81618,6 +81619,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
   const secureAnalystPoolState = options.secureAnalystPoolState ?? new SecureAnalystPoolState(options.secureAnalystPool);
   return {
     async answer(request, local) {
+      const reranker = typeof options.reranker === "function" ? options.reranker() : options.reranker;
       const startedAt = Date.now();
       const question = request.question?.trim();
       if (!question) {
@@ -81703,7 +81705,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
         ...request.query?.trim() ? { searchQuery: request.query.trim() } : {},
         ...request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {},
         ...options.queryPlanner ? { queryPlanner: options.queryPlanner } : {},
-        ...options.reranker ? { reranker: options.reranker } : {},
+        ...reranker ? { reranker } : {},
         maxResults,
         ...requestedCorpusIds ? { corpusIds: requestedCorpusIds } : {},
         searchContext: {
@@ -164084,18 +164086,25 @@ function createCrossEncoderReranker(options) {
     }
   };
 }
-async function prepareBuiltInRerankerFromEnv(options = {}, warn = console.warn) {
-  const reranker = builtInRerankerFromEnv(options);
-  await reranker?.prepare().catch(() => {
-    warn("[reranker] Could not load the model at startup; scoring will retry.");
-  });
-  return reranker;
+function builtInRerankerMayRun(env = process.env) {
+  const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
+  return mode === undefined || mode === "built-in";
+}
+function createBuiltInRerankerResolver(options = {}, warn = console.warn) {
+  let found;
+  return () => {
+    if (found)
+      return found;
+    found = builtInRerankerFromEnv(options);
+    found?.prepare().catch(() => warn("[reranker] Could not load the model; scoring will retry."));
+    return found;
+  };
 }
 function builtInRerankerFromEnv(options = {}) {
   const env = options.env ?? process.env;
-  const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
-  if (mode !== undefined && mode !== "built-in")
+  if (!builtInRerankerMayRun(env))
     return;
+  const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
   if (mode === undefined && (options.totalmem ?? totalmem4)() < DEFAULT_ON_MIN_MEMORY_BYTES)
     return;
   const modelDir = (mode === "built-in" ? env[SOURCE_RERANKER_MODEL_DIR_ENV]?.trim() : undefined) || join129(builtInEmbeddingPaths(env).root, "reranker", MMARCO_MMINILMV2_L12_H384_V1.modelId);
@@ -247039,6 +247048,8 @@ async function main() {
           return;
         });
     }
+    if (builtInRerankerMayRun(process.env))
+      installBuiltInReranker({ env: process.env });
   }
   const readwiseEmbeddingProvider = envPolicyFallback ? createCloudSourceIndexEmbeddingProviderFromEnv(process.env, "OLYMPUS_SOURCE_INDEX_READWISE") ?? sourceIndexEmbeddingProvider : sourceIndexEmbeddingProvider;
   const xBookmarksEmbeddingProvider = envPolicyFallback ? createCloudSourceIndexEmbeddingProviderFromEnv(process.env, "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS") ?? sourceIndexEmbeddingProvider : sourceIndexEmbeddingProvider;
@@ -248831,14 +248842,15 @@ ${key2}`;
       });
     }
     const defaultLocalAnalyst = sovereigntyAnalysts.get("local-source-answer")?.analyst ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: "compact" });
-    const sourceReranker = await prepareBuiltInRerankerFromEnv();
+    const sourceReranker = createBuiltInRerankerResolver();
+    sourceReranker();
     return createAnalystSourceIndexAnswerHandler({
       requestOnDemandRead: requestFileRead,
       inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes, pack, request, corpusIds }),
       analyst: defaultLocalAnalyst,
       releaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions),
       queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
-      ...sourceReranker ? { reranker: sourceReranker } : {},
+      reranker: sourceReranker,
       ...cloudAnalyst ? { cloudAnalyst } : {},
       veniceAnalyst: (request) => {
         const requestedProvider = request.analyst_provider ?? (request.analyst_model ? "venice" : "default");
