@@ -1,5 +1,5 @@
 /** Content-free owner settings and stops. Bun-only (the scheduler store): workers and the engine import it, the Node plugin never does. */
-import { readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { LocalSourceSchedulerStateStore, defaultSourceSchedulerStateDbPath } from '../workers/source-scheduler-state.ts';
@@ -12,14 +12,25 @@ export function ownerLimitSettingsPath(): string {
 }
 
 /** Owner config key judge.dailyCalls; a temporary value belongs to one UTC day. */
-export function readJudgeCallOverride(now: Date, path = ownerLimitSettingsPath()): number | undefined {
+// The judge asks on every call (hundreds of thousands a day), so the file is parsed again only when it changes.
+let settingsCache: { path: string; stamp: string; value: DailyCallOverride | undefined } | undefined;
+function readDailyCallSetting(path: string): DailyCallOverride | undefined {
+  const stat = statSync(path, { throwIfNoEntry: false });
+  if (!stat) return undefined;
+  const stamp = `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+  if (settingsCache?.path === path && settingsCache.stamp === stamp) return settingsCache.value;
   let raw: { judge?: { dailyCalls?: DailyCallOverride } };
   try { raw = JSON.parse(readFileSync(path, 'utf8')); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw new Error('Owner limit settings could not be read.');
   }
-  const value = raw.judge?.dailyCalls;
+  settingsCache = { path, stamp, value: raw.judge?.dailyCalls };
+  return settingsCache.value;
+}
+
+export function readJudgeCallOverride(now: Date, path = ownerLimitSettingsPath()): number | undefined {
+  const value = readDailyCallSetting(path);
   if (!value) return undefined;
   if (!Number.isSafeInteger(value.to) || value.to < 0 || typeof value.keep !== 'boolean') throw new Error('Owner judge.dailyCalls setting is invalid.');
   if (value.base !== undefined && (!Number.isSafeInteger(value.base) || value.base < 0)) throw new Error('Owner judge.dailyCalls base setting is invalid.');

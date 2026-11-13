@@ -139718,12 +139718,18 @@ var init_provider_credit_status = __esm(() => {
 });
 
 // src/core/owner-limit-state.ts
-import { readFileSync as readFileSync76, mkdirSync as mkdirSync58, existsSync as existsSync94 } from "node:fs";
+import { readFileSync as readFileSync76, mkdirSync as mkdirSync58, existsSync as existsSync94, statSync as statSync40 } from "node:fs";
 import { dirname as dirname96 } from "node:path";
 function ownerLimitSettingsPath() {
   return sharedDataPath("limit-settings");
 }
-function readJudgeCallOverride(now, path = ownerLimitSettingsPath()) {
+function readDailyCallSetting(path) {
+  const stat6 = statSync40(path, { throwIfNoEntry: false });
+  if (!stat6)
+    return;
+  const stamp = `${stat6.mtimeMs}:${stat6.size}:${stat6.ino}`;
+  if (settingsCache?.path === path && settingsCache.stamp === stamp)
+    return settingsCache.value;
   let raw;
   try {
     raw = JSON.parse(readFileSync76(path, "utf8"));
@@ -139732,7 +139738,11 @@ function readJudgeCallOverride(now, path = ownerLimitSettingsPath()) {
       return;
     throw new Error("Owner limit settings could not be read.");
   }
-  const value2 = raw.judge?.dailyCalls;
+  settingsCache = { path, stamp, value: raw.judge?.dailyCalls };
+  return settingsCache.value;
+}
+function readJudgeCallOverride(now, path = ownerLimitSettingsPath()) {
+  const value2 = readDailyCallSetting(path);
   if (!value2)
     return;
   if (!Number.isSafeInteger(value2.to) || value2.to < 0 || typeof value2.keep !== "boolean")
@@ -139779,7 +139789,7 @@ function clearOwnerLimitStop(id, subject) {
 function openVeniceCreditPausePaths() {
   return withOwnerLimitStore((store) => store.openLimitStops().filter((stop) => stop.id === "venice.credit").map((stop) => stop.subject));
 }
-var ownerLimitStopHooks;
+var settingsCache, ownerLimitStopHooks;
 var init_owner_limit_state = __esm(() => {
   init_atomic_file();
   init_source_scheduler_state();
@@ -139865,6 +139875,7 @@ class SnifferCallBudget {
   used = 0;
   explicitLimit;
   stopRecorded = false;
+  recordedStop = "";
   clearedOnStart = false;
   settingsPath;
   constructor(options = {}) {
@@ -139872,7 +139883,7 @@ class SnifferCallBudget {
     this.maxCallsPerDay = Math.max(0, Math.floor(options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY));
     this.now = options.now ?? (() => new Date);
     this.statePath = options.statePath;
-    this.settingsPath = options.settingsPath;
+    this.settingsPath = options.settingsPath ?? ownerLimitSettingsPath();
     if (this.statePath) {
       try {
         const saved = JSON.parse(readFileSync77(this.statePath, "utf8"));
@@ -139888,15 +139899,13 @@ class SnifferCallBudget {
     this.roll(now);
     const limit = readJudgeCallOverride(now, this.settingsPath) ?? (decisionMode && !this.explicitLimit ? DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY : this.maxCallsPerDay);
     if (this.used >= limit) {
-      recordOwnerLimitStop({
-        id: "judge.daily_calls",
-        subject: "judge",
-        since: now.toISOString(),
-        limit,
-        used: this.used,
-        resumesAt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString()
-      });
-      this.stopRecorded = true;
+      const resumesAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+      const key2 = `${limit}:${this.used}:${resumesAt}`;
+      if (!this.stopRecorded || this.recordedStop !== key2) {
+        recordOwnerLimitStop({ id: "judge.daily_calls", subject: "judge", since: now.toISOString(), limit, used: this.used, resumesAt });
+        this.stopRecorded = true;
+        this.recordedStop = key2;
+      }
       return false;
     }
     if (this.stopRecorded || !this.clearedOnStart) {
@@ -140595,7 +140604,7 @@ var init_owner_limits = __esm(() => {
 });
 
 // src/data-restore.ts
-import { closeSync as closeSync33, copyFileSync as copyFileSync4, existsSync as existsSync95, fsyncSync as fsyncSync9, openSync as openSync32, readFileSync as readFileSync78, renameSync as renameSync21, rmSync as rmSync37, statSync as statSync40, chmodSync as chmodSync39 } from "node:fs";
+import { closeSync as closeSync33, copyFileSync as copyFileSync4, existsSync as existsSync95, fsyncSync as fsyncSync9, openSync as openSync32, readFileSync as readFileSync78, renameSync as renameSync21, rmSync as rmSync37, statSync as statSync41, chmodSync as chmodSync39 } from "node:fs";
 import { dirname as dirname98, join as join121, resolve as resolve24 } from "node:path";
 import { randomUUID as randomUUID32 } from "node:crypto";
 import { Database as Database29 } from "bun:sqlite";
@@ -140698,7 +140707,7 @@ function restoreOlympusData(options) {
   if (manifest2.version < 3 || !sawJudgments) {
     notes.push("This backup has no privacy judgments, so Olympus judges the restored items again.");
   }
-  const holds2 = (path) => existsSync95(path) && statSync40(path).size > 0;
+  const holds2 = (path) => existsSync95(path) && statSync41(path).size > 0;
   const restoredSources = [...new Set(plan.filter((entry) => entry.kind !== "owner_settings").map((entry) => entry.sourceId))];
   const occupiedSources = restoredSources.filter((sourceId) => storesOf(sourceId).some((store) => [
     store,
@@ -141013,7 +141022,7 @@ var init_data_restore = __esm(() => {
 
 // src/data-backup.ts
 import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash89, createHmac as createHmac5, randomBytes as randomBytes21, randomUUID as randomUUID33, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
-import { closeSync as closeSync34, existsSync as existsSync96, lstatSync as lstatSync44, mkdirSync as mkdirSync60, openSync as openSync33, readdirSync as readdirSync27, readSync as readSync12, renameSync as renameSync22, rmSync as rmSync38, statSync as statSync41, unlinkSync as unlinkSync5, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync10 } from "node:fs";
+import { closeSync as closeSync34, existsSync as existsSync96, lstatSync as lstatSync44, mkdirSync as mkdirSync60, openSync as openSync33, readdirSync as readdirSync27, readSync as readSync12, renameSync as renameSync22, rmSync as rmSync38, statSync as statSync42, unlinkSync as unlinkSync5, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync10 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename20, dirname as dirname99, join as join122, resolve as resolve25, sep as sep21 } from "node:path";
 function normalizePassphrase(passphrase) {
@@ -141220,7 +141229,7 @@ async function writeBackupFile(options) {
   await handle.close();
   renameSync22(staging, target2);
   syncDirectorySync(folder);
-  return { path: target2, name, bytes: statSync41(target2).size, encrypted: options.key !== undefined, createdAt: now.toISOString() };
+  return { path: target2, name, bytes: statSync42(target2).size, encrypted: options.key !== undefined, createdAt: now.toISOString() };
 }
 function readExactly(fd2, length, position) {
   const out = Buffer.alloc(length);
@@ -141239,7 +141248,7 @@ function notABackup(path) {
 function readBackupHeader(path) {
   const fd2 = openSync33(path, "r");
   try {
-    const size = statSync41(path).size;
+    const size = statSync42(path).size;
     const lead = readExactly(fd2, MAGIC.length + 4, 0);
     if (lead.length < MAGIC.length + 4 || !lead.subarray(0, MAGIC.length).equals(MAGIC))
       throw notABackup(path);
@@ -141543,7 +141552,7 @@ function restoreOlympusBackup(options) {
   };
   if (!existsSync96(input))
     throw new OperationError("invalid_params", `${input} does not exist.`);
-  if (statSync41(input).isDirectory())
+  if (statSync42(input).isDirectory())
     return restoreOlympusData({ input, ...options.dryRun ? { dryRun: true } : {}, ...context2 });
   const staging = backupStagingDir(lifecycleEnv(context2));
   try {
@@ -141928,7 +141937,7 @@ __export(exports_zkapi_funding_date, {
   zkapiFundingDateRefresher: () => zkapiFundingDateRefresher,
   setZkapiFundingDate: () => setZkapiFundingDate
 });
-import { readFileSync as readFileSync82, statSync as statSync42 } from "node:fs";
+import { readFileSync as readFileSync82, statSync as statSync43 } from "node:fs";
 function setZkapiFundingDate(input) {
   const date = input.date.trim();
   if (parseIsoDate(date) === undefined) {
@@ -141975,7 +141984,7 @@ function zkapiFundingDateRefresher(path) {
       return;
     let key2;
     try {
-      const stat6 = statSync42(path);
+      const stat6 = statSync43(path);
       key2 = `${stat6.ino}:${stat6.size}:${stat6.mtimeMs}`;
     } catch {
       return known;
@@ -158421,7 +158430,7 @@ var init_embedding_runtime = __esm(() => {
 
 // src/core/native-embedding-drain-service.ts
 import { randomUUID as randomUUID34 } from "node:crypto";
-import { readFileSync as readFileSync85, statSync as statSync43 } from "node:fs";
+import { readFileSync as readFileSync85, statSync as statSync44 } from "node:fs";
 import { delimiter as delimiter8, dirname as dirname103, isAbsolute as isAbsolute36, join as join126 } from "node:path";
 import { fileURLToPath as fileURLToPath13 } from "node:url";
 function createNativeEmbeddingDrainService(options) {
@@ -158522,7 +158531,7 @@ function resolveBunRuntimePath2(configured, env) {
     if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
     try {
-      if (statSync43(candidate).isFile())
+      if (statSync44(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -158533,14 +158542,14 @@ function assertUsableFile(path, label) {
     throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
   }
   try {
-    if (statSync43(path).isFile())
+    if (statSync44(path).isFile())
       return path;
   } catch {}
   throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
 }
 async function embeddingDrainReadinessProbe(readinessPath, instanceId, child2) {
   try {
-    const stat6 = statSync43(readinessPath);
+    const stat6 = statSync44(readinessPath);
     if (!stat6.isFile() || stat6.size > 16 * 1024)
       return false;
     const receipt = JSON.parse(readFileSync85(readinessPath, "utf8"));
@@ -160455,7 +160464,7 @@ var init_tier_owner_items = __esm(() => {
 });
 
 // src/workers/source-scope-runtime.ts
-import { statSync as statSync44 } from "node:fs";
+import { statSync as statSync45 } from "node:fs";
 function isMailSourceScopePolicyRef(ref) {
   return ref.sourceId === "gmail.email";
 }
@@ -160583,7 +160592,7 @@ class FileSourceScopeAuthority {
       return;
     try {
       const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
-        const stat6 = statSync44(path, { throwIfNoEntry: false });
+        const stat6 = statSync45(path, { throwIfNoEntry: false });
         return stat6 ? [stat6.ino, stat6.mtimeMs, stat6.size] : null;
       });
       return JSON.stringify([ref.accountGeneration, ref.revision, files]);
@@ -180700,7 +180709,7 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync106, mkdirSync as mkdirSync68, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync45, statfsSync as statfsSync6, utimesSync } from "node:fs";
+import { existsSync as existsSync106, mkdirSync as mkdirSync68, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync46, statfsSync as statfsSync6, utimesSync } from "node:fs";
 import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep22, join as join134, resolve as resolve28 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -181050,7 +181059,7 @@ function createArchiveUploads(options) {
         if (found && (found.active > 0 || now() - found.lastTouch < ARCHIVE_UPLOAD_IDLE_MS))
           continue;
         try {
-          if (!statSync45(dir).isDirectory())
+          if (!statSync46(dir).isDirectory())
             continue;
         } catch {
           continue;
@@ -187016,7 +187025,7 @@ var init_volume_identity = __esm(() => {
 });
 
 // src/workers/backup-service.ts
-import { existsSync as existsSync108, mkdirSync as mkdirSync69, readFileSync as readFileSync94, readdirSync as readdirSync31, rmSync as rmSync44, statSync as statSync46 } from "node:fs";
+import { existsSync as existsSync108, mkdirSync as mkdirSync69, readFileSync as readFileSync94, readdirSync as readdirSync31, rmSync as rmSync44, statSync as statSync47 } from "node:fs";
 import { dirname as dirname107, join as join135 } from "node:path";
 function defaultBackupServicePaths(env = process.env) {
   return {
@@ -187227,7 +187236,7 @@ function createBackupService(options) {
       let file2;
       try {
         file2 = input.file;
-        if (!statSync46(file2).isFile())
+        if (!statSync47(file2).isFile())
           throw new Error("not a file");
       } catch {
         throw new OperationError("invalid_params", "That backup file is no longer there. Choose it again.");
@@ -194081,7 +194090,7 @@ var init_source_watch_requests = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-connections.ts
-import { statSync as statSync47 } from "node:fs";
+import { statSync as statSync48 } from "node:fs";
 function dashboardLivePasses(read) {
   if (!read)
     return {};
@@ -194242,7 +194251,7 @@ function assertDashboardSourceMayRead(source, sourceDashboard, disconnected) {
 }
 function dashboardRegistryStamp(registryPath) {
   try {
-    const stat7 = statSync47(registryPath);
+    const stat7 = statSync48(registryPath);
     return `${stat7.mtimeMs}:${stat7.size}`;
   } catch {
     return "absent";
@@ -214444,7 +214453,7 @@ var init_scheduler_source2 = __esm(() => {
 });
 
 // src/workers/local-files/open-target.ts
-import { realpathSync as realpathSync28, statSync as statSync48 } from "node:fs";
+import { realpathSync as realpathSync28, statSync as statSync49 } from "node:fs";
 function localFilesOpenRoots(volumes, approvedScopePaths) {
   const roots = [];
   for (const scopePath of approvedScopePaths()) {
@@ -214453,7 +214462,7 @@ function localFilesOpenRoots(volumes, approvedScopePaths) {
       continue;
     try {
       const real = realpathSync28.native(resolved);
-      if (statSync48(real).isDirectory() && !roots.includes(real))
+      if (statSync49(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
   }
@@ -214475,7 +214484,7 @@ function createLocalFilesOpenTargets(options) {
       return;
     try {
       const real = realpathSync28.native(resolved);
-      return statSync48(real).isFile() ? { localPath: real } : undefined;
+      return statSync49(real).isFile() ? { localPath: real } : undefined;
     } catch {
       return;
     }
@@ -220565,7 +220574,7 @@ var init_remote_access_control = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync5, lstatSync as lstatSync53, mkdirSync as mkdirSync72, readdirSync as readdirSync35, realpathSync as realpathSync29, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync49, unlinkSync as unlinkSync6 } from "node:fs";
+import { linkSync as linkSync5, lstatSync as lstatSync53, mkdirSync as mkdirSync72, readdirSync as readdirSync35, realpathSync as realpathSync29, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync50, unlinkSync as unlinkSync6 } from "node:fs";
 import { basename as basename23, dirname as dirname115, isAbsolute as isAbsolute40, join as join147, relative as relative17, resolve as resolve31, sep as sep23 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -220730,7 +220739,7 @@ function nearestExisting(path) {
   let near = resolve31(path);
   for (;; ) {
     try {
-      statSync49(near);
+      statSync50(near);
       return near;
     } catch {
       const up = dirname115(near);
@@ -220790,7 +220799,7 @@ function inspect(ctx, sourceId, slot, entry) {
   }
   let folderDevice;
   try {
-    folderDevice = statSync49(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
+    folderDevice = statSync50(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
   } catch {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
@@ -244631,7 +244640,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync44, lstatSync as lstatSync55, mkdirSync as mkdirSync73, statSync as statSync50 } from "node:fs";
+import { chmodSync as chmodSync44, lstatSync as lstatSync55, mkdirSync as mkdirSync73, statSync as statSync51 } from "node:fs";
 import { dirname as dirname116, isAbsolute as isAbsolute42 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -244717,7 +244726,7 @@ function ensureSettingsDirectory(directory) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync50(dirname116(directory));
+      statSync51(dirname116(directory));
     } catch {
       return "home_missing";
     }

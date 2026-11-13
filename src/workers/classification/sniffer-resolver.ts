@@ -24,7 +24,7 @@ import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from '
 //   stored content.
 
 import { registerLimit } from '../../core/limit-stops.ts';
-import { clearOwnerLimitStop, recordOwnerLimitStop, readJudgeCallOverride } from '../../core/owner-limit-state.ts';
+import { clearOwnerLimitStop, ownerLimitSettingsPath, recordOwnerLimitStop, readJudgeCallOverride } from '../../core/owner-limit-state.ts';
 
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -114,15 +114,17 @@ export class SnifferCallBudget {
   private used = 0;
   private readonly explicitLimit: boolean;
   private stopRecorded = false;
+  private recordedStop = '';
   private clearedOnStart = false;
-  private readonly settingsPath: string | undefined;
+  private readonly settingsPath: string;
 
   constructor(options: { maxCallsPerDay?: number; now?: () => Date; statePath?: string; settingsPath?: string } = {}) {
     this.explicitLimit = options.maxCallsPerDay !== undefined;
     this.maxCallsPerDay = Math.max(0, Math.floor(options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY));
     this.now = options.now ?? (() => new Date());
     this.statePath = options.statePath;
-    this.settingsPath = options.settingsPath;
+    // Resolved once: the judge asks on every call, and resolving the layout path is the costly part.
+    this.settingsPath = options.settingsPath ?? ownerLimitSettingsPath();
     if (this.statePath) {
       try {
         const saved = JSON.parse(readFileSync(this.statePath, 'utf8')) as { day?: unknown; used?: unknown };
@@ -142,9 +144,14 @@ export class SnifferCallBudget {
     const limit = readJudgeCallOverride(now, this.settingsPath)
       ?? (decisionMode && !this.explicitLimit ? DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY : this.maxCallsPerDay);
     if (this.used >= limit) {
-      recordOwnerLimitStop({ id: 'judge.daily_calls', subject: 'judge', since: now.toISOString(), limit, used: this.used,
-        resumesAt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString() });
-      this.stopRecorded = true;
+      // Once per stop (and per limit): a refused attempt must not reopen the scheduler store each time.
+      const resumesAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+      const key = `${limit}:${this.used}:${resumesAt}`;
+      if (!this.stopRecorded || this.recordedStop !== key) {
+        recordOwnerLimitStop({ id: 'judge.daily_calls', subject: 'judge', since: now.toISOString(), limit, used: this.used, resumesAt });
+        this.stopRecorded = true;
+        this.recordedStop = key;
+      }
       return false;
     }
     if (this.stopRecorded || !this.clearedOnStart) {
