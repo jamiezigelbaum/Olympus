@@ -84588,7 +84588,11 @@ class LocalXBookmarksApiUsageStore {
       `).run(input.resourceIds.length, billableResources, billableResources * input.config.estimatedUnitCostMicrousd, input.rateLimit?.limit ?? null, input.rateLimit?.remaining ?? null, input.rateLimit?.resetAt ?? null, now.toISOString(), reservation.account_id, reservation.utc_day);
       this.deleteReservation(reservation.reservation_id);
     })();
-    providerStops.success();
+    const rate = input.rateLimit;
+    if (rate?.remaining === 0 && rate.resetAt)
+      providerStops.report(rate.resetAt, now, { limit: rate.limit ?? null, used: rate.limit ?? null });
+    else
+      providerStops.success();
   }
   settleFailure(input) {
     const now = validDate4(input.now ?? new Date);

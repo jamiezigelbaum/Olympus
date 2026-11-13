@@ -228,3 +228,21 @@ test('the X low-watermark buffer is Olympus pacing, not a wait X sets; only exha
     await shown('x', now, resetAt, { limit: 100, used: 100 });
   } finally { usage.close(); }
 });
+
+test('a successful X response that spends the last request reports the wait; one with requests left clears it', async () => {
+  const now = new Date('2026-11-13T12:00:00.000Z');
+  const resetAt = new Date(now.getTime() + 15 * 60_000).toISOString();
+  const config = defaultXBookmarksLiveSyncConfig({});
+  const usage = new LocalXBookmarksApiUsageStore(':memory:');
+  const succeed = (remaining: number, at: Date, reset: string) => {
+    const reservation = usage.reserveRequest({ account: 'personal', requestedMaxResources: 1, provenance: 'operator', config, now: at });
+    usage.settleSuccess({ reservation, resourceIds: [], rateLimit: { limit: 100, remaining, resetAt: reset }, config, now: at });
+  };
+  try {
+    succeed(0, now, resetAt);
+    await shown('x', now, resetAt, { limit: 100, used: 100 });
+    const later = new Date(Date.parse(resetAt) + 1_000);
+    succeed(40, later, new Date(later.getTime() + 15 * 60_000).toISOString());
+    await absent('x', later);
+  } finally { usage.close(); }
+});

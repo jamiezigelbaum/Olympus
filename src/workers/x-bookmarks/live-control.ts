@@ -1028,7 +1028,10 @@ export class LocalXBookmarksApiUsageStore {
       );
       this.deleteReservation(reservation.reservation_id);
     })();
-    providerStops.success();
+    // A successful response can still spend X's last request: that is the provider's wait.
+    const rate = input.rateLimit;
+    if (rate?.remaining === 0 && rate.resetAt) providerStops.report(rate.resetAt, now, { limit: rate.limit ?? null, used: rate.limit ?? null });
+    else providerStops.success();
   }
 
   settleFailure(input: {
