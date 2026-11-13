@@ -107,6 +107,22 @@ describe('Takeout label names reach owner rules on label ids', () => {
     // Nothing is asked of Gmail when no rule names a label.
     expect(asked).toBe(0);
   });
+
+  test('a label rule scoped to another source does not hold a Gmail import', async () => {
+    const other: OwnerTierRule = { ...rule, id: 'readwise-private', source: 'readwise' };
+    const h = gmailArchiveHarness(cleanups, { rules: [other] });
+    let asked = 0;
+    h.labels.current = async () => { asked += 1; return { unavailable: 'gmail_labels_unavailable' }; };
+    expect(await gmailLabelLookup({ set: h.set, labelIds: h.labels.current })).toEqual({ kind: 'none' });
+    expect(asked).toBe(0);
+    const id = await started(await h.approve('takeout.mbox', takeoutMbox([mail(8, { labels: ['Inbox'] })])));
+    expect((await h.importAll(id)).record?.status).toBe('imported');
+  });
+
+  test('a label rule scoped to Gmail still waits for the account\'s labels', async () => {
+    const h = gmailArchiveHarness(cleanups, { rules: [{ ...rule, source: 'gmail' }] });
+    expect(await gmailLabelLookup({ set: h.set, labelIds: async () => ({ unavailable: 'gmail_labels_unavailable' }) })).toEqual({ kind: 'unavailable', reason: 'gmail_labels_unavailable' });
+  });
 });
 
 describe('a spent request budget keeps what was read and waits', () => {

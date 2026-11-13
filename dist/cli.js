@@ -216453,7 +216453,7 @@ function gmailExportEvidence(archive) {
 }
 async function gmailLabelLookup(lane) {
   const rules = lane.set.classification()?.rules ?? [];
-  if (!rules.some((rule) => rule.match.kind === "label"))
+  if (!rules.some((rule) => rule.match.kind === "label" && (rule.source === undefined || rule.source === GMAIL_PROVIDER_ID)))
     return { kind: "none" };
   let found;
   try {
