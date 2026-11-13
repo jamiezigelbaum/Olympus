@@ -254136,7 +254136,7 @@ function waitForWorkerReadiness(options, port, wait) {
       break;
     const now = Date.now();
     const boot = readBoot();
-    if (boot && boot.phase !== "done")
+    if (boot && bootProgressIsLive(boot, now) && Date.parse(boot.startedAt) >= waitStartedAt)
       bootStarts.add(boot.pid);
     const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(boot, now);
     const front3 = bootMoving ? undefined : readFront();

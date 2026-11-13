@@ -801,6 +801,42 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
+  test('a stopped predecessor\'s unfinished boot file does not use up a boot: the third real background is still waited for (Astra on #1600)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-stale-'));
+    const manager = linuxManager('active');
+    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
+    const backgrounds = Array.from({ length: 3 }, () => Bun.spawn(['sleep', '60'], { stdout: 'ignore', stderr: 'ignore' }));
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      let polls = 0;
+      const staleAt = new Date(Date.now() - 60_000).toISOString();
+      const result = runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        readinessTimeoutMs: 300, actionSettlePollMs: 5,
+        bootProgress: () => {
+          const poll = polls++;
+          // First the stopped background's file, then three real boots, each past the window.
+          if (poll < 10) return { schema: 'olympus.boot-progress.v1', pid: gone, phase: 'starting', startedAt: staleAt, updatedAt: staleAt, completedStores: 2 };
+          const at = new Date().toISOString();
+          const pid = backgrounds[Math.min(2, Math.floor((poll - 10) / 80))]!.pid;
+          return { schema: 'olympus.boot-progress.v1', pid, phase: 'starting', startedAt: at, updatedAt: at, completedStores: 0 };
+        },
+        frontProgress: () => undefined,
+        progressLine: () => {},
+        // Ready late in the third real boot, past the first window.
+        readinessProbe: () => polls >= 10 + 2 * 80 + 60,
+        rollbackReadinessProbe: () => true,
+      });
+      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
+    } finally {
+      for (const child of backgrounds) child.kill();
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('a front that has stopped moving gets one window after the boot work, then the upgrade rolls back (#1563)', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-front-stalled-'));
     const manager = linuxManager('active');
