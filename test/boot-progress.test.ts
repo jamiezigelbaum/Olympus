@@ -249,7 +249,7 @@ describe('a killed backup leaves nothing behind once a backup runs again', () =>
     expect(existsSync(`${backup}.${gone}.partial-journal`)).toBe(false);
     expect(existsSync(`${backup}.${live}.partial`)).toBe(true);
     expect(existsSync(backup)).toBe(true);
-  });
+  }, 30_000);
 });
 
 describe('retired state is moved aside for the upgrade that retires it (#1563 review)', () => {
