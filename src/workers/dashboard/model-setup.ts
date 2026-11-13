@@ -3,7 +3,7 @@ import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
 import { VENICE_SETUP_SHORTCUT, VENICE_SETUP_STEPS } from '../source-dashboard.ts';
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
 import { blockerBanner, connectorSheet, escapeHtml, rowMenu, setupStepsSheet } from './components.ts';
-import { judgeArchiveEstimate, judgeDefaultCapDollars, judgeLocalIsSlow, type JudgeObserved } from '../classification/judge-spending.ts';
+import { DEFAULT_VENICE_JUDGE_MODEL, judgeArchiveEstimate, judgeDefaultCapDollars, judgeLocalIsSlow, type JudgeObserved } from '../classification/judge-spending.ts';
 import { runtimeArchiveFor } from '../source-index/built-in-reasoning/manifest.ts';
 import { judgeCount, judgeDuration, judgeMoney } from './judge-format.ts';
 
@@ -111,7 +111,9 @@ function firstRunJudgeForm(options: ModelSetupOptions): string {
   const observed = options.judgeSetup?.observed ?? {};
   const archive = options.judgeRuntime ?? runtimeArchiveFor(`${process.platform}-${process.arch}`);
   const slow = judgeLocalIsSlow(observed, archive);
-  const estimate = judgeArchiveEstimate(1_000, options.judgeSetup?.cloudModel ?? '', observed);
+  // A fresh install has no Venice lane yet (the Private pool is off until the
+  // privacy choice applies), so price the model Venice judging would use.
+  const estimate = judgeArchiveEstimate(1_000, options.judgeSetup?.cloudModel ?? DEFAULT_VENICE_JUDGE_MODEL, observed);
   const count = judgeCount(estimate.items);
   const localTime = estimate.measuredHours !== undefined
     ? `${judgeDuration(estimate.measuredHours)} for ${count} items, measured on this computer (${judgeCount(estimate.measuredPerMinute!)} items a minute).`

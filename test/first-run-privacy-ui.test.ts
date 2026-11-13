@@ -34,7 +34,7 @@ afterEach(() => {
 });
 
 function fixture(upgrade = false, needsLocalUnlock = false, extra: () => string = () => '', setupOptions: NonNullable<Parameters<typeof renderModelSetup>[1]> = {
-  judgeSetup: { cloudModel: DEFAULT_VENICE_JUDGE_MODEL }, judgeRuntime: { gpu: false },
+  judgeSetup: { cloudModel: null }, judgeRuntime: { gpu: false },
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'privacy-sheet-ui-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -100,7 +100,8 @@ test.each([
   [{ gpu: false }, { localItemsPerMinute: 67 }, 'local'],
   [{ gpu: true }, { localItemsPerMinute: 1 }, 'venice'],
 ] as const)('first-run judge preselection follows measurements and runtime capability (%j, %j)', async (judgeRuntime, observed, selected) => {
-  const f = fixture(false, false, () => '', { judgeRuntime, judgeSetup: { cloudModel: DEFAULT_VENICE_JUDGE_MODEL, observed } });
+  // cloudModel is null as on a real fresh install, before the Private pool is on.
+  const f = fixture(false, false, () => '', { judgeRuntime, judgeSetup: { cloudModel: null, observed } });
   await f.submit('[data-first-run-privacy]');
   f.click('[data-first-run-sheet] [data-setup-next]');
   const form = visiblePanel(f.root)?.querySelector<HTMLFormElement>('[data-first-run-judge]')!;
