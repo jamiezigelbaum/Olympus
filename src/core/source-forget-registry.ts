@@ -462,6 +462,10 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
  */
 export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
   {
+    file: 'limit-settings', modules: [],
+    reason: 'The owner’s global judge daily-call settings, containing only limits and UTC dates. Source deletion must not undo an owner choice.',
+  },
+  {
     file: 'embedding-ledger',
     modules: [],
     reason: 'An append-only record of embedding decisions: corpus ids, counts and one-sentence notes, no item content or names. The owner\'s ruling is that it is never rewritten.',

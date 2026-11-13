@@ -86,6 +86,9 @@ const IMPORT_ALLOWLIST = new Set([
   './sniffer-decision-mass.ts',
   './tier-ledger.ts',
   './tier-rules.ts',
+  // Limits step 2: the judge's daily call stop and the owner's Raise (no source names).
+  '../../core/limit-stops.ts',
+  '../../core/owner-limit-state.ts',
   // The pinned built-in model list (pure data, no imports): which lanes are the small model.
   '../source-index/built-in-reasoning/manifest.ts',
 ]);

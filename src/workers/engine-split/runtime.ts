@@ -115,6 +115,8 @@ export interface EngineFront {
   status(): EngineStatusRead | undefined;
   /** One built-in model completion, run by the background, which holds the model. */
   completeModel(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
+  /** Whether the background answers its ready check now, boot work done (the front's health reports it). */
+  backgroundReady(): Promise<boolean>;
   stop(): void;
 }
 
@@ -163,7 +165,8 @@ export function createEngineFront(input: {
   const poll = setInterval(() => { status(); }, 2_000);
   poll.unref?.();
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
-  return { client, ownerBusy: relay, status, completeModel, stop: () => { clearInterval(poll); relay?.stop(); } };
+  const backgroundReady = () => probeEngineBackground(fetchBackground, input.authToken, undefined, 1_000);
+  return { client, ownerBusy: relay, status, completeModel, backgroundReady, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
 /** A forwarded sync answers when its pass ends, as the route did in one process: up to a long pass. */

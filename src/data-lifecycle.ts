@@ -1,5 +1,5 @@
 import { connectionRequestsPath } from './core/connection-requests.ts';
-import { preSchemaBackupsOf } from './core/boot-progress.ts';
+import { preSchemaBackupsOf, retiredStateBackupPath } from './core/boot-progress.ts';
 import { PEOPLE_INDEX_STORE_ID, peopleIndexPath } from './core/people-index.ts';
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
 import { APP_RELEASE_LOG_STORE_ID, appReleaseLogDbPath } from './core/app-release-log.ts';
@@ -1594,7 +1594,8 @@ function looksLikeSqlite(path: string): boolean {
 
 /** Both historical model locations, including directories with unpublished scratch weights. */
 function retiredEmbeddingDirectoryTargets(ledgerPath: string): DeleteTarget[] {
-  return retiredEmbeddingPrefilterPaths(ledgerPath).directories.map(path => ({
+  // Each with the copy a start moved aside until its upgrade commits (#1563).
+  return retiredEmbeddingPrefilterPaths(ledgerPath).directories.flatMap(path => [path, retiredStateBackupPath(path)]).map(path => ({
     path, kind: 'known_root', allowRecursive: true,
   }));
 }

@@ -5,6 +5,7 @@ import { openEngineMcp, runLiveAccounts, type EngineMcp, type LiveSourceSpec } f
 import { openFreshDashboard, type FreshDashboard } from './fresh-dashboard.ts';
 import { runFreshOnDemand, type FreshTimingOptions } from './fresh-on-demand.ts';
 import type { OnDemandTimingResult } from './on-demand-timing.ts';
+import { runFreshLimits, type FreshLimitsOptions, type LimitsResult } from './fresh-limits.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../../src/workers/answer-model-required.ts';
 import { FIRST_RUN_PRIVACY_REQUIRED_TEXT } from '../../src/workers/first-run-privacy-gate.ts';
 
@@ -91,6 +92,9 @@ export interface FreshOptions {
   bundle?: { installer: string; tarball: string };
   cdp?: string;
   onDemandTiming?: FreshTimingOptions;
+  limits?: FreshLimitsOptions;
+  /** Unit-test seam. Every production fresh install runs limits. */
+  limitsStage?: typeof runFreshLimits;
   /** Current harness bundle, copied to the fresh user's home for the existing owner-bridge command. */
   bridgeAgent?: string;
   /** Test seam: real implementation uses only dashboard controls and persisted reads. */
@@ -99,12 +103,13 @@ export interface FreshOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-export async function runFreshInstall(machine: Machine, options: FreshOptions): Promise<{ checks: CheckResult[]; screens: []; onDemandTiming?: OnDemandTimingResult }> {
+export async function runFreshInstall(machine: Machine, options: FreshOptions): Promise<{ checks: CheckResult[]; screens: []; onDemandTiming?: OnDemandTimingResult; limits?: LimitsResult }> {
   const sources = validateFreshSources(options.sources);
   if (machine.os !== 'linux') throw new Error('fresh install requires Linux');
   if (!options.dashboard && !options.bridgeAgent) throw new Error('fresh install needs the machine-agent bundle');
   const checks: CheckResult[] = [];
   let onDemandTiming: OnDemandTimingResult | undefined;
+  let limits: LimitsResult | undefined;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   let current = 'install';
   let interrupted = false;
@@ -244,6 +249,9 @@ done; exit 1`), 200_000);
         async ms => { if (interrupted) throw new Error('run interrupted'); await sleep(ms); }, machine);
       checks.push(...onDemandTiming.checks);
     }
+    current = 'limits';
+    limits = await (options.limitsStage ?? runFreshLimits)(fresh, options.limits ?? {}, machine);
+    checks.push(...limits.checks);
   } catch (error) {
     checks.push({ id: `fresh.${current}`, title: current, status: error instanceof FreshInconclusive ? 'skip' : 'fail', detail: error instanceof FreshInconclusive ? `Inconclusive: ${error.message}` : `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
   } finally {
@@ -265,7 +273,7 @@ done; exit 1`, 130_000);
   }
   process.removeListener('SIGINT', onInterrupt);
   process.removeListener('SIGTERM', onInterrupt);
-  return { checks, screens: [], ...(onDemandTiming ? { onDemandTiming } : {}) };
+  return { checks, screens: [], ...(onDemandTiming ? { onDemandTiming } : {}), ...(limits ? { limits } : {}) };
 }
 
 async function ask(engine: EngineMcp, question: string, sleep: (ms: number) => Promise<void>) {

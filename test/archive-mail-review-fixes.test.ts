@@ -1,3 +1,6 @@
+import { AsyncResource } from 'node:async_hooks';
+import { ownerLimits } from '../src/core/owner-limits.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 // Regressions for the review of PR #546 (Astra and the review bot): every
 // message is the proved account's, Takeout's label names reach owner rules on
 // label ids, a spent request budget keeps what was read and waits, account
@@ -29,6 +32,7 @@ import {
   gmailImportAllowance,
   gmailImportBudget,
   gmailImportWait,
+  withGmailImportRunOnce,
 } from '../src/workers/google-connectors/gmail-import-allowance.ts';
 import { GoogleDailyRequestBudget } from '../src/workers/google-connectors/request-budget.ts';
 import { dashboardImportAttentionSentence } from '../src/workers/dashboard/vocabulary.ts';
@@ -373,4 +377,37 @@ describe('Gmail\'s item scope and approved scope', () => {
     expect(store.itemMatchesSearchFilters('personal:m1', 'personal', { provider: 'gmail', observedConnectorId: 'gmail.scope.x' })).toBe(false);
     expect(googleAccountIdFromAddress(OWNER_ADDRESS)).toMatch(/^google:/);
   });
+});
+
+
+test('the Gmail archive wait boundary reports the import allowance stop', async () => {
+  const time = createTestClock(Date.parse('2026-11-12T12:00:00Z'));
+  const allowance = gmailImportAllowance({ usage: () => ({ utcDay: '2026-11-12', dailyRequestBudget: 1, requests: 0 }), now: time.date });
+  const rule: OwnerTierRule = { id: 'payroll-private', match: { kind: 'label', value: 'Label_7' }, tier: 'secure', strength: 'force' };
+  const h = gmailArchiveHarness(cleanups, { rules: [rule], reportWait: reason => allowance.reportWait?.(reason) });
+  h.labels.current = async () => ({ unavailable: 'gmail_budget_too_small' });
+  const id = await started(await h.approve('wait.mbox', takeoutMbox([mail(5, { labels: ['Inbox', 'Payroll'] })])));
+  const outcome = await h.importAll(id);
+  expect(outcome.continueSoon).toBe(false);
+  expect((await ownerLimits({}, { now: time.date })).stops?.find(stop => stop.id === 'gmail.import_allowance')).toMatchObject({
+    reason: 'gmail_budget_too_small', continue: 'raise', unit: 'requests', limit: 1, used: 0,
+  });
+});
+
+
+test('one operator import pass revokes its allowance bypass even in inherited async work', async () => {
+  const time = createTestClock(Date.parse('2026-11-12T12:00:00Z'));
+  const counter = new GoogleDailyRequestBudget({ provider: 'Gmail', dailyRequestBudget: GMAIL_IMPORT_MIN_DAILY_BUDGET, now: time.date });
+  const allowance = gmailImportAllowance({ usage: () => counter.status(), now: time.date });
+  const gate = gmailImportBudget(counter, allowance);
+  for (let i = 0; i < GMAIL_IMPORT_MIN_DAILY_BUDGET / 2; i++) gate.reserve();
+  expect(allowance.check(1)).toBe('gmail_import_allowance_spent');
+  let inherited: () => unknown = () => undefined;
+  await withGmailImportRunOnce(async () => {
+    inherited = AsyncResource.bind(() => allowance.check(1));
+    expect(inherited()).toBe(true);
+    gate.reserve();
+  });
+  expect(inherited()).toBe('gmail_import_allowance_spent');
+  expect(counter.status().requests).toBe(GMAIL_IMPORT_MIN_DAILY_BUDGET / 2 + 1);
 });

@@ -231,6 +231,21 @@ const PRIVACY_ITEM_SET_PARAMS = {
 
 export const operations: Operation[] = [
   {
+    name: 'olympus_limits',
+    description: 'List open work stops with exact reasons, amounts, units and continuation actions; continue one with run_once, raise (--to, optional --keep), or refill. Daily raises without keep last only this UTC day; the cumulative judge spending cap stays raised.',
+    params: {
+      action: { type: 'string', enum: ['list', 'continue'] },
+      id: { type: 'string', description: 'The limit id from the list.' },
+      subject: { type: 'string', description: 'The exact subject from the list; required if more than one matches.' },
+      to: { type: 'number', description: 'New total limit in the reported unit, covering the next step and greater than the current limit and usage.' },
+      keep: { type: 'boolean', description: 'Keep the new daily limit for good.' },
+    },
+    mutating: true,
+    cliHints: { name: 'limits', positional: ['action', 'id'] },
+    // The stops live in the engine's Bun store, so the engine runs it (owner-limits.ts).
+    handler: async (ctx, params) => ctx.email.ownerLimits(params),
+  },
+  {
     name: 'argus_ping',
     description: 'Check whether the configured Argus local model profile is reachable.',
     params: {

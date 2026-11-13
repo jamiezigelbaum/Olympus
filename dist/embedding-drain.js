@@ -663,6 +663,7 @@ var SHARED_DATA_FILES = {
   "remote-connections": "remote-connections.sqlite",
   "source-dashboard": "source-dashboard.sqlite",
   "source-scheduler": "source-scheduler.sqlite",
+  "limit-settings": "limits.json",
   "source-watches": "source-watches.sqlite",
   "file-extraction-jobs": "file-extraction-jobs.sqlite",
   "ingestion-doctor-state": "source-ingestion-doctor-state.json",
@@ -682,6 +683,7 @@ var SHARED_DATA_FILES = {
   "backup-staging": "backup-staging",
   "people-index": "people-index.sqlite",
   "boot-progress": "boot-progress.json",
+  "front-progress": "front-progress.json",
   "schema-backups": "schema-backups.jsonl",
   models: "models",
   "built-in-embedding": "models/built-in-embedding",
@@ -1664,6 +1666,7 @@ var SOURCE_INDEX_ACTIVATION_MODES = ["lexical_only", "hybrid_shadow", "hybrid_pr
 
 // src/core/public-surface.ts
 var V0_4_PUBLIC_NATIVE_TOOLS = [
+  "olympus_limits",
   "argus_ping",
   "argus_list_models",
   "argus_complete",
@@ -1683,6 +1686,7 @@ var V0_4_PUBLIC_NATIVE_TOOLS = [
   "olympus_open_remote"
 ];
 var V0_4_PUBLIC_MCP_TOOLS = [
+  "olympus_limits",
   "argus_ping",
   "argus_list_models",
   "argus_complete",
@@ -1699,6 +1703,7 @@ var V0_4_PUBLIC_MCP_TOOLS = [
   "privacy_item_set"
 ];
 var V0_4_PUBLIC_CLI_OPERATIONS = [
+  "olympus_limits",
   "argus_ping",
   "argus_list_models",
   "argus_complete",
@@ -2342,7 +2347,7 @@ function withSqliteFiles(path) {
 
 // scripts/source-embedding-drain.ts
 import { createHash as createHash22 } from "node:crypto";
-import { existsSync as existsSync29, lstatSync as lstatSync11, mkdirSync as mkdirSync16, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync30, lstatSync as lstatSync11, mkdirSync as mkdirSync16, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname32, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
@@ -13298,12 +13303,28 @@ import { chmodSync as chmodSync3, closeSync as closeSync7, existsSync as existsS
 import { dirname as dirname19 } from "node:path";
 
 // src/core/boot-progress.ts
-import { appendFileSync, existsSync as existsSync14, mkdirSync as mkdirSync10, readdirSync as readdirSync2, readFileSync as readFileSync19, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync8 } from "node:fs";
+import { appendFileSync, existsSync as existsSync14, mkdirSync as mkdirSync10, readdirSync as readdirSync2, readFileSync as readFileSync19, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync8, utimesSync } from "node:fs";
 import { basename as basename3, dirname as dirname18, join as join20 } from "node:path";
 var BOOT_LONG_STEP_BACKSTOP_MS = 6 * 60 * 60 * 1000;
 var BOOT_STALL_MS = 5 * 60 * 1000;
 var WRITE_INTERVAL_MS = 1000;
 var current2;
+var front;
+function reportFrontStoreOpened(now = Date.now) {
+  stepFront(true, now);
+}
+function stepFront(storeOpened, now) {
+  try {
+    if (!front)
+      return;
+    front.progress = {
+      ...front.progress,
+      updatedAt: new Date(now()).toISOString(),
+      completedStores: front.progress.completedStores + (storeOpened ? 1 : 0)
+    };
+    write(front, now(), false);
+  } catch {}
+}
 function reportBootStep(env, event, now = Date.now) {
   try {
     if (!current2 || bootProgressPath(env) !== bootProgressPath(current2.env))
@@ -13319,20 +13340,18 @@ function reportBootStep(env, event, now = Date.now) {
       current2.progress.storeId = event.storeId;
     else
       delete current2.progress.storeId;
-    write(now(), phaseChanged);
+    write(current2, now(), phaseChanged);
   } catch {}
 }
-function write(nowMs, force) {
-  if (!current2)
-    return;
-  if (!force && nowMs - current2.lastWriteMs < WRITE_INTERVAL_MS)
+function write(target, nowMs, force) {
+  if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS)
     return;
   try {
-    const path = bootProgressPath(current2.env);
+    const path = sharedDataPath(target.file, target.env);
     mkdirSync10(dirname18(path), { recursive: true, mode: 448 });
-    writePrivateFileAtomicSync(path, `${JSON.stringify(current2.progress)}
+    writePrivateFileAtomicSync(path, `${JSON.stringify(target.progress)}
 `);
-    current2.lastWriteMs = nowMs;
+    target.lastWriteMs = nowMs;
   } catch {}
 }
 function bootProgressPath(env) {
@@ -13915,6 +13934,7 @@ class GoogleRequestBudgetError extends Error {
   provider;
   reason;
   observedFutureUtcDay;
+  amounts;
   constructor(provider, retryAt, reason = "daily_api_request_guard", options = {}) {
     super(reason === "future_utc_day" ? `${provider} request budget clock regression: persisted future UTC day ` + `${options.observedFutureUtcDay ?? "future"} is later than current UTC day ` + `${options.currentUtcDay ?? "current"}; recover with ` + "`olympus source request-budget recover-future` using the observed day." : reason === "ledger_busy" ? `${provider} request budget ledger remained busy; the provider request was refused before dispatch.` : `${provider} request deferred by daily_api_request_guard.`);
     this.name = "GoogleRequestBudgetError";
@@ -13922,6 +13942,7 @@ class GoogleRequestBudgetError extends Error {
     this.retryAt = retryAt;
     this.reason = reason;
     this.observedFutureUtcDay = options.observedFutureUtcDay;
+    this.amounts = options.limit !== undefined ? { limit: options.limit, ...options.used !== undefined ? { used: options.used } : {} } : undefined;
   }
 }
 
@@ -21346,6 +21367,41 @@ function* profileSteps(db) {
   profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
   return languages;
 }
+// src/core/limit-stops.ts
+var limits = new Map;
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+var stopHooks;
+var stopGenerations = new Map;
+function createLimitStopReporter() {
+  const reported = new Map;
+  return {
+    report(stop) {
+      const key2 = JSON.stringify([stop.id, stop.subject]);
+      const signature = JSON.stringify([{ ...stop, since: undefined }, stopGenerations.get(key2) ?? 0]);
+      if (stopHooks && reported.get(key2) !== signature) {
+        stopHooks.record(stop);
+        reported.set(key2, signature);
+      }
+    },
+    clear(id, subject) {
+      const key2 = JSON.stringify([id, subject]);
+      if (stopHooks && reported.get(key2) !== "") {
+        stopHooks.clear(id, subject);
+        reported.set(key2, "");
+      }
+    }
+  };
+}
+
+// src/workers/classification/judge-spending.ts
+import { existsSync as existsSync19, readFileSync as readFileSync20 } from "node:fs";
+
 // src/workers/classification/sniffer.ts
 import { createHash as createHash14 } from "node:crypto";
 
@@ -21975,6 +22031,14 @@ var SNIFFER_CATEGORIES = [
   "other"
 ];
 var SNIFFER_PRIVATE_KINDS = ["none", "health", "therapy", "financial", "legal", "identity", "intimate", "family", "other"];
+
+class JudgeCloudStopped extends Error {
+  reason;
+  constructor(reason) {
+    super(`Cloud judging stopped: ${reason}`);
+    this.reason = reason;
+  }
+}
 var QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text";
 var SNIFFER_DECISION_BARS = [
   [QWEN35_4B.modelId, "qwen3\\.5-4b", 0.15],
@@ -22080,6 +22144,8 @@ function boundedOwnerContext(ownerContext) {
 var SNIFFER_PROMPT_VERSION = `p-${createHash14("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
 var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash14("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 // src/workers/classification/judge-spending.ts
+registerLimit({ id: "judge.spend_cap", kind: "cost", scope: "judge", label: "Privacy judge spending cap reached", unit: "usd", continue: "raise" });
+registerLimit({ id: "judge.payment", kind: "funding", scope: "judge", label: "Privacy judge provider refused payment (402)", unit: "usd", continue: "refill" });
 var JUDGE_PRICES = Object.freeze({
   "deepseek-v4-flash-0731": { input: 0.13, output: 0.26 },
   "qwen3-6-35b-a3b": { input: 0.1, output: 1 },
@@ -22088,6 +22154,234 @@ var JUDGE_PRICES = Object.freeze({
   "grok-4-3": { input: 1.42, output: 2.83 },
   "grok-4-5": { input: 2.27, output: 6.8 }
 });
+function judgeChoiceUsesVenice(choice) {
+  return choice !== "local";
+}
+var JUDGE_CHOICES = ["local", "local-then-venice", "venice"];
+function readJudgeSpending(path) {
+  try {
+    return statusFromRow(readBudgetRow(path));
+  } catch {
+    return { choice: "local", capDollars: 0, spentDollars: 0, remainingDollars: 0, stop: "storage" };
+  }
+}
+function readBudgetRow(path) {
+  try {
+    const row = JSON.parse(readFileSync20(path, "utf8"));
+    statusFromRow(row);
+    return row;
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return { choice: "local", cap: 0, spent: 0, stop: null };
+    throw new Error("The saved judge budget cannot be read. Restore the spending record or fix its file permissions; cloud judging is off.");
+  }
+}
+function statusFromRow(row) {
+  if (!row || !JUDGE_CHOICES.includes(row.choice) || !Number.isSafeInteger(row.cap) || !Number.isSafeInteger(row.spent) || row.cap < 0 || row.spent < 0 || ![null, "cap", "payment"].includes(row.stop) || ![undefined, true].includes(row.uncapped))
+    throw new Error("The saved judge budget cannot be read. Cloud judging is stopped.");
+  return {
+    choice: row.choice,
+    capDollars: row.cap / 1e6,
+    spentDollars: row.spent / 1e6,
+    remainingDollars: Math.max(0, row.cap - row.spent) / 1e6,
+    stop: row.stop,
+    ...row.uncapped ? { uncapped: true } : {}
+  };
+}
+
+class JudgeSpending {
+  path;
+  stops = createLimitStopReporter();
+  constructor(path) {
+    this.path = path;
+  }
+  raise(capDollars) {
+    const cap = judgeCapMicros(capDollars);
+    this.change((row) => {
+      row.cap = cap;
+      if (row.stop === "cap" && row.spent < cap)
+        row.stop = null;
+      delete row.uncapped;
+    });
+  }
+  refill() {
+    this.change((row) => {
+      if (row.stop === "payment")
+        row.stop = null;
+    });
+  }
+  report(row, cost = 0) {
+    for (const [reason, id] of [["cap", "judge.spend_cap"], ["payment", "judge.payment"]]) {
+      if (row.stop === reason)
+        this.stops.report({
+          id,
+          subject: this.path,
+          since: new Date().toISOString(),
+          reason,
+          limit: row.cap / 1e6,
+          used: row.spent / 1e6,
+          waiting: { runs: 1 },
+          ...reason === "cap" ? { toContinue: { raiseTo: Math.max(row.cap + 1, row.spent + cost) / 1e6 } } : {}
+        });
+      else
+        this.stops.clear(id, this.path);
+    }
+  }
+  reportedOnStart = false;
+  status() {
+    const status = readJudgeSpending(this.path);
+    if (!this.reportedOnStart && status.stop !== "storage") {
+      this.report(readBudgetRow(this.path));
+      this.reportedOnStart = true;
+    }
+    return status;
+  }
+  change(edit) {
+    return withFileLeaseSync(this.path, () => {
+      const row = readBudgetRow(this.path);
+      const result = edit(row);
+      statusFromRow(row);
+      writePrivateFileAtomicSync(this.path, `${JSON.stringify(row)}
+`);
+      return result;
+    });
+  }
+  choose(choice, capDollars) {
+    const cap = judgeCapMicros(capDollars);
+    this.change((row) => {
+      row.choice = choice;
+      row.cap = cap;
+      row.stop = null;
+      delete row.uncapped;
+      delete row.noted;
+      this.report(row);
+    });
+  }
+  adoptExistingApproval() {
+    withFileLeaseSync(this.path, () => {
+      if (existsSync19(this.path))
+        return;
+      writePrivateFileAtomicSync(this.path, `${JSON.stringify({ choice: "venice", cap: 0, spent: 0, stop: null, uncapped: true })}
+`);
+    });
+  }
+  hasRecord() {
+    return existsSync19(this.path);
+  }
+  takeUpgradeNote() {
+    if (!this.status().uncapped)
+      return false;
+    return this.change((row) => {
+      const show = row.uncapped === true && !row.noted;
+      if (show)
+        row.noted = true;
+      return show;
+    });
+  }
+  lowerCap(capDollars) {
+    const cap = judgeCapMicros(capDollars);
+    this.change((row) => {
+      row.cap = Math.min(row.cap, cap);
+      if (!row.stop && row.spent >= row.cap)
+        row.stop = "cap";
+      this.report(row);
+    });
+  }
+  reserve(cost) {
+    const stopped = this.change((row) => {
+      if (!judgeChoiceUsesVenice(row.choice))
+        return "opt_in";
+      if (row.stop) {
+        this.report(row, cost);
+        return row.stop;
+      }
+      if (row.spent + cost > row.cap) {
+        row.stop = "cap";
+        this.report(row, cost);
+        return row.stop;
+      }
+      this.report(row);
+      row.spent += cost;
+      return;
+    });
+    if (stopped)
+      throw new JudgeCloudStopped(stopped);
+  }
+  fetch(fetchImpl, onStop = () => {}) {
+    return async (url, init) => {
+      const status = this.status();
+      if (status.uncapped) {
+        if (status.stop) {
+          onStop();
+          throw new JudgeCloudStopped(status.stop);
+        }
+        const response2 = await fetchImpl(url, init);
+        if (response2.status === 402) {
+          this.change((row) => {
+            row.stop = "payment";
+            this.report(row);
+          });
+          onStop();
+          throw new JudgeCloudStopped("payment");
+        }
+        return response2;
+      }
+      const body = JSON.parse(String(init.body));
+      const price = JUDGE_PRICES[normalizeVeniceAnalystModelId(body.model)];
+      if (!price)
+        throw new JudgeCloudStopped("price");
+      const input = Buffer.byteLength(JSON.stringify(body.messages), "utf8") + 64;
+      const output = body.max_completion_tokens;
+      if (!Number.isSafeInteger(output) || output < 0)
+        throw new Error("The judge output allowance is missing.");
+      const cost = Math.ceil(input * price.input + output * price.output);
+      try {
+        this.reserve(cost);
+      } catch (error) {
+        if (error instanceof JudgeCloudStopped)
+          onStop();
+        throw error;
+      }
+      const response = await fetchImpl(url, init);
+      if (response.status === 402) {
+        this.change((row) => {
+          row.spent -= cost;
+          row.stop = "payment";
+          this.report(row);
+        });
+        onStop();
+        throw new JudgeCloudStopped("payment");
+      }
+      if ([400, 401, 403, 404, 405, 413, 422, 429].includes(response.status)) {
+        this.change((row) => {
+          row.spent -= cost;
+        });
+      }
+      if (response.ok) {
+        try {
+          const reply = await response.clone().json();
+          const usage = reply.usage;
+          if (usage && Number.isSafeInteger(usage.prompt_tokens) && Number.isSafeInteger(usage.completion_tokens) && usage.prompt_tokens >= 0 && usage.completion_tokens >= 0) {
+            const actual = Math.ceil(usage.prompt_tokens * price.input + usage.completion_tokens * price.output);
+            this.change((row) => {
+              row.spent += actual - cost;
+              if (row.spent >= row.cap)
+                row.stop = "cap";
+              this.report(row);
+            });
+          }
+        } catch {}
+      }
+      return response;
+    };
+  }
+}
+function judgeCapMicros(capDollars) {
+  const cap = Math.round(capDollars * 1e6);
+  if (!Number.isFinite(capDollars) || capDollars < 0 || !Number.isSafeInteger(cap))
+    throw new Error("Enter a spending limit in dollars.");
+  return cap;
+}
 
 // src/workers/classification/built-in-sniffer.ts
 var BUILT_IN_SNIFFER_PROFILE_ID = "built_in";
@@ -22604,7 +22898,7 @@ function hasImmutableAccountLabel(id) {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash16, randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync24, lstatSync as lstatSync10, mkdirSync as mkdirSync15, statSync as statSync14, statfsSync as statfsSync2 } from "node:fs";
+import { existsSync as existsSync25, lstatSync as lstatSync10, mkdirSync as mkdirSync15, statSync as statSync14, statfsSync as statfsSync2 } from "node:fs";
 import { dirname as dirname27 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
@@ -22613,12 +22907,12 @@ import { createHash as createHash15, randomUUID as randomUUID9 } from "node:cryp
 import {
   chmodSync as chmodSync6,
   closeSync as closeSync10,
-  existsSync as existsSync20,
+  existsSync as existsSync21,
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync13,
   lstatSync as lstatSync8,
   openSync as openSync10,
-  readFileSync as readFileSync20,
+  readFileSync as readFileSync21,
   readdirSync as readdirSync3,
   realpathSync as realpathSync5,
   renameSync as renameSync7,
@@ -22670,7 +22964,7 @@ function olympusDataDir(env = process.env) {
 }
 
 // src/core/store-identity.ts
-import { existsSync as existsSync19, realpathSync as realpathSync4, statSync as statSync12 } from "node:fs";
+import { existsSync as existsSync20, realpathSync as realpathSync4, statSync as statSync12 } from "node:fs";
 import { basename as basename4, dirname as dirname22, isAbsolute as isAbsolute10, join as join22, relative as relative5, resolve as resolve7, sep as sep5 } from "node:path";
 var LAYOUTS2 = ["folder", "legacy"];
 function layoutPath(identity, layout, env) {
@@ -22749,7 +23043,7 @@ function storePlacementView(env = process.env) {
       return loaded = { kind: "unreadable" };
     try {
       const read = readSourceRegistry(env);
-      loaded = existsSync19(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
+      loaded = existsSync20(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
     } catch {
       loaded = { kind: "unreadable" };
     }
@@ -22952,10 +23246,10 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
     const refs = refsDir(path);
     for (const name of markerNames(holder))
       rmSync8(join23(refs, name), { force: true });
-    const remaining = existsSync20(refs) ? readdirSync3(refs) : [];
+    const remaining = existsSync21(refs) ? readdirSync3(refs) : [];
     if (remaining.length > 0)
       return false;
-    if (existsSync20(refs))
+    if (existsSync21(refs))
       rmdirSync(refs);
     rmSync8(path, { force: true });
     return true;
@@ -22992,7 +23286,7 @@ function sweepMediaCache(dir, options = {}) {
       if (!name.endsWith(".jpg") || !isSha256(name.slice(0, -4)))
         continue;
       const refs = refsDir(path);
-      if (existsSync20(refs)) {
+      if (existsSync21(refs)) {
         for (const marker of readdirSync3(refs)) {
           const markerPath = join23(refs, marker);
           const gone = marker.startsWith("staging-") || marker.endsWith(".tmp") ? old(markerPath) : marker.startsWith(STORE_MARKER_PREFIX) ? storeHolderGone(markerPath, placement) : holderGone(markerPath, marker, placement);
@@ -23047,7 +23341,7 @@ function flushMarker(marker, refs) {
 }
 function readMarker(marker) {
   try {
-    return readFileSync20(marker, "utf8");
+    return readFileSync21(marker, "utf8");
   } catch {
     return;
   }
@@ -23056,12 +23350,12 @@ function holderGone(marker, markerName, placement) {
   const name = readMarker(marker);
   if (!name || !isAbsolute11(name) || holderDigest(name) !== markerName)
     return false;
-  if (existsSync20(name))
+  if (existsSync21(name))
     return false;
   const verdict = placement.pathMarker(name);
   if (verdict !== "unplaced")
     return verdict === "gone";
-  return existsSync20(dirname23(name));
+  return existsSync21(dirname23(name));
 }
 var STORE_MARKER_PREFIX = "store-";
 function storeHolderGone(marker, placement) {
@@ -23330,6 +23624,7 @@ var REMOTE_ERROR_TEXT = {
   argus_error: "Olympus's private analyst could not answer. Try again later.",
   email_not_configured: "Olympus on the computer needs setup before it can answer.",
   email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+  worker_restarting: "Olympus is restarting. Try again in a moment.",
   email_error: "Olympus could not complete this request.",
   email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
   source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
@@ -23608,7 +23903,7 @@ var STOP_WORDS2 = new Set([
 ]);
 
 // src/workers/classification/tier-set-binding.ts
-import { existsSync as existsSync21 } from "node:fs";
+import { existsSync as existsSync22 } from "node:fs";
 import { basename as basename6, dirname as dirname24, join as join24, resolve as resolve9 } from "node:path";
 function tierStoreDataRoot(storeDbPath) {
   const folder = dirname24(resolve9(storeDbPath));
@@ -23645,7 +23940,7 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
 }
 function findTierSetLedger(storeDbPath, binding) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
-    if (candidate === ":memory:" || !existsSync21(candidate))
+    if (candidate === ":memory:" || !existsSync22(candidate))
       continue;
     if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
       return candidate;
@@ -23795,12 +24090,12 @@ function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
 }
 
 // src/workers/connector-store/secrets-disposition.ts
-import { existsSync as existsSync23 } from "node:fs";
+import { existsSync as existsSync24 } from "node:fs";
 
 // src/core/app-release-log.ts
 import { Database as Database5 } from "bun:sqlite";
 import { randomBytes as randomBytes2 } from "node:crypto";
-import { chmodSync as chmodSync7, existsSync as existsSync22, lstatSync as lstatSync9, mkdirSync as mkdirSync14 } from "node:fs";
+import { chmodSync as chmodSync7, existsSync as existsSync23, lstatSync as lstatSync9, mkdirSync as mkdirSync14 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { dirname as dirname26, isAbsolute as isAbsolute13, join as join25 } from "node:path";
 
@@ -24036,7 +24331,7 @@ function openAppReleaseLog(dbPath, options = {}) {
   };
 }
 function forgetSecretAppReleaseItem(dbPath, item, options = {}) {
-  if (!existsSync22(dbPath))
+  if (!existsSync23(dbPath))
     return 0;
   const store = openAppReleaseLog(dbPath);
   try {
@@ -24046,7 +24341,7 @@ function forgetSecretAppReleaseItem(dbPath, item, options = {}) {
   }
 }
 function retireSecretAppReleaseItem(dbPath, item, options = {}) {
-  if (!existsSync22(dbPath))
+  if (!existsSync23(dbPath))
     return;
   const store = openAppReleaseLog(dbPath);
   try {
@@ -24131,7 +24426,7 @@ function hardenPrivatePath(dbPath) {
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
     throw new Error("The AI apps log must live in a real private directory.");
   chmodSync7(leafDir, 448);
-  if (existsSync22(dbPath)) {
+  if (existsSync23(dbPath)) {
     const fileStat = lstatSync9(dbPath);
     if (fileStat.isSymbolicLink() || !fileStat.isFile())
       throw new Error("The AI apps log must be a regular file, not a symlink.");
@@ -24164,7 +24459,7 @@ function forgetSecretInSideStores(options) {
     result.failed += 1;
   }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
-  if (snifferPath !== ":memory:" && existsSync23(snifferPath)) {
+  if (snifferPath !== ":memory:" && existsSync24(snifferPath)) {
     try {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath });
       try {
@@ -24221,7 +24516,7 @@ function forgetSecretInSideStores(options) {
     }
   }
   try {
-    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync23(path)));
+    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync24(path)));
   } catch {}
   try {
     if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
@@ -25865,7 +26160,7 @@ class LocalConnectorStore {
       if (this.dbPath !== ":memory:")
         mkdirSync15(dirname27(this.dbPath), { recursive: true, mode: 448 });
     }
-    const creatingFile = this.dbPath === ":memory:" || !existsSync24(this.dbPath);
+    const creatingFile = this.dbPath === ":memory:" || !existsSync25(this.dbPath);
     this.db = new Database6(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
     this.openedFile = fileIdentity(this.dbPath);
     try {
@@ -25916,6 +26211,7 @@ class LocalConnectorStore {
         if (model && !vectorDigestState(this.db, model).completed)
           this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
+      reportFrontStoreOpened();
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       throw error;
@@ -26159,7 +26455,7 @@ class LocalConnectorStore {
       return;
     if (!this.tierLedgerHandle) {
       const path = tierLedgerPathForStore(this.dbPath);
-      if (this.readOnly && (path === ":memory:" || !existsSync24(path)))
+      if (this.readOnly && (path === ":memory:" || !existsSync25(path)))
         return;
       this.tierLedgerHandle = new TierLedger({ dbPath: path, now: this.now, ...this.readOnly ? { readOnly: true } : {} });
       this.tierLedgerOwned = true;
@@ -26255,7 +26551,7 @@ class LocalConnectorStore {
     if (this.tierLedgerDisabled === true)
       return;
     const path = tierLedgerPathForStore(this.dbPath);
-    if (path === ":memory:" || !existsSync24(path))
+    if (path === ":memory:" || !existsSync25(path))
       return;
     return this.tierLedger();
   }
@@ -28066,7 +28362,7 @@ ${parentKey(ref)}`, { ref, origin });
       seen.add(sha);
       if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha))
         continue;
-      if (!isMediaCachePath(row.media_path, sha) || !existsSync24(row.media_path))
+      if (!isMediaCachePath(row.media_path, sha) || !existsSync25(row.media_path))
         continue;
       images.push({ path: row.media_path, sha256: sha, mimeType: "image/jpeg" });
     }
@@ -29761,7 +30057,7 @@ ${parentKey(ref)}`, { ref, origin });
         WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
       `).all();
       for (const row of rows) {
-        if (existsSync24(row.media_path))
+        if (existsSync25(row.media_path))
           retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
       }
       reassertedMediaHolders.add(holderKey);
@@ -32078,7 +32374,7 @@ ${parentKey(ref)}`, { ref, origin });
             continue;
           if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
             skip.add(row);
-          } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync24(row.media_path)) {
+          } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync25(row.media_path)) {
             this.clearChunkMedia(row.chunk_pk, row.item_pk);
             skip.add(row);
           }
@@ -36226,13 +36522,13 @@ var RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
 
 // src/workers/source-index/built-in-embedding/provider.ts
 import { createHash as createHash17 } from "node:crypto";
-import { readFileSync as readFileSync22 } from "node:fs";
+import { readFileSync as readFileSync23 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname29, join as join28 } from "node:path";
 
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { closeSync as closeSync11, constants as constants4, existsSync as existsSync25, fstatSync as fstatSync2, openSync as openSync11, readdirSync as readdirSync4, statSync as statSync15 } from "node:fs";
+import { closeSync as closeSync11, constants as constants4, existsSync as existsSync26, fstatSync as fstatSync2, openSync as openSync11, readdirSync as readdirSync4, statSync as statSync15 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname28, isAbsolute as isAbsolute14, join as join26 } from "node:path";
 import { createInterface } from "node:readline";
@@ -36488,7 +36784,7 @@ function helperPath() {
   const here = dirname28(fileURLToPath(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join26(here, name);
-    if (existsSync25(candidate))
+    if (existsSync26(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -36513,7 +36809,7 @@ function resolveBun() {
 }
 
 // src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-import { readFileSync as readFileSync21 } from "node:fs";
+import { readFileSync as readFileSync22 } from "node:fs";
 
 class RemoteLiteRtEmbedder {
   options;
@@ -36603,7 +36899,7 @@ class RemoteLiteRtEmbedder {
   async request(path, texts) {
     const headers = {};
     if (this.options.tokenFile) {
-      const token = readFileSync21(this.options.tokenFile, "utf8").trim();
+      const token = readFileSync22(this.options.tokenFile, "utf8").trim();
       if (!token)
         throw new Error("Empty remote token file.");
       headers.Authorization = `Bearer ${token}`;
@@ -37324,7 +37620,7 @@ class BuiltInSourceEmbeddingProvider {
   }
 }
 function loadTokenizer(path) {
-  const tokenizer = new WordPieceTokenizer(readFileSync22(path, "utf8"));
+  const tokenizer = new WordPieceTokenizer(readFileSync23(path, "utf8"));
   return {
     tokenize: (text2) => tokenizer.tokenize(text2),
     startId: tokenizer.clsId,
@@ -38051,6 +38347,292 @@ var PRIVATE_ANSWER_OPTIONS = [
   { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
   { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.", recommended: false }
 ];
+// src/core/provider-rate-limits.ts
+registerLimit({ id: "x.rate_limit", kind: "requests", scope: "source", label: "X is limiting requests", unit: "requests", continue: "none" });
+registerLimit({ id: "evernote.rate_limit", kind: "requests", scope: "source", label: "Evernote is limiting requests", unit: "requests", continue: "none" });
+registerLimit({ id: "readwise.rate_limit", kind: "requests", scope: "source", label: "Readwise is limiting requests", unit: "requests", continue: "none" });
+var PROVIDERS = {
+  x: { id: "x.rate_limit", subject: "x.bookmarks", name: "X" },
+  evernote: { id: "evernote.rate_limit", subject: "evernote.notes", name: "Evernote" },
+  readwise: { id: "readwise.rate_limit", subject: "readwise.library", name: "Readwise" }
+};
+var SOURCE_RATE_LIMITED = "rate_limited";
+function providerRetryTime(value, now, fallbackMs) {
+  const seconds = value?.trim() ? Number(value) : NaN;
+  const timestamp = Number.isFinite(seconds) ? seconds >= 0 ? now.getTime() + seconds * 1000 : NaN : Date.parse(value ?? "");
+  const retry = new Date(timestamp);
+  return Number.isFinite(retry.getTime()) ? retry.toISOString() : new Date(now.getTime() + fallbackMs).toISOString();
+}
+var reporters = {};
+function createProviderRateLimitReporter(provider) {
+  return reporters[provider] ??= buildProviderRateLimitReporter(provider);
+}
+function buildProviderRateLimitReporter(provider) {
+  const registration = PROVIDERS[provider];
+  const stops = createLimitStopReporter();
+  let resumesAt;
+  return {
+    report(at, now, amounts) {
+      if (!Number.isFinite(Date.parse(at)) || Date.parse(at) - now.getTime() <= 60000)
+        return;
+      resumesAt = at;
+      stops.report({
+        id: registration.id,
+        subject: registration.subject,
+        since: now.toISOString(),
+        resumesAt: at,
+        limit: amounts?.limit ?? null,
+        used: amounts?.used ?? null
+      });
+    },
+    success() {
+      stops.clear(registration.id, registration.subject);
+      resumesAt = undefined;
+    },
+    resume(now) {
+      if (resumesAt && Date.parse(resumesAt) <= now.getTime())
+        this.success();
+    }
+  };
+}
+
+// src/workers/readwise/api.ts
+var READWISE_API_V2_BASE_URL = "https://readwise.io/api/v2/";
+var READWISE_READER_API_V3_BASE_URL = "https://readwise.io/api/v3/";
+var DEFAULT_TIMEOUT_MS = 30000;
+
+class ReadwiseApiError extends Error {
+  status;
+  retryAfter;
+  resumesAt;
+  constructor(message2, options = {}) {
+    super(message2);
+    if (options.status !== undefined)
+      this.status = options.status;
+    if (options.retryAfter !== undefined)
+      this.retryAfter = options.retryAfter;
+  }
+}
+
+class ReadwiseApiClient {
+  providerStops = createProviderRateLimitReporter("readwise");
+  now;
+  token;
+  fetchImpl;
+  apiV2BaseUrl;
+  readerApiV3BaseUrl;
+  timeoutMs;
+  constructor(options) {
+    this.now = options.now ?? (() => new Date);
+    const token = options.token.trim();
+    if (!token)
+      throw new Error("Readwise API token is required.");
+    this.token = token;
+    this.fetchImpl = options.fetch ?? fetch;
+    this.apiV2BaseUrl = normalizeBaseUrl(options.apiV2BaseUrl ?? READWISE_API_V2_BASE_URL);
+    this.readerApiV3BaseUrl = normalizeBaseUrl(options.readerApiV3BaseUrl ?? READWISE_READER_API_V3_BASE_URL);
+    this.timeoutMs = normalizeTimeoutMs(options.timeoutMs);
+  }
+  async verifyToken() {
+    const response = await this.request("auth/", { baseUrl: this.apiV2BaseUrl });
+    if (response.status !== 204) {
+      throw await errorFromResponse(response, "Readwise auth check failed");
+    }
+  }
+  async listReaderDocuments(request = {}) {
+    const limit = normalizeReaderPageLimit(request.limit);
+    const params = new URLSearchParams({ limit: String(limit) });
+    appendParam(params, "id", request.documentId);
+    appendParam(params, "updatedAfter", request.updatedAfter);
+    appendParam(params, "location", request.location);
+    appendParam(params, "category", request.category);
+    appendParam(params, "pageCursor", request.pageCursor);
+    if (request.withHtmlContent === true)
+      params.set("withHtmlContent", "true");
+    if (request.withRawSourceUrl === true)
+      params.set("withRawSourceUrl", "true");
+    const payload2 = await this.requestJson(`list/?${params.toString()}`, {
+      baseUrl: this.readerApiV3BaseUrl,
+      context: "Readwise Reader list request"
+    });
+    const record = requireRecord(payload2, "Readwise Reader list response");
+    const results = requireRecordArray(record.results, "Readwise Reader list response results");
+    const count = optionalNumber2(record.count) ?? results.length;
+    const nextPageCursor = optionalString2(record.nextPageCursor);
+    return {
+      count,
+      ...nextPageCursor ? { nextPageCursor } : {},
+      results
+    };
+  }
+  async fetchReaderDocuments(request = {}) {
+    const maxDocuments = normalizeOptionalPositiveInteger(request.maxDocuments, "maxDocuments");
+    const pageLimit = normalizeReaderPageLimit(request.pageLimit);
+    const documents = [];
+    let pageCursor;
+    let requestCount = 0;
+    while (maxDocuments === undefined || documents.length < maxDocuments) {
+      const remaining = maxDocuments === undefined ? pageLimit : Math.min(pageLimit, maxDocuments - documents.length);
+      if (remaining <= 0)
+        break;
+      const page = await this.listReaderDocuments({
+        ...request,
+        limit: remaining,
+        ...pageCursor ? { pageCursor } : {}
+      });
+      requestCount += 1;
+      documents.push(...page.results);
+      if (!page.nextPageCursor)
+        break;
+      pageCursor = page.nextPageCursor;
+    }
+    return { documents, requestCount };
+  }
+  async exportBooks(request = {}) {
+    const params = new URLSearchParams;
+    appendParam(params, "updatedAfter", request.updatedAfter);
+    appendParam(params, "pageCursor", request.pageCursor);
+    const query = params.toString();
+    const suffix = query ? `export/?${query}` : "export/";
+    const payload2 = await this.requestJson(suffix, {
+      baseUrl: this.apiV2BaseUrl,
+      context: "Readwise export request"
+    });
+    const results = Array.isArray(payload2) ? requireRecordArray(payload2, "Readwise export response") : requireRecordArray(requireRecord(payload2, "Readwise export response").results, "Readwise export response results");
+    const nextPageCursor = Array.isArray(payload2) ? undefined : optionalString2(requireRecord(payload2, "Readwise export response").nextPageCursor);
+    return {
+      ...nextPageCursor ? { nextPageCursor } : {},
+      results
+    };
+  }
+  async fetchExportBooks(request = {}) {
+    const maxPages = normalizeOptionalPositiveInteger(request.maxPages, "maxPages") ?? 10;
+    const books = [];
+    let pageCursor;
+    let requestCount = 0;
+    while (requestCount < maxPages) {
+      const page = await this.exportBooks({
+        ...request.updatedAfter ? { updatedAfter: request.updatedAfter } : {},
+        ...pageCursor ? { pageCursor } : {}
+      });
+      requestCount += 1;
+      books.push(...page.results);
+      if (!page.nextPageCursor)
+        break;
+      pageCursor = page.nextPageCursor;
+    }
+    return {
+      books,
+      requestCount,
+      ...pageCursor ? { nextPageCursor: pageCursor } : {},
+      pageLimitReached: pageCursor !== undefined && requestCount >= maxPages
+    };
+  }
+  async requestJson(path, options) {
+    const response = await this.request(path, { baseUrl: options.baseUrl });
+    if (!response.ok)
+      throw await errorFromResponse(response, options.context);
+    try {
+      return await response.json();
+    } catch (error) {
+      throw new ReadwiseApiError(`${options.context} returned invalid JSON.`);
+    }
+  }
+  async request(path, options) {
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const url = new URL(path, options.baseUrl).toString();
+      this.providerStops.resume(this.now());
+      const response = await this.fetchImpl(url, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Token ${this.token}`
+        },
+        signal: controller.signal
+      });
+      if (response.status === 429) {
+        const now = this.now();
+        const error = await errorFromResponse(response, "Readwise request");
+        error.resumesAt = providerRetryTime(error.retryAfter, now, 60000);
+        this.providerStops.report(error.resumesAt, now);
+        throw error;
+      }
+      if (response.ok)
+        this.providerStops.success();
+      return response;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new ReadwiseApiError("Readwise API request timed out.");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+function normalizeBaseUrl(value) {
+  const trimmed = value.trim();
+  if (!trimmed)
+    throw new Error("Readwise API base URL must be non-empty.");
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+}
+function normalizeTimeoutMs(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_TIMEOUT_MS;
+  return Math.max(1000, Math.floor(value));
+}
+function normalizeReaderPageLimit(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return 100;
+  return Math.max(1, Math.min(Math.floor(value), 100));
+}
+function normalizeOptionalPositiveInteger(value, name) {
+  if (value === undefined)
+    return;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return value;
+}
+function appendParam(params, name, value) {
+  const trimmed = value?.trim();
+  if (trimmed)
+    params.set(name, trimmed);
+}
+function requireRecord(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ReadwiseApiError(`${label} must be a JSON object.`);
+  }
+  return value;
+}
+function requireRecordArray(value, label) {
+  if (!Array.isArray(value)) {
+    throw new ReadwiseApiError(`${label} must be an array.`);
+  }
+  return value.filter((item) => !!item && typeof item === "object" && !Array.isArray(item));
+}
+function optionalString2(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function optionalNumber2(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+async function errorFromResponse(response, context2) {
+  const retryAfter = response.headers.get("retry-after") ?? undefined;
+  let detail = "";
+  try {
+    detail = (await response.text()).slice(0, 240).trim();
+  } catch {
+    detail = "";
+  }
+  return new ReadwiseApiError(`${context2} returned HTTP ${response.status}${detail ? `: ${detail}` : ""}.`, {
+    status: response.status,
+    ...retryAfter ? { retryAfter } : {}
+  });
+}
+
 // src/workers/source-scheduler.ts
 import { createHash as createHash20 } from "node:crypto";
 
@@ -38311,14 +38893,14 @@ function parseDropboxLocalFileRootsFromEnv(env = process.env) {
       throw new Error(`Dropbox local root ${index} must be an object.`);
     }
     const record = item;
-    const rootPath = optionalString2(record.rootPath) ?? optionalString2(record.root_path);
+    const rootPath = optionalString3(record.rootPath) ?? optionalString3(record.root_path);
     if (!rootPath) {
       throw new Error(`Dropbox local root ${index} requires rootPath.`);
     }
-    const account = optionalString2(record.account);
-    const approvedScopeKey = optionalString2(record.approvedScopeKey) ?? optionalString2(record.approved_scope_key);
-    const dropboxPathPrefix = normalizeDropboxPath(optionalString2(record.dropboxPathPrefix) ?? optionalString2(record.dropbox_path_prefix));
-    const rootId = optionalString2(record.rootId) ?? optionalString2(record.root_id);
+    const account = optionalString3(record.account);
+    const approvedScopeKey = optionalString3(record.approvedScopeKey) ?? optionalString3(record.approved_scope_key);
+    const dropboxPathPrefix = normalizeDropboxPath(optionalString3(record.dropboxPathPrefix) ?? optionalString3(record.dropbox_path_prefix));
+    const rootId = optionalString3(record.rootId) ?? optionalString3(record.root_id);
     const root = { rootPath };
     if (account)
       root.account = account;
@@ -38337,7 +38919,7 @@ function normalizeDropboxPath(path) {
     return;
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
-function optionalString2(value) {
+function optionalString3(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
@@ -38498,16 +39080,6 @@ var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 // src/core/evidence-window-placement.ts
 var keyedHistory = new Map;
 var unkeyedHistory = new WeakMap;
-
-// src/core/limit-stops.ts
-var limits = new Map;
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
 
 // src/core/source-index/router.ts
 var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
@@ -38820,6 +39392,7 @@ var X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
   trustDomain: "internal"
 });
 // src/workers/x-bookmarks/live-control.ts
+var providerStops = createProviderRateLimitReporter("x");
 var X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
 var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60000;
 var X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
@@ -38833,12 +39406,31 @@ var DEFAULT_X_HEAD_PAGE_SIZE_LADDER = Object.freeze([10, 20, 40, 80, 100]);
 var X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2;
 var FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
 // src/workers/x-bookmarks/api-connector.ts
+var providerStops2 = createProviderRateLimitReporter("x");
 var X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY = Object.freeze({
   algorithmVersion: X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION,
   approvedProviderErrorTypes: Object.freeze([]),
   approvedProviderErrorCodes: Object.freeze([])
 });
 var X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER = Object.freeze([80, 50, 20]);
+// src/workers/scheduler-limit-stops.ts
+var DAILY_LIMITS = new Map(Object.entries({
+  daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X spending budget used" },
+  daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X request budget used" },
+  daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X resource-read budget used" },
+  head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "X request reserve for new bookmarks reached" },
+  head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "X resource-read reserve for new bookmarks reached" },
+  head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "X spending reserve for new bookmarks reached" },
+  readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
+  gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
+  google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
+}));
+for (const limit of DAILY_LIMITS.values()) {
+  registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+}
+
+// src/workers/x-bookmarks/content-recovery.ts
+var X_CONTENT_RECOVERY_LIMIT_SUBJECT = JSON.stringify(["x.bookmarks", "internal.x.bookmarks", "content_recovery"]);
 // src/workers/connector-store/capture-spool-secrets.ts
 var SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
 var SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
@@ -39591,7 +40183,7 @@ var WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
 var CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 // src/workers/source-index/built-in-reasoning/off-thread.ts
 import { Worker as Worker2 } from "node:worker_threads";
-import { existsSync as existsSync26 } from "node:fs";
+import { existsSync as existsSync27 } from "node:fs";
 import { dirname as dirname30, join as join30 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 var shared;
@@ -39693,7 +40285,7 @@ function modelWorkerPath() {
   const here = dirname30(fileURLToPath2(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
     const path = join30(here, name);
-    if (existsSync26(path))
+    if (existsSync27(path))
       return path;
   }
   throw new Error("The built-in model worker is not installed.");
@@ -40848,24 +41440,9 @@ function stripDataUrlPrefix(dataUrl) {
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram";
 var TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
-// src/workers/scheduler-limit-stops.ts
-var DAILY_LIMITS = new Map(Object.entries({
-  daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
-  daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
-  daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X API budget used" },
-  head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "daily X API budget used" },
-  head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "daily X API budget used" },
-  head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "daily X API budget used" },
-  readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
-  gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
-  google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
-}));
-for (const limit of DAILY_LIMITS.values()) {
-  registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
-}
 // src/workers/local-pacing.ts
 import { execFile, spawn as spawn2 } from "node:child_process";
-import { existsSync as existsSync27, readdirSync as readdirSync5, readFileSync as readFileSync23 } from "node:fs";
+import { existsSync as existsSync28, readdirSync as readdirSync5, readFileSync as readFileSync24 } from "node:fs";
 var GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60000;
 var GO_EASY_REFRESH_MS = 30000;
 var GO_EASY_NIGHT = { fromHour: 22, toHour: 7 };
@@ -40873,7 +41450,7 @@ var GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60000;
 var GO_EASY_TRICKLE_GAP_MS = 20000;
 function readGoEasySetting(path) {
   try {
-    const value = JSON.parse(readFileSync23(path, "utf8")).go_easy;
+    const value = JSON.parse(readFileSync24(path, "utf8")).go_easy;
     return typeof value === "boolean" ? value : undefined;
   } catch {
     return;
@@ -42126,7 +42703,10 @@ var UTC_DAY_SCOPED_DEGRADED_REASONS = new Set([
 var SCHEDULER_PARK_REASONS = new Set([
   ...UTC_DAY_SCOPED_DEGRADED_REASONS,
   "provider_rate_limit",
-  "provider_rate_limited"
+  "provider_rate_limited",
+  "x.rate_limit",
+  "evernote.rate_limit",
+  "readwise.rate_limit"
 ]);
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -42165,7 +42745,7 @@ function safeSchedulerErrorKind(error) {
   if (/timeout/i.test(message2))
     return "timeout";
   if (/rate.?limit|too many requests/i.test(message2))
-    return "rate_limited";
+    return SOURCE_RATE_LIMITED;
   if (/network|connection|ECONN/i.test(message2))
     return "network";
   if (/temporar|try again/i.test(message2))
@@ -42189,7 +42769,7 @@ function mapExplicitSchedulerErrorKind(value) {
   if (/timeout/i.test(value))
     return "timeout";
   if (/rate.?limit|too many requests/i.test(value))
-    return "rate_limited";
+    return SOURCE_RATE_LIMITED;
   if (/network|connection|ECONN/i.test(value))
     return "network";
   if (/temporar|try again/i.test(value))
@@ -42251,7 +42831,7 @@ function sanitizeSchedulerWarnings(warnings) {
     if (/timeout/i.test(warning))
       return "timeout";
     if (/rate.?limit|too many requests/i.test(warning))
-      return "rate_limited";
+      return SOURCE_RATE_LIMITED;
     if (/network|connection|ECONN/i.test(warning))
       return "network";
     return "task_warning";
@@ -42271,7 +42851,7 @@ import { statSync as statSync16 } from "node:fs";
 
 // src/core/this-computer.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { existsSync as existsSync28, readFileSync as readFileSync24 } from "node:fs";
+import { existsSync as existsSync29, readFileSync as readFileSync25 } from "node:fs";
 import { createHash as createHash21, randomUUID as randomUUID11 } from "node:crypto";
 import { dirname as dirname31, join as join31 } from "node:path";
 var MACHINE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -42286,7 +42866,7 @@ var systemHostIdentity = () => {
       value = /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(result.stdout ?? "")?.[1];
     } else if (process.platform === "linux") {
       for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
-        const id = existsSync28(path) ? readFileSync24(path, "utf8").trim() : "";
+        const id = existsSync29(path) ? readFileSync25(path, "utf8").trim() : "";
         if (/^[0-9a-f]{32}$/.test(id)) {
           value = id;
           break;
@@ -42317,10 +42897,10 @@ function defaultThisComputerStatePath(handleRegistryPath) {
   return join31(dirname31(handleRegistryPath), "this-computer.json");
 }
 function readState3(path) {
-  if (!existsSync28(path))
+  if (!existsSync29(path))
     return;
   try {
-    const parsed = JSON.parse(readFileSync24(path, "utf8"));
+    const parsed = JSON.parse(readFileSync25(path, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       return;
     const record = parsed;
@@ -43560,7 +44140,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync29(config.dbPath))
+    if (!config.dbPath || !existsSync30(config.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config), { ...config, dbPath: config.dbPath, readOnly: true }, env);
     try {

@@ -10,7 +10,7 @@ import {
 import { closeSqliteStore } from '../core/sqlite-store.ts';
 import { filterFor, forgetSqliteRows } from '../core/sqlite-forget.ts';
 import { isBoundedSourceCheckpoint } from './source-checkpoint.ts';
-import { initializeLimitStops, listOpenLimitStops, type LimitStop } from '../core/limit-stops.ts';
+import { clearLimitStop, reportLimitStop, initializeLimitStops, listOpenLimitStops, type LimitStop } from '../core/limit-stops.ts';
 import { syncSchedulerLimitStop } from './scheduler-limit-stops.ts';
 
 export { SOURCE_CHECKPOINT_MAX_LENGTH } from './source-checkpoint.ts';
@@ -300,6 +300,10 @@ export class LocalSourceSchedulerStateStore {
   openLimitStops(now?: Date): LimitStop[] {
     return this.closed ? [] : listOpenLimitStops(this.db, now);
   }
+
+  reportLimitStop(stop: LimitStop): void { reportLimitStop(stop, this.db); }
+
+  clearLimitStop(id: string, subject: string): void { clearLimitStop(id, subject, this.db); }
 
   close(): void {
     this.closed = true;

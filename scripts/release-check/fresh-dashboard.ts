@@ -8,6 +8,9 @@ import { PRIVATE_ANSWER_OPTIONS } from '../../src/core/privacy-language.ts';
 import { ON_DEMAND_FOLDER, type SeedFolder } from './on-demand-seeds.ts';
 import type { FolderMode, TimingDashboard } from './on-demand-timing.ts';
 
+/** The Add a source tile for a source, by its provider id (gmail.email, google_drive.docs, dropbox.files). */
+const sourcePick = (s: LiveSourceSpec) => `[data-source-pick^="${s.id}."]`;
+
 export interface FreshDashboard {
   privacyChoice(): Promise<string>;
   connection?(source: LiveSourceSpec): Promise<'connected' | 'web' | 'unavailable'>;
@@ -35,7 +38,7 @@ export const DASHBOARD_JSON = `curl -sS --max-time 10 -w '\\n%{http_code}' --uni
 Authorization: Bearer $("$HOME/.local/bin/olympus" dashboard token)
 EOF`;
 
-export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number;
+export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number; modelWaitMs?: number; modelStallMs?: number;
   bridge?: { agentPath: string; pidFile: string; logTemplate: string } } = {}): Promise<FreshDashboard & TimingDashboard> {
   const { host, port } = parseCdpEndpoint(endpoint);
   let tunnel: Tunnel | undefined;
@@ -133,6 +136,35 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     const sourceAction = async (s: LiveSourceSpec, pattern: string) => {
       const row = `[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)})`;
       await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
+    };
+    // Sources not yet connected are offered as tiles in the Add a source sheet: pick the tile, then press
+    // that source's Connect. A build that still lists unconnected sources as rows uses the row's Connect.
+    const startConnect = async (s: LiveSourceSpec) => {
+      const tile = sourcePick(s);
+      const pick = () => panel<boolean>(`(() => {const tile=document.querySelector(${JSON.stringify(tile)}); if(!tile)return false; const d=tile.closest('dialog'); if(d && !d.open) document.querySelector('[data-dialog-open="add-source"]')?.click(); tile.click(); return true;})()`, Boolean);
+      if (!await pick()) return sourceAction(s, '^Connect$');
+      const setup = `[...document.querySelectorAll('[data-source-setup]')].find(e=>e.getAttribute('data-source-setup').startsWith(${JSON.stringify(`${s.id}.`)}))`;
+      const press = () => panel<boolean>(`(() => { const setup=${setup}; const e=setup ? [...setup.querySelectorAll('button')].find(e=>/^Connect$/.test(e.textContent.trim())) : null; if(!e || e.disabled || !(${visible})(e)) return false; e.click(); return true; })()`, Boolean);
+      // The sheet's own lock line, plus the page's blocker banner, which names the model in the way.
+      const heldBy = () => panel<string>(`(()=>{const setup=${setup}; const own=setup?.querySelector('.blocked')?.textContent?.trim() || ''; const page=document.querySelector('[data-blocker] .name')?.textContent?.trim() || ''; return [own, page && page !== own ? 'page says: ' + page : ''].filter(Boolean).join('; ');})()`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
+      // A fresh install locks Connect until its private models are ready (a multi-GB download). Wait while the
+      // product's own progress text keeps changing; fail with that text once it stops moving or the bound passes.
+      const deadline = Date.now() + (timings.modelWaitMs ?? 30 * 60_000);
+      const stallMs = timings.modelStallMs ?? 5 * 60_000;
+      let held: string | undefined;
+      let movedAt = Date.now();
+      let reloadedAt = Date.now();
+      for (;;) {
+        if (await press()) return;
+        const now = await heldBy();
+        if (now !== held) { held = now; movedAt = Date.now(); }
+        if (!held && Date.now() - movedAt > (timings.timeoutMs ?? 90_000)) throw new Error(`${s.label} Connect did not appear in the Add a source sheet`);
+        if (held && Date.now() - movedAt > stallMs) throw new Error(`${s.label} Connect is held with no progress for ${Math.round(stallMs / 60_000)} min: ${held}`);
+        if (Date.now() >= deadline) throw new Error(`${s.label} Connect is still held: ${held ?? 'no reason shown'}`);
+        await sleep(timings.pollMs ?? 1000);
+        // Reopen the sheet now and then so the held text is the dashboard's latest.
+        if (Date.now() - reloadedAt > 60_000) { reloadedAt = Date.now(); await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`); await pick(); }
+      }
     };
     const folderRow = (name: string) => `(()=>{
       const row=[...document.querySelectorAll('.frow:not(.jump)')].find(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(name)});
@@ -267,7 +299,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         if (!view) throw new Error(`source cards unreadable: HTTP ${status}`);
         const c = sourceCard(view, s.id);
         if (connected(c)) return 'connected';
-        return await panel<boolean>(`(() => {const row=[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)});if(!row)return null;return [...row.querySelectorAll('button')].some(e=>/^Connect$/.test(e.textContent.trim()));})()`, value => typeof value === 'boolean') ? 'web' : 'unavailable';
+        // An unconnected source is offered as a tile in the Add a source sheet (older builds: a row with Connect).
+        return await panel<boolean>(`(() => {if(document.querySelector(${JSON.stringify(sourcePick(s))}))return true;const row=[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)});if(!row)return null;return [...row.querySelectorAll('button')].some(e=>/^Connect$/.test(e.textContent.trim()));})()`, value => typeof value === 'boolean') ? 'web' : 'unavailable';
       },
       connect: async s => {
         // Say which precondition failed, from the dashboard's own JSON: provider names and states only.
@@ -280,7 +313,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         baseline.clear();
         for (const t of (await browser!.send('Target.getTargets')).targetInfos) baseline.add(t.targetId);
         windowOffered = false;
-        await sourceAction(s, '^Connect$');
+        await startConnect(s);
         // A remembered grant can redirect at once and finish between polls; the callback check verifies completion.
         await until(async () => { const c = await card(s); return c?.connection?.state === 'awaiting_consent' || (!!c && connected(c)); }, 'source card did not enter awaiting_consent or connect');
       },

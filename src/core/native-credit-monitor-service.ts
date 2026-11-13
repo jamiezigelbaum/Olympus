@@ -128,7 +128,7 @@ export function createNativeCreditMonitorService(
         lifetime.timer = undefined;
         if (!isCurrent(lifetime)) return;
         lifetime.tick = runTick(lifetime, settings);
-      }, options.intervalMs ?? settings.intervalSeconds * 1_000);
+      }, options.intervalMs ?? Math.min(settings.intervalSeconds * 1_000, 15 * 60_000));
       lifetime.timer.unref?.();
     }
   }

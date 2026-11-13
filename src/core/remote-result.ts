@@ -660,6 +660,7 @@ const REMOTE_ERROR_TEXT: Readonly<Record<RemoteErrorCode, string>> = {
   argus_error: 'Olympus\'s private analyst could not answer. Try again later.',
   email_not_configured: 'Olympus on the computer needs setup before it can answer.',
   email_unreachable: 'Olympus could not reach its source worker in time. Try again later.',
+  worker_restarting: 'Olympus is restarting. Try again in a moment.',
   email_error: 'Olympus could not complete this request.',
   email_policy_violation: 'Olympus withheld this result under the owner\'s privacy rules.',
   source_index_not_enabled: 'Searching sources is not turned on in Olympus on the computer.',

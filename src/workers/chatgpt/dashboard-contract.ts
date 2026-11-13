@@ -252,6 +252,9 @@ export interface DashboardSourceWait {
   label: string;
   reason: 'daily_budget' | 'rate_limit' | 'limit';
   limitLabel?: string;
+  limit?: number | null;
+  used?: number | null;
+  unit?: string;
   since?: string;
   waiting?: { items?: number; runs?: number };
   fix?: DashboardFix;
@@ -883,6 +886,7 @@ export const COMPUTER_LOCAL_SESSION_TOOL_NAMES: readonly string[] = [
  * the answer tools are the conversation's, not the panel's.
  */
 export const PANEL_TOOL_NAMES = [
+  'olympus_limits',
   DASHBOARD_TOOL_NAME,
   CONNECT_SOURCE_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,

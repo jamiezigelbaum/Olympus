@@ -1,7 +1,12 @@
+import { registerLimit } from './limit-stops.ts';
+import type { LimitStop } from './limit-stops.ts';
+
 import { fetchModelEndpoint } from './model-transport.ts';
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
+
+registerLimit({ id: 'venice.credit', kind: 'funding', scope: 'judge', label: 'Venice billing/balance.canConsume is false', unit: 'usd', continue: 'refill' });
 
 /**
  * The official Venice billing origin. It is a constant on purpose: callers may
@@ -108,6 +113,8 @@ export interface FetchVeniceCreditStatusOptions {
   timeoutMs?: number;
   /** Caller-owned cancellation (service stop/restart) forwarded to the request. */
   signal?: AbortSignal;
+  /** Recovery needs only the pause authority, not a usage ledger scan. */
+  balanceOnly?: boolean;
 }
 
 interface UsageLedgerResult {
@@ -159,6 +166,7 @@ export async function fetchVeniceCreditStatus(
     if (!response.ok) return buildHttpErrorReport(generatedAt, response.status, 'balance');
 
     const body = await response.json() as VeniceBalanceResponse;
+    if (options.balanceOnly) return buildBalanceReport(generatedAt, body);
     const usageResult = await fetchBundledCreditUsage({
       baseUrl,
       generatedAt,
@@ -423,7 +431,7 @@ function unavailableUsage(errorKind: string, errorMessage: string, pagesFetched 
 function actionsForReport(report: VeniceCreditStatusReport): string[] {
   const actions: string[] = [];
   if (report.status === 'credit_exhausted') {
-    actions.push('venice: billing/balance.canConsume is false; keep escalation paused until credits are refilled, then clear the provider pause marker and restart Venice timers.');
+    actions.push('venice: billing/balance.canConsume is false; refill Venice credits, then use olympus limits continue venice.credit to re-check, or wait for the automatic re-check (at most 15 minutes).');
   } else if (report.status === 'not_configured') {
     actions.push('venice: credit monitor is not configured; provide OLYMPUS_SOURCE_INDEX_VENICE_API_KEY through the private-host runtime secret wrapper.');
   } else if (report.status === 'auth_failed') {
@@ -535,23 +543,90 @@ function writeProviderPause(path: string, report: VeniceCreditStatusReport): voi
     reason: 'provider_credit_exhausted',
     error_kind: report.error_kind ?? 'venice_billing_credit_exhausted',
     created_at: report.generated_at,
-    message: 'Venice escalation paused because billing/balance.canConsume is false. Refill Venice credits, remove this marker, then restart Venice escalation timers.',
+    message: 'Venice escalation paused because billing/balance.canConsume is false. Refill Venice credits; Olympus re-checks automatically within 15 minutes, or use olympus limits continue venice.credit.',
   }, null, 2)}\n`);
 }
 
-export function reconcileProviderPauseFile(path: string, report: VeniceCreditStatusReport): 'written' | 'cleared' | 'left' {
+/**
+ * Where reported stops are kept. The store is Bun-only, so only the engine
+ * passes these; the Node plugin's monitor writes the marker alone and the
+ * engine's marker check reports it (startVeniceCreditRecovery).
+ */
+export interface LimitStopHooks {
+  record(stop: LimitStop): void;
+  clear(id: string, subject: string): void;
+}
+
+export function veniceCreditStop(path: string, since: string): LimitStop {
+  return { id: 'venice.credit', subject: path, since, limit: null, used: null };
+}
+
+export function reconcileProviderPauseFile(path: string, report: VeniceCreditStatusReport, stops?: LimitStopHooks): 'written' | 'cleared' | 'left' {
   if (report.can_consume === false) {
     writeProviderPause(path, report);
+    stops?.record(veniceCreditStop(path, report.generated_at));
     return 'written';
   }
   if (report.status === 'ok' && report.can_consume === true && isVeniceProviderPauseFile(path)) {
     unlinkSync(path);
+    stops?.clear('venice.credit', path);
     return 'cleared';
   }
+  // A crash after unlink, or an externally removed marker, must not leave a phantom stop.
+  if (report.status === 'ok' && report.can_consume === true && !existsSync(path)) stops?.clear('venice.credit', path);
   return 'left';
 }
 
-function isVeniceProviderPauseFile(path: string): boolean {
+/** A refill is proved by the official billing authority, never inferred from a balance amount. */
+export async function recheckVeniceCredit(path: string, options: FetchVeniceCreditStatusOptions = {}, stops?: LimitStopHooks): Promise<boolean> {
+  const report = await fetchVeniceCreditStatus({ ...options, baseUrl: VENICE_BILLING_BASE_URL, balanceOnly: true });
+  reconcileProviderPauseFile(path, report, stops);
+  return report.status === 'ok' && report.can_consume === true;
+}
+
+/** Non-overlapping bounded retries; stop cancels the probe and fences late writes. */
+export function startVeniceCreditRecovery(options: {
+  paths: () => string[];
+  stops?: LimitStopHooks;
+  /** Marker files another process may write; a Venice one is reported as a stop every markerCheckMs. */
+  markers?: () => string[];
+  markerCheckMs?: number;
+  probe?: (signal: AbortSignal) => Promise<VeniceCreditStatusReport>;
+  onResume?: () => void;
+  schedule?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  cancel?: (timer: ReturnType<typeof setTimeout>) => void;
+}): () => void {
+  const controller = new AbortController();
+  const schedule = options.schedule ?? ((run, ms) => { const timer = setTimeout(run, ms); timer.unref?.(); return timer; });
+  const cancel = options.cancel ?? clearTimeout;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const tick = async (): Promise<void> => {
+    try {
+      const paths = options.paths();
+      if (paths.length) {
+        const report = await (options.probe?.(controller.signal) ?? fetchVeniceCreditStatus({ baseUrl: VENICE_BILLING_BASE_URL, signal: controller.signal, balanceOnly: true }));
+        if (controller.signal.aborted) return;
+        for (const path of paths) reconcileProviderPauseFile(path, report, options.stops);
+        if (report.can_consume === true) options.onResume?.();
+      }
+    } catch { /* Keep the last proved state; the next bounded tick retries. */ }
+    finally { if (!controller.signal.aborted) timer = schedule(() => { void tick(); }, 15 * 60_000); }
+  };
+  let markerTimer: ReturnType<typeof setTimeout> | undefined;
+  const checkMarkers = (): void => {
+    try {
+      for (const path of options.markers?.() ?? []) {
+        if (isVeniceProviderPauseFile(path)) options.stops?.record(veniceCreditStop(path, new Date().toISOString()));
+      }
+    } catch { /* The next check retries. */ }
+    finally { if (!controller.signal.aborted) markerTimer = schedule(checkMarkers, options.markerCheckMs ?? 60_000); }
+  };
+  if (options.markers && options.stops) checkMarkers();
+  void tick();
+  return () => { controller.abort(); if (timer) cancel(timer); if (markerTimer) cancel(markerTimer); };
+}
+
+export function isVeniceProviderPauseFile(path: string): boolean {
   if (!existsSync(path)) return false;
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as { kind?: unknown };

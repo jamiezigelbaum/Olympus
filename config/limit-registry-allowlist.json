@@ -114,12 +114,6 @@
     "retire_when": "Remove when the bounded input/output clamp CONSULT_STANDARD_INSTRUCTION_MAX_CHARS is removed or becomes a registered work stop."
   },
   {
-    "path": "src/core/consult-transport-zkapi.ts",
-    "symbol": "reserveZkapiRequest",
-    "reason": "pending",
-    "retire_when": "The zkAPI daily-cap adopter reports and clears reserveZkapiRequest request/spend stops, with a raise control."
-  },
-  {
     "path": "src/core/control-ui-gateway.ts",
     "symbol": "DASHBOARD_TOOL_REQUEST_MAX_BYTES",
     "reason": "clamp",
@@ -162,6 +156,12 @@
     "retire_when": "Remove when the bounded input/output clamp SECRET_MAX_BYTES is removed or becomes a registered work stop."
   },
   {
+    "path": "src/core/lifecycle.ts",
+    "symbol": "FRONT_PROGRESS_MAX_STARTS",
+    "reason": "internal",
+    "retire_when": "Remove when the upgrade's readiness wait stops counting front restarts to tell a starting front from a crash loop."
+  },
+  {
     "path": "src/core/oauth-relay.ts",
     "symbol": "OAUTH_RELAY_MAX_STATE_LENGTH",
     "reason": "clamp",
@@ -178,12 +178,6 @@
     "symbol": "PARENT_LABEL_MAX_CHARS",
     "reason": "clamp",
     "retire_when": "Remove when the bounded input/output clamp PARENT_LABEL_MAX_CHARS is removed or becomes a registered work stop."
-  },
-  {
-    "path": "src/core/provider-credit-status.ts",
-    "symbol": "reconcileProviderPauseFile",
-    "reason": "pending",
-    "retire_when": "The Venice credit-marker adopter reports and clears stops from reconcileProviderPauseFile, with a refill control."
   },
   {
     "path": "src/core/release-signing.ts",
@@ -372,12 +366,6 @@
     "retire_when": "Remove when the resumable pacing/retry boundary JUDGE_CHECK_MAX_PAGES is retired or adopted."
   },
   {
-    "path": "src/workers/classification/judge-spending.ts",
-    "symbol": "JudgeSpending",
-    "reason": "pending",
-    "retire_when": "The judge-spending adopter reports and clears JudgeSpending cap/payment stops, with raise/refill controls."
-  },
-  {
     "path": "src/workers/classification/privacy-profile.ts",
     "symbol": "PRIVACY_DESCRIPTION_MAX_CHARS",
     "reason": "clamp",
@@ -394,12 +382,6 @@
     "symbol": "PRIVACY_KEY_MAX_CHARS",
     "reason": "clamp",
     "retire_when": "Remove when the bounded input/output clamp PRIVACY_KEY_MAX_CHARS is removed or becomes a registered work stop."
-  },
-  {
-    "path": "src/workers/classification/sniffer-resolver.ts",
-    "symbol": "SnifferCallBudget",
-    "reason": "pending",
-    "retire_when": "The sniffer daily-call adopter reports and clears stops from SnifferCallBudget.tryConsume, with a continue control."
   },
   {
     "path": "src/workers/classification/sniffer-service.ts",
@@ -552,18 +534,6 @@
     "retire_when": "The Drive text-size adopter reports reads clipped at the 128 KB boundary in drive.ts, with a continue control."
   },
   {
-    "path": "src/workers/google-connectors/gmail-import-allowance.ts",
-    "symbol": "GMAIL_IMPORT_MIN_DAILY_BUDGET",
-    "reason": "pending",
-    "retire_when": "The limits adopter for src/workers/google-connectors/gmail-import-allowance.ts must register/report/clear GMAIL_IMPORT_MIN_DAILY_BUDGET and expose its continue action."
-  },
-  {
-    "path": "src/workers/google-connectors/gmail-import-allowance.ts",
-    "symbol": "GmailImportWaitError",
-    "reason": "pending",
-    "retire_when": "The limits adopter for src/workers/google-connectors/gmail-import-allowance.ts must register/report/clear GmailImportWaitError and expose its continue action."
-  },
-  {
     "path": "src/workers/google-connectors/gmail-mail-record.ts",
     "symbol": "GMAIL_CHILD_MAX_DEPTH",
     "reason": "clamp",
@@ -694,5 +664,317 @@
     "symbol": "X_BOOKMARKS_HEAD_MAX_LADDER_PAGES",
     "reason": "pacing",
     "retire_when": "Remove when the resumable pacing/retry boundary X_BOOKMARKS_HEAD_MAX_LADDER_PAGES is retired or adopted."
+  },
+  {
+    "path": "src/core/consult-transport-zkapi.ts",
+    "symbol": "reason:daily_cap_reached",
+    "reason": "internal",
+    "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
+  },
+  {
+    "path": "src/core/consult-transport-zkapi.ts",
+    "symbol": "reason:spend_cap_reached",
+    "reason": "internal",
+    "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
+  },
+  {
+    "path": "src/core/source-index/retrieval.ts",
+    "symbol": "reason:hybrid_capability_unreported",
+    "reason": "internal",
+    "retire_when": "the non-cost capability/readiness diagnostic is removed or starts holding paid work"
+  },
+  {
+    "path": "src/core/source-index/retrieval.ts",
+    "symbol": "reason:lane_budget_cut",
+    "reason": "pending",
+    "retire_when": "the existing bounded work refusal is adopted by its owning limit lane with report/continue"
+  },
+  {
+    "path": "src/core/source-index/router.ts",
+    "symbol": "reason:hybrid_capability_unreported",
+    "reason": "internal",
+    "retire_when": "the non-cost capability/readiness diagnostic is removed or starts holding paid work"
+  },
+  {
+    "path": "src/workers/classification/judge-pacing.ts",
+    "symbol": "retry:fetch:retryAfter",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/classification/judge-pacing.ts",
+    "symbol": "retry:fetch:retryAt",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/classification/sniffer-resolver.ts",
+    "symbol": "reason:daily_budget",
+    "reason": "internal",
+    "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
+  },
+  {
+    "path": "src/workers/classification/sniffer-resolver.ts",
+    "symbol": "reason:pass_budget",
+    "reason": "pacing",
+    "retire_when": "the bounded sniffer pass yield is removed or becomes an owner limit"
+  },
+  {
+    "path": "src/workers/classification/sniffer-service.ts",
+    "symbol": "reason:daily_budget",
+    "reason": "internal",
+    "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
+  },
+  {
+    "path": "src/workers/classification/tier-ledger.ts",
+    "symbol": "retry:markRejudgeUnavailable:retryAt",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/classification/tier-migration.ts",
+    "symbol": "reason:chunk_cap",
+    "reason": "pending",
+    "retire_when": "the existing bounded work refusal is adopted by its owning limit lane with report/continue"
+  },
+  {
+    "path": "src/workers/classification/tier-migration.ts",
+    "symbol": "reason:cost_cap",
+    "reason": "pending",
+    "retire_when": "the existing bounded work refusal is adopted by its owning limit lane with report/continue"
+  },
+  {
+    "path": "src/workers/classification/tier-migration.ts",
+    "symbol": "reason:destination_chunk_cap",
+    "reason": "pending",
+    "retire_when": "the existing bounded work refusal is adopted by its owning limit lane with report/continue"
+  },
+  {
+    "path": "src/workers/classification/tier-migration.ts",
+    "symbol": "reason:destination_cost_cap",
+    "reason": "pending",
+    "retire_when": "the existing bounded work refusal is adopted by its owning limit lane with report/continue"
+  },
+  {
+    "path": "src/workers/credential-broker/connected-handles.ts",
+    "symbol": "reason:missing_allowed_capabilities",
+    "reason": "pending",
+    "retire_when": "the existing bounded work refusal is adopted by its owning limit lane with report/continue"
+  },
+  {
+    "path": "src/workers/dropbox-files/provider-client.ts",
+    "symbol": "retry:dropboxMetadataError:retryAfterMs",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/dropbox-files/provider-client.ts",
+    "symbol": "retry:dropboxRetryAfterMs:retryAfter",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/engine/index.ts",
+    "symbol": "retry:fetch:retryAfterMs",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/engine/index.ts",
+    "symbol": "retry:fetch:retry_at",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/engine/runtime/connector-mounts.ts",
+    "symbol": "retry:createConnectorStoreMountDiscovery:retryAt",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/engine/server.ts",
+    "symbol": "reason:gmail_requests_spent",
+    "reason": "internal",
+    "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
+  },
+  {
+    "path": "src/workers/google-connectors/drive.ts",
+    "symbol": "retry:driveRetryDelayMs:retryAfter",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/google-connectors/gmail-header-match.ts",
+    "symbol": "reason:gmail_requests_spent",
+    "reason": "internal",
+    "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
+  },
+  {
+    "path": "src/workers/google-connectors/gmail-import-allowance.ts",
+    "symbol": "reason:gmail_budget_too_small",
+    "reason": "internal",
+    "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
+  },
+  {
+    "path": "src/workers/google-connectors/gmail-import-allowance.ts",
+    "symbol": "reason:gmail_import_allowance_spent",
+    "reason": "internal",
+    "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
+  },
+  {
+    "path": "src/workers/google-connectors/gmail-import-allowance.ts",
+    "symbol": "reason:gmail_requests_spent",
+    "reason": "internal",
+    "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
+  },
+  {
+    "path": "src/workers/google-connectors/gmail.ts",
+    "symbol": "retry:gmailRetryDelayMs:retryAfter",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/local-files/scheduler-source.ts",
+    "symbol": "retry:createLocalFilesSchedulerSource:retryAt",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/remote-mcp.ts",
+    "symbol": "retry:withToolRetryAfter:retryAfter",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/remote-openapi.ts",
+    "symbol": "retry:failure:retryAfter",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/source-index/built-in-reasoning/install.ts",
+    "symbol": "retry:spaceShortfallError:retryAfter",
+    "reason": "pacing",
+    "retire_when": "disk-space retry is adopted by the size limit lane or removed"
+  },
+  {
+    "path": "src/workers/source-index/status.ts",
+    "symbol": "reason:hybrid_capability_unreported",
+    "reason": "internal",
+    "retire_when": "the non-cost capability/readiness diagnostic is removed or starts holding paid work"
+  },
+  {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "reason:source_budget_exhausted",
+    "reason": "pending",
+    "retire_when": "the existing bounded work refusal is adopted by its owning limit lane with report/continue"
+  },
+  {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "retry:runTask:retryAt",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/source-watch-runtime.ts",
+    "symbol": "retry:failure:retryAfterMs",
+    "reason": "pacing",
+    "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
+  },
+  {
+    "path": "src/workers/x-bookmarks/api-connector.ts",
+    "symbol": "retry:acquireReconciliation:retryAt",
+    "reason": "pending",
+    "retire_when": "The 429 path is reported by guardedPage. This boundary also schedules preservation-floor refusals and temporary provider outages; retire when those distinct reconciliation stops are adopted or the retries are removed."
+  },
+  {
+    "path": "src/workers/x-bookmarks/api-connector.ts",
+    "symbol": "retry:guardedReconcilePostPage:retryAt",
+    "reason": "pending",
+    "retire_when": "Retries an incomplete or truncated provider page after its page-size ladder is exhausted, not a provider rate-limit reset; retire when truncation recovery is reported as its own stop or removed."
+  },
+  {
+    "path": "src/workers/x-bookmarks/api-connector.ts",
+    "symbol": "retry:incompleteReconcileError:retryAt",
+    "reason": "pending",
+    "retire_when": "Retries a traversal that reached its staging/page safety bound without a complete snapshot; retire when incomplete-traversal recovery is reported as its own stop or removed."
+  },
+  {
+    "path": "src/workers/x-bookmarks/api-connector.ts",
+    "symbol": "retry:stagedFailureOutcome:retryAt",
+    "reason": "pending",
+    "retire_when": "Retries recoverable cursor, window-boundary or scope failures while preserving the staged snapshot; retire when staged recovery is reported as its own stop or removed."
+  },
+  {
+    "path": "src/workers/x-bookmarks/api-connector.ts",
+    "symbol": "retry:stagedRecoveryRequiredError:retryAt",
+    "reason": "pending",
+    "retire_when": "Retries staged traversal recovery required by repeated structural failures, not provider throttling; retire when staged recovery is reported as its own stop or removed."
+  },
+  {
+    "path": "src/workers/x-bookmarks/live-sync.ts",
+    "symbol": "retry:reconcile:retryAt",
+    "reason": "pending",
+    "retire_when": "Retries failed reconciliation membership/coverage or tombstone-accounting proofs without advancing authoritative freshness; retire when these reconciliation refusals are reported as their own stops or removed."
+  },
+  {
+    "path": "src/workers/dropbox-files/provider-client.ts",
+    "symbol": "retry:dropboxRetryAfterMs:return",
+    "reason": "pacing",
+    "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
+  },
+  {
+    "path": "src/workers/file-extraction/job-store.ts",
+    "symbol": "retry:nextRetryAt:return",
+    "reason": "pacing",
+    "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
+  },
+  {
+    "path": "src/workers/remote-mcp.ts",
+    "symbol": "retry:withToolRetryAfter:return",
+    "reason": "pacing",
+    "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
+  },
+  {
+    "path": "src/workers/source-index/embeddings.ts",
+    "symbol": "retry:retryAfterMs:return",
+    "reason": "pacing",
+    "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
+  },
+  {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "reason:google_drive_request_budget_clock_regression",
+    "reason": "internal",
+    "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
+  },
+  {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "reason:google_drive_request_budget_ledger_busy",
+    "reason": "internal",
+    "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
+  },
+  {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "retry:createCanonicalDropboxSchedulerSource:retryAt_at",
+    "reason": "pacing",
+    "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
+  },
+  {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "retry:embeddingSweepTask:retryAt_at",
+    "reason": "pacing",
+    "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
+  },
+  {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "retry:safeNormalizeFailureRetryAt:return",
+    "reason": "pacing",
+    "retire_when": "the existing retry or clock/ledger safety refusal is reported with its continuation, or removed"
+  },
+  {
+    "path": "src/workers/x-bookmarks/live-sync.ts",
+    "symbol": "retry:reconcile:retryAt_at",
+    "reason": "pending",
+    "retire_when": "Schedules another reconciliation when the applied result cannot advance the authoritative watermark; retire when that distinct reconciliation wait is reported as its own stop or removed."
   }
 ]

@@ -40,6 +40,7 @@ import {
 import type { RawItem } from '../../../core/contracts.ts';
 import { mediaCacheDir, sweepMediaCache } from '../../../core/media-cache.ts';
 import { extractionSpoolRoot } from '../../../core/olympus-layout.ts';
+import { writableStoreOpensForbidden } from '../../../core/store-write-guard.ts';
 import { extractionSpoolPlacementForCorpus, whatsappMovedPathMapper } from '../../../core/source-placement.ts';
 import { extractionSpoolOwnerKey, prepareExtractionSpool } from '../../file-extraction/spool.ts';
 import type { LocalConnectorStore } from '../../connector-store/index.ts';
@@ -215,8 +216,10 @@ export interface FileExtractionRuntimeOptions {
   warn?: (message: string) => void;
   jobsDbPath?: string;
   /**
-   * The engine split's front: the queue is opened read-only and no spool is
-   * prepared. The front reads extraction state; only the background runs jobs.
+   * The queue is opened read-only and no spool is prepared: the runtime reads
+   * extraction state and runs no job. Always on in the engine split's front,
+   * whatever is passed (the process role decides, #1563): a front that built
+   * a writable runtime crashed on every start of rc.4's install.
    */
   readOnly?: boolean;
 }
@@ -305,6 +308,7 @@ export function createFileExtractionRuntime(
   options: FileExtractionRuntimeOptions,
 ): FileExtractionRuntime | undefined {
   const env = options.env ?? process.env;
+  const readOnly = options.readOnly === true || writableStoreOpensForbidden();
   if (
     options.enabled !== true
     && (env[FILE_EXTRACTION_ENABLED_ENV] ?? '').trim().toLowerCase() !== 'true'
@@ -330,11 +334,8 @@ export function createFileExtractionRuntime(
   // opens the queue before it bails, so that path closes it explicitly.
   const jobsDbPath = options.jobsDbPath ?? defaultFileExtractionJobsDbPath(env);
   // A front reads the queue the background created; before that there is nothing to read.
-  if (options.readOnly === true && !existsSync(jobsDbPath)) return undefined;
-  const jobs = new LocalFileExtractionJobStore(
-    jobsDbPath,
-    options.readOnly === true ? { readonly: true } : {},
-  );
+  if (readOnly && !existsSync(jobsDbPath)) return undefined;
+  const jobs = new LocalFileExtractionJobStore(jobsDbPath, readOnly ? { readonly: true } : {});
 
   // Each account keeps the scratch files a file reader's input is written to in its own folder
   // (core/source-placement.ts, `extractionSpoolPlacementForCorpus`), so deleting the account takes them
@@ -343,7 +344,7 @@ export function createFileExtractionRuntime(
   // account scope or source that has no job left).
   const preparedSpools = new Map<string, string | undefined>();
   const prepareSpool = (root: string): string | undefined => {
-    if (options.readOnly === true) return undefined;
+    if (readOnly) return undefined;
     if (!preparedSpools.has(root)) {
       preparedSpools.set(root, prepareExtractionSpool(root, {
         ownersWithJobs: () => new Set(jobs.jobOwners().map(extractionSpoolOwnerKey)),
@@ -381,7 +382,7 @@ export function createFileExtractionRuntime(
     // A store that is not Private holds no picture content of an item its set
     // never routed (or of any item, untiered); what an earlier build stored
     // there is removed (the names stay).
-    if (store.trustDomain !== 'secure_local') {
+    if (store.trustDomain !== 'secure_local' && !readOnly) {
       try {
         if (tierSet) store.stripImageContentOutsidePrivate({ keep: (identity) => tierSet.ledger.isRouted(identity) });
         else store.stripImageContentOutsidePrivate();
@@ -553,7 +554,7 @@ export function createFileExtractionRuntime(
   // them through this same runner after a restart or an ordinary retry backoff.
   let resumeTicks = 0;
   const resumeReads = () => {
-    if (closed || options.readOnly) return;
+    if (closed || readOnly) return;
     try {
       // A read settled unread (no reader yet) is queued again once its reader
       // is ready. Checked about once a minute; the queue itself every tick.
@@ -567,7 +568,7 @@ export function createFileExtractionRuntime(
       }
     } catch { console.warn('[olympus:on-demand] resume_failed count=1'); }
   };
-  const recoveryTimer = options.readOnly ? undefined : setInterval(resumeReads, 5_000);
+  const recoveryTimer = readOnly ? undefined : setInterval(resumeReads, 5_000);
   recoveryTimer?.unref?.();
   void Promise.resolve().then(resumeReads);
 

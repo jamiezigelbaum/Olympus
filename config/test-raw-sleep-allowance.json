@@ -86,7 +86,6 @@
     "test/helpers/zkapi-transport-harness.ts": 3,
     "test/install-linux-script.test.ts": 3,
     "test/install-macos-script.test.ts": 1,
-    "test/judge-spending.test.ts": 3,
     "test/linux-openclaw-upgrade.test.ts": 1,
     "test/linux-owner-bridge-host.test.ts": 4,
     "test/linux-owner-bridge-security.test.ts": 3,

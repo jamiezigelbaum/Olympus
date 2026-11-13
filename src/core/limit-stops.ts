@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Database } from 'bun:sqlite';
 import { runSqliteMigrations } from './sqlite-migrations.ts';
 
@@ -19,6 +20,9 @@ export interface LimitStop {
   /** Null means the reporting boundary does not know the amount. */
   limit: number | null;
   used: number | null;
+  reason?: string;
+  /** A single registered limit may offer a different action for a configuration refusal. */
+  continue?: LimitRegistration['continue'];
   waiting?: { items?: number; runs?: number };
   toContinue?: { cost?: number; time?: number; raiseTo?: number };
   resumesAt?: string;
@@ -59,6 +63,9 @@ export function initializeLimitStops(db: Database): void {
         resumes_at TEXT, cleared_at TEXT, PRIMARY KEY (id, subject)
       )`);
     },
+  }, {
+    version: 2, name: 'limit_stop_reason_and_action',
+    up(db) { db.exec('ALTER TABLE limit_stops ADD COLUMN reason TEXT; ALTER TABLE limit_stops ADD COLUMN continue_action TEXT;'); },
   }]);
 }
 
@@ -75,8 +82,8 @@ export function reportLimitStop(input: LimitStop, db: Database): void {
     throw new TypeError('Limit stops require a subject and valid timestamps.');
   }
   db.query(`
-    INSERT INTO limit_stops (id, subject, since, "limit", used, waiting_json, to_continue_json, resumes_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO limit_stops (id, subject, since, "limit", used, waiting_json, to_continue_json, resumes_at, reason, continue_action)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id, subject) DO UPDATE SET
       -- A stop still open keeps its start; a cleared or self-expired one starts again.
       since = CASE WHEN limit_stops.cleared_at IS NULL
@@ -84,12 +91,12 @@ export function reportLimitStop(input: LimitStop, db: Database): void {
         THEN limit_stops.since ELSE excluded.since END,
       "limit" = excluded."limit", used = excluded.used,
       waiting_json = excluded.waiting_json, to_continue_json = excluded.to_continue_json,
-      resumes_at = excluded.resumes_at, cleared_at = NULL
+      resumes_at = excluded.resumes_at, reason = excluded.reason, continue_action = excluded.continue_action, cleared_at = NULL
   `).run(input.id, input.subject, input.since, input.limit, input.used,
     input.waiting ? JSON.stringify(input.waiting) : null,
     input.toContinue ? JSON.stringify(input.toContinue) : null,
     // Stored in one ISO form, so listing can compare it as text.
-    input.resumesAt === undefined ? null : new Date(input.resumesAt).toISOString());
+    input.resumesAt === undefined ? null : new Date(input.resumesAt).toISOString(), input.reason ?? null, input.continue ?? null);
 }
 
 export function clearLimitStop(id: string, subject: string, db: Database): void {
@@ -105,10 +112,11 @@ export function listOpenLimitStops(db: Database, now: Date = new Date()): LimitS
   const rows = db.query(`SELECT * FROM limit_stops WHERE cleared_at IS NULL
     AND (resumes_at IS NULL OR resumes_at > ?) ORDER BY id, subject`).all(now.toISOString()) as Array<{
     id: string; subject: string; since: string; limit: number | null; used: number | null;
-    waiting_json: string | null; to_continue_json: string | null; resumes_at: string | null;
+    reason?: string | null; continue_action?: LimitRegistration['continue'] | null; waiting_json: string | null; to_continue_json: string | null; resumes_at: string | null;
   }>;
   return rows.map((row) => ({
     id: row.id, subject: row.subject, since: row.since, limit: row.limit, used: row.used,
+    ...(row.reason ? { reason: row.reason } : {}), ...(row.continue_action ? { continue: row.continue_action } : {}),
     ...(row.waiting_json ? { waiting: JSON.parse(row.waiting_json) } : {}),
     ...(row.to_continue_json ? { toContinue: JSON.parse(row.to_continue_json) } : {}),
     ...(row.resumes_at ? { resumesAt: row.resumes_at } : {}),
@@ -122,4 +130,34 @@ export function limitStopSubjects(stop: LimitStop): readonly string[] {
     if (Array.isArray(parts) && parts.length === 3 && parts.every((part) => typeof part === 'string')) return parts.slice(0, 2);
   } catch { /* A plain source or corpus id is also a valid subject. */ }
   return [stop.subject];
+}
+
+/** Dashboard continuations carry an opaque identity, never a marker path or internal task ids. */
+export function limitStopReference(stop: Pick<LimitStop, 'id' | 'subject'>): string {
+  return 'limit:' + createHash('sha256').update(stop.id).update('\0').update(stop.subject).digest('hex');
+}
+
+/** Shared transports report through hooks installed only by the worker store owner. */
+let stopHooks: { record(stop: LimitStop): void; clear(id: string, subject: string): void } | undefined;
+export function installLimitStopHooks(hooks: NonNullable<typeof stopHooks>): void { stopHooks = hooks; }
+/** Keep repeated refusals off the store path; a successful attempt clears once, including after restart. */
+const stopGenerations = new Map<string, number>();
+/** A continuation can clear a stop reported by another object in this process. */
+export function invalidateLimitStop(id: string, subject: string): void {
+  const key = JSON.stringify([id, subject]);
+  stopGenerations.set(key, (stopGenerations.get(key) ?? 0) + 1);
+}
+export function createLimitStopReporter() {
+  const reported = new Map<string, string>();
+  return {
+    report(stop: LimitStop) {
+      const key = JSON.stringify([stop.id, stop.subject]);
+      const signature = JSON.stringify([{ ...stop, since: undefined }, stopGenerations.get(key) ?? 0]);
+      if (stopHooks && reported.get(key) !== signature) { stopHooks.record(stop); reported.set(key, signature); }
+    },
+    clear(id: string, subject: string) {
+      const key = JSON.stringify([id, subject]);
+      if (stopHooks && reported.get(key) !== '') { stopHooks.clear(id, subject); reported.set(key, ''); }
+    },
+  };
 }

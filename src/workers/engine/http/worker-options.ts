@@ -104,6 +104,8 @@ export interface EmailSourceWorkerOptions {
    * Absent: `/consult/ask` answers 501.
    */
   consultAsk?: (input: ConsultAskWireRequest, signal: AbortSignal) => Promise<unknown>;
+  /** olympus_limits (owner-limits.ts): list open stops and continue one, beside the Bun stores. */
+  ownerLimits?: (params: Record<string, unknown>) => Promise<unknown>;
   /**
    * What an agent may do about archive imports (archive-import/agent.ts):
    * ask for an import or a removal, and read the list. Absent:

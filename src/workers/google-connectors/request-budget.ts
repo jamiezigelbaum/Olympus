@@ -43,6 +43,7 @@ export interface GoogleDailyRequestBudgetOptions {
   /** Provider label; appears in the deferral message and ledger key only. */
   provider: string;
   dailyRequestBudget: number;
+  dailyRequestBudgetOverride?: (now: Date) => number | undefined;
   /**
    * Durable counter location. Existing JSON state is imported into an adjacent
    * SQLite ledger; new `.sqlite` paths are used directly.
@@ -88,12 +89,13 @@ export class GoogleRequestBudgetError extends Error {
   readonly provider: string;
   readonly reason: GoogleRequestBudgetErrorReason;
   readonly observedFutureUtcDay: string | undefined;
+  readonly amounts: { limit: number; used?: number } | undefined;
 
   constructor(
     provider: string,
     retryAt: string,
     reason: GoogleRequestBudgetErrorReason = 'daily_api_request_guard',
-    options: { observedFutureUtcDay?: string; currentUtcDay?: string } = {},
+    options: { observedFutureUtcDay?: string; currentUtcDay?: string; limit?: number; used?: number } = {},
   ) {
     super(
       reason === 'future_utc_day'
@@ -110,6 +112,7 @@ export class GoogleRequestBudgetError extends Error {
     this.retryAt = retryAt;
     this.reason = reason;
     this.observedFutureUtcDay = options.observedFutureUtcDay;
+    this.amounts = options.limit !== undefined ? { limit: options.limit, ...(options.used !== undefined ? { used: options.used } : {}) } : undefined;
   }
 }
 
@@ -117,13 +120,18 @@ export class GoogleDailyRequestBudget {
   private utcDay = '';
   private requests = 0;
   private readonly provider: string;
-  private readonly dailyRequestBudget: number;
+  private readonly baseDailyRequestBudget: number;
+  private readonly dailyRequestBudgetOverride: ((now: Date) => number | undefined) | undefined;
+  private get dailyRequestBudget(): number {
+    return positiveInteger(this.dailyRequestBudgetOverride?.(this.now()) ?? this.baseDailyRequestBudget, `${this.provider} daily API request budget`);
+  }
   private readonly ledgerPath: string | undefined;
   private readonly now: () => Date;
 
   constructor(options: GoogleDailyRequestBudgetOptions) {
     this.provider = providerLabel(options.provider);
-    this.dailyRequestBudget = positiveInteger(
+    this.dailyRequestBudgetOverride = options.dailyRequestBudgetOverride;
+    this.baseDailyRequestBudget = positiveInteger(
       options.dailyRequestBudget,
       `${options.provider} daily API request budget`,
     );
@@ -194,7 +202,7 @@ export class GoogleDailyRequestBudget {
       this.requests = 0;
     }
     if (routine && this.requests >= this.dailyRequestBudget) {
-      throw new GoogleRequestBudgetError(this.provider, nextUtcDay(now));
+      throw new GoogleRequestBudgetError(this.provider, nextUtcDay(now), 'daily_api_request_guard', { limit: this.dailyRequestBudget, used: this.requests });
     }
     this.requests += 1;
   }
@@ -340,7 +348,7 @@ function reservePersistentRequest(input: {
           input.dailyRequestBudget,
         ) as { requests?: number } | null;
         if (!reserved) {
-          throw new GoogleRequestBudgetError(input.provider, nextUtcDay(input.now));
+          throw new GoogleRequestBudgetError(input.provider, nextUtcDay(input.now), 'daily_api_request_guard', { limit: input.dailyRequestBudget });
         }
       });
       reserve.immediate();

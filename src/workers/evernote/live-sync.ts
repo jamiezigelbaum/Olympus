@@ -21,7 +21,8 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import type { RawItem } from '../../core/contracts.ts';
-import { MCP_SOURCE_DASHBOARD_STATE, isMcpSourceError, type McpSourceDashboardState, type McpSourceErrorKind } from '../../core/mcp-source/errors.ts';
+import { createProviderRateLimitReporter, providerRetryTime } from '../../core/provider-rate-limits.ts';
+import { MCP_SOURCE_DASHBOARD_STATE, McpSourceError, isMcpSourceError, type McpSourceDashboardState, type McpSourceErrorKind } from '../../core/mcp-source/errors.ts';
 import {
   McpTokenSource,
   mcpAuthorizedFetch,
@@ -193,7 +194,7 @@ export function createEvernoteTierLane(options: {
 export interface EvernotePassStatus {
   last_completed_at?: string;
   counts?: EvernotePassCounts;
-  last_error?: { kind: McpSourceErrorKind | 'listing_incomplete' | 'account_changed' | 'pass_failed'; state: McpSourceDashboardState | 'provider_error'; at: string };
+  last_error?: { kind: McpSourceErrorKind | 'listing_incomplete' | 'account_changed' | 'pass_failed'; state: McpSourceDashboardState | 'provider_error'; at: string; resumesAt?: string };
 }
 
 interface PassFile {
@@ -348,7 +349,27 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     ...(options.fetch ? { fetch: options.fetch } : {}),
     now,
   });
-  const authorizedFetch = mcpAuthorizedFetch(tokens, serverUrl, options.fetch);
+  const providerStops = createProviderRateLimitReporter('evernote');
+  let resumesAt: string | undefined;
+  const reportRateLimit = (retryAfterMs: number) => {
+    resumesAt ??= new Date(now().getTime() + retryAfterMs).toISOString();
+    providerStops.report(resumesAt, now());
+  };
+  const authorized = mcpAuthorizedFetch(tokens, serverUrl, options.fetch);
+  const authorizedFetch: FetchLike = async (url, init) => {
+    providerStops.resume(now());
+    const response = await authorized(url, init);
+    if (response.status === 429) {
+      resumesAt = providerRetryTime(response.headers.get('retry-after') ?? undefined, now(), 15 * 60_000);
+      providerStops.report(resumesAt, now());
+      const retryAfterMs = Date.parse(resumesAt) - now().getTime();
+      if (retryAfterMs > 60_000) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new McpSourceError('rate_limited', { retryAfterMs });
+      }
+    }
+    return response;
+  };
   const accountScope = options.handle.accountRole ?? EVERNOTE_ACCOUNT_ROLE;
   let shouldContinue: () => boolean = () => true;
   let notebookChoice: EvernoteNotebookGate = () => 'ingest';
@@ -363,6 +384,8 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     callBudget: purpose === 'pass' ? options.callBudget ?? EVERNOTE_PASS_CALL_BUDGET
       : purpose === 'notebooks' ? NOTEBOOKS_CALL_BUDGET : ATTACHMENT_CALL_BUDGET,
     fetch: authorizedFetch,
+    onSuccess: () => { providerStops.success(); resumesAt = undefined; },
+    onRateLimit: reportRateLimit,
     ...(options.pacer ? { pacer: options.pacer } : {}),
     ...(purpose === 'pass' ? { shouldContinue: () => shouldContinue() } : {}),
   });
@@ -411,7 +434,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
         : name === 'EvernoteAccountChanged' ? 'account_changed'
           : 'pass_failed';
     const state = isMcpSourceError(error) ? MCP_SOURCE_DASHBOARD_STATE[error.kind] : 'provider_error';
-    writePassFile(passPath, { ...file, status: { ...file.status, last_error: { kind, state, at: now().toISOString() } } });
+    writePassFile(passPath, { ...file, status: { ...file.status, last_error: { kind, state, at: now().toISOString(), ...(kind === 'rate_limited' && resumesAt ? { resumesAt } : {}) } } });
     // A refused or lost sign-in: the card says Reconnect.
     if (isMcpSourceError(error) && AUTH_KINDS.has(error.kind)) markConnectedHandleReauthRequired(options.handle.handle, options.registryPath, now());
     throw error;
@@ -458,7 +481,7 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
         status: {
           last_completed_at: completedAt,
           counts: outcome.counts,
-          ...(outcome.stoppedBy ? { last_error: { kind: outcome.stoppedBy, state: MCP_SOURCE_DASHBOARD_STATE[outcome.stoppedBy], at: completedAt } } : {}),
+          ...(outcome.stoppedBy ? { last_error: { kind: outcome.stoppedBy, state: MCP_SOURCE_DASHBOARD_STATE[outcome.stoppedBy], at: completedAt, ...(outcome.stoppedBy === 'rate_limited' && resumesAt ? { resumesAt } : {}) } } : {}),
         },
       });
       lastCompletedAt = completedAt;
@@ -524,3 +547,5 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
   };
 }
 
+
+// limit-retry: retry:authorizedFetch:retryAfterMs -> evernote.rate_limit

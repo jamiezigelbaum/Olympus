@@ -1,6 +1,7 @@
 import type { EvidenceWindowSource, WindowScorer } from '../../core/evidence-window-placement.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
+import { reportFrontStoreOpened } from '../../core/boot-progress.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
 import { storeOwnerIdleMs, storeReadHasPriority } from '../../core/store-reclaim-admission.ts';
@@ -3625,6 +3626,8 @@ export class LocalConnectorStore {
         const model = (this.db.query('SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1').get() as { model_id: string } | null)?.model_id;
         if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
+      // The split front's start moves one store at a time; the upgrade's wait reads it (#1563).
+      reportFrontStoreOpened();
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       throw error;

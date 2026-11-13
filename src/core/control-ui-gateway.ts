@@ -21,6 +21,7 @@ import {
  * The worker checks its own list again (dashboard-panel-tools.ts).
  */
 export const OLYMPUS_TAB_TOOL_NAMES = [
+  'olympus_limits',
   'olympus_dashboard',
   'olympus_connect_source',
   'olympus_scope_list',
