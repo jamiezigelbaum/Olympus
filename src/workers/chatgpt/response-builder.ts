@@ -190,7 +190,11 @@ export function limitsToolResult(raw: unknown): ChatGptToolResult {
       const registration = registrations.find(limit => limit.id === stop?.id);
       if (!registration || typeof stop?.subject !== 'string') return [];
       const waiting = asRecord(stop.waiting);
-      return [{ ...registration, subject: limitStopReference({ id: registration.id, subject: stop.subject }),
+      return [{ ...registration,
+        ...(['raise', 'refill', 'run_once', 'none'].includes(String(stop.continue)) ? { continue: stop.continue } : {}),
+        ...(typeof stop.reason === 'string' && /^[a-z0-9_.:-]{1,127}$/.test(stop.reason) ? { reason: stop.reason } : {}),
+        ...(asRecord(stop.toContinue) && finite(asRecord(stop.toContinue)!.raiseTo) ? { toContinue: { raiseTo: asRecord(stop.toContinue)!.raiseTo } } : {}),
+        subject: limitStopReference({ id: registration.id, subject: stop.subject }),
         since: iso(stop.since), limit: finite(stop.limit) && stop.limit >= 0 ? stop.limit : null,
         used: finite(stop.used) && stop.used >= 0 ? stop.used : null,
         ...(waiting ? { waiting: {
@@ -203,11 +207,11 @@ export function limitsToolResult(raw: unknown): ChatGptToolResult {
   const ok = record.ok === true;
   const status = asRecord(record.result)?.status;
   const message = record.action === 'raise' && ok
-    ? `Call limit raised to ${whole(record.to)} calls${record.keep === true ? ' for good' : ' for this UTC day'}. Judging can continue.`
+    ? `${record.unit === 'calls' ? 'Call limit' : 'Limit'} raised to ${finite(record.to) ? record.to : 0} ${['usd', 'requests', 'calls'].includes(String(record.unit)) ? record.unit : 'calls'}${record.keep === true || record.id === 'judge.spend_cap' ? ' for good' : ' for this UTC day'}. ${record.unit === 'calls' ? 'Judging' : 'Work'} can continue.`
     : record.action === 'refill'
-      ? ok ? 'Venice can consume again. Work can continue.' : 'Venice billing has not confirmed canConsume=true. The stop remains; Olympus will re-check automatically.'
+      ? ok ? record.id === 'judge.payment' ? 'Payment stop lifted. The next judge call will re-check payment.' : 'Venice can consume again. Work can continue.' : 'Venice billing has not confirmed canConsume=true. The stop remains; Olympus will re-check automatically.'
       : record.action === 'run_once'
-        ? ok ? 'One operator run requested. Usage stays counted.' : status === 'busy' ? 'This source already has a run in progress.' : 'This source was just started. Check its progress on Home.'
+        ? ok ? 'One operator run requested. Usage stays counted.' : status === 'busy' ? 'This source already has a run in progress.' : status === 'too_soon' ? 'This source was just started. Check its progress on Home.' : 'The operator run remains stopped. Check its result and source status.'
         : 'Olympus could not continue this stop. Refresh Home and try again.';
   return { content: [{ type: 'text', text: message }], ...(!ok ? { isError: true } : {}) };
 }

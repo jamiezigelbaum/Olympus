@@ -1,3 +1,7 @@
+import { registerLimit, createLimitStopReporter } from '../../core/limit-stops.ts';
+registerLimit({ id: 'judge.spend_cap', kind: 'cost', scope: 'judge', label: 'Privacy judge spending cap reached', unit: 'usd', continue: 'raise' });
+registerLimit({ id: 'judge.payment', kind: 'funding', scope: 'judge', label: 'Privacy judge provider refused payment (402)', unit: 'usd', continue: 'refill' });
+
 import { existsSync, readFileSync } from 'node:fs';
 import { withFileLeaseSync } from '../../core/file-lease.ts';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
@@ -101,8 +105,31 @@ function statusFromRow(row: BudgetRow): JudgeSpendingStatus {
  * They serialize reservations across processes without a new store/sidecar owner.
  * A crash or unknown transport outcome retains its reservation, never a free retry. */
 export class JudgeSpending {
+  private readonly stops = createLimitStopReporter();
   constructor(private readonly path: string) {}
-  status(): JudgeSpendingStatus { return readJudgeSpending(this.path); }
+  /** Owner continuation preserves both the selected judge and all spending. */
+  raise(capDollars: number): void {
+    const cap = judgeCapMicros(capDollars);
+    this.change(row => { row.cap = cap; if (row.stop === 'cap' && row.spent < cap) row.stop = null; delete row.uncapped; });
+  }
+  refill(): void { this.change(row => { if (row.stop === 'payment') row.stop = null; }); }
+  private report(row: BudgetRow, cost = 0): void {
+    for (const [reason, id] of [['cap', 'judge.spend_cap'], ['payment', 'judge.payment']] as const) {
+      if (row.stop === reason) this.stops.report({ id, subject: this.path, since: new Date().toISOString(), reason,
+        limit: row.cap / 1_000_000, used: row.spent / 1_000_000, waiting: { runs: 1 },
+        ...(reason === 'cap' ? { toContinue: { raiseTo: Math.max(row.cap + 1, row.spent + cost) / 1_000_000 } } : {}) });
+      else this.stops.clear(id, this.path);
+    }
+  }
+  private reportedOnStart = false;
+  status(): JudgeSpendingStatus {
+    const status = readJudgeSpending(this.path);
+    if (!this.reportedOnStart && status.stop !== 'storage') {
+      this.report(readBudgetRow(this.path));
+      this.reportedOnStart = true;
+    }
+    return status;
+  }
   private change<T>(edit: (row: BudgetRow) => T): T {
     return withFileLeaseSync(this.path, () => {
       const row = readBudgetRow(this.path);
@@ -114,7 +141,7 @@ export class JudgeSpending {
   }
   choose(choice: JudgeChoice, capDollars: number): void {
     const cap = judgeCapMicros(capDollars);
-    this.change(row => { row.choice = choice; row.cap = cap; row.stop = null; delete row.uncapped; delete row.noted; });
+    this.change(row => { row.choice = choice; row.cap = cap; row.stop = null; delete row.uncapped; delete row.noted; this.report(row); });
   }
   /** Upgrade only: an approval given before this record existed was the owner's
    * opt-in. Any later saved choice exists as a file, so this never overrides it. */
@@ -132,13 +159,14 @@ export class JudgeSpending {
   }
   lowerCap(capDollars: number): void {
     const cap = judgeCapMicros(capDollars);
-    this.change(row => { row.cap = Math.min(row.cap, cap); if (!row.stop && row.spent >= row.cap) row.stop = 'cap'; });
+    this.change(row => { row.cap = Math.min(row.cap, cap); if (!row.stop && row.spent >= row.cap) row.stop = 'cap'; this.report(row); });
   }
   private reserve(cost: number): void {
     const stopped = this.change(row => {
       if (!judgeChoiceUsesVenice(row.choice)) return 'opt_in' as const;
-      if (row.stop) return row.stop;
-      if (row.spent + cost > row.cap) { row.stop = 'cap'; return row.stop; }
+      if (row.stop) { this.report(row, cost); return row.stop; }
+      if (row.spent + cost > row.cap) { row.stop = 'cap'; this.report(row, cost); return row.stop; }
+      this.report(row);
       row.spent += cost;
       return undefined;
     });
@@ -150,7 +178,17 @@ export class JudgeSpending {
   fetch(fetchImpl: OpenAIAnalystFetch, onStop: () => void = () => {}): OpenAIAnalystFetch {
     return async (url, init) => {
       // No limit set yet: exactly the calls this install made before limits existed.
-      if (this.status().uncapped) return fetchImpl(url, init);
+      const status = this.status();
+      if (status.uncapped) {
+        if (status.stop) { onStop(); throw new JudgeCloudStopped(status.stop); }
+        const response = await fetchImpl(url, init);
+        if (response.status === 402) {
+          this.change(row => { row.stop = 'payment'; this.report(row); });
+          onStop();
+          throw new JudgeCloudStopped('payment');
+        }
+        return response;
+      }
       const body = JSON.parse(String(init.body)) as { model: string; messages: unknown; max_completion_tokens: number };
       const price = JUDGE_PRICES[normalizeVeniceAnalystModelId(body.model)];
       if (!price) throw new JudgeCloudStopped('price');
@@ -163,7 +201,7 @@ export class JudgeSpending {
       try { this.reserve(cost); } catch (error) { if (error instanceof JudgeCloudStopped) onStop(); throw error; }
       const response = await fetchImpl(url, init);
       if (response.status === 402) {
-        this.change(row => { row.spent -= cost; row.stop = 'payment'; });
+        this.change(row => { row.spent -= cost; row.stop = 'payment'; this.report(row); });
         onStop();
         throw new JudgeCloudStopped('payment');
       }
@@ -181,6 +219,7 @@ export class JudgeSpending {
             this.change(row => {
               row.spent += actual - cost;
               if (row.spent >= row.cap) row.stop = 'cap';
+              this.report(row);
             });
           }
         } catch { /* Unknown usage retains its durable reservation. */ }

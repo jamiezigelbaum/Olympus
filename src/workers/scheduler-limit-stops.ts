@@ -8,7 +8,7 @@ import { clearLimitStop, registerLimit, reportLimitStop } from '../core/limit-st
 
 // Provider guards forward known amounts through the existing counts payload.
 // Older markers and boundaries without amounts remain explicitly unknown.
-const DAILY_LIMITS = new Map<string, { id: string; kind: 'cost' | 'requests'; label: string }>(Object.entries({
+export const DAILY_LIMITS = new Map<string, { id: string; kind: 'cost' | 'requests'; label: string }>(Object.entries({
   daily_cost_guard: { id: 'x.daily_cost', kind: 'cost', label: 'daily X spending budget used' },
   daily_api_request_guard: { id: 'x.daily_requests', kind: 'requests', label: 'daily X request budget used' },
   daily_resource_read_guard: { id: 'x.daily_resource_reads', kind: 'requests', label: 'daily X resource-read budget used' },
