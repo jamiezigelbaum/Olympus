@@ -19,6 +19,7 @@
 ## Pages
 - [Home](https://olympusplugin.ai/)
 - [Install: add Olympus to your AI](https://olympusplugin.ai/install/)
+- [Guides: using AI without giving up your private data](https://olympusplugin.ai/guides/)
 - [Help](https://olympusplugin.ai/help/)
 - [Support](https://olympusplugin.ai/support/)
 - [Privacy policy: what each AI can and cannot see](https://olympusplugin.ai/privacy/)
