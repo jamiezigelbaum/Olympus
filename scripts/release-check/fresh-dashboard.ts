@@ -147,6 +147,17 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     const clickKey = (key: string) => click(byKey(key), `control ${key}`, `'controls with keys: ' + [...new Set([...document.querySelectorAll('[data-key]')].map(e=>e.getAttribute('data-key').replace(/:[^:]*$/, ':…')))].slice(0, 20).join(', ')`);
     const sourceAction = async (s: LiveSourceSpec, pattern: string) => {
       const row = `[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)})`;
+      // Sources lists a connected source as a short row whose Details opens its full row (with Choose mail or
+      // Choose folders, Sync now) on Home; Home lists no sources otherwise (#1085). Go there when this page has no such row.
+      if (!await panel<boolean>(`!!${row}`, Boolean)) {
+        const details = `document.querySelector('[data-source-row^=${JSON.stringify(`${s.id}.`)}] a[data-source-details]')?.getAttribute('href')`;
+        let href = await panel<string>(details, v => typeof v === 'string' && v.length > 0);
+        if (!href) {
+          await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
+          href = await panel<string>(details, v => typeof v === 'string' && v.length > 0);
+        }
+        if (href) await reload(href, `!!${row}`);
+      }
       try {
         await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
       } catch (error) {
