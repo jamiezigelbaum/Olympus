@@ -118,7 +118,7 @@ describe('fresh install canary', () => {
     expect(checks.map(c => c.id)).toEqual([
       'fresh.machine-clear', 'fresh.install', 'fresh.engine-up', 'fresh.reranker-ready', 'fresh.ask-without-model', 'fresh.dashboard-opens', 'fresh.privacy-choice',
       ...sources.flatMap(s => ['connect', 'consent', 'callback', 'scope', 'first-items'].map(step => `fresh.${s.id}.${step}`)),
-      'live.gmail.status', 'live.dropbox.status', 'live.gmail.known', 'live.dropbox.known',
+      'live.gmail.status', 'live.dropbox.status', 'live.gmail.known', 'live.dropbox.known', 'fresh.engine-log',
       'fresh.gmail.answer', 'fresh.gmail.scope-absence', 'fresh.dropbox.answer', 'fresh.dropbox.scope-absence', 'fresh.judge-spend', 'fresh.restore-zig',
     ]);
     expect(r.events.slice(-3)).toEqual(['engine.close', 'dashboard.close', 'restore']);

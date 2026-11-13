@@ -202,6 +202,22 @@ export interface LiveAccountsOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Runs a plant command; tests replace it. */
   runPlant?: (argv: readonly string[], env: Record<string, string>) => { code: number; output: string };
+  /**
+   * When set, every poll of the fresh-item wait also records the engine's counts per corpus and this machine sample
+   * (load, the busiest processes) as one `live.timeline` line, so a slow first find shows which stage held the time.
+   */
+  sampleMachine?: () => Promise<string>;
+}
+
+/** One timeline line: seconds since the plant, then per corpus items, chunks and embedded chunks, then the privacy wait. */
+export function timelineLine(seconds: number, structured: unknown, machine: string): string {
+  const rows = corpusRows(structured).filter((row) => row.configured && (row.counts?.indexed_items ?? 0) > 0);
+  const counts = rows.map((row) => {
+    const c = row.counts as { indexed_items: number; chunks?: number; embedded_chunks?: number };
+    return `${row.label}/${row.corpus_id.split(':').pop()} items ${c.indexed_items} emb ${c.embedded_chunks ?? '?'}/${c.chunks ?? '?'}${row.retrieval?.state === 'degraded' ? ' degraded' : ''}`;
+  }).join('; ');
+  const privacy = privacyCheckOf(structured);
+  return `t+${seconds}s | ${counts || 'no items'} | privacy wait ${privacy ? `${privacy.waiting_items}${privacy.waiting_for ? ` (${privacy.waiting_for})` : ''}` : 0} | ${machine}`;
 }
 
 const defaultPlant = (argv: readonly string[], env: Record<string, string>): { code: number; output: string } => {
@@ -241,7 +257,16 @@ export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOp
     planted.push({ spec, word, deadline: Date.now() + (spec.plant.withinS ?? 900) * 1000, started });
   }
   const waiting = new Set(planted);
+  const timeline: string[] = [];
+  const plantedAt = Date.now();
+  const sample = async () => {
+    if (!options.sampleMachine) return;
+    const now = await engine.call('source_index_status', {});
+    const machine = await options.sampleMachine().catch((error) => `machine sample failed: ${error instanceof Error ? error.message : String(error)}`);
+    timeline.push(timelineLine(Math.round((Date.now() - plantedAt) / 1000), now.ok ? now.structured : null, machine));
+  };
   while (waiting.size > 0) {
+    await sample();
     for (const row of [...waiting]) {
       const search = await engine.call('olympus_search', { question: row.word, limit: 24 });
       const title = `${row.spec.label}: a new item is found within ${row.spec.plant!.withinS ?? 900} s`;
@@ -258,5 +283,6 @@ export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOp
     }
     if (waiting.size > 0) await sleep(pollMs);
   }
+  if (timeline.length) checks.push({ id: 'live.timeline', title: 'Where the wait for new items went', status: 'pass', detail: timeline.join('\n') });
   return checks;
 }

@@ -51,6 +51,13 @@ export function scopeAbsenceProblem(spec: LiveSourceSpec, answer: { ok: boolean;
 
 export const redactFreshDetail = (text: string): string => text.replace(/https?:\/\/[^\s]+/gi, '[URL redacted]').replace(/(?:Bearer\s+|(?:token|code|state|cookie|password)[=:]\s*)[^\s,;]+/gi, '[credential redacted]').slice(0, 300);
 
+/** A timeline or log excerpt keeps its lines, with links and credentials taken out like any detail, up to 20,000 characters. */
+export const redactFreshTimeline = (text: string): string => text.replace(/https?:\/\/[^\s]+/gi, '[URL redacted]').replace(/(?:Bearer\s+|(?:token|code|state|cookie|password|key)[=:]\s*)[^\s,;]+/gi, '[credential redacted]').slice(-20_000);
+/** Load, CPU count and the four busiest processes of the fresh user; never fails the sample. */
+export const FRESH_MACHINE_SAMPLE = `{ printf 'load %s of %s cpus | ' "$(cut -d' ' -f1 /proc/loadavg)" "$(nproc)"; ps -u "$(id -un)" -o pcpu=,rss=,args= --sort=-pcpu | head -n 4 | awk '{ c=$1; r=int($2/1024); $1=""; $2=""; sub(/^ +/, ""); printf "%s%% %sMB %s; ", c, r, substr($0, 1, 70) }'; } 2>/dev/null || true`;
+/** The engine's log lines about judging, embedding and the privacy check: counts and the last 60 lines. */
+export const FRESH_ENGINE_LOG = `{ log=$(journalctl --user --no-pager -o short-iso 2>/dev/null | grep -iE 'embed|judg|sniffer|classif|privacy check|tier' || true); printf 'matching lines: %s (embed %s, judge %s)\\n' "$(printf '%s\\n' "$log" | grep -c . || true)" "$(printf '%s\\n' "$log" | grep -ic embed || true)" "$(printf '%s\\n' "$log" | grep -icE 'judg|sniffer|classif' || true)"; printf '%s\\n' "$log" | tail -n 60 | cut -c1-220; } || true`;
+
 export class FreshInconclusive extends Error {}
 export function validateFreshSources(sources: LiveSourceSpec[]): LiveSourceSpec[] {
   const nonempty = (value: unknown): boolean => typeof value === 'string' && value.trim().length > 0;
@@ -330,7 +337,11 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
     current = 'live-accounts';
     // A pass keeps the matched item's title out of the report; a failure or skip keeps its reason (counts, refresh
     // times, source labels), which run 6 needed and the old one-line summary threw away.
-    checks.push(...(await runLiveAccounts(engine!, { sources, ...(options.sleep ? { sleep, pollMs: 1 } : {}) })).map(c => ({ ...c, detail: c.status === 'pass' ? 'engine status/search verified' : redactFreshDetail(c.detail ?? 'no detail') })));
+    // Each poll of the new-item wait also records load and the busiest processes, beside the engine's counts (live.timeline).
+    const sampleMachine = async () => (await exec(asFresh(FRESH_MACHINE_SAMPLE), 30_000)).trim();
+    checks.push(...(await runLiveAccounts(engine!, { sources, sampleMachine, ...(options.sleep ? { sleep, pollMs: 1 } : {}) })).map(c => ({ ...c, detail: c.id === 'live.timeline' ? redactFreshTimeline(c.detail ?? '') : c.status === 'pass' ? 'engine status/search verified' : redactFreshDetail(c.detail ?? 'no detail') })));
+    // The engine's own log lines about judging and embedding since the install, for the same diagnosis.
+    await recorded('engine-log', async () => redactFreshTimeline((await exec(asFresh(FRESH_ENGINE_LOG), 60_000)).trim()) || 'no matching log lines');
     // Answer and scope checks are recorded without ending the leg: the read-on-demand timing after them needs neither.
     for (const source of sources) {
       await recorded(`${source.id}.answer`, async () => {
