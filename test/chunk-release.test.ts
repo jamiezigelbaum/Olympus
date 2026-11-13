@@ -11,7 +11,7 @@ import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import type { TierVisibilityScope } from '../src/workers/connector-store/tier-visibility.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
-import { answerReleaseWithheldReasonOffThread, ANSWER_BECAME_PRIVATE, ANSWER_RELEASE_UNVERIFIED, createReleaseManifestSink, bindReleaseChunks, passagesWithheldAtReleasableTiers, recheckSearchEvidence, releaseCandidateHashes, releasedTextDigest, runWithReleaseManifestSink, type ReleaseInput } from '../src/core/release-manifest.ts';
+import { answerReleaseWithheldReasonOffThread, ANSWER_BECAME_PRIVATE, ANSWER_RELEASE_UNVERIFIED, createReleaseManifestSink, bindReleaseChunks, passagesWithheldAtReleasableTiers, recheckSearchEvidence, releaseCandidateHashes, releasedTextDigest, runWithReleaseManifestSink, type ReleaseCheck, type ReleaseInput } from '../src/core/release-manifest.ts';
 import { remoteOperationOutputOffThread } from '../src/core/remote-result.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
@@ -620,4 +620,24 @@ test('a ledger removed while windows are judged no longer vouches for what it re
   // With the ledger still there, the same short item is proved and released.
   current = w.scopes();
   expect(await answerReleaseWithheldReasonOffThread(manifest, live, 'private', { chunks: true })).toBeUndefined();
+});
+
+test('a ledger removed during the last tier read holds passages that needed no new judging', async () => {
+  const w = await world('violet turnips garden.');
+  let current = w.scopes();
+  const live = createReleaseTierCheck(() => current, () => 'allow');
+  // The first release judges the window; the second finds it read and returns its first inspection.
+  expect((await releaseChunks([w.input()], () => current, live)).allowed[0]!.length).toBe(1);
+  let reads = 0;
+  // The ledger goes while that inspection's final tier read is pending.
+  const { inputsOffThread: _offThread, ...here } = live;
+  const check: ReleaseCheck = { ...here, inputs: (inputs) => {
+    reads += 1;
+    if (reads === 2) current = [];
+    return live.inputs(inputs);
+  } };
+  const result = await releaseChunks([w.input()], () => current, check);
+  expect(reads).toBeGreaterThanOrEqual(2);
+  expect(result.allowed).toEqual([[]]);
+  expect(result.withheldPassages).toBe(1);
 });

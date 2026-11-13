@@ -46,7 +46,21 @@ time (#1045, #1046, #1047, #1074), and agent-proposed settings with one-click
 apply (#1050; the owner chose "agent proposes, person clicks Apply" on
 2026-11-10).
 
+Lane 5 also includes the on-demand reading decision approved on 2026-11-12:
+folders have Full, Names only, and Names with read on demand modes. Defaults
+stay Names only. Only the owner can read individual files in a plain Names only
+folder; remote apps and the Analyst can request reads in the third mode, with
+three files and 25 MB per question. Every read goes through the shared
+extraction queue and stays out of evidence until judged. Lane 2 uses its existing
+`source_item_read` surface; lane 7 owns the visible limit setting.
+
 Rules for this release:
+
+- Recent requests from AI apps (#1266): the Agents panel and
+  `olympus connections requests` show bounded relay and engine request
+  metadata, including requests answered while the engine was offline. Relay
+  forwarding is feature-negotiated and scoped to the authenticated install;
+  the directory listing and admission stay unchanged.
 
 - New or changed screens are built only after the owner signs off a mockup. A
   screen without sign-off at the freeze moves to 1.6.
@@ -320,19 +334,17 @@ show the Olympus dashboard as an MCP App, not only the four remote tools, on
 the condition that a privacy proof passes on each Claude client. The proof
 passed on Claude web, desktop and the iPhone app (2026-11-11, #1303). The
 iPhone app shows no panels, so Claude's text results stand on their own.
-`remote.claudeAppEnabled` is off by default again (2026-11-11): the first
-Claude leg run with it on (43006900498) had Claude say it had no Olympus tools
-in 4 of 9 chats, against 0 in five earlier runs with it off. It goes back on
-by default only when, with the switch on, the answer tools are available in as
-many chats as with it off, over at least 20 chats a side, with each side's tool
-count and listing size recorded. The first fix to try is listing less on the
-Claude surface. If that fails, 1.5 ships with it off and the setting
-documented. Release-note line if it ships on: "**Olympus's dashboard opens
+`remote.claudeAppEnabled` is on by default (2026-11-12). It was off from
+2026-11-11, after the first Claude leg run with it on (43006900498) had Claude
+say it had no Olympus tools in 4 of 9 chats. Later runs with it off showed the
+same gap (4 of 8, then 5 of 9), and a second run with it on (43265678631) had
+6 of 9: 10 of 18 on against 9 of 17 off, so the switch does not cause the
+missing tools. The engine received nothing from Claude in those chats; the
+cause is tracked in #1266. Release-note line: "**Olympus's dashboard opens
 inside Claude.** In Claude on the web and the desktop app, Olympus shows its
 dashboard and private answers in a panel that Claude itself never reads.
 Claude's phone apps show answers as text for now. To turn it off, set
-`remote.claudeAppEnabled` to `false` and restart Olympus (#1266)." If it ships
-off, the line says to set it to `true`. There is no dashboard control for it yet. This is a side lane
+`remote.claudeAppEnabled` to `false` and restart Olympus (#1266)." There is no dashboard control for it yet. This is a side lane
 and does not gate 1.5. Decisions has the entry.
 
 Closed on approval as accepted or stale: #690, #695, #964, #1001, #1027, #698.
@@ -902,7 +914,8 @@ testers have exercised the normal product journey without custom engineering.
   so text results stand alone). The plan owner set `remote.claudeAppEnabled`
   on by default for 1.5, provided the Claude release-check leg covers it. On
   2026-11-11 the default went back to off: with it on, Claude had no Olympus
-  tools in 4 of 9 leg chats. It returns when the leg shows no loss.
+  tools in 4 of 9 leg chats. On 2026-11-12 it went back on: runs with it off
+  showed the same missing-tools rate (9 of 17 off, 10 of 18 on).
 - **2026-11-05 — Decision mode for local judging.** Local llama.cpp servers
   now answer the privacy question with a one-token read instead of a written
   JSON reply; Venice and the built-in model keep full mode. The owner approved

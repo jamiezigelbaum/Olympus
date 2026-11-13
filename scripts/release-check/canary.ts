@@ -38,8 +38,11 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { CommandDriver, type Machine } from './machine.ts';
-import { escapeHtml, type CheckResult, type CheckStatus } from './report.ts';
+import { escapeHtml, renderOnDemandTiming, type CheckResult, type CheckStatus } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type LiveSourceSpec } from './live-accounts.ts';
+import { parseTimingAccounts, parseTimingSeedConfig, realTimingSeeds, type TimingAccounts } from './on-demand-seeds.ts';
+import { runOnDemandTiming, type OnDemandTimingResult } from './on-demand-timing.ts';
+import { openTimingDashboard, openTimingDiagnostics } from './on-demand-machine.ts';
 import { isInconclusive, openForSignIn, parseClientQuestions, runWebClients, WEB_CLIENT_IDS, type ClientQuestion, type WebClientId } from './web-clients.ts';
 
 export type CanaryOs = 'linux' | 'macos';
@@ -61,6 +64,7 @@ export interface CanaryReport {
   counts: Record<CheckStatus, number>;
   checks: CheckResult[];
   screens: CanaryScreen[];
+  onDemandTiming?: OnDemandTimingResult;
 }
 
 export interface CanaryOptions {
@@ -75,6 +79,9 @@ export interface CanaryOptions {
   accounts?: CanaryAccounts;
   /** Leave out the update and the desktop checks: only the accounts and web clients. */
   accountsOnly?: boolean;
+  /** Only the real-accounts legs. Requires the engine split already running on the test machine. */
+  onDemandTiming?: boolean;
+  cdp?: string;
   /** Linux web clients: the machine-agent bundle for the owner-socket forward (web-clients.ts). */
   bridgeAgent?: string;
   /** Poll timing; tests shorten it. */
@@ -156,12 +163,13 @@ export interface CanaryAccounts {
   sources: LiveSourceSpec[];
   clients: WebClientId[];
   questions: ClientQuestion[];
-  /** Expected Claude MCP Apps switch (`remote.claudeAppEnabled`); left out, the product default, which is off. */
+  /** Expected Claude MCP Apps switch (`remote.claudeAppEnabled`); left out, the product default, which is on. */
   claude_app?: boolean;
+  on_demand_timing?: TimingAccounts;
 }
 
 export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) => unknown): CanaryAccounts {
-  const record = (raw ?? {}) as { sources?: unknown; clients?: unknown; questions?: unknown; claude_app?: unknown };
+  const record = (raw ?? {}) as { sources?: unknown; clients?: unknown; questions?: unknown; claude_app?: unknown; on_demand_timing?: unknown };
   if (record.claude_app !== undefined && typeof record.claude_app !== 'boolean') throw new Error('claude_app must be true or false');
   const sources = Array.isArray(record.sources) ? record.sources as LiveSourceSpec[] : [];
   for (const source of sources) {
@@ -176,33 +184,60 @@ export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) 
   // A client no question applies to would pass having been asked nothing.
   const unasked = clients.filter((client) => !questions.some((q) => !q.clients || q.clients.includes(client as WebClientId)));
   if (unasked.length > 0) throw new Error(`no question applies to ${unasked.join(', ')}`);
-  return { sources, clients: clients as WebClientId[], questions, claude_app: (record.claude_app as boolean | undefined) ?? false };
+  const timing = parseTimingSeedConfig(record.on_demand_timing);
+  return { sources, clients: clients as WebClientId[], questions, claude_app: (record.claude_app as boolean | undefined) ?? true,
+    ...(timing ? { on_demand_timing: timing } : {}) };
 }
 
 /** Runs the canary's checks on one machine. Never throws for a product problem: every failure is a check. */
-export async function runCanary(machine: Machine, options: CanaryOptions): Promise<{ checks: CheckResult[]; screens: CanaryScreen[] }> {
+export async function runCanary(machine: Machine, options: CanaryOptions): Promise<{ checks: CheckResult[]; screens: CanaryScreen[]; onDemandTiming?: OnDemandTimingResult }> {
   const desktop = options.accountsOnly ? { checks: [], screens: [] } : await runDesktopChecks(machine, options);
   const accounts = options.accounts;
   // A failed update leaves nothing worth asking.
   if (!accounts || desktop.checks.some((check) => check.id === 'canary.update' && check.status === 'fail')) return desktop;
   const checks = [...desktop.checks];
   const screens = [...desktop.screens];
-  if (accounts.sources.length > 0) {
+  let onDemandTiming: OnDemandTimingResult | undefined;
+  if (accounts.sources.length > 0 || options.onDemandTiming) {
     const started = Date.now();
     let engine;
     try { engine = await openEngineMcp(machine); } catch (error) {
       checks.push({ id: 'live.connection', title: 'A connection to the machine\'s Olympus for the account checks', status: 'fail', detail: error instanceof Error ? error.message : String(error), ms: Date.now() - started });
     }
     if (engine) {
-      try { checks.push(...await runLiveAccounts(engine, { sources: accounts.sources, ...(options.sleep ? { sleep: options.sleep, pollMs: options.pollMs ?? 1 } : {}) })); } finally { await engine.close(); }
+      try {
+        checks.push(...await runLiveAccounts(engine, { sources: accounts.sources, ...(options.sleep ? { sleep: options.sleep, pollMs: options.pollMs ?? 1 } : {}) }));
+        if (options.onDemandTiming) {
+          let dashboard;
+          let diagnostics;
+          let seeds: import('./on-demand-seeds.ts').TimingSeeds & { close?(): Promise<void> } | undefined;
+          try {
+            diagnostics = await openTimingDiagnostics(machine);
+            // Verify the running split before provider mutations or dashboard saves.
+            await diagnostics.preflight();
+            // Browser seeds keep their names and revisions, so only a fresh store gives them a cold read; this leg keeps its store.
+            if (!accounts.on_demand_timing) throw new Error('an accounts leg needs on_demand_timing token commands (new revisions each run); browser seeding is for the fresh-install leg');
+            seeds = await realTimingSeeds(parseTimingAccounts(accounts.on_demand_timing));
+            dashboard = await openTimingDashboard(machine, options.cdp ?? '127.0.0.1:9333', options.bridgeAgent);
+            onDemandTiming = await runOnDemandTiming(engine, seeds, dashboard, diagnostics);
+          } catch (error) {
+            onDemandTiming = { rows: [], checks: [{ id: 'ondemand.setup', title: 'Read-on-demand timing setup', status: 'fail', detail: String(error) }] };
+          } finally {
+            for (const resource of [dashboard, diagnostics, seeds]) {
+              try { await resource?.close?.(); } catch (error) { checks.push({ id: 'ondemand.cleanup', title: 'Timing resources closed', status: 'fail', detail: String(error) }); }
+            }
+          }
+          checks.push(...onDemandTiming.checks);
+        }
+      } finally { await engine.close(); }
     }
   }
   if (accounts.clients.length > 0) {
-    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, claudeApp: accounts.claude_app ?? false, os: options.os, screensDir: options.screensDir, ...(options.bridgeAgent ? { bridgeAgent: options.bridgeAgent } : {}) });
+    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, claudeApp: accounts.claude_app ?? true, os: options.os, screensDir: options.screensDir, ...(options.bridgeAgent ? { bridgeAgent: options.bridgeAgent } : {}) });
     checks.push(...web.checks);
     screens.push(...web.screens);
   }
-  return { checks, screens };
+  return { checks, screens, ...(onDemandTiming ? { onDemandTiming } : {}) };
 }
 
 async function runDesktopChecks(machine: Machine, options: CanaryOptions): Promise<{ checks: CheckResult[]; screens: CanaryScreen[] }> {
@@ -466,18 +501,27 @@ export function renderCanaryHtml(report: CanaryReport, relative: (path: string) 
 <p>${escapeHtml(report.candidate.label)}${report.candidate.version ? ` (${escapeHtml(report.candidate.version)})` : ''}, ${escapeHtml(report.candidate.source)} &middot; ${escapeHtml(report.startedAt)} to ${escapeHtml(report.finishedAt)}</p>
 ${renewals(report.checks).length > 0 ? `<h2>To renew before the next run</h2><ul>${renewals(report.checks).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>` : ''}
 <table>${rows}</table>
+${report.onDemandTiming?.preflight ? `<p>${escapeHtml(report.onDemandTiming.preflight)}</p>` : ''}
+${renderOnDemandTiming(report.onDemandTiming?.rows, report.onDemandTiming?.notRun)}
 ${pictures}
 </body></html>
 `;
 }
 
+/** Shared CLI validation, kept executable without spawning a machine. */
+export function validateCanaryTimingMode(mode: { enabled: boolean; accounts: boolean; freshInstall: boolean; webSignIn: boolean; os: string }): void {
+  if (!mode.enabled) return;
+  if (!mode.accounts || mode.webSignIn) throw new Error('--on-demand-timing requires --accounts and cannot combine with --web-sign-in');
+  if (mode.freshInstall && mode.os !== 'linux') throw new Error('--fresh-install requires Linux');
+}
+
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   const option = (name: string): string | undefined => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] : undefined; };
-  const usage = 'usage: bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --out <reports dir> [--candidate <bundle dir> | --published <site base URL>] [--accounts <file> [--claude-app on|off] [--accounts-only | --fresh-install [--cdp <host:port>]]] [--label <text>] [--sha <commit>] [--harness-commit <commit>]\n       bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --accounts <file> --web-sign-in\n       fresh mode: --fresh-install --accounts <file> [--candidate <tgz>] [--cdp <host:port>] (same --config, --machine, --os and --out)';
+  const usage = 'usage: bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --out <reports dir> [--candidate <bundle dir> | --published <site base URL>] [--accounts <file> [--claude-app on|off] [--on-demand-timing [--cdp <host:port>]] [--accounts-only | --fresh-install [--cdp <host:port>]]] [--label <text>] [--sha <commit>] [--harness-commit <commit>]\n       bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --accounts <file> --web-sign-in\n       fresh mode: --fresh-install --accounts <file> [--candidate <tgz>] [--cdp <host:port>] (same --config, --machine, --os and --out)';
   const freshInstall = argv.includes('--fresh-install');
-  const cdp = option('--cdp') ?? '127.0.0.1:9333';
-  if (freshInstall) {
+  const cdp = option('--cdp') ?? (freshInstall ? '127.0.0.1:9334' : '127.0.0.1:9333');
+  if (freshInstall || argv.includes('--on-demand-timing')) {
     try { parseCdpEndpoint(cdp); } catch { console.error('--cdp must be host:port'); process.exit(2); }
   }
   const configPath = option('--config');
@@ -496,6 +540,9 @@ if (import.meta.main) {
     process.exit(2);
   }
   const accountsPath = option('--accounts');
+  const onDemandTimingEnabled = argv.includes('--on-demand-timing');
+  try { validateCanaryTimingMode({ enabled: onDemandTimingEnabled, accounts: !!accountsPath, freshInstall, webSignIn: argv.includes('--web-sign-in'), os }); }
+  catch (error) { console.error((error as Error).message); process.exit(2); }
   let accounts: CanaryAccounts | undefined;
   if (accountsPath) {
     try {
@@ -543,8 +590,9 @@ if (import.meta.main) {
   const startedAt = new Date().toISOString();
   const bundle = freshInstall && candidate ? prepareLinuxLocalBundle({ root: resolve(import.meta.dir, '../..'), artifact: resolve(candidate), output: join(runDir, 'candidate') }) : undefined;
   if (bundle) expectVersion = bundle.version;
-  const { checks, screens } = freshInstall ? await runFreshInstall(machine, {
+  const { checks, screens, ...extras } = freshInstall ? await runFreshInstall(machine, {
     sources: accounts!.sources, cdp,
+    ...(onDemandTimingEnabled ? { onDemandTiming: { ...(accounts!.on_demand_timing ? { accounts: accounts!.on_demand_timing } : {}) } } : {}),
     bridgeAgent: await bundleAgent(runDir),
     ...(bundle ? { bundle: { installer: join(bundle.directory, 'install-linux.sh'), tarball: join(bundle.directory, `olympus-${bundle.version}.tgz`) } } : {}),
   }) : await runCanary(machine, {
@@ -553,18 +601,19 @@ if (import.meta.main) {
     ...(expectVersion ? { expectVersion } : {}),
     ...(accounts ? { accounts } : {}),
     accountsOnly: argv.includes('--accounts-only'),
+    ...(onDemandTimingEnabled ? { onDemandTiming: true, cdp } : {}),
     screensDir: join(runDir, 'screens'),
-    ...(os === 'linux' && accounts && accounts.clients.length > 0 ? { bridgeAgent: await bundleAgent(runDir) } : {}),
+    ...(os === 'linux' && accounts && (accounts.clients.length > 0 || onDemandTimingEnabled) ? { bridgeAgent: await bundleAgent(runDir) } : {}),
   });
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, warn: 0, skip: 0 };
   for (const check of checks) counts[check.status] += 1;
   const sha = option('--sha');
   const harnessCommit = option('--harness-commit');
   const report: CanaryReport = {
-    schema: 'olympus.release-check.canary.v1', ...(freshInstall ? { leg: FRESH_LEG } : {}), runId, machine: { handle, os },
+    schema: 'olympus.release-check.canary.v1', ...(freshInstall ? { leg: FRESH_LEG } : onDemandTimingEnabled ? { leg: os === 'linux' ? 'accounts-test-omarchy' : 'accounts-test-mac' } : {}), runId, machine: { handle, os },
     candidate: { label: option('--label') ?? (candidate ? 'local build' : published ? published : freshInstall ? 'published fresh install' : 'installed'), ...(sha ? { sha } : {}), ...(expectVersion ? { version: expectVersion } : {}), source: candidate ? 'candidate' : published || freshInstall ? 'published' : 'installed' },
     ...(harnessCommit ? { harnessCommit } : {}),
-    startedAt, finishedAt: new Date().toISOString(), verdict: canaryVerdict(checks), counts, checks, screens,
+    startedAt, finishedAt: new Date().toISOString(), verdict: canaryVerdict(checks), counts, checks, screens, ...extras,
   };
   const relative = (path: string): string => path.startsWith(`${runDir}/`) ? path.slice(runDir.length + 1) : path;
   writeFileSync(join(runDir, 'report.json'), `${JSON.stringify({ ...report, screens: screens.map((screen) => ({ ...screen, path: relative(screen.path) })) }, null, 2)}\n`);

@@ -5,6 +5,7 @@ import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scri
 // connection-token handler, every other route to the worker-bearer wrapper.
 // A real MCP SDK client talks Streamable HTTP to it over loopback.
 
+import { connectionRequestsPath } from '../src/core/connection-requests.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../src/workers/answer-model-required.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../connect-relay/shared/tokens.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -17,7 +18,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { defaultConfig } from '../src/core/config.ts';
 import { exposedOperations } from '../src/core/operation-exposure.ts';
 import { operations } from '../src/core/operations.ts';
-import { V0_4_HERMES_MCP_TOOLS } from '../src/core/public-surface.ts';
+import { V0_4_PUBLIC_REMOTE_MCP_TOOLS } from '../src/core/public-surface.ts';
 import {
   openRemoteConnectionStore,
   REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS,
@@ -101,6 +102,7 @@ let base: string;
 let answerHeld: Promise<void> | undefined;
 let answerStarted: (() => void) | undefined;
 let logLines: string[];
+let observations: Array<{ entry: import('../connect-relay/shared/request-log.ts').RequestLogEntry; app?: string; relayed?: boolean }>;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'olympus-remote-mcp-'));
@@ -110,6 +112,7 @@ beforeEach(() => {
   answerHeld = undefined;
   answerStarted = undefined;
   logLines = [];
+  observations = [];
   const worker = createEmailSourceWorker({
     sourceAnswer: { async answer() {
       answered += 1;
@@ -124,6 +127,7 @@ beforeEach(() => {
     createRemoteMcpHandler({
       connections: () => store,
       log: (line) => logLines.push(line),
+      onRequestLog: (entry, app, relayed) => observations.push({ entry, ...(app ? { app } : {}), ...(relayed === undefined ? {} : { relayed }) }),
       // The relay child's per-boot secret, as the worker reads it from its 0600 file.
       isRelayed: (request) => request.headers.get('x-olympus-relay') === 'per-boot-secret',
       makeOperationContext: (caller, signal) => createInProcessOperationContext({
@@ -175,10 +179,10 @@ function mcpInitialize(authorization?: string, extraHeaders: Record<string, stri
 }
 
 describe('remote operation surface', () => {
-  test('exposes exactly the Hermes tool list', () => {
+  test('exposes exactly the remote tool list', () => {
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
-    expect(exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name))
-      .toEqual([...V0_4_HERMES_MCP_TOOLS]);
+    expect(exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name).sort())
+      .toEqual([...V0_4_PUBLIC_REMOTE_MCP_TOOLS].sort());
   });
 });
 
@@ -258,6 +262,9 @@ describe('remote MCP over loopback with a connection token', () => {
       await client.close();
     }
     expect((await mcpInitialize('Bearer not-a-connection-token')).status).toBe(401);
+    expect(observations).toHaveLength(logLines.length);
+    expect(observations.filter(o => o.entry.calls === 'tools/list')[0]).toMatchObject({ app: 'Claude', relayed: false, entry: { status: 200, surface: 'default' } });
+    expect(observations.at(-1)).not.toHaveProperty('app');
     const lines = logLines.map((line) => JSON.parse(line) as { event: string; calls: string[]; status: number; ms: number; connection?: string; surface: string; relayed: boolean });
     expect(lines.every((line) => line.event === 'remote_mcp' && line.surface === 'default' && line.relayed === false && line.ms >= 0)).toBe(true);
     const calls = lines.flatMap((line) => line.calls);
@@ -504,15 +511,20 @@ describe('review fixes', () => {
     const outside = openRemoteConnectionStore(dbPath);
     const { token } = outside.create('Muse');
     outside.close();
+    const requestsPath = connectionRequestsPath(dbPath);
+    writeFileSync(requestsPath, '[]', { mode: 0o600 });
 
     const exported = exportOlympusData({ destination: join(dir, 'export'), homeDir: home, env });
     expect(exported.skipped).toContain(dbPath);
+    expect(exported.skipped).toContain(requestsPath);
     expect(JSON.stringify(exported.files)).not.toContain('remote-connections');
 
     const preview = deleteOlympusData({ all: true, dryRun: true, homeDir: home, env });
     expect(preview.removed).toContain(dbPath);
+    expect(preview.removed).toContain(requestsPath);
     deleteOlympusData({ all: true, homeDir: home, env });
     expect(existsSync(dbPath)).toBe(false);
+    expect(existsSync(requestsPath)).toBe(false);
     const reopened = openRemoteConnectionStore(dbPath);
     try {
       expect(reopened.verifyToken(token)).toEqual({ ok: false, reason: 'unknown' });
@@ -741,7 +753,7 @@ describe('remote evidence search', () => {
     const client = await searchClient(token);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status', 'source_item_read']);
       const search = tools.tools.find((tool) => tool.name === 'olympus_search')!;
       expect(search.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 
@@ -834,7 +846,7 @@ describe('remote evidence search', () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort())
-        .toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status']);
+        .toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status', 'source_item_read']);
       const answer = await client.callTool({ name: 'source_answer', arguments: { question: 'what changed?' } });
       expect(answer.isError).toBeFalsy();
       expect(answered).toBe(1);

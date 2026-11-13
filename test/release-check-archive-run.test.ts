@@ -159,6 +159,25 @@ describe('the archive-import leg in a run', () => {
     expect(readFileSync(join(opts.outDir, 'traces', 'archive-agent-approve.json'), 'utf8')).toContain('archive-agent-approve');
   }, 120_000);
 
+  test('scale is opt-in, runs after ordinary archive cleanup, and always runs its own cleanup', async () => {
+    const report = await runReleaseCheck(options({ archiveScale: true, skipRestore: true }));
+    const calls = archiveCalls();
+    expect(verbs().indexOf('archive-scale')).toBeGreaterThan(verbs().indexOf('archive-cleanup'));
+    expect(calls.filter(c => c.startsWith('archive-scale ')).map(c => /--format (\S+)/.exec(c)![1])).toEqual(['mbox', 'roam', 'reflect-json', 'reflect-markdown', 'readwise']);
+    expect(verbs()).toContain('archive-scale-cleanup');
+    for (const format of ['mbox', 'roam', 'reflect-json', 'reflect-markdown', 'readwise']) expect(failedIds(report)).toContain(`archive.scale.${format}.ran`);
+    expect(failedIds(report)).toContain('archive.scale.cleanup');
+    expect(report.settings).toEqual({ engineSplit: true, archiveScale: true });
+    expect(existsSync(join(dir, 'destroyed'))).toBe(true);
+  }, 120_000);
+
+  test('scale can run independently when the ordinary archive leg is skipped', async () => {
+    await runReleaseCheck(options({ archiveScale: true, skipArchive: true, skipRestore: true }));
+    expect(verbs()).not.toContain('archive-import');
+    expect(verbs().filter(v => v === 'archive-scale')).toHaveLength(5);
+    expect(verbs()).toContain('archive-scale-cleanup');
+  }, 120_000);
+
   test('--skip-archive leaves the leg out: no archive verb is called, nothing is checked', async () => {
     const report = await runReleaseCheck(options({ skipArchive: true }));
     expect(archiveCalls()).toEqual([]);

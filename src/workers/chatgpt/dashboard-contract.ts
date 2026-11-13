@@ -250,7 +250,14 @@ export function unreadableNames(input: unknown): string[] {
 export interface DashboardSourceWait {
   sourceId: string;
   label: string;
-  reason: 'daily_budget' | 'rate_limit';
+  reason: 'daily_budget' | 'rate_limit' | 'limit';
+  limitLabel?: string;
+  limit?: number | null;
+  used?: number | null;
+  unit?: string;
+  since?: string;
+  waiting?: { items?: number; runs?: number };
+  fix?: DashboardFix;
   api: string;
   resumesAt?: string;
 }
@@ -879,6 +886,7 @@ export const COMPUTER_LOCAL_SESSION_TOOL_NAMES: readonly string[] = [
  * the answer tools are the conversation's, not the panel's.
  */
 export const PANEL_TOOL_NAMES = [
+  'olympus_limits',
   DASHBOARD_TOOL_NAME,
   CONNECT_SOURCE_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
@@ -953,7 +961,7 @@ export interface ConnectSourceResult {
   expiresAt: string;
 }
 
-export type ScopeSelectionState = 'ingest' | 'metadata_only' | 'exclude';
+export type ScopeSelectionState = 'ingest' | 'metadata_only' | 'on_demand' | 'exclude';
 
 export interface ScopeSelection {
   /** Opaque provider key from a node. */

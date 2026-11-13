@@ -1962,6 +1962,44 @@ describe('source worker scheduler', () => {
     expect(seen[1]).toBe(envelope);
   });
 
+  test('Gmail pull with a traversal still in progress runs again within seconds', async () => {
+    let pulls = 0;
+    let backlog = true;
+    const sync = gmailStoreHandler({ onPull: () => { pulls += 1; } });
+    const pull = sync.pull.bind(sync);
+    sync.pull = async (request) => {
+      const outcome = await pull(request);
+      return backlog ? { ...outcome, backlog: true } : outcome;
+    };
+    const source = createGmailConnectorStoreSchedulerSource({ config: schedulerConfig(), sync })!;
+    let clock = Date.parse('2026-07-07T12:00:00.000Z');
+    const scheduler = new SourceScheduler({
+      enabled: true,
+      tickMs: 1_000,
+      errorBackoffMs: 5_000,
+      maxTransientRetries: 1,
+      now: () => new Date(clock),
+      sources: [source],
+    });
+
+    await scheduler.runDueTasks();
+    expect(pulls).toBe(1);
+    // A widened window starts a long walk: the next slice runs seconds later,
+    // not after the 30-minute pull interval.
+    clock += 10_000;
+    await scheduler.runDueTasks();
+    expect(pulls).toBe(2);
+
+    // Once the walk is done the lane goes back to its normal interval.
+    backlog = false;
+    clock += 10_000;
+    await scheduler.runDueTasks();
+    expect(pulls).toBe(3);
+    clock += 10_000;
+    await scheduler.runDueTasks();
+    expect(pulls).toBe(3);
+  });
+
   test('Gmail lane fails closed without its connector-store handler', () => {
     expect(createGmailConnectorStoreSchedulerSource({ config: schedulerConfig() })).toBeUndefined();
   });

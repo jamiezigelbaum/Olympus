@@ -223,7 +223,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   const el = kit.el;
   const add = kit.add;
   const fill = kit.fill;
-  const STATES = ['ingest', 'metadata_only', 'exclude'];
+  const STATES = ['ingest', 'metadata_only', 'on_demand', 'exclude'];
   const WINDOWS = ['6m', '1y', '2y', '5y', 'all'];
   const CATEGORIES = ['primary', 'updates', 'forums', 'social', 'promotions'];
 
@@ -1266,6 +1266,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       } else if (choice === 'metadata_only' && state !== 'exclude') {
         state = 'metadata_only';
         from = ancestor;
+      } else if (choice === 'on_demand' && state !== 'exclude' && state !== 'metadata_only') {
+        state = 'on_demand';
+        from = ancestor;
       } else if (choice === 'ingest' && (state === '' || state === 'ingest')) {
         state = 'ingest';
         from = ancestor;
@@ -1280,6 +1283,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const own = p.own.get(key) || '';
     if (from === 'exclude' || own === 'exclude') return 'exclude';
     if (from === 'metadata_only') return 'metadata_only';
+    if (from === 'on_demand' && own !== 'metadata_only') return 'on_demand';
     return own || from;
   }
 
@@ -1287,7 +1291,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const from = inherited(key).state;
     if (!state) return true;
     if (from === 'exclude') return state === 'exclude';
-    if (from === 'metadata_only') return state !== 'ingest';
+    if (from === 'metadata_only') return state !== 'ingest' && state !== 'on_demand';
+    if (from === 'on_demand') return state !== 'ingest';
     return true;
   }
 
@@ -1419,7 +1424,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   function counts(): Any {
-    const totals: Any = { ingest: 0, metadata_only: 0, exclude: 0 };
+    const totals: Any = { ingest: 0, metadata_only: 0, on_demand: 0, exclude: 0 };
     p.own.forEach((_state: string, key: string) => {
       const state = effective(key);
       if (state) totals[state]++;
@@ -1456,7 +1461,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const totals = counts();
     const lines: string[] = [];
     const parts: string[] = [];
-    const templates: Array<[string, string]> = [['ingest', Q.summaryIngest], ['metadata_only', Q.summaryMetadata], ['exclude', Q.summaryExclude]];
+    const templates: Array<[string, string]> = [['ingest', Q.summaryIngest], ['metadata_only', Q.summaryMetadata], ['on_demand', '{n} names with read on demand'], ['exclude', Q.summaryExclude]];
     for (const [state, template] of templates) {
       const n = totals[state] || 0;
       if (!n) continue;
@@ -1479,7 +1484,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     let chosen = false;
     p.own.forEach((_state: string, key: string) => {
       const state = effective(key);
-      if (state === 'ingest' || state === 'metadata_only') chosen = true;
+      if (state === 'ingest' || state === 'metadata_only' || state === 'on_demand') chosen = true;
     });
     return chosen;
   }
@@ -1616,7 +1621,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       button.setAttribute('aria-pressed', pressed ? 'true' : 'false');
       add(button, el('span', 'seg-long', words[0]), el('span', 'seg-short', words[1]));
       const blocked = pressed ? '' : model.blocked(state);
-      const note = blocked || model.note(state);
+      const note = blocked || model.note(state) || (state === 'on_demand' ? 'Search file names now; read an individual file when you or your AI asks for it.' : '');
       if (note) {
         button.setAttribute('aria-description', note);
         button.title = note;

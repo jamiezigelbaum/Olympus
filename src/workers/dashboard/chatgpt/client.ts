@@ -2913,7 +2913,8 @@ export function chatgptDashboardClient(
       facts.length ? el('span', 'muted', ' · ' + facts.join(' · ')) : null);
     const stages = Array.isArray(progress.details) ? progress.details : [];
     const faster = indexFasterControl();
-    const row = add(el('li', 'row home-line'), add(el('div', 'need-body'), line));
+    const body = add(el('div', 'need-body'), line);
+    const row = add(el('li', 'row home-line'), body);
     row.setAttribute('data-home-index', progress.phase === 'initial' ? 'initial' : 'refresh');
     if (!stages.length && !faster) return row;
     const open = !!state.open['progress-details'];
@@ -2951,11 +2952,23 @@ export function chatgptDashboardClient(
   function waitRow(wait: Any): HTMLElement | null {
     if (!wait || typeof wait.label !== 'string') return null;
     const api = String(wait.api || wait.label);
-    const facts = [fill(wait.reason === 'rate_limit' ? P.home.waitRateLimit : P.home.waitBudget, { api })];
+    const facts = [wait.reason === 'limit' ? String(wait.limitLabel || '')
+      : fill(wait.reason === 'rate_limit' ? P.home.waitRateLimit : P.home.waitBudget, { api })];
+    if (wait.reason === 'limit' && (wait.limit != null || wait.used != null)) facts.push(String(wait.used ?? '?') + ' / ' + String(wait.limit ?? '?') + ' ' + String(wait.unit || ''));
+    if (wait.reason === 'limit' && wait.since) facts.push('since ' + String(wait.since));
+    if (wait.waiting?.items !== undefined) facts.push(String(wait.waiting.items) + ' items waiting');
+    if (wait.waiting?.runs !== undefined) facts.push(String(wait.waiting.runs) + ' runs waiting');
     const when = typeof wait.resumesAt === 'string' ? resumeWords(wait.resumesAt) : '';
     if (when) facts.push(when);
     const line = add(el('p', 'row-text'), el('strong', '', wait.label), el('span', 'muted', ' · ' + facts.join(' · ')));
-    const row = add(el('li', 'row home-line'), add(el('div', 'need-body'), line));
+    const body = add(el('div', 'need-body'), line);
+    const row = add(el('li', 'row home-line'), body);
+    if (wait.fix) {
+      const source = (state.data?.sources || []).find((entry: Any) => entry.id === wait.sourceId);
+      const key = 'limit:' + String(wait.fix.args?.id || wait.sourceId) + ':' + String(wait.fix.args?.subject || '');
+      add(body, add(el('div', 'source-actions'), wait.fix.tool === config.syncTool && source && syncChecking(source)
+        ? checkingControl(key) : fixControl(wait.fix, key, 'plain', false, { id: wait.sourceId, label: wait.label })));
+    }
     row.setAttribute('data-source-wait', String(wait.sourceId || ''));
     return row;
   }

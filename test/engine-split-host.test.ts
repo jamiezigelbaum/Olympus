@@ -58,6 +58,30 @@ describe('the host starts the background, then the front', () => {
     await waiting;
   });
 
+  test('past its deadline the front keeps waiting while the background reports boot work (#1494)', async () => {
+    const bg = background({});
+    bg.setReady(false);
+    const clock = createTestClock();
+    let inProgress = true;
+    const waiting = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: bg.fetch, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, inProgress: () => inProgress });
+    let failed = false;
+    void waiting.catch(() => { failed = true; });
+    await flushMicrotasks();
+    await clock.advance(5_000);
+    expect(failed).toBe(false);
+    bg.setReady(true);
+    await clock.advance(250);
+    await waiting;
+    // Without progress, the same wait gives up at its deadline.
+    bg.setReady(false);
+    inProgress = false;
+    const stalled = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: bg.fetch, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, inProgress: () => inProgress });
+    const outcome = stalled.then(() => 'ready', () => 'gave up');
+    await flushMicrotasks();
+    await clock.advance(1_500);
+    expect(await outcome).toBe('gave up');
+  });
+
   test('a front worker service does not start while its background is not ready', async () => {
     const fixture = fakeWorker(tempRoot());
     const service = track(createNativeWorkerService({

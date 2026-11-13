@@ -28,6 +28,7 @@ import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 export const DASHBOARD_PRIVACY_ITEMS_PATHS = {
   find: '/dashboard/privacy/items/find',
   set: '/dashboard/privacy/items/set',
+  read: '/dashboard/privacy/items/read',
 } as const;
 
 /** How long the confirmation with Undo stays up after a change. */
@@ -345,6 +346,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
       + '<div class="pidhead">' + logo(item, true) + '<div class="grow"><h4>' + esc(title(item)) + '</h4><span class="pimeta">' + esc(meta(item)) + '</span></div>'
       + '<button type="button" class="pix" data-pi-close aria-label="' + esc(C.close) + '">✕</button></div>'
       + '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview
+      + (item.family === 'file' && (item.names_only || item.not_read && item.not_read.kind === 'by_choice') ? '<button type="button" class="btn" data-pi-read>Read this file</button>' : '')
       + '<p class="pidcap" id="pi-who">' + esc(C.whoCaption) + '</p>'
       + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>'
       + why
@@ -483,6 +485,14 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
       var id = rowButton.getAttribute('data-pi-item');
       selected = selected === id ? null : id;
       render();
+      return;
+    }
+    if (target.closest('[data-pi-read]') && selected) {
+      var button = target.closest('[data-pi-read]');
+      button.disabled = true;
+      post(config.paths.read, { item_id: selected }).then(function (result) {
+        button.textContent = result.ok && (result.result.state === 'reading' || result.result.state === 'queued') ? 'Reading. Ask again in about a minute.' : 'Could not start reading this file.';
+      }).catch(function () { button.disabled = false; button.textContent = 'Try reading again'; });
       return;
     }
     if (target.closest('[data-pi-close]')) { selected = null; render(); return; }

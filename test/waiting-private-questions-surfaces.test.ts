@@ -20,6 +20,7 @@ import type { OperationContext } from '../src/core/operations.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { createRemotePrivateParts, remotePrivateOutcome, type PrivateMatchVerdict } from '../src/core/remote-private-part.ts';
 import { recordReleaseManifest, type ReleaseCheck } from '../src/core/release-manifest.ts';
+import { provedChunks } from './helpers/scripted-search-release.ts';
 import { REMOTE_ANSWER_CHANGED, REMOTE_OUTPUT_SCHEMAS, REMOTE_PRIVATE_NOTE, remoteOperationOutput, withRemotePrivateNote } from '../src/core/remote-result.ts';
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
@@ -516,8 +517,8 @@ describe('remote: over /mcp and the REST surface', () => {
   let audit: Record<string, unknown>;
   let probes: number;
   let answerDelayMs: number;
-  // Set by a test that checks the release: the answer records a manifest of
-  // one Personal input, and this is its tier now.
+  // The answer records a manifest of one Personal input whose passage was
+  // read; a test that checks the release sets its tier now.
   let inputTier: 'public_or_personal' | 'secret' | undefined;
   // While set, the probe waits on it (a slow local probe).
   let probeHeld: Promise<void> | undefined;
@@ -533,12 +534,10 @@ describe('remote: over /mcp and the REST surface', () => {
       sourceAnswer: {
         answer: async () => {
           if (answerDelayMs > 0) await Bun.sleep(answerDelayMs);
-          if (inputTier) {
-            recordReleaseManifest({
-              inputs: [{ corpusId: 'personal.fixture.files', provider: 'fixture_files', accountScope: 'personal', providerItemId: 'notes', privateAtAnswer: false }],
-              constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false },
-            });
-          }
+          recordReleaseManifest({
+            inputs: [{ corpusId: 'personal.fixture.files', provider: 'fixture_files', accountScope: 'personal', providerItemId: 'notes', privateAtAnswer: false, chunkHashes: ['notes-chunk'] }],
+            constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false },
+          });
           return answerResult(audit);
         },
       },
@@ -553,15 +552,16 @@ describe('remote: over /mcp and the REST surface', () => {
       store: () => store,
     });
     const releaseCheck: ReleaseCheck = {
-      inputs: (inputs) => inputs.map(() => ({ tier: inputTier ?? 'legacy', gone: false })),
+      inputs: (inputs) => inputs.map(() => ({ tier: inputTier ?? 'public_or_personal', gone: false })),
       secureDerivativeDefault: () => 'allow',
+      chunks: provedChunks,
     };
     const remote = {
       connections: () => connections,
       makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
         ...createInProcessOperationContext({ config: CONFIG, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal, sourceAnswerJobs }),
         ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
-        ...(inputTier ? { releaseCheck } : {}),
+        releaseCheck,
       }),
     };
     const mcp = createRemoteMcpHandler(remote);

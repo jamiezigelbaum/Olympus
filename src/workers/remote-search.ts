@@ -31,6 +31,7 @@
  * Answer tools stay listed without a model and explain setup. Anonymous
  * answers can still be collected without a local answer model.
  */
+import type { RemoteReadHandleScope } from '../core/remote-read-handles.ts';
 import { answerModelRequiredResult } from './answer-model-required.ts';
 import type { SourceAnswerJobScope } from '../core/source-answer-jobs.ts';
 import { createReleaseCapture, recordAppRequest, runWithReleaseCapture } from '../core/app-release-capture.ts';
@@ -53,6 +54,7 @@ export interface RemoteSearchOptions {
 
 /** What one request adds to the search: its connection's Private part and the tiers to read again. */
 export interface RemoteSearchRequestContext {
+  issueReadHandle?: RemoteReadHandleScope['issueReadHandle'];
   sourceAnswerJobs?: SourceAnswerJobScope;
   /** Global pending privacy-judgment count, read when building the response. */
   pendingPrivacyItems?: () => number | undefined;
@@ -123,7 +125,9 @@ export function remoteSearchExtension(
   request: RemoteSearchRequestContext = {},
 ): McpServerExtension {
   return {
-    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed],
+    tools: (listed) => [request.issueReadHandle
+      ? { ...REMOTE_SEARCH_TOOL, description: `${REMOTE_SEARCH_TOOL.description} Pass an item's read_handle to source_item_read to read more of it.` }
+      : REMOTE_SEARCH_TOOL, ...listed],
     call: async (call, next, signal) => {
       if (call.params.name === REMOTE_SEARCH_TOOL.name) {
         const signals = [signal, request.signal].filter((one): one is AbortSignal => one !== undefined);
@@ -169,7 +173,15 @@ async function runSearch(
   }
   // The same allowlisted, field-by-field result ChatGPT gets, with no panel.
   const capture = createReleaseCapture();
-  let result = runWithReleaseCapture(capture, () => searchToolResult(raw, { pendingPrivacyItems: context.pendingPrivacyItems?.() }));
+  const kept = new Map<string, Record<string, unknown>>();
+  const buildResult = (value: unknown) => {
+    kept.clear();
+    return runWithReleaseCapture(capture, () => searchToolResult(value, {
+      pendingPrivacyItems: context.pendingPrivacyItems?.(),
+      onKeptEvidence: (item, id) => { kept.set(id, item); },
+    }));
+  };
+  let result = buildResult(raw);
   let withheldAfter = false;
   let note: string | undefined;
   if (privateCall) {
@@ -183,12 +195,26 @@ async function runSearch(
   const checked = await recheckSearchEvidence(raw as Record<string, unknown>, manifests.manifests, context.releaseCheck);
   if (checked.withheldAfter) {
     // Rebuild capture from only what is actually leaving the computer.
-    result = runWithReleaseCapture(capture, () => searchToolResult(checked.raw, { pendingPrivacyItems: context.pendingPrivacyItems?.() }));
+    result = buildResult(checked.raw);
     withheldAfter = Array.isArray(checked.raw.evidence) && checked.raw.evidence.length === 0;
   }
   // The release judgment can await the pool or judge; recheck the connection afterward.
   const afterRelease = currentAccess(authorized);
   if (afterRelease !== 'active') return refusedAccess(afterRelease);
+  // Issue only for the final, released evidence. Raw identities never leave.
+  const evidence = result.structuredContent?.evidence;
+  if (context.issueReadHandle && Array.isArray(evidence)) {
+    for (const entry of evidence) {
+      const item = kept.get(entry.id);
+      const handle = item ? context.issueReadHandle(item) : undefined;
+      if (handle) entry.read_handle = handle;
+    }
+    // Clients that pass only text to their model need the handles there too.
+    const lines = evidence.filter((entry) => entry.read_handle).map((entry) => `[${entry.id}] read_handle: ${entry.read_handle}`);
+    if (lines.length > 0 && result.content[0]) {
+      result = { ...result, content: [{ ...result.content[0], text: `${result.content[0].text}\n\nTo read more of an item, pass its read_handle to source_item_read:\n${lines.join('\n')}` }, ...result.content.slice(1)] };
+    }
+  }
   if (context.caller) {
     recordAppRequest({
       caller: context.caller,

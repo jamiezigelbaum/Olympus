@@ -1,4 +1,6 @@
-import { ANSWER_RELEASE_UNVERIFIED, isWithheldSourceAnswer, withheldSourceAnswer } from './release-manifest.ts';
+import { parseSourceItemReadResult, type SourceItemReadResult } from './source-item-read.ts';
+import { sourceItemReadSelectedItem, sourceItemReadPage } from './source-index/selected-items.ts';
+import { ANSWER_RELEASE_UNVERIFIED, isWithheldSourceAnswer, withheldSourceAnswer, recordReleaseManifest } from './release-manifest.ts';
 import { workerFetch } from './worker-transport.ts';
 import { isSourceIndexReadSurfaceEnabled, type OlympusConfig } from './config.ts';
 import { assertNoRawEmailFields } from './email-policy.ts';
@@ -39,8 +41,15 @@ export interface EmailTransport {
 const MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512;
 const MAX_EMAIL_WORKER_ERROR_BODY_LENGTH = 8 * 1024;
 const PASSTHROUGH_EMAIL_WORKER_ERROR_CODES: ReadonlyMap<string, OperationErrorCode> = new Map([
+  ['not_personal', 'not_personal'],
   ['unsupported_filter', 'unsupported_filter'],
   ['invalid_request', 'invalid_request'],
+  // olympus_limits refusals (owner-limits.ts) carry no source content.
+  ['invalid_params', 'invalid_params'],
+  // The engine split's answers when the background cannot take a forwarded action (engine-split/runtime.ts).
+  ['worker_restarting', 'worker_restarting'],
+  ['engine_background_unavailable', 'email_unreachable'],
+  ['engine_background_failed', 'email_error'],
   ['source_index_policy_violation', 'source_index_policy_violation'],
 ]);
 
@@ -468,6 +477,28 @@ export class EmailClient {
   }
 
   /**
+   * olympus_limits: the stops live in the engine's Bun store, so the engine
+   * lists and continues them (owner-limits.ts). Refusals arrive as errors.
+   */
+  async ownerLimits(params: Record<string, unknown>): Promise<unknown> {
+    if (!this.config.email.enabled) {
+      throw new OperationError('email_not_configured', 'Private source worker is disabled.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before continuing stopped work.');
+    }
+    try {
+      return await this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
+      });
+    } catch (error) {
+      // Restarting, unanswered or failed: a continue may already have applied, so never say it did not.
+      if (error instanceof OperationError && (error.code === 'worker_restarting' || error.code === 'email_unreachable' || error.code === 'email_error')) {
+        throw new OperationError(error.code, error.message, 'It may still go through. Run olympus limits in a moment to see whether the stop is still open.');
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Ask the worker to import an archive or remove one, or list them
    * (archive_import). The worker only records the request and reads; the
    * person approves on the computer's dashboard. Its outcome, refusals
@@ -748,6 +779,28 @@ export class EmailClient {
     return data;
   }
 
+  async sourceItemRead(options: { selectedItem: SourceAnswerSelectedItemOption; page?: number; pages?: number }): Promise<SourceItemReadResult> {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) throw new OperationError('source_index_not_enabled', 'Source-index read is disabled.');
+    if (!this.config.email.enabled) throw new OperationError('email_not_configured', 'Private source worker is disabled.');
+    const selected = sourceItemReadSelectedItem(options.selectedItem);
+    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/item/read`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected_item: selected, page: sourceItemReadPage(options.page, 'page'), pages: sourceItemReadPage(options.pages, 'pages', 3) }),
+    });
+    assertNoRawEmailFields(response);
+    assertNoSourceIndexOperationalLeakFields(response);
+    const result = parseSourceItemReadResult(response);
+    if (result.couldNotRead.includes('not_personal')) throw new OperationError('not_personal', 'Private item: ask with source_answer');
+    if (result.pages.length > 0) recordReleaseManifest({
+      inputs: [{ corpusId: selected.corpus_id, provider: selected.provider, accountScope: selected.account_scope,
+        providerItemId: selected.provider_item_id,
+        ...(selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {}),
+        privateAtAnswer: false }],
+      constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
+    });
+    return result;
+  }
+
   async sourceIndexSearch(options: SourceIndexSearchOptions): Promise<SourceIndexSearchResult> {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError(
@@ -984,6 +1037,14 @@ function boundedEmailWorkerErrorMessage(value: unknown): string | undefined {
   return value;
 }
 
+function isOwnerLimitsRoute(url: string): boolean {
+  try {
+    return new URL(url).pathname.endsWith('/limits');
+  } catch {
+    return false;
+  }
+}
+
 function isSourceIndexSearchRoute(url: string): boolean {
   try {
     return new URL(url).pathname.endsWith('/source/index/search');
@@ -1003,10 +1064,13 @@ function workerLaneLabel(url: string): string {
 }
 
 function isAllowlistedEmailWorkerErrorResponse(status: number, url: string): boolean {
+  // olympus_limits: a refused Raise, a restarting or busy engine are told in their own words, never as a bare status.
+  if ((status === 400 || status === 502 || status === 503) && isOwnerLimitsRoute(url)) return true;
   if (status === 400) return isSourceIndexSearchRoute(url);
   if (status !== 403) return false;
   try {
-    return new URL(url).pathname.endsWith('/source/answer');
+    const path = new URL(url).pathname;
+    return path.endsWith('/source/answer') || path.endsWith('/source/item/read');
   } catch {
     return false;
   }
@@ -1743,7 +1807,7 @@ const FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS = new Set([
   'token',
 ]);
 
-function assertNoSourceIndexOperationalLeakFields(value: unknown): void {
+export function assertNoSourceIndexOperationalLeakFields(value: unknown): void {
   assertNoSourceIndexOperationalLeakFieldsAtPath(value, []);
 }
 

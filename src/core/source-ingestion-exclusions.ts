@@ -85,16 +85,16 @@ const SOURCE_INGESTION_DISPOSITION_RANK: Record<SourceIngestionDisposition, numb
 /**
  * The dispositions a rule may ask for. `admit` is the absence of a rule.
  */
-export type SourceIngestionRuleMode = 'exclude' | 'metadata_only';
+export type SourceIngestionRuleMode = 'exclude' | 'metadata_only' | 'on_demand';
 
-const SOURCE_INGESTION_RULE_MODES: readonly SourceIngestionRuleMode[] = ['exclude', 'metadata_only'];
+const SOURCE_INGESTION_RULE_MODES: readonly SourceIngestionRuleMode[] = ['exclude', 'metadata_only', 'on_demand'];
 
 /**
  * The order the gate consults modes in: strictest first, DERIVED from the rank
  * above rather than written out again, so the two cannot drift apart.
  */
 const SOURCE_INGESTION_DISPOSITION_ORDER: readonly SourceIngestionRuleMode[] = [...SOURCE_INGESTION_RULE_MODES]
-  .sort((left, right) => SOURCE_INGESTION_DISPOSITION_RANK[right] - SOURCE_INGESTION_DISPOSITION_RANK[left]);
+  .sort((left, right) => (right === 'on_demand' ? 0.5 : SOURCE_INGESTION_DISPOSITION_RANK[right]) - (left === 'on_demand' ? 0.5 : SOURCE_INGESTION_DISPOSITION_RANK[left]));
 
 /**
  * Why an item was admitted, refused, or admitted-without-content. Categorical
@@ -324,6 +324,7 @@ export interface SourceExclusionDecision {
    */
   excluded: boolean;
   disposition: SourceIngestionDisposition;
+  readOnDemand?: boolean;
   outcome: SourceExclusionOutcome;
   ruleId?: string;
   reason?: string;
@@ -868,7 +869,8 @@ export function createSourceExclusionMatcherFromPrefixes(
     outcome: SourceExclusionOutcome,
   ): SourceExclusionDecision => ({
     excluded: entry.mode === 'exclude',
-    disposition: entry.mode,
+    disposition: entry.mode === 'on_demand' ? 'metadata_only' : entry.mode,
+    ...(entry.mode === 'on_demand' ? { readOnDemand: true } : {}),
     outcome,
     ruleId: entry.ruleId,
     reason: entry.reason,

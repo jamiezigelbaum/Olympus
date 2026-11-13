@@ -23,6 +23,9 @@ import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from '
 // - The pass only updates ledger decisions. It never moves, embeds or deletes
 //   stored content.
 
+import { registerLimit } from '../../core/limit-stops.ts';
+import { clearOwnerLimitStop, ownerLimitSettingsPath, recordOwnerLimitStop, readJudgeCallOverride } from '../../core/owner-limit-state.ts';
+
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -61,6 +64,8 @@ import type {
 import { TIER_CLASSIFIER_VERSION, type TierDecision, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
 
+registerLimit({ id: 'judge.daily_calls', kind: 'calls', scope: 'judge', label: 'Privacy judge daily call budget used', unit: 'calls', continue: 'raise' });
+
 /** The UTC daily cap survives restart. Time slices, not call counts, set the pace. */
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20_000;
 /** One decision item attempt per call: enough for a sustained 150/min lane. */
@@ -81,6 +86,7 @@ const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 const OUTPUT_CHARS_PER_ITEM = 110;
 
 export interface SnifferTarget {
+  onDemandRead?: (question: SnifferQuestion) => boolean;
   ledger: TierLedger;
   sniffer: TierSnifferStore;
   /**
@@ -107,12 +113,18 @@ export class SnifferCallBudget {
   private day = '';
   private used = 0;
   private readonly explicitLimit: boolean;
+  private stopRecorded = false;
+  private recordedStop = '';
+  private clearedOnStart = false;
+  private readonly settingsPath: string;
 
-  constructor(options: { maxCallsPerDay?: number; now?: () => Date; statePath?: string } = {}) {
+  constructor(options: { maxCallsPerDay?: number; now?: () => Date; statePath?: string; settingsPath?: string } = {}) {
     this.explicitLimit = options.maxCallsPerDay !== undefined;
     this.maxCallsPerDay = Math.max(0, Math.floor(options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY));
     this.now = options.now ?? (() => new Date());
     this.statePath = options.statePath;
+    // Resolved once: the judge asks on every call, and resolving the layout path is the costly part.
+    this.settingsPath = options.settingsPath ?? ownerLimitSettingsPath();
     if (this.statePath) {
       try {
         const saved = JSON.parse(readFileSync(this.statePath, 'utf8')) as { day?: unknown; used?: unknown };
@@ -127,9 +139,26 @@ export class SnifferCallBudget {
   }
 
   tryConsume(decisionMode = false): boolean {
-    this.roll();
-    const limit = decisionMode && !this.explicitLimit ? DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY : this.maxCallsPerDay;
-    if (this.used >= limit) return false;
+    const now = this.now();
+    this.roll(now);
+    const limit = readJudgeCallOverride(now, this.settingsPath)
+      ?? (decisionMode && !this.explicitLimit ? DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY : this.maxCallsPerDay);
+    if (this.used >= limit) {
+      // Once per stop (and per limit): a refused attempt must not reopen the scheduler store each time.
+      const resumesAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+      const key = `${limit}:${this.used}:${resumesAt}`;
+      if (!this.stopRecorded || this.recordedStop !== key) {
+        recordOwnerLimitStop({ id: 'judge.daily_calls', subject: 'judge', since: now.toISOString(), limit, used: this.used, resumesAt });
+        this.stopRecorded = true;
+        this.recordedStop = key;
+      }
+      return false;
+    }
+    if (this.stopRecorded || !this.clearedOnStart) {
+      clearOwnerLimitStop('judge.daily_calls', 'judge');
+      this.stopRecorded = false;
+      this.clearedOnStart = true;
+    }
     this.used += 1;
     this.save();
     return true;
@@ -150,8 +179,8 @@ export class SnifferCallBudget {
     return this.used;
   }
 
-  private roll(): void {
-    const day = this.now().toISOString().slice(0, 10);
+  private roll(now = this.now()): void {
+    const day = now.toISOString().slice(0, 10);
     if (day !== this.day) {
       this.day = day;
       this.used = 0;
@@ -806,6 +835,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       } finally {
         turnCallMs = Math.max(0, monotonicNow() - callStarted);
         report.callMs += turnCallMs;
+        const onDemandCount = group.filter((item) => item.question.pass === 'content' && item.target.onDemandRead?.(item.question)).length;
+        if (onDemandCount > 0) console.info(`[olympus:on-demand] step=judge count=${onDemandCount} ms=${Math.max(0, turnCallMs - Math.min(slotWaitMs, turnCallMs))}`);
         // A wait can never be longer than the call that reported it.
         const waited = Math.min(slotWaitMs, turnCallMs);
         report.timing.slotWaitMs += waited;

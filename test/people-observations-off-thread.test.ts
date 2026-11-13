@@ -244,6 +244,33 @@ describe('people observations off the main thread (#1305)', () => {
     expect(observed.sort(bySenderKey)).toEqual(oracle(store).sort(bySenderKey));
   }, 60_000);
 
+  test('a ledger write that changes no visibility does not push the read onto this thread (gate 1, ops#168)', async () => {
+    const { fixture, store } = await senderFixture();
+    const db = storeDb(store);
+    // The sweep and the judge write the ledger every few seconds: meta, receipts, verdicts.
+    let pooled = 0;
+    setReadPoolObserverForTests((_path, read) => {
+      if (!/GROUP BY/.test(read.sql)) return;
+      pooled += 1;
+      fixture.ledger.writeMeta('test-unrelated-write', String(pooled));
+    });
+    const here: string[] = [];
+    const original = db.query.bind(db);
+    db.query = ((sql: string) => {
+      if (/FROM items/.test(sql) && /GROUP BY/.test(sql)) here.push(sql);
+      return original(sql);
+    }) as typeof db.query;
+    let observed: PeopleSenderObservation[];
+    try {
+      observed = await store.peopleObservationsOffThread();
+    } finally {
+      db.query = original;
+    }
+    expect(pooled).toBe(1);
+    expect(here).toEqual([]);
+    expect(observed.sort(bySenderKey)).toEqual(oracle(store).sort(bySenderKey));
+  }, 60_000);
+
   test('the people query reads a covering index', async () => {
     const { store } = await senderFixture();
     const db = storeDb(store);

@@ -10,6 +10,7 @@ import { parseCdpEndpoint, type FreshDashboard } from '../scripts/release-check/
 import type { LiveSourceSpec, EngineMcp } from '../scripts/release-check/live-accounts.ts';
 import type { Machine } from '../scripts/release-check/machine.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../src/workers/answer-model-required.ts';
+import { FIRST_RUN_PRIVACY_REQUIRED_TEXT } from '../src/workers/first-run-privacy-gate.ts';
 
 const sources: LiveSourceSpec[] = ['gmail', 'dropbox'].map(id => ({ id, label: id === 'gmail' ? 'Gmail' : 'Dropbox', known: { question: `${id} inside?`, expect: ['inside fact'] }, fresh: { scope: 'Canary', outside: { question: `${id} outside?`, expect: ['outside-unique-fact', 'outside-unique-title'] } } }));
 const snapshot = (extra: Partial<ConsentSnapshot> = {}): ConsentSnapshot => ({ url: 'https://accounts.google.com/consent', text: 'Advanced Go to Olympus (unsafe) Continue', password: false, accounts: 0, signedOut: false, ...extra });
@@ -52,7 +53,7 @@ function rig(failAt?: string, inconclusive = false) {
     listTools: async () => ['olympus_search', 'source_answer', 'source_answer_result', 'source_index_status'],
     close: () => step('engine.close'),
   };
-  return { events, commands, machine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {} } };
+  return { events, commands, machine, dashboard, engine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {} } };
 }
 
 describe('fresh install canary', () => {
@@ -81,6 +82,43 @@ describe('fresh install canary', () => {
       expect(syntax.status).toBe(0);
     }
   }, 30_000);
+  for (const splitFails of [false, true]) test(`fresh timing is wired after connect and restores zig (split failure: ${splitFails})`, async () => {
+    const r = rig();
+    const { browserSeedPlan } = await import('../scripts/release-check/on-demand-seeds.ts');
+    const file = browserSeedPlan('dropbox')[0]!;
+    let atTiming = false;
+    Object.assign(r.dashboard, {
+      connection: async () => 'connected', folderMode: async () => '',
+      setFolderMode: async () => {}, sync: async () => {}, prepareRead: async () => async () => 'Reading.',
+    });
+    const call = r.engine.call;
+    r.engine.call = async (...args) => atTiming ? response({ answer: file.fact, citations: [{ title: file.name }] }) : call(...args);
+    const result = await runFreshInstall(r.machine, { ...r.options, onDemandTiming: {
+      diagnostics: async target => {
+        await target.exec('timing-probe-test');
+        return {
+          enableSplit: async () => { atTiming = true; r.events.push('split'); if (splitFails) throw new Error('restart failed'); },
+          preflight: async () => 'engine split on; healthy front and background',
+          resolve: async f => ({ ...f, providerItemId: 'provider-id', version: 'source-version' }), begin: async () => {},
+          finish: async () => ({ indexed: true, jobIds: ['job'], attribution: 'single read in log interval', log: ['fetch', 'extract', 'judge', 'embed'].map(step => `[olympus:on-demand] step=${step} count=1 ms=1`).join('\n') }),
+          close: async () => { r.events.push('probe.close'); },
+        };
+      },
+      seeds: async (target, endpoint) => {
+        expect(target).toBe(r.machine); // Upload files belong to zig's signed-in browser, while the probe runs as olyfresh.
+        expect(endpoint).toBe('127.0.0.1:9334');
+        return { folders: async () => [{ source: 'dropbox', id: 'seed' }], upload: async () => [file] };
+      },
+    } });
+    expect(result.onDemandTiming?.rows).toHaveLength(splitFails ? 0 : 1);
+    expect(result.onDemandTiming?.preflight?.includes('split on') ?? false).toBe(!splitFails);
+    expect(result.checks.findIndex(c => c.id === 'fresh.dropbox.scope-absence')).toBeLessThan(result.checks.findIndex(c => c.id.startsWith('ondemand.')));
+    expect(r.commands.find(c => c.includes('timing-probe-test'))).toContain('sudo -n -u olyfresh');
+    expect(r.events.indexOf('split')).toBeGreaterThan(r.events.indexOf('dropbox.first-items'));
+    expect(r.events.indexOf('probe.close')).toBeLessThan(r.events.lastIndexOf('restore'));
+    expect(result.checks.at(-1)).toMatchObject({ id: 'fresh.restore-zig', status: 'pass' });
+    expect(canaryVerdict(result.checks)).toBe(splitFails ? 'fail' : 'pass');
+  });
   test('Ask without a model must explain setup; a real answer fails that check without stopping the leg', async () => {
     const r = rig();
     const { checks } = await runFreshInstall(r.machine, { ...r.options, engine: async () => ({
@@ -94,6 +132,17 @@ describe('fresh install canary', () => {
     expect(JSON.stringify(checks)).not.toContain('private words');
     expect(checks.map(c => c.id)).toContain('fresh.dropbox.first-items');
     expect(checks.at(-1)?.id).toBe('fresh.restore-zig');
+  });
+  test('before the privacy choice, Ask explaining that step counts as setup text; any other refusal fails', async () => {
+    for (const [error, status] of [[FIRST_RUN_PRIVACY_REQUIRED_TEXT, 'pass'], ['engine unavailable', 'fail']] as const) {
+      const r = rig();
+      const { checks } = await runFreshInstall(r.machine, { ...r.options, engine: async () => ({
+        call: async () => ({ ok: false, structured: null, text: '', error }),
+        listTools: async () => ['source_answer'],
+        close: async () => {},
+      }) });
+      expect(checks.find(c => c.id === 'fresh.ask-without-model')?.status).toBe(status);
+    }
   });
   test('Ask without a model must also be listed, not only callable', async () => {
     const r = rig();

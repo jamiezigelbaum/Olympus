@@ -12,6 +12,7 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
+import { bootProgressIsLive, bootProgressLine, readBootProgress, removeSchemaBackupsSince, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
 import { OperationError } from './operation-error.ts';
@@ -89,6 +90,14 @@ export interface WorkerLifecycleOptions extends WorkerServiceInstallOptions {
    * is set, otherwise 180000.
    */
   readinessTimeoutMs?: number;
+  /**
+   * The worker's boot progress (core/boot-progress.ts). Past the readiness
+   * timeout the upgrade keeps waiting while the unit is active and this shows
+   * boot work under way. Defaults to the worker's progress file.
+   */
+  bootProgress?: () => BootProgress | undefined;
+  /** Where progress lines go while the upgrade waits. Defaults to stderr. */
+  progressLine?: (line: string) => void;
 }
 
 interface LifecycleTransactionV1 {
@@ -350,6 +359,9 @@ function installOrUpgradeLifecycle(
     }
     const readiness = readinessPort === undefined ? undefined : qualifyWorkerReadiness(effective, readinessPort);
     markTransactionCommitReady(effective);
+    // Committed first: a crash from here on never rolls back onto stores whose
+    // copies are gone. The stores the new worker updated are kept.
+    removeUpgradeBackups(effective);
     clearTransaction(effective);
     return {
       schema_version: OLYMPUS_LIFECYCLE_SCHEMA_VERSION,
@@ -366,7 +378,11 @@ function installOrUpgradeLifecycle(
       ...(readiness ? { readiness } : {}),
     };
   } catch (error) {
-    rollbackTransaction(effective, { activatePrevious: true, touchServiceManager: true });
+    const restored = rollbackTransaction(effective, { activatePrevious: true, touchServiceManager: true });
+    if (restored.length > 0 && error instanceof OperationError) {
+      const note = `Stores put back as they were before the update: ${restored.join(', ')}.`;
+      error.suggestion = error.suggestion ? `${error.suggestion} ${note}` : note;
+    }
     throw error;
   }
 }
@@ -568,12 +584,12 @@ function recoverInterruptedTransaction(
 function rollbackTransaction(
   options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
   intent: { activatePrevious: boolean; touchServiceManager: boolean },
-): void {
+): string[] {
   const transaction = readTransaction(options);
-  if (!transaction) return;
+  if (!transaction) return [];
   if (transaction.phase === 'snapshotting' || transaction.phase === 'commit_ready') {
     clearTransaction(options);
-    return;
+    return [];
   }
   updateTransactionPhase(options, 'rollback_required');
   const paths = transactionPaths(options.homeDir);
@@ -581,6 +597,11 @@ function rollbackTransaction(
   // so restoring them is the whole rollback; nothing needs stopping or
   // reloading, and touching the running worker would be a surprise.
   if (intent.touchServiceManager) quiesceAttemptedWorker(options);
+  // The attempted worker is stopped: the stores it updated go back to the
+  // copies taken before, so the previous version can open them (#1494).
+  const restored = intent.touchServiceManager
+    ? restoreSchemaBackupsSince(lifecycleEnv(options), Date.parse(transaction.started_at))
+    : [];
   restoreManagedFile(options.homeDir, transaction.unit_path, paths.unitBackup, transaction.previous_unit_present, transaction.previous_unit_sha256);
   restoreManagedFile(options.homeDir, transaction.env_path, paths.envBackup, transaction.previous_env_present, transaction.previous_env_sha256);
   if (transaction.previous_launcher_present !== undefined) {
@@ -623,6 +644,41 @@ function rollbackTransaction(
   }
   markTransactionCommitReady(options);
   clearTransaction(options);
+  return restored;
+}
+
+function removeUpgradeBackups(options: WorkerLifecycleOptions & { homeDir: string }): void {
+  const transaction = readTransaction(options);
+  if (!transaction) return;
+  try {
+    removeSchemaBackupsSince(lifecycleEnv(options), Date.parse(transaction.started_at));
+  } catch {
+    // A copy left behind costs disk, not correctness.
+  }
+}
+
+/**
+ * The environment the worker resolves its data root in: the home's defaults
+ * (data-lifecycle.ts `envForContext`), then what the worker's own environment
+ * file sets, since the service manager loads it into the worker.
+ */
+function lifecycleEnv(options: WorkerLifecycleOptions & { homeDir: string }): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = options.homeDir === process.env.HOME ? { ...process.env } : {
+    HOME: options.homeDir,
+    XDG_DATA_HOME: join(options.homeDir, '.local', 'share'),
+    XDG_STATE_HOME: join(options.homeDir, '.local', 'state'),
+  };
+  const envPath = options.envPath ?? workerServicePaths(options.platform ?? 'linux', options.homeDir).envPath;
+  try {
+    const text = readFileSync(envPath, 'utf8');
+    for (const name of ['HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) {
+      const value = new RegExp(`^${name}=(.*)$`, 'm').exec(text)?.[1];
+      if (value !== undefined && unquoteEnvValue(value).trim()) env[name] = unquoteEnvValue(value).trim();
+    }
+  } catch {
+    // No environment file: the home's defaults.
+  }
+  return env;
 }
 
 function quiesceAttemptedWorker(
@@ -904,11 +960,33 @@ function qualifyWorkerReadiness(
     'Lifecycle readiness poll interval',
     10_000,
   );
-  const deadline = Date.now() + timeoutMs;
+  const firstDeadline = Date.now() + timeoutMs;
+  let deadline = firstDeadline;
+  // Past the deadline, a worker still doing boot work (store updates, a slow
+  // cold start) is waited for while its unit stays active (#1494). Each time
+  // that work is seen, the full window starts again: when it ends (phase
+  // done), the split's front still mounts its stores and starts listening,
+  // and gets the same window to answer as a worker that did no boot work.
+  const readProgress = options.bootProgress ?? (() => readBootProgress(lifecycleEnv(options)));
+  const progressLine = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
+  let lastLineAt = 0;
   let ready = probe();
-  while (!ready && Date.now() < deadline) {
+  while (!ready) {
     if (inspectWorkerService(serviceActionOptions(options)).state !== 'active') break;
-    waitForActivationSettle(Math.min(Math.max(1, pollMs), Math.max(0, deadline - Date.now())));
+    const now = Date.now();
+    // Read on every poll: the window restarts from the last poll that saw
+    // boot work, so the front's full window begins when that work ends.
+    const progress = readProgress();
+    if (bootProgressIsLive(progress, now)) {
+      if (now >= firstDeadline && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
+        progressLine(bootProgressLine(progress!, now));
+        lastLineAt = now;
+      }
+      deadline = Math.max(deadline, now + timeoutMs);
+    } else if (now >= deadline) {
+      break;
+    }
+    waitForActivationSettle(Math.max(1, Math.min(pollMs, now < deadline ? deadline - now : pollMs)));
     ready = probe();
   }
   if (!ready) {
@@ -989,6 +1067,8 @@ const DEFAULT_ACTION_SETTLE_POLL_MS = 500;
  * on boot still fails at once.
  */
 const DEFAULT_READINESS_TIMEOUT_MS = 180_000;
+/** While an upgrade waits on boot work, one progress line at most this often. */
+const READINESS_PROGRESS_LINE_MS = 30_000;
 const MAX_READINESS_TIMEOUT_MS = 600_000;
 
 /**

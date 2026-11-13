@@ -149,7 +149,7 @@ describe('Names-only matches are counted apart from unreadable ones', () => {
 
   test('the Names-only hint appears only when Names-only matches are why nothing was answered', () => {
     const hint = '2 matches are in folders set to Names only, so Olympus has their names but not their contents. '
-      + 'Switch those folders to Full in the folder picker to let Olympus read them.';
+      + 'Use Read this file for one file, or switch those folders to Full in the folder picker.';
     // Only title-only matches: the hint explains the empty answer.
     const namesOnly = searchToolResult({
       evidence: [{ trust_domain: 'internal', family: 'file', provider: 'dropbox', title: 'orchard-plan.pdf' }],
@@ -168,7 +168,7 @@ describe('Names-only matches are counted apart from unreadable ones', () => {
     const one = searchToolResult({ evidence: [], coverage: { searched_corpora: 1, names_only_items: 1 } });
     expect((one.structuredContent as { notes: string[] }).notes).toEqual([
       '1 match is in a folder set to Names only, so Olympus has its name but not its contents. '
-      + 'Switch that folder to Full in the folder picker to let Olympus read it.',
+      + 'Use Read this file for one file, or switch that folder to Full in the folder picker.',
     ]);
     const none = searchToolResult({ evidence: [], coverage: { searched_corpora: 1, names_only_items: 0 } });
     expect((none.structuredContent as { notes: string[] }).notes).toEqual([]);

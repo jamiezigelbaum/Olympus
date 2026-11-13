@@ -61,7 +61,7 @@ export interface LocalFilesContentScope {
    */
   snapshotDecider(): (scopePath: string) => LocalFilesDecision;
   /** The selected folders that are not excluded: the roots a pass lists. */
-  roots(): Array<{ scopePath: string; state: 'ingest' | 'metadata_only' }>;
+  roots(): Array<{ scopePath: string; state: 'ingest' | 'metadata_only' | 'on_demand' }>;
 }
 
 export function decideLocalFilesPath(
@@ -92,7 +92,7 @@ export function decideLocalFilesPath(
   }
   if (selected.some((selection) => selection.state === 'exclude')) return 'denied';
   if (!approval.wholeAccount && !selected.some((selection) => selection.state !== 'exclude')) return 'denied';
-  if (selected.some((selection) => selection.state === 'metadata_only')) return 'metadata';
+  if (selected.some((selection) => (selection.state === 'metadata_only' || selection.state === 'on_demand'))) return 'metadata';
   return approval.wholeAccount || selected.some((selection) => selection.state === 'ingest') ? 'content' : 'denied';
 }
 
@@ -103,12 +103,12 @@ function safeKey(key: string): string | undefined {
 export function localFilesRoots(
   approval: Pick<FileSourceScopeApprovalSnapshot, 'selections' | 'wholeAccount'>,
   context?: DefaultExclusionContext,
-): Array<{ scopePath: string; state: 'ingest' | 'metadata_only' }> {
+): Array<{ scopePath: string; state: 'ingest' | 'metadata_only' | 'on_demand' }> {
   // Whole computer: the one root is the top of the primary disk, read in
   // full except what is excluded or off by default. (Other disks are chosen
   // by name, since a disk mounted later is a different place.)
   if (approval.wholeAccount) return [{ scopePath: '/', state: 'ingest' }];
-  const roots: Array<{ scopePath: string; state: 'ingest' | 'metadata_only' }> = [];
+  const roots: Array<{ scopePath: string; state: 'ingest' | 'metadata_only' | 'on_demand' }> = [];
   for (const selection of approval.selections) {
     if (selection.state === 'exclude') continue;
     const scopePath = safeKey(selection.key);
@@ -151,7 +151,7 @@ export function fileSourceScopeLocalFilesPolicy(
     roots: localFilesRoots(approval, context).map(({ scopePath, state }) => ({
       path: scopePath,
       approved_scope_key: `${LOCAL_FILES_POLICY_SOURCE}:${scopePath}`,
-      default_action: state === 'ingest' ? 'full_extract' as const : 'metadata_only' as const,
+      default_action: state === 'ingest' ? 'full_extract' as const : state === 'on_demand' ? 'on_demand' as const : 'metadata_only' as const,
     })),
   };
 }

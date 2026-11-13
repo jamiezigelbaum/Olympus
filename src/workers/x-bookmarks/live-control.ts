@@ -209,7 +209,7 @@ export class XApiUsageGuardError extends Error {
   readonly guardKind: XApiUsageGuardKind;
   readonly retryAt: string;
 
-  constructor(guardKind: XApiUsageGuardKind, retryAt: string) {
+  constructor(guardKind: XApiUsageGuardKind, retryAt: string, readonly amounts?: { limit: number; used: number }) {
     super(`X bookmarks request deferred by ${guardKind}.`);
     this.name = 'XApiUsageGuardError';
     this.guardKind = guardKind;
@@ -752,7 +752,7 @@ export class LocalXBookmarksApiUsageStore {
         throw new XApiUsageGuardError('provider_rate_limit', row.rate_limit_reset_at!);
       }
       if (routine && row.api_requests + pendingRequests + 1 > input.config.dailyApiRequestBudget) {
-        throw new XApiUsageGuardError('daily_api_request_guard', retryAt);
+        throw new XApiUsageGuardError('daily_api_request_guard', retryAt, { limit: input.config.dailyApiRequestBudget, used: row.api_requests + pendingRequests });
       }
       if (routine && input.preserveHeadReserve && row.api_requests + pendingRequests + 1
         > backgroundBudget(
@@ -763,12 +763,12 @@ export class LocalXBookmarksApiUsageStore {
             now,
           ),
         )) {
-        throw new XApiUsageGuardError('head_api_request_reserve_guard', retryAt);
+        throw new XApiUsageGuardError('head_api_request_reserve_guard', retryAt, { limit: backgroundBudget(input.config.dailyApiRequestBudget, cadenceSteppedHeadReserve(input.config.headApiRequestReserve, input.config.headIntervalMs, now)), used: row.api_requests + pendingRequests });
       }
 
       const remainingReads = input.config.dailyResourceReadBudget - row.resource_reads - reserved;
       if (routine && remainingReads < minimumResources) {
-        throw new XApiUsageGuardError('daily_resource_read_guard', retryAt);
+        throw new XApiUsageGuardError('daily_resource_read_guard', retryAt, { limit: input.config.dailyResourceReadBudget, used: row.resource_reads + reserved });
       }
       const remainingCostUnits = Math.floor(
         (input.config.dailyEstimatedSpendMicrousd - row.estimated_spend_microusd
@@ -776,7 +776,7 @@ export class LocalXBookmarksApiUsageStore {
         / input.config.estimatedUnitCostMicrousd,
       );
       if (routine && remainingCostUnits < minimumResources) {
-        throw new XApiUsageGuardError('daily_cost_guard', retryAt);
+        throw new XApiUsageGuardError('daily_cost_guard', retryAt, { limit: input.config.dailyEstimatedSpendMicrousd, used: row.estimated_spend_microusd + reserved * input.config.estimatedUnitCostMicrousd });
       }
       const backgroundRemainingReads = remainingReads
         - cadenceSteppedHeadReserve(
@@ -785,7 +785,7 @@ export class LocalXBookmarksApiUsageStore {
           now,
         );
       if (routine && input.preserveHeadReserve && backgroundRemainingReads < minimumResources) {
-        throw new XApiUsageGuardError('head_resource_read_reserve_guard', retryAt);
+        throw new XApiUsageGuardError('head_resource_read_reserve_guard', retryAt, { limit: Math.max(0, input.config.dailyResourceReadBudget - cadenceSteppedHeadReserve(input.config.headResourceReadReserve, input.config.headIntervalMs, now)), used: row.resource_reads + reserved });
       }
       const backgroundRemainingCostUnits = Math.floor(
         (input.config.dailyEstimatedSpendMicrousd
@@ -798,7 +798,7 @@ export class LocalXBookmarksApiUsageStore {
         / input.config.estimatedUnitCostMicrousd,
       );
       if (routine && input.preserveHeadReserve && backgroundRemainingCostUnits < minimumResources) {
-        throw new XApiUsageGuardError('head_cost_reserve_guard', retryAt);
+        throw new XApiUsageGuardError('head_cost_reserve_guard', retryAt, { limit: Math.max(0, input.config.dailyEstimatedSpendMicrousd - cadenceSteppedHeadReserve(input.config.headEstimatedSpendReserveMicrousd, input.config.headIntervalMs, now)), used: row.estimated_spend_microusd + reserved * input.config.estimatedUnitCostMicrousd });
       }
 
       const maxResources = routine
@@ -876,7 +876,7 @@ export class LocalXBookmarksApiUsageStore {
         throw new XApiUsageGuardError('provider_rate_limit', row.rate_limit_reset_at!);
       }
       if (routine && row.api_requests + pendingRequests + 1 > input.config.dailyApiRequestBudget) {
-        throw new XApiUsageGuardError('daily_api_request_guard', retryAt);
+        throw new XApiUsageGuardError('daily_api_request_guard', retryAt, { limit: input.config.dailyApiRequestBudget, used: row.api_requests + pendingRequests });
       }
       if (routine && input.preserveHeadReserve && row.api_requests + pendingRequests + 1
         > backgroundBudget(
@@ -887,12 +887,12 @@ export class LocalXBookmarksApiUsageStore {
             now,
           ),
         )) {
-        throw new XApiUsageGuardError('head_api_request_reserve_guard', retryAt);
+        throw new XApiUsageGuardError('head_api_request_reserve_guard', retryAt, { limit: backgroundBudget(input.config.dailyApiRequestBudget, cadenceSteppedHeadReserve(input.config.headApiRequestReserve, input.config.headIntervalMs, now)), used: row.api_requests + pendingRequests });
       }
       const remainingReads = input.config.dailyResourceReadBudget
         - row.resource_reads - reserved;
       if (routine && remainingReads < reservation.max_resources) {
-        throw new XApiUsageGuardError('daily_resource_read_guard', retryAt);
+        throw new XApiUsageGuardError('daily_resource_read_guard', retryAt, { limit: input.config.dailyResourceReadBudget, used: row.resource_reads + reserved });
       }
       const remainingCostUnits = Math.floor(
         (input.config.dailyEstimatedSpendMicrousd - row.estimated_spend_microusd
@@ -900,7 +900,7 @@ export class LocalXBookmarksApiUsageStore {
         / input.config.estimatedUnitCostMicrousd,
       );
       if (routine && remainingCostUnits < reservation.max_resources) {
-        throw new XApiUsageGuardError('daily_cost_guard', retryAt);
+        throw new XApiUsageGuardError('daily_cost_guard', retryAt, { limit: input.config.dailyEstimatedSpendMicrousd, used: row.estimated_spend_microusd + reserved * input.config.estimatedUnitCostMicrousd });
       }
       if (routine && input.preserveHeadReserve
         && remainingReads - cadenceSteppedHeadReserve(
@@ -909,7 +909,7 @@ export class LocalXBookmarksApiUsageStore {
           now,
         )
           < reservation.max_resources) {
-        throw new XApiUsageGuardError('head_resource_read_reserve_guard', retryAt);
+        throw new XApiUsageGuardError('head_resource_read_reserve_guard', retryAt, { limit: Math.max(0, input.config.dailyResourceReadBudget - cadenceSteppedHeadReserve(input.config.headResourceReadReserve, input.config.headIntervalMs, now)), used: row.resource_reads + reserved });
       }
       const backgroundRemainingCostUnits = Math.floor(
         (input.config.dailyEstimatedSpendMicrousd
@@ -924,7 +924,7 @@ export class LocalXBookmarksApiUsageStore {
       );
       if (routine && input.preserveHeadReserve
         && backgroundRemainingCostUnits < reservation.max_resources) {
-        throw new XApiUsageGuardError('head_cost_reserve_guard', retryAt);
+        throw new XApiUsageGuardError('head_cost_reserve_guard', retryAt, { limit: Math.max(0, input.config.dailyEstimatedSpendMicrousd - cadenceSteppedHeadReserve(input.config.headEstimatedSpendReserveMicrousd, input.config.headIntervalMs, now)), used: row.estimated_spend_microusd + reserved * input.config.estimatedUnitCostMicrousd });
       }
       this.db.query(`
         UPDATE x_api_request_reservations

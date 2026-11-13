@@ -88,12 +88,13 @@ export class GoogleRequestBudgetError extends Error {
   readonly provider: string;
   readonly reason: GoogleRequestBudgetErrorReason;
   readonly observedFutureUtcDay: string | undefined;
+  readonly amounts: { limit: number; used?: number } | undefined;
 
   constructor(
     provider: string,
     retryAt: string,
     reason: GoogleRequestBudgetErrorReason = 'daily_api_request_guard',
-    options: { observedFutureUtcDay?: string; currentUtcDay?: string } = {},
+    options: { observedFutureUtcDay?: string; currentUtcDay?: string; limit?: number; used?: number } = {},
   ) {
     super(
       reason === 'future_utc_day'
@@ -110,6 +111,7 @@ export class GoogleRequestBudgetError extends Error {
     this.retryAt = retryAt;
     this.reason = reason;
     this.observedFutureUtcDay = options.observedFutureUtcDay;
+    this.amounts = options.limit !== undefined ? { limit: options.limit, ...(options.used !== undefined ? { used: options.used } : {}) } : undefined;
   }
 }
 
@@ -194,7 +196,7 @@ export class GoogleDailyRequestBudget {
       this.requests = 0;
     }
     if (routine && this.requests >= this.dailyRequestBudget) {
-      throw new GoogleRequestBudgetError(this.provider, nextUtcDay(now));
+      throw new GoogleRequestBudgetError(this.provider, nextUtcDay(now), 'daily_api_request_guard', { limit: this.dailyRequestBudget, used: this.requests });
     }
     this.requests += 1;
   }
@@ -340,7 +342,7 @@ function reservePersistentRequest(input: {
           input.dailyRequestBudget,
         ) as { requests?: number } | null;
         if (!reserved) {
-          throw new GoogleRequestBudgetError(input.provider, nextUtcDay(input.now));
+          throw new GoogleRequestBudgetError(input.provider, nextUtcDay(input.now), 'daily_api_request_guard', { limit: input.dailyRequestBudget });
         }
       });
       reserve.immediate();

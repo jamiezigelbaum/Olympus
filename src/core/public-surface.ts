@@ -8,11 +8,13 @@
  */
 
 export const V0_4_PUBLIC_NATIVE_TOOLS = [
+  'olympus_limits',
   'argus_ping',
   'argus_list_models',
   'argus_complete',
   'source_answer',
   'source_index_status',
+  'source_item_read',
   'source_index_search',
   'source_watch_create',
   'source_watches',
@@ -44,12 +46,14 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
 // own tool budget (timeoutMs up to 600000) and never hands off; a one-shot CLI
 // process could not keep a job alive between two commands.
 export const V0_4_PUBLIC_MCP_TOOLS = [
+  'olympus_limits',
   'argus_ping',
   'argus_list_models',
   'argus_complete',
   'source_answer',
   'source_answer_result',
   'source_index_status',
+  'source_item_read',
   'source_index_search',
   'olympus_doctor',
   'olympus_setup_status',
@@ -63,11 +67,13 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
 // CLI as the command `olympus doctor` through its cliHints; see
 // V0_4_PUBLIC_CLI_COMMANDS for the user-facing command roster.
 export const V0_4_PUBLIC_CLI_OPERATIONS = [
+  'olympus_limits',
   'argus_ping',
   'argus_list_models',
   'argus_complete',
   'source_answer',
   'source_index_status',
+  'source_item_read',
   'source_index_search',
   'olympus_doctor',
   'olympus_setup_status',
@@ -88,10 +94,12 @@ export const V0_4_HERMES_MCP_TOOLS = [
   'ask_anonymously',
 ] as const;
 
-// Remote MCP (`/mcp` on the worker, reached by agents outside this machine
-// through an owner-approved connection) serves the same narrowed list Hermes
-// gets. Source watches stay native-only: their delivery needs OpenClaw routing.
-export const V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
+// Remote MCP serves the Hermes operations plus reads of Personal items found
+// through connection-bound opaque handles. Source watches stay native-only.
+export const V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
+  ...V0_4_HERMES_MCP_TOOLS,
+  'source_item_read',
+] as const;
 
 export const V0_4_PUBLIC_SKILL_DIRS = [
   'skills/ask-argus',
@@ -153,6 +161,7 @@ export const V0_4_PUBLIC_SOURCE_IDS = [
 ] as const;
 
 export const V0_4_PUBLIC_CLI_COMMANDS = [
+  'limits',
   'setup',
   'sovereignty init',
   'worker install',
@@ -190,6 +199,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'connections list',
   'connections revoke',
   'connections status',
+  'connections requests',
   'dashboard',
   'open',
   'open-handler install',
@@ -206,6 +216,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'source answer',
   'source index status',
   'source index search',
+  'source item read',
   'source extract-pdfs',
   'data export',
   'data verify',
@@ -330,6 +341,7 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   // DASHBOARD_PRIVACY_ITEM_PATHS).
   { method: 'POST', path: '/dashboard/privacy/items/find' },
   { method: 'POST', path: '/dashboard/privacy/items/set' },
+  { method: 'POST', path: '/dashboard/privacy/items/read' },
   { method: 'POST', path: '/dashboard/privacy/judge-check' },
   // Remote agent connections: mint a pairing code, create a key (shown once),
   // revoke, and turn remote access on or off. Same control-session custody as

@@ -1,4 +1,5 @@
 export type OperationErrorCode =
+  | 'not_personal'
   | 'invalid_params'
   | 'config_error'
   | 'argus_unreachable'
@@ -6,6 +7,7 @@ export type OperationErrorCode =
   | 'email_not_configured'
   | 'email_unreachable'
   | 'email_error'
+  | 'worker_restarting'
   | 'unsupported_filter'
   | 'invalid_request'
   | 'email_policy_violation'

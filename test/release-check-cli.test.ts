@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { engineSplitCheck, parseCli } from '../scripts/release-check/run.ts';
-import { engineRolesIn, turnOnEngineSplit } from '../scripts/release-check/machine-agent.ts';
+import { engineRolesIn, engineRolesInPs, turnOnEngineSplit } from '../scripts/release-check/machine-agent.ts';
 import { buildReport, renderHtml } from '../scripts/release-check/report.ts';
 
 const A = 'a'.repeat(40);
@@ -58,6 +58,27 @@ describe('release-check run command arguments', () => {
     });
   });
 
+  test('--archive-scale is opt-in, implies the split, and accepts the repo harness environment input', () => {
+    const previous = process.env.RC_ARCHIVE_SCALE;
+    try {
+      delete process.env.RC_ARCHIVE_SCALE;
+      withConfig(base => {
+        expect(parseCli(base).archiveScale).toBeUndefined();
+        expect(parseCli([...base, '--archive-scale'])).toMatchObject({ archiveScale: true, engineSplit: true });
+        expect(parseCli([...base, '--archive-scale', '--skip-archive']).skipArchive).toBe(true);
+        expect(() => parseCli([...base, '--archive-scale', '--baselines', base[3]!, '--update-baselines'])).toThrow('--archive-scale');
+        expect(() => parseCli([...base, '--archive-scale', '--carry-from', '/tmp/report.json'])).toThrow('--archive-scale');
+        process.env.RC_ARCHIVE_SCALE = '1';
+        expect(parseCli(base)).toMatchObject({ archiveScale: true, engineSplit: true });
+        process.env.RC_ARCHIVE_SCALE = '0';
+        expect(parseCli(base).archiveScale).toBeUndefined();
+      });
+    } finally {
+      if (previous === undefined) delete process.env.RC_ARCHIVE_SCALE;
+      else process.env.RC_ARCHIVE_SCALE = previous;
+    }
+  });
+
   test('--engine-split is off unless named, is refused with a kept run or new baselines, and the usage names it', () => {
     withConfig((base) => {
       expect(parseCli(base).engineSplit).toBeUndefined();
@@ -74,6 +95,14 @@ describe('release-check run command arguments', () => {
 });
 
 describe('the engine split on the install under test', () => {
+  test('macOS process roles are counted from ps environments without treating unrelated text as a role', () => {
+    expect(engineRolesInPs([
+      '/path/engine OLYMPUS_WORKER_ENGINE_ROLE=front PATH=/bin',
+      '/path/engine OLYMPUS_WORKER_ENGINE_ROLE=background',
+      '/path/unrelated ANOTHER_OLYMPUS_WORKER_ENGINE_ROLE=front',
+      '/path/unrelated OLYMPUS_WORKER_ENGINE_ROLE=single',
+    ].join('\n'))).toEqual({ front: 1, background: 1 });
+  });
   test('turning the switch on keeps every other setting and the file stays owner-only', () => {
     const dir = mkdtempSync(join(tmpdir(), 'rc-split-test-'));
     try {

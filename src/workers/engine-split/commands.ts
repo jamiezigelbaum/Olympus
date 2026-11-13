@@ -76,13 +76,18 @@ export const ENGINE_FORWARDED_ROUTES = {
     '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
   ],
   embed_chunks: ['/v1/source/index/embed'],
+  // Reading can queue a window judgment or raise a tier: the writer owns both.
+  source_item_read: ['/v1/source/item/read'],
   // The CLI's export (and so its backup): the background takes the snapshots
   // on the writer's own loop, between its writes (#1224).
   data_export: ['/v1/cli/data-export'],
+  // olympus_limits: stops sit in the scheduler store, and a continue wakes the judge or runs a sync (owner-limits.ts).
+  owner_limits: ['/v1/limits'],
   // The background runs source watches' passes and owns their store.
   source_watch: ['/v1/source/watch/create', '/v1/source/watch/cancel'],
   // The extraction queue's writes, under the generic path or a family's alias.
   extraction_queue: [
+    '/v1/source/index/files/read-on-demand', '/dashboard/privacy/items/read',
     '/v1/source/index/files/plan', '/v1/source/index/files/transcribe', '/v1/source/index/files/recycle-leases',
     '/v1/source/index/files/janitor-requeue', '/v1/source/index/files/extract-pdfs', '/v1/source/index/files/extract',
     '/v1/source/index/dropbox/content/plan', '/v1/source/index/dropbox/content/recycle-leases',
@@ -383,11 +388,13 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'storage_registry':
     case 'capture':
     case 'embed_chunks':
+    case 'source_item_read':
     case 'source_watch':
     case 'extraction_queue':
     case 'people':
     case 'source_sync':
     case 'data_export':
+    case 'owner_limits':
     {
       const frontPid = command!.frontPid;
       if (frontPid !== undefined && (kind !== 'delete_source_data' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a delete.');

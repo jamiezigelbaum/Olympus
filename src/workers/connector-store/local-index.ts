@@ -2,6 +2,7 @@ import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vec
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
+import { storeOwnerIdleMs, storeReadHasPriority } from '../../core/store-reclaim-admission.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import { unreadHoldDisposition, type UnreadHoldDisposition } from '../file-extraction/unreadable-files.ts';
@@ -12,7 +13,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
-import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
+import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
@@ -43,7 +44,7 @@ import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHa
 
 import { compareProviderAccounts } from '../../core/provider-account-identity.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, statSync, statfsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
@@ -97,6 +98,9 @@ import {
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
 import { conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import type { SourceItemReadResult, SourceItemReadRefusal } from '../../core/source-item-read.ts';
+import { checkReleaseChunks, chunkCoverageNote, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ReleaseCheck, type ReleaseInput } from '../../core/release-manifest.ts';
+import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
 import { assertStoreTierLedgerCanOpen, findTierSetLedger } from '../classification/tier-set-binding.ts';
 import {
@@ -119,7 +123,6 @@ import {
   judgedAwaited,
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
-  childVisibilityUnchanged,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
@@ -2222,6 +2225,8 @@ interface ConnectorStoreCurrentEmbeddingRowsOptions {
   accountScope?: string;
   filters?: ConnectorStoreSearchFilters;
   chunkPks?: readonly number[];
+  /** Set only after checking sqlite_master on the scan's read snapshot. */
+  onDemandReadsTablePresent?: boolean;
 }
 
 const CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
@@ -2251,6 +2256,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   const modelId = requireNonEmpty(options.modelId, 'Connector store embedding model id');
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
+  const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
   return {
     sql: `
       SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
@@ -2261,6 +2267,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
         ${options.chunkPks ? 'AND emb.chunk_pk IN (SELECT value FROM json_each(?))' : ''}
         ${accountScope ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
+        ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ''}
       ${page ? 'ORDER BY emb.chunk_pk ASC LIMIT ?' : ordered ? 'ORDER BY emb.item_pk ASC, emb.chunk_pk ASC' : ''}
     `,
     params: [
@@ -2269,6 +2276,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
       ...(options.chunkPks ? [JSON.stringify(options.chunkPks)] : []),
       ...(accountScope ? [accountScope] : []),
       ...selectedFilters.params,
+      ...metadataOnly.params,
       ...(page ? [Math.max(1, Math.floor(page.limit))] : []),
     ],
   };
@@ -2357,9 +2365,13 @@ async function scanVectorPages(
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
   if (after.skippedReason) return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken) return { skippedReason: 'embedding_authority_changed_during_query' };
+  if (pageOptions.filters?.metadataOnlyLocatorPathScopes?.length || pageOptions.filters?.metadataOnlySourceScopeFolderKeys?.length) {
+    pageOptions = { ...pageOptions, onDemandReadsTablePresent: Boolean(await read({ mode: 'get',
+      sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] })) };
+  }
   // Old/read-only schemas and incomplete backfills retain the exact scan, as
-  // does every store when OLYMPUS_VECTOR_DIGEST=off: the fallback an owner or
-  // an eval can force without touching the store.
+  // does every store unless OLYMPUS_VECTOR_DIGEST=on (see
+  // vectorDigestSearchDisabled).
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
   if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
@@ -2393,9 +2405,14 @@ async function scanVectorPages(
   return { bestByItem, dimensionMismatches };
 }
 
-/** OLYMPUS_VECTOR_DIGEST=off: every vector lane runs the exact scan; the digest is still kept. */
+/**
+ * The digest pass is off by default until an intermittent Bun memory fault
+ * seen with it on a 608K-row store under concurrent reads is understood
+ * (olympus-ops#151): OLYMPUS_VECTOR_DIGEST=on turns it on. Off, every vector
+ * lane runs the exact scan; the digest is still written and backfilled.
+ */
 export function vectorDigestSearchDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === 'off';
+  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() !== 'on';
 }
 
 /** Backfill turns stay short on the worker thread (plan ruling on #1444). */
@@ -2434,14 +2451,15 @@ export async function scanDigestPages(
   while (true) {
     if (expired()) return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const rows = await read({ mode: 'all', ...page }) as Array<{ chunk_pk: number; digest: Uint8Array }>;
-    for (let index = 0; index < rows.length; index++) {
-      if ((index & 31) === 0 && expired()) return cut;
-      const row = rows[index]!;
-      heap.append(row.chunk_pk, scoreVectorDigest(query, row.digest));
-    }
-    if (rows.length < 4096) break;
-    afterChunkPk = rows.at(-1)!.chunk_pk;
+    const packed = await read({ mode: 'get', ...page }) as VectorDigestPackedPage;
+    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index) => {
+      if ((index & 31) === 0 && expired()) return false;
+      heap.append(chunkPk, scoreVectorDigest(query, digest));
+      return true;
+    });
+    if (!finished) return cut;
+    if (packed.n < VECTOR_DIGEST_PAGE_ROWS) break;
+    afterChunkPk = packed.last_pk;
     // Same cadence as the exact scan: a timer tick per page costs more than the page.
     if (digestPages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
   }
@@ -2485,15 +2503,49 @@ export async function scanDigestPages(
   return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
 
+const VECTOR_DIGEST_PAGE_ROWS = 4096;
+
+/**
+ * One page of digests as ONE row: the digests concatenated into a single
+ * blob, with their keys and byte lengths alongside in the same aggregate
+ * pass, so the three always line up. A page crosses the read-pool thread as
+ * one buffer and two strings instead of 4,096 small typed arrays; per-row
+ * blobs were the shape under the Bun memory fault on large stores
+ * (olympus-ops#151).
+ */
+export type VectorDigestPackedPage = { n: number; last_pk: number; pks: string; lengths: string; packed: Uint8Array };
+
+/** Visits each digest as a view into the page's blob; false from `visit` stops early. */
+export function forEachPackedVectorDigest(
+  page: VectorDigestPackedPage, visit: (chunkPk: number, digest: Uint8Array, index: number) => boolean,
+): boolean {
+  if (page.n === 0) return true;
+  const pks = JSON.parse(page.pks) as number[];
+  const lengths = JSON.parse(page.lengths) as number[];
+  const total = lengths.reduce((sum, length) => sum + length, 0);
+  if (pks.length !== page.n || lengths.length !== page.n || total !== page.packed.byteLength) {
+    throw new Error('vector digest page does not unpack: key, length and byte counts disagree');
+  }
+  let offset = 0;
+  for (let index = 0; index < page.n; index++) {
+    const length = lengths[index]!;
+    if (!visit(pks[index]!, page.packed.subarray(offset, offset + length), index)) return false;
+    offset += length;
+  }
+  return true;
+}
+
 /** INTEGER PRIMARY KEY is the rowid: no secondary index, joins, or blob sort. */
 export function connectorStoreVectorDigestPageQuery(
-  options: { modelId: string; accountScope?: string }, afterChunkPk: number, limit = 4096,
+  options: { modelId: string; accountScope?: string }, afterChunkPk: number, limit = VECTOR_DIGEST_PAGE_ROWS,
 ): { sql: string; params: Array<string | number> } {
   const account = normalizeOptionalAccountScope(options.accountScope);
   return {
-    sql: `SELECT chunk_pk, digest FROM chunk_vector_digest
-      WHERE chunk_pk > ? AND model_id = ? ${account ? 'AND account_scope = ?' : ''}
-      ORDER BY chunk_pk LIMIT ?`,
+    sql: `SELECT count(*) AS n, max(chunk_pk) AS last_pk, json_group_array(chunk_pk) AS pks,
+        json_group_array(length(digest)) AS lengths, CAST(coalesce(group_concat(digest, ''), x'') AS BLOB) AS packed
+      FROM (SELECT chunk_pk, digest FROM chunk_vector_digest
+        WHERE chunk_pk > ? AND model_id = ? ${account ? 'AND account_scope = ?' : ''}
+        ORDER BY chunk_pk LIMIT ?)`,
     params: [afterChunkPk, options.modelId, ...(account ? [account] : []), limit],
   };
 }
@@ -2685,6 +2737,8 @@ export interface ConnectorStoreActiveLocatorItem {
  * already inside it in a second time.
  */
 export interface ConnectorStoreItemMetadataSnapshot {
+  read_on_demand?: true;
+  sizeBytes?: number;
   sourceVersion?: string;
   contentHash?: string;
   mimeType?: string;
@@ -3316,6 +3370,55 @@ export function connectorStoreReadableNow(dbPath: string): boolean {
   }
 }
 
+/** The store's own maintenance opener, like its read-pool opener, on an isolated Bun process. */
+const CONNECTOR_RECLAIM_WORKER_SOURCE = `
+import { Database } from 'bun:sqlite';
+import { statSync } from 'node:fs';
+// core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
+// process and cannot import it. Checkpoint first so no WAL is left for a reap.
+const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
+self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
+  // This is the mounted store's own maintenance connection. Never create a missing store.
+  const db = new Database(path, { create: false, strict: true });
+  db.exec('PRAGMA busy_timeout = 0; PRAGMA foreign_keys = ON;');
+  try {
+    postMessage({ started: true });
+    const mode = db.query('PRAGMA auto_vacuum').get().auto_vacuum;
+    if (mode !== 2) {
+      db.exec('PRAGMA auto_vacuum = INCREMENTAL;');
+      // NONE needs one transactional rebuild. A killed conversion leaves the
+      // original database usable; there is no rename or half-swapped file.
+      if (mode === 0) {
+        // VACUUM may renumber rowids in the composite-key embedding table.
+        // Restart unfinished physical backfills before that can happen.
+        db.exec('UPDATE chunk_vector_digest_meta SET cursor_rowid = 0 WHERE completed = 0;');
+        db.exec('VACUUM;');
+      }
+    }
+    const started = performance.now();
+    let free = db.query('PRAGMA freelist_count').get().freelist_count;
+    while (free > 0 && performance.now() - started < budgetMs) {
+      db.exec('PRAGMA incremental_vacuum(' + pagesPerStep + ')');
+      free = db.query('PRAGMA freelist_count').get().freelist_count;
+    }
+    // WAL truncation is part of reclaim, not a blocking close-time courtesy.
+    // A status snapshot may still own old pages: retry on the next tick.
+    const checkpoint = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    postMessage({ done: free === 0 && checkpoint.busy === 0, bytes: statSync(path).size });
+  } catch {
+    postMessage({ failed: true });
+  } finally {
+    closeSqliteStore(db);
+  }
+};`;
+
+/** Pages per statement; the worker also stops at the existing sweep slice budget. */
+const RECLAIM_MAX_PAGES_PER_STEP = 128;
+/** Effective conversion throughput, about 3x the file in I/O at ~45 MB/s; replace with a measurement. */
+const RECLAIM_CONVERSION_BYTES_PER_MS = 15_000;
+/** File releases include filesystem work: admit one picture per prune step. */
+const SUPERSEDED_PRUNE_MEDIA_ROWS = 1;
+
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
@@ -3440,6 +3543,7 @@ export class LocalConnectorStore {
       assertWritableStoreOpenAllowed('connector store', this.dbPath);
       if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
+    const creatingFile = this.dbPath === ':memory:' || !existsSync(this.dbPath);
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
       : { create: true });
@@ -3447,9 +3551,21 @@ export class LocalConnectorStore {
     try {
       this.db.exec(options.readOnly === true
         ? 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;'
+        : creatingFile
+        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;'
         : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+      // New stores need no conversion. Existing stores are converted only by
+      // background reclaim, after the sweep, never by opening a request's store.
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
+      const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
+      // A store already at this build's schema is checked by shape only. The
+      // checks that read every row (the text index's ownership count, every
+      // foreign key) run only when this open migrates: on Sparta they read
+      // about 22 GB per plain restart across both engine processes, most of
+      // each one's 6 minutes to ready (ops#151, 2026-11-12).
+      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
+      if (migrating) validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
       if (options.readOnly === true) {
         const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         // Anything newer than this build already failed
@@ -3466,7 +3582,14 @@ export class LocalConnectorStore {
         createConnectorStoreItemTextVersions(this.db);
         createConnectorStoreVisibilityTables(this.db);
         createConnectorStorePeopleIndex(this.db);
+        this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+          local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+        );`);
         validateConnectorStoreSchema(this.db);
+        if (migrating) {
+          validateConnectorStoreRows(this.db, 'v15');
+          validateConnectorStoreForeignKeys(this.db);
+        }
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
       // A read-only open of a store no writer of this build has opened has no
@@ -3524,7 +3647,7 @@ export class LocalConnectorStore {
       if (!model) return;
       // An Ask in flight on this store, or any owner-visible read waiting
       // for the pool (a status count, another store's lane), goes first.
-      if (this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
@@ -3596,10 +3719,14 @@ export class LocalConnectorStore {
   }
 
   close(): void {
+    const reclaiming = this.reclaimProcess !== undefined;
+    this.reclaimProcess?.kill('SIGKILL');
     clearTimeout(this.vectorDigestBackfillTimer);
     this.stopVisibilityPublisher();
     try {
-      if (!this.readOnly) this.releaseUnreferencedChunkMedia();
+      // SIGKILL releases the worker's write lock asynchronously. Media cleanup
+      // can retry on a later close; close must not race it with another write.
+      if (!this.readOnly && !reclaiming) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
@@ -3610,6 +3737,120 @@ export class LocalConnectorStore {
       this.closedForPoolReads = true;
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
+    }
+  }
+
+  private reclaimProcess: ReturnType<typeof Bun.spawn> | undefined;
+  private reclaimKilledAttempts = 0;
+
+  /** A conversion child holds this store's write lock; other writers defer instead of blocking. */
+  get reclaiming(): boolean { return this.reclaimProcess !== undefined; }
+
+  private reclaimPreempt: (() => void) | undefined;
+
+  /** Stops a running reclaim child at once (ingest or an Ask comes first). A no-op when none runs. */
+  preemptReclaim(): void { this.reclaimPreempt?.(); }
+
+  /**
+   * How long the one-time conversion is expected to run, so it starts only in
+   * a quiet window; 0 once the store reclaims incrementally (drains are short).
+   * Unmeasured: assumes about 3x the file in I/O at RECLAIM_CONVERSION_BYTES_PER_MS.
+   */
+  reclaimQuietWindowMs(): number {
+    try {
+      if ((this.db.query('PRAGMA auto_vacuum').get() as { auto_vacuum: number }).auto_vacuum !== 0) return 0;
+      return Math.ceil(statSync(this.dbPath).size / RECLAIM_CONVERSION_BYTES_PER_MS);
+    } catch { return 0; }
+  }
+
+  /** Cheap header introspection for the ticker's eligibility check. */
+  reclaimablePages(): { pages: number; free: number; pageBytes: number; bytes: number } | undefined {
+    if (this.readOnly || this.dbPath === ':memory:' || this.closedForPoolReads || this.fileReplacedOrRemoved()) return undefined;
+    return {
+      pages: (this.db.query('PRAGMA page_count').get() as { page_count: number }).page_count,
+      free: (this.db.query('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count,
+      pageBytes: (this.db.query('PRAGMA page_size').get() as { page_size: number }).page_size,
+      bytes: statSync(this.dbPath).size,
+    };
+  }
+
+  /** Called under Ask admission and the scheduler source hold, from the ticker only. */
+  async reclaimFreePages(budgetMs: number, options: { pagesPerStep?: number; onStarted?: () => void; statfs?: (path: string) => Pick<ReturnType<typeof statfsSync>, 'bavail' | 'bsize'> } = {}): Promise<{ done: boolean; bytes: number } | undefined> {
+    // Publisher/backfill promises span turns: let any existing write finish;
+    // new turns see reclaimProcess and defer until the child releases its lock.
+    if (this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing
+      || storeReadHasPriority() || !this.reclaimablePages()) return undefined;
+    const converting = (this.db.query('PRAGMA auto_vacuum').get() as { auto_vacuum: number }).auto_vacuum === 0;
+    if (converting) {
+      if (this.reclaimKilledAttempts >= 3 && storeOwnerIdleMs(this.now().getTime()) < 10 * 60_000) return undefined;
+      const neededBytes = 2 * statSync(this.dbPath).size + 1024 ** 3;
+      const disk = (options.statfs ?? statfsSync)(dirname(this.dbPath));
+      const availableBytes = Number(disk.bavail) * Number(disk.bsize);
+      if (!Number.isFinite(availableBytes) || availableBytes < neededBytes) {
+        console.info(`[store-reclaim] conversion_skipped reason=disk_space needed_bytes=${neededBytes} available_bytes=${availableBytes}`);
+        return undefined;
+      }
+    }
+    let pagesPerStep = options.pagesPerStep ?? RECLAIM_MAX_PAGES_PER_STEP;
+    if (pagesPerStep > RECLAIM_MAX_PAGES_PER_STEP) pagesPerStep = RECLAIM_MAX_PAGES_PER_STEP;
+    pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
+    assertWritableStoreOpenAllowed('connector store reclaim', this.dbPath);
+    assertStoreTierLedgerCanOpen(this.dbPath);
+    // A separate process is essential: Bun Worker.terminate() cannot interrupt
+    // an executing SQLite statement. SIGKILL can, and SQLite rolls it back.
+    // Its main thread watches our stdin even while its worker runs VACUUM:
+    // parent death closes the pipe and kills the child, releasing every lock.
+    const supervisor = `
+      const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(CONNECTOR_RECLAIM_WORKER_SOURCE)}], {type:'text/javascript'})));
+      process.stdin.resume();
+      process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
+      worker.onmessage = ({data}) => {
+        console.log(JSON.stringify(data));
+        if (!data.started) process.exit(0);
+      };
+      worker.onerror = () => process.exit(1);
+      worker.postMessage(JSON.parse(process.argv[1]));`;
+    const child = Bun.spawn([process.execPath, '-e', supervisor, JSON.stringify([this.dbPath, budgetMs, pagesPerStep])],
+      { stdin: 'pipe', stdout: 'pipe', stderr: 'ignore',
+        env: { ...process.env, SQLITE_TMPDIR: dirname(this.dbPath), TMPDIR: dirname(this.dbPath) } });
+    this.reclaimProcess = child;
+    let preempted = false;
+    const preempt = () => { if (!preempted) { preempted = true; child.kill('SIGKILL'); } };
+    this.reclaimPreempt = preempt;
+    const interrupt = setInterval(() => {
+      try { if (storeReadHasPriority()) preempt(); }
+      catch { child.kill('SIGKILL'); } // fail closed if admission cannot be checked
+    }, CONTROL_PATH_SLICE_MS);
+    try {
+      let result: { failed?: boolean; done: boolean; bytes: number } | undefined;
+      const output = (async () => {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for await (const chunk of child.stdout) {
+          buffer += decoder.decode(chunk, { stream: true });
+          let newline: number;
+          while ((newline = buffer.indexOf('\n')) >= 0) {
+            const message = JSON.parse(buffer.slice(0, newline));
+            buffer = buffer.slice(newline + 1);
+            if (message.started) options.onStarted?.();
+            else result = message;
+          }
+        }
+      })();
+      const code = await child.exited;
+      await output;
+      if (code !== 0 || this.closedForPoolReads) return undefined;
+      if (!result?.failed) this.reclaimKilledAttempts = 0;
+      return result?.failed ? undefined : result;
+    } finally {
+      clearInterval(interrupt);
+      child.stdin.end();
+      this.reclaimProcess = undefined;
+      this.reclaimPreempt = undefined;
+      if (converting && preempted) this.reclaimKilledAttempts++;
+      if (!this.closedForPoolReads) {
+        if (this.visibilityPending) this.scheduleVisibilityPublish(0);
+      }
     }
   }
 
@@ -3676,6 +3917,7 @@ export class LocalConnectorStore {
       };
       const title = metadataString(['title', 'name', 'subject']);
       const path = metadataString(['locatorUri', 'pathDisplay']);
+      const judgeStarted = Date.now();
       const content = classifyContentTier(
         {
           text,
@@ -3690,7 +3932,7 @@ export class LocalConnectorStore {
           titleIsConversation: item.metadata.titleIsConversation === true,
           ...(read?.secret ? { heldSecret: true } : {}),
           // The lane's hold, or the one its listing-time decision recorded.
-          ...(inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {}),
+          ...(inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? '') ? { holdUntilJudged: true } : {}),
           subject: item.identity,
         },
         {
@@ -3699,6 +3941,9 @@ export class LocalConnectorStore {
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
       );
+      if (!content.contentPending && this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? '')) {
+        console.info(`[olympus:on-demand] step=judge count=1 ms=${Math.max(0, Date.now() - judgeStarted)}`);
+      }
       const recorded = ledger.recordContentDecision(item.identity, content);
       // Secrets as recorded (a newer Secrets decision is kept as the floor):
       // the side stores forget its names and excerpt too.
@@ -3971,6 +4216,7 @@ export class LocalConnectorStore {
     throwOnUnavailable = false,
     copiesAllowed?: (copies: readonly TierCopy[]) => boolean,
   ): Generator<VisibilityRead, T[], unknown> {
+    rows = rows.filter((row) => layerOf(row) !== 'content' || !this.onDemandContentHeld(identityOf(row)));
     if (rows.length === 0) return [];
     let copies: Map<string, TierCopy[]> | undefined;
     try {
@@ -4067,16 +4313,21 @@ export class LocalConnectorStore {
   }
 
   /**
-   * Brings this writer's visibility set up to date and saves it in the store,
-   * with a turn between steps, for read-only connections to start from. The
-   * writer also does this on its own (refreshVisibilityIfBehind); this is for
-   * a caller that wants the saved set current now. Does nothing on a
-   * read-only store.
+   * Builds, or brings up to date, this connection's hidden-copy set with a
+   * turn between steps, and on a writer saves it in the store for read-only
+   * connections to start from. The engine calls it for every store after it
+   * starts and then on a timer: the split's front before it reports ready, so
+   * an Ask never pays the first build on its own thread, and the background
+   * (or the single worker) so each store's saved set stays inside the
+   * ledger's visibility feed. A writer keeps its saved set inside the feed on
+   * its own only once it has built a set (refreshVisibilityIfBehind); a store
+   * with no import after a restart never did, and ledger-only writes (the
+   * prune sweep, judging) moved the shared feed past its stamp, so every
+   * front start rebuilt it from the ledger (gate 1, ops#151: about 59 s).
    */
-  async saveVisibilityInTurns(): Promise<void> {
-    if (this.readOnly) return;
-    await runStepsInTurns(this.tierLedgerHiddenSteps());
-    await this.publishVisibility();
+  async keepVisibilityCurrentInTurns(): Promise<void> {
+    await this.tierHiddenItemPksInTurns();
+    if (!this.readOnly) await this.publishVisibility();
   }
 
   private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
@@ -4279,13 +4530,17 @@ export class LocalConnectorStore {
   } | undefined> {
     const ledgerId = this.ledgerIdOf(ledger);
     if (ledgerId === undefined) return undefined;
-    const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
-      FROM main.tier_visibility_members
-      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
-      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const state = this.readVisibilityState();
       if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId) return undefined;
+      // A stamp already outside either feed can't be served: give up before
+      // reading every saved row (Sparta's largest store holds about 645k).
+      if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined
+        || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined) return undefined;
+      const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+        FROM main.tier_visibility_members
+        WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+        ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
       const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
       let after: [string, string, string, string] = ['', '', '', ''];
       for (;;) {
@@ -4371,6 +4626,7 @@ export class LocalConnectorStore {
     }
     if (this.visibilityPublishing) return this.visibilityPublishing;
     if (!this.visibilityPending || this.visibilityClosed) return Promise.resolve();
+    if (this.reclaimProcess) { this.scheduleVisibilityPublish(VISIBILITY_RETRY_MIN_MS); return Promise.resolve(); }
     let publishing: Promise<void> | undefined;
     publishing = (async () => {
       try {
@@ -4422,6 +4678,7 @@ export class LocalConnectorStore {
 
   /** Lets the next publisher (here or on another connection) start at once. */
   private releaseVisibilityLease(): void {
+    if (this.reclaimProcess) return; // close may interrupt a conversion; its lease expires on its own
     try {
       this.db.exec('PRAGMA busy_timeout = 0');
       this.db.query('DELETE FROM main.tier_visibility_lease WHERE id = 1 AND owner = ?').run(this.visibilityOwner);
@@ -5777,7 +6034,7 @@ export class LocalConnectorStore {
         // The restore's own refusals, in its order: an excluded or
         // metadata-only item takes no text, so there is no text to settle and
         // its names stay exactly as policy keeps them.
-        const disposition = this.exclusions.evaluateMetadata(options.metadata);
+        const disposition = this.extractionDisposition({ metadata: options.metadata, identity });
         if (disposition.excluded) return 'excluded';
         if (disposition.disposition === 'metadata_only') return 'metadata_only';
         const existing = this.db.query(`
@@ -6603,6 +6860,68 @@ export class LocalConnectorStore {
     }
   }
 
+  /**
+   * One resumable superseded-copy step. The sweep's durable pending receipt
+   * owns authorization; remaining rows ARE the cursor. Delete vectors before
+   * chunks so ON DELETE CASCADE cannot hide an unbounded vector fan-out.
+   * FTS ownership is indexed, and is removed with its text in the same commit.
+   */
+  pruneSupersededCopyStep(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    options: { rowLimit: number; connectorId: string },
+  ): boolean {
+    if (this.reclaimProcess) throw new Error('Superseded store is reclaiming; retry cleanup later.');
+    const limit = Math.max(1, Math.floor(options.rowLimit));
+    const previousWait = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+    this.db.exec('PRAGMA busy_timeout = 0');
+    try {
+      return this.db.transaction(() => {
+        const row = this.db.query(`SELECT item_pk, family, local_item_id, tombstoned FROM items
+          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`)
+          .get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as
+          { item_pk: number; family: SourceItemIdentity['family']; local_item_id: string; tombstoned: number } | null;
+        let remaining = limit;
+        if (row) {
+          remaining -= this.db.query(`DELETE FROM chunk_embeddings WHERE rowid IN
+            (SELECT rowid FROM chunk_embeddings WHERE item_pk = ? LIMIT ?)`).run(row.item_pk, remaining).changes;
+          if (this.db.query('SELECT 1 FROM chunk_embeddings WHERE item_pk = ? LIMIT 1').get(row.item_pk)) return false;
+          const fts = this.db.query(`SELECT fts_rowid FROM connector_store_fts_rows WHERE item_pk = ? LIMIT ?`)
+            .all(row.item_pk, remaining) as Array<{ fts_rowid: number }>;
+          for (const held of fts) {
+            this.db.query('DELETE FROM connector_store_fts WHERE rowid = ?').run(held.fts_rowid);
+            this.db.query('DELETE FROM connector_store_fts_rows WHERE fts_rowid = ?').run(held.fts_rowid);
+          }
+          remaining -= fts.length;
+          if (this.db.query('SELECT 1 FROM connector_store_fts_rows WHERE item_pk = ? LIMIT 1').get(row.item_pk)) return false;
+          remaining -= this.db.query(`DELETE FROM chunks WHERE chunk_pk IN
+            (SELECT chunk_pk FROM chunks WHERE item_pk = ? LIMIT ?)`).run(row.item_pk, remaining).changes;
+          if (this.db.query('SELECT 1 FROM chunks WHERE item_pk = ? LIMIT 1').get(row.item_pk)) return false;
+          // At most one version row per item; it shares the same row allowance.
+          if (!remaining && this.db.query('SELECT 1 FROM item_text_versions WHERE item_pk = ?').get(row.item_pk)) return false;
+          remaining -= this.db.query('DELETE FROM item_text_versions WHERE item_pk = ?').run(row.item_pk).changes;
+        }
+        const mediaPending = this.db.query('SELECT 1 FROM chunk_media_releases LIMIT 1').get();
+        if (mediaPending) {
+          // Commit chunk deletions BEFORE releasing files. A rollback must
+          // never restore a chunk whose picture was already removed. On the
+          // next step all children are durably empty, and the queued releases
+          // (including judgments) can share this step's transaction safely.
+          if (remaining !== limit) return false;
+          if (!this.releaseUnreferencedChunkMedia(SUPERSEDED_PRUNE_MEDIA_ROWS)) return false;
+        }
+        if (!row) return true;
+        this.db.query(`UPDATE items SET title = NULL, search_text = NULL, locator_uri = NULL,
+          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL
+          WHERE item_pk = ?`).run(row.item_pk);
+        // No version is stamped: exactly the existing withdrawal semantics.
+        // Empty children make tombstoneCopy's deletes bounded. Its media
+        // cleanup is deferred because we are inside the store transaction.
+        if (!row.tombstoned) this.tombstoneCopy({ ...identity, family: row.family, localItemId: row.local_item_id }, { connectorId: options.connectorId });
+        return true;
+      }).immediate();
+    } finally { this.db.exec(`PRAGMA busy_timeout = ${previousWait}`); }
+  }
+
   private stripCopyContentHeld(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
     options: { keepMetadata?: boolean } = {},
@@ -6952,13 +7271,16 @@ export class LocalConnectorStore {
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
     for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+      // The marker covers the ledger's visibility feed and every lane store's
+      // item feed. Never the ledger's whole change marker: the sweep and the
+      // judge write the ledger every few seconds, and every attempt would then
+      // fall back to the synchronous walk on this thread (gate 1, ops#168).
       const marker = this.visibilityMarker();
-      const unchanged = childVisibilityUnchanged(this.childVisibilityLane());
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.visibilityMarker() === marker && unchanged()) return this.peopleObservationsFromRows(step.value);
+      if (this.visibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
   }
@@ -7832,6 +8154,65 @@ export class LocalConnectorStore {
     };
   }
 
+  /** A grant is engine-owned state, never a flag accepted from source metadata. */
+  grantOnDemandRead(localItemId: string, sourceVersion = ''): void {
+    this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
+      ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
+  }
+
+  onDemandContentHeld(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get()) return false;
+    const granted = this.db.query(`SELECT 1 FROM on_demand_item_reads r JOIN items i ON i.local_item_id = r.local_item_id
+      AND COALESCE(i.source_version, '') = r.source_version WHERE i.provider = ? AND i.account_scope = ?
+      AND i.provider_item_id = ? AND i.normalized_conversation = ? AND i.tombstoned = 0 LIMIT 1`)
+      .get(identity.provider, identity.accountScope, identity.providerItemId, normalizeConversationId(identity.providerConversationId));
+    if (!granted) return false;
+    try {
+      const record = this.visibilityLedger()?.getCurrent(identity);
+      return !record || !record.contentRead || record.contentPending || record.metadataPending
+        || record.state !== 'current' || record.contentTier === 'secrets'
+        || (record.contentTier === 'secure' && this.trustDomain !== 'secure_local')
+        || (record.contentTier === 'private' && this.trustDomain === 'public_safe');
+    } catch { return true; }
+  }
+
+  onDemandReadForLocator(locator: string): boolean {
+    const row = this.db.query('SELECT local_item_id FROM items WHERE locator_uri = ? AND tombstoned = 0 LIMIT 1')
+      .get(locator) as { local_item_id: string } | null;
+    return Boolean(row && this.readOnDemand(row.local_item_id));
+  }
+
+  readOnDemand(localItemId: string, sourceVersion?: string): boolean {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get()) return false;
+    const grant = this.db.query('SELECT source_version FROM on_demand_item_reads WHERE local_item_id = ?')
+      .get(localItemId) as { source_version: string } | null;
+    if (!grant) return false;
+    const version = sourceVersion ?? (this.db.query('SELECT source_version FROM items WHERE local_item_id = ? AND tombstoned = 0')
+      .get(localItemId) as { source_version: string | null } | null)?.source_version ?? '';
+    return grant.source_version === version;
+  }
+
+  onDemandReadCandidate(providerItemId: string): { identity: SourceItemIdentity; metadata: ConnectorStoreItemMetadataSnapshot; readableOnRequest: boolean } | undefined {
+    const rows = this.db.query('SELECT local_item_id FROM items WHERE provider_item_id = ? AND tombstoned = 0 LIMIT 2')
+      .all(providerItemId) as Array<{ local_item_id: string }>;
+    if (rows.length !== 1) return undefined;
+    const row = this.activeLocalItemRow(rows[0]!.local_item_id);
+    if (!row || row.trustTier === 'S5') return undefined;
+    const identity: SourceItemIdentity = { ...row.identity, localItemId: rows[0]!.local_item_id, family: this.family };
+    try { if (this.visibilityLedger()?.itemIsSecret(identity)) return undefined; } catch { return undefined; }
+    const metadata = this.itemMetadataSnapshot(identity);
+    if (!metadata) return undefined;
+    const decision = this.exclusions.evaluateItem({ path: metadata.locatorUri, name: metadata.name, mimeType: metadata.mimeType });
+    if (decision.excluded || sourceExclusionOutcomeIsUnevaluable(decision.outcome)) return undefined;
+    return { identity, metadata, readableOnRequest: decision.readOnDemand === true };
+  }
+
+  private extractionDisposition(item: Pick<RawItem, 'identity' | 'metadata'>) {
+    const decision = this.exclusions.evaluateMetadata(item.metadata);
+    return decision.disposition === 'metadata_only' && this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion)
+      ? { ...decision, disposition: 'admit' as const } : decision;
+  }
+
   /**
    * The live row's preservable metadata, or undefined when the identity has no
    * active row. See ConnectorStoreItemMetadataSnapshot for why a caller that
@@ -7840,6 +8221,7 @@ export class LocalConnectorStore {
   itemMetadataSnapshot(identity: SourceItemIdentity): ConnectorStoreItemMetadataSnapshot | undefined {
     const row = this.db.query(`
       SELECT source_version, content_hash, mime_type, title, locator_uri,
+             ${this.childItemColumnsPresent ? 'size_bytes' : 'NULL AS size_bytes'},
              authored_at, updated_at, tombstoned
       FROM items
       WHERE provider = ? AND account_scope = ?
@@ -7859,9 +8241,12 @@ export class LocalConnectorStore {
       authored_at: string | null;
       updated_at: string | null;
       tombstoned: number;
+      size_bytes: number | null;
     } | null;
     if (!row || row.tombstoned === 1) return undefined;
     return {
+      ...(row.size_bytes !== null ? { sizeBytes: row.size_bytes } : {}),
+      ...(this.readOnDemand(identity.localItemId, row.source_version ?? '') ? { read_on_demand: true as const } : {}),
       ...(row.source_version ? { sourceVersion: row.source_version } : {}),
       ...(row.content_hash ? { contentHash: row.content_hash } : {}),
       ...(row.mime_type ? { mimeType: row.mime_type } : {}),
@@ -8485,7 +8870,7 @@ export class LocalConnectorStore {
         // lookup: an excluded item is counted and skipped rather than raising
         // the "targeted store item is missing" error the gate would otherwise
         // produce, which would read as corruption instead of policy.
-        const disposition = this.exclusions.evaluateMetadata(item.metadata);
+        const disposition = this.extractionDisposition(item);
         if (disposition.excluded) {
           itemsExcluded += 1;
           skippedProviderItemIds.push(item.identity.providerItemId);
@@ -8696,15 +9081,16 @@ export class LocalConnectorStore {
    * goes. Best effort and cheap when nothing changed: a failure only keeps a
    * file longer.
    */
-  private releaseUnreferencedChunkMedia(): void {
-    if (!this.chunkMediaColumnsPresent) return;
+  private releaseUnreferencedChunkMedia(limit?: number): boolean {
+    if (!this.chunkMediaColumnsPresent) return true;
+    if (this.reclaimProcess) return false;
     try {
       // Page by page until the queue is empty: a bulk purge or strip can queue
       // far more than one page, and the store may be deleted right after.
       for (;;) {
-      const queued = this.db.query('SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000')
-        .all() as Array<{ media_sha256: string; media_path: string }>;
-      if (queued.length === 0) break;
+      const queued = this.db.query('SELECT media_sha256, media_path FROM chunk_media_releases LIMIT ?')
+        .all(limit ?? 1000) as Array<{ media_sha256: string; media_path: string }>;
+      if (queued.length === 0) return true;
       for (const entry of queued) {
         const referenced = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
           .get(entry.media_sha256) as { present: number } | null;
@@ -8718,9 +9104,13 @@ export class LocalConnectorStore {
         }
         this.db.query('DELETE FROM chunk_media_releases WHERE media_sha256 = ?').run(entry.media_sha256);
       }
+      if (limit !== undefined) return !this.db.query('SELECT 1 FROM chunk_media_releases LIMIT 1').get();
       }
-    } catch {
+    } catch (error) {
+      // A bounded caller must report failure, rather than spin on the same page.
+      if (limit !== undefined) throw error;
       // Kept longer, never lost: the queue row stays for the next pass.
+      return false;
     }
   }
 
@@ -9474,6 +9864,8 @@ export class LocalConnectorStore {
       for (const row of rows) {
         const decision = this.exclusions.evaluatePath(row.locator_uri);
         if (decision.disposition !== 'metadata_only') continue;
+        const granted = this.db.query('SELECT local_item_id FROM items WHERE item_pk = ?').get(row.item_pk) as { local_item_id: string };
+        if (this.readOnDemand(granted.local_item_id)) continue;
         tallyExclusion(tally, decision);
         if (sourceExclusionOutcomeIsUnevaluable(decision.outcome) && options.stripUnevaluable !== true) {
           itemsUnevaluableKept += 1;
@@ -9525,7 +9917,8 @@ export class LocalConnectorStore {
    * means the same thing to the only caller: this row's missing text is not
    * explained by a metadata-only rule, so do not claim it is.
    */
-  metadataOnlyRuleForLocator(locatorUri: string | undefined): string | undefined {
+  metadataOnlyRuleForLocator(locatorUri: string | undefined, localItemId?: string): string | undefined {
+    if (localItemId && this.readOnDemand(localItemId)) return undefined;
     if (!this.exclusions.active) return undefined;
     const decision = this.exclusions.evaluatePath(locatorUri);
     return decision.disposition === 'metadata_only' ? decision.ruleId : undefined;
@@ -10385,7 +10778,8 @@ export class LocalConnectorStore {
           }
           const routedLayer = route.kind === 'store' ? route.layer : undefined;
           const sensitivity = route.kind === 'store' ? route.sensitivity : legacySensitivity;
-          if (route.kind === 'legacy' && itemForStorage.metadata['deleted'] !== true) {
+          if (route.kind === 'legacy' && itemForStorage.metadata['deleted'] !== true
+            && !this.readOnDemand(itemForStorage.identity.localItemId, itemForStorage.identity.sourceVersion ?? '')) {
             this.recordTierDecision(
               connector, itemForStorage, sensitivity, tierClassification, tierRun,
               metadataOnly || itemContentKeptNamesOnly(itemForStorage),
@@ -10914,7 +11308,7 @@ export class LocalConnectorStore {
       identity.parent?.localItemId ?? null,
       item.deferredBytes?.locator ?? null,
       item.deferredBytes === undefined ? null : Number(item.deferredBytes.available),
-      item.deferredBytes?.sizeBytes ?? null,
+      item.deferredBytes?.sizeBytes ?? (Number.isSafeInteger(meta['sizeBytes']) && Number(meta['sizeBytes']) >= 0 ? Number(meta['sizeBytes']) : null),
       sender.senderId ?? null,
       sender.senderLabel ?? null,
       sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner),
@@ -11529,7 +11923,7 @@ export class LocalConnectorStore {
     // gate that has to be remembered is a gate that is eventually forgotten,
     // and forgetting it means an owner's private folder quietly acquiring
     // full-text search a year after they asked for titles only.
-    const disposition = this.exclusions.evaluateMetadata(item.metadata);
+    const disposition = this.extractionDisposition(item);
     if (disposition.disposition === 'metadata_only') {
       throw new ConnectorStoreMetadataOnlyViolationError(disposition.ruleId);
     }
@@ -12130,6 +12524,10 @@ export class LocalConnectorStore {
     provider_conversation_id: string | null;
   }>, allowHeld = false): Set<number> {
     const hidden = new Set<number>();
+    for (const row of rows) {
+      if (this.onDemandContentHeld({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}) })) hidden.add(row.item_pk);
+    }
     if (rows.length === 0) return hidden;
     const identityOf = (row: (typeof rows)[number]) => ({
       provider: row.provider,
@@ -12567,6 +12965,7 @@ export class LocalConnectorStore {
           : {}),
       }));
       let vectors: number[][];
+      const embedStarted = Date.now();
       // Pictures not yet judged are judged from the same model call: the
       // provider hands back each picture's image-only vector too.
       const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined
@@ -12620,6 +13019,10 @@ export class LocalConnectorStore {
         if (batch.length === 0) continue;
         vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
       }
+      const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
+        AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`)
+        .get(JSON.stringify([...new Set(batch.map((row) => row.item_pk))])) as { n: number };
+      if (onDemandItems.n > 0) console.info(`[olympus:on-demand] step=embed count=${onDemandItems.n} ms=${Math.max(0, Date.now() - embedStarted)}`);
       if (vectors.length !== batch.length) {
         throw new Error('Connector store embedding provider returned the wrong number of vectors.');
       }
@@ -13305,7 +13708,7 @@ export class LocalConnectorStore {
     laneOptions: { locate?: boolean } = {},
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
-    const vectorFilters = connectorStoreVectorScopeFilters(filters);
+    const vectorFilters = normalizeConnectorStoreSearchFilters(filters);
     const trimmed = query.trim();
     if (!trimmed) return { rows: [] };
     const before = this.embeddingReadAuthority(provider);
@@ -13821,8 +14224,10 @@ export class LocalConnectorStore {
     ftsOptions: ConnectorStoreKeywordFtsOptions,
   ): Generator<StoreRead | VisibilityRead, ConnectorStoreKeywordSearch, unknown> {
     const selectedFilters = connectorStoreFilterSql(filters);
-    const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-    const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
+    const onDemandReadsTablePresent = Boolean((filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length)
+      && (yield { mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] }));
+    const selectedFtsScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent);
+    const conceptScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent, 'r.chunk_pk');
     const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -14448,7 +14853,7 @@ export class LocalConnectorStore {
     } catch {
       return false;
     }
-    if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined) !== undefined) return false;
+    if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined, localItemId) !== undefined) return false;
     const hasText = this.db.query('SELECT EXISTS (SELECT 1 FROM chunks WHERE item_pk = ?) AS present').get(row.item_pk) as { present: number } | null;
     if (!hasText?.present) return false;
     const identity = {
@@ -14458,6 +14863,91 @@ export class LocalConnectorStore {
       ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
     };
     return this.tierVisibleRows([identity], (entry) => entry, () => 'content', throwOnUnavailable).length > 0;
+  }
+
+  /** Read Personal content only, with a fresh per-item gate around the shared release check. */
+  async readItemPages(localItemId: string, options: {
+    page?: number; pages?: number; releaseCheck?: ReleaseCheck | undefined; budgetMs?: number;
+    scope?: () => { allowed: boolean; accountScope?: string; filters?: ConnectorStoreSearchFilters;
+      contentAllowed?: boolean; contentFilters?: ConnectorStoreSearchFilters };
+  } = {}): Promise<SourceItemReadResult> {
+    const page = Math.max(1, Math.trunc(options.page ?? 1));
+    const count = Math.min(3, Math.max(1, Math.trunc(options.pages ?? 1)));
+    const cap = 12_000;
+    let totalPages = 0; let totalChars = 0;
+    const refuse = (reason: SourceItemReadRefusal, nextPage?: number): SourceItemReadResult => ({
+      pages: [], totalPages, totalChars, couldNotRead: [reason], ...(nextPage ? { nextPage } : {}),
+    });
+    const active = this.activeLocalItemRow(localItemId);
+    if (!active) return refuse('not_in_scope');
+    const identity = active.identity;
+    const ledger = this.governingTierLedger();
+    let generation: number | undefined;
+    let initialOverride: string | undefined;
+    const gate = (): SourceItemReadRefusal | undefined => {
+      if (currentRemoteReadAccess() !== 'active') return 'not_in_scope';
+      const scope = options.scope?.();
+      if (scope?.allowed === false || !this.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.filters)) return 'not_in_scope';
+      const now = this.activeLocalItemRow(localItemId);
+      if (!now || tierLedgerIdentityKey(now.identity) !== tierLedgerIdentityKey(identity)) return 'not_in_scope';
+      const row = ledger?.getCurrent(identity);
+      const override = ledger?.getOverride(identity);
+      if (!row) return 'held_until_judged';
+      if (row.metadataTier === 'secure' || row.metadataTier === 'secrets'
+        || row.contentTier !== 'private'
+        || (override?.kind === 'tier' && override.tier !== 'private')) return 'not_personal';
+      if (row.state !== 'current' || row.metadataPending || row.contentPending
+        || ledger!.rejudgeQuestion(identity) || heldUntilJudged(row.reasons)) return 'held_until_judged';
+      if (generation !== undefined && (row.generation !== generation || JSON.stringify(override) !== initialOverride)) return 'held_until_judged';
+      if (this.contentHeldPrivate(localItemId)) return 'content_private';
+      // A version-bound on-demand grant lifts the names-only layer only; the
+      // metadata scope above still applies, as in the extraction scope guard.
+      if (!this.readOnDemand(localItemId) && (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined
+        || (scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters)))) return 'names_only';
+      if (!this.contentServedNow(localItemId, true)) return 'extraction_pending';
+      return undefined;
+    };
+    const initial = gate(); if (initial) return refuse(initial);
+    generation = ledger!.getCurrent(identity)!.generation;
+    initialOverride = JSON.stringify(ledger!.getOverride(identity));
+    const readChunks = () => this.db.query(`SELECT c.bounded_text AS text, c.content_hash AS hash
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId) as Array<{ text: string; hash: string }>;
+    const chunks = readChunks();
+    totalChars = chunks.reduce((n, chunk) => n + chunk.text.length, 0);
+    if (!totalChars || chunks.some(chunk => chunk.text.length > cap)) return refuse('extraction_pending');
+    const split: Array<typeof chunks> = [];
+    let size = 0;
+    for (const chunk of chunks) {
+      if (!split.length || size + chunk.text.length > cap) { split.push([]); size = 0; }
+      split[split.length - 1]!.push(chunk); size += chunk.text.length;
+    }
+    totalPages = split.length;
+    const selected = split.slice(page - 1, page - 1 + count);
+    const result: SourceItemReadResult = { pages: [], totalPages, totalChars, couldNotRead: [] };
+    if (!selected.length) return result;
+    const inputs: ReleaseInput[] = [{
+      corpusId: this.corpusId, provider: identity.provider, accountScope: identity.accountScope ?? '',
+      providerItemId: identity.providerItemId,
+      ...(identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}),
+      privateAtAnswer: false, chunkHashes: [...new Set(selected.flatMap(chunks => chunks.map(chunk => chunk.hash)))],
+    }];
+    const report = await checkReleaseChunks(options.releaseCheck, inputs, { budgetMs: options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS });
+    const after = gate(); if (after) return refuse(after);
+    if (JSON.stringify(readChunks()) !== JSON.stringify(chunks)) return refuse('held_until_judged');
+    const coverageNote = chunkCoverageNote(report);
+    if (coverageNote) result.coverageNote = coverageNote;
+    for (const [index, chunks] of selected.entries()) {
+      if (chunks.some(chunk => !report.allowed[0]?.includes(chunk.hash))) {
+        result.couldNotRead.push('window_judging');
+        result.nextPage = page + index;
+        return result;
+      }
+      result.pages.push({ page: page + index, text: chunks.map(chunk => chunk.text).join('') });
+    }
+    const next = page + result.pages.length;
+    if (next <= totalPages) result.nextPage = next;
+    return result;
   }
 
   // Local content lane for the evidence-pack provider: bounded chunks, the
@@ -16691,8 +17181,9 @@ export function createConnectorStoreContentProvider(
     contentServable(request) {
       if (request.trustDomain !== store.trustDomain) return false;
       const localItemId = request.provenance.sourceItem.localItemId.trim();
-      if (!localItemId || options.contentAllowed === false) return false;
-      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return false;
+      if (!localItemId) return false;
+      if (!(options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
+        && !(options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters))) return false;
       return store.contentServedNow(localItemId, request.throwOnUnavailable);
     },
     async fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined> {
@@ -16705,8 +17196,9 @@ export function createConnectorStoreContentProvider(
       return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
-      const contentInScope = options.contentAllowed !== false
-        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
+      const contentInScope = (options.contentAllowed !== false
+        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
+        || (options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters));
       if (!contentInScope) {
         if (!options.metadataFilters
           || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
@@ -16760,7 +17252,7 @@ export function createConnectorStoreContentProvider(
       // is what tells them apart; without it every metadata-only item in the
       // owner's 64k would report a stall forever.
       const metadataOnlyRuleId = content.storedChunks === 0
-        ? store.metadataOnlyRuleForLocator(content.locatorUri)
+        ? store.metadataOnlyRuleForLocator(content.locatorUri, localItemId)
         : undefined;
       const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
       return {
@@ -18390,16 +18882,13 @@ function connectorStoreConceptHitRead(
   };
 }
 
-function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefined, chunkColumn = 'connector_store_fts.chunk_pk'): {
-  sql: string;
-  params: string[];
-} {
+/** A folder's names-only restriction lifts only for a grant to this item version. */
+function connectorStoreMetadataOnlySql(
+  filters: ConnectorStoreSearchFilters | undefined,
+  onDemandReadsTablePresent = false,
+): { sql: string; params: string[] } {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
-  const contentRow = `(
-    ${chunkColumn} IS NOT NULL
-    OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
-  )`;
-  if (!normalized) return { sql: `AND ${contentRow}`, params: [] };
+  if (!normalized) return { sql: '', params: [] };
   const metadataOnly: string[] = [];
   const params: string[] = [];
   for (const locatorPath of normalized.metadataOnlyLocatorPathScopes ?? []) {
@@ -18417,33 +18906,34 @@ function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefi
     )`);
     params.push(...normalized.metadataOnlySourceScopeFolderKeys);
   }
-  if (metadataOnly.length === 0) return { sql: `AND ${contentRow}`, params: [] };
-  const metadataExpression = `(${metadataOnly.join(' OR ')})`;
-  return {
-    sql: `AND (
-      (${metadataExpression} AND ${chunkColumn} IS NULL)
-      OR (NOT ${metadataExpression} AND ${contentRow})
-    )`,
-    params: [...params, ...params],
-  };
+  if (metadataOnly.length === 0) return { sql: '', params: [] };
+  // Read-only stores may predate the grant table. Never name it in their SQL.
+  const notGranted = onDemandReadsTablePresent ? ` AND NOT EXISTS (
+    SELECT 1 FROM on_demand_item_reads on_demand
+    WHERE on_demand.local_item_id = i.local_item_id
+      AND on_demand.source_version = COALESCE(i.source_version, '')
+  )` : '';
+  return { sql: `((${metadataOnly.join(' OR ')})${notGranted})`, params };
 }
 
-function connectorStoreVectorScopeFilters(
+function connectorStoreFtsScopeSql(
   filters: ConnectorStoreSearchFilters | undefined,
-): ConnectorStoreSearchFilters | undefined {
-  const normalized = normalizeConnectorStoreSearchFilters(filters);
-  if (!normalized) return undefined;
-  return normalizeConnectorStoreSearchFilters({
-    ...normalized,
-    locatorPathExcludedScopes: [
-      ...(normalized.locatorPathExcludedScopes ?? []),
-      ...(normalized.metadataOnlyLocatorPathScopes ?? []),
-    ],
-    sourceScopeFolderNoneKeys: [
-      ...(normalized.sourceScopeFolderNoneKeys ?? []),
-      ...(normalized.metadataOnlySourceScopeFolderKeys ?? []),
-    ],
-  });
+  onDemandReadsTablePresent: boolean,
+  chunkColumn = 'connector_store_fts.chunk_pk',
+): { sql: string; params: string[] } {
+  const contentRow = `(
+    ${chunkColumn} IS NOT NULL
+    OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
+  )`;
+  const metadataOnly = connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent);
+  if (!metadataOnly.sql) return { sql: `AND ${contentRow}`, params: [] };
+  return {
+    sql: `AND (
+      (${metadataOnly.sql} AND ${chunkColumn} IS NULL)
+      OR (NOT ${metadataOnly.sql} AND ${contentRow})
+    )`,
+    params: [...metadataOnly.params, ...metadataOnly.params],
+  };
 }
 
 function normalizeScopePaths(values: readonly string[] | undefined): string[] {
@@ -19127,6 +19617,21 @@ function validateConnectorStoreV6Schema(db: Database): void {
   validateConnectorStoreFtsOwnership(db, 'v6');
 }
 
+/**
+ * The checks that read every row of the text index (its ownership map is
+ * complete), for an open that migrates. Version 6 and later; earlier stores
+ * have no ownership map.
+ */
+function validateConnectorStoreRows(db: Database, versionLabel: string): void {
+  if (readSqliteSchemaVersion(db, SQLITE_STORE_ID) < 6) return;
+  // One statement, so one snapshot.
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get() as { fts_rows: number; mapped_rows: number };
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
+    throw new Error(`Connector store schema ${versionLabel} FTS row ownership map is incomplete.`);
+  }
+}
+
 function validateVectorDigestSchema(db: Database): void {
   assertExactTableColumns(db, 'chunk_vector_digest', ['chunk_pk', 'model_id', 'item_pk', 'account_scope', 'digest'], false, 'v16');
   assertExactTableColumns(db, 'chunk_vector_digest_meta', ['model_id', 'cursor_rowid', 'completed'], false, 'v16');
@@ -19137,7 +19642,6 @@ function validateVectorDigestSchema(db: Database): void {
 function validateConnectorStoreSchema(db: Database): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
   validateVectorDigestSchema(db);
-  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
@@ -19278,18 +19782,11 @@ function validateConnectorStoreFtsOwnership(db: Database, versionLabel: string):
     versionLabel,
   );
   assertIndexColumns(db, 'idx_connector_store_fts_rows_item', ['item_pk'], versionLabel);
-  // One statement, so one snapshot: a read-only open runs beside the writer,
-  // and two separate counts let its commit land between them.
-  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
-    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get() as { fts_rows: number; mapped_rows: number };
-  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
-    throw new Error('Connector store schema FTS row ownership map is incomplete.');
-  }
 }
 
 // Walks every foreign key in the file: most of a large store's open time
-// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only the writer's open runs
-// it, after its migrations; a read-only open migrates nothing.
+// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only a writer's open that
+// migrates runs it, after its migrations.
 function validateConnectorStoreForeignKeys(db: Database): void {
   const foreignKeyErrors = db.query('PRAGMA foreign_key_check').all();
   if (foreignKeyErrors.length > 0) {
