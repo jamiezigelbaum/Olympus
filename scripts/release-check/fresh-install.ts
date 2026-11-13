@@ -118,6 +118,8 @@ export interface FreshOptions {
   limits?: FreshLimitsOptions;
   /** Unit-test seam. Every production fresh install runs limits. */
   limitsStage?: typeof runFreshLimits;
+  /** The test Venice key (olympus-ops#211), given to the install on stdin before the walkthrough; never logged or reported. */
+  veniceKey?: string;
   /** Current harness bundle, copied to the fresh user's home for the existing owner-bridge command. */
   bridgeAgent?: string;
   /** Test seam: real implementation uses only dashboard controls and persisted reads. */
@@ -239,6 +241,15 @@ done; exit 1`), 200_000);
         if (result.text.trim() !== ANSWER_MODEL_REQUIRED_TEXT) throw new Error('source_answer did not return the setup text');
         return 'source_answer listed; setup text returned, no answer run';
     });
+    // With the test Venice key, the walkthrough's "Who checks privacy?" step can save Venice (#1634); without it, it saves this computer.
+    if (options.veniceKey !== undefined) {
+      await checked('venice-key', async () => {
+        if (!options.veniceKey) throw new Error('the Venice key command returned nothing');
+        const result = await fresh.exec('"$HOME/.local/bin/olympus" connect venice --api-key-stdin > /dev/null 2>&1', { stdin: `${options.veniceKey}\n`, timeoutMs: 60_000 });
+        if (result.code !== 0) throw new Error(`olympus connect venice --api-key-stdin failed (exit ${result.code})`);
+        return 'test Venice key saved through olympus connect venice --api-key-stdin';
+      });
+    }
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9334'); });
     // Includes the explicit Venice judge choice when first run offers it.
     await checked('privacy-choice', () => dashboard!.privacyChoice());

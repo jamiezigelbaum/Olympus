@@ -59,6 +59,24 @@ function rig(failAt?: string, inconclusive = false, listening = '') {
 }
 
 describe('fresh install canary', () => {
+  test('the test Venice key goes to the install on stdin before the walkthrough, never in a command or a check', async () => {
+    const r = rig();
+    const stdins: string[] = [];
+    const exec = r.machine.exec;
+    r.machine.exec = async (script, options) => { if (options?.stdin) stdins.push(options.stdin); return exec(script, options); };
+    const key = 'vk-test-not-a-real-key';
+    const { checks } = await runFreshInstall(r.machine, { ...r.options, veniceKey: key });
+    const ids = checks.map(c => c.id);
+    expect(ids.indexOf('fresh.venice-key')).toBeGreaterThan(ids.indexOf('fresh.engine-up'));
+    expect(ids.indexOf('fresh.venice-key')).toBeLessThan(ids.indexOf('fresh.privacy-choice'));
+    expect(r.commands.some(c => c.includes('connect venice --api-key-stdin'))).toBe(true);
+    expect(r.commands.some(c => c.includes(key))).toBe(false);
+    expect(JSON.stringify(checks)).not.toContain(key);
+    expect(stdins).toEqual([`${key}\n`]);
+    const empty = await runFreshInstall(rig().machine, { ...rig().options, veniceKey: '' });
+    expect(empty.checks.find(c => c.id === 'fresh.venice-key')?.status).toBe('fail');
+  }, 30_000);
+
   test('a server left on the local-first model port fails the leg before anything is installed, naming it and its unit (olympus-ops#221)', async () => {
     expect(LOCAL_FIRST_PORTS).toEqual([28090]);
     const line = 'LISTEN 0 512 127.0.0.1:28090 0.0.0.0:* users:(("llama-server",pid=885816,fd=3))';
