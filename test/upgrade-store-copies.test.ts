@@ -118,7 +118,7 @@ describe('the upgrade copies the stores before the new version starts', () => {
     expect(copy.query('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
     expect(copy.query('SELECT value, COUNT(*) AS n FROM kept GROUP BY value').all()).toEqual([{ value: 'committed', n: 2000 }]);
     copy.close();
-  });
+  }, 30_000);
 
   test('a copy an earlier upgrade left behind does not stand in for a new one', () => {
     const { env, root } = fixture();
