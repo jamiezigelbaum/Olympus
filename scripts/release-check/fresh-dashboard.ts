@@ -262,7 +262,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await clickKey('picker:save');
         await until(async () => {
           await panel<boolean>(`(() => {const e=document.querySelector('[data-unlock-here]'); if(e && !e.disabled && (${visible})(e)){e.click();return true;}return false;})()`, Boolean);
-          return !!await panel<boolean>(`!document.querySelector('[data-key="picker:save"]') && !!document.querySelector('.srcrows')`, Boolean);
+          return !!await panel<boolean>(`!document.querySelector('[data-key="picker:save"]') && !!document.querySelector('.srcrows, .source')`, Boolean);
         }, 'folder mode was not saved');
         await openTimingFolder(folder);
         const saved = await pressedMode();
