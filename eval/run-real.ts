@@ -1,3 +1,4 @@
+import { captureEvalPack, prepareCaptureReranker, writePoolCapture } from './capture-pool.ts';
 import { openEvalDataRoot } from './data-root.ts';
 import { parseDataRootArgs, dataRootArgv } from './data-root-args.ts';
 import { createEvalSourceLanes } from './retrieval.ts';
@@ -223,7 +224,9 @@ async function main(): Promise<void> {
   const queryPlanner = queryPlannerEnabled ? createAnalystQueryPlanner(model) : undefined;
   // Off unless OLYMPUS_SOURCE_RERANKER=built-in names a reranker model
   // directory, so one corpus can be measured with and without it (issue #921).
-  const reranker = await prepareBuiltInRerankerFromEnv();
+  const reranker = args.capturePoolDir
+    ? await prepareCaptureReranker(process.env)
+    : await prepareBuiltInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
   const rawResultsByPack = new WeakMap<object, AnalystResult>();
@@ -292,7 +295,7 @@ async function main(): Promise<void> {
     continueOnQuestionError: true,
     stopOnQuestionTimeout: true,
     async buildPack(question) {
-      const detail = await buildEvalPack({
+      const packInput = {
         question: question.question,
         lanes,
         ...(queryPlanner ? { queryPlanner } : {}),
@@ -301,7 +304,15 @@ async function main(): Promise<void> {
         // Keep local-model prompts bounded for an eval gate. Truncation is
         // reported as a coverage gap; raise this only for targeted diagnosis.
         maxCharsPerCandidate,
-      });
+      };
+      let detail: EvidencePackBuildDetail;
+      if (args.capturePoolDir) {
+        const captured = await captureEvalPack({ ...packInput, question, captureDepth: args.captureDepth ?? 30 });
+        writePoolCapture(args.capturePoolDir, captured.capture);
+        detail = captured.detail;
+      } else {
+        detail = await buildEvalPack(packInput);
+      }
       detailsByPack.set(detail.pack, detail);
       return detail.pack;
     },
@@ -1204,10 +1215,12 @@ async function runIsolatedPass(
         '--analyst-provider',
         input.args.analystProvider,
         ...dataRootArgv(input.args.isolation),
+        ...(input.args.capturePoolDir && label === 'gate' ? ['--capture-pool', input.args.capturePoolDir, '--capture-depth', String(input.args.captureDepth ?? 30)] : []),
       ],
       env: {
         ...process.env,
         ...env,
+        ...(input.args.capturePoolDir ? { OLYMPUS_EVAL_CAPTURE_POOL_DIR: '' } : {}),
         [INTERNAL_QUESTION_INDEX_ENV]: String(index),
         OLYMPUS_EVAL_REPORT_PATH: childReportPath,
       },
@@ -1366,13 +1379,28 @@ function parseQuestionTimeoutMs(value: string | undefined): number {
 export function parseEvalRealArgs(
   argv: readonly string[],
   env: Record<string, string | undefined> = process.env,
-): { datasetPath: string; analystProvider: EvalAnalystProvider; isolation?: EvalDataRootOptions } {
+): { datasetPath: string; analystProvider: EvalAnalystProvider; isolation?: EvalDataRootOptions; capturePoolDir?: string; captureDepth?: number } {
   const offline = parseDataRootArgs(argv);
   argv = offline.rest;
   let datasetPath: string | undefined;
+  let capturePoolDir = env.OLYMPUS_EVAL_CAPTURE_POOL_DIR?.trim() || undefined;
+  let captureDepth = 30;
+  let captureDepthSet = false;
   let analystProvider = resolveEvalAnalystProvider(env.OLYMPUS_EVAL_ANALYST_PROVIDER);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
+    const name = arg.split('=')[0];
+    if (name === '--capture-pool' || name === '--capture-depth') {
+      const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : argv[++index];
+      if (!value || value.startsWith('--')) throw new Error(`${name} requires a value.`);
+      if (name === '--capture-pool') capturePoolDir = value;
+      else {
+        captureDepth = Number(value);
+        captureDepthSet = true;
+        if (!Number.isSafeInteger(captureDepth) || captureDepth < 1) throw new Error('--capture-depth must be a positive integer.');
+      }
+      continue;
+    }
     if (arg === '--analyst-provider') {
       const value = argv[index + 1];
       if (!value) throw new Error('--analyst-provider requires local or venice.');
@@ -1394,6 +1422,7 @@ export function parseEvalRealArgs(
   }
   return {
     ...(offline.isolation ? { isolation: offline.isolation } : {}),
+    ...(capturePoolDir ? { capturePoolDir, captureDepth } : captureDepthSet ? { captureDepth } : {}),
     datasetPath: datasetPath ?? DEFAULT_DATASET_PATH,
     analystProvider,
   };

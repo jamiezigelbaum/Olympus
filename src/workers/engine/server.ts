@@ -3640,6 +3640,7 @@ export async function main(): Promise<void> {
           ? {
               checking_items: backlog.checkingItems,
               remaining_questions: backlog.remainingQuestions,
+              pending_items: backlog.pendingItems + backlog.lowerMovesQueued,
               summary: backlog.summary,
               awaiting_owner_approval: backlog.awaitingOwnerApproval,
               ...(backlog.waiting

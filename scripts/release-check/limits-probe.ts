@@ -16,9 +16,12 @@ import { TELEGRAM_BESIDE_LIVE } from './archive-fixtures.ts';
 import { defaultTelegramCaptureSpoolDir } from '../../src/workers/telegram-messages/index.ts';
 import { liveSpoolLine } from '../../test/support/telegram-spool-fixtures.ts';
 
+/** The step a failure is reported against: a fixed name, never machine output, paths or item text. */
+let step = 'input';
+const at = (name: string) => { step = name; };
 function cli(...args: string[]): any {
   const result = Bun.spawnSync([join(homedir(), '.local/bin/olympus'), ...args], { timeout: 180_000 });
-  if (result.exitCode !== 0) throw new Error('installed CLI failed');
+  if (result.exitCode !== 0) { step += result.exitCode === null ? ' (CLI timed out)' : ` (CLI exit ${result.exitCode})`; throw new Error('installed CLI failed'); }
   const value = JSON.parse(result.stdout.toString());
   if (value.ok === false) throw new Error('installed CLI refused the operation');
   return value;
@@ -33,14 +36,15 @@ function restoreFile(path: string, value: string | null) {
 async function probe(command: string, scratch: string): Promise<unknown> {
   const savedPath = join(scratch, 'saved.json');
   if (command === 'prepare') {
-    mkdirSync(scratch, { mode: 0o700 });
-    const status = cli('engine', 'status');
-    const config = JSON.parse(readFileSync(status.config.path, 'utf8'));
+    at('prepare.scratch'); mkdirSync(scratch, { mode: 0o700 });
+    at('prepare.engine-status'); const status = cli('engine', 'status');
+    at('prepare.config'); const config = JSON.parse(readFileSync(status.config.path, 'utf8'));
     const env = environmentWithWorkerSetupEnv({ env: process.env });
+    at('prepare.pause-marker');
     const pause = config.worker?.creditMonitor?.pauseFile ?? env.OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE ?? join(scratch, 'pause.json');
     if (existsSync(pause)) throw new Error('a provider marker already exists');
     if (/[\p{Cc}']/u.test(pause)) throw new Error('pause path cannot be stored in the managed environment');
-    const envPath = workerSetupEnvPath();
+    at('prepare.worker-env'); const envPath = workerSetupEnvPath();
     const settingsPath = sharedDataPath('limit-settings', env);
     const current = text(envPath);
     const lines = (current ?? '').split('\n');
@@ -55,6 +59,7 @@ async function probe(command: string, scratch: string): Promise<unknown> {
     return { ok: true };
   }
   if (command === 'restore') {
+    at('restore');
     if (!existsSync(savedPath)) { rmSync(scratch, { recursive: true, force: true }); return { ok: true }; }
     const saved: Saved = JSON.parse(readFileSync(savedPath, 'utf8'));
     rmSync(saved.pause, { force: true });
@@ -62,13 +67,14 @@ async function probe(command: string, scratch: string): Promise<unknown> {
     restoreFile(saved.envPath, !saved.hadEnv && !kept.some(line => line.trim()) ? null : [...kept, ...saved.limitLines].join('\n'));
     restoreFile(saved.settingsPath, saved.settings);
     // Restoration is outside the no-restart observation interval. Keep the receipt if restart fails.
-    cli('engine', 'restart', '--now');
+    at('restore.restart'); cli('engine', 'restart', '--now');
     rmSync(scratch, { recursive: true, force: true });
     return { ok: true };
   }
-  const saved: Saved = JSON.parse(readFileSync(savedPath, 'utf8'));
+  at(`${command}.saved`); const saved: Saved = JSON.parse(readFileSync(savedPath, 'utf8'));
   const env = environmentWithWorkerSetupEnv({ env: process.env });
   if (command === 'seed') {
+    at('seed.spool');
     // New identities and materials prevent an earlier archive leg's cached judgments satisfying this proof.
     const items = FIXTURE_ITEMS.filter(item => item.tier === 'personal');
     const spool = defaultTelegramCaptureSpoolDir(env);
@@ -79,21 +85,21 @@ async function probe(command: string, scratch: string): Promise<unknown> {
       chatTitle: TELEGRAM_BESIDE_LIVE.chatName,
     })).join(''), { mode: 0o600 });
     // The existing hook registers the synthetic account and pulls through the thin connector and shared intake.
-    const classification = configureInstalledTierClassification({ env, retirePublic: true, ownerContext: () => privacyOwnerContext({ env }) });
+    at('seed.classification'); const classification = configureInstalledTierClassification({ env, retirePublic: true, ownerContext: () => privacyOwnerContext({ env }) });
     try {
-      const seeded = await liveSeedHook('telegram').seed({ env, home: homedir() });
+      at('seed.intake'); const seeded = await liveSeedHook('telegram').seed({ env, home: homedir() });
       if (!seeded.ok || seeded.liveItems < items.length) throw new Error('fixture intake failed');
     }
     finally { classification.close(); }
-    cli('engine', 'restart', '--now');
+    at('seed.restart'); cli('engine', 'restart', '--now');
     return { count: items.length };
   }
   if (command === 'snapshot') {
-    const status = cli('engine', 'status');
-    const children = JSON.parse(readFileSync(engineChildrenPath(env), 'utf8'));
+    at('snapshot.engine-status'); const status = cli('engine', 'status');
+    at('snapshot.engine-children'); const children = JSON.parse(readFileSync(engineChildrenPath(env), 'utf8'));
     const workerPids = children.children.filter((child: { service: string }) => /^olympus-worker(?:-background)?$/.test(child.service))
       .map((child: { pgid: number }) => child.pgid).sort((a: number, b: number) => a - b);
-    const budget = text(join(dirname(resolveClassificationLedgerPath(env)), 'tier-sniffer-budget.json'));
+    at('snapshot.judge-counter'); const budget = text(join(dirname(resolveClassificationLedgerPath(env)), 'tier-sniffer-budget.json'));
     const calls = budget ? JSON.parse(budget).used : 0;
     if (!Number.isSafeInteger(calls) || calls < 0) throw new Error('judge counter unavailable');
     const healthy = status.ok === true && status.engine?.state === 'running'
@@ -102,11 +108,13 @@ async function probe(command: string, scratch: string): Promise<unknown> {
     return { pid: healthy ? status.engine.pid : 0, workerPids, calls };
   }
   if (command === 'credential') {
+    at('credential');
     const config = JSON.parse(readFileSync(cli('engine', 'status').config.path, 'utf8'));
     const values = { ...env, ...config.worker?.creditMonitor?.credentials };
     return { present: ['OLYMPUS_SOURCE_INDEX_VENICE_API_KEY', 'OLYMPUS_VENICE_API_KEY', 'VENICE_API_KEY', 'API_KEY_VENICE'].some(key =>
       typeof values[key] === 'string' ? values[key].trim().length > 0 : values[key] !== undefined && values[key] !== null) };
   }
+  at(command);
   if (command === 'marker-write') {
     if (existsSync(saved.pause)) throw new Error('refusing to overwrite a provider marker');
     mkdirSync(dirname(saved.pause), { recursive: true, mode: 0o700 });
@@ -119,5 +127,6 @@ async function probe(command: string, scratch: string): Promise<unknown> {
 }
 if (import.meta.main) {
   try { const input = JSON.parse(await Bun.stdin.text()); console.log(JSON.stringify(await probe(input.command, input.scratch))); }
-  catch { console.error('limits probe failed'); process.exit(1); }
+  // Only the fixed step name leaves the machine, so the report says where setup stopped without machine output.
+  catch { console.log(JSON.stringify({ failed: step })); process.exit(1); }
 }

@@ -19850,11 +19850,12 @@ function backupsSince(env, sinceMs) {
 function restoreSchemaBackupsSince(env, sinceMs) {
   const restored = [];
   for (const entry of backupsSince(env, sinceMs)) {
-    rmSync8(`${entry.dbPath}-wal`, { force: true });
-    rmSync8(`${entry.dbPath}-shm`, { force: true });
+    for (const suffix of ["-wal", "-shm", "-journal"])
+      rmSync8(`${entry.dbPath}${suffix}`, { force: true });
     renameSync4(entry.backupPath, entry.dbPath);
     restored.push(entry.storeId);
   }
+  removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return restored;
 }
@@ -19862,8 +19863,13 @@ function removeSchemaBackupsSince(env, sinceMs) {
   const removed = backupsSince(env, sinceMs);
   for (const entry of removed)
     rmSync8(entry.backupPath, { recursive: true, force: true });
+  removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return removed.length;
+}
+function removeAbandonedCopiesOfRecorded(env) {
+  for (const backup of new Set(schemaBackups(env).map((entry) => entry.backupPath)))
+    removeAbandonedBackupCopies(backup);
 }
 function removeAllSchemaBackups(env, dryRun) {
   const copies = [...new Set(schemaBackups(env).flatMap((entry) => preSchemaBackupsOf(entry.dbPath)))];
@@ -35468,6 +35474,7 @@ function sourceIndexStatusOutput(raw) {
     const retrieval = asRecord7(corpus.retrieval);
     const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
     const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
+    const reason = state === "degraded" ? oneOf(retrieval?.reason, RETRIEVAL_REASONS) : undefined;
     const refresh = asRecord7(corpus.last_refresh);
     const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
     const completedAt = iso(refresh?.completed_at);
@@ -35478,7 +35485,7 @@ function sourceIndexStatusOutput(raw) {
       label: sourceLabel(corpus.provider, corpus.family),
       ...trustDomain ? { trust_domain: trustDomain } : {},
       configured: corpus.configured === true,
-      ...mode && state ? { retrieval: { mode, state } } : {},
+      ...mode && state ? { retrieval: { mode, state, ...reason ? { reason } : {} } } : {},
       ...refreshStatus ? { last_refresh: { status: refreshStatus, ...completedAt ? { completed_at: completedAt } : {} } } : {},
       ...counts ? {
         counts: {
@@ -35489,7 +35496,16 @@ function sourceIndexStatusOutput(raw) {
       } : {}
     });
   }
-  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora };
+  const privacyCheck = privacyCheckOutput(record.tier_classification);
+  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora, ...privacyCheck ? { privacy_check: privacyCheck } : {} };
+}
+function privacyCheckOutput(raw) {
+  const backlog = asRecord7(raw);
+  const waiting = wholeNumber(backlog?.pending_items);
+  if (!backlog || waiting === 0)
+    return;
+  const reason = backlog.awaiting_owner_approval === true ? "awaiting_owner_approval" : typeof backlog.waiting_reason === "string" && Object.hasOwn(PRIVACY_CHECK_WAITS, backlog.waiting_reason) ? PRIVACY_CHECK_WAITS[backlog.waiting_reason] : undefined;
+  return { waiting_items: waiting, ...reason ? { waiting_for: reason } : {} };
 }
 function remoteRetryAfterSeconds(body) {
   if (!body || typeof body !== "object")
@@ -35589,7 +35605,7 @@ function dateOnly(value) {
 function asRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_source_item_read();
   init_app_release_capture();
@@ -35723,6 +35739,24 @@ var init_remote_result = __esm(() => {
   TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
   RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
   RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+  RETRIEVAL_REASONS = Object.freeze([
+    "embedding_provider_unavailable",
+    "embedding_provider_not_allowed",
+    "no_current_embedding_artifacts",
+    "embedding_epoch_stale"
+  ]);
+  PRIVACY_CHECK_WAITS = Object.freeze({
+    yielding_to_answers: "yielding_to_answers",
+    breaker_open: "breaker_open",
+    pass_running: "pass_running",
+    pass_stuck: "pass_stuck",
+    awaiting_owner_approval: "awaiting_owner_approval",
+    no_model: "no_model",
+    daily_budget: "judge.daily_calls",
+    cloud_stopped: "cloud_stopped",
+    model_not_answering: "model_not_answering",
+    failed: "failed"
+  });
   NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
   CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
   OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
@@ -35910,7 +35944,8 @@ var init_remote_result = __esm(() => {
               required: ["mode", "state"],
               properties: {
                 mode: { enum: [...RETRIEVAL_MODES] },
-                state: { enum: [...RETRIEVAL_STATES] }
+                state: { enum: [...RETRIEVAL_STATES] },
+                reason: { enum: [...RETRIEVAL_REASONS], description: "Why a degraded corpus searches by keyword only." }
               }
             },
             last_refresh: {
@@ -35933,6 +35968,16 @@ var init_remote_result = __esm(() => {
               }
             }
           }
+        }
+      },
+      privacy_check: {
+        type: "object",
+        additionalProperties: false,
+        required: ["waiting_items"],
+        description: "New items not searchable yet because they wait for the privacy check, and what the check waits for.",
+        properties: {
+          waiting_items: { type: "integer", minimum: 1 },
+          waiting_for: { enum: [...new Set(Object.values(PRIVACY_CHECK_WAITS))] }
         }
       }
     }
@@ -40382,11 +40427,16 @@ function withPinnedNewestChatHits(input) {
       result[at] = { ...result[at], newestInStore };
       continue;
     }
-    while (result.length >= limit)
-      result.pop();
+    while (result.length >= limit) {
+      let last = result.length - 1;
+      while (last > 0 && result[last].newestInStore !== undefined)
+        last -= 1;
+      result.splice(last, 1);
+    }
     result.push({
       ...connectorStoreHitFromRow(input.store, row, CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope),
-      newestInStore
+      newestInStore,
+      pinAppended: true
     });
   }
   return result;
@@ -80607,17 +80657,20 @@ async function rerankCandidates(options) {
   const startedAt = timers.now();
   const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
   const scoredIndexes = passages.flatMap((passage, index) => passage ? [index] : []);
-  const fusedCut = (outcome, scored) => ({
-    kept: options.items.slice(0, keep),
-    audit: {
-      rerankerId: options.reranker.id,
-      outcome,
-      scored,
-      kept: Math.min(keep, options.items.length),
-      promoted: 0,
-      elapsedMs: timers.now() - startedAt
-    }
-  });
+  const fusedCut = (outcome, scored) => {
+    options.onScores?.([], outcome);
+    return {
+      kept: options.items.slice(0, keep),
+      audit: {
+        rerankerId: options.reranker.id,
+        outcome,
+        scored,
+        kept: Math.min(keep, options.items.length),
+        promoted: 0,
+        elapsedMs: timers.now() - startedAt
+      }
+    };
+  };
   if (scoredIndexes.length === 0)
     return fusedCut("applied", 0);
   const controller = new AbortController;
@@ -80649,6 +80702,8 @@ async function rerankCandidates(options) {
   if (scores.length !== scoredIndexes.length || scores.some((score) => typeof score !== "number" || Number.isNaN(score))) {
     return fusedCut("failed", 0);
   }
+  if (options.onScores)
+    options.onScores(scoredIndexes.map((index, position) => ({ item: options.items[index], score: scores[position] })), "applied");
   const scoreByIndex = new Map(scoredIndexes.map((index, position) => [index, scores[position]]));
   const order = options.items.map((_, index) => index).sort((left, right) => {
     const leftScore = scoreByIndex.get(left);
@@ -80784,7 +80839,7 @@ async function routePreparedSourceIndexSearch(options) {
     const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);
     const corpusRequest = {
       query: request.query,
-      maxResults: request.maxResults,
+      maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: request.context,
       ...cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}
@@ -80876,17 +80931,8 @@ async function routePreparedSourceIndexSearch(options) {
     for (const corpusId of [...unchecked].sort())
       degradations.push(visibilityCheckDegradation(corpusId));
   }
-  const laneOrder = storeOrderForQuestion(lanes);
-  const fusedAll = fuseRankedCandidateLanes({
-    lanes,
-    getId: routedHitCandidateId,
-    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
-    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
-  });
-  const budgeted = request.poolAllocation ? applyStrengthPoolBudget(fusedAll, request.maxResults, laneOrder, request.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, request.maxResults);
-  const pool = fusedAll.map((candidate) => candidate.item);
-  const leadered = withReservedLeaderSeats(budgeted, pool, request.maxResults);
-  const recency = request.temporalIntent ? withReservedRecencySeats(leadered, pool, request.maxResults) : { ...leadered, recencySeats: 0 };
+  options.onSeatingLanes?.(lanes);
+  const recency = seatRoutedLanes(lanes, request);
   const { hits: fused, degradations: budgetDegradations } = recency;
   const result = {
     hits: fused,
@@ -80912,6 +80958,20 @@ async function routePreparedSourceIndexSearch(options) {
     after_lanes_ms: Date.now() - lanesSettledAt
   });
   return result;
+}
+function seatRoutedLanes(lanes, options) {
+  const laneOrder = storeOrderForQuestion(lanes);
+  const fusedAll = fuseRankedCandidateLanes({
+    lanes,
+    getId: routedHitCandidateId,
+    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
+    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
+  });
+  const budgeted = options.poolAllocation ? applyStrengthPoolBudget(fusedAll, options.maxResults, laneOrder, options.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, options.maxResults);
+  const pool = fusedAll.map((candidate) => candidate.item);
+  const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
+  const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
+  return recency;
 }
 function corpusContributedSecure(corpus, response) {
   const count = response.matchCount;
@@ -81266,7 +81326,7 @@ async function buildEvidencePackDetailed(input) {
 async function buildPreparedEvidencePackDetailed(input) {
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
-  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined);
+  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined));
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
   const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
@@ -81354,7 +81414,8 @@ async function buildPreparedEvidencePackDetailed(input) {
       items: scorable,
       passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
       keep: input.maxResults,
-      ...input.rerankTimers ? { timers: input.rerankTimers } : {}
+      ...input.rerankTimers ? { timers: input.rerankTimers } : {},
+      ...input.onRerankScores ? { onScores: (entries, outcome) => input.onRerankScores(entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome) } : {}
     });
     hydrated = [...denied, ...reranked.kept];
     rerank = reranked.audit;
@@ -81623,15 +81684,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
   }
   if (runs.length === 1)
     return literalRun;
-  const queries = [literalQuery, ...expansions];
-  const ranked = fuseRankedCandidateLanes({
-    lanes: runs.map((run, index) => ({ name: queries[index], items: run.hits })),
-    getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
-    limit: runs.reduce((total, run) => total + run.hits.length, 0),
-    tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id))
-  });
-  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
-  const recency = questionHasTemporalIntent(input) ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit) : { ...budgeted, recencySeats: 0 };
+  const recency = seatRoutedQueryRuns(runs.map((run) => run.hits), retrievalLimit, questionHasTemporalIntent(input));
   const { hits: fused, degradations: budgetDegradations } = recency;
   return {
     hits: fused,
@@ -81645,6 +81698,17 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
     ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}
   };
+}
+function seatRoutedQueryRuns(runs, retrievalLimit, temporalIntent) {
+  const ranked = fuseRankedCandidateLanes({
+    lanes: runs.map((run, index) => ({ name: String(index + 1), items: run })),
+    getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
+    limit: runs.reduce((total, run) => total + run.length, 0),
+    tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id))
+  });
+  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  const recency = temporalIntent ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit) : { ...budgeted, recencySeats: 0 };
+  return recency;
 }
 function mergeRoutedSkippedCorpora(runs) {
   const merged = new Map;
@@ -81688,6 +81752,8 @@ function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, searc
       ...poolAllocation ? { poolAllocation } : {}
     },
     laneTimeoutMs,
+    ...input.onSeatingLanes ? { onSeatingLanes: (lanes) => input.onSeatingLanes(lanes, ordinal) } : {},
+    ...input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {},
     ...searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {},
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
   }));
@@ -199010,7 +199076,7 @@ function createEmailSourceWorker(options = {}) {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
               retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
               ...secretLocations.length > 0 ? {
                 secret_locations: secretLocations.map((location) => ({
                   source: location.source,
@@ -216387,7 +216453,7 @@ function gmailExportEvidence(archive) {
 }
 async function gmailLabelLookup(lane) {
   const rules = lane.set.classification()?.rules ?? [];
-  if (!rules.some((rule) => rule.match.kind === "label"))
+  if (!rules.some((rule) => rule.match.kind === "label" && (rule.source === undefined || rule.source === GMAIL_PROVIDER_ID)))
     return { kind: "none" };
   let found;
   try {
@@ -249459,6 +249525,7 @@ ${key2}`;
       return backlog ? {
         checking_items: backlog.checkingItems,
         remaining_questions: backlog.remainingQuestions,
+        pending_items: backlog.pendingItems + backlog.lowerMovesQueued,
         summary: backlog.summary,
         awaiting_owner_approval: backlog.awaitingOwnerApproval,
         ...backlog.waiting ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since } : {}
@@ -254130,7 +254197,7 @@ function waitForWorkerReadiness(options, port, wait) {
       break;
     const now = Date.now();
     const boot = readBoot();
-    if (boot && boot.phase !== "done")
+    if (boot && bootProgressIsLive(boot, now) && Date.parse(boot.startedAt) >= waitStartedAt)
       bootStarts.add(boot.pid);
     const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(boot, now);
     const front3 = bootMoving ? undefined : readFront();
@@ -258283,6 +258350,9 @@ function formatCliFatalError(error2) {
   if (typeof candidate2.code !== "string" || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(candidate2.code))
     return [message2];
   const lines2 = [`Error [${candidate2.code}]: ${message2}`];
+  const suggestion = error2.suggestion;
+  if (typeof suggestion === "string" && suggestion.trim())
+    lines2.push(`Fix: ${suggestion}`);
   if (candidate2.retryable === true && typeof candidate2.retryAfterMs === "number" && Number.isSafeInteger(candidate2.retryAfterMs) && candidate2.retryAfterMs > 0) {
     lines2.push(`Retryable: retry after ${Math.ceil(candidate2.retryAfterMs / 1000)} seconds.`);
   } else if (candidate2.retryable === true) {

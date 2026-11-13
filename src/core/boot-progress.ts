@@ -405,17 +405,21 @@ function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
 
 /**
  * Puts back every store backed up at or after `sinceMs`: the backup replaces
- * its database, and the database's -wal and -shm go. Returns the store ids
- * restored. The worker must be stopped first.
+ * its database, and the database's -wal, -shm and -journal go. A -journal
+ * left by a process stopped inside a transaction belongs to the file being
+ * replaced: SQLite would roll it back into the restored copy, which is not
+ * the file it was written for. Returns the store ids restored. The worker
+ * must be stopped first, so every part-way copy a stopped process left is
+ * removed too (the gate7 forced leg, 2026-11-13, left both behind).
  */
 export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): string[] {
   const restored: string[] = [];
   for (const entry of backupsSince(env, sinceMs)) {
-    rmSync(`${entry.dbPath}-wal`, { force: true });
-    rmSync(`${entry.dbPath}-shm`, { force: true });
+    for (const suffix of ['-wal', '-shm', '-journal']) rmSync(`${entry.dbPath}${suffix}`, { force: true });
     renameSync(entry.backupPath, entry.dbPath);
     restored.push(entry.storeId);
   }
+  removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return restored;
 }
@@ -424,8 +428,13 @@ export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): stri
 export function removeSchemaBackupsSince(env: LayoutEnv, sinceMs: number): number {
   const removed = backupsSince(env, sinceMs);
   for (const entry of removed) rmSync(entry.backupPath, { recursive: true, force: true });
+  removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return removed.length;
+}
+
+function removeAbandonedCopiesOfRecorded(env: LayoutEnv): void {
+  for (const backup of new Set(schemaBackups(env).map((entry) => entry.backupPath))) removeAbandonedBackupCopies(backup);
 }
 
 /**

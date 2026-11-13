@@ -7,6 +7,7 @@ import {
   rerankPoolSize,
   RERANK_POOL_STORE_DEPTH,
   type EvidenceRerankAudit,
+  type EvidenceRerankOutcome,
   type EvidenceReranker,
   type RerankTimers,
 } from './evidence-reranker.ts';
@@ -55,6 +56,8 @@ import {
   resolveAskSearchBudgetMs,
   resolveLaneTimeoutMs,
   routeSourceIndexSearch,
+  routedHitCandidateId,
+  type SeatingLane,
   type SourceIndexRoutedCorpusTiming,
   type SourceIndexRoutedMatchCount,
   type SourceIndexRoutedSearchHit,
@@ -72,6 +75,7 @@ import {
   type RetrievalDegradation,
   type RetrievalLaneAudit,
   type SourceIndexProvenance,
+  type SourceIndexCandidateId,
   type SourceItemIdentity,
   type SourceCitationMetadata,
   type SourceSensitivity,
@@ -236,6 +240,13 @@ export interface BuildEvidencePackInput {
    */
   reranker?: EvidenceReranker;
   rerankTimers?: RerankTimers;
+  // Internal eval observers; never part of the EvidencePack contract.
+  onSeatingLanes?: (lanes: readonly SeatingLane[], ordinal: number) => void;
+  onRerankScores?: (entries: readonly { candidateId: SourceIndexCandidateId; score: number }[], outcome: EvidenceRerankOutcome) => void;
+  // Optional experimental store allocation; ordinary builds use the shared default.
+  poolAllocation?: { storeDepth: number };
+  // Eval capture's adapter depth, independent of pool/pack seats.
+  storeSearchDepth?: number;
   now?: () => Date;
 }
 
@@ -362,7 +373,7 @@ async function buildPreparedEvidencePackDetailed(
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
-    : await runRoutedSearches(input, retrievalLimit, reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined);
+    : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined));
   // A build can fan out more than once (the literal query plus planner
   // expansions), and each routed run judged its hits against its own ledger
   // snapshot. One more pass over the merged hits puts the whole pack on ONE
@@ -483,13 +494,16 @@ async function buildPreparedEvidencePackDetailed(
       }
       scorable.push(entry);
     }
-    const reranked = await rerankCandidates({
+    const reranked = await rerankCandidates<(typeof pool)[number]>({
       reranker,
       query: literalSearchQuery(input),
       items: scorable,
       passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
       keep: input.maxResults,
       ...(input.rerankTimers ? { timers: input.rerankTimers } : {}),
+      ...(input.onRerankScores ? { onScores: (entries, outcome) => input.onRerankScores!(
+        entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome,
+      ) } : {}),
     });
     // Denied items carry no text, but every one is still counted below, so the
     // policy gap and the content-free lane audits do not depend on the cut.
@@ -761,7 +775,7 @@ function contentFreePolicyLaneAudits(
   }));
 }
 
-function questionHasTemporalIntent(input: Pick<BuildEvidencePackInput, 'question' | 'searchQuery'>): boolean {
+export function questionHasTemporalIntent(input: Pick<BuildEvidencePackInput, 'question' | 'searchQuery'>): boolean {
   return hasTemporalIntent(input.question) || hasTemporalIntent(input.searchQuery ?? '');
 }
 
@@ -920,27 +934,7 @@ async function runRoutedSearches(
   }
   if (runs.length === 1) return literalRun;
 
-  const queries = [literalQuery, ...expansions];
-  const ranked = fuseRankedCandidateLanes({
-    lanes: runs.map((run, index) => ({ name: queries[index]!, items: run.hits })),
-    getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
-    // Rank the whole bounded union before allocating seats by corpus. Taking
-    // the cut here could discard a corpus before the shared budget sees it.
-    limit: runs.reduce((total, run) => total + run.hits.length, 0),
-    // Scale-free, and deliberately so. Adapter `score` is adapter-local — a
-    // negated bm25 rank in one corpus, a sub-lane RRF sum in another — and RRF
-    // exists precisely so those are never compared. Comparing them here decided
-    // the pack cut by scoring scale rather than relevance, dropping a whole
-    // corpus family from the analyst's evidence with nothing in coverage to
-    // record it.
-    tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id)),
-  });
-  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
-  // The fused budget cuts again, so the recency seats are taken again from
-  // the fused pool; the router's leader seats are not re-reserved here.
-  const recency = questionHasTemporalIntent(input)
-    ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit)
-    : { ...budgeted, recencySeats: 0 };
+  const recency = seatRoutedQueryRuns(runs.map(run => run.hits), retrievalLimit, questionHasTemporalIntent(input));
   const { hits: fused, degradations: budgetDegradations } = recency;
 
   return {
@@ -963,6 +957,35 @@ async function runRoutedSearches(
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
     ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
   };
+}
+
+// Shared final fusion of multiple routed runs, also used by offline eval replay.
+export function seatRoutedQueryRuns(
+  runs: readonly (readonly SourceIndexRoutedSearchHit[])[],
+  retrievalLimit: number,
+  temporalIntent: boolean,
+): { hits: SourceIndexRoutedSearchHit[]; degradations: RetrievalDegradation[]; recencySeats: number } {
+  const ranked = fuseRankedCandidateLanes({
+    lanes: runs.map((run, index) => ({ name: String(index + 1), items: run })),
+    getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
+    // Rank the whole bounded union before allocating seats by corpus. Taking
+    // the cut here could discard a corpus before the shared budget sees it.
+    limit: runs.reduce((total, run) => total + run.length, 0),
+    // Scale-free, and deliberately so. Adapter `score` is adapter-local — a
+    // negated bm25 rank in one corpus, a sub-lane RRF sum in another — and RRF
+    // exists precisely so those are never compared. Comparing them here decided
+    // the pack cut by scoring scale rather than relevance, dropping a whole
+    // corpus family from the analyst's evidence with nothing in coverage to
+    // record it.
+    tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id)),
+  });
+  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  // The fused budget cuts again, so the recency seats are taken again from
+  // the fused pool; the router's leader seats are not re-reserved here.
+  const recency = temporalIntent
+    ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit)
+    : { ...budgeted, recencySeats: 0 };
+  return recency;
 }
 
 function mergeRoutedSkippedCorpora(
@@ -1034,6 +1057,8 @@ function runRoutedSearch(
         ...(poolAllocation ? { poolAllocation } : {}),
       },
       laneTimeoutMs,
+      ...(input.onSeatingLanes ? { onSeatingLanes: (lanes) => input.onSeatingLanes!(lanes, ordinal) } : {}),
+      ...(input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {}),
       ...(searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {}),
       ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),
     }));

@@ -309,6 +309,8 @@ export interface SourceIndexStatusHandlerOptions {
 export interface SourceIndexTierClassificationStatus {
   checking_items: number;
   remaining_questions: number;
+  /** Items an agent outside this computer cannot find yet: pending a verdict, or judged lower with the move still queued. */
+  pending_items?: number;
   summary: string;
   awaiting_owner_approval: boolean;
   /** Why the sniffer asked nothing while questions wait (content-free code, label, since). */

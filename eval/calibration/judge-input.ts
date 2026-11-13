@@ -12,15 +12,18 @@ export interface JudgeInput {
   secret: boolean;
   /** The classifier's own answer without the judge: a structured identifier is Private at once. */
   privateWithoutJudge: boolean;
+  /** The question's flags, which production passes to `snifferVerdictTier` (own-record holds). */
+  flags: readonly string[];
 }
 
 export function judgeInput(signals: SourceClassificationSignals, text: string, provider: string): JudgeInput {
   let material: string | undefined;
   let materialHash: string | undefined;
+  let flags: readonly string[] = [];
   const sniffer: TierSniffer = {
     id: 'calibration-recorder',
     judge(request) {
-      if (request.pass === 'content') { material = request.material; materialHash = request.materialHash; }
+      if (request.pass === 'content') { material = request.material; materialHash = request.materialHash; flags = request.flags ?? []; }
       return { verdict: 'undecided' };
     },
   };
@@ -30,5 +33,6 @@ export function judgeInput(signals: SourceClassificationSignals, text: string, p
     ...(secret || material === undefined ? {} : { material, ...(materialHash ? { materialHash } : {}) }),
     secret,
     privateWithoutJudge: decision.contentTier === 'secure',
+    flags,
   };
 }

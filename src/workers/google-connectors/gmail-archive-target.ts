@@ -116,8 +116,9 @@ export interface GmailArchiveLane {
  */
 export async function gmailLabelLookup(lane: Pick<GmailArchiveLane, 'set' | 'labelIds'>): Promise<GmailLabelLookup> {
   const rules = lane.set.classification()?.rules ?? [];
-  // No rule names a label: names are enough, and nothing is asked of Gmail.
-  if (!rules.some((rule) => rule.match.kind === 'label')) return { kind: 'none' };
+  // No rule names a label that can apply to Gmail mail: names are enough, and nothing is asked of Gmail. A label rule the
+  // owner scoped to another source (a Readwise tag) never matches Gmail mail, so it must not hold the import.
+  if (!rules.some((rule) => rule.match.kind === 'label' && (rule.source === undefined || rule.source === GMAIL_PROVIDER_ID))) return { kind: 'none' };
   let found: ReadonlyMap<string, string> | { unavailable: string; minimum?: number } | undefined;
   try {
     found = await lane.labelIds?.();

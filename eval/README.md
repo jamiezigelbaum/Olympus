@@ -228,6 +228,47 @@ local Dropbox index and a reachable Argus lane:
 `source_answer` path uses — so the privacy dimension grades real gate decisions,
 not a stub. Exit code 0 means the instantiated set passed.
 
+## Capture candidate pools and replay seating
+
+On the eval machine, capture while running the real questions as usual:
+
+```sh
+OLYMPUS_SOURCE_RERANKER=built-in \
+OLYMPUS_SOURCE_RERANKER_MODEL_DIR=/path/to/installed/reranker \
+bun eval/run-real.ts /path/to/questions.json --capture-pool /tmp/olympus-pools --capture-depth 30
+bun eval/replay-pool.ts /tmp/olympus-pools --store-depth 5,10,30 --pool-size 30,100,400 --keep 5
+```
+
+`OLYMPUS_EVAL_CAPTURE_POOL_DIR` also enables capture. Depth defaults to 30;
+without a capture directory the ordinary eval behavior is unchanged. A requested
+built-in reranker must have its model/tokenizer/runtime files installed and
+load successfully; capture fails clearly otherwise. Each question's ordinary
+answer and grading still run. Informational passes do not overwrite captures.
+
+One JSON file per question records query-run ordinals, store/candidate/item ids,
+store ranks and relevance, adapter/reranker scores, numeric recency and leader
+signals, visibility/policy eligibility, and expected-document/paragraph booleans
+(including alternates). It stores no question/query text, titles, item text,
+quotes or hints. Keep these id-bearing files private on the eval machine.
+Scoring covers the first 400 seated candidates at most; larger captures record
+`scoringTruncated: true`, and retain extra candidates without scores. Temporal
+questions preserve the product's recency seating and skip reranking.
+
+Replay calls the same pure seating and expansion-fusion functions as live
+retrieval. Smaller depths use captured list prefixes: **store rankings must be
+prefix-stable**. It replays the recorded query runs and scores; it cannot predict
+new planner runs, changed passages, or fresh visibility decisions. `--temporal
+as-captured` is the default (`on`/`off` can override seating). `--keep` defaults
+to the captured runner maxResults, before Analyst prompt fitting. Use a fresh
+directory for each capture configuration.
+
+Tables report each expected document and paragraph's pool rank (before reranking)
+and pack seat (after reranking), totals, and paired wins/losses against the first
+variant with an exact two-sided sign-flip p-value over discordant expected
+entries. Ties do not enter that test. Scored candidates lead; equal scores and
+unscored candidates retain seating order. Add `--json` for machine-readable
+results. The depth and pool-size lists form a Cartesian product, in input order.
+
 ## Where this plugs into the gate
 
 `bun run verify` (typecheck + tests) is the local inner loop and the GitHub

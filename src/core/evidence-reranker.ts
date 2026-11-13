@@ -88,6 +88,8 @@ export interface RerankCandidatesOptions<T> {
   keep: number;
   timeoutMs?: number;
   timers?: RerankTimers;
+  // Internal observer; entries are in input order and contain no passage text.
+  onScores?: (entries: readonly { item: T; score: number }[], outcome: EvidenceRerankOutcome) => void;
 }
 
 export interface RerankCandidatesResult<T> {
@@ -106,17 +108,20 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
   const startedAt = timers.now();
   const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
   const scoredIndexes = passages.flatMap((passage, index) => (passage ? [index] : []));
-  const fusedCut = (outcome: EvidenceRerankOutcome, scored: number): RerankCandidatesResult<T> => ({
-    kept: options.items.slice(0, keep),
-    audit: {
-      rerankerId: options.reranker.id,
-      outcome,
-      scored,
-      kept: Math.min(keep, options.items.length),
-      promoted: 0,
-      elapsedMs: timers.now() - startedAt,
-    },
-  });
+  const fusedCut = (outcome: EvidenceRerankOutcome, scored: number): RerankCandidatesResult<T> => {
+    options.onScores?.([], outcome);
+    return {
+      kept: options.items.slice(0, keep),
+      audit: {
+        rerankerId: options.reranker.id,
+        outcome,
+        scored,
+        kept: Math.min(keep, options.items.length),
+        promoted: 0,
+        elapsedMs: timers.now() - startedAt,
+      },
+    };
+  };
   if (scoredIndexes.length === 0) return fusedCut('applied', 0);
 
   const controller = new AbortController();
@@ -148,6 +153,7 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
     return fusedCut('failed', 0);
   }
 
+  if (options.onScores) options.onScores(scoredIndexes.map((index, position) => ({ item: options.items[index]!, score: scores[position]! })), 'applied');
   const scoreByIndex = new Map(scoredIndexes.map((index, position) => [index, scores[position]!] as const));
   const order = options.items.map((_, index) => index).sort((left, right) => {
     const leftScore = scoreByIndex.get(left);
