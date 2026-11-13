@@ -240,6 +240,7 @@ done; exit 1`), 200_000);
         return 'source_answer listed; setup text returned, no answer run';
     });
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9334'); });
+    // Includes the explicit Venice judge choice when first run offers it.
     await checked('privacy-choice', () => dashboard!.privacyChoice());
     for (const source of sources) {
       await checked(`${source.id}.connect`, () => dashboard!.connect(source));

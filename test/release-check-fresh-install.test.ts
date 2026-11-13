@@ -38,7 +38,7 @@ function rig(failAt?: string, inconclusive = false, listening = '') {
     put: async () => {}, get: async () => {}, upgrade: async () => {},
   };
   const dashboard: FreshDashboard = {
-    privacyChoice: async () => { await step('privacy-choice'); modelSet = true; return 'Local models with Venice fallback (local-first, Recommended) saved and verified after reload'; },
+    privacyChoice: async () => { await step('privacy-choice'); modelSet = true; return 'Local models with Venice fallback (local-first, Recommended) saved and verified after reload; privacy check: Venice (venice) saved'; },
     connect: s => step(`${s.id}.connect`), consent: s => step(`${s.id}.consent`), callback: s => step(`${s.id}.callback`), scope: s => step(`${s.id}.scope`),
     indexed: async s => { await step(`${s.id}.first-items`); return 2; },
     close: () => step('dashboard.close'),
@@ -101,6 +101,7 @@ describe('fresh install canary', () => {
     expect(r.events.slice(-3)).toEqual(['engine.close', 'dashboard.close', 'restore']);
     expect(checks.find(c => c.id === 'fresh.gmail.first-items')?.detail).toBe('2 item(s) indexed');
     expect(checks.find(c => c.id === 'fresh.privacy-choice')?.detail).toContain('Local models with Venice fallback (local-first, Recommended)');
+    expect(checks.find(c => c.id === 'fresh.privacy-choice')?.detail).toContain('privacy check: Venice (venice) saved');
     expect(r.events.indexOf('privacy-choice')).toBeLessThan(r.events.indexOf('gmail.connect'));
     expect(r.commands.find(c => c.includes('seq 1 180'))).toContain(SOCKET_READY);
     expect(r.commands.find(c => c.includes('seq 1 120'))).toContain(SOCKET_READY);

@@ -32168,6 +32168,10 @@ var init_classification_ledger = __esm(() => {
 // src/workers/classification/judge-spending.ts
 import { existsSync as existsSync28, readFileSync as readFileSync29 } from "node:fs";
 import { dirname as dirname35, join as join37 } from "node:path";
+function judgeLocalIsSlow(observed, archive) {
+  const rate = observed.localItemsPerMinute;
+  return rate !== undefined ? 1000 / rate > 60 : archive?.gpu === false;
+}
 function judgeArchiveEstimate(count, model, observed = {}) {
   const items = Math.max(0, Math.trunc(count));
   const shortHours = items / LOCAL_JUDGE_MEASUREMENT.shortPerMinute / 60;
@@ -162077,6 +162081,7 @@ function createJudgeSetup(options) {
   const cloud = options.cloud;
   const status = () => ({
     ...options.spending.status(),
+    chosen: options.spending.hasRecord(),
     cloudModel: cloud.source === "off" ? null : cloud.lane.modelId,
     cloudAvailable: cloud.source !== "off" && Boolean(JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)]),
     observed: options.observed?.() ?? {}
@@ -169116,6 +169121,16 @@ function mountDashboardController(options) {
   let redrawOwed = false;
   let firstRunChoice;
   let firstRunCheckRequested = false;
+  function setupPanels(sheet) {
+    const panels = Array.from(sheet.querySelectorAll(":scope > [data-setup-panel]"));
+    if (!sheet.closest("[data-first-run-sheet]") || !firstRunChoice)
+      return panels;
+    return panels.filter((panel, index) => {
+      if (firstRunChoice === "no-sensitive")
+        return index === 0 || index === panels.length - 1;
+      return !panel.querySelector("[data-first-run-judge]") || ["local-first", "private-cloud-only"].includes(firstRunChoice);
+    });
+  }
   function showSetupStep(sheet, next) {
     const panels = Array.from(sheet.querySelectorAll(":scope > [data-setup-panel]"));
     const firstRun = sheet.closest("[data-first-run-sheet]");
@@ -169123,8 +169138,9 @@ function mountDashboardController(options) {
     panels.forEach((panel, index) => {
       panel.hidden = index !== next;
     });
-    const count = noConnection ? 2 : panels.length;
-    const position = noConnection && next === 2 ? 2 : next + 1;
+    const available = setupPanels(sheet);
+    const count = available.length;
+    const position = available.indexOf(panels[next]) + 1;
     const counter = sheet.querySelector("[data-setup-counter]");
     if (counter)
       counter.textContent = sheet.hasAttribute("data-setup-guided") ? `STEP ${position} OF ${count}` : `Step ${position} of ${count}`;
@@ -169137,7 +169153,7 @@ function mountDashboardController(options) {
     }
     const forward = sheet.querySelector("[data-setup-next]");
     if (forward)
-      forward.hidden = next === panels.length - 1 || Boolean(firstRun && next === 0);
+      forward.hidden = next === panels.length - 1 || Boolean(panels[next]?.dataset.setupForm);
     const back = sheet.querySelector("[data-setup-back]");
     if (back)
       back.disabled = next === 0 || Boolean(firstRun && (next < 2 || noConnection));
@@ -169692,7 +169708,8 @@ function mountDashboardController(options) {
       closeAuthorizationTab(authorizationTab);
       const message2 = errorMessage3(result);
       say(form, message2);
-      showSetupFailure(form, message2);
+      if (!form.hasAttribute("data-first-run-judge"))
+        showSetupFailure(form, message2);
       return;
     }
     if (params.action === "discover_local_models") {
@@ -169716,7 +169733,14 @@ function mountDashboardController(options) {
         help.textContent = params.choice === "local-first" ? "Optional: add a key for Venice fallback, or continue with the built-in model on this computer." : "Add your Venice key in the existing field below, then return here to check readiness.";
       const steps = form.closest("[data-setup-steps]");
       if (steps)
-        showSetupStep(steps, params.choice === "no-sensitive" ? 2 : 1);
+        showSetupStep(steps, params.choice === "no-sensitive" ? steps.querySelectorAll(":scope > [data-setup-panel]").length - 1 : 1);
+      return;
+    }
+    if (params.action === "save_judge" && form.hasAttribute("data-first-run-judge")) {
+      releaseSubmittedForm(form, submittedValues);
+      const steps = form.closest("[data-setup-steps]");
+      if (steps)
+        showSetupStep(steps, steps.querySelectorAll(":scope > [data-setup-panel]").length - 1);
       return;
     }
     if (params.action === "check_model_setup" && form.closest("[data-first-run-sheet]")) {
@@ -170979,7 +171003,9 @@ function mountDashboardController(options) {
         return;
       const panels = Array.from(sheet.querySelectorAll(":scope > [data-setup-panel]"));
       const current3 = panels.findIndex((panel) => !panel.hidden);
-      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute("data-setup-retry") ? Number(setupControl.dataset.setupRetry) : setupControl.hasAttribute("data-setup-jump") ? Number(setupControl.dataset.setupJump) : current3 + (setupControl.hasAttribute("data-setup-next") ? 1 : -1)));
+      const available = setupPanels(sheet);
+      const adjacent = available[Math.max(0, Math.min(available.length - 1, available.indexOf(panels[current3]) + (setupControl.hasAttribute("data-setup-next") ? 1 : -1)))];
+      const next = setupControl.hasAttribute("data-setup-retry") ? Number(setupControl.dataset.setupRetry) : setupControl.hasAttribute("data-setup-jump") ? Number(setupControl.dataset.setupJump) : panels.indexOf(adjacent);
       showSetupStep(sheet, next);
       return;
     }
@@ -184100,6 +184126,30 @@ var init_source_watch_runtime = __esm(() => {
   });
 });
 
+// src/workers/dashboard/judge-format.ts
+function judgeMoney(dollars2, bare = false) {
+  if (dollars2 === null || dollars2 === undefined)
+    return "Cost unavailable";
+  const text4 = dollars2 > 0 && dollars2 < 0.005 ? "less than $0.01" : dollars2.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return bare ? text4 : `About ${text4}`;
+}
+function judgeHours(n) {
+  return n.toLocaleString("en-US", { maximumFractionDigits: 1 });
+}
+function judgeCount(n) {
+  const rounded2 = n >= 1000 ? Math.round(n / 100) * 100 : n >= 100 ? Math.round(n / 10) * 10 : Math.round(n);
+  return rounded2.toLocaleString("en-US");
+}
+function judgeDuration(hours) {
+  const minutes = Math.max(1, Math.round(hours * 60));
+  if (minutes < 60)
+    return `About ${minutes} minute${minutes === 1 ? "" : "s"}`;
+  if (hours < 8)
+    return `About ${judgeHours(hours)} hour${judgeHours(hours) === "1" ? "" : "s"}`;
+  const nights = Math.round(hours / 8);
+  return `About ${nights} night${nights === 1 ? "" : "s"} (${Math.round(hours)} hours)`;
+}
+
 // src/workers/dashboard/backup-section.ts
 function formatBytes2(bytes) {
   if (bytes >= 1e9)
@@ -186008,7 +186058,7 @@ function renderModelSetup(view4, options = {}) {
     return status + renderComputerUseChoice(view4);
   const engine = renderEngineServerMode(view4);
   if (view4.privacy_choice_pending)
-    return status + engine + privateModelProgress(view4) + renderFirstRunPrivacyChoice();
+    return status + engine + privateModelProgress(view4) + renderFirstRunPrivacyChoice(options);
   const bannerOwnsToggle = blockerOwnsLocalToggle(view4);
   const cards = view4.cards.map((card) => {
     if (card.state === "ready")
@@ -186030,24 +186080,40 @@ function renderModelSetup(view4, options = {}) {
   const extras = view4.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
   return status + engine + (view4.ready ? privateModelProgress(view4) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view4.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view4.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view4.attention ? `<p role="status">${escapeHtml(view4.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
 }
-function renderFirstRunPrivacyChoice() {
+function renderFirstRunPrivacyChoice(options) {
   const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml(option.description)}</p></label>`).join("");
   const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
   const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>' + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
   const verify3 = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
+  const judge3 = options.judgeSetup?.chosen ? "" : firstRunJudgeForm(options);
   return '<section aria-label="Private answers" data-first-run-sheet>' + setupStepsSheet({
     id: "first-run-privacy",
     provider: "Olympus",
     steps: [
       { title: "How should Olympus answer with Private items?", text: "Choose how Private answers may be made. You can change this later in Privacy settings." },
       { title: "Connect your choice", text: "Your privacy choice is saved." },
+      ...judge3 ? [{ title: "Who checks privacy?", text: "Choose who reads each item to check whether it is Personal, Private or Secret." }] : [],
       { title: "Verify it works", text: "Check that Olympus is ready with your saved choice." }
     ],
-    stepContent: [choice, connect],
+    stepContent: [choice, connect, ...judge3 ? [judge3] : []],
     finalForm: () => verify3,
-    stepActions: [{ formId: "first-run-privacy-choice", label: "Continue" }, undefined, { formId: "first-run-privacy-form", label: "Check readiness" }],
+    stepActions: [
+      { formId: "first-run-privacy-choice", label: "Continue" },
+      undefined,
+      ...judge3 ? [{ formId: "first-run-judge-form", label: "Save privacy check choice" }] : [],
+      { formId: "first-run-privacy-form", label: "Check readiness" }
+    ],
     footerContent: '<button class="btn primary" type="button" data-first-run-done hidden>Done</button>'
   }) + "</section>";
+}
+function firstRunJudgeForm(options) {
+  const observed = options.judgeSetup?.observed ?? {};
+  const archive = options.judgeRuntime ?? runtimeArchiveFor(`${process.platform}-${process.arch}`);
+  const slow = judgeLocalIsSlow(observed, archive);
+  const estimate = judgeArchiveEstimate(1000, options.judgeSetup?.cloudModel ?? DEFAULT_VENICE_JUDGE_MODEL, observed);
+  const count = judgeCount(estimate.items);
+  const localTime = estimate.measuredHours !== undefined ? `${judgeDuration(estimate.measuredHours)} for ${count} items, measured on this computer (${judgeCount(estimate.measuredPerMinute)} items a minute).` : `Time for ${count} items: not measured yet.${archive?.gpu === false ? " The built-in privacy checker uses only the CPU on this computer and may be slow." : ""}`;
+  return '<form id="first-run-judge-form" method="post" action="/dashboard/models/judge" data-judge-choice data-first-run-judge>' + `<label class="modelcard"><input type="radio" name="choice" value="local"${slow ? "" : " checked"}> <b>This computer</b><p>Free. ${escapeHtml(localTime)}</p></label>` + `<label class="modelcard"><input type="radio" name="choice" value="venice"${slow ? " checked" : ""}> <b>Venice${slow ? " — Recommended" : ""}</b><p>${escapeHtml(judgeDuration(estimate.cloudHours))} and ${escapeHtml(judgeMoney(estimate.cloudDollars).toLowerCase())} for ${count} items, charged to your Venice account.</p></label>` + "<p>Choosing Venice lets it read every item, including Private items, to check privacy. End-to-end encryption is not available yet.</p>" + `<label>Total Venice spending limit in dollars<input class="keyfield" type="number" name="cap_dollars" min="0" step="0.01" value="${judgeDefaultCapDollars(estimate.cloudDollars)}"></label>` + "<p>Olympus stops sending privacy checks to Venice at this limit. You can change your choice and limit later in Privacy settings.</p>" + '<span data-action-message role="status"></span></form>';
 }
 function localModelsSheet() {
   const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Olympus tests the answer model before saving it. Your existing search index stays unchanged.</p><button class="btn primary" type="submit">Connect answer model</button><span data-action-message role="status"></span></form>';
@@ -186171,6 +186237,8 @@ var init_model_setup2 = __esm(() => {
   init_privacy_language();
   init_source_dashboard();
   init_components();
+  init_judge_spending();
+  init_manifest2();
 });
 
 // src/workers/dashboard/pages/local.ts
@@ -186206,7 +186274,7 @@ function renderDashboardKeysPage(view4, options) {
     lockedGate2(options),
     dashboardPrivacyTabs("settings", token),
     `<section id="whats-private"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml(`${home2}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_PRIVACY_LANDING}`)}" data-privacy-open>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
-    `<section id="private-routing"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml(mode.id)}"><div class="smain"><b>${escapeHtml(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml(home2)}">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view4.model_setup) + `<div${view4.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view4.model_setup, { heading: false })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
+    `<section id="private-routing"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml(mode.id)}"><div class="smain"><b>${escapeHtml(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml(home2)}">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view4.model_setup) + `<div${view4.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view4.model_setup, { heading: false, judgeSetup: options?.judgeSetup })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
     renderZkapiPrivacy(options, token),
     view4.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     renderJudgeChoice(view4, options)
@@ -186608,28 +186676,6 @@ function renderJudgeChoice(view4, options) {
     <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: ${measured ? `measured from its own recent sorting, ${judgeCount(estimate.measuredPerMinute)} items a minute while it sorts.` : `not measured here yet, so the range is from an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ.`} Times assume this computer sorts about 8 hours a night. ${held} Venice${status.cloudModel ? ` (${escapeHtml(status.cloudModel)})` : ""}: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
-}
-function judgeMoney(dollars2, bare = false) {
-  if (dollars2 === null || dollars2 === undefined)
-    return "Cost unavailable";
-  const text4 = dollars2 > 0 && dollars2 < 0.005 ? "less than $0.01" : dollars2.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return bare ? text4 : `About ${text4}`;
-}
-function judgeHours(n) {
-  return n.toLocaleString("en-US", { maximumFractionDigits: 1 });
-}
-function judgeCount(n) {
-  const rounded2 = n >= 1000 ? Math.round(n / 100) * 100 : n >= 100 ? Math.round(n / 10) * 10 : Math.round(n);
-  return rounded2.toLocaleString("en-US");
-}
-function judgeDuration(hours) {
-  const minutes = Math.max(1, Math.round(hours * 60));
-  if (minutes < 60)
-    return `About ${minutes} minute${minutes === 1 ? "" : "s"}`;
-  if (hours < 8)
-    return `About ${judgeHours(hours)} hour${judgeHours(hours) === "1" ? "" : "s"}`;
-  const nights = Math.round(hours / 8);
-  return `About ${nights} night${nights === 1 ? "" : "s"} (${Math.round(hours)} hours)`;
 }
 var CONNECTOR_DIALOG_ID = "build-connector", CONNECTOR_DIALOG_HEADING = "Build a connector with your agent", CONNECTOR_DIALOG_INTRO, CONNECTOR_PROMPT, W, SYNC_ROUTE_SOURCES, SOURCE_TILE_LINES, CONNECTED_STATES, MESSAGING_SOURCES, SOURCES_CSS = `
 .srcrows { display: grid; gap: 10px; max-width: 760px; }
