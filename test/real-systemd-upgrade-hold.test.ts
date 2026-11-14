@@ -50,9 +50,14 @@ describe.skipIf(!REAL)('the upgrade copy under a real systemd user unit', () => 
       import { Database } from 'bun:sqlite';
       import { appendFileSync } from 'node:fs';
       const db = new Database(${JSON.stringify(store)});
-      db.exec("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE; INSERT INTO kept (value) VALUES ('engine');");
+      db.exec('PRAGMA journal_mode = WAL');
+      db.exec('BEGIN IMMEDIATE');
+      db.exec("INSERT INTO kept (value) VALUES ('engine')");
+      if (!db.inTransaction) throw new Error('the stand-in holds no write');
       appendFileSync(${JSON.stringify(opened)}, process.pid + '\\n');
-      setInterval(() => {}, 60_000);
+      // The timer keeps the connection referenced: a collected one closes,
+      // and its write with it.
+      setInterval(() => { if (!db.inTransaction) process.exit(1); }, 1_000);
     `);
     const installed = installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: scratch });
     // The real unit, with the stand-in as its engine.
