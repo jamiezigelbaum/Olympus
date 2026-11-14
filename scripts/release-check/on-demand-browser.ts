@@ -312,8 +312,9 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         await send('Page.setInterceptFileChooserDialog', { enabled: true }, tab.session);
         try {
           await click(tab.session, folder.source === 'google_drive' ? ['New', 'Create new'] : ['Upload', 'Upload or drop']);
-          // Not 'File': it starts Dropbox's "File requests" link too (run 43601843090 landed on /requests).
-          await click(tab.session, folder.source === 'google_drive' ? ['File upload'] : ['Files']);
+          // Dropbox's Upload menu item is "File"; it also starts the "File requests" link (run 43601843090 landed on
+          // /requests), so the open menu's item wins (providerClickExpression prefers [role=menu]).
+          await click(tab.session, folder.source === 'google_drive' ? ['File upload'] : ['File']);
           // A chooser opened from a script click needs user activation the page may not grant (Dropbox, run 43599034232):
           // then the page's own file input takes the file directly.
           let input = await until(async () => choosers.has(tab.session), 'chooser', 15_000).then(() => choosers.get(tab.session), () => undefined);
