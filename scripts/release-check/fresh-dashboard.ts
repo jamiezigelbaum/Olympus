@@ -224,16 +224,23 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     };
     const card = async (s: LiveSourceSpec): Promise<any> => sourceCard((await dashboardView()).view, s.id);
     const connected = sourceConnected;
+    let navigationError = '';
     const navigate = async (path: string): Promise<boolean> => {
       frameSessions.clear();
       const navigation = await browser!.send('Page.navigate', { url: new URL(path, url).href }, session);
+      navigationError = navigation.errorText ?? '';
       if (navigation.errorText) return false;
       await until(async () => navigated.get(session) === navigation.loaderId, 'dashboard navigation did not commit');
       return true;
     };
     // Home with no source yet shows only its status card, so either marker means the page drew.
     const reload = async (path = '/dashboard', ready = `!!document.querySelector('.source-name, [data-home-status]')`) => {
-      if (!await navigate(path)) throw new Error(`dashboard navigation to ${path} failed`);
+      // A saved setup choice can restart the engine, so a refused load is retried until the engine is back.
+      const stopAt = Date.now() + (timings.timeoutMs ?? 90_000);
+      while (!await navigate(path)) {
+        if (Date.now() >= stopAt) throw new Error(`dashboard navigation to ${path} failed: ${navigationError}`);
+        await sleep(timings.pollMs ?? 1000);
+      }
       await until(async () => !!await panel<boolean>(ready, Boolean), `dashboard reload of ${path} failed`);
     };
     const timingSource = (folder: SeedFolder): LiveSourceSpec => ({ id: folder.source, label: folder.source === 'dropbox' ? 'Dropbox' : 'Google Drive' });
