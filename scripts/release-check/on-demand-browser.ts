@@ -58,7 +58,7 @@ const CONTROL_NAMES = `(e) => [e.getAttribute('aria-label'), e.textContent, (e.i
  * (Drive) act on mousedown/mouseup, so send those before the click. */
 /** Presses the first visible control with one of these names; one inside an open dialog wins (a dialog's Create, not the toolbar's). */
 export function providerClickExpression(labels: readonly string[]): string {
-  return `(() => {const names=${CONTROL_NAMES};const named=${PROVIDER_CONTROLS}.filter(e=>names(e).some(value=>${JSON.stringify(labels)}.some(label=>value===label || value.startsWith(label+' '))));const e=named.find(e=>e.closest('[role=dialog],[role=alertdialog],[aria-modal=true]'))||named[0];if(!e||e.disabled||e.getAttribute('aria-disabled')==='true')return false;for(const type of ['mousedown','mouseup'])e.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,view:window}));e.click();return true;})()`;
+  return `(() => {const names=${CONTROL_NAMES};const named=${PROVIDER_CONTROLS}.filter(e=>names(e).some(value=>${JSON.stringify(labels)}.some(label=>value===label || value.startsWith(label+' '))));const e=named.find(e=>e.closest('[role=dialog],[role=alertdialog],[aria-modal=true],[role=menu]'))||named[0];if(!e||e.disabled||e.getAttribute('aria-disabled')==='true')return false;for(const type of ['mousedown','mouseup'])e.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,view:window}));e.click();return true;})()`;
 }
 
 /** Whether a Dropbox listing row (not a toast or the rename box) names this folder exactly. */
@@ -312,7 +312,8 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         await send('Page.setInterceptFileChooserDialog', { enabled: true }, tab.session);
         try {
           await click(tab.session, folder.source === 'google_drive' ? ['New', 'Create new'] : ['Upload', 'Upload or drop']);
-          await click(tab.session, folder.source === 'google_drive' ? ['File upload'] : ['Files', 'File']);
+          // Not 'File': it starts Dropbox's "File requests" link too (run 43601843090 landed on /requests).
+          await click(tab.session, folder.source === 'google_drive' ? ['File upload'] : ['Files']);
           // A chooser opened from a script click needs user activation the page may not grant (Dropbox, run 43599034232):
           // then the page's own file input takes the file directly.
           let input = await until(async () => choosers.has(tab.session), 'chooser', 15_000).then(() => choosers.get(tab.session), () => undefined);
