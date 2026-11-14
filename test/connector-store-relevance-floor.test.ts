@@ -189,6 +189,15 @@ describe('the private match floor', () => {
       } as never);
       expect(hitIds(near).sort()).toEqual(['letter', 'mandate']);
       expect(near.matchCount?.matchedItems).toBe(0);
+      // The search itself carries the same below-bar rows, so a reranked pool
+      // needs no second vector scan.
+      const searched = await adapter({
+        query: 'zzq below',
+        maxResults: 5,
+        corpus: { corpusId: store.corpusId, family: 'file', trustDomain: 'secure_local' },
+        context: { allowedTrustDomains: ['secure_local'] },
+      } as never);
+      expect(hitIds({ hits: searched.semanticNeighbourHits ?? [] }).sort()).toEqual(['letter', 'mandate']);
 
       const lanes = privateLanes(store, provider);
       // "notary" and "below" are only in the mandate: one match, and the

@@ -16578,9 +16578,14 @@ async function hybridConnectorStoreSearch(
     ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
   }), keywordLane);
 
+  const vettedRows = new Set(vectorRows.map((row) => row.sourceItem.localItemId));
+  const semanticNeighbourHits = scoredVectorRows
+    .filter((row) => !vettedRows.has(row.sourceItem.localItemId))
+    .map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope));
   return {
     hits,
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
+    ...(semanticNeighbourHits.length > 0 ? { semanticNeighbourHits } : {}),
     latencyMs: Date.now() - startedAt,
     // Per-lane candidate counts: keyword, vector, and the fused cut — the
     // same audit fields the Dropbox retrieval audit records

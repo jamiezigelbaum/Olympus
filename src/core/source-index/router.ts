@@ -157,6 +157,13 @@ export interface SourceIndexCorpusSearchResponse {
    * it (#1354). Search routes never return it.
    */
   storeRelevance?: SourceIndexStoreRelevance;
+  /**
+   * Internal: the store's nearest semantic rows that fell under its relevance
+   * bar in this same search, nearest first. They are never matches and never
+   * counted; a reranked pool may seat them after the store's matches. Read
+   * from the search the store already ran, so no second vector scan is paid.
+   */
+  semanticNeighbourHits?: readonly SourceIndexSearchHit[];
   rawExposed: false;
 }
 
@@ -586,26 +593,17 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
         if (metadataMatches) return metadataMatches(corpusRequest);
         const response = await adapter(corpusRequest);
         // A reranked pool draws each store's share from its matches first,
-        // then its nearest semantic neighbours: a below-bar vector hit can
-        // still be the answer, and the reranker decides. Neighbours are never
-        // matches, so match counts stay the store's own.
+        // then its nearest semantic neighbours from the same search: a
+        // below-bar vector hit can still be the answer, and the reranker
+        // decides. Neighbours are never matches, so match counts stay the
+        // store's own.
         const depth = request.poolAllocation?.storeDepth;
-        if (depth === undefined || !adapter.semanticNeighbours || response.hits.length >= depth) return response;
-        try {
-          const neighbours = await adapter.semanticNeighbours({ ...corpusRequest, maxResults: depth });
-          const key = (hit: SourceIndexCorpusSearchResponse['hits'][number]) =>
-            `${hit.sourceItem.providerItemId}\u0000${hit.sourceItem.localItemId ?? ''}`;
-          const seen = new Set(response.hits.map(key));
-          const added = neighbours.hits.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
-          if (added.length === 0) return response;
-          return {
-            ...response,
-            hits: [...response.hits, ...added],
-            ...(neighbours.laneAudits?.length ? { laneAudits: [...(response.laneAudits ?? []), ...neighbours.laneAudits] } : {}),
-          };
-        } catch {
-          return response;
-        }
+        const neighbours = response.semanticNeighbourHits;
+        if (depth === undefined || !neighbours?.length || response.hits.length >= depth) return response;
+        const key = (hit: SourceIndexSearchHit) => `${hit.sourceItem.providerItemId}\u0000${hit.sourceItem.localItemId ?? ''}`;
+        const seen = new Set(response.hits.map(key));
+        const added = neighbours.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
+        return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
       }),
       laneTimeoutMs,
       corpus.corpusId,

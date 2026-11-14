@@ -134,10 +134,10 @@ describe('a store whose matches fall short of its pool depth fills the rest with
     const { input } = packInput();
     const item = (id: string) => ({ family: 'chat' as const, provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: id });
     const hit = (id: string) => ({ sourceItem: item(id), provenance: { sourceItem: item(id), citation: { title: id } }, rawExposed: false as const });
-    const below: SourceIndexCorpusSearchAdapter = Object.assign(
-      () => ({ hits: [], matchCount: { matchedItems: 0, contentMatchedItems: 0, saturated: false }, latencyMs: 1, rawExposed: false as const }),
-      { semanticNeighbours: async () => ({ hits: [hit('chat-answer'), hit('chat-other')], latencyMs: 1, rawExposed: false as const }) },
-    );
+    const below: SourceIndexCorpusSearchAdapter = () => ({
+      hits: [], semanticNeighbourHits: [hit('chat-answer'), hit('chat-other')],
+      matchCount: { matchedItems: 0, contentMatchedItems: 0, saturated: false }, latencyMs: 1, rawExposed: false as const,
+    });
     const provider: LocalContentProvider = {
       async fetchLocalContent(request) {
         const id = request.provenance.sourceItem.providerItemId;

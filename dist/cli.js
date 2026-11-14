@@ -40997,9 +40997,12 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
     ...resultProjector ? { resultProjector } : {},
     ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
   }), keywordLane);
+  const vettedRows = new Set(vectorRows.map((row) => row.sourceItem.localItemId));
+  const semanticNeighbourHits = scoredVectorRows.filter((row) => !vettedRows.has(row.sourceItem.localItemId)).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope));
   return {
     hits,
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
+    ...semanticNeighbourHits.length > 0 ? { semanticNeighbourHits } : {},
     latencyMs: Date.now() - startedAt,
     laneAudits: [
       { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
@@ -83839,23 +83842,13 @@ async function routePreparedSourceIndexSearch(options) {
         return metadataMatches(corpusRequest);
       const response = await adapter(corpusRequest);
       const depth = request.poolAllocation?.storeDepth;
-      if (depth === undefined || !adapter.semanticNeighbours || response.hits.length >= depth)
+      const neighbours = response.semanticNeighbourHits;
+      if (depth === undefined || !neighbours?.length || response.hits.length >= depth)
         return response;
-      try {
-        const neighbours = await adapter.semanticNeighbours({ ...corpusRequest, maxResults: depth });
-        const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId ?? ""}`;
-        const seen = new Set(response.hits.map(key));
-        const added = neighbours.hits.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
-        if (added.length === 0)
-          return response;
-        return {
-          ...response,
-          hits: [...response.hits, ...added],
-          ...neighbours.laneAudits?.length ? { laneAudits: [...response.laneAudits ?? [], ...neighbours.laneAudits] } : {}
-        };
-      } catch {
-        return response;
-      }
+      const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId ?? ""}`;
+      const seen = new Set(response.hits.map(key));
+      const added = neighbours.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
+      return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
     }), laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
     return { corpus, outcome, retrievalState };
   }));
