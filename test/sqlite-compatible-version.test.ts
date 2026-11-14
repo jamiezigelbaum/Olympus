@@ -4,7 +4,7 @@
 // "start the previous build". Everything else raises the compatible version.
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { upgradeInFlight } from './helpers/upgrade-in-flight.ts';
@@ -30,9 +30,12 @@ afterEach(() => {
 });
 
 function home(): Record<string, string> {
-  const root = mkdtempSync(join(tmpdir(), 'olympus-compatible-version-'));
-  roots.push(root);
-  const env = { HOME: root, XDG_DATA_HOME: join(root, '.local', 'share') };
+  // HOME is the data root itself, where the store copies live (boot-progress.ts ownedBackup).
+  const base = mkdtempSync(join(tmpdir(), 'olympus-compatible-version-'));
+  roots.push(base);
+  const root = join(base, 'openclaw', 'olympus');
+  mkdirSync(root, { recursive: true });
+  const env = { HOME: root, XDG_DATA_HOME: base, XDG_CONFIG_HOME: join(base, 'config'), XDG_STATE_HOME: join(base, 'state'), XDG_CACHE_HOME: join(base, 'cache') };
   upgradeInFlight(env);
   return env;
 }

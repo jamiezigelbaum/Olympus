@@ -14,9 +14,9 @@
 // failed upgrade can put them back before the previous version starts.
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
-import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { olympusDataRoot, sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
 export const BOOT_PROGRESS_SCHEMA = 'olympus.boot-progress.v1';
 
@@ -352,7 +352,12 @@ export function recordSchemaBackup(env: LayoutEnv, entry: { storeId: string; dbP
 
 interface SchemaBackupEntry { storeId: string; dbPath: string; backupPath: string }
 
-function schemaBackups(env: LayoutEnv): SchemaBackupEntry[] {
+/**
+ * The recorded copies. `owned` (the restore and the commit) keeps only the
+ * product's own copies inside the live data root; a forget and the record's
+ * own upkeep see every line, since a forget must reach every copy of its rows.
+ */
+function schemaBackups(env: LayoutEnv, owned = true): SchemaBackupEntry[] {
   let text: string;
   try {
     text = readFileSync(sharedDataPath('schema-backups', env), 'utf8');
@@ -364,7 +369,8 @@ function schemaBackups(env: LayoutEnv): SchemaBackupEntry[] {
     if (!line.trim()) continue;
     try {
       const entry = JSON.parse(line) as Partial<SchemaBackupEntry>;
-      if (typeof entry.storeId === 'string' && typeof entry.dbPath === 'string' && typeof entry.backupPath === 'string') {
+      if (typeof entry.storeId === 'string' && typeof entry.dbPath === 'string' && typeof entry.backupPath === 'string'
+        && (!owned || ownedBackup(env, entry.dbPath, entry.backupPath))) {
         entries.set(entry.backupPath, entry as SchemaBackupEntry);
       }
     } catch {
@@ -372,6 +378,23 @@ function schemaBackups(env: LayoutEnv): SchemaBackupEntry[] {
     }
   }
   return [...entries.values()];
+}
+
+/** The product's own names for a copy: `<store>.pre-schema-<n|retired|upgrade>.bak`. */
+const BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade)\.bak$/;
+
+/**
+ * Whether a recorded copy is one this product made of a store in the live data
+ * root: named exactly `<store>` plus a copy suffix, beside its store, inside
+ * the root. A line naming anything else (a whole-root backup kept beside the
+ * root, a path outside it) is never restored or removed, whatever wrote it.
+ */
+function ownedBackup(env: LayoutEnv, dbPath: string, backupPath: string): boolean {
+  if (!isAbsolute(dbPath) || !isAbsolute(backupPath)) return false;
+  const suffix = backupPath.slice(dbPath.length);
+  if (!backupPath.startsWith(dbPath) || !BACKUP_NAME.test(suffix) || suffix !== BACKUP_NAME.exec(suffix)![0]) return false;
+  const inside = relative(resolve(olympusDataRoot(env)), resolve(backupPath));
+  return inside !== '' && !inside.startsWith('..') && !isAbsolute(inside);
 }
 
 function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
@@ -442,7 +465,7 @@ function removeAbandonedCopiesOfRecorded(env: LayoutEnv): void {
  * how many there are; a dry run removes nothing.
  */
 export function removeAllSchemaBackups(env: LayoutEnv, dryRun: boolean): number {
-  const copies = [...new Set(schemaBackups(env).flatMap((entry) => preSchemaBackupsOf(entry.dbPath)))];
+  const copies = [...new Set(schemaBackups(env, false).flatMap((entry) => preSchemaBackupsOf(entry.dbPath)))];
   if (dryRun) return copies.length;
   for (const copy of copies) rmSync(copy, { recursive: true, force: true });
   pruneSchemaBackupRecord(env);
@@ -452,7 +475,7 @@ export function removeAllSchemaBackups(env: LayoutEnv, dryRun: boolean): number 
 function pruneSchemaBackupRecord(env: LayoutEnv): void {
   const path = sharedDataPath('schema-backups', env);
   if (!existsSync(path)) return;
-  const kept = schemaBackups(env).filter((entry) => existsSync(entry.backupPath));
+  const kept = schemaBackups(env, false).filter((entry) => existsSync(entry.backupPath));
   if (kept.length === 0) rmSync(path, { force: true });
   else writePrivateFileAtomicSync(path, kept.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
 }

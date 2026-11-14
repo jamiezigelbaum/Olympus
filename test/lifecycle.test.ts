@@ -1035,9 +1035,12 @@ describe('versioned Olympus worker lifecycle', () => {
       const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-retired-state-'));
       const manager = linuxManager('active');
       const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share') };
-      const retired = join(home, 'classification.jsonl.embedding-prefilter.tier-ledger.sqlite');
+      const retired = join(olympusDataRoot(env), 'classification.jsonl.embedding-prefilter.tier-ledger.sqlite');
       try {
-        writeFileSync(retired, 'retired ledger');
+        mkdirSync(olympusDataRoot(env), { recursive: true });
+        const seed = new Database(retired, { create: true });
+        seed.exec("CREATE TABLE kept (body TEXT); INSERT INTO kept VALUES ('retired ledger')");
+        seed.close();
         // A store for the upgrade to copy: retired state is moved aside only while an upgrade is in flight.
         mkdirSync(olympusDataRoot(env), { recursive: true });
         new Database(join(olympusDataRoot(env), 'store.sqlite'), { create: true }).close();
@@ -1071,7 +1074,9 @@ describe('versioned Olympus worker lifecycle', () => {
           expect(existsSync(retired)).toBe(false);
         } else {
           expect(String(error)).toContain('did not answer its loopback readiness probe');
-          expect(readFileSync(retired, 'utf8')).toBe('retired ledger');
+          const back = new Database(retired, { readonly: true });
+          expect(back.query('SELECT body FROM kept').get()).toEqual({ body: 'retired ledger' });
+          back.close();
         }
       } finally {
         makeTreeWritable(home);

@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn as spawnProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -44,9 +44,12 @@ afterEach(() => {
  * copy is of a file outside the tests' view, made an hour ago.
  */
 function home(options: { upgrade?: boolean } = {}): Record<string, string> {
-  const root = mkdtempSync(join(tmpdir(), 'olympus-boot-progress-'));
-  roots.push(root);
-  const env = { HOME: root, XDG_DATA_HOME: join(root, '.local', 'share') };
+  // HOME is the data root itself, where the store copies live (boot-progress.ts ownedBackup).
+  const base = mkdtempSync(join(tmpdir(), 'olympus-boot-progress-'));
+  roots.push(base);
+  const root = join(base, 'openclaw', 'olympus');
+  mkdirSync(root, { recursive: true });
+  const env = { HOME: root, XDG_DATA_HOME: base, XDG_CONFIG_HOME: join(base, 'config'), XDG_STATE_HOME: join(base, 'state'), XDG_CACHE_HOME: join(base, 'cache') };
   if (options.upgrade !== false) upgradeInFlight(env);
   return env;
 }
@@ -259,6 +262,26 @@ describe('with no worker upgrade in flight the boot leaves no copy', () => {
     expect(preSchemaBackupsOf(path)).toEqual([]);
     expect(preSchemaBackupsOf(left)).toEqual([]);
     expect(existsSync(join(env.HOME!, 'other', `upgraded.sqlite${UPGRADE_COPY_SUFFIX}`))).toBe(false);
+  });
+});
+
+describe('a commit and a restore touch only the product\'s own copies in the live data root', () => {
+  test('a recorded line naming a kept whole-root backup, or a file not named as a copy, is left alone', () => {
+    const env = home();
+    // A whole-root backup kept beside the live root, as an owner keeps one before an install.
+    const kept = join(env.XDG_DATA_HOME!, 'openclaw', 'olympus.pre-06f7f555');
+    mkdirSync(kept, { recursive: true });
+    writeFileSync(join(kept, 'store.sqlite'), 'kept');
+    writeFileSync(join(kept, 'store.sqlite.pre-schema-7.bak'), 'kept copy');
+    recordSchemaBackup(env, { storeId: 'kept', dbPath: join(kept, 'store.sqlite'), backupPath: join(kept, 'store.sqlite.pre-schema-7.bak') });
+    // Inside the root, but not a copy's name.
+    writeFileSync(join(env.HOME!, 'notes.sqlite'), 'live');
+    recordSchemaBackup(env, { storeId: 'odd', dbPath: join(env.HOME!, 'notes'), backupPath: join(env.HOME!, 'notes.sqlite') });
+    expect(removeRecordedSchemaBackups(env)).toBe(1);
+    expect(restoreSchemaBackupsSince(env, 0)).toEqual([]);
+    expect(readFileSync(join(kept, 'store.sqlite.pre-schema-7.bak'), 'utf8')).toBe('kept copy');
+    expect(readFileSync(join(kept, 'store.sqlite'), 'utf8')).toBe('kept');
+    expect(readFileSync(join(env.HOME!, 'notes.sqlite'), 'utf8')).toBe('live');
   });
 });
 

@@ -2316,7 +2316,7 @@ function withSqliteFiles(path) {
 // scripts/source-embedding-drain.ts
 import { createHash as createHash13 } from "node:crypto";
 import { existsSync as existsSync23, lstatSync as lstatSync11, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname25, isAbsolute as isAbsolute14 } from "node:path";
+import { dirname as dirname25, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
 import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
@@ -10188,7 +10188,7 @@ import { dirname as dirname14 } from "node:path";
 
 // src/core/boot-progress.ts
 import { appendFileSync, existsSync as existsSync11, mkdirSync as mkdirSync8, readdirSync as readdirSync2, readFileSync as readFileSync14, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync8, utimesSync } from "node:fs";
-import { basename as basename3, dirname as dirname13, join as join16 } from "node:path";
+import { basename as basename3, dirname as dirname13, isAbsolute as isAbsolute9, join as join16, relative as relative5, resolve as resolve6 } from "node:path";
 var WRITE_INTERVAL_MS = 1000;
 var current2;
 var front;
@@ -10283,7 +10283,7 @@ function recordSchemaBackup(env, entry) {
   appendFileSync(path, `${JSON.stringify(entry)}
 `, { mode: 384 });
 }
-function schemaBackups(env) {
+function schemaBackups(env, owned = true) {
   let text;
   try {
     text = readFileSync14(sharedDataPath("schema-backups", env), "utf8");
@@ -10297,12 +10297,22 @@ function schemaBackups(env) {
       continue;
     try {
       const entry = JSON.parse(line);
-      if (typeof entry.storeId === "string" && typeof entry.dbPath === "string" && typeof entry.backupPath === "string") {
+      if (typeof entry.storeId === "string" && typeof entry.dbPath === "string" && typeof entry.backupPath === "string" && (!owned || ownedBackup(env, entry.dbPath, entry.backupPath))) {
         entries.set(entry.backupPath, entry);
       }
     } catch {}
   }
   return [...entries.values()];
+}
+var BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade)\.bak$/;
+function ownedBackup(env, dbPath, backupPath) {
+  if (!isAbsolute9(dbPath) || !isAbsolute9(backupPath))
+    return false;
+  const suffix = backupPath.slice(dbPath.length);
+  if (!backupPath.startsWith(dbPath) || !BACKUP_NAME.test(suffix) || suffix !== BACKUP_NAME.exec(suffix)[0])
+    return false;
+  const inside = relative5(resolve6(olympusDataRoot(env)), resolve6(backupPath));
+  return inside !== "" && !inside.startsWith("..") && !isAbsolute9(inside);
 }
 
 // src/core/engine-heartbeat.ts
@@ -18607,7 +18617,7 @@ import {
   statSync as statSync14,
   writeFileSync as writeFileSync5
 } from "node:fs";
-import { basename as basename5, dirname as dirname18, isAbsolute as isAbsolute10, join as join19, resolve as resolve7 } from "node:path";
+import { basename as basename5, dirname as dirname18, isAbsolute as isAbsolute11, join as join19, resolve as resolve8 } from "node:path";
 
 // src/core/remote-access.ts
 import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
@@ -18651,7 +18661,7 @@ function olympusDataDir(env = process.env) {
 
 // src/core/store-identity.ts
 import { existsSync as existsSync16, realpathSync as realpathSync4, statSync as statSync13 } from "node:fs";
-import { basename as basename4, dirname as dirname17, isAbsolute as isAbsolute9, join as join18, relative as relative5, resolve as resolve6, sep as sep5 } from "node:path";
+import { basename as basename4, dirname as dirname17, isAbsolute as isAbsolute10, join as join18, relative as relative6, resolve as resolve7, sep as sep5 } from "node:path";
 var LAYOUTS2 = ["folder", "legacy"];
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
@@ -18667,7 +18677,7 @@ function storePathKey(path) {
     return realpathSync4(path);
   } catch {}
   const folder = dirname17(path);
-  let real = resolve6(folder);
+  let real = resolve7(folder);
   try {
     real = realpathSync4(folder);
   } catch {}
@@ -18675,7 +18685,7 @@ function storePathKey(path) {
 }
 function registryKey(env = process.env) {
   const path = sourceRegistryPath(env);
-  let folder = resolve6(dirname17(path));
+  let folder = resolve7(dirname17(path));
   try {
     folder = realpathSync4.native(folder);
   } catch {}
@@ -18768,7 +18778,7 @@ function storePlacementView(env = process.env) {
   const folderRoots = () => {
     const roots = new Set;
     try {
-      roots.add(resolve6(accountFoldersRoot(env)));
+      roots.add(resolve7(accountFoldersRoot(env)));
       if (root !== undefined)
         roots.add(join18(realpathSync4(root), ACCOUNT_FOLDERS_DIR));
     } catch {}
@@ -18776,8 +18786,8 @@ function storePlacementView(env = process.env) {
   };
   const folderPlace = (path) => {
     for (const folders of folderRoots()) {
-      const inside = relative5(folders, path);
-      if (inside.startsWith("..") || isAbsolute9(inside))
+      const inside = relative6(folders, path);
+      if (inside.startsWith("..") || isAbsolute10(inside))
         continue;
       const [sourceId, slot, stores, file, ...rest] = inside.split(sep5);
       if (!sourceId || !slot || stores !== "stores" || !file?.endsWith(".sqlite") || rest.length > 0)
@@ -18828,7 +18838,7 @@ function storePlacementView(env = process.env) {
       return "kept";
     try {
       const key = storePathKey(path);
-      const inFolder = folderPlace(key) ?? folderPlace(resolve6(path));
+      const inFolder = folderPlace(key) ?? folderPlace(resolve7(path));
       if (state.kind === "missing")
         return inFolder !== undefined || legacyPlaced(key) ? "kept" : "unplaced";
       const identity = placedAt(state.registry).get(key);
@@ -18873,7 +18883,7 @@ function isMissing(path) {
 var MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
-  if (configured && !isAbsolute10(configured))
+  if (configured && !isAbsolute11(configured))
     throw new TypeError(`${MEDIA_CACHE_DIR_ENV} must be an absolute path.`);
   if (!configured)
     olympusDataDir(env);
@@ -18890,11 +18900,11 @@ function isSha256(value) {
 }
 var MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 function isMediaCachePath(path, sha256, dir) {
-  if (!isAbsolute10(path) || !isSha256(sha256) || resolve7(path) !== path)
+  if (!isAbsolute11(path) || !isSha256(sha256) || resolve8(path) !== path)
     return false;
   if (basename5(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename5(dirname18(path))))
     return false;
-  if (dir !== undefined && dirname18(path) !== resolve7(dir))
+  if (dir !== undefined && dirname18(path) !== resolve8(dir))
     return false;
   try {
     const stat = lstatSync8(path);
@@ -18909,7 +18919,7 @@ function mediaHolderName(holder) {
   try {
     return realpathSync5(holder);
   } catch {
-    return resolve7(holder);
+    return resolve8(holder);
   }
 }
 function mediaHolderKey(holder) {
@@ -19034,7 +19044,7 @@ function readMarker(marker) {
 }
 function holderGone(marker, markerName, placement) {
   const name = readMarker(marker);
-  if (!name || !isAbsolute10(name) || holderDigest(name) !== markerName)
+  if (!name || !isAbsolute11(name) || holderDigest(name) !== markerName)
     return false;
   if (existsSync17(name))
     return false;
@@ -19619,9 +19629,9 @@ var STOP_WORDS2 = new Set([
 
 // src/workers/classification/tier-set-binding.ts
 import { existsSync as existsSync18 } from "node:fs";
-import { basename as basename6, dirname as dirname19, join as join20, resolve as resolve8 } from "node:path";
+import { basename as basename6, dirname as dirname19, join as join20, resolve as resolve9 } from "node:path";
 function tierStoreDataRoot(storeDbPath) {
-  const folder = dirname19(resolve8(storeDbPath));
+  const folder = dirname19(resolve9(storeDbPath));
   return accountSiblingStorePath(storeDbPath, "secure_local") ? dirname19(dirname19(dirname19(dirname19(folder)))) : folder;
 }
 var tierLedgerIsWithin = pathResolvesWithin;
@@ -19815,10 +19825,10 @@ import { Database as Database5 } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
 import { chmodSync as chmodSync8, existsSync as existsSync19, lstatSync as lstatSync9, mkdirSync as mkdirSync12 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { dirname as dirname21, isAbsolute as isAbsolute12, join as join21 } from "node:path";
+import { dirname as dirname21, isAbsolute as isAbsolute13, join as join21 } from "node:path";
 
 // src/core/remote-connections.ts
-import { dirname as dirname20, isAbsolute as isAbsolute11 } from "node:path";
+import { dirname as dirname20, isAbsolute as isAbsolute12 } from "node:path";
 
 // src/core/operation-caller.ts
 var inProcessRemoteRequests = new WeakSet;
@@ -19870,7 +19880,7 @@ function resolveRemoteConnectionsDbPath(env = process.env) {
 }
 function defaultRemoteConnectionsDbPath(env = process.env) {
   const path = sharedDataPath("remote-connections", env);
-  if (!isAbsolute11(path)) {
+  if (!isAbsolute12(path)) {
     throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
   }
   return path;
@@ -20133,7 +20143,7 @@ function migrations() {
   }];
 }
 function hardenPrivatePath(dbPath) {
-  if (!isAbsolute12(dbPath))
+  if (!isAbsolute13(dbPath))
     throw new TypeError("The AI apps log path must be absolute.");
   const leafDir = dirname21(dbPath);
   if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir9()]).has(leafDir)) {
@@ -32284,7 +32294,7 @@ import { isMainThread as isMainThread4 } from "node:worker_threads";
 import { spawn } from "node:child_process";
 import { closeSync as closeSync12, constants as constants4, existsSync as existsSync22, fstatSync as fstatSync2, openSync as openSync12, readdirSync as readdirSync5, statSync as statSync16 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname23, isAbsolute as isAbsolute13, join as join22 } from "node:path";
+import { delimiter as delimiter2, dirname as dirname23, isAbsolute as isAbsolute14, join as join22 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
@@ -32583,7 +32593,7 @@ function resolveBun() {
     join22(homedir10(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute13(candidate))
+    if (!candidate || !isAbsolute14(candidate))
       continue;
     try {
       if (statSync16(candidate).isFile())
@@ -36388,7 +36398,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!instanceId || !CANONICAL_UUID.test(instanceId)) {
     throw new Error(`${NATIVE_SERVICE_INSTANCE_ID_ENV} must be a canonical UUID for native startup.`);
   }
-  if (!readinessPath || !isAbsolute14(readinessPath)) {
+  if (!readinessPath || !isAbsolute15(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
   const directory = dirname25(readinessPath);
