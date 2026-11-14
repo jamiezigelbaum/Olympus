@@ -238,9 +238,19 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     };
     const timingSource = (folder: SeedFolder): LiveSourceSpec => ({ id: folder.source, label: folder.source === 'dropbox' ? 'Dropbox' : 'Google Drive' });
     const openTimingFolder = async (folder: SeedFolder) => {
-      await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
-      await sourceAction(timingSource(folder), 'Choose folders|Scope|Edit scope');
-      await until(async () => !!await panel<boolean>(`!!${folderRow(ON_DEMAND_FOLDER)}`, Boolean), 'seed folder did not appear in the dashboard picker');
+      // The seed folder can be minutes old; a picker opened before the provider lists it is opened again.
+      for (let attempt = 1; ; attempt++) {
+        await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
+        await sourceAction(timingSource(folder), 'Choose folders|Scope|Edit scope');
+        try {
+          await until(async () => !!await panel<boolean>(`!!${folderRow(ON_DEMAND_FOLDER)}`, Boolean), 'seed folder did not appear in the dashboard picker');
+          return;
+        } catch (error) {
+          if (attempt < 3) continue;
+          const shown = await panel<string[]>(`[...document.querySelectorAll('.frow .fname-text')].map(e=>e.textContent||'').slice(0,20)`, (v: string[]) => Array.isArray(v) && v.length > 0).catch(() => undefined);
+          throw new Error(`${timingSource(folder).label}: seed folder did not appear in the dashboard picker after ${attempt} opens${shown ? ` (picker showed ${JSON.stringify(shown)})` : ' (picker showed no folders)'}`, { cause: error });
+        }
+      }
     };
     const pressedMode = async (): Promise<FolderMode> => {
       const mode = await panel<string>(`(() => {const row=${folderRow(ON_DEMAND_FOLDER)}; return row ? (row.querySelector('[aria-pressed=true][data-key^="picker:seg:"]')?.getAttribute('data-key')?.split(':').pop() || '') : null;})()`, value => typeof value === 'string');
