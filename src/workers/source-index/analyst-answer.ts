@@ -2362,7 +2362,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
   const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...(input.onDemandNotes ?? [])];
   const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
   const finalDraftAnswer = composeReleasedAnswer(
-    unsupportedNoContent ? safeUnsupportedDraft : input.result.answer,
+    unsupportedNoContent ? safeUnsupportedDraft : plainTrustWords(input.result.answer),
     unsupportedNoContent ? [] : releasedUnanswered,
   );
   const originalScanDecision = finalDraftAnswer === originalDraftAnswer
@@ -2542,6 +2542,16 @@ function secretLocationCoverageNotes(detail: EvidencePackBuildDetail): string[] 
   const count = detail.secretLocations?.length ?? 0;
   if (count === 0) return [];
   return [secretLocationCoverageNote(count)];
+}
+
+/**
+ * The model sees each item's trust label in the evidence and sometimes repeats
+ * it ("per the secure_local copy"). The person reads the tier's own name.
+ */
+export function plainTrustWords(answer: string): string {
+  return answer
+    .replace(/\bsecure_local(?:\.[a-z0-9_]+)*\b/gi, 'Private')
+    .replace(/\bpublic_safe(?:\.[a-z0-9_]+)*\b/gi, 'Personal');
 }
 
 function composeReleasedAnswer(answer: string, unanswered: readonly string[]): string {

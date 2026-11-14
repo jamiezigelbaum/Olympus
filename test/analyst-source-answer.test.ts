@@ -3770,3 +3770,9 @@ function citeFirstInternal(pack: EvidencePack): AnalystResult {
     unanswered: [],
   };
 }
+
+test('a trust label the model repeats reaches the person as the tier name', async () => {
+  const { plainTrustWords } = await import('../src/workers/source-index/analyst-answer.ts');
+  expect(plainTrustWords('The code is "ZULE", per the secure_local copy of the PDF [1].')).toBe('The code is "ZULE", per the Private copy of the PDF [1].');
+  expect(plainTrustWords('From secure_local.dropbox and public_safe [2].')).toBe('From Private and Personal [2].');
+});

@@ -86511,7 +86511,7 @@ function releaseAnalystAnswer(input) {
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer2(input.result);
   const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...input.onDemandNotes ?? []];
   const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
-  const finalDraftAnswer = composeReleasedAnswer(unsupportedNoContent ? safeUnsupportedDraft : input.result.answer, unsupportedNoContent ? [] : releasedUnanswered);
+  const finalDraftAnswer = composeReleasedAnswer(unsupportedNoContent ? safeUnsupportedDraft : plainTrustWords(input.result.answer), unsupportedNoContent ? [] : releasedUnanswered);
   const originalScanDecision = finalDraftAnswer === originalDraftAnswer ? undefined : evaluateReleaseGate({
     facts,
     draftAnswer: originalDraftAnswer,
@@ -86622,6 +86622,9 @@ function secretLocationCoverageNotes(detail) {
   if (count === 0)
     return [];
   return [secretLocationCoverageNote(count)];
+}
+function plainTrustWords(answer) {
+  return answer.replace(/\bsecure_local(?:\.[a-z0-9_]+)*\b/gi, "Private").replace(/\bpublic_safe(?:\.[a-z0-9_]+)*\b/gi, "Personal");
 }
 function composeReleasedAnswer(answer, unanswered) {
   if (unanswered.length === 0)
