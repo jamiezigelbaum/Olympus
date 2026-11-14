@@ -9,6 +9,7 @@ import { openFreshDashboard, type FreshDashboard } from './fresh-dashboard.ts';
 import { runFreshOnDemand, type FreshTimingOptions } from './fresh-on-demand.ts';
 import type { OnDemandTimingResult } from './on-demand-timing.ts';
 import { runFreshLimits, type FreshLimitsOptions, type LimitsResult } from './fresh-limits.ts';
+import { memoryCheck, splitRestartCheck, startRssSampler, type RssSample } from './split-watch.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../../src/workers/answer-model-required.ts';
 import { FIRST_RUN_PRIVACY_REQUIRED_TEXT } from '../../src/workers/first-run-privacy-gate.ts';
 import localFirst from '../../config/sovereignty/presets/local-first.json';
@@ -57,6 +58,26 @@ export const redactFreshTimeline = (text: string): string => text.replace(/https
 export const FRESH_MACHINE_SAMPLE = `{ printf 'clock %s | load %s of %s cpus | ' "$(date -u +%H:%M:%S)" "$(cut -d' ' -f1 /proc/loadavg)" "$(nproc)"; ps -u "$(id -un)" -o pcpu=,rss=,args= --sort=-pcpu | head -n 4 | awk '{ n=split($3, a, "/"); m=split($4, b, "/"); printf "%s%% %sMB %s %s %s; ", $1, int($2/1024), a[n], b[m], $5 }'; } 2>/dev/null || true`;
 /** The engine's log lines about judging, embedding and the privacy check: counts and the last 60 lines. */
 export const FRESH_ENGINE_LOG = `{ out=$(systemctl --user cat olympus-engine.service 2>/dev/null | sed -n 's/^StandardOutput=append://p' | head -n 1); log=$(cat "$out" "\${out%.log}.err" 2>/dev/null | grep -iE 'embed|judg|sniffer|classif|privacy check|tier|source-scheduler|gmail' || true); printf 'log %s: matching lines %s (embed %s, judge %s)\\n' "\${out:-not found}" "$(printf '%s\\n' "$log" | grep -c . || true)" "$(printf '%s\\n' "$log" | grep -ic embed || true)" "$(printf '%s\\n' "$log" | grep -icE 'judg|sniffer|classif' || true)"; printf '%s\\n' "$log" | grep -v 'olympus:gmail-list' | tail -n 80 | cut -c1-220; printf 'gmail list pages:\\n'; printf '%s\\n' "$log" | grep 'olympus:gmail-list' | tail -n 60 | cut -c1-260; } || true`;
+
+/** The fresh install's service memory cap (cgroup MemoryMax): the 8 GB case. */
+export const FRESH_MEMORY_CAP_GB = 8;
+/** The service cgroup's limit, peaks and out-of-memory kills, and whether the user manager delegates the memory controller at all. */
+export const FRESH_CGROUP_READ = `cg="/sys/fs/cgroup$(systemctl --user show -p ControlGroup --value olympus-engine.service 2>/dev/null)"
+printf 'max %s\\n' "$(cat "$cg/memory.max" 2>/dev/null || echo none)"
+printf 'peak %s\\n' "$(cat "$cg/memory.peak" 2>/dev/null || echo none)"
+printf 'swap_peak %s\\n' "$(cat "$cg/memory.swap.peak" 2>/dev/null || echo none)"
+printf 'oom_kill %s\\n' "$(awk '/^oom_kill / { print $2 }' "$cg/memory.events" 2>/dev/null || echo none)"
+printf 'high %s\\n' "$(awk '/^high / { print $2 }' "$cg/memory.events" 2>/dev/null || echo none)"`;
+
+/** One line for split.memory from FRESH_CGROUP_READ: the cap in force, the service's peak and swap peak, and any out-of-memory kill. */
+export function cgroupLimit(text: string): string {
+  const field = (name: string) => new RegExp(`^${name} (\\S+)`, 'm').exec(text)?.[1];
+  const max = field('max');
+  const mb = (value?: string) => (value && /^\d+$/.test(value) ? `${Math.round(Number(value) / 2 ** 20)} MB` : 'not read');
+  if (!max || max === 'none') return `no service memory cap could be read (the user manager may not delegate the memory controller), so this is not the 8 GB measurement`;
+  if (max === 'max') return 'the service memory cap was not applied (memory.max is unlimited), so this is not the 8 GB measurement';
+  return `Olympus's service held to ${mb(max)} by its cgroup (an 8 GB budget for Olympus alone, not an 8 GB machine): service peak ${mb(field('peak'))}, service swap peak ${mb(field('swap_peak'))}, out-of-memory kills ${field('oom_kill') ?? 'not read'}, times over the high mark ${field('high') ?? 'not read'}`;
+}
 
 export class FreshInconclusive extends Error {}
 export function validateFreshSources(sources: LiveSourceSpec[]): LiveSourceSpec[] {
@@ -156,6 +177,7 @@ export async function runFreshInstall(machine: Machine, options: FreshOptions): 
   const checks: CheckResult[] = [];
   let onDemandTiming: OnDemandTimingResult | undefined;
   let limits: LimitsResult | undefined;
+  let sampler: { stop(): Promise<RssSample[]> } | undefined;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   let current = 'install';
   let interrupted = false;
@@ -248,6 +270,18 @@ sudo -n install -o olyfresh -g "$(id -gn olyfresh)" -m 600 ${ROOT}/agent.js /hom
       }
     });
     const fresh = freshMachine(machine);
+    // The 8 GB case (lane 1's brief, 14 Nov 2026): the fresh install's whole service (front, background, models, drains) is held
+    // to FRESH_MEMORY_CAP_GB by its cgroup, so split.memory reads what Olympus takes, and whether it swaps, inside 8 GB.
+    const watchSplit = !options.sleep;
+    if (watchSplit) {
+      await recorded('memory-cap', async () => {
+        await exec(asFresh(`mkdir -p "$HOME/.config/systemd/user/olympus-engine.service.d"
+printf '[Service]\\nMemoryMax=${FRESH_MEMORY_CAP_GB}G\\n' > "$HOME/.config/systemd/user/olympus-engine.service.d/rc-memory.conf"
+systemctl --user daemon-reload
+systemctl --user try-restart olympus-engine.service`), 120_000);
+        return `olympus-engine.service MemoryMax=${FRESH_MEMORY_CAP_GB}G`;
+      });
+    }
     await checked('engine-up', async () => {
       await exec(asFresh(`systemctl --user start olympus-engine.service
 for i in $(seq 1 180); do
@@ -341,6 +375,8 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
         return `${count} item(s) indexed`;
       });
     }
+    // Memory of each process from here through the account checks and the model change (split.memory).
+    sampler = watchSplit ? await startRssSampler(fresh).catch(() => undefined) : undefined;
     // Reuse existing status, known-search and optional fresh-item plant checks.
     current = 'live-accounts';
     // A pass keeps the matched item's title out of the report; a failure or skip keeps its reason (counts, refresh
@@ -382,6 +418,17 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
       if (typeof cap === 'number' && spent > cap) throw new Error(`spent past the limit: ${detail}`);
       return detail;
     });
+    if (sampler) {
+      // A Venice answer-model save restarts front and background behind the engine host while the page is probed (split.restart).
+      if (dashboard?.saveAnswerModel) {
+        try { checks.push(await splitRestartCheck(fresh, { saveAnswerModel: (want) => dashboard!.saveAnswerModel!(want) })); }
+        catch (error) { checks.push({ id: 'split.restart', title: 'Engine split: a model change restarts front and background while the page stays up', status: 'fail', detail: `could not run: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` }); }
+      }
+      const samples: RssSample[] = await sampler.stop().catch(() => []);
+      sampler = undefined;
+      const cap = await exec(asFresh(FRESH_CGROUP_READ), 30_000).catch(() => '');
+      checks.push(memoryCheck(samples, 'over the account checks and the model change', cgroupLimit(cap)));
+    }
     if (rerankerOn) {
       await checked('reranker-applied', async () => {
         const counts = (await rerankHealth()).rerank_outcomes ?? {};
@@ -403,6 +450,7 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
     checks.push({ id: `fresh.${current}`, title: current, status: error instanceof FreshInconclusive ? 'skip' : 'fail', detail: error instanceof FreshInconclusive ? `Inconclusive: ${error.message}` : `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
   } finally {
     // Cleanup errors must not prevent service restoration or the report.
+    await sampler?.stop().catch(() => undefined);
     await engine?.close().catch(() => {});
     await dashboard?.close().catch(() => {});
     if (armed) {

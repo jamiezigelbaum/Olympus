@@ -25,7 +25,7 @@ const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
  * processes. The role comes from the command (model processes, embedding drain, relay), the engine host from the port's
  * listener, then the split role from the environment (OLYMPUS_WORKER_ENGINE_ROLE). Works on macOS and Linux.
  */
-export const RSS_SAMPLE = `host=$(lsof -nP -iTCP:${SPLIT_PORT} -sTCP:LISTEN -t 2>/dev/null | head -n 1)
+export const RSS_SAMPLE = `host=$( (lsof -nP -iTCP:${SPLIT_PORT} -sTCP:LISTEN -t 2>/dev/null || ss -ltnpH "sport = :${SPLIT_PORT}" 2>/dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p') | head -n 1)
 out=$(ps axeww -o pid=,rss=,command= 2>/dev/null | awk -v host="$host" '
   function base(path,  n, a) { n = split(path, a, "/"); return a[n] }
   {
@@ -41,16 +41,18 @@ out=$(ps axeww -o pid=,rss=,command= 2>/dev/null | awk -v host="$host" '
     else if (cmd ~ /OLYMPUS_WORKER_ENGINE_ROLE=front/) role = "front";
     else if (cmd ~ /OLYMPUS_WORKER_ENGINE_ROLE=background/) role = "background";
     else if (cmd ~ /[Oo]lympus/ && cmd ~ /(bun|node)/) role = "other-olympus";
-    if (role != "") print role, pid, rss;
+    sw = 0; f = "/proc/" pid "/status";
+    if (role != "") { while ((getline l < f) > 0) if (l ~ /^VmSwap:/) { split(l, v, " "); sw = v[2] } close(f); print role, pid, rss, sw }
     else if (rss > 0) other[base($3)] += rss;
   }
   END { for (name in other) print "other", name, other[name] }')
 printf '%s\\n' "$out" | grep -v '^other '
 printf '%s\\n' "$out" | grep '^other ' | sort -k3,3nr | head -n 5
-printf 'ram %s\\n' "$( (sysctl -n hw.memsize 2>/dev/null) || awk '/MemTotal/ { print $2 * 1024 }' /proc/meminfo)"`;
+printf 'ram %s\\n' "$( (sysctl -n hw.memsize 2>/dev/null) || awk '/MemTotal/ { print $2 * 1024 }' /proc/meminfo)"
+printf 'swap %s\\n' "$( (awk '/SwapTotal/ { t = $2 } /SwapFree/ { f = $2 } END { if (t != "") print t - f }' /proc/meminfo 2>/dev/null) || true)"`;
 
 /** The engine host (the port's listener) and the top front process, as `host=<pid> front=<pid>`. */
-export const SPLIT_PIDS = `host=$(lsof -nP -iTCP:${SPLIT_PORT} -sTCP:LISTEN -t 2>/dev/null | head -n 1)
+export const SPLIT_PIDS = `host=$( (lsof -nP -iTCP:${SPLIT_PORT} -sTCP:LISTEN -t 2>/dev/null || ss -ltnpH "sport = :${SPLIT_PORT}" 2>/dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p') | head -n 1)
 front=$(ps axeww -o pid=,ppid=,command= 2>/dev/null | awk '/OLYMPUS_WORKER_ENGINE_ROLE=front/ && !/ps axeww|awk / { r[$1] = $2 } END { for (p in r) if (!(r[p] in r)) { print p; exit } }')
 printf 'host=%s front=%s\\n' "\${host:-}" "\${front:-}"`;
 
@@ -84,32 +86,34 @@ export function probeCounts(text: string): ProbeCounts {
   return counts;
 }
 
-export interface RssSample { roles: Array<{ role: string; pid: number; kb: number }>; others: Array<{ name: string; kb: number }>; ramBytes?: number }
+export interface RssSample { roles: Array<{ role: string; pid: number; kb: number; swapKb?: number }>; others: Array<{ name: string; kb: number }>; ramBytes?: number; swapUsedKb?: number }
 
 export function parseRssSample(text: string): RssSample {
   const sample: RssSample = { roles: [], others: [] };
   for (const line of text.split('\n')) {
-    const [a, b, c] = line.trim().split(/\s+/);
+    const [a, b, c, d] = line.trim().split(/\s+/);
     if (a === 'ram' && b) { const n = Number(b); if (n > 0) sample.ramBytes = n; continue; }
+    if (a === 'swap') { if (b && /^\d+$/.test(b)) sample.swapUsedKb = Number(b); continue; }
     if (a === 'other' && b && c) { sample.others.push({ name: b, kb: Number(c) || 0 }); continue; }
-    if (a && b && c && /^\d+$/.test(b)) sample.roles.push({ role: a, pid: Number(b), kb: Number(c) || 0 });
+    if (a && b && c && /^\d+$/.test(b)) sample.roles.push({ role: a, pid: Number(b), kb: Number(c) || 0, ...(d && /^\d+$/.test(d) ? { swapKb: Number(d) } : {}) });
   }
   return sample;
 }
 
 /** Per role: the peak and the steady size (the median of the last third of the samples), in MB, summing a role's processes in each sample. */
-export function summarizeRss(samples: readonly RssSample[]): Array<{ role: string; peakMb: number; steadyMb: number; processes: number }> {
+export function summarizeRss(samples: readonly RssSample[]): Array<{ role: string; peakMb: number; steadyMb: number; processes: number; swapPeakMb: number }> {
   const roles = [...new Set(samples.flatMap((s) => s.roles.map((r) => r.role)))].sort();
   return roles.map((role) => {
     const series = samples.map((s) => s.roles.filter((r) => r.role === role).reduce((sum, r) => sum + r.kb, 0));
     const tail = series.slice(Math.floor(series.length * 2 / 3)).filter((kb) => kb > 0).sort((x, y) => x - y);
     const steady = tail.length ? tail[Math.floor(tail.length / 2)]! : 0;
     const processes = Math.max(0, ...samples.map((s) => s.roles.filter((r) => r.role === role).length));
-    return { role, peakMb: Math.round(Math.max(0, ...series) / 1024), steadyMb: Math.round(steady / 1024), processes };
+    const swapPeak = Math.max(0, ...samples.map((s) => s.roles.filter((r) => r.role === role).reduce((sum, r) => sum + (r.swapKb ?? 0), 0)));
+    return { role, peakMb: Math.round(Math.max(0, ...series) / 1024), steadyMb: Math.round(steady / 1024), processes, swapPeakMb: Math.round(swapPeak / 1024) };
   });
 }
 
-export function memoryCheck(samples: readonly RssSample[], during: string): CheckResult {
+export function memoryCheck(samples: readonly RssSample[], during: string, limit?: string): CheckResult {
   const id = 'split.memory';
   const title = 'Engine split: memory of each Olympus process while it ingests and judges';
   if (samples.length === 0) return { id, title, status: 'skip', detail: 'no memory samples were taken' };
@@ -119,12 +123,17 @@ export function memoryCheck(samples: readonly RssSample[], during: string): Chec
   const last = samples[samples.length - 1]!;
   const others = last.others.map((o) => `${o.name} ${Math.round(o.kb / 1024)} MB`).join(', ');
   const total = rows.reduce((sum, r) => sum + r.peakMb, 0);
-  const machine = ramGb === undefined ? 'machine RAM unknown' : ramGb === 8 ? 'machine RAM 8 GB (the 8 GB case)' : `machine RAM ${ramGb} GB (not the 8 GB measurement)`;
+  const machine = limit ? `machine RAM ${ramGb ?? '?'} GB; ${limit}` : ramGb === undefined ? 'machine RAM unknown' : ramGb === 8 ? 'machine RAM 8 GB (the 8 GB case)' : `machine RAM ${ramGb} GB (not the 8 GB measurement)`;
+  const swapRead = samples.some((s) => s.swapUsedKb !== undefined || s.roles.some((r) => r.swapKb !== undefined));
+  const swapUsed = samples.map((s) => s.swapUsedKb).filter((n): n is number => n !== undefined);
+  const swapped = rows.filter((r) => r.swapPeakMb > 0);
+  const swap = !swapRead ? 'swap not read on this machine'
+    : `swap: ${swapped.length ? swapped.map((r) => `${r.role} ${r.swapPeakMb} MB`).join(', ') : 'no Olympus process swapped'}; machine swap used ${swapUsed.length ? `${Math.round(Math.min(...swapUsed) / 1024)} to ${Math.round(Math.max(...swapUsed) / 1024)} MB` : 'not read'}`;
   return {
     id, title, status: 'pass',
     detail: `${samples.length} samples ${during}; ${machine}; `
       + rows.map((r) => `${r.role}${r.processes > 1 ? ` (${r.processes} processes)` : ''} peak ${r.peakMb} MB, steady ${r.steadyMb} MB`).join('; ')
-      + `; Olympus peaks sum to ${total} MB; largest other processes at the end: ${others || 'none read'}`,
+      + `; Olympus peaks sum to ${total} MB; ${swap}; largest other processes at the end: ${others || 'none read'}`,
   };
 }
 
