@@ -243,8 +243,9 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
             const shown = await evaluate<Record<string, unknown>>(tab.session, drivePageSnapshot(name)).catch(() => undefined);
             throw new Error(`${opened === 'many' ? 'duplicate Drive seed folders' : 'Drive seed folder not listed in search or My Drive'}${shown ? ` (${JSON.stringify(shown)})` : ''}`);
           }
+          // A new, empty folder shows Drive's empty state, not a grid: the address and a settled page are enough.
           try {
-            await until(() => evaluate(tab.session, `location.pathname.includes('/folders/') && !!document.querySelector('[role=grid]')`), 'Drive seed folder did not open');
+            await until(() => evaluate(tab.session, `location.pathname.includes('/folders/') && (!!document.querySelector('[role=grid]') || !(${BUSY}))`), 'Drive seed folder did not open');
           } catch (error) {
             const shown = await evaluate<Record<string, unknown>>(tab.session, drivePageSnapshot(name)).catch(() => undefined);
             throw new Error(`Drive seed folder did not open${shown ? ` (${JSON.stringify(shown)})` : ''}`, { cause: error });
