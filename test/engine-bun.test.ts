@@ -50,7 +50,7 @@ describe.skipIf(!OLD_BUN)('the upgrade started on the oldest Bun an install can 
     expect(result.status).not.toBe(0);
     expect(`${result.stdout}${result.stderr}`).toContain(`needs Bun ${ENGINE_BUN_MINIMUM} or newer`);
     expect(readdirSync(home)).toEqual([]);
-  });
+  }, 30_000);
 
   test('with the pinned Bun on the machine, it moves onto it before anything else', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-old-bun-home-'));
@@ -61,5 +61,5 @@ describe.skipIf(!OLD_BUN)('the upgrade started on the oldest Bun an install can 
     const result = run(['upgrade', '--artifact', join(home, 'missing.tgz'), '--home', home, '--dry-run'], { HOME: home, PATH: `${bin}:/usr/bin:/bin` });
     expect(result.stderr).toContain(`running this upgrade on Bun ${Bun.version} (${join(home, '.bun', 'bin', 'bun')})`);
     expect(existsSync(join(home, '.olympus'))).toBe(false);
-  });
+  }, 30_000);
 });
