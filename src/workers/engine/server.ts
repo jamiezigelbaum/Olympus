@@ -532,7 +532,8 @@ import {
   storeEmbeddingScope,
   sourceStoresCouldEmbed,
 } from './runtime/embedding-providers.ts';
-import { createWorkerSharedBuiltInModel, createTierSnifferModel, stopBuiltInModelOnShutdown } from './runtime/judging-models.ts';
+import { createWorkerSharedBuiltInModel,
+  builtInModelWanted, createTierSnifferModel, stopBuiltInModelOnShutdown } from './runtime/judging-models.ts';
 import {
   createEmailSourceConnectorFromEnv,
   createRefreshableReadwiseConnectorStoreRuntime,
@@ -746,7 +747,7 @@ export async function main(): Promise<void> {
   }
   // With the engine split, only the background holds the built-in model (one
   // server per computer); the front's completions run there (judging-models.ts).
-  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env, engineFront ? {
+  const workerBuiltInModel = !builtInModelWanted(sovereigntyEngine, process.env) ? undefined : createWorkerSharedBuiltInModel(process.env, engineFront ? {
     complete: (request) => engineFront!.completeModel(request),
     prepare: () => { void engineFront!.client.post({ kind: 'model_prepare' }).catch(() => undefined); },
   } : undefined);

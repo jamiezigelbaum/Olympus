@@ -224351,6 +224351,19 @@ function stopBuiltInModelOnShutdown(model) {
     });
   } catch {}
 }
+function builtInModelWanted(engine, env = process.env) {
+  if (/^(on|true|1|yes)$/i.test(env.OLYMPUS_BUILT_IN_ANALYST?.trim() ?? ""))
+    return true;
+  if (Object.values(engine.config.modelProfiles).some((profile) => profile.trust === "local" && profile.purpose !== "embedding" && profile.purpose !== "vision"))
+    return true;
+  try {
+    return resolveSnifferLane(engine).kind === "local";
+  } catch (error) {
+    if (error instanceof SnifferLaneRefusedError)
+      return error.reason === "no_private_lane";
+    return true;
+  }
+}
 function createWorkerSharedBuiltInModel(env, background) {
   const base = createWorkerBuiltInAnalystModel(env);
   if (!base)
@@ -224491,6 +224504,7 @@ var init_judging_models = __esm(() => {
   init_analyst_delphi();
   init_analyst_venice();
   init_delphi();
+  init_sniffer_lane();
   init_environment();
   BUILT_IN_MODEL_RETRY_MS = 10 * 60000;
 });
@@ -248071,7 +248085,7 @@ async function main() {
     if (builtInChoice)
       process.env[BUILT_IN_ANALYST_MODEL_ENV] = builtInChoice;
   }
-  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env, engineFront ? {
+  const workerBuiltInModel = !builtInModelWanted(sovereigntyEngine, process.env) ? undefined : createWorkerSharedBuiltInModel(process.env, engineFront ? {
     complete: (request) => engineFront.completeModel(request),
     prepare: () => {
       engineFront.client.post({ kind: "model_prepare" }).catch(() => {

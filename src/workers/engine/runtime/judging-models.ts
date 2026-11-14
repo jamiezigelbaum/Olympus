@@ -19,7 +19,8 @@ import {
 import {
   WorkerBootSecretResolver,
 } from '../../credential-degradation.ts';
-import { type SnifferLane } from '../../classification/sniffer-lane.ts';
+import { resolveSnifferLane, SnifferLaneRefusedError, type SnifferLane } from '../../classification/sniffer-lane.ts';
+import type { SovereigntyEngine } from '../../../core/sovereignty.ts';
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../../core/analyst.ts';
 import { resolveSecretRefSync, bootSecretOptions } from './environment.ts';
 
@@ -65,6 +66,29 @@ export interface BackgroundBuiltInModel {
   complete(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
   /** Ask the background to install or re-arm the model (a wake, no answer awaited). */
   prepare(): void;
+}
+
+/**
+ * Whether the owner's privacy choice uses the built-in private model at all.
+ * It backs a local answer model (any local analyst profile) and judges when
+ * no private lane is configured. When Private answers and privacy checks both
+ * go to Venice, nothing needs it, so it is never downloaded or started: the
+ * machine keeps the memory (the first-run recommendation below 12 GB). An
+ * operator's OLYMPUS_BUILT_IN_ANALYST=on keeps it.
+ */
+export function builtInModelWanted(
+  engine: Pick<SovereigntyEngine, 'config' | 'resolveAnalystPool'>,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (/^(on|true|1|yes)$/i.test(env.OLYMPUS_BUILT_IN_ANALYST?.trim() ?? '')) return true;
+  if (Object.values(engine.config.modelProfiles).some((profile) => profile.trust === 'local'
+    && profile.purpose !== 'embedding' && profile.purpose !== 'vision')) return true;
+  try {
+    return resolveSnifferLane(engine).kind === 'local';
+  } catch (error) {
+    if (error instanceof SnifferLaneRefusedError) return error.reason === 'no_private_lane';
+    return true;
+  }
 }
 
 export function createWorkerSharedBuiltInModel(
