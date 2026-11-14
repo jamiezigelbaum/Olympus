@@ -1,7 +1,7 @@
 {
   "id": "olympus",
   "name": "Olympus",
-  "version": "1.4.2",
+  "version": "1.5.0-rc.0",
   "description": "Olympus is a private second brain that lives on your computer and works with any AI. You decide what each model sees. Agents: after installing, read INSTALL_FOR_AGENTS.md and follow it before setup.",
   "configSchema": {
     "type": "object",
