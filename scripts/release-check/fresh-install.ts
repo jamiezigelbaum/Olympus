@@ -60,7 +60,7 @@ export const FRESH_MACHINE_SAMPLE = `{ printf 'clock %s | load %s of %s cpus | '
 export const FRESH_ENGINE_LOG = `{ out=$(systemctl --user cat olympus-engine.service 2>/dev/null | sed -n 's/^StandardOutput=append://p' | head -n 1); log=$(cat "$out" "\${out%.log}.err" 2>/dev/null | grep -iE 'embed|judg|sniffer|classif|privacy check|tier|source-scheduler|gmail' || true); printf 'log %s: matching lines %s (embed %s, judge %s)\\n' "\${out:-not found}" "$(printf '%s\\n' "$log" | grep -c . || true)" "$(printf '%s\\n' "$log" | grep -ic embed || true)" "$(printf '%s\\n' "$log" | grep -icE 'judg|sniffer|classif' || true)"; printf '%s\\n' "$log" | grep -v 'olympus:gmail-list' | tail -n 80 | cut -c1-220; printf 'gmail list pages:\\n'; printf '%s\\n' "$log" | grep 'olympus:gmail-list' | tail -n 60 | cut -c1-260; } || true`;
 
 /** The fresh install's service memory cap (cgroup MemoryMax): the 8 GB case. */
-/** 0 runs the leg uncapped, for a one-off comparison. */
+/** The 8 GB case: 0 runs the ordinary leg (no cap, Recommended choice). Off while 8 GB with Venice for Private answers leaves no answer model. */
 export const FRESH_MEMORY_CAP_GB: number = 0;
 /** The service cgroup's limit, peaks and out-of-memory kills, and whether the user manager delegates the memory controller at all. */
 export const FRESH_CGROUP_READ = `cg="/sys/fs/cgroup$(systemctl --user show -p ControlGroup --value olympus-engine.service 2>/dev/null)"
@@ -276,7 +276,7 @@ sudo -n install -o olyfresh -g "$(id -gn olyfresh)" -m 600 ${ROOT}/agent.js /hom
     const watchSplit = !options.sleep;
     if (watchSplit) {
       await recorded('memory-cap', async () => {
-        if (!FRESH_MEMORY_CAP_GB) return 'no cap: an uncapped comparison run';
+        if (!FRESH_MEMORY_CAP_GB) return 'no cap: the ordinary leg';
         await exec(asFresh(`mkdir -p "$HOME/.config/systemd/user/olympus-engine.service.d"
 printf '[Service]\\nMemoryMax=${FRESH_MEMORY_CAP_GB}G\\n' > "$HOME/.config/systemd/user/olympus-engine.service.d/rc-memory.conf"
 systemctl --user daemon-reload
@@ -359,8 +359,9 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
     }
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9334'); });
     // Includes the explicit Venice judge choice when first run offers it.
-    // The 8 GB leg runs as the first run recommends below 12 GB: Venice for Private answers, no local private model (lane 1, 14 Nov).
-    await checked('privacy-choice', () => dashboard!.privacyChoice(watchSplit && options.veniceKey !== undefined ? 'private-cloud-only' : undefined));
+    // The 8 GB case (cap on) runs as the first run recommends below 12 GB: Venice for Private answers (lane 1, 14 Nov). It is off
+    // while that choice leaves the install with no answer model ("No answer model is set up in Olympus"; runs 43626605016, 43627599232).
+    await checked('privacy-choice', () => dashboard!.privacyChoice(FRESH_MEMORY_CAP_GB && options.veniceKey !== undefined ? 'private-cloud-only' : undefined));
     for (const source of sources) {
       await checked(`${source.id}.connect`, () => dashboard!.connect(source));
       await checked(`${source.id}.consent`, () => dashboard!.consent(source));
