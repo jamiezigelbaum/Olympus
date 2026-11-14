@@ -21573,17 +21573,20 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
   let pagesScanned = 0;
+  const excluded = pageOptions.excludedItemPks;
+  const cutExact = () => bestByItem.size > 0 ? { bestByItem, dimensionMismatches, exhausted: false, cutReason: "vector_scan_deadline_exceeded" } : { skippedReason: "vector_scan_deadline_exceeded" };
   while (true) {
     if (connectorStoreVectorDeadlineExpired(deadlineAtMs))
-      return { skippedReason: "vector_scan_deadline_exceeded" };
+      return cutExact();
     const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(pageOptions, afterChunkPk, pageSize);
     const page = await read({ mode: "all", sql, params });
     if (page.length === 0)
       break;
     for (const [index, row] of page.entries()) {
-      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-        return { skippedReason: "vector_scan_deadline_exceeded" };
-      }
+      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs))
+        return cutExact();
+      if (excluded?.has(row.item_pk))
+        continue;
       dimensionMismatches += foldVectorScore(bestByItem, row, queryVector).mismatch;
     }
     afterChunkPk = page.at(-1).chunk_pk;
@@ -21621,9 +21624,12 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
       return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
     const packed = await read({ mode: "get", ...page });
-    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index) => {
+    const excluded = options.excludedItemPks;
+    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index, itemPk) => {
       if ((index & 31) === 0 && expired())
         return false;
+      if (excluded && itemPk !== undefined && excluded.has(itemPk))
+        return true;
       heap.append(chunkPk, scoreVectorDigest(query, digest));
       return true;
     });
@@ -21645,6 +21651,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
   }
   const bestByItem = new Map;
   let dimensionMismatches = 0;
+  const cutWith = () => bestByItem.size > 0 ? { bestByItem, dimensionMismatches, exhausted: false, cutReason: cut.skippedReason } : cut;
   const batchSize = Math.max(400, 20 * limit);
   let underestimate = VECTOR_DIGEST_MIN_MARGIN;
   let candidates = 0;
@@ -21654,7 +21661,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
     if (qualifiedItems >= limit && (candidates >= VECTOR_DIGEST_MAX_CANDIDATES || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
       break;
     if (expired())
-      return cut;
+      return cutWith();
     if (batches++ > 0)
       await yieldConnectorStoreVectorScan();
     const digestScores = new Map;
@@ -21668,12 +21675,12 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
     let rePages = 0;
     while (true) {
       if (expired())
-        return cut;
+        return cutWith();
       const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks }, after);
       const rows = await read({ mode: "all", ...page });
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired())
-          return cut;
+          return cutWith();
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
@@ -21688,7 +21695,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
         await yieldConnectorStoreVectorScan();
     }
   }
-  return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
+  return { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
 var VECTOR_DIGEST_PAGE_ROWS = 4096;
 var VECTOR_DIGEST_MIN_MARGIN = 0.05;
@@ -21703,6 +21710,9 @@ function forEachPackedVectorDigest(page, visit) {
   if (page.n === 0)
     return true;
   const pks = JSON.parse(page.pks);
+  const items = page.items === undefined ? undefined : JSON.parse(page.items);
+  if (items && items.length !== page.n)
+    throw new Error("vector digest page does not unpack: item and key counts disagree");
   const lengths = JSON.parse(page.lengths);
   const total = lengths.reduce((sum, length) => sum + length, 0);
   if (pks.length !== page.n || lengths.length !== page.n || total !== page.packed.byteLength) {
@@ -21711,7 +21721,7 @@ function forEachPackedVectorDigest(page, visit) {
   let offset = 0;
   for (let index = 0;index < page.n; index++) {
     const length = lengths[index];
-    if (!visit(pks[index], page.packed.subarray(offset, offset + length), index))
+    if (!visit(pks[index], page.packed.subarray(offset, offset + length), index, items?.[index]))
       return false;
     offset += length;
   }
@@ -21719,15 +21729,29 @@ function forEachPackedVectorDigest(page, visit) {
 }
 function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECTOR_DIGEST_PAGE_ROWS) {
   const account = normalizeOptionalAccountScope(options.accountScope);
+  const selectedFilters = connectorStoreFilterSql(options.filters);
+  const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
+  const filtered = Boolean(selectedFilters.sql.trim() || metadataOnly.sql);
   return {
     sql: `SELECT count(*) AS n, max(chunk_pk) AS last_pk, json_group_array(chunk_pk) AS pks,
+        json_group_array(item_pk) AS items,
         json_group_array(length(digest)) AS lengths, CAST(coalesce(group_concat(digest, ''), x'') AS BLOB) AS packed
-      FROM (SELECT chunk_pk, digest FROM chunk_vector_digest
-        WHERE chunk_pk > ? AND model_id = ? ${account ? "AND account_scope = ?" : ""}
-        ORDER BY chunk_pk LIMIT ?)`,
-    params: [afterChunkPk, options.modelId, ...account ? [account] : [], limit]
+      FROM (SELECT d.chunk_pk, d.item_pk, d.digest FROM chunk_vector_digest d
+        ${filtered ? "JOIN items i ON i.item_pk = d.item_pk" : ""}
+        WHERE d.chunk_pk > ? AND d.model_id = ? ${account ? "AND d.account_scope = ?" : ""}
+        ${filtered ? `AND i.tombstoned = 0 ${selectedFilters.sql} ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}` : ""}
+        ORDER BY d.chunk_pk LIMIT ?)`,
+    params: [
+      afterChunkPk,
+      options.modelId,
+      ...account ? [account] : [],
+      ...filtered ? [...selectedFilters.params, ...metadataOnly.params] : [],
+      limit
+    ]
   };
 }
+var VECTOR_SCAN_BACKSTOP_GRACE_MS = 250;
+var VECTOR_SCAN_EXCLUSION_MAX_AGE_MS = 5000;
 async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit)).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
@@ -21738,7 +21762,7 @@ async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector,
     return scan;
   let timer;
   const deadline = new Promise((resolve) => {
-    timer = setTimeout(() => resolve({ skippedReason: "vector_scan_deadline_exceeded" }), Math.max(0, deadlineAtMs - Date.now()));
+    timer = setTimeout(() => resolve({ skippedReason: "vector_scan_deadline_exceeded" }), Math.max(0, deadlineAtMs - Date.now()) + VECTOR_SCAN_BACKSTOP_GRACE_MS);
   });
   try {
     return await Promise.race([scan, deadline]);
@@ -22494,6 +22518,7 @@ class LocalConnectorStore {
   visibilityFeedPresent = false;
   visibilitySqlMemo;
   visibilityPending;
+  vectorScanExclusion;
   visibilityPublishing;
   visibilityPublishTimer;
   visibilityRetryDelay = 0;
@@ -28635,31 +28660,23 @@ ${parentKey(ref)}`, { ref, origin });
       ...selectedAccount ? { accountScope: selectedAccount } : {},
       ...filters ? { filters } : {}
     };
-    let wanted = limit;
-    let rankedItems = [];
-    let dimensionMismatches = 0;
-    for (;; ) {
-      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, wanted) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, wanted);
-      if ("skippedReason" in scanned)
-        return { rows: [], skippedReason: scanned.skippedReason };
-      const { bestByItem } = scanned;
-      dimensionMismatches = scanned.dimensionMismatches;
-      const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-      rankedItems = [];
-      let candidateOffset = 0;
-      while (rankedItems.length < limit && candidateOffset < candidates.length) {
-        const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
-        const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
-        for (const candidate of batch)
-          if (visible.has(candidate[0]))
-            rankedItems.push(candidate);
-        candidateOffset += batch.length;
-      }
-      if (rankedItems.length >= limit || scanned.exhausted !== false)
-        break;
-      if (connectorStoreVectorDeadlineExpired(deadlineAtMs))
-        break;
-      wanted *= 8;
+    const excludedItemPks = this.vectorScanExcludedItemPks();
+    if (excludedItemPks)
+      pageOptions.excludedItemPks = excludedItemPks;
+    const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
+    if ("skippedReason" in scanned)
+      return { rows: [], skippedReason: scanned.skippedReason };
+    const { bestByItem, dimensionMismatches } = scanned;
+    const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+    const rankedItems = [];
+    let candidateOffset = 0;
+    while (rankedItems.length < limit && candidateOffset < candidates.length) {
+      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+      for (const candidate of batch)
+        if (visible.has(candidate[0]))
+          rankedItems.push(candidate);
+      candidateOffset += batch.length;
     }
     const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
     const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
@@ -28674,8 +28691,22 @@ ${parentKey(ref)}`, { ref, origin });
     });
     return {
       rows: laneRows,
-      ...laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
+      ...scanned.cutReason !== undefined ? { skippedReason: scanned.cutReason } : laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
     };
+  }
+  vectorScanExcludedItemPks() {
+    let value;
+    try {
+      value = this.tierHiddenItemPks({ countsMaxAgeMs: VECTOR_SCAN_EXCLUSION_MAX_AGE_MS });
+    } catch {
+      return;
+    }
+    const cached = this.vectorScanExclusion;
+    if (cached?.value === value)
+      return cached.set;
+    const set = new Set([...value.hidden, ...value.held, ...value.metadataLayer]);
+    this.vectorScanExclusion = { value, set };
+    return set.size > 0 ? set : undefined;
   }
   async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
     const scanDb = this.dbPath === ":memory:" ? this.db : new Database6(this.dbPath, { readonly: true, create: false, strict: true });
