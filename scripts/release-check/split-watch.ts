@@ -197,7 +197,7 @@ export async function splitRestartCheck(machine: Machine, dashboard: ModelSaver,
   const other = Object.entries(counts.other).map(([code, n]) => `${n}×${code}`).join(', ');
   const said = `${counts.total} requests: ${counts.ok} 200, ${counts.starting} 503 starting, ${counts.refused} refused${other ? `, other ${other}` : ''}`;
   const pidsSaid = `engine host ${before.host}→${after.host ?? '?'}, front ${before.front}→${after.front ?? '?'}`;
-  const changeSaid = change ? `${change.provider} answer model ${change.from}→${change.to}` : 'no model change';
+  const changeSaid = change ? `${change.provider === 'judge' ? 'judge' : `${change.provider} answer model`} ${change.from}→${change.to}` : 'no model change';
   const faults = [
     problem,
     counts.refused > 0 ? `${counts.refused} refused connection(s)` : undefined,
@@ -211,3 +211,9 @@ export async function splitRestartCheck(machine: Machine, dashboard: ModelSaver,
     ms: Date.now() - started,
   };
 }
+
+/** The Mac's clock, load and busiest processes, for each poll of the fresh-item wait (live.timeline). */
+export const MAC_MACHINE_SAMPLE = `{ printf 'clock %s | load %s of %s cpus | ' "$(date -u +%H:%M:%S)" "$(sysctl -n vm.loadavg | awk '{ print $2 }')" "$(sysctl -n hw.ncpu)"; ps -U "$(id -u)" -r -o pcpu=,rss=,comm= | head -n 4 | awk '{ n=split($3, a, "/"); printf "%s%% %sMB %s; ", $1, int($2/1024), a[n] }'; } 2>/dev/null || true`;
+
+/** The Mac engine's log lines about judging, embedding, the privacy check and Gmail: counts and the last 80 lines. */
+export const MAC_ENGINE_LOG = `{ d="$HOME/Library/Logs/Olympus"; log=$(cat "$d/engine.log" "$d/engine.err" 2>/dev/null | grep -iE 'embed|judg|sniffer|classif|privacy check|tier|source-scheduler|gmail' || true); printf 'log %s: matching lines %s (embed %s, judge %s)\\n' "$d/engine.log" "$(printf '%s\\n' "$log" | grep -c . || true)" "$(printf '%s\\n' "$log" | grep -ic embed || true)" "$(printf '%s\\n' "$log" | grep -icE 'judg|sniffer|classif' || true)"; printf '%s\\n' "$log" | tail -n 80 | cut -c1-240; } || true`;

@@ -517,7 +517,22 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
             form.requestSubmit();
             return JSON.stringify({provider, from: current?.value||'', to: next.value});
           }
-          return 'no picker with another model: ' + forms.map(f=>(f.querySelector('input[name=provider]')?.value||'?')+' '+f.querySelectorAll('input[name=model][type=radio]').length).join(', ');
+          // No answer model here reloads (a zkAPI-only Mac): a judge change restarts front and background the same way.
+          const judge=document.querySelector('form[data-judge-choice]:not([data-first-run-judge])');
+          if (judge && (!want || want.provider==='judge')) {
+            const radios=[...judge.querySelectorAll('input[name=choice][type=radio]')];
+            const current=judge.dataset.judgeCurrent||radios.find(r=>r.checked)?.value||'';
+            const next=want ? radios.find(r=>r.value===want.model) : radios.find(r=>r.value!==current && !r.disabled);
+            if (next && !next.disabled) {
+              next.checked=true;
+              next.dispatchEvent(new Event('change',{bubbles:true}));
+              const cap=judge.querySelector('input[name=cap_dollars]');
+              if (cap && next.value!=='local' && !cap.value.trim()) cap.value='1';
+              judge.requestSubmit();
+              return JSON.stringify({provider:'judge', from: current, to: next.value});
+            }
+          }
+          return 'no picker with another model: ' + (judge ? 'judge ' + [...judge.querySelectorAll('input[name=choice]')].map(r=>r.value+(r.disabled?' (off)':'')).join('/') + ', ' : '') + forms.map(f=>(f.querySelector('input[name=provider]')?.value||'?')+' '+f.querySelectorAll('input[name=model][type=radio]').length).join(', ');
         })()`;
         const said = await panel<string>(pick, (value) => typeof value === 'string' && value.startsWith('{'))
           ?? await panel<string>(pick, (value) => typeof value === 'string');

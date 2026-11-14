@@ -31,9 +31,9 @@
  * (nothing failed, but a sign-in to renew or a bot check kept a check from being made; the report lists what to renew).
  */
 import { prepareLinuxLocalBundle } from '../publish-release-to-site.ts';
-import { FRESH_LEG, runFreshInstall, validateFreshSources } from './fresh-install.ts';
+import { FRESH_LEG, redactFreshTimeline, runFreshInstall, validateFreshSources } from './fresh-install.ts';
 import { openFreshDashboard, parseCdpEndpoint } from './fresh-dashboard.ts';
-import { memoryCheck, splitRestartCheck, startRssSampler, type RssSample } from './split-watch.ts';
+import { MAC_ENGINE_LOG, MAC_MACHINE_SAMPLE, memoryCheck, splitRestartCheck, startRssSampler, type RssSample } from './split-watch.ts';
 import { bundleAgent } from './run.ts';
 import { readAgentKey } from './agents.ts';
 import { randomBytes } from 'node:crypto';
@@ -217,7 +217,14 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
       const privacyWait = async () => { const s = await engine!.call('source_index_status', {}).catch(() => undefined); return (s?.structured as { privacy_check?: { waiting_items?: number } } | null)?.privacy_check?.waiting_items ?? 0; };
       const waitBefore = sampler ? await privacyWait() : 0;
       try {
-        checks.push(...await runLiveAccounts(engine, { sources: accounts.sources, ...(options.sleep ? { sleep: options.sleep, pollMs: options.pollMs ?? 1 } : {}) }));
+        // On the Mac each poll of the fresh-item wait records the counts, privacy wait and load (live.timeline), and the engine's
+        // judging and embedding log follows, so a slow find names the stage that held it.
+        const sampleMachine = sampler ? async () => (await machine.exec(MAC_MACHINE_SAMPLE, { timeoutMs: 30_000 })).stdout.trim() : undefined;
+        checks.push(...await runLiveAccounts(engine, { sources: accounts.sources, ...(sampleMachine ? { sampleMachine } : {}), ...(options.sleep ? { sleep: options.sleep, pollMs: options.pollMs ?? 1 } : {}) }));
+        if (sampler) {
+          const log = await machine.exec(MAC_ENGINE_LOG, { timeoutMs: 60_000 }).catch(() => undefined);
+          checks.push({ id: 'live.engine-log', title: 'The engine log about judging and embedding', status: 'pass', detail: redactFreshTimeline(log?.stdout.trim() ?? '') || 'no matching log lines' });
+        }
         if (sampler) {
           let dashboard: Awaited<ReturnType<typeof openFreshDashboard>> | undefined;
           try {
