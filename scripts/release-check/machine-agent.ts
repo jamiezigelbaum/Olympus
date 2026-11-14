@@ -1979,6 +1979,12 @@ async function scaleHost(): Promise<ScaleHost> {
       const response = await session.call('GET', '/dashboard.json', undefined, AbortSignal.timeout(30_000));
       return response.status === 200;
     },
+    async sourceStatus() {
+      ensureMcpToken();
+      const called = await mcpRpc(await mcpSession(), { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'source_index_status', arguments: {} } });
+      const message = parseRpc(called.text);
+      return called.status === 200 && !message.error && message.result?.isError !== true;
+    },
     engineRss: scaleEngineRss,
     archiveGaps(id) { return new ArchiveImportStateStore({ path: defaultArchiveImportStatePath() }).get(id)?.findings.gaps; },
     async beginReadwise(seed) {

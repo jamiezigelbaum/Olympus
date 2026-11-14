@@ -15,6 +15,13 @@ import type { ArchiveScaleMeasurement, CheckResult } from './report.ts';
 export const SCALE_BOUND_S = 3_600;
 export const SCALE_REPEAT_S = 300;
 export const SCALE_REMOVE_S = 900;
+/**
+ * While the import writes and the judge runs, the dashboard's /dashboard.json and source_index_status each answer within
+ * this, every time (plan thread, 14 Nov: on Jamie's box both took 1 to 2 minutes under a busy writer). Search is timed beside them.
+ */
+export const SCALE_RESPONSIVE_MS = 10_000;
+/** Status and search are asked every this many 2 s ticks, so the probes stay light beside the import. */
+const SCALE_PROBE_EVERY = 5;
 
 export interface ReadwiseScaleSnapshot {
   items: number;
@@ -34,6 +41,8 @@ export interface ScaleHost extends ArchiveHost {
   scaleCli(args: string[]): Promise<CliAnswer>;
   /** An asynchronous status read of the front, including its response body. */
   frontStatus(): Promise<boolean>;
+  /** `source_index_status` over the engine's MCP endpoint, as a connected agent asks: whether it answered. */
+  sourceStatus(): Promise<boolean>;
   /** Sum of RSS for the front and background processes, bytes, or null if unavailable. */
   engineRss(): number | null;
   archiveGaps(id: string): Record<string, number> | undefined;
@@ -80,13 +89,28 @@ async function measured<T>(host: ScaleHost, obs: ScaleObservation, work: () => P
   let active = true;
   let peak: number | null = null;
   let failures = 0;
+  const status: number[] = [];
+  const search: number[] = [];
+  let statusFailures = 0;
+  let searchFailures = 0;
+  const timed = async (into: number[], ask: () => Promise<boolean>): Promise<boolean> => {
+    const at = host.now();
+    let ok = false;
+    // A hung answer counts as a failure after 30 s, so it can't stall the sampler past the import.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { ok = await Promise.race([ask(), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 30_000); })]); } catch { ok = false; } finally { clearTimeout(timer); }
+    into.push(host.now() - at);
+    return ok;
+  };
   const loop = (async () => {
-    while (active) {
+    for (let tick = 0; active; tick++) {
       const at = host.now();
       try { const rss = host.engineRss(); if (rss !== null) peak = Math.max(peak ?? 0, rss); } catch { /* measurement unavailable */ }
-      const requestAt = host.now();
-      try { if (!await host.frontStatus()) failures++; } catch { failures++; }
-      latencies.push(host.now() - requestAt);
+      if (!await timed(latencies, () => host.frontStatus())) failures++;
+      if (tick % SCALE_PROBE_EVERY === 0) {
+        if (!await timed(status, () => host.sourceStatus())) statusFailures++;
+        if (!await timed(search, async () => { const r = await host.search(`scale import ${tick}`); return r.ok && !r.isError; })) searchFailures++;
+      }
       if (active) await host.sleep(Math.max(1, 2_000 - (host.now() - at)));
     }
   })();
@@ -97,7 +121,9 @@ async function measured<T>(host: ScaleHost, obs: ScaleObservation, work: () => P
     await loop;
     const items = obs.archive?.messages ?? 0;
     obs.measurement = { format: obs.format, wallMs, items, itemsPerMinute: wallMs > 0 ? items * 60_000 / wallMs : 0,
-      peakRssBytes: peak, frontP50Ms: percentile(latencies, 0.5), frontP95Ms: percentile(latencies, 0.95), frontSamples: latencies.length, frontFailures: failures };
+      peakRssBytes: peak, frontP50Ms: percentile(latencies, 0.5), frontP95Ms: percentile(latencies, 0.95), frontSamples: latencies.length, frontFailures: failures,
+      frontMaxMs: percentile(latencies, 1), statusMaxMs: percentile(status, 1), statusSamples: status.length, statusFailures,
+      searchP95Ms: percentile(search, 0.95), searchMaxMs: percentile(search, 1), searchSamples: search.length, searchFailures };
   }
 }
 
@@ -308,6 +334,26 @@ export function scaleChecks(format: ScaleFormat, obs: ScaleObservation | undefin
     check('repeat', format === 'readwise' ? 'A completed second Readwise sync adds zero items' : 'Re-importing the same file says already imported and adds zero items',
       obs.repeat?.already === true && obs.repeat.added === 0, JSON.stringify(obs.repeat ?? 'not completed')),
     ...(format === 'readwise' ? [] : [check('renamed', 'A renamed byte-identical copy adds zero items', obs.renamed?.already === true && obs.renamed.added === 0, JSON.stringify(obs.renamed ?? 'not completed'))]),
+    responsiveCheck(format, obs.measurement),
     check('removed', 'All data imported by the scale stage was removed', obs.removed, obs.removed ? 'removed and verified' : 'removal or verification failed'),
   ];
+}
+
+/** The dashboard and status stay quick while the import writes and the judge runs; search is reported beside them. */
+export function responsiveCheck(format: ScaleFormat, m: ArchiveScaleMeasurement): CheckResult {
+  const ms = (v: number | null | undefined) => (v === null || v === undefined ? 'unmeasured' : `${(v / 1_000).toFixed(1)} s`);
+  // A measurement from before these probes, or a stage that never got as far as the import, has nothing to judge.
+  if (!m.frontSamples && m.statusSamples === undefined) {
+    return { id: `archive.scale.${format}.responsive`, title: 'During the import and judging, the dashboard and status answer within 10 s and search answers', status: 'skip', detail: 'not measured' };
+  }
+  const problems: string[] = [];
+  if (!m.frontSamples) problems.push('/dashboard.json was never read');
+  else if ((m.frontMaxMs ?? 0) >= SCALE_RESPONSIVE_MS || m.frontFailures > 0) problems.push(`/dashboard.json slowest ${ms(m.frontMaxMs)}, ${m.frontFailures} failed`);
+  if (!m.statusSamples) problems.push('source_index_status was never asked');
+  else if ((m.statusMaxMs ?? 0) >= SCALE_RESPONSIVE_MS || (m.statusFailures ?? 0) > 0) problems.push(`source_index_status slowest ${ms(m.statusMaxMs)}, ${m.statusFailures ?? 0} failed`);
+  if ((m.searchFailures ?? 0) > 0) problems.push(`${m.searchFailures} of ${m.searchSamples ?? 0} searches failed`);
+  const detail = `/dashboard.json ${m.frontSamples} reads, p95 ${ms(m.frontP95Ms)}, slowest ${ms(m.frontMaxMs)}; source_index_status ${m.statusSamples ?? 0} asks, slowest ${ms(m.statusMaxMs)}; `
+    + `olympus_search ${m.searchSamples ?? 0} asks, p95 ${ms(m.searchP95Ms)}, slowest ${ms(m.searchMaxMs)}; bound ${SCALE_RESPONSIVE_MS / 1_000} s`;
+  return { id: `archive.scale.${format}.responsive`, title: 'During the import and judging, the dashboard and status answer within 10 s and search answers',
+    status: problems.length ? 'fail' : 'pass', detail: problems.length ? `${problems.join('; ')} (${detail})` : detail };
 }
