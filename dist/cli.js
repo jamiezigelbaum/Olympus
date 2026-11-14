@@ -44093,7 +44093,7 @@ var init_local_index = __esm(() => {
           ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? "") ? { holdUntilJudged: true } : {},
           subject: item.identity
         }, {
-          ...inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), ledger.newArrival(item.identity, { consume: true })) } : {},
+          ...inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), ledger.newArrival(item.identity, { consume: true }) || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? "")) } : {},
           ...override ? { override } : {},
           ...inputs?.retirePublic ? { retirePublic: true } : {}
         });
@@ -110914,7 +110914,7 @@ function createTieredStoreExtractionSink(options) {
         ...parentContext ? { parentContext } : {},
         subject: identity
       }, {
-        ...tierClassification?.sniffer ? { sniffer: arrivalOrderedSniffer(secretFencedSniffer(tierClassification.sniffer, ledger, identity, read), ledger.newArrival(identity, { consume: true })) } : {},
+        ...tierClassification?.sniffer ? { sniffer: arrivalOrderedSniffer(secretFencedSniffer(tierClassification.sniffer, ledger, identity, read), ledger.newArrival(identity, { consume: true }) || anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? "")) } : {},
         ...override ? { override } : {},
         ...tierClassification?.retirePublic ? { retirePublic: true } : {}
       });
