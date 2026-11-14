@@ -54,7 +54,7 @@ describe('the upgrade hold', () => {
     const held = holdLinuxWorkerStopped({ homeDir: dir, exec, sleep: () => { slept += 1; } });
     const hold = workerUpgradeHoldPath(workerServicePaths('linux', dir).unitPath);
     expect(readFileSync(hold, 'utf8')).toBe(`${process.pid}\n`);
-    expect(calls.slice(0, 2)).toEqual(['systemctl --user daemon-reload', 'systemctl --user stop olympus-worker.service']);
+    expect(calls.slice(0, 2)).toEqual(['systemctl --user daemon-reload', 'systemctl --user stop --job-mode=replace-irreversibly olympus-worker.service']);
     expect(slept).toBe(2);
     held.release();
     expect(existsSync(hold)).toBe(false);

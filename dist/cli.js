@@ -8852,7 +8852,7 @@ function inspectWorkerService(options = {}) {
     ...loop ? { restart_loop: loop } : {}
   };
 }
-function linuxWorkerRestartLoop(exec, errorLogPath) {
+function linuxWorkerRestartLoop(exec, errorLogPath, ageOf = processAgeSeconds) {
   let shown;
   try {
     shown = exec("systemctl", ["--user", "show", "-p", "NRestarts", "-p", "SubState", "-p", "MainPID", "-p", "ExecMainStatus", "olympus-worker.service"]);
@@ -8869,7 +8869,7 @@ function linuxWorkerRestartLoop(exec, errorLogPath) {
   if (field("SubState") !== "auto-restart") {
     if (!Number.isSafeInteger(pid) || pid <= 0)
       return;
-    const age = processAgeSeconds(pid);
+    const age = ageOf(pid);
     if (age === undefined || age >= RESTART_LOOP_STABLE_SECONDS)
       return;
   }
@@ -8942,11 +8942,11 @@ function holdLinuxWorkerStopped(options) {
   const release = () => rmSync3(hold, { force: true });
   try {
     reloadLinuxWorkerServiceManager({ exec });
-    const stopped = runWorkerServiceCommand(["systemctl", "--user", "stop", "olympus-worker.service"], exec);
+    const sleep = options.sleep ?? ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+    const stopped = runWorkerServiceCommand(["systemctl", "--user", "stop", "--job-mode=replace-irreversibly", "olympus-worker.service"], exec);
     if (stopped.status !== 0)
       throwWorkerServiceActionError("stop", stopped);
     const deadline = performance.now() + (options.timeoutMs ?? 120000);
-    const sleep = options.sleep ?? ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
     for (;; ) {
       const left = linuxWorkerProcessesLeft(exec);
       if (left.length === 0)

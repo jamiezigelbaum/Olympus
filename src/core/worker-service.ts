@@ -319,7 +319,7 @@ export function inspectWorkerService(
  * last manual start, SubState is auto-restart between them, and the main
  * process's age says whether the current run has stayed up.
  */
-export function linuxWorkerRestartLoop(exec: WorkerServiceExec, errorLogPath: string): WorkerRestartLoop | undefined {
+export function linuxWorkerRestartLoop(exec: WorkerServiceExec, errorLogPath: string, ageOf: (pid: number) => number | undefined = processAgeSeconds): WorkerRestartLoop | undefined {
   let shown: WorkerServiceExecResult;
   try {
     shown = exec('systemctl', ['--user', 'show', '-p', 'NRestarts', '-p', 'SubState', '-p', 'MainPID', '-p', 'ExecMainStatus', 'olympus-worker.service']);
@@ -331,7 +331,7 @@ export function linuxWorkerRestartLoop(exec: WorkerServiceExec, errorLogPath: st
   const pid = Number(field('MainPID'));
   if (field('SubState') !== 'auto-restart') {
     if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
-    const age = processAgeSeconds(pid);
+    const age = ageOf(pid);
     if (age === undefined || age >= RESTART_LOOP_STABLE_SECONDS) return undefined;
   }
   const code = Number(field('ExecMainStatus'));
@@ -430,10 +430,14 @@ export function holdLinuxWorkerStopped(options: {
   const release = () => rmSync(hold, { force: true });
   try {
     reloadLinuxWorkerServiceManager({ exec });
-    const stopped = runWorkerServiceCommand(['systemctl', '--user', 'stop', 'olympus-worker.service'], exec);
+    const sleep = options.sleep ?? ((ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+    // Irreversible, so a start from anyone else (a supervisor, a timer) that
+    // lands while it runs cannot replace it: systemd refuses that start
+    // instead of cancelling this stop (rc.14 gate, 14 Nov), and starts after it
+    // are skipped by the hold.
+    const stopped = runWorkerServiceCommand(['systemctl', '--user', 'stop', '--job-mode=replace-irreversibly', 'olympus-worker.service'], exec);
     if (stopped.status !== 0) throwWorkerServiceActionError('stop', stopped);
     const deadline = performance.now() + (options.timeoutMs ?? 120_000);
-    const sleep = options.sleep ?? ((ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
     for (;;) {
       const left = linuxWorkerProcessesLeft(exec);
       if (left.length === 0) break;

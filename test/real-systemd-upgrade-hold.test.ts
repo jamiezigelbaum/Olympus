@@ -58,6 +58,9 @@ describe.skipIf(!REAL)('the upgrade copy under a real systemd user unit', () => 
       // The timer keeps the connection referenced: a collected one closes,
       // and its write with it.
       setInterval(() => { if (!db.inTransaction) process.exit(1); }, 1_000);
+      // Slow to stop, as a real engine draining work is: the restarter's
+      // starts land while the stop job runs (the rc.14 gate's race).
+      process.on('SIGTERM', () => setTimeout(() => process.exit(0), 2_000));
     `);
     const installed = installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: scratch });
     // The real unit, with the stand-in as its engine.
@@ -80,7 +83,7 @@ describe.skipIf(!REAL)('the upgrade copy under a real systemd user unit', () => 
 
   test('without the hold, an engine started under the copy makes it fail (the rc.11 failure)', async () => {
     await waitFor(() => existsSync(opened) && activeState() === 'active', { timeoutMs: 20_000 });
-    expect(systemctl('stop', UNIT).status).toBe(0);
+    expect(systemctl('stop', '--job-mode=replace-irreversibly', UNIT).status).toBe(0);
     // The restarter starts it again, and it opens the store.
     await waitFor(() => activeState() === 'active' && readFileSync(opened, 'utf8').trim().split('\n').length >= 2, { timeoutMs: 20_000 });
     expect(() => copyStoresBeforeUpgrade(env, { bunBin: process.execPath })).toThrow(/could not copy a store before updating it; it is open in pid \d+/);

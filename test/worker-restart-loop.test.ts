@@ -20,10 +20,10 @@ test('a worker waiting to restart after repeated exits is a crash loop, with the
 });
 
 test('a worker that just restarted again is still in the loop; one that has stayed up is not', () => {
-  // This test process started moments ago: a fresh run.
-  expect(linuxWorkerRestartLoop(show(`NRestarts=5\nSubState=running\nMainPID=${process.pid}\nExecMainStatus=0\n`), errLog())?.restarts).toBe(5);
-  // pid 1 has been up since boot.
-  expect(linuxWorkerRestartLoop(show('NRestarts=5\nSubState=running\nMainPID=1\nExecMainStatus=0\n'), errLog())).toBeUndefined();
+  const running = show('NRestarts=5\nSubState=running\nMainPID=4242\nExecMainStatus=0\n');
+  expect(linuxWorkerRestartLoop(running, errLog(), () => 3)?.restarts).toBe(5);
+  expect(linuxWorkerRestartLoop(running, errLog(), () => 600)).toBeUndefined();
+  expect(linuxWorkerRestartLoop(running, errLog(), () => undefined)).toBeUndefined();
 });
 
 test('a couple of restarts, or no systemd record, is not a loop', () => {

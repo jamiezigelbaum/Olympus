@@ -32,6 +32,11 @@ import {
   type WorkerServiceExec,
 } from '../src/core/worker-service.ts';
 
+// The upgrade's stop is irreversible (--job-mode=replace-irreversibly) so a
+// racing start cannot cancel it; the fakes below match the plain call.
+const systemdCall = (command: string, args: readonly string[]): string =>
+  [command, ...args.filter((arg) => arg !== '--job-mode=replace-irreversibly')].join(' ');
+
 describe('versioned Olympus worker lifecycle', () => {
   for (const platform of ['linux', 'darwin'] as const) {
     test(`${platform} CLI follows an artifact upgrade and returns to the previous CLI on rollback`, () => {
@@ -83,7 +88,7 @@ describe('versioned Olympus worker lifecycle', () => {
     let state = 'inactive', crash = true;
     const calls: string[] = [];
     const exec: WorkerServiceExec = (cmd, args) => {
-      calls.push([cmd, ...args].join(' '));
+      calls.push(systemdCall(cmd, args));
       if (args.includes('is-active')) return { status: state === 'active' ? 0 : 3, stdout: state, stderr: '' };
       if (args.includes('enable')) state = crash ? transient : 'active';
       if (args.includes('stop')) state = 'failed';
@@ -477,7 +482,7 @@ describe('versioned Olympus worker lifecycle', () => {
     let enableCalls = 0;
     let state: 'active' | 'inactive' = 'active';
     const exec: WorkerServiceExec = (command, args) => {
-      const call = [command, ...args].join(' ');
+      const call = systemdCall(command, args);
       calls.push(call);
       if (call === 'systemctl --user is-active olympus-worker.service') {
         return state === 'active'
@@ -542,7 +547,7 @@ describe('versioned Olympus worker lifecycle', () => {
     let enableCalls = 0;
     let state: 'active' | 'inactive' | 'failed' = 'active';
     const exec: WorkerServiceExec = (command, args) => {
-      const call = [command, ...args].join(' ');
+      const call = systemdCall(command, args);
       if (call === 'systemctl --user is-active olympus-worker.service') {
         statusCalls += 1;
         if (statusCalls === 3) state = 'failed';
@@ -805,7 +810,7 @@ describe('versioned Olympus worker lifecycle', () => {
       let probes = 0;
       let stopped = false;
       const exec: WorkerServiceExec = (command, args) => {
-        const call = [command, ...args].join(' ');
+        const call = systemdCall(command, args);
         if (call.endsWith('restart olympus-worker.service') || call.endsWith('stop olympus-worker.service')) stopped = false;
         if (stopped && call === 'systemctl --user is-active olympus-worker.service') return { status: 3, stdout: 'failed\n', stderr: '' };
         return manager.exec(command, args);
@@ -904,7 +909,7 @@ describe('versioned Olympus worker lifecycle', () => {
       installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
       let stopped = false;
       const exec: WorkerServiceExec = (command, args) => {
-        const call = [command, ...args].join(' ');
+        const call = systemdCall(command, args);
         if (call === 'systemctl --user stop olympus-worker.service') stopped = true;
         if (stopped && call === 'systemctl --user restart olympus-worker.service') return { status: 1, stdout: '', stderr: 'Job failed' };
         return manager.exec(command, args);
@@ -951,7 +956,7 @@ describe('versioned Olympus worker lifecycle', () => {
       let probed = false;
       let atPreviousStart: { version: number; wal: boolean } | undefined;
       const exec: WorkerServiceExec = (command, args) => {
-        const call = [command, ...args].join(' ');
+        const call = systemdCall(command, args);
         // The rollback's stop, after the new worker ran: not the stop the upgrade makes to copy the stores.
         if (call === 'systemctl --user stop olympus-worker.service' && probed) stopped = true;
         if (stopped && !atPreviousStart && (call.endsWith('restart olympus-worker.service') || call.endsWith('enable --now olympus-worker.service'))) {
@@ -1174,7 +1179,7 @@ describe('versioned Olympus worker lifecycle', () => {
     let statusCalls = 0;
     let state: string = 'active';
     const exec: WorkerServiceExec = (command, args) => {
-      const call = [command, ...args].join(' ');
+      const call = systemdCall(command, args);
       calls.push(call);
       if (call === 'systemctl --user is-active olympus-worker.service') {
         statusCalls += 1;
@@ -1293,7 +1298,7 @@ describe('versioned Olympus worker lifecycle', () => {
       let startedUnit = '';
       const calls: string[] = [];
       const exec: WorkerServiceExec = (command, args) => {
-        const call = [command, ...args].join(' ');
+        const call = systemdCall(command, args);
         calls.push(call);
         if (call === 'systemctl --user is-active olympus-worker.service') {
           return state === 'active'
@@ -1445,7 +1450,7 @@ describe('versioned Olympus worker lifecycle', () => {
     let nestedError: unknown;
     let attempted = false;
     const exec: WorkerServiceExec = (command, args) => {
-      if (!attempted && [command, ...args].join(' ') === 'systemctl --user is-active olympus-worker.service') {
+      if (!attempted && systemdCall(command, args) === 'systemctl --user is-active olympus-worker.service') {
         attempted = true;
         try {
           runWorkerLifecycle('start', { platform: 'linux', homeDir: home, exec: base.exec });
@@ -1709,7 +1714,7 @@ function linuxManager(initial: 'active' | 'inactive' | 'failed') {
   let state = initial;
   const calls: string[] = [];
   const exec: WorkerServiceExec = (command, args) => {
-    const call = [command, ...args].join(' ');
+    const call = systemdCall(command, args);
     calls.push(call);
     if (call === 'systemctl --user is-active olympus-worker.service') {
       return state === 'active'
@@ -1748,7 +1753,7 @@ function slowDarwinManager(pollsBeforeActive: number) {
   let kickstarted = false;
   const calls: string[] = [];
   const exec: WorkerServiceExec = (command, args) => {
-    calls.push([command, ...args].join(' '));
+    calls.push(systemdCall(command, args));
     if (args[0] === 'print') {
       if (kickstarted) printsSinceKickstart += 1;
       const active = kickstarted && printsSinceKickstart > pollsBeforeActive;
@@ -1783,7 +1788,7 @@ function slowDarwinBootstrapManager(pollsBeforeActive: number) {
   let printsSinceBootstrap = 0;
   const calls: string[] = [];
   const exec: WorkerServiceExec = (command, args) => {
-    calls.push([command, ...args].join(' '));
+    calls.push(systemdCall(command, args));
     if (args[0] === 'print') {
       if (!bootstrapped) return { status: 113, stdout: '', stderr: 'Could not find service.\n' };
       printsSinceBootstrap += 1;
@@ -1799,7 +1804,7 @@ function slowDarwinBootstrapManager(pollsBeforeActive: number) {
       printsSinceBootstrap = 0;
       return { status: 0, stdout: 'submitted\n', stderr: '' };
     }
-    return { status: 1, stdout: '', stderr: `unexpected ${[command, ...args].join(' ')}` };
+    return { status: 1, stdout: '', stderr: `unexpected ${systemdCall(command, args)}` };
   };
   return {
     calls,
@@ -1815,7 +1820,7 @@ function darwinManager(initial: 'active' | 'inactive' | 'missing' | 'failed') {
   let loaded = initial !== 'missing';
   const calls: string[] = [];
   const exec: WorkerServiceExec = (command, args) => {
-    const call = [command, ...args].join(' ');
+    const call = systemdCall(command, args);
     calls.push(call);
     if (args[0] === 'print') {
       if (!loaded) return { status: 113, stdout: '', stderr: 'Could not find service.\n' };
