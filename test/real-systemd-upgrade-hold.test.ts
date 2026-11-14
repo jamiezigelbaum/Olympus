@@ -43,15 +43,14 @@ describe.skipIf(!REAL)('the upgrade copy under a real systemd user unit', () => 
     const db = new Database(store, { create: true });
     db.exec("PRAGMA journal_mode = WAL; CREATE TABLE kept (value TEXT); INSERT INTO kept (value) VALUES ('before the upgrade');");
     db.close();
-    // The stand-in engine: opens the store, writes to it, then holds a read
-    // open, so a checkpoint under it cannot finish (as a real engine's reads do).
+    // The stand-in engine: opens the store and holds a write open, as a real
+    // engine's boot does through a migration or a backfill.
     const engine = join(scratch, 'engine.ts');
     writeFileSync(engine, `
       import { Database } from 'bun:sqlite';
       import { appendFileSync } from 'node:fs';
       const db = new Database(${JSON.stringify(store)});
-      db.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; INSERT INTO kept (value) VALUES ('engine');");
-      db.exec('BEGIN'); db.query('SELECT COUNT(*) FROM kept').get();
+      db.exec("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE; INSERT INTO kept (value) VALUES ('engine');");
       appendFileSync(${JSON.stringify(opened)}, process.pid + '\\n');
       setInterval(() => {}, 60_000);
     `);
