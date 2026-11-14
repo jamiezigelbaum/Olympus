@@ -465,6 +465,10 @@ export class TierSnifferService {
   private backlogCache: { counts: BacklogCounts; atMs: number } | undefined;
   private lowerMovesCache: { count: number; atMs: number; pendingItems: number } | undefined;
   private lastIdleLowerLogMs = Number.NEGATIVE_INFINITY;
+  /** Why the judge last held back or gave way, and when that was last logged (a waiting arrival only). */
+  private lastYieldReason: 'breaker' | 'answer' | 'owner_answer' | 'caller' | undefined;
+  private lastHeldLogMs = Number.NEGATIVE_INFINITY;
+  private lastSkipLogMs = Number.NEGATIVE_INFINITY;
   private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
@@ -543,8 +547,15 @@ export class TierSnifferService {
 
   /** A pass the timer or a wake asked for: held back while the model is not answering. */
   private async scheduledRun(): Promise<TierSnifferTick> {
-    if (this.notAnsweringUntilMs > this.clockMs()) return { state: 'skipped_running' };
-    if (this.pacedUntilMs > this.clockMs() && this.trickle()) return { state: 'skipped_running' };
+    const held = this.notAnsweringUntilMs > this.clockMs() ? 'model_not_answering'
+      : this.pacedUntilMs > this.clockMs() && this.trickle() ? 'going_easy' : undefined;
+    if (held) {
+      if (this.clockMs() - this.lastSkipLogMs >= 60_000) {
+        this.lastSkipLogMs = this.clockMs();
+        this.options.log?.(`Olympus tier sniffer: pass held back (${held}) at=${new Date(this.clockMs()).toISOString()}.`);
+      }
+      return { state: 'skipped_running' };
+    }
     return this.runOnce();
   }
 
@@ -1103,14 +1114,16 @@ export class TierSnifferService {
 
   /** The pass yields while an answer is in flight, the breaker is open, or the caller says so. */
   private yieldNow(): boolean {
-    if (this.breakerOpen()) return true;
+    if (this.breakerOpen()) { this.lastYieldReason = 'breaker'; return true; }
     let busy = this.answering();
+    this.lastYieldReason = busy ? 'answer' : undefined;
     if (!busy) {
       try {
         busy = this.options.shouldYield?.() ?? false;
       } catch {
         busy = false;
       }
+      if (busy) this.lastYieldReason = 'caller';
     }
     // Only a pass takes a turn; the timer's move drain still yields.
     if (!this.running) return busy;
@@ -1121,6 +1134,7 @@ export class TierSnifferService {
     // A long owner call still running ends a turn and holds the wait at its
     // start, as preempt() does when that call begins (#1031).
     if (this.ownerAnswering()) {
+      this.lastYieldReason = 'owner_answer';
       this.fairTurn = false;
       this.yieldingSinceMs = undefined;
       return true;
@@ -1421,7 +1435,10 @@ export class TierSnifferService {
     if (report.verdictsApplied > 0) this.forgetLowerMoves();
     const autoMoves = await this.drainMoves();
     phase('moves');
-    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
+    // A pass that made no call while an arrival waited says why, at most every 15 s.
+    const arrivalHeld = report.calls === 0 && report.arrivalsWaiting > 0 && this.clockMs() - this.lastHeldLogMs >= 15_000;
+    if (arrivalHeld) this.lastHeldLogMs = this.clockMs();
+    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || arrivalHeld) {
       const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(' ');
       this.options.log?.(
         `Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied `
@@ -1432,7 +1449,8 @@ export class TierSnifferService {
         + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? '' : ` idle_before=${Math.round(idleMs)} wait_before=${this.lastTickYielded ? 'yield' : 'idle'} after_prev_ms=${Math.round(this.lastAfterPassMs)}`}; `
         + `pass_ms=${Math.round(report.timing.passMs)} setup_ms=${Math.round(report.timing.setupMs)} dispatch_ms=${Math.round(report.timing.dispatchMs)} `
         + `slot_wait_ms=${Math.round(report.timing.slotWaitMs)} model_ms=${Math.round(report.timing.modelMs)} pass_switches=${report.timing.passSwitches}; `
-        + `arrivals_waiting=${report.arrivalsWaiting} arrivals_taken=${report.arrivalsTaken} arrival_queue_age_max_ms=${Math.round(report.arrivalMaxQueueAgeMs)}.`,
+        + `arrivals_waiting=${report.arrivalsWaiting} arrivals_taken=${report.arrivalsTaken} arrival_queue_age_max_ms=${Math.round(report.arrivalMaxQueueAgeMs)}`
+        + `${report.stoppedBy === 'yield' && this.lastYieldReason ? ` yield_by=${this.lastYieldReason}` : ''} at=${new Date(this.clockMs()).toISOString()}.`,
       );
     }
     // A move that just landed may have carried an item whose owner override

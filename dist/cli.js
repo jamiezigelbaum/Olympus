@@ -220113,6 +220113,9 @@ class TierSnifferService {
   backlogCache;
   lowerMovesCache;
   lastIdleLowerLogMs = Number.NEGATIVE_INFINITY;
+  lastYieldReason;
+  lastHeldLogMs = Number.NEGATIVE_INFINITY;
+  lastSkipLogMs = Number.NEGATIVE_INFINITY;
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -220191,10 +220194,14 @@ class TierSnifferService {
     this.wake();
   }
   async scheduledRun() {
-    if (this.notAnsweringUntilMs > this.clockMs())
+    const held = this.notAnsweringUntilMs > this.clockMs() ? "model_not_answering" : this.pacedUntilMs > this.clockMs() && this.trickle() ? "going_easy" : undefined;
+    if (held) {
+      if (this.clockMs() - this.lastSkipLogMs >= 60000) {
+        this.lastSkipLogMs = this.clockMs();
+        this.options.log?.(`Olympus tier sniffer: pass held back (${held}) at=${new Date(this.clockMs()).toISOString()}.`);
+      }
       return { state: "skipped_running" };
-    if (this.pacedUntilMs > this.clockMs() && this.trickle())
-      return { state: "skipped_running" };
+    }
     return this.runOnce();
   }
   get passRunning() {
@@ -220672,15 +220679,20 @@ class TierSnifferService {
     }
   }
   yieldNow() {
-    if (this.breakerOpen())
+    if (this.breakerOpen()) {
+      this.lastYieldReason = "breaker";
       return true;
+    }
     let busy = this.answering();
+    this.lastYieldReason = busy ? "answer" : undefined;
     if (!busy) {
       try {
         busy = this.options.shouldYield?.() ?? false;
       } catch {
         busy = false;
       }
+      if (busy)
+        this.lastYieldReason = "caller";
     }
     if (!this.running)
       return busy;
@@ -220690,6 +220702,7 @@ class TierSnifferService {
       return false;
     }
     if (this.ownerAnswering()) {
+      this.lastYieldReason = "owner_answer";
       this.fairTurn = false;
       this.yieldingSinceMs = undefined;
       return true;
@@ -220967,9 +220980,12 @@ class TierSnifferService {
       this.forgetLowerMoves();
     const autoMoves = await this.drainMoves();
     phase("moves");
-    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
+    const arrivalHeld = report.calls === 0 && report.arrivalsWaiting > 0 && this.clockMs() - this.lastHeldLogMs >= 15000;
+    if (arrivalHeld)
+      this.lastHeldLogMs = this.clockMs();
+    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || arrivalHeld) {
       const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(" ");
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)} wait_before=${this.lastTickYielded ? "yield" : "idle"} after_prev_ms=${Math.round(this.lastAfterPassMs)}`}; ` + `pass_ms=${Math.round(report.timing.passMs)} setup_ms=${Math.round(report.timing.setupMs)} dispatch_ms=${Math.round(report.timing.dispatchMs)} ` + `slot_wait_ms=${Math.round(report.timing.slotWaitMs)} model_ms=${Math.round(report.timing.modelMs)} pass_switches=${report.timing.passSwitches}; ` + `arrivals_waiting=${report.arrivalsWaiting} arrivals_taken=${report.arrivalsTaken} arrival_queue_age_max_ms=${Math.round(report.arrivalMaxQueueAgeMs)}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)} wait_before=${this.lastTickYielded ? "yield" : "idle"} after_prev_ms=${Math.round(this.lastAfterPassMs)}`}; ` + `pass_ms=${Math.round(report.timing.passMs)} setup_ms=${Math.round(report.timing.setupMs)} dispatch_ms=${Math.round(report.timing.dispatchMs)} ` + `slot_wait_ms=${Math.round(report.timing.slotWaitMs)} model_ms=${Math.round(report.timing.modelMs)} pass_switches=${report.timing.passSwitches}; ` + `arrivals_waiting=${report.arrivalsWaiting} arrivals_taken=${report.arrivalsTaken} arrival_queue_age_max_ms=${Math.round(report.arrivalMaxQueueAgeMs)}` + `${report.stoppedBy === "yield" && this.lastYieldReason ? ` yield_by=${this.lastYieldReason}` : ""} at=${new Date(this.clockMs()).toISOString()}.`);
     }
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
