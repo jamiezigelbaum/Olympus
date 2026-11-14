@@ -822,7 +822,7 @@ function withRetrievalEnforcementStatus<T extends SourceIndexStatusCorpus>(
 ): T {
   // Names-only policy has no content retrieval, even when old vectors remain
   // or a local embedding provider is available. Exemption is not keyword readiness.
-  const retrieval = corpus.activationMode === 'metadata_only'
+  const assessed = corpus.activationMode === 'metadata_only'
     ? {
       declaredMode: 'metadata_only' as const,
       servableMode: 'metadata_only' as const,
@@ -835,6 +835,14 @@ function withRetrievalEnforcementStatus<T extends SourceIndexStatusCorpus>(
     });
   const counts = status.configured ? status.counts : undefined;
   const chunks = counts?.chunks ?? 0;
+  // A store with no text chunks yet (an empty store, or a file whose text is
+  // still being read) has nothing a vector could find: its search is not
+  // degraded, it simply has nothing to search. Reporting it degraded failed
+  // a fresh install's Dropbox check in the half minute between the first
+  // file landing and its text being read (ops#222, run 43573805556).
+  const retrieval = counts !== undefined && chunks === 0 && assessed.reason === 'no_current_embedding_artifacts'
+    ? { ...assessed, servableMode: 'hybrid' as const, health: 'ready' as const, reason: undefined }
+    : assessed;
   const noCurrentArtifacts = retrieval.reason === 'no_current_embedding_artifacts';
   const embeddedChunks = noCurrentArtifacts
     ? 0

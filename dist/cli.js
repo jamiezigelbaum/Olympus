@@ -114268,7 +114268,7 @@ function baseStatus(corpus) {
   };
 }
 function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
-  const retrieval = corpus.activationMode === "metadata_only" ? {
+  const assessed = corpus.activationMode === "metadata_only" ? {
     declaredMode: "metadata_only",
     servableMode: "metadata_only",
     health: "ready",
@@ -114282,6 +114282,7 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
   });
   const counts = status.configured ? status.counts : undefined;
   const chunks = counts?.chunks ?? 0;
+  const retrieval = counts !== undefined && chunks === 0 && assessed.reason === "no_current_embedding_artifacts" ? { ...assessed, servableMode: "hybrid", health: "ready", reason: undefined } : assessed;
   const noCurrentArtifacts = retrieval.reason === "no_current_embedding_artifacts";
   const embeddedChunks = noCurrentArtifacts ? 0 : counts?.embedded_chunks ?? 0;
   const currentCounts = counts !== undefined && noCurrentArtifacts && ITEMS_EMBEDDED_COUNT_KEY in counts ? { counts: { ...counts, [ITEMS_EMBEDDED_COUNT_KEY]: 0 } } : {};
