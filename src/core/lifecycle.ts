@@ -267,7 +267,7 @@ export function lifecycleRecoveryPlan(
 }
 
 function lifecycleStatus(options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string }): WorkerLifecycleStatus {
-  const service = inspectWorkerService(serviceActionOptions(options));
+  const service = inspectWorkerService({ ...serviceActionOptions(options), restartLoop: true });
   const transaction = readTransaction(options);
   const transactionSignal: LifecycleRecoverySignal[] = transaction
     ? [{ kind: transaction.phase === 'rollback_required' ? 'rollback_required' : transaction.action === 'upgrade' ? 'upgrade_interrupted' : 'setup_interrupted' }]

@@ -8840,7 +8840,7 @@ function inspectWorkerService(options = {}) {
   const unsafeParentDetail = managedParentSafetyDetail(homeDir, paths.unitPath, envPath);
   const nonRegularDetail = unsafeParentDetail ?? (unitPathPresent && !unitPresent ? "managed worker unit path is not a regular file" : envPathPresent && !isManagedRegularFile(envPath) ? "managed worker environment path is not a regular file" : undefined);
   const state = nonRegularDetail ? "unknown" : classifyWorkerServiceState(platform, result, unitPresent);
-  const loop = platform === "linux" && (state === "active" || state === "transitioning") ? linuxWorkerRestartLoop(options.exec ?? defaultWorkerServiceExec, paths.errorLogPath) : undefined;
+  const loop = options.restartLoop && platform === "linux" && (state === "active" || state === "transitioning") ? linuxWorkerRestartLoop(options.exec ?? defaultWorkerServiceExec, paths.errorLogPath) : undefined;
   return {
     platform,
     state,
@@ -254316,7 +254316,7 @@ function lifecycleRecoveryPlan(signals) {
   });
 }
 function lifecycleStatus(options) {
-  const service = inspectWorkerService(serviceActionOptions(options));
+  const service = inspectWorkerService({ ...serviceActionOptions(options), restartLoop: true });
   const transaction = readTransaction(options);
   const transactionSignal = transaction ? [{ kind: transaction.phase === "rollback_required" ? "rollback_required" : transaction.action === "upgrade" ? "upgrade_interrupted" : "setup_interrupted" }] : [];
   return {

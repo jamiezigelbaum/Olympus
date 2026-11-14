@@ -272,6 +272,8 @@ export function inspectWorkerService(
     homeDir?: string;
     envPath?: string;
     exec?: WorkerServiceExec;
+    /** Status only: also ask systemd whether the worker is restarting in a loop. */
+    restartLoop?: boolean;
   } = {},
 ): WorkerServiceInspection {
   const platform = normalizePlatform(options.platform ?? osPlatform());
@@ -295,7 +297,7 @@ export function inspectWorkerService(
   const state = nonRegularDetail
     ? 'unknown'
     : classifyWorkerServiceState(platform, result, unitPresent);
-  const loop = platform === 'linux' && (state === 'active' || state === 'transitioning')
+  const loop = options.restartLoop && platform === 'linux' && (state === 'active' || state === 'transitioning')
     ? linuxWorkerRestartLoop(options.exec ?? defaultWorkerServiceExec, paths.errorLogPath)
     : undefined;
   return {
