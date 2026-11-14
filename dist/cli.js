@@ -23869,6 +23869,9 @@ class TierSnifferStore {
       return true;
     }).immediate();
   }
+  hasArrivalWaiting() {
+    return this.db.query(`SELECT 1 FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} LIMIT 1`).get() != null;
+  }
   questionFor(subject, pass) {
     const row = this.db.query(`
       SELECT * FROM sniffer_questions
@@ -142378,8 +142381,16 @@ async function runSnifferPass(options) {
       try {
         const aged = pending.filter((item) => options.lane.kind !== "venice" && dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
         const raisedNext = aged.length === 0 ? pending.find((item) => boosts.has(item.question)) : undefined;
-        const arrival = aged.length === 0 && !raisedNext ? newestArrival(pending) : undefined;
-        let next = aged[0] ?? raisedNext ?? arrival ?? nextInTurn(pending, options.targets, dispatches);
+        if (options.arrivalsOnly) {
+          const only = newestArrival(pending);
+          if (!only) {
+            report.stoppedBy = "yield";
+            return;
+          }
+          pending.splice(0, pending.length, ...pending.filter((item) => item.question.priority >= NEW_ARRIVAL_PRIORITY || item.question.pass === "metadata" && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(only.question)));
+        }
+        const arrival = options.arrivalsOnly || aged.length === 0 && !raisedNext ? newestArrival(pending) : undefined;
+        let next = options.arrivalsOnly ? arrival : aged[0] ?? raisedNext ?? arrival ?? nextInTurn(pending, options.targets, dispatches);
         if (next.question.pass === "content")
           next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
         pending.splice(pending.indexOf(next), 1);
@@ -220116,6 +220127,8 @@ class TierSnifferService {
   lastYieldReason;
   lastHeldLogMs = Number.NEGATIVE_INFINITY;
   lastSkipLogMs = Number.NEGATIVE_INFINITY;
+  heldBackSinceMs;
+  arrivalTurn = false;
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -220223,6 +220236,8 @@ class TierSnifferService {
   preempt() {
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
+    if (this.arrivalTurn)
+      return;
     this.abort?.abort();
   }
   backlog() {
@@ -220520,6 +220535,9 @@ class TierSnifferService {
       this.running = false;
     }
     const generation = ++this.passGeneration;
+    this.arrivalTurn = this.arrivalTurnDue();
+    if (this.arrivalTurn)
+      this.heldBackSinceMs = undefined;
     this.running = true;
     this.runningSinceMs = this.clockMs();
     this.overrunReported = false;
@@ -220553,6 +220571,9 @@ class TierSnifferService {
       return tick;
     }
     const overran = this.overrunAbortedAtMs !== 0;
+    if (this.arrivalTurn)
+      this.heldBackSinceMs = this.clockMs();
+    this.arrivalTurn = false;
     this.running = false;
     this.abort = undefined;
     this.lastTick = tick;
@@ -220683,6 +220704,25 @@ class TierSnifferService {
       this.lastYieldReason = "breaker";
       return true;
     }
+    if (this.running && this.arrivalTurn)
+      return false;
+    const held = this.holdsBack();
+    if (this.running)
+      this.heldBackSinceMs = held ? this.heldBackSinceMs ?? this.clockMs() : undefined;
+    return held;
+  }
+  arrivalTurnDue() {
+    if (this.heldBackSinceMs === undefined || this.clockMs() - this.heldBackSinceMs < ARRIVAL_STAND_BACK_MS)
+      return false;
+    if (this.breakerOpen())
+      return false;
+    try {
+      return this.ledgerPaths().some((path) => this.options.installed.snifferStoreForLedger(path).hasArrivalWaiting());
+    } catch {
+      return false;
+    }
+  }
+  holdsBack() {
     let busy = this.answering();
     this.lastYieldReason = busy ? "answer" : undefined;
     if (!busy) {
@@ -220967,8 +221007,9 @@ class TierSnifferService {
       promptVersion: versions.cache,
       ...ownerContext ? { ownerContext } : {},
       budget: this.budget,
-      maxCallsPerPass: this.options.maxCallsPerPass,
-      concurrentCalls: this.options.concurrentCalls,
+      maxCallsPerPass: this.arrivalTurn ? 1 : this.options.maxCallsPerPass,
+      concurrentCalls: this.arrivalTurn ? 1 : this.options.concurrentCalls,
+      ...this.arrivalTurn ? { arrivalsOnly: true } : {},
       passTimeMs: this.options.passTimeMs,
       ...this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {},
       shouldYield: () => this.yieldNow(),
@@ -221519,7 +221560,7 @@ function checkpointRetiredLedger(path) {
     db?.close();
   }
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000;
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, ARRIVAL_STAND_BACK_MS = 15000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000;
 var init_sniffer_service = __esm(() => {
   init_tier_move();
   init_control_path_headroom();

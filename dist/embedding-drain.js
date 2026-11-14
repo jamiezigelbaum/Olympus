@@ -17647,6 +17647,9 @@ class TierSnifferStore {
       return true;
     }).immediate();
   }
+  hasArrivalWaiting() {
+    return this.db.query(`SELECT 1 FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} LIMIT 1`).get() != null;
+  }
   questionFor(subject, pass) {
     const row = this.db.query(`
       SELECT * FROM sniffer_questions

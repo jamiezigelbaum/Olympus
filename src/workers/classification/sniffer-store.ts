@@ -368,6 +368,11 @@ export class TierSnifferStore {
     }).immediate();
   }
 
+  /** Whether a new arrival's question waits (NEW_ARRIVAL_PRIORITY or above). */
+  hasArrivalWaiting(): boolean {
+    return this.db.query(`SELECT 1 FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} LIMIT 1`).get() != null;
+  }
+
   questionFor(subject: TierSnifferSubject, pass: SnifferPass): SnifferQuestion | undefined {
     const row = this.db.query(`
       SELECT * FROM sniffer_questions

@@ -222,6 +222,8 @@ export interface SnifferPassOptions {
    * (#1062) may go ahead regardless.
    */
   trickle?: () => boolean;
+  /** An arrival's turn (the service's bounded stand-back): ask new arrivals only, and nothing else. */
+  arrivalsOnly?: boolean;
   /** Items a question matched while they wait: asked first (judge-boost.ts). Default: the worker's set. */
   boosts?: JudgeBoosts;
 }
@@ -756,8 +758,14 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       // takes turns too.
       // A live source's new arrival goes ahead of every store's backlog,
       // newest first; the aged slot above keeps the backlog moving.
-      const arrival = aged.length === 0 && !raisedNext ? newestArrival(pending) : undefined;
-      let next = aged[0] ?? raisedNext ?? arrival ?? nextInTurn(pending, options.targets, dispatches);
+      if (options.arrivalsOnly) {
+        const only = newestArrival(pending);
+        if (!only) { report.stoppedBy = 'yield'; return; }
+        pending.splice(0, pending.length, ...pending.filter(item => item.question.priority >= NEW_ARRIVAL_PRIORITY
+          || (item.question.pass === 'metadata' && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(only.question))));
+      }
+      const arrival = options.arrivalsOnly || (aged.length === 0 && !raisedNext) ? newestArrival(pending) : undefined;
+      let next = options.arrivalsOnly ? arrival! : aged[0] ?? raisedNext ?? arrival ?? nextInTurn(pending, options.targets, dispatches);
       // Within an item, names go first: a Private names verdict can settle both.
       if (next.question.pass === 'content') next = pending.find(item => item.question.pass === 'metadata'
         && item.target === next.target

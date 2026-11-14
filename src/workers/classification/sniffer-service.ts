@@ -276,6 +276,14 @@ export const DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60_000;
  * yielding, one pass runs to its normal end, then answers lead again.
  */
 export const DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60_000;
+/**
+ * Standing back for answers and the owner's searches is bounded for a new
+ * arrival: after this long held back with one waiting, the judge asks about
+ * that arrival once (one call, not interrupted), then stands back again.
+ * Backlog work keeps waiting for the answers as before (test-mac, 14 Nov
+ * 2026: a search every 34 s held a new email's judgment off for 9 min).
+ */
+export const ARRIVAL_STAND_BACK_MS = 15_000;
 export const DEFAULT_STALE_MOVE_MS = 60 * 60_000;
 export const BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = 'built-in local model, nothing leaves the Mac (owner default 2026-10-01)';
 
@@ -469,6 +477,10 @@ export class TierSnifferService {
   private lastYieldReason: 'breaker' | 'answer' | 'owner_answer' | 'caller' | undefined;
   private lastHeldLogMs = Number.NEGATIVE_INFINITY;
   private lastSkipLogMs = Number.NEGATIVE_INFINITY;
+  /** Since when passes have been held back by answers or the owner (cleared when one runs). */
+  private heldBackSinceMs: number | undefined;
+  /** This pass is an arrival's bounded turn: it asks one new arrival and does not give way. */
+  private arrivalTurn = false;
   private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
@@ -588,6 +600,8 @@ export class TierSnifferService {
     // only other answers are outlasted, never the owner (#1030 review).
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
+    // An arrival's turn is one short call: it finishes, then the pass ends.
+    if (this.arrivalTurn) return;
     this.abort?.abort();
   }
 
@@ -928,6 +942,8 @@ export class TierSnifferService {
       this.running = false;
     }
     const generation = ++this.passGeneration;
+    this.arrivalTurn = this.arrivalTurnDue();
+    if (this.arrivalTurn) this.heldBackSinceMs = undefined;
     this.running = true;
     this.runningSinceMs = this.clockMs();
     this.overrunReported = false;
@@ -966,6 +982,9 @@ export class TierSnifferService {
       return tick;
     }
     const overran = this.overrunAbortedAtMs !== 0;
+    // After an arrival's turn the bound starts again, so answers get the pool back.
+    if (this.arrivalTurn) this.heldBackSinceMs = this.clockMs();
+    this.arrivalTurn = false;
     this.running = false;
     this.abort = undefined;
     this.lastTick = tick;
@@ -1115,6 +1134,24 @@ export class TierSnifferService {
   /** The pass yields while an answer is in flight, the breaker is open, or the caller says so. */
   private yieldNow(): boolean {
     if (this.breakerOpen()) { this.lastYieldReason = 'breaker'; return true; }
+    if (this.running && this.arrivalTurn) return false;
+    const held = this.holdsBack();
+    if (this.running) this.heldBackSinceMs = held ? this.heldBackSinceMs ?? this.clockMs() : undefined;
+    return held;
+  }
+
+  /** An arrival held back past ARRIVAL_STAND_BACK_MS gets the next pass as its turn. */
+  private arrivalTurnDue(): boolean {
+    if (this.heldBackSinceMs === undefined || this.clockMs() - this.heldBackSinceMs < ARRIVAL_STAND_BACK_MS) return false;
+    if (this.breakerOpen()) return false;
+    try {
+      return this.ledgerPaths().some(path => this.options.installed.snifferStoreForLedger(path).hasArrivalWaiting());
+    } catch {
+      return false;
+    }
+  }
+
+  private holdsBack(): boolean {
     let busy = this.answering();
     this.lastYieldReason = busy ? 'answer' : undefined;
     if (!busy) {
@@ -1422,8 +1459,9 @@ export class TierSnifferService {
       promptVersion: versions.cache,
       ...(ownerContext ? { ownerContext } : {}),
       budget: this.budget,
-      maxCallsPerPass: this.options.maxCallsPerPass,
-      concurrentCalls: this.options.concurrentCalls,
+      maxCallsPerPass: this.arrivalTurn ? 1 : this.options.maxCallsPerPass,
+      concurrentCalls: this.arrivalTurn ? 1 : this.options.concurrentCalls,
+      ...(this.arrivalTurn ? { arrivalsOnly: true } : {}),
       passTimeMs: this.options.passTimeMs,
       // One clock for the tick and its pass, so the breakdown adds up (#893).
       ...(this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {}),

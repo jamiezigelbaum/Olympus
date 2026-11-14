@@ -51,7 +51,7 @@ import {
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
-import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { arrivalOrderedSniffer, classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { loadOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
 import { tierSnifferPathForLedger, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
@@ -237,6 +237,50 @@ describe('2. an answer preempts the sniffer', () => {
     expect(ledger.getCurrent(subject(0))?.state).toBe('pending');
     expect(pool.isBreakerOpen('secure_local', LANE.profileId)).toBe(false);
     service.stop();
+  });
+
+  test('answers that never stop hold back backlog work, but a new arrival gets one call within the bound, not interrupted', async () => {
+    const dir = workspace();
+    const ledgerPath = join(dir, 'store.tier-ledger.sqlite');
+    const ledger = new TierLedger({ dbPath: ledgerPath });
+    cleanups.push(() => ledger.close());
+    const installed = new InstalledTierClassification({ env: {}, lane: LANE });
+    cleanups.push(() => installed.close());
+    const store = installed.snifferStoreForLedger(ledgerPath);
+    for (let n = 0; n < 3; n += 1) {
+      ledger.recordDecision(subject(n), classifyItemTiers({ signals: { title: `bank ${n}`, labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(n) },
+        { sniffer: arrivalOrderedSniffer(new CachedTierSniffer(store, LANE), n === 2) }));
+    }
+    await appendClassificationLedgerEntry(join(dir, 'classification-ledger.jsonl'), {
+      recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'approved', model_id: LANE.modelId,
+      prompt_version: SNIFFER_PROMPT_VERSION, lane: LANE.kind, profile_id: LANE.profileId, approved_by: 'owner', status: 'complete',
+    });
+    let clock = Date.parse('2026-11-14T20:00:00Z');
+    let service: TierSnifferService | undefined;
+    const asked: string[] = [];
+    const model: AnalystModel = { async complete(request) {
+      // The owner searches while the call runs: it is not interrupted.
+      service!.preempt();
+      asked.push(request.prompt);
+      return answering(() => ({ tier: 'personal', category: 'other', confidence: 0.9 })).complete(request);
+    } };
+    service = new TierSnifferService({
+      installed, lane: LANE, model, now: () => new Date(clock),
+      stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+      classificationLedgerPath: join(dir, 'classification-ledger.jsonl'),
+      answersInFlight: () => true, ownerInFlight: () => true,
+    });
+    cleanups.push(() => service!.stop());
+    for (let s = 0; s < 14; s += 1) { await service.runOnce(); clock += 1_000; }
+    expect(asked).toHaveLength(0);
+    clock += 2_000;
+    const turn = await service.runOnce();
+    expect(turn).toMatchObject({ state: 'ran', report: { calls: 1, verdictsApplied: 1, arrivalsTaken: 1 } });
+    expect(asked[0]).toContain('bank 2');
+    expect(ledger.getCurrent(subject(2))?.metadataPending).toBe(false);
+    // The bound starts again, and backlog never gets a turn from it.
+    for (let s = 0; s < 30; s += 1) { clock += 1_000; await service.runOnce(); }
+    expect(asked).toHaveLength(1);
   });
 
   test('every call carries one item, on a local lane too', async () => {
