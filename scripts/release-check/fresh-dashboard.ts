@@ -329,7 +329,10 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           const shown = await panel<string>(`(() => {const row=${row}; if(!row) return undefined; return JSON.stringify({buttons:[...row.querySelectorAll('button')].map(e=>(e.textContent||'').trim().slice(0,40)+(e.getAttribute('aria-busy')==='true'?'(busy)':'')+(e.disabled?'(disabled)':'')).slice(0,8), text:(row.textContent||'').replace(/\\s+/g,' ').trim().slice(0,300)});})()`, (v) => typeof v === 'string').catch(() => undefined);
           // The engine's own lines for this source (test machine, test account), to tell a slow listing from a stuck one.
           const log = await machine.exec(`f="$HOME/.local/state/olympus/engine/engine.log"; [ -f "$f" ] && grep -iE ${JSON.stringify(folder.source === 'dropbox' ? 'dropbox' : 'drive')} "$f" | grep -v 'tier sniffer' | tail -25 | cut -c1-240`, { timeoutMs: 30_000 }).then(r => r.stdout.trim().slice(-4000)).catch(() => '');
-          throw new Error(`seed metadata sync did not finish in 10 min${shown ? ` (row ${shown})` : ' (no source row)'}${log ? `; engine log:\n${log}` : ''}`, { cause: error });
+          // The engine's own view of the source: what its scheduler is running and what the manual sync is waiting on.
+          const seen = await card(timingSource(folder)).catch(() => undefined);
+          const state = seen ? JSON.stringify({ schedule: seen.schedule, last_manual_sync: seen.last_manual_sync, connection: seen.connection, phase: seen.phase, status: seen.status }).slice(0, 2500) : 'card unavailable';
+          throw new Error(`seed metadata sync did not finish in 10 min${shown ? ` (row ${shown})` : ' (no source row)'}; card ${state}${log ? `; engine log:\n${log}` : ''}`, { cause: error });
         }
       },
       prepareRead: async (name, requireUnread = true) => {
