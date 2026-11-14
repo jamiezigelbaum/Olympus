@@ -304,7 +304,12 @@ const plugin = {
     // background writer is registered before the worker, which becomes its
     // front and starts once the background is ready. Captures still wait for
     // the front (workerIsReady below), which itself waits for the background.
-    const engineBackground = config.worker.engineSplit
+    // Under OpenClaw the front binds the worker socket or port itself, so a
+    // model change still takes the page down for the front's restart: the
+    // split runs here only when the config asks for it, not by the Linux default.
+    const workerConfig = (api.pluginConfig as { worker?: Record<string, unknown> } | undefined)?.worker;
+    const splitAsked = Boolean(workerConfig && Object.prototype.hasOwnProperty.call(workerConfig, 'engineSplit'));
+    const engineBackground = splitAsked && config.worker.engineSplit
       ? createNativeEngineBackgroundService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url })
       : undefined;
     const workerService = createNativeWorkerService({

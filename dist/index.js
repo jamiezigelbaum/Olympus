@@ -31704,7 +31704,9 @@ var plugin = {
   description: "Privacy-aware source ingestion and cited answers across email, files, messaging, bookmarks, and reading sources.",
   register(api) {
     const config = configFromPluginConfig(api.pluginConfig, { requireResolvedWorkerSecrets: false });
-    const engineBackground = config.worker.engineSplit ? createNativeEngineBackgroundService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url }) : undefined;
+    const workerConfig = api.pluginConfig?.worker;
+    const splitAsked = Boolean(workerConfig && Object.prototype.hasOwnProperty.call(workerConfig, "engineSplit"));
+    const engineBackground = splitAsked && config.worker.engineSplit ? createNativeEngineBackgroundService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url }) : undefined;
     const workerService = createNativeWorkerService({
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,

@@ -257326,7 +257326,14 @@ async function runWorkerForeground(options = {}) {
     env,
     engineSplit: options.engineSplit ?? (() => {
       try {
-        return loadWorkerConfig({ nativeServiceSupervised: false }, env).worker.engineSplit;
+        const config = loadWorkerConfig({ nativeServiceSupervised: false }, env);
+        if (!config.worker.engineSplit)
+          return false;
+        if (!workerAuthTokenFromConfig(config, { env })) {
+          console.warn("[olympus:worker] the engine split is on but this install has no worker auth token (OLYMPUS_WORKER_AUTH_TOKEN in worker.env); running as one worker.");
+          return false;
+        }
+        return true;
       } catch {
         return false;
       }

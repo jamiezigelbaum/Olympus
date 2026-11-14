@@ -2182,7 +2182,18 @@ export async function runWorkerForeground(options: {
     env,
     engineSplit: options.engineSplit ?? (() => {
       // A config the worker cannot read fails as it always has, in the worker.
-      try { return loadWorkerConfig({ nativeServiceSupervised: false }, env).worker.engineSplit; } catch { return false; }
+      try {
+        const config = loadWorkerConfig({ nativeServiceSupervised: false }, env);
+        if (!config.worker.engineSplit) return false;
+        // The two processes talk under the worker token. An install that has
+        // none (a 1.0.x layout runs its loopback worker without one) keeps the
+        // one worker, and says so, rather than not starting.
+        if (!workerAuthTokenFromConfig(config, { env })) {
+          console.warn('[olympus:worker] the engine split is on but this install has no worker auth token (OLYMPUS_WORKER_AUTH_TOKEN in worker.env); running as one worker.');
+          return false;
+        }
+        return true;
+      } catch { return false; }
     }),
   })) {
     await (options.superviseSplit ?? superviseWorkerServiceSplitHere)(env);

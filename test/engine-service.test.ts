@@ -504,7 +504,7 @@ if (env.LAUNCH === '0') {
   });
 
   test('hosts the same worker, relay and embedding services the plugin registers', () => {
-    expect(engineHostServices(defaultEngineConfig(), 'file:///fixture/dist/cli.js').map((service) => service.id)).toEqual([
+    expect(engineHostServices({ ...defaultEngineConfig(), worker: { ...(defaultEngineConfig() as { worker?: object }).worker, engineSplit: false } }, 'file:///fixture/dist/cli.js').map((service) => service.id)).toEqual([
       'olympus-worker',
       'olympus-remote-relay',
       'olympus-source-embedding-drain',

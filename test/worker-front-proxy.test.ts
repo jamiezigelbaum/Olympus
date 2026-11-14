@@ -8,6 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startWorkerFrontProxy } from '../src/core/worker-front-proxy.ts';
+import { waitFor } from './helpers/test-clock.ts';
 import { workerFrontSocketPath, workerListenSocketPath, WORKER_LISTEN_SOCKET_ENV } from '../src/core/worker-transport.ts';
 
 const cleanups: Array<() => void> = [];
@@ -50,7 +51,9 @@ describe('the worker socket under the unit split', () => {
     expect(await (await ask()).text()).toBe('a');
     a.stop();
     const asked = ask();
-    await Bun.sleep(300);
+    // The pipe is waiting on the front by now; the next one comes up 300 ms later.
+    const until = performance.now() + 300;
+    await waitFor(() => performance.now() >= until);
     const b = front('b');
     try {
       const response = await asked;
