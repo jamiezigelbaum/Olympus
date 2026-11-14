@@ -25948,6 +25948,15 @@ class TierLedger {
     `).all(...params);
     return rows.map(recordFromRow);
   }
+  clearedOverrideFingerprint() {
+    const row = this.db.query(`
+      SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
+        || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
+          FROM tier_ledger_meta WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;')
+        || '|' || (SELECT count(*) FROM tier_items WHERE state > 'current' OR state < 'current') AS f
+    `).get();
+    return row?.f ?? "";
+  }
   listClearedOverrideRows(limit = 100, after) {
     const rows = this.db.query(`
       SELECT i.* FROM tier_items i
@@ -77302,17 +77311,29 @@ function applyOwnerOverrides(options) {
       applyOne(set, record, override.tier, retirePublic, report, { generation: record.generation, override });
     } catch {}
   }
-  const CLEARED_PAGE = 100;
-  for (let after, page;; after = page[page.length - 1]) {
-    page = ledger.listClearedOverrideRows(CLEARED_PAGE, after);
-    for (const record of page) {
-      try {
-        if (restoreClearedOverride(set, record))
-          report.restored += 1;
-      } catch {}
+  const fingerprint = ledger.clearedOverrideFingerprint();
+  const nowMs = (options.nowMs ?? Date.now)();
+  const last = clearedChecks.get(ledger);
+  if (!last || last.fingerprint !== fingerprint || nowMs - last.atMs >= CLEARED_RECHECK_MS) {
+    let failed = false;
+    const CLEARED_PAGE = 100;
+    for (let after, page;; after = page[page.length - 1]) {
+      page = ledger.listClearedOverrideRows(CLEARED_PAGE, after);
+      for (const record of page) {
+        try {
+          if (restoreClearedOverride(set, record))
+            report.restored += 1;
+        } catch {
+          failed = true;
+        }
+      }
+      if (page.length < CLEARED_PAGE)
+        break;
     }
-    if (page.length < CLEARED_PAGE)
-      break;
+    if (failed)
+      clearedChecks.delete(ledger);
+    else
+      clearedChecks.set(ledger, { fingerprint: ledger.clearedOverrideFingerprint(), atMs: nowMs });
   }
   retireSecretRedactions(ledger);
   return report;
@@ -77520,6 +77541,7 @@ function identityOf3(record) {
 function minTier(a, b) {
   return tierRank(a) <= tierRank(b) ? a : b;
 }
+var CLEARED_RECHECK_MS, clearedChecks;
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
@@ -77528,6 +77550,8 @@ var init_tier_override_settle = __esm(() => {
   init_stored_names();
   init_tier_rejudge();
   init_tier_rules_sweep();
+  CLEARED_RECHECK_MS = 10 * 60000;
+  clearedChecks = new WeakMap;
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts

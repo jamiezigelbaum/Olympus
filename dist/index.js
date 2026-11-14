@@ -16366,6 +16366,7 @@ var init_tier_rejudge = __esm(() => {
 });
 
 // src/workers/connector-store/tier-override-settle.ts
+var CLEARED_RECHECK_MS, clearedChecks;
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
@@ -16374,6 +16375,8 @@ var init_tier_override_settle = __esm(() => {
   init_stored_names();
   init_tier_rejudge();
   init_tier_rules_sweep();
+  CLEARED_RECHECK_MS = 10 * 60000;
+  clearedChecks = new WeakMap;
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts

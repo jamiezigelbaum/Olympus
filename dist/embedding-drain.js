@@ -13778,6 +13778,15 @@ class TierLedger {
     `).all(...params);
     return rows.map(recordFromRow);
   }
+  clearedOverrideFingerprint() {
+    const row = this.db.query(`
+      SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
+        || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
+          FROM tier_ledger_meta WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;')
+        || '|' || (SELECT count(*) FROM tier_items WHERE state > 'current' OR state < 'current') AS f
+    `).get();
+    return row?.f ?? "";
+  }
   listClearedOverrideRows(limit = 100, after) {
     const rows = this.db.query(`
       SELECT i.* FROM tier_items i
@@ -33636,6 +33645,10 @@ function sharedBuiltInSourceEmbeddingProvider(options) {
 
 // src/workers/connector-store/tier-row-rehome.ts
 var MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
+
+// src/workers/connector-store/tier-override-settle.ts
+var CLEARED_RECHECK_MS = 10 * 60000;
+var clearedChecks = new WeakMap;
 
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
