@@ -207,7 +207,15 @@ export async function runFreshInstall(machine: Machine, options: FreshOptions): 
       await exec(`umask 077
 [ "$(id -un)" = zig ]
 mkdir -p "$HOME/.olympus-canary"
-mkdir ${ROOT} || { echo 'fresh run already active or left over'; exit 1; }
+# One fresh leg runs per machine at a time (the runner's concurrency group), so a run directory here was left by a run
+# that was cancelled or lost its runner. End its guard the normal way (no lease: it restores zig and exits), then clear it.
+if [ -e ${ROOT} ]; then
+  rm -f ${ROOT}/lease
+  for i in $(seq 1 150); do pgrep -u "$(id -u)" -f 'olympus-canary/fresh-run/guard.sh' >/dev/null || break; sleep 1; done
+  if pgrep -u "$(id -u)" -f 'olympus-canary/fresh-run/guard.sh' >/dev/null; then echo 'a left-over fresh run guard did not stop'; exit 1; fi
+  rm -rf ${ROOT}
+fi
+mkdir ${ROOT}
 if ! id olyfresh >/dev/null 2>&1; then sudo -n useradd -m olyfresh; fi
 [ "$(getent passwd olyfresh | cut -d: -f6)" = /home/olyfresh ]
 sudo -n loginctl enable-linger olyfresh
