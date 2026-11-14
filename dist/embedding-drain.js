@@ -21956,7 +21956,7 @@ class LocalConnectorStore {
       const model = this.vectorDigestBackfillModel;
       if (!model)
         return;
-      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork()) {
+      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || storeReadHasPriority() || offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork()) {
         this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
         return;
       }
@@ -28088,7 +28088,7 @@ ${parentKey(ref)}`, { ref, origin });
     const judgedThisPass = new Set;
     let stoppedAtDeadline = false;
     for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-      if (offset > 0 && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+      if (offset > 0 && (options.stopAtMs !== undefined && Date.now() >= options.stopAtMs || options.shouldStop?.() === true)) {
         stoppedAtDeadline = true;
         break;
       }

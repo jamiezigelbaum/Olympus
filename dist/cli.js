@@ -40225,7 +40225,7 @@ async function embedPendingChunks(targets, options) {
     }
     let answered = false;
     for (const group of groups) {
-      if (answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+      if (answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs || options.shouldStop?.() === true) {
         run.stoppedAtDeadline = true;
         break;
       }
@@ -40239,7 +40239,8 @@ async function embedPendingChunks(targets, options) {
       }
       const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
         ...target,
-        ...options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}
+        ...options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {},
+        ...options.shouldStop ? { shouldStop: options.shouldStop } : {}
       });
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
@@ -40276,7 +40277,8 @@ async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
       ...scope.accountScope ? { accountScope: scope.accountScope } : {},
       ...scope.filters ? { filters: scope.filters } : {},
       ...scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {},
-      ...scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}
+      ...scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {},
+      ...scope.shouldStop ? { shouldStop: scope.shouldStop } : {}
     });
     if (embed.stoppedAtDeadline)
       return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0, stoppedAtDeadline: true };
@@ -40296,7 +40298,7 @@ async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
     let chunksEmbedded = 0;
     let itemsFailed = 0;
     for (const [index, localItemId] of localItemIds.entries()) {
-      if (index > 0 && scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs) {
+      if (index > 0 && (scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs || scope.shouldStop?.() === true)) {
         return { chunksEmbedded, itemsFailed, stoppedAtDeadline: true };
       }
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
@@ -43735,7 +43737,7 @@ var init_local_index = __esm(() => {
         const model = this.vectorDigestBackfillModel;
         if (!model)
           return;
-        if (this.reclaimProcess || this.vectorLanesInFlight > 0 || offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork()) {
+        if (this.reclaimProcess || this.vectorLanesInFlight > 0 || storeReadHasPriority() || offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork()) {
           this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
           return;
         }
@@ -49867,7 +49869,7 @@ ${parentKey(ref)}`, { ref, origin });
       const judgedThisPass = new Set;
       let stoppedAtDeadline = false;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-        if (offset > 0 && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+        if (offset > 0 && (options.stopAtMs !== undefined && Date.now() >= options.stopAtMs || options.shouldStop?.() === true)) {
           stoppedAtDeadline = true;
           break;
         }
@@ -202155,6 +202157,7 @@ class SourceScheduler {
   continueWake;
   changeDebounceMs;
   changeWakes = new Map;
+  holdForAsk;
   constructor(options) {
     this.enabled = options.enabled;
     this.tickMs = options.tickMs;
@@ -202174,8 +202177,16 @@ class SourceScheduler {
     this.setTimeoutImpl = options.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = options.clearTimeoutImpl ?? clearTimeout;
     this.changeDebounceMs = options.changeDebounceMs ?? SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS;
+    this.holdForAsk = options.holdForAsk;
     const firstRun = this.now().getTime();
     this.states = this.sources.flatMap((source) => source.tasks.map((task) => this.createTaskState(source, task, firstRun)));
+  }
+  askHolds() {
+    try {
+      return this.holdForAsk?.() === true;
+    } catch {
+      return false;
+    }
   }
   updateSources(sources, now = this.now()) {
     const existing = new Map(this.states.map((state) => [schedulerStateKey(state.source, state.task), state]));
@@ -202388,6 +202399,10 @@ class SourceScheduler {
       return this.status(now);
     const dueAt = now.getTime();
     this.applyPendingUnparks(dueAt);
+    if (this.askHolds()) {
+      this.scheduleContinueWake(dueAt + SOURCE_SCHEDULER_ASK_RECHECK_MS);
+      return this.status(now);
+    }
     await this.runStates(this.states.filter((state) => taskCadence(state.source, state.task) === "continuous" && !state.running && state.nextRunAt <= dueAt), dueAt, "scheduled");
     const status = this.status(this.now());
     await this.publishAfterTick(status);
@@ -202973,6 +202988,7 @@ ${request.taskId}`);
 }
 function createSourceSchedulerFromConfig(input) {
   return new SourceScheduler({
+    ...input.holdForAsk ? { holdForAsk: input.holdForAsk } : {},
     enabled: input.config.worker.scheduler.enabled,
     tickMs: input.config.worker.scheduler.tickSeconds * 1000,
     errorBackoffMs: input.config.worker.scheduler.errorBackoffSeconds * 1000,
@@ -203241,7 +203257,7 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
       return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined) ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON : undefined
     };
   });
@@ -203249,8 +203265,15 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
 function embeddingSweepConcurrencyKey(source) {
   return `${source.corpusId}.embeddings`;
 }
-function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0, trickle, onProgress) {
+function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0, trickle, onProgress, holdForAsk) {
   const maxItems = embeddingSweepMaxItems();
+  const askHolds = () => {
+    try {
+      return holdForAsk?.() === true;
+    } catch {
+      return false;
+    }
+  };
   const tricklingTarget = (target) => {
     try {
       return trickle?.(target) === true;
@@ -203276,7 +203299,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         let timer;
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true }),
+          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true, ...holdForAsk ? { shouldStop: askHolds } : {} }),
           new Promise((resolve) => {
             timer = setTimeout(() => resolve(overran), deadlineMs);
           })
@@ -203334,7 +203357,8 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       }));
       const attemptedAt = Date.parse(context?.attemptedAt ?? "") || Date.now();
       if (deferred === 0) {
-        const more = !trickled && runs.some((run) => run.busy !== true && run.chunksEmbedded > 0 && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
+        const heldForAsk = holdForAsk !== undefined && runs.some((run) => run.stoppedAtDeadline === true) && askHolds();
+        const more = heldForAsk || !trickled && runs.some((run) => run.busy !== true && run.chunksEmbedded > 0 && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
         if (counts.items_failed === 0)
           return { status, counts, embeddingSweep, ...more ? { continueSoon: true } : {} };
         return {
@@ -204118,7 +204142,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_ASK_RECHECK_MS = 1000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_provider_rate_limits();
   init_api();
@@ -247870,6 +247894,22 @@ async function main() {
   const ownerQuestions = createOwnerQuestionActivity(engineFront?.ownerBusy);
   const remoteOwnerMarks = new OwnerBusyMarks;
   const remoteOwnerBusy = (resource) => remoteOwnerMarks.busy(resource);
+  let readPriorityProbe;
+  const ownerAskRunning = () => {
+    if (ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
+      return true;
+    const now = Date.now();
+    if (!readPriorityProbe || now - readPriorityProbe.at >= 250) {
+      let busy = false;
+      try {
+        busy = storeReadHasPriority();
+      } catch {
+        busy = false;
+      }
+      readPriorityProbe = { at: now, busy };
+    }
+    return readPriorityProbe.busy;
+  };
   const answerActivity = createAnswerActivity(() => {
     return;
   }, {
@@ -250395,7 +250435,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       onProgress: (target) => {
         if (embedsOnThisComputer(target.provider))
           localPacer.noteLocalWork();
-      }
+      },
+      holdForAsk: ownerAskRunning
     });
     const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
@@ -250413,6 +250454,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const sourceScheduler = engineFront ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront.status(), sourcesChanged: () => refreshFrontMounts() }) : olympusConfig.worker.scheduler.enabled ? createSourceSchedulerFromConfig({
     config: olympusConfig,
     sources: schedulerSources,
+    holdForAsk: ownerAskRunning,
     ...!(sourceIndexStatus && sourceIngestionLedger) ? {
       afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
       afterTick: () => refreshPeople()
@@ -252136,8 +252178,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : snifferLane.kind === "venice" ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {},
     ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "venice" && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, "tier_sniffer") || remoteOwnerBusy(snifferResource)),
-    ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
-    shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
+    ownerInFlight: () => ownerAskRunning() || snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
+    shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || ownerAskRunning(),
     pacing: localPacer,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line),
@@ -252264,14 +252306,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         owner_busy: (change) => {
           if (!remoteOwnerMarks.apply(change))
             return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          if (change.resource === snifferResource)
+          if (change.resource === snifferResource || change.resource === OWNER_QUESTION_RESOURCE)
             tierSniffer?.preempt();
           return { busy: true };
         },
         owner_idle: (change) => {
           if (!remoteOwnerMarks.apply(change))
             return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          if (change.resource === snifferResource)
+          if (change.resource === snifferResource || change.resource === OWNER_QUESTION_RESOURCE)
             tierSniffer?.wake();
           return { busy: false };
         },

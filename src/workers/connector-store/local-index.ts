@@ -1837,6 +1837,11 @@ export interface ConnectorStoreEmbedOptions {
    * first batch always runs, so every pass makes progress. Not with a journal.
    */
   stopAtMs?: number;
+  /**
+   * Polled before each batch after the first, like `stopAtMs`: true stops the
+   * pass the same way (the owner's Ask is running). Not with a journal.
+   */
+  shouldStop?: () => boolean;
   /** Durable idempotency key for a maintenance page's embedding phase. */
   journalId?: string;
   /** Monotonic owner generation used to fence a superseded maintenance run. */
@@ -1983,7 +1988,8 @@ export async function embedPendingChunks(
   targets: readonly ConnectorStoreEmbeddingTarget[],
   // stopAtMs: no batch starts after it (the first always runs). Items count
   // badly as work: one long file can hold more chunks than a pass has time for.
-  options: { maxItems: number; stopAtMs?: number; diagnostics?: boolean },
+  // shouldStop: polled with stopAtMs, and before the first batch too (the owner's Ask).
+  options: { maxItems: number; stopAtMs?: number; diagnostics?: boolean; shouldStop?: () => boolean },
 ): Promise<ConnectorStoreEmbedStoreRun[]> {
   const runs: ConnectorStoreEmbedStoreRun[] = [];
   for (const target of targets) {
@@ -2014,7 +2020,7 @@ export async function embedPendingChunks(
     }
     let answered = false;
     for (const group of groups) {
-      if (answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+      if ((answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) || options.shouldStop?.() === true) {
         run.stoppedAtDeadline = true;
         break;
       }
@@ -2029,6 +2035,7 @@ export async function embedPendingChunks(
       const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
         ...target,
         ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
+        ...(options.shouldStop ? { shouldStop: options.shouldStop } : {}),
       });
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
@@ -2066,7 +2073,7 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
-  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs'> = {},
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'shouldStop'> = {},
 ): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
   try {
     const embed = await store.embedChunks({
@@ -2075,6 +2082,7 @@ async function embedItemsIsolated(
       ...(scope.filters ? { filters: scope.filters } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
       ...(scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}),
+      ...(scope.shouldStop ? { shouldStop: scope.shouldStop } : {}),
     });
     // Stopped part-way, the items stay queued: the next pass skips the chunks
     // that already hold a current vector and embeds the rest.
@@ -2098,7 +2106,7 @@ async function embedItemsIsolated(
     for (const [index, localItemId] of localItemIds.entries()) {
       // One budget for the whole retry: each item's first batch always runs,
       // so without this check every item past the deadline would still run.
-      if (index > 0 && scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs) {
+      if (index > 0 && ((scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs) || scope.shouldStop?.() === true)) {
         return { chunksEmbedded, itemsFailed, stoppedAtDeadline: true };
       }
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
@@ -3693,7 +3701,7 @@ export class LocalConnectorStore {
       if (!model) return;
       // An Ask in flight on this store, or any owner-visible read waiting
       // for the pool (a status count, another store's lane), goes first.
-      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || storeReadHasPriority() || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
@@ -12962,7 +12970,7 @@ export class LocalConnectorStore {
     const judgedThisPass = new Set<string>();
     let stoppedAtDeadline = false;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-      if (offset > 0 && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+      if (offset > 0 && ((options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) || options.shouldStop?.() === true)) {
         stoppedAtDeadline = true;
         break;
       }

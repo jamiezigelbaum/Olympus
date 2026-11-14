@@ -107,6 +107,8 @@ export const SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS = 48 * 60 * 60 * 1_000;
  * removes the idle interval between passes while there is a backlog.
  */
 export const SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5_000;
+/** While an Ask holds scheduled work, how often the scheduler looks again. */
+export const SOURCE_SCHEDULER_ASK_RECHECK_MS = 1_000;
 export const SOURCE_SCHEDULER_SOURCE_IDS_ENV = 'OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS';
 const GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = 'gmail_request_budget_clock_regression';
 const GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = 'google_drive_request_budget_clock_regression';
@@ -411,6 +413,13 @@ export interface SourceSchedulerOptions {
   clearTimeoutImpl?: typeof clearTimeout;
   /** Window over which change signals from `subscribeChanges` coalesce into one run. Defaults to SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS. */
   changeDebounceMs?: number;
+  /**
+   * True while the owner's Ask runs (in this process or the split's front):
+   * no scheduled task starts until it is answered, and the tick after it
+   * ends starts them. A task already running finishes. An operator's own
+   * run (runSource) is never held.
+   */
+  holdForAsk?: () => boolean;
 }
 
 export interface SourceSchedulerStateStore {
@@ -588,6 +597,7 @@ export class SourceScheduler {
   private continueWake: { at: number; timer: ReturnType<typeof setTimeout> } | undefined;
   private readonly changeDebounceMs: number;
   private readonly changeWakes = new Map<string, ChangeWakeSubscription>();
+  private readonly holdForAsk: (() => boolean) | undefined;
 
   constructor(options: SourceSchedulerOptions) {
     this.enabled = options.enabled;
@@ -610,10 +620,15 @@ export class SourceScheduler {
     this.setTimeoutImpl = options.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = options.clearTimeoutImpl ?? clearTimeout;
     this.changeDebounceMs = options.changeDebounceMs ?? SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS;
+    this.holdForAsk = options.holdForAsk;
     const firstRun = this.now().getTime();
     this.states = this.sources.flatMap((source) => source.tasks.map((task) =>
       this.createTaskState(source, task, firstRun)
     ));
+  }
+
+  private askHolds(): boolean {
+    try { return this.holdForAsk?.() === true; } catch { return false; }
   }
 
   updateSources(sources: SourceSchedulerSource[], now: Date = this.now()): void {
@@ -856,6 +871,10 @@ export class SourceScheduler {
     if (!this.enabled) return this.status(now);
     const dueAt = now.getTime();
     this.applyPendingUnparks(dueAt);
+    if (this.askHolds()) {
+      this.scheduleContinueWake(dueAt + SOURCE_SCHEDULER_ASK_RECHECK_MS);
+      return this.status(now);
+    }
     await this.runStates(this.states.filter((state) =>
       taskCadence(state.source, state.task) === 'continuous'
       && !state.running
@@ -1581,8 +1600,10 @@ export function createSourceSchedulerFromConfig(input: {
   afterTick?: (status: SourceSchedulerStatus) => void | Promise<void>;
   afterTickMinIntervalMs?: number;
   stateStore?: SourceSchedulerStateStore;
+  holdForAsk?: () => boolean;
 }): SourceScheduler {
   return new SourceScheduler({
+    ...(input.holdForAsk ? { holdForAsk: input.holdForAsk } : {}),
     enabled: input.config.worker.scheduler.enabled,
     tickMs: input.config.worker.scheduler.tickSeconds * 1_000,
     errorBackoffMs: input.config.worker.scheduler.errorBackoffSeconds * 1_000,
@@ -2029,6 +2050,8 @@ export function withEmbeddingSweep(
     trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean;
     /** Called after a target embedded at least one chunk (the power assertion, local-pacing.ts). */
     onProgress?: (target: ConnectorStoreEmbeddingTarget) => void;
+    /** True while the owner's Ask runs: a pass starts no new batch, and continues soon after. */
+    holdForAsk?: () => boolean;
   } = {},
 ): SourceSchedulerSource[] {
   return sources.map((source, sourceIndex) => {
@@ -2036,7 +2059,7 @@ export function withEmbeddingSweep(
     if (!targets) return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
         ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         : undefined,
@@ -2055,8 +2078,12 @@ function embeddingSweepTask(
   sourceIndex = 0,
   trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean,
   onProgress?: (target: ConnectorStoreEmbeddingTarget) => void,
+  holdForAsk?: () => boolean,
 ): SourceSchedulerTask {
   const maxItems = embeddingSweepMaxItems();
+  const askHolds = (): boolean => {
+    try { return holdForAsk?.() === true; } catch { return false; }
+  };
   const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
     try { return trickle?.(target) === true; } catch { return false; }
   };
@@ -2088,7 +2115,7 @@ function embeddingSweepTask(
         // Dropbox, whose Private store then embedded nothing for an hour).
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true }),
+          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true, ...(holdForAsk ? { shouldStop: askHolds } : {}) }),
           new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
@@ -2138,8 +2165,11 @@ function embeddingSweepTask(
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
       if (deferred === 0) {
         // A store that filled its bound has more owed: a backlog drains pass after pass, not one bound a minute.
-        const more = !trickled && runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
-          && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
+        // A pass the owner's Ask stopped continues soon after it is answered
+        // (the scheduler holds new runs until then).
+        const heldForAsk = holdForAsk !== undefined && runs.some((run) => run.stoppedAtDeadline === true) && askHolds();
+        const more = heldForAsk || (!trickled && runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
+          && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true)));
         if (counts.items_failed === 0) return { status, counts, embeddingSweep, ...(more ? { continueSoon: true } : {}) };
         // Skipped items are surfaced, not retried. A backlog still drains pass
         // after pass: one failed item, ever, once held every later pass of the
