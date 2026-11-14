@@ -42,7 +42,8 @@ import {
 import { createNativeRelayService } from './native-relay-service.ts';
 import { createNativeEngineBackgroundService, createNativeWorkerService, ENGINE_BACKGROUND_SERVICE_ID, WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE, WORKER_SOCKET_RETAINED_MESSAGE } from './native-worker-service.ts';
 import { resolveRemoteAccessMode } from './remote-access.ts';
-import { createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket, validateWorkerSocketDirectory } from './worker-transport.ts';
+import { createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket, validateWorkerSocketDirectory, workerFrontSocketPath } from './worker-transport.ts';
+import { startWorkerFrontProxy } from './worker-front-proxy.ts';
 
 export const ENGINE_STATUS_SCHEMA = 'olympus.engine.status.v1';
 /** EX_CONFIG: launchd's throttle keeps a misconfigured engine from spinning. */
@@ -92,14 +93,14 @@ export interface EngineHostHandle {
   status(): EngineStatusFile;
 }
 
-export function engineHostServices(pluginConfig: Record<string, unknown>, moduleUrl: string, paths?: ReturnType<typeof engineServicePaths>, ownerBridgeHostSocket?: string): NativeProcessServiceDefinition[] {
+export function engineHostServices(pluginConfig: Record<string, unknown>, moduleUrl: string, paths?: ReturnType<typeof engineServicePaths>, ownerBridgeHostSocket?: string, frontSocket?: string): NativeProcessServiceDefinition[] {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
   // The engine split (core/engine-split.ts): the background writer starts
   // first and the worker becomes its front, which waits for it to be ready.
   // Stop runs in reverse, so the front stops before the background.
   const split = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false }).worker.engineSplit;
   const background = split ? createNativeEngineBackgroundService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed }) : undefined;
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...(ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}), ...(background ? { engineBackground: background } : {}) });
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...(ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}), ...(background ? { engineBackground: background } : {}), ...(background && frontSocket ? { frontSocket } : {}) });
   return [
     ...(background ? [backgroundNativeProcessService((({ isReady: _isReady, ...rest }) => rest)(background))] : []),
     backgroundNativeProcessService(worker),
@@ -124,11 +125,13 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   let pluginConfig: Record<string, unknown> | undefined;
   let remoteMode = 'off';
   let enabled: Record<string, boolean> = {};
+  let splitOn = false;
   try {
     pluginConfig = readEngineConfig(paths.configPath);
     if (pluginConfig) {
       const parsed = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
       remoteMode = resolveRemoteAccessMode(parsed.remote).mode;
+      splitOn = parsed.worker.engineSplit && parsed.worker.service.enabled;
       // Services whose config turns them off start nothing and report nothing;
       // say so instead of leaving them "starting".
       enabled = {
@@ -208,7 +211,18 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     }
   };
 
-  const makeServices = (options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths, desktopBridge?.controlPath)));
+  // Linux with the split on: this process holds the worker socket for as long
+  // as it runs and pipes it to the front on front.sock, so a front restart (a
+  // model change, a delete, a crash) never takes the socket away
+  // (worker-front-proxy.ts). A socket another listener holds is left to the
+  // worker's own conflict report.
+  let frontProxy: ReturnType<typeof startWorkerFrontProxy> | undefined;
+  if (paths.linux && splitOn && !options.services) {
+    try { frontProxy = startWorkerFrontProxy({ env: dataEnv, clearStale: true, log: (line) => log(`engine: ${line}`) }); }
+    catch (error) { log(`engine: the worker socket could not be held for the front (${error instanceof Error ? error.message : 'unknown error'}); the front binds it itself.`); }
+  }
+  const frontSocket = frontProxy ? workerFrontSocketPath({ platform: 'linux', env: dataEnv }) : undefined;
+  const makeServices = (options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths, desktopBridge?.controlPath, frontSocket)));
   let services: NativeProcessServiceDefinition[] = [];
   const contextFor = (id: string): NativeProcessServiceContext => ({
     // The shape the Gateway hands its services: the services read
@@ -259,6 +273,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
         Promise.allSettled([...services].reverse().map((service) => service.stop())),
         deadline,
       ]);
+      frontProxy?.stop();
       for (const [id, health] of Object.entries(status.services)) {
         if (health.state !== 'off') status.services[id] = { state: 'stopped', message: null, updated_at: now() };
       }

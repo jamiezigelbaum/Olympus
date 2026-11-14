@@ -266,6 +266,23 @@ the cause).
   interrupted pass is not a failure (#803, PR #1096). The owner-busy
   state for the shared model is re-sent by the front when the background
   comes back.
+- **The front restarts behind a socket that stays (14 Nov 2026).** A
+  model, judge or policy change restarts both processes: the front builds
+  its answer routing, keys and policy at boot, and serving on the old
+  routing after a switch to local-only would be a privacy fault. From the
+  save on, the front's gate answers "restarting". On Linux the unit's own
+  process (the worker unit's supervisor, or the engine host) holds the
+  worker socket for as long as it runs and pipes each connection to the
+  front on `front.sock` beside it (`src/core/worker-front-proxy.ts`). A
+  connection that comes while the front is down waits up to 2.5 s for
+  the next front, then gets "starting: <step>": a page that loads itself
+  again for a browser, JSON otherwise. A read that the exiting front took
+  and dropped unanswered goes to the next front. A request that writes
+  is never sent twice. The standard answer, a listening socket inherited
+  by each front, is not available: Bun 1.4.4's `Bun.serve` ignores `fd`,
+  and a parent that keeps the descriptor accepts on it itself. Mac and
+  OpenClaw-hosted fronts still bind their own socket or port, so a model
+  change drops the page there for the length of the front's restart.
 - **Health (13 Nov 2026).** A slow answer is never read as a dead
   process. Every split install failure on large data was one: the
   background's only thread sat in a long synchronous SQLite call and a

@@ -110,6 +110,18 @@ if (role === 'background') {
 if (role === 'front' && process.env.FRONT_WAITS) {
   void waitForBackgroundBootDone({ env: process.env }).then(() => note('serving'), (error: unknown) => { note('gave-up', { error: String(error) }); process.exit(1); });
 }
+// FRONT_SERVES: the front answers on its own socket (the unit's process holds
+// the worker socket and pipes to it), and /restart exits 75 as a model change does.
+if (role === 'front' && process.env.FRONT_SERVES) {
+  note('listen', { socket: process.env.OLYMPUS_WORKER_LISTEN_SOCKET ?? null });
+  server = Bun.serve({
+    unix: process.env.OLYMPUS_WORKER_LISTEN_SOCKET!,
+    fetch(request) {
+      if (new URL(request.url).pathname === '/restart') setTimeout(() => process.exit(75), 50);
+      return new Response(`front ${process.pid}`);
+    },
+  });
+}
 const crashAfter = Number(process.env.CRASH_AFTER_MS ?? 0);
 if (crashAfter > 0) setTimeout(() => process.exit(1), crashAfter);
 

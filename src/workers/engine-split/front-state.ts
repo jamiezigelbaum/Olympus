@@ -112,7 +112,10 @@ export function frontJudgeBoost(client: Pick<EngineCommandClient, 'post'>): (ide
  * A model, judge or policy change saved through the front. Both processes
  * read the models at boot, so both restart: the background is told first and
  * the front restarts only once the background has answered that it is
- * restarting (or the ask ran out, which is logged). The background waits for
+ * restarting (or the ask ran out, which is logged). Nobody sees the front go:
+ * its gate answers "restarting" from the save on, and under the worker unit
+ * the unit's process holds the worker socket through the restart
+ * (core/worker-front-proxy.ts). The background waits for
  * this front to end before it restarts, so the answer is never cut off. One ask at a time; a
  * second change while one is in flight rides along.
  */
@@ -125,12 +128,18 @@ export function frontModelReload<R>(options: {
   log?: (line: string) => void;
   /** This front's process id: the background restarts after it ends. */
   pid?: number;
+  /**
+   * Closes the front's read gate (runtime.ts createFrontGate): from the save
+   * on, nothing is answered on the routing being replaced. The save itself is.
+   */
+  closeGate?: () => void;
 }): (request?: R) => boolean {
   const log = options.log ?? (() => {});
   let pending: Promise<void> | undefined;
   return (request) => {
     if (!options.managed) return false;
     if (pending) return true;
+    options.closeGate?.();
     pending = options.client.send({ kind: 'reload', target: 'models', frontPid: options.pid ?? process.pid }, { timeoutMs: 30_000 }).then((receipt) => {
       if (receipt.state !== 'done' || (receipt.result as { restarting?: unknown } | undefined)?.restarting !== true) {
         log('[engine-split] the background did not confirm it is restarting for the model change; restart Olympus if the new model does not take effect.');

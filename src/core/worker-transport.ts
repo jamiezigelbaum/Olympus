@@ -66,8 +66,30 @@ export function validateWorkerSocket(options: WorkerTransportOptions = {}): stri
 }
 
 /** Before bind: never delete, chmod or adopt an occupied path, even a stale socket. */
-export function prepareWorkerSocket(options: WorkerTransportOptions = {}): string | undefined {
+/**
+ * Where a front under the worker unit's split listens instead of the worker
+ * socket: the unit's own process owns the worker socket and forwards to this
+ * one, so the worker socket stays up while the front restarts
+ * (worker-front-proxy.ts). Always `front.sock` beside the worker socket.
+ */
+export const WORKER_LISTEN_SOCKET_ENV = 'OLYMPUS_WORKER_LISTEN_SOCKET';
+
+export function workerFrontSocketPath(options: WorkerTransportOptions = {}): string | undefined {
   const path = workerSocketPath(options);
+  return path ? join(dirname(path), 'front.sock') : undefined;
+}
+
+/** The socket this process binds: the worker socket, or the front's own under the unit's split. */
+export function workerListenSocketPath(options: WorkerTransportOptions = {}): string | undefined {
+  const requested = (options.env ?? process.env)[WORKER_LISTEN_SOCKET_ENV]?.trim();
+  if (!requested) return workerSocketPath(options);
+  const front = workerFrontSocketPath(options);
+  if (requested !== front) throw new Error(`${WORKER_LISTEN_SOCKET_ENV} must name front.sock beside the worker socket.`);
+  return front;
+}
+
+export function prepareWorkerSocket(options: WorkerTransportOptions = {}): string | undefined {
+  const path = workerListenSocketPath(options);
   if (!path) return undefined;
   try { mkdirSync(dirname(path), { mode: 0o700 }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
@@ -117,6 +139,9 @@ export function removeReleasedWorkerSocket(
 export function releaseSystemdWorkerSocket(options: WorkerTransportOptions = {}): boolean {
  const env=options.env??process.env;
  if((options.platform??process.platform)!=='linux'||env.OLYMPUS_MANAGED_WORKER!=='1'||!env.INVOCATION_ID)return false;
+ // A front under the unit's split: the unit's process owns the worker socket,
+ // and clears the front's own before each start (worker-service-split.ts).
+ if(env[WORKER_LISTEN_SOCKET_ENV]?.trim())return false;
  try{return removeReleasedWorkerSocket(options,{previousWorkerReleased:true});}catch{return false;}
 }
 

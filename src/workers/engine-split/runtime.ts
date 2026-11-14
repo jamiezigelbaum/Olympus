@@ -6,6 +6,7 @@
  */
 import { readBootProgress, type BootProgress } from '../../core/boot-progress.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, processAlive, readEngineHeartbeat } from '../../core/engine-heartbeat.ts';
+import { engineStartingAnswer, engineStartingResponse } from '../../core/worker-front-proxy.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { lstatSync, rmSync } from 'node:fs';
@@ -130,11 +131,7 @@ export function listenWhileStarting(input: {
   port: number;
   log?: (line: string) => void;
 }): { stop(): void } {
-  const answer = () => {
-    const heartbeat = readEngineHeartbeat(input.env);
-    const step = heartbeat && engineHeartbeatBeating(heartbeat) ? engineHeartbeatLine(heartbeat) : 'starting';
-    return Response.json({ reachable: false, status: 'starting', step }, { status: 503, headers: { 'retry-after': '5' } });
-  };
+  const answer = (request: Request) => engineStartingResponse(request, input.env);
   try {
     if (releaseSystemdWorkerSocket()) (input.log ?? console.warn)('[olympus:worker] removed the socket left by the previous worker run');
     const socketPath = prepareWorkerSocket();
@@ -227,7 +224,12 @@ export const DATA_EXPORT_WAIT_MS = 3 * 60 * 60_000;
 // the stop was unconfirmed while the background went on to apply it.
 export const OWNER_ACTION_WAIT_MS = 5 * 60_000;
 
-function restartingResponse(): Response {
+function restartingResponse(request: Request): Response {
+  // A browser gets the page that loads itself again until Olympus is back.
+  if ((request.headers.get('accept') ?? '').includes('text/html')) {
+    const answer = engineStartingAnswer({ step: 'restarting', acceptsHtml: true });
+    return new Response(answer.body, { status: answer.status, headers: { 'content-type': answer.contentType, 'retry-after': '5' } });
+  }
   return Response.json({ error: { code: 'worker_restarting', message: 'Olympus is restarting; try again in a moment.' } }, { status: 503 });
 }
 
@@ -252,13 +254,13 @@ export function createFrontGate() {
     reopen() { open = true; },
     wrap<S>(handler: (request: Request, server: S) => Response | Promise<Response>) {
       return async (request: Request, server: S): Promise<Response> => {
-        if (!open) return restartingResponse();
+        if (!open) return restartingResponse(request);
         const started = generation;
         const context = { closedTheGate: false };
         const response = await current.run(context, () => handler(request, server));
         if (!context.closedTheGate && (started !== generation || !open)) {
           await response.body?.cancel().catch(() => undefined);
-          return restartingResponse();
+          return restartingResponse(request);
         }
         return response;
       };
@@ -358,7 +360,7 @@ export function createEngineFrontRoutes(input: {
     const kind = forwardedKindFor(path);
     if (!kind) return undefined;
     return (async (): Promise<Response | undefined> => {
-      if (!input.gate.isOpen()) return restartingResponse();
+      if (!input.gate.isOpen()) return restartingResponse(request);
       if (path === '/v1/cli/tier' && tierCommandOnlyReads(await request.clone().text())) return undefined;
       if (kind !== 'delete_source_data') return send(kind, request);
       input.gate.close();
@@ -374,7 +376,7 @@ export function createEngineFrontRoutes(input: {
         // new front waits for the background, which deletes at its boot if it
         // marked the account and otherwise changed nothing.
         input.restartFront();
-        return restartingResponse();
+        return restartingResponse(request);
       }
       const response = new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
       const restarting = response.status === 200

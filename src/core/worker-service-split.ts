@@ -33,6 +33,8 @@ import { createNativeProcessService, setNativeProcessChildStdio, type NativeProc
 import { ENGINE_BACKGROUND_SERVICE_ID, engineBackgroundLaunch } from './native-worker-service.ts';
 import { readWorkerSetupEnv } from './worker-auth.ts';
 import { WORKER_SHUTDOWN_DEADLINE_MS } from './worker-shutdown.ts';
+import { clearLeftFrontSocket, startWorkerFrontProxy } from './worker-front-proxy.ts';
+import { WORKER_LISTEN_SOCKET_ENV, workerFrontSocketPath } from './worker-transport.ts';
 
 /** Each child gets its own shutdown deadline and a margin before the forced kill. */
 const STOP_GRACE_MS = WORKER_SHUTDOWN_DEADLINE_MS + 5_000;
@@ -70,6 +72,8 @@ export async function superviseWorkerServiceSplit(input: {
    * `ignore`. Process-wide in the kernel, so it is set here, before any start.
    */
   childStdio?: NativeProcessChildStdio;
+  /** The worker socket's pipe to the front; tests that run no real socket pass a stand-in. */
+  startProxy?: (options: { env: NodeJS.ProcessEnv; frontSocket: string; log: (line: string) => void }) => { stop(): void };
 }): Promise<{ stop(): Promise<void> }> {
   const log = input.log ?? ((line: string) => console.warn(line));
   setNativeProcessChildStdio(input.childStdio ?? 'inherit');
@@ -103,6 +107,11 @@ export async function superviseWorkerServiceSplit(input: {
     ...(input.readinessPollMs !== undefined ? { readinessPollMs: input.readinessPollMs } : {}),
     ...(input.spawn ? { spawn: input.spawn as unknown as typeof spawnProcess } : {}),
   };
+  // The worker socket is this process's for as long as the unit runs; the
+  // front serves on front.sock behind it, so a front restart never takes the
+  // socket away (worker-front-proxy.ts).
+  const frontSocket = workerFrontSocketPath({ env: input.env, platform: 'linux' })!;
+  const proxy = (input.startProxy ?? startWorkerFrontProxy)({ env: input.env, frontSocket, log });
   const background = createNativeProcessService({
     ...shared,
     id: ENGINE_BACKGROUND_SERVICE_ID,
@@ -131,15 +140,19 @@ export async function superviseWorkerServiceSplit(input: {
     id: 'olympus-worker',
     label: 'worker front',
     descendantGroupsPath: descendantGroupsPath('olympus-worker', input.env),
-    prepareStart: async () => ({
+    prepareStart: async () => {
+      // The kernel starts no front over a live one: a socket left here is the last front's.
+      clearLeftFrontSocket(frontSocket);
+      return {
       command: input.runtimePath,
       args,
-      env: { ...launchEnv(), [ENGINE_ROLE_ENV]: 'front', [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath },
+      env: { ...launchEnv(), [ENGINE_ROLE_ENV]: 'front', [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath, [WORKER_LISTEN_SOCKET_ENV]: frontSocket },
       startupTimeoutMs,
       endpointOccupied: false,
       // The front waits for the background itself before it serves; running is enough here.
       readinessProbe: async (child) => child.exitCode === null && child.signalCode === null,
-    }),
+      };
+    },
   });
   const context: NativeProcessServiceContext = {
     logger: { info: log, warn: log },
@@ -156,6 +169,7 @@ export async function superviseWorkerServiceSplit(input: {
       // Both at once, so a child that the unit's own SIGTERM already ended is
       // never started again while the other is still stopping.
       await Promise.all([front.stop().catch(() => undefined), background.stop().catch(() => undefined)]);
+      proxy.stop();
       clearInterval(keepAlive);
     })();
     return stopping;

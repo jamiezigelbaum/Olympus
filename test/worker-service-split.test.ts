@@ -7,7 +7,7 @@
 // records what it was started as), so this file is in the deploy lane.
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as childProcess from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runWorkerForeground } from '../src/cli.ts';
@@ -108,6 +108,24 @@ describe('the worker service runs the engine split itself', () => {
     expect(second!.argv).toEqual(['__worker-service-run']);
     expect(first!.managed).toBe('1');
     expect(second!.managed).toBe('1');
+  }, 30_000);
+
+  test('the worker socket stays up while the front restarts: a request waits for the next front (lane 6, first-run save)', async () => {
+    const context = setup();
+    context.env.FRONT_SERVES = '1';
+    await supervise(context);
+    const socket = join(context.env.XDG_RUNTIME_DIR!, 'olympus', 'worker.sock');
+    await waitFor(() => context.read().some((e) => e.role === 'front' && (e.event as string) === 'listen') ? true : undefined);
+    const ask = async (path = '/dashboard') => (await fetch(`http://127.0.0.1:8010${path}`, { unix: socket, keepalive: false } as RequestInit)).text();
+    const first = await waitFor(async () => { try { return await ask(); } catch { return undefined; } });
+    expect(first).toMatch(/^front \d+$/);
+    expect(context.read().find((e) => (e.event as string) === 'listen')?.socket).toBe(join(context.env.XDG_RUNTIME_DIR!, 'olympus', 'front.sock'));
+    await ask('/restart');
+    // Every request from here on is answered, by a front: never a refused connection.
+    const answers: string[] = [];
+    while (!answers.some((answer) => answer !== first)) answers.push(await ask());
+    expect(answers.every((answer) => /^front \d+$/.test(answer))).toBe(true);
+    expect(existsSync(socket)).toBe(true);
   }, 30_000);
 
   test('a background that exits is started again; the front keeps running', async () => {

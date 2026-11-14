@@ -4366,8 +4366,21 @@ function validateWorkerSocket(options = {}) {
     throw new Error("Worker socket must be owner-owned and 0600.");
   return path;
 }
-function prepareWorkerSocket(options = {}) {
+function workerFrontSocketPath(options = {}) {
   const path = workerSocketPath(options);
+  return path ? join7(dirname7(path), "front.sock") : undefined;
+}
+function workerListenSocketPath(options = {}) {
+  const requested = (options.env ?? process.env)[WORKER_LISTEN_SOCKET_ENV]?.trim();
+  if (!requested)
+    return workerSocketPath(options);
+  const front = workerFrontSocketPath(options);
+  if (requested !== front)
+    throw new Error(`${WORKER_LISTEN_SOCKET_ENV} must name front.sock beside the worker socket.`);
+  return front;
+}
+function prepareWorkerSocket(options = {}) {
+  const path = workerListenSocketPath(options);
   if (!path)
     return;
   try {
@@ -4412,6 +4425,8 @@ function removeReleasedWorkerSocket(options, custody) {
 function releaseSystemdWorkerSocket(options = {}) {
   const env = options.env ?? process.env;
   if ((options.platform ?? process.platform) !== "linux" || env.OLYMPUS_MANAGED_WORKER !== "1" || !env.INVOCATION_ID)
+    return false;
+  if (env[WORKER_LISTEN_SOCKET_ENV]?.trim())
     return false;
   try {
     return removeReleasedWorkerSocket(options, { previousWorkerReleased: true });
@@ -4494,7 +4509,7 @@ async function nodeWorkerFetch(unix, input, init, options) {
     outgoing.end(body);
   });
 }
-var WORKER_SOCKET_SERVE_OPTIONS, workerFetch = (input, init) => createWorkerFetch()(input, init);
+var WORKER_LISTEN_SOCKET_ENV = "OLYMPUS_WORKER_LISTEN_SOCKET", WORKER_SOCKET_SERVE_OPTIONS, workerFetch = (input, init) => createWorkerFetch()(input, init);
 var init_worker_transport = __esm(() => {
   init_linux_engine_layout();
   init_atomic_file();
@@ -54270,6 +54285,199 @@ var init_linux_owner_bridge_host = __esm(() => {
   init_worker_transport();
 });
 
+// src/core/worker-front-proxy.ts
+import { rmSync as rmSync17 } from "node:fs";
+function engineStartingStep(env) {
+  const heartbeat = readEngineHeartbeat(env);
+  return heartbeat && engineHeartbeatBeating(heartbeat) ? engineHeartbeatLine(heartbeat) : "starting";
+}
+function engineStartingAnswer(input) {
+  if (input.acceptsHtml) {
+    return {
+      status: 503,
+      contentType: "text/html; charset=utf-8",
+      body: `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="3"><title>Olympus is starting</title></head>` + `<body style="font-family:system-ui,sans-serif;margin:3rem"><p>Olympus is starting: ${escapeHtml(input.step)}.</p><p>This page loads again on its own.</p></body></html>`
+    };
+  }
+  return { status: 503, contentType: "application/json", body: JSON.stringify({ reachable: false, status: "starting", step: input.step }) };
+}
+function engineStartingResponse(request, env) {
+  const answer = engineStartingAnswer({ step: engineStartingStep(env), acceptsHtml: (request.headers.get("accept") ?? "").includes("text/html") });
+  return new Response(answer.body, { status: answer.status, headers: { "content-type": answer.contentType, "retry-after": "5" } });
+}
+function rawStartingAnswer(head, env) {
+  const accept = /^accept:(.*)$/im.exec(head)?.[1] ?? "";
+  const answer = engineStartingAnswer({ step: engineStartingStep(env), acceptsHtml: accept.includes("text/html") });
+  const body = Buffer.from(answer.body);
+  return Buffer.concat([Buffer.from(`HTTP/1.1 ${answer.status} Service Unavailable\r
+content-type: ${answer.contentType}\r
+content-length: ${body.length}\r
+retry-after: 5\r
+connection: close\r
+\r
+`), body]);
+}
+function send2(socket, chunk) {
+  const side = socket.data;
+  if (side.queue.length > 0) {
+    side.queue.push(chunk);
+    return;
+  }
+  const written = socket.write(chunk);
+  if (written < chunk.length)
+    side.queue.push(chunk.subarray(Math.max(written, 0)));
+}
+function drain(socket) {
+  const side = socket.data;
+  while (side.queue.length > 0) {
+    const chunk = side.queue[0];
+    const written = socket.write(chunk);
+    if (written < chunk.length) {
+      side.queue[0] = chunk.subarray(Math.max(written, 0));
+      return;
+    }
+    side.queue.shift();
+  }
+  if (side.ended)
+    socket.end();
+}
+function toFront(client, front, chunk) {
+  const side = client.data;
+  if (side.replay === "unknown")
+    side.replay = READS.test(Buffer.from(chunk.subarray(0, 8)).toString("latin1")) ? "yes" : "no";
+  if (side.replay === "yes")
+    side.unanswered.push(chunk);
+  send2(front, chunk);
+}
+function endWhenSent(socket) {
+  if (!socket)
+    return;
+  socket.data.ended = true;
+  if (socket.data.queue.length === 0)
+    socket.end();
+}
+function startWorkerFrontProxy(input) {
+  const env = input.env;
+  const log = input.log ?? ((line) => console.warn(line));
+  const frontSocket = input.frontSocket ?? workerFrontSocketPath({ env, platform: "linux" });
+  const waitMs = input.waitMs ?? FRONT_PROXY_WAIT_MS;
+  const retryMs = input.retryMs ?? 100;
+  if (releaseSystemdWorkerSocket({ env }))
+    log("[olympus:worker] removed the socket left by the previous worker run");
+  else if (input.clearStale && removeReleasedWorkerSocket({ env, platform: "linux" }, { previousWorkerReleased: true }))
+    log("removed the worker socket a previous engine left");
+  const socketPath = prepareWorkerSocket({ env, platform: "linux" });
+  const connectFront = (client) => {
+    const side = client.data;
+    Bun.connect({
+      unix: frontSocket,
+      data: { queue: [], pending: [], ended: false, startedAt: side.startedAt, unanswered: [], replay: "no" },
+      socket: {
+        open(front) {
+          if (side.ended) {
+            front.end();
+            return;
+          }
+          front.data.peer = client;
+          side.peer = front;
+          for (const chunk of side.pending.splice(0))
+            toFront(client, front, chunk);
+        },
+        data(front, chunk) {
+          side.replay = "no";
+          side.unanswered = [];
+          if (front.data.peer)
+            send2(front.data.peer, chunk);
+        },
+        drain(front) {
+          drain(front);
+        },
+        close() {
+          frontGone();
+        },
+        error() {
+          frontGone();
+        }
+      }
+    }).catch(() => {
+      if (side.ended)
+        return;
+      retry();
+    });
+    function frontGone() {
+      side.peer = undefined;
+      const replay = side.replay === "yes" ? side.unanswered.splice(0) : [];
+      if (side.ended || replay.length === 0) {
+        endWhenSent(client);
+        return;
+      }
+      side.pending.unshift(...replay);
+      side.startedAt = performance.now();
+      side.timer = setTimeout(() => connectFront(client), retryMs);
+    }
+    function retry() {
+      if (performance.now() - side.startedAt >= waitMs) {
+        const head = Buffer.concat(side.pending).toString("latin1");
+        side.pending.length = 0;
+        side.ended = true;
+        client.write(rawStartingAnswer(head, env));
+        client.end();
+        return;
+      }
+      side.timer = setTimeout(() => connectFront(client), retryMs);
+    }
+  };
+  const server = bindWorkerSocket(socketPath, () => Bun.listen({
+    unix: socketPath,
+    data: undefined,
+    socket: {
+      open(client) {
+        client.data = { queue: [], pending: [], ended: false, startedAt: performance.now(), unanswered: [], replay: "unknown" };
+        connectFront(client);
+      },
+      data(client, chunk) {
+        const front = client.data.peer;
+        if (!front)
+          client.data.pending.push(Uint8Array.from(chunk));
+        else
+          toFront(client, front, Uint8Array.from(chunk));
+      },
+      drain(client) {
+        drain(client);
+      },
+      close(client) {
+        client.data.ended = true;
+        if (client.data.timer)
+          clearTimeout(client.data.timer);
+        endWhenSent(client.data.peer);
+      },
+      error(client) {
+        client.data.ended = true;
+        if (client.data.timer)
+          clearTimeout(client.data.timer);
+        endWhenSent(client.data.peer);
+      }
+    }
+  }));
+  return {
+    socketPath,
+    stop() {
+      server.stop(true);
+      rmSync17(socketPath, { force: true });
+    }
+  };
+}
+function clearLeftFrontSocket(frontSocket) {
+  if (workerSocketListenerStopped(frontSocket) === true)
+    rmSync17(frontSocket, { force: true });
+}
+var FRONT_PROXY_WAIT_MS = 2500, escapeHtml = (text) => text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`), READS;
+var init_worker_front_proxy = __esm(() => {
+  init_engine_heartbeat();
+  init_worker_transport();
+  READS = /^(GET|HEAD|OPTIONS) /;
+});
+
 // src/core/native-worker-service.ts
 import { homedir as homedir23 } from "node:os";
 import { randomUUID as randomUUID10 } from "node:crypto";
@@ -54284,7 +54492,7 @@ function createNativeWorkerService(options) {
     proofGeneration += 1;
     readyChild = undefined;
   };
-  const fetchWorker = options.fetch ?? workerFetch;
+  const fetchWorker = options.fetch ?? (options.frontSocket ? createUnixSocketFetch(options.frontSocket) : workerFetch);
   const service = createNativeProcessService({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
@@ -54327,6 +54535,11 @@ function createNativeWorkerService(options) {
         settings.env[ENGINE_ROLE_ENV] = "front";
         settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = engineBackgroundSocketPath({ env: settings.env });
       }
+      if (options.frontSocket) {
+        clearLeftFrontSocket(options.frontSocket);
+        settings.env[WORKER_LISTEN_SOCKET_ENV] = options.frontSocket;
+      } else
+        delete settings.env[WORKER_LISTEN_SOCKET_ENV];
       if (options.ownerBridgeHostSocket)
         settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
       else
@@ -54733,6 +54946,7 @@ var init_native_worker_service = __esm(() => {
   init_data_owner_lock();
   init_linux_owner_bridge_host();
   init_worker_transport();
+  init_worker_front_proxy();
   init_engine_split();
   init_descendant_groups();
   init_config();
@@ -65802,7 +66016,7 @@ var init_continuation_cache = __esm(() => {
 });
 
 // src/workers/archive-import/forget.ts
-import { existsSync as existsSync51, realpathSync as realpathSync12, rmSync as rmSync18 } from "node:fs";
+import { existsSync as existsSync51, realpathSync as realpathSync12, rmSync as rmSync19 } from "node:fs";
 import { join as join59, relative as relative8, sep as sep11 } from "node:path";
 function forgetSourceArchiveImports(env, sourceIds, options = {}) {
   const path = defaultArchiveImportStatePath(env);
@@ -65825,7 +66039,7 @@ function forgetSourceArchiveImports(env, sourceIds, options = {}) {
     const kept = stagingCopiesOf(path, state.list());
     for (const copy of copies)
       if (!kept.has(copy))
-        rmSync18(copy, { recursive: true, force: true });
+        rmSync19(copy, { recursive: true, force: true });
     return removed;
   } finally {
     bindings.close();
@@ -80951,7 +81165,7 @@ import {
   readFileSync as readFileSync49,
   readdirSync as readdirSync11,
   renameSync as renameSync12,
-  rmSync as rmSync19,
+  rmSync as rmSync20,
   statSync as statSync26,
   statfsSync as statfsSync4,
   writeFileSync as writeFileSync11,
@@ -81204,7 +81418,7 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
   reporter.verifying(label, 0, file.bytes);
   const digest = size === file.bytes ? await sha256File2(path, timeoutMs, (done) => reporter.verifying(label, done, file.bytes)) : undefined;
   if (digest !== file.sha256) {
-    rmSync19(path, { force: true });
+    rmSync20(path, { force: true });
     throw new BuiltInReasoningInstallError("checksum_mismatch", `${file.name} did not match its pinned checksum and was removed; it will download again.`);
   }
   verifiedThisProcess2.add(key);
@@ -81235,7 +81449,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       }
       throw new BuiltInReasoningInstallError("runtime_load_failed", `The built-in model server could not be unpacked (${error instanceof Error ? error.message : String(error)}).`);
     }
-    rmSync19(archivePath, { force: true });
+    rmSync20(archivePath, { force: true });
     const server = locateFile(staging, SERVER_BINARY);
     if (!server) {
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
@@ -81243,10 +81457,10 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
     writeFileSync11(join68(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
-    rmSync19(runtimeDir, { recursive: true, force: true });
+    rmSync20(runtimeDir, { recursive: true, force: true });
     renameSync12(staging, runtimeDir);
   } catch (error) {
-    rmSync19(staging, { recursive: true, force: true });
+    rmSync20(staging, { recursive: true, force: true });
     throw error;
   }
 }
@@ -81374,7 +81588,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
   } finally {
     clearInterval(refresh);
     if (lockHolder(lockPath)?.token === token)
-      rmSync19(lockPath, { force: true });
+      rmSync20(lockPath, { force: true });
   }
 }
 function lockHolder(lockPath) {
@@ -81401,7 +81615,7 @@ function tryAcquireLock2(lockPath, token) {
     return true;
   } catch {
     if (lockIsStale2(lockPath)) {
-      rmSync19(lockPath, { force: true });
+      rmSync20(lockPath, { force: true });
       return tryAcquireLock2(lockPath, token);
     }
     return false;
@@ -81535,7 +81749,7 @@ var init_install = __esm(() => {
 import { isMainThread as isMainThread7 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
 import { randomBytes as randomBytes15 } from "node:crypto";
-import { mkdtempSync as mkdtempSync3, rmSync as rmSync20, writeFileSync as writeFileSync12 } from "node:fs";
+import { mkdtempSync as mkdtempSync3, rmSync as rmSync21, writeFileSync as writeFileSync12 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
 import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir3 } from "node:os";
 import { join as join69 } from "node:path";
@@ -81891,7 +82105,7 @@ function callerCancelled(reason) {
 }
 function removeTokenDir(tokenDir) {
   try {
-    rmSync20(tokenDir, { recursive: true, force: true });
+    rmSync21(tokenDir, { recursive: true, force: true });
     return true;
   } catch {
     console.warn("Olympus built-in model: could not remove a model server token directory.");
@@ -90302,7 +90516,7 @@ import { createHash as createHash54, randomUUID as randomUUID23 } from "node:cry
 import {
   chmodSync as chmodSync23,
   renameSync as renameSync14,
-  rmSync as rmSync21,
+  rmSync as rmSync22,
   writeFileSync as writeFileSync14
 } from "node:fs";
 import { resolve as resolve16 } from "node:path";
@@ -90653,7 +90867,7 @@ function writeReceipt(pathValue, receipt) {
     chmodSync23(path, 384);
     return receipt;
   } catch (error) {
-    rmSync21(temporary, { force: true });
+    rmSync22(temporary, { force: true });
     throw error;
   }
 }
@@ -94164,7 +94378,7 @@ var init_record_builder = __esm(() => {
 });
 
 // src/workers/telegram-messages/media-child.ts
-import { lstatSync as lstatSync31, readdirSync as readdirSync12, readFileSync as readFileSync50, rmSync as rmSync22, statfsSync as statfsSync5 } from "node:fs";
+import { lstatSync as lstatSync31, readdirSync as readdirSync12, readFileSync as readFileSync50, rmSync as rmSync23, statfsSync as statfsSync5 } from "node:fs";
 import { join as join76, resolve as resolve17, sep as sep13 } from "node:path";
 function telegramMediaChild(parent, media, deferredBytes, options = {}) {
   const providerItemId = childProviderItemId(parent.identity.providerItemId, TELEGRAM_CHILD_KEY);
@@ -94300,7 +94514,7 @@ function sweepTelegramMediaTemporaries(spoolDir) {
       const owner = Number(name.slice(name.lastIndexOf(TEMPORARY_MARK) + TEMPORARY_MARK.length));
       if (Number.isSafeInteger(owner) && owner > 0 && processIsRunning(owner))
         continue;
-      rmSync22(join76(folder, name), { force: true });
+      rmSync23(join76(folder, name), { force: true });
       removed += 1;
     }
   }
@@ -96345,7 +96559,7 @@ var init_archive_target = __esm(() => {
 });
 
 // src/workers/archive-import/input-media.ts
-import { closeSync as closeSync23, constants as constants8, openSync as openSync23, rmSync as rmSync23, writeSync as writeSync6 } from "node:fs";
+import { closeSync as closeSync23, constants as constants8, openSync as openSync23, rmSync as rmSync24, writeSync as writeSync6 } from "node:fs";
 function archiveInputMediaLocator(ref) {
   if (!ARCHIVE_ID.test(ref.archiveId) || !BINDING_ID.test(ref.bindingId))
     throw new Error("An archive media locator needs a plain archive and binding id.");
@@ -96411,7 +96625,7 @@ function copyArchiveInputMediaToFile(locator, deps, options, dest) {
     });
   } catch (error) {
     closeSync23(out);
-    rmSync23(dest, { force: true });
+    rmSync24(dest, { force: true });
     throw error;
   }
   closeSync23(out);
@@ -96664,7 +96878,7 @@ var init_on_demand_read = () => {};
 
 // src/workers/file-extraction/spool.ts
 import { createHash as createHash66 } from "node:crypto";
-import { chmodSync as chmodSync24, existsSync as existsSync62, mkdirSync as mkdirSync41, readdirSync as readdirSync14, rmSync as rmSync24, rmdirSync as rmdirSync5, statSync as statSync30 } from "node:fs";
+import { chmodSync as chmodSync24, existsSync as existsSync62, mkdirSync as mkdirSync41, readdirSync as readdirSync14, rmSync as rmSync25, rmdirSync as rmdirSync5, statSync as statSync30 } from "node:fs";
 import { dirname as dirname70, isAbsolute as isAbsolute26, join as join78, relative as relative9, sep as sep14 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
   return join78(root, corpusFolder(owner.corpusId), accountFolder2(owner.accountScope));
@@ -96703,7 +96917,7 @@ function forgetExtractionSpool(root, scope, options = {}) {
         continue;
       removed += filesUnder(target);
       if (!dryRun)
-        rmSync24(target, { recursive: true, force: true });
+        rmSync25(target, { recursive: true, force: true });
     }
     if (!dryRun) {
       try {
@@ -96769,7 +96983,7 @@ function prepareExtractionSpool(dir, options = {}) {
     };
     const remove = (path) => {
       try {
-        rmSync24(path, { recursive: true, force: true });
+        rmSync25(path, { recursive: true, force: true });
       } catch {}
     };
     for (const name of readdirSync14(dir)) {
@@ -96822,7 +97036,7 @@ function prepareExtractionSpool(dir, options = {}) {
   }
 }
 function discardExtractionSpoolFile(path, ownerDir) {
-  rmSync24(path, { force: true });
+  rmSync25(path, { force: true });
   for (const dir of [ownerDir, dirname70(ownerDir)]) {
     try {
       rmdirSync5(dir);
@@ -97381,7 +97595,7 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/connector-source.ts
-import { rmSync as rmSync25, writeFileSync as writeFileSync15 } from "node:fs";
+import { rmSync as rmSync26, writeFileSync as writeFileSync15 } from "node:fs";
 import { basename as basename12, join as join79, resolve as resolve19, sep as sep16 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
@@ -97638,7 +97852,7 @@ function fileHandOver(path, spooled, spoolDir, tidy) {
       const target = resolve19(path);
       if (!target.startsWith(root) || basename12(target) === "")
         return;
-      rmSync25(target, { force: true });
+      rmSync26(target, { force: true });
       tidy();
     }
   };
@@ -97651,7 +97865,7 @@ var init_connector_source = __esm(() => {
 });
 
 // src/workers/whatsapp/child-media.ts
-import { closeSync as closeSync24, constants as constants9, fstatSync as fstatSync5, openSync as openSync24, readSync as readSync7, realpathSync as realpathSync15, rmSync as rmSync26, statSync as statSync31 } from "node:fs";
+import { closeSync as closeSync24, constants as constants9, fstatSync as fstatSync5, openSync as openSync24, readSync as readSync7, realpathSync as realpathSync15, rmSync as rmSync27, statSync as statSync31 } from "node:fs";
 import { isAbsolute as isAbsolute27, join as join80, relative as relative11, resolve as resolve20 } from "node:path";
 function whatsAppMediaFileLocator(path) {
   return `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
@@ -97737,7 +97951,7 @@ function copyBounded(fd, maxBytes, dest) {
     }
   } catch (error) {
     closeSync24(out);
-    rmSync26(dest, { force: true });
+    rmSync27(dest, { force: true });
     throw error;
   }
   closeSync24(out);
@@ -97828,7 +98042,7 @@ var init_child_media = __esm(() => {
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile6, realpath as realpath2, stat as stat4 } from "node:fs/promises";
-import { closeSync as closeSync25, constants as constants10, openSync as openSync25, readSync as readSync8, rmSync as rmSync27 } from "node:fs";
+import { closeSync as closeSync25, constants as constants10, openSync as openSync25, readSync as readSync8, rmSync as rmSync28 } from "node:fs";
 import { basename as basename13, join as join81, relative as relative12, resolve as resolve21, sep as sep17 } from "node:path";
 
 class WhatsAppExtractionSource {
@@ -97933,7 +98147,7 @@ class WhatsAppExtractionSource {
       ...ref.mimeType ? { mimeType: ref.mimeType } : {},
       sizeBytes,
       dispose: async () => {
-        rmSync27(dest, { force: true });
+        rmSync28(dest, { force: true });
         pruneExtractionSpoolOwner(options.spoolDir, owner);
       }
     };
@@ -98849,7 +99063,7 @@ var init_spool_reader = __esm(() => {
 // src/workers/whatsapp/live-connector.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { createHash as createHash68 } from "node:crypto";
-import { closeSync as closeSync27, existsSync as existsSync64, fsyncSync as fsyncSync5, lstatSync as lstatSync33, openSync as openSync27, readFileSync as readFileSync52, readdirSync as readdirSync15, realpathSync as realpathSync16, rmSync as rmSync28, statSync as statSync33 } from "node:fs";
+import { closeSync as closeSync27, existsSync as existsSync64, fsyncSync as fsyncSync5, lstatSync as lstatSync33, openSync as openSync27, readFileSync as readFileSync52, readdirSync as readdirSync15, realpathSync as realpathSync16, rmSync as rmSync29, statSync as statSync33 } from "node:fs";
 import { basename as basename14, dirname as dirname71, isAbsolute as isAbsolute28, join as join85, relative as relative13 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
@@ -99824,7 +100038,7 @@ function deleteFetchedMedia(message, roots) {
 }
 function removeTemp(path) {
   try {
-    rmSync28(path);
+    rmSync29(path);
   } catch (error) {
     if (error.code !== "ENOENT")
       throw error;
@@ -99897,7 +100111,7 @@ function deleteSavedMedia(mediaPath, mediaRoots) {
     return;
   if (!statSync33(real).isFile())
     return;
-  rmSync28(real, { force: true });
+  rmSync29(real, { force: true });
   fsyncFolderOf(real);
 }
 function enrichWithLinkPreview(text, message) {
@@ -100025,7 +100239,7 @@ import {
   readFileSync as readFileSync53,
   readdirSync as readdirSync16,
   renameSync as renameSync15,
-  rmSync as rmSync29,
+  rmSync as rmSync30,
   statfsSync as statfsSync6,
   statSync as statSync34,
   writeSync as writeSync8
@@ -100549,7 +100763,7 @@ function fsyncFolder(dir) {
 }
 function removeDurably(path) {
   try {
-    rmSync29(path);
+    rmSync30(path);
   } catch (error) {
     if (error.code !== "ENOENT")
       throw error;
@@ -111503,7 +111717,7 @@ var init_media_extraction = __esm(() => {
 });
 
 // src/workers/telegram-messages/store-sync.ts
-import { existsSync as existsSync68, readdirSync as readdirSync18, rmSync as rmSync30 } from "node:fs";
+import { existsSync as existsSync68, readdirSync as readdirSync18, rmSync as rmSync31 } from "node:fs";
 import { join as join98 } from "node:path";
 function createTelegramConnectorStores(env = process.env) {
   const account = { sourceId: TELEGRAM_MESSAGES_SOURCE_ID };
@@ -111711,7 +111925,7 @@ function removeSecretTelegramMedia(spoolDir, ledger) {
       continue;
     const messageId = identity.providerItemId.slice(0, -TELEGRAM_MEDIA_CHILD_SUFFIX.length);
     for (const path of telegramLiveMediaFile(spoolDir, identity.providerConversationId, messageId))
-      rmSync30(path, { force: true });
+      rmSync31(path, { force: true });
   }
 }
 function telegramCaptureSince(spoolDir) {
@@ -117796,7 +118010,7 @@ var init_judge_check = __esm(() => {
 // src/workers/classification/judge-second-round.ts
 import { Database as Database26 } from "bun:sqlite";
 import { createHash as createHash75 } from "node:crypto";
-import { chmodSync as chmodSync30, existsSync as existsSync74, readFileSync as readFileSync57, rmSync as rmSync31 } from "node:fs";
+import { chmodSync as chmodSync30, existsSync as existsSync74, readFileSync as readFileSync57, rmSync as rmSync32 } from "node:fs";
 import { dirname as dirname81, join as join102, sep as sep18 } from "node:path";
 function judgeObservationsPath(env) {
   return join102(dirname81(resolveClassificationLedgerPath(env)), "judge-observed.json");
@@ -117971,7 +118185,7 @@ class SecondRoundSweep {
   }
   static reset(statePath) {
     try {
-      rmSync31(statePath, { force: true });
+      rmSync32(statePath, { force: true });
     } catch {}
   }
   read() {
@@ -119182,7 +119396,7 @@ import {
   realpathSync as realpathSync17,
   renameSync as renameSync16,
   rmdirSync as rmdirSync6,
-  rmSync as rmSync32,
+  rmSync as rmSync33,
   statSync as statSync35
 } from "node:fs";
 import { homedir as homedir29 } from "node:os";
@@ -119245,7 +119459,7 @@ function exportOlympusData(options) {
   refuseExportDuringMove(selected, options);
   const durabilityBoundary = exportDurabilityBoundary(destination);
   makeDurableDirectory(destination, durabilityBoundary);
-  rmSync32(join104(destination, "manifest.json"), { force: true });
+  rmSync33(join104(destination, "manifest.json"), { force: true });
   syncDirectorySync2(destination);
   const files = [];
   const skipped = [];
@@ -119424,14 +119638,14 @@ function exportReferencedMedia(refs, destination, durabilityBoundary, files, art
       copyFileSync2(path, staging);
       chmodSync33(staging, 384);
       if (sha256File3(staging) !== sha256) {
-        rmSync32(staging, { force: true });
+        rmSync33(staging, { force: true });
         counts.missing += 1;
         continue;
       }
       syncFileSync(staging);
       renameSync16(staging, target);
     } catch (error) {
-      rmSync32(staging, { force: true });
+      rmSync33(staging, { force: true });
       if (error.code === "ENOENT") {
         counts.missing += 1;
         continue;
@@ -119684,7 +119898,7 @@ function moveAccountFolderToTrash(folder, env, options) {
     moved = false;
   }
   if (!moved) {
-    rmSync32(folder, { recursive: true, force: true });
+    rmSync33(folder, { recursive: true, force: true });
     return;
   }
   emptyAccountTrash(env, options);
@@ -119712,7 +119926,7 @@ function emptyAccountTrash(env, options) {
     return;
   }
   for (const name of names)
-    rmSync32(accountTrashEntry(name, env), { recursive: true, force: true });
+    rmSync33(accountTrashEntry(name, env), { recursive: true, force: true });
   removeEmptyTrash();
 }
 function optionalList(key, values) {
@@ -119971,7 +120185,7 @@ function rmTargetKeepingOwnerLock(target, lockPath) {
   const lock = canonicalPath2(lockPath);
   const root = canonicalPath2(target.path);
   if (!target.allowRecursive || !isStrictlyInside(lock, root) || !existsSync77(lockPath)) {
-    rmSync32(target.path, { recursive: target.allowRecursive, force: true });
+    rmSync33(target.path, { recursive: target.allowRecursive, force: true });
     return;
   }
   const keep = relative15(root, lock).split(sep19);
@@ -119985,7 +120199,7 @@ function rmTargetKeepingOwnerLock(target, lockPath) {
         clear(child, depth + 1);
         continue;
       }
-      rmSync32(child, { recursive: true, force: true });
+      rmSync33(child, { recursive: true, force: true });
     }
   };
   clear(target.path, 0);
@@ -120222,7 +120436,7 @@ function exportSqliteStore(options) {
       syncFileSync(staging);
       renameSync16(staging, destination);
     } catch (error) {
-      rmSync32(staging, { force: true });
+      rmSync33(staging, { force: true });
       throw error;
     }
     syncDirectorySync2(dirname85(destination));
@@ -120236,7 +120450,7 @@ function exportSqliteStore(options) {
   throw new OperationError("source_index_error", `Declared Olympus SQLite store is not a readable database: ${sqlitePath}`, "The export failed closed; repair or explicitly account for the store before transition.");
 }
 function snapshotSqliteStore(sqlitePath, staging) {
-  rmSync32(staging, { force: true });
+  rmSync33(staging, { force: true });
   let db;
   try {
     db = new Database27(sqlitePath, { readonly: true });
@@ -120247,7 +120461,7 @@ function snapshotSqliteStore(sqlitePath, staging) {
     db.exec("PRAGMA busy_timeout = 10000;");
     db.exec(`VACUUM INTO '${sqliteStringLiteral(staging)}'`);
   } catch (error) {
-    rmSync32(staging, { force: true });
+    rmSync33(staging, { force: true });
     if (isUnreadableSqliteError(error))
       return false;
     throw new OperationError("source_index_error", `Failed to snapshot Olympus SQLite store for export: ${sqlitePath}`, "Retry the export once the store is readable; no partial snapshot was published.");
@@ -122998,7 +123212,7 @@ import {
   readdirSync as readdirSync21,
   realpathSync as realpathSync18,
   renameSync as renameSync17,
-  rmSync as rmSync33,
+  rmSync as rmSync34,
   statSync as statSync36,
   symlinkSync,
   writeFileSync as writeFileSync16,
@@ -123345,7 +123559,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
       ensureOwnedDirectory(toolDir, uid, `The ${pin.label} folder`);
       for (const entry of readdirSync21(toolDir)) {
         if (/^\.(download|staging|old)-/.test(entry))
-          rmSync33(join108(toolDir, entry), { recursive: true, force: true });
+          rmSync34(join108(toolDir, entry), { recursive: true, force: true });
       }
     });
     options.onProgress?.({ tool, phase: "downloading", receivedBytes: 0, totalBytes: asset.bytes });
@@ -123358,7 +123572,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     await lease.assertOwned();
     mkdirSync53(staging, { mode: 448 });
     await extractVerifiedArchive(download, staging, asset, tool);
-    rmSync33(download, { force: true });
+    rmSync34(download, { force: true });
     for (const required of asset.required) {
       if (!privatelyOwned(join108(staging, required), uid, "file")) {
         throw new ManagedToolsError("archive_incomplete", `The ${pin.label} download is missing ${required}, so nothing was installed.`, tool);
@@ -123401,7 +123615,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
       }
       renameSync17(staging, versionDir);
       if (old)
-        rmSync33(old, { recursive: true, force: true });
+        rmSync34(old, { recursive: true, force: true });
     });
     const executable = managedToolExecutable(tool, host);
     if (!executable)
@@ -123418,15 +123632,15 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
           const now = lstatSync38(path);
           if (now.isSymbolicLink() || now.dev !== folder.dev || now.ino !== folder.ino)
             continue;
-          rmSync33(path, { recursive: true, force: true });
+          rmSync34(path, { recursive: true, force: true });
           replaced.push(folder.version);
         }
       });
     }
     return { tool, version: pin.version, outcome: "installed", executable, ...replaced.length > 0 ? { replaced } : {} };
   } catch (error) {
-    rmSync33(download, { force: true });
-    rmSync33(staging, { recursive: true, force: true });
+    rmSync34(download, { force: true });
+    rmSync34(staging, { recursive: true, force: true });
     if (error instanceof FileLeaseLostError)
       throw error;
     const failure = error instanceof ManagedToolsError ? error : new ManagedToolsError("install_failed", `${pin.label} could not be installed: ${error.message}`, tool);
@@ -124414,7 +124628,7 @@ var init_zkapi_confine_fetch = __esm(() => {
 
 // src/core/zkapi-confine-selftest.ts
 import { randomBytes as randomBytes18 } from "node:crypto";
-import { chmodSync as chmodSync35, readFileSync as readFileSync65, readlinkSync as readlinkSync2, readdirSync as readdirSync22, rmSync as rmSync34, writeFileSync as writeFileSync17 } from "node:fs";
+import { chmodSync as chmodSync35, readFileSync as readFileSync65, readlinkSync as readlinkSync2, readdirSync as readdirSync22, rmSync as rmSync35, writeFileSync as writeFileSync17 } from "node:fs";
 import { createServer as createServer3, createConnection as createConnection3 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces as networkInterfaces2 } from "node:os";
@@ -124602,7 +124816,7 @@ async function releaseFixtureResources(servers, datagrams, sockets, acceptedSock
   }));
   const stopped = await Promise.allSettled(decoys.map(({ handle }) => stopGroup(handle.pgid)));
   for (const path of paths)
-    rmSync34(path, { force: true });
+    rmSync35(path, { force: true });
   const failure = stopped.find((result) => result.status === "rejected");
   if (failure)
     throw failure.reason;
@@ -125209,8 +125423,8 @@ main().catch(() => process.exit(1));
             throw cleanupError;
         }
       } finally {
-        rmSync34(probePath, { force: true });
-        rmSync34(watchdogPath, { force: true });
+        rmSync35(probePath, { force: true });
+        rmSync35(watchdogPath, { force: true });
       }
     }
   };
@@ -125570,7 +125784,7 @@ var init_zkapi_confinement_linux = __esm(() => {
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn7, execFileSync as execFileSync4 } from "node:child_process";
 import { createHash as createHash80, randomUUID as randomUUID28 } from "node:crypto";
-import { accessSync as accessSync10, chmodSync as chmodSync36, closeSync as closeSync30, constants as constants14, existsSync as existsSync80, mkdirSync as mkdirSync54, mkdtempSync as mkdtempSync4, readdirSync as readdirSync24, readFileSync as readFileSync67, readlinkSync as readlinkSync4, realpathSync as realpathSync20, rmSync as rmSync35, statSync as statSync37, writeFileSync as writeFileSync18 } from "node:fs";
+import { accessSync as accessSync10, chmodSync as chmodSync36, closeSync as closeSync30, constants as constants14, existsSync as existsSync80, mkdirSync as mkdirSync54, mkdtempSync as mkdtempSync4, readdirSync as readdirSync24, readFileSync as readFileSync67, readlinkSync as readlinkSync4, realpathSync as realpathSync20, rmSync as rmSync36, statSync as statSync37, writeFileSync as writeFileSync18 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir31, tmpdir as tmpdir12 } from "node:os";
 import { delimiter as delimiter7, dirname as dirname90, isAbsolute as isAbsolute32, join as join111, resolve as resolvePath } from "node:path";
@@ -126240,7 +126454,7 @@ async function recoverStrandedGroups(statePath, now) {
     return "stranded";
   if (running.workDir) {
     try {
-      rmSync35(running.workDir, { recursive: true, force: true });
+      rmSync36(running.workDir, { recursive: true, force: true });
     } catch {}
   }
   updateState(statePath, now, (state) => {
@@ -127350,7 +127564,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
   confinementSession?.close();
   if (allStopped) {
     try {
-      rmSync35(workDir, { recursive: true, force: true });
+      rmSync36(workDir, { recursive: true, force: true });
     } catch {}
   } else {
     result = fail("teardown_incomplete");
@@ -127849,7 +128063,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 // src/core/engine-service.ts
 import { spawn as spawn8, spawnSync as spawnSync14 } from "node:child_process";
 import { createHash as createHash81, randomBytes as randomBytes19 } from "node:crypto";
-import { existsSync as existsSync81, lstatSync as lstatSync40, readdirSync as readdirSync25, readFileSync as readFileSync68, renameSync as renameSync18, rmSync as rmSync36, statSync as statSync38 } from "node:fs";
+import { existsSync as existsSync81, lstatSync as lstatSync40, readdirSync as readdirSync25, readFileSync as readFileSync68, renameSync as renameSync18, rmSync as rmSync37, statSync as statSync38 } from "node:fs";
 import { homedir as homedir32, platform as osPlatform3 } from "node:os";
 import { basename as basename16, dirname as dirname91, isAbsolute as isAbsolute33, join as join112, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
@@ -128872,7 +129086,7 @@ function recoverInterruptedHelperSwap(paths, deps = {}) {
     }
   }
   for (const name of over)
-    rmSync36(join112(paths.appSupportDir, name), { recursive: true, force: true });
+    rmSync37(join112(paths.appSupportDir, name), { recursive: true, force: true });
   return result;
 }
 function installedEngineHelper(paths) {
@@ -129382,7 +129596,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync15 } from "node:child_process";
-import { chmodSync as chmodSync37, closeSync as closeSync31, constants as constants15, copyFileSync as copyFileSync3, existsSync as existsSync82, fstatSync as fstatSync6, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync41, linkSync as linkSync3, mkdirSync as mkdirSync55, openSync as openSync30, readFileSync as readFileSync69, readlinkSync as readlinkSync5, readdirSync as readdirSync26, realpathSync as realpathSync21, renameSync as renameSync19, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync19 } from "node:fs";
+import { chmodSync as chmodSync37, closeSync as closeSync31, constants as constants15, copyFileSync as copyFileSync3, existsSync as existsSync82, fstatSync as fstatSync6, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync41, linkSync as linkSync3, mkdirSync as mkdirSync55, openSync as openSync30, readFileSync as readFileSync69, readlinkSync as readlinkSync5, readdirSync as readdirSync26, realpathSync as realpathSync21, renameSync as renameSync19, rmSync as rmSync38, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync19 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename17, dirname as dirname92, join as join113, relative as relative16, resolve as resolve23, sep as sep21 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
@@ -129536,7 +129750,7 @@ function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
       const dest = `${path}.${i}`;
       assertLinuxManagedPath(dest);
       if (i === retained)
-        rmSync37(dest, { force: true });
+        rmSync38(dest, { force: true });
       else if (existsSync82(dest))
         renameSync19(dest, `${path}.${i + 1}`);
     }
@@ -129817,7 +130031,7 @@ function durableProgram(layout, source, transaction, options) {
   const generations = join113(layout.packageDir, "generations");
   createLinuxPrivateDirectory(generations);
   const staging = transaction.stagingPath;
-  rmSync37(staging, { recursive: true, force: true });
+  rmSync38(staging, { recursive: true, force: true });
   mkdirSync55(staging, { mode: 448 });
   const stagingInfo = lstatSync41(staging);
   transaction.stagingDevice = stagingInfo.dev;
@@ -129850,7 +130064,7 @@ function durableProgram(layout, source, transaction, options) {
   if (existsSync82(generation)) {
     if (linuxMachineArtifactDigest(generation, "tree") !== digest)
       throw new Error(`Existing engine generation ${generation} failed identity verification.`);
-    rmSync37(staging, { recursive: true });
+    rmSync38(staging, { recursive: true });
   } else {
     renameSync19(staging, generation);
     syncDirectorySync(generations);
@@ -130043,7 +130257,7 @@ function removeOwnedDirectory(path, device, inode) {
   const info = lstatSync41(path);
   if (info.dev !== device || info.ino !== inode)
     throw new Error(`Directory custody changed for ${path}; it was retained.`);
-  rmSync37(path, { recursive: true });
+  rmSync38(path, { recursive: true });
   syncDirectorySync(dirname92(path));
 }
 function cleanupTransactionTrees(transaction) {
@@ -130052,7 +130266,7 @@ function cleanupTransactionTrees(transaction) {
     if (!transaction.generationArtifact)
       throw new Error("Missing generation custody identity; it was retained.");
     assertTreeArtifactCustody(transaction.generationPath, transaction.generationArtifact);
-    rmSync37(transaction.generationPath, { recursive: true });
+    rmSync38(transaction.generationPath, { recursive: true });
     syncDirectorySync(dirname92(transaction.generationPath));
   }
 }
@@ -130137,7 +130351,7 @@ function withLegacyConsultLease(layout, run) {
         throw new FileLeaseBusyError(join113(directory, "consult.json"));
       const result = run();
       for (const name of LEGACY_CONSULT_LEASE_FILES)
-        rmSync37(join113(directory, name), { force: true });
+        rmSync38(join113(directory, name), { force: true });
       return result;
     }), { acquireTimeoutMs: 100, pollIntervalMs: 10 });
   } catch (error) {
@@ -130580,7 +130794,7 @@ function installLinuxEngine(options) {
         if (check.status !== 0 || /Unknown (?:key|lvalue)|Unknown section|Failed to parse/i.test(check.stderr))
           throw new Error(`systemd cannot validate the engine unit: ${check.stderr.slice(0, 300)}`);
       } finally {
-        rmSync37(candidateDir, { recursive: true, force: true });
+        rmSync38(candidateDir, { recursive: true, force: true });
       }
       if (before.active || before.state === "loaded")
         waitForQuietEngine(options);
@@ -130673,7 +130887,7 @@ function pruneOldGenerations(layout) {
     if (!artifact)
       throw new Error(`Unrecognized engine generation ${path}; automatic cleanup refused.`);
     assertTreeArtifactCustody(path, artifact);
-    rmSync37(path, { recursive: true });
+    rmSync38(path, { recursive: true });
   }
   syncDirectorySync(generations);
 }
@@ -142005,7 +142219,7 @@ var init_owner_limits = __esm(() => {
 });
 
 // src/data-restore.ts
-import { closeSync as closeSync34, copyFileSync as copyFileSync4, existsSync as existsSync95, fsyncSync as fsyncSync10, openSync as openSync33, readFileSync as readFileSync80, renameSync as renameSync22, rmSync as rmSync39, statSync as statSync42, chmodSync as chmodSync40 } from "node:fs";
+import { closeSync as closeSync34, copyFileSync as copyFileSync4, existsSync as existsSync95, fsyncSync as fsyncSync10, openSync as openSync33, readFileSync as readFileSync80, renameSync as renameSync22, rmSync as rmSync40, statSync as statSync42, chmodSync as chmodSync40 } from "node:fs";
 import { dirname as dirname99, join as join122, resolve as resolve24 } from "node:path";
 import { randomUUID as randomUUID32 } from "node:crypto";
 import { Database as Database29 } from "bun:sqlite";
@@ -142282,7 +142496,7 @@ function copyPrivate(from, to, prepare) {
     }
     renameSync22(staging, to);
   } catch (error) {
-    rmSync39(staging, { force: true });
+    rmSync40(staging, { force: true });
     throw error;
   }
   syncDirectorySync(dirname99(to));
@@ -142423,7 +142637,7 @@ var init_data_restore = __esm(() => {
 
 // src/data-backup.ts
 import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash90, createHmac as createHmac5, randomBytes as randomBytes21, randomUUID as randomUUID33, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
-import { closeSync as closeSync35, existsSync as existsSync96, lstatSync as lstatSync45, mkdirSync as mkdirSync60, openSync as openSync34, readdirSync as readdirSync28, readSync as readSync12, renameSync as renameSync23, rmSync as rmSync40, statSync as statSync43, unlinkSync as unlinkSync5, writeSync as writeSync9, chmodSync as chmodSync41, fsyncSync as fsyncSync11 } from "node:fs";
+import { closeSync as closeSync35, existsSync as existsSync96, lstatSync as lstatSync45, mkdirSync as mkdirSync60, openSync as openSync34, readdirSync as readdirSync28, readSync as readSync12, renameSync as renameSync23, rmSync as rmSync41, statSync as statSync43, unlinkSync as unlinkSync5, writeSync as writeSync9, chmodSync as chmodSync41, fsyncSync as fsyncSync11 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename20, dirname as dirname100, join as join123, resolve as resolve25, sep as sep22 } from "node:path";
 function normalizePassphrase(passphrase) {
@@ -142624,7 +142838,7 @@ async function writeBackupFile(options) {
     await handle.close().catch(() => {
       return;
     });
-    rmSync40(staging, { force: true });
+    rmSync41(staging, { force: true });
     throw error;
   }
   await handle.close();
@@ -142881,7 +143095,7 @@ function openBackupFile(options) {
     return { exportDir, encrypted: header.encrypted };
   } catch (error) {
     extractor.abort();
-    rmSync40(into, { recursive: true, force: true });
+    rmSync41(into, { recursive: true, force: true });
     throw error;
   } finally {
     closeSync35(fd);
@@ -142942,7 +143156,7 @@ async function backupOlympusData(options) {
     const removed = options.keep ? pruneBackups(folder, options.keep) : [];
     return { ok: true, file: written.path, bytes: written.bytes, encrypted: written.encrypted, createdAt: written.createdAt, removed };
   } finally {
-    rmSync40(staging, { recursive: true, force: true });
+    rmSync41(staging, { recursive: true, force: true });
   }
 }
 function restoreOlympusBackup(options) {
@@ -142966,7 +143180,7 @@ function restoreOlympusBackup(options) {
     const result = restoreOlympusData({ input: opened.exportDir, ...options.dryRun ? { dryRun: true } : {}, ...context });
     return { ...result, input, encrypted: opened.encrypted };
   } finally {
-    rmSync40(staging, { recursive: true, force: true });
+    rmSync41(staging, { recursive: true, force: true });
   }
 }
 var BACKUP_FILE_EXTENSION = ".olympusbackup", BACKUP_FORMAT_VERSION = 1, BACKUP_KEEP = 7, MAGIC, KEY_CHECK_LABEL = "olympus-backup-key-check-v1", CHUNK, TAG_BYTES = 16, DIGEST_BYTES = 32, MAX_HEADER_BYTES, BACKUP_NAME, DEFAULT_SCRYPT, MIN_SCRYPT_N = 16384, MAX_SCRYPT_N = 1048576, USTAR_MAX_SIZE = 8589934591, BACKUP_WRONG_PASSPHRASE = "That passphrase does not open this backup.", BACKUP_CHANGED = "This backup has been changed or damaged since it was made, so nothing was restored.";
@@ -159095,7 +159309,7 @@ var init_server4 = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync62, readFileSync as readFileSync86, rmSync as rmSync42, writeFileSync as writeFileSync22 } from "node:fs";
+import { mkdirSync as mkdirSync62, readFileSync as readFileSync86, rmSync as rmSync43, writeFileSync as writeFileSync22 } from "node:fs";
 import { dirname as dirname103, join as join126 } from "node:path";
 import { homedir as homedir40 } from "node:os";
 function guardStateDir(env) {
@@ -159140,7 +159354,7 @@ function readEmbeddingOperatorOverride(path) {
 }
 function writeEmbeddingOperatorOverride(path, on) {
   if (!on) {
-    rmSync42(path, { force: true });
+    rmSync43(path, { force: true });
     return;
   }
   mkdirSync62(dirname103(path), { recursive: true, mode: 448 });
@@ -159765,11 +159979,11 @@ var init_native_relay_service = __esm(() => {
 // src/core/engine-host.ts
 import { mkdirSync as mkdirSync63 } from "node:fs";
 import { join as join128 } from "node:path";
-function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket) {
+function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket, frontSocket) {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
   const split = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false }).worker.engineSplit;
   const background = split ? createNativeEngineBackgroundService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed }) : undefined;
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}, ...background ? { engineBackground: background } : {} });
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}, ...background ? { engineBackground: background } : {}, ...background && frontSocket ? { frontSocket } : {} });
   return [
     ...background ? [backgroundNativeProcessService((({ isReady: _isReady, ...rest }) => rest)(background))] : [],
     backgroundNativeProcessService(worker),
@@ -159794,11 +160008,13 @@ async function startEngineHost(options) {
   let pluginConfig;
   let remoteMode = "off";
   let enabled = {};
+  let splitOn = false;
   try {
     pluginConfig = readEngineConfig(paths.configPath);
     if (pluginConfig) {
       const parsed = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
       remoteMode = resolveRemoteAccessMode(parsed.remote).mode;
+      splitOn = parsed.worker.engineSplit && parsed.worker.service.enabled;
       enabled = {
         ...parsed.worker.engineSplit ? { [ENGINE_BACKGROUND_SERVICE_ID]: parsed.worker.service.enabled } : {},
         "olympus-worker": parsed.worker.service.enabled,
@@ -159869,7 +160085,16 @@ async function startEngineHost(options) {
       lastStatus = content;
     } catch {}
   };
-  const makeServices = options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths, desktopBridge?.controlPath));
+  let frontProxy;
+  if (paths.linux && splitOn && !options.services) {
+    try {
+      frontProxy = startWorkerFrontProxy({ env: dataEnv, clearStale: true, log: (line) => log(`engine: ${line}`) });
+    } catch (error) {
+      log(`engine: the worker socket could not be held for the front (${error instanceof Error ? error.message : "unknown error"}); the front binds it itself.`);
+    }
+  }
+  const frontSocket = frontProxy ? workerFrontSocketPath({ platform: "linux", env: dataEnv }) : undefined;
+  const makeServices = options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths, desktopBridge?.controlPath, frontSocket));
   let services = [];
   const contextFor = (id) => ({
     config: { plugins: { entries: { olympus: { config: pluginConfig } } } },
@@ -159928,6 +160153,7 @@ async function startEngineHost(options) {
         Promise.allSettled([...services].reverse().map((service) => service.stop())),
         deadline
       ]);
+      frontProxy?.stop();
       for (const [id, health] of Object.entries(status.services)) {
         if (health.state !== "off")
           status.services[id] = { state: "stopped", message: null, updated_at: now() };
@@ -160059,6 +160285,7 @@ var init_engine_host = __esm(() => {
   init_native_worker_service();
   init_remote_access();
   init_worker_transport();
+  init_worker_front_proxy();
   init_engine_service();
 });
 
@@ -166576,7 +166803,7 @@ var init_release_signing = __esm(() => {
 // src/core/self-update.ts
 import { spawn as spawn11 } from "node:child_process";
 import { randomBytes as randomBytes27 } from "node:crypto";
-import { chmodSync as chmodSync43, existsSync as existsSync104, mkdirSync as mkdirSync65, readdirSync as readdirSync29, readFileSync as readFileSync90, rmSync as rmSync43 } from "node:fs";
+import { chmodSync as chmodSync43, existsSync as existsSync104, mkdirSync as mkdirSync65, readdirSync as readdirSync29, readFileSync as readFileSync90, rmSync as rmSync44 } from "node:fs";
 import { join as join131 } from "node:path";
 function linuxSelfUpdateRunArgs(runner, runDir, layoutEnv) {
   return [
@@ -166772,7 +166999,7 @@ function createSelfUpdater(options) {
       try {
         for (const name of existsSync104(options.stateDir) ? readdirSync29(options.stateDir) : []) {
           if (name.startsWith("run-"))
-            rmSync43(join131(options.stateDir, name), { recursive: true, force: true });
+            rmSync44(join131(options.stateDir, name), { recursive: true, force: true });
         }
       } catch {}
       const record = { id: randomBytes27(8).toString("hex"), from: options.runningVersion, to: target.version, step: 1, started_at: now(), engine_pid: pid };
@@ -168264,7 +168491,7 @@ import {
   mkdirSync as mkdirSync67,
   readFileSync as readFileSync93,
   renameSync as renameSync26,
-  rmSync as rmSync44,
+  rmSync as rmSync45,
   writeFileSync as writeFileSync24
 } from "node:fs";
 import { randomUUID as randomUUID35 } from "node:crypto";
@@ -168490,7 +168717,7 @@ function writeCatalogCache(path, catalog) {
 `, { mode: 384 });
     renameSync26(tempPath, path);
   } catch {} finally {
-    rmSync44(tempPath, { force: true });
+    rmSync45(tempPath, { force: true });
   }
 }
 function parsePrivacyCategory(value) {
@@ -171814,7 +172041,7 @@ dialog.msgdialog > .messaging-card { margin: 0; border: 0; border-radius: 12px; 
 
 // src/workers/dashboard/components.ts
 import { createHash as createHash96 } from "node:crypto";
-function escapeHtml(value) {
+function escapeHtml2(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 function escapeScriptJson(value) {
@@ -171860,7 +172087,7 @@ function externalLink(input) {
   const href = safeExternalHref(input.url);
   if (href === undefined)
     return "";
-  return `<a class="ext" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(input.label)}</a>`;
+  return `<a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(input.label)}</a>`;
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
@@ -171870,7 +172097,7 @@ function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
-  const brand = crumb === "" ? escapeHtml(input.title) : `<a class="lead" href="${escapeHtml(leadHref)}">${escapeHtml(input.title)}</a> <span class="crumb">/</span> ${escapeHtml(crumb)}`;
+  const brand = crumb === "" ? escapeHtml2(input.title) : `<a class="lead" href="${escapeHtml2(leadHref)}">${escapeHtml2(input.title)}</a> <span class="crumb">/</span> ${escapeHtml2(crumb)}`;
   const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : dashboardSessionMarker(input.poll.controlSessionCsrfToken);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
@@ -171890,9 +172117,9 @@ function pageShell(input) {
   const content = `<div class="frame">
       <div class="page">
       ${input.nav ? `${input.nav}
-      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml(input.meta)}</span>` : ""}</div>` : `<div class="top">
-        <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `
-        <span class="meta">${escapeHtml(input.meta)}</span>` : ""}
+      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml2(input.meta)}</span>` : ""}</div>` : `<div class="top">
+        <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `
+        <span class="meta">${escapeHtml2(input.meta)}</span>` : ""}
       </div>`}
       ${input.body}
       </div>
@@ -171904,11 +172131,11 @@ function pageShell(input) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml(documentTitle)}</title>
+    <title>${escapeHtml2(documentTitle)}</title>
     <style>${styles}</style>
   </head>
   <body>
-    <div data-olympus-dashboard-root data-signature="${escapeHtml(dashboardPageSignature(input.body))}" data-unlocked="${input.poll?.unlocked === true ? "true" : "false"}" data-session="${escapeHtml(sessionMarker)}">${content}</div>
+    <div data-olympus-dashboard-root data-signature="${escapeHtml2(dashboardPageSignature(input.body))}" data-unlocked="${input.poll?.unlocked === true ? "true" : "false"}" data-session="${escapeHtml2(sessionMarker)}">${content}</div>
     ${scripts}
   </body>
 </html>`;
@@ -171942,20 +172169,20 @@ function statusGlyph(status, fraction) {
 function actionButton(input) {
   const action = input === undefined ? undefined : { ...input, label: dashboardActionLabel(input.label) };
   if (action?.blockedReason !== undefined && (action.kind !== "none" || action.sheet !== undefined)) {
-    return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml(action.label)}</button>` + `<span class="hint">${escapeHtml(action.blockedReason)}</span></span>`;
+    return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml2(action.label)}</button>` + `<span class="hint">${escapeHtml2(action.blockedReason)}</span></span>`;
   }
   if (action?.kind === "link") {
     const href = safeHref(action.href);
-    return href === undefined ? "" : `<a class="btn${action.primary ? " primary" : ""}" href="${escapeHtml(href)}">${escapeHtml(action.label)}</a>`;
+    return href === undefined ? "" : `<a class="btn${action.primary ? " primary" : ""}" href="${escapeHtml2(href)}">${escapeHtml2(action.label)}</a>`;
   }
   if (action === undefined || action.kind === "none") {
     if (action?.sheet === undefined)
       return "";
     const sheetId = safeId2(action.sheet);
-    return `<button class="btn${action.primary ? " primary" : ""}" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">${escapeHtml(action.label)}</button>`;
+    return `<button class="btn${action.primary ? " primary" : ""}" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">${escapeHtml2(action.label)}</button>`;
   }
-  const button = `<button class="btn${action.primary ? " primary" : ""}" type="submit">${escapeHtml(action.label)}</button>`;
-  const source = `<input type="hidden" name="source" value="${escapeHtml(action.source ?? "")}">`;
+  const button = `<button class="btn${action.primary ? " primary" : ""}" type="submit">${escapeHtml2(action.label)}</button>`;
+  const source = `<input type="hidden" name="source" value="${escapeHtml2(action.source ?? "")}">`;
   const message = `<span class="actmsg" data-action-message role="status"></span>`;
   const key = action.kind === "api_key" ? `<input class="keyfield" type="password" name="api_key" required placeholder="API key" aria-label="API key">` : "";
   return `<form class="rowform" data-connect-kind="${action.kind}">${source}${key}${button}${message}</form>`;
@@ -171966,42 +172193,42 @@ function dashboardControlGate(input) {
   }
   const sheetId = `${DASHBOARD_CONTROL_GATE_ID}-how`;
   const promptId = `${sheetId}-prompt`;
-  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Open dashboard controls</span>` + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>` + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Open dashboard controls</h4>` + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<details><summary>Advanced: use a worker token</summary>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn" type="submit">Unlock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
+  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Open dashboard controls</span>` + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>` + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Open dashboard controls</h4>` + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<details><summary>Advanced: use a worker token</summary>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn" type="submit">Unlock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
 }
 function rowMenu(label, itemsHtml) {
   if (itemsHtml.trim() === "")
     return "";
-  return `<details class="rowmenu"><summary class="btn" aria-label="${escapeHtml(`More actions for ${label}`)}">⋯</summary>` + `<div class="menu">${itemsHtml}</div></details>`;
+  return `<details class="rowmenu"><summary class="btn" aria-label="${escapeHtml2(`More actions for ${label}`)}">⋯</summary>` + `<div class="menu">${itemsHtml}</div></details>`;
 }
 function setupRow(input) {
   const href = safeHref(input.href);
   const blurb = input.blurb.trim();
   const link = input.blurbLink === undefined ? "" : externalLink(input.blurbLink);
-  const blurbText = blurb === "" ? "" : escapeHtml(blurb);
+  const blurbText = blurb === "" ? "" : escapeHtml2(blurb);
   const instructions = [blurbText, link].filter((part) => part !== "").join(" ");
   const summary = (input.summary ?? "").trim();
   const caveat = (input.caveat ?? "").trim();
   const lead = [
-    caveat === "" ? "" : `<span class="caveat">${escapeHtml(caveat)}.</span>`,
-    summary === "" ? "" : escapeHtml(summary)
+    caveat === "" ? "" : `<span class="caveat">${escapeHtml2(caveat)}.</span>`,
+    summary === "" ? "" : escapeHtml2(summary)
   ].filter((part) => part !== "").join(" ");
   const blurbBody = lead === "" ? instructions : `${lead}${instructions === "" ? "" : detailsDisclosure("How to set this up", `<p>${instructions}</p>`)}`;
   const blurbSpan = blurbBody === "" ? "" : `<span class="blurb">${blurbBody}</span>`;
-  const sourceId = input.sourceId ? ` data-source-id="${escapeHtml(input.sourceId)}"` : "";
-  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}"${sourceId}${href ? ` data-dashboard-href="${escapeHtml(href)}"` : ""}>` + `${statusGlyph("Off")}` + (href ? `<a class="name" href="${escapeHtml(href)}">${escapeHtml(input.label)}</a>` : `<span class="name">${escapeHtml(input.label)}</span>`) + `${blurbSpan}` + `${actionButton({ ...input.action, primary: input.action.primary ?? false })}` + `</div>`;
+  const sourceId = input.sourceId ? ` data-source-id="${escapeHtml2(input.sourceId)}"` : "";
+  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}"${sourceId}${href ? ` data-dashboard-href="${escapeHtml2(href)}"` : ""}>` + `${statusGlyph("Off")}` + (href ? `<a class="name" href="${escapeHtml2(href)}">${escapeHtml2(input.label)}</a>` : `<span class="name">${escapeHtml2(input.label)}</span>`) + `${blurbSpan}` + `${actionButton({ ...input.action, primary: input.action.primary ?? false })}` + `</div>`;
 }
 function blockerBanner(input) {
-  return `<div class="attncard banner blocker" role="status" data-blocker>` + `<div class="grow"><span class="name">${escapeHtml(input.sentence)}</span></div>` + `${input.controlHtml ?? actionButton(input.action)}` + `</div>`;
+  return `<div class="attncard banner blocker" role="status" data-blocker>` + `<div class="grow"><span class="name">${escapeHtml2(input.sentence)}</span></div>` + `${input.controlHtml ?? actionButton(input.action)}` + `</div>`;
 }
 function detailsDisclosure(summary, body) {
   if (body.trim() === "")
     return "";
-  return `<details class="howto"><summary>${escapeHtml(summary)}</summary>${body}</details>`;
+  return `<details class="howto"><summary>${escapeHtml2(summary)}</summary>${body}</details>`;
 }
 function connectorSheet(input) {
   const id = safeId2(input.id);
   const promptId = `${id}-prompt`;
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `<p>${escapeHtml(input.intro)}</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">${escapeHtml(input.copyButtonLabel)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `<p>${escapeHtml2(input.intro)}</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">${escapeHtml2(input.copyButtonLabel)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</div>`;
 }
 function setupStepsSheet(input) {
   const id = safeId2(input.id);
@@ -172009,24 +172236,24 @@ function setupStepsSheet(input) {
   const current = input.initialStep ?? 0;
   const redirectStep = input.steps.findIndex((step) => step.redirect_uri && input.redirect);
   const shortcutTarget = redirectStep >= 0 ? redirectStep : count - 1;
-  const shortcut = input.shortcut && shortcutTarget > 0 ? `<p class="setupshortcut"><button class="btn" type="button" data-setup-jump="${shortcutTarget}">${escapeHtml(input.shortcut)}</button></p>` : "";
+  const shortcut = input.shortcut && shortcutTarget > 0 ? `<p class="setupshortcut"><button class="btn" type="button" data-setup-jump="${shortcutTarget}">${escapeHtml2(input.shortcut)}</button></p>` : "";
   const formId = `${id}-form`;
   const initialAction = input.stepActions?.[0];
   const panels = input.steps.map((step, index) => {
     const url = step.link && safeExternalHref(step.link.url);
-    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">${escapeHtml(step.button_label ?? `Open this page in ${input.provider}${input.guided ? " ↗" : ""}`)}</button>` : "";
+    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url)}">${escapeHtml2(step.button_label ?? `Open this page in ${input.provider}${input.guided ? " ↗" : ""}`)}</button>` : "";
     const extraLinks = (step.links ?? []).map((link) => {
       const href = safeExternalHref(link.url);
-      return href ? `<p><a class="ext" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)} ↗</a></p>` : "";
+      return href ? `<p><a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(link.label)} ↗</a></p>` : "";
     }).join("");
-    const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
+    const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
     const action = input.stepActions?.[index];
-    const instructions = step.instructions ? `<ol class="steps">${step.instructions.map((click) => `<li>${escapeHtml(click).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`).join("")}</ol>` : step.text ? `<p>${escapeHtml(step.text)}</p>` : "";
+    const instructions = step.instructions ? `<ol class="steps">${step.instructions.map((click) => `<li>${escapeHtml2(click).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`).join("")}</ol>` : step.text ? `<p>${escapeHtml2(step.text)}</p>` : "";
     const heading = input.guided ? "h2" : "h4";
-    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml(action.formId)}" data-setup-label="${escapeHtml(action.label)}"` : ""}${index !== current ? " hidden" : ""}><${heading}>${escapeHtml(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml(step.return_note)}</p>` : ""}${index === 0 ? shortcut : ""}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml2(action.formId)}" data-setup-label="${escapeHtml2(action.label)}"` : ""}${index !== current ? " hidden" : ""}><${heading}>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml2(step.return_note)}</p>` : ""}${index === 0 ? shortcut : ""}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
   }).join("");
   const progress = input.guided ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current + 1}">${input.steps.map((_, i) => `<span data-setup-segment${i <= current ? ' class="filled"' : ""}></span>`).join("")}</div>` : `<progress data-setup-progress max="${count}" value="${current + 1}"></progress>`;
-  return `<div data-setup-steps${input.guided ? " data-setup-guided" : ""}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current + 1} OF ${count}` : `Step ${current + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current === 0 ? " disabled" : ""}>Back</button><button class="btn primary" type="button" data-setup-next${current === count - 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml(initialAction?.formId ?? formId)}" data-setup-submit${current === count - 1 || initialAction ? "" : " hidden"}>${escapeHtml(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div>${input.footer ? `<p class="setupfooter">${escapeHtml(input.footer)}</p>` : ""}</div>`;
+  return `<div data-setup-steps${input.guided ? " data-setup-guided" : ""}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current + 1} OF ${count}` : `Step ${current + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current === 0 ? " disabled" : ""}>Back</button><button class="btn primary" type="button" data-setup-next${current === count - 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml2(initialAction?.formId ?? formId)}" data-setup-submit${current === count - 1 || initialAction ? "" : " hidden"}>${escapeHtml2(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div>${input.footer ? `<p class="setupfooter">${escapeHtml2(input.footer)}</p>` : ""}</div>`;
 }
 function connectSetupSheet(input) {
   const id = safeId2(input.id);
@@ -172034,41 +172261,41 @@ function connectSetupSheet(input) {
   const inputs = input.fields.map((field) => {
     const value = field.secret && input.savedSecrets?.includes(field.name) ? DASHBOARD_SAVED_SECRET_FIELD_VALUE : input.values?.[field.name];
     const placeholder = input.placeholders?.[field.name] ?? field.label;
-    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml(field.name)}"` + `${field.required ? " required" : ""} autocomplete="off"` + `${value === undefined ? "" : ` value="${escapeHtml(value)}"`}` + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
+    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml2(field.name)}"` + `${field.required ? " required" : ""} autocomplete="off"` + `${value === undefined ? "" : ` value="${escapeHtml2(value)}"`}` + ` placeholder="${escapeHtml2(placeholder)}" aria-label="${escapeHtml2(field.label)}">`;
   }).join("");
   const hasError = Boolean(input.notice?.trim());
-  const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
-  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? " data-shared-app-note" : ""}>${escapeHtml(input.providerNote)}</p>` : "";
+  const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
+  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? " data-shared-app-note" : ""}>${escapeHtml2(input.providerNote)}</p>` : "";
   const registration = callbackRegistrationSteps(id, input.registration);
-  const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml(input.redirectUri.guidance)}</p>`}`;
-  const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
-  const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
-  const submitLabel = escapeHtml(input.submitLabel ?? "Connect");
-  const sourceField = `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`;
-  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml(input.notice)}</p>${detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml(input.noticeDetail)}</p>` : "")}</div>` : ""}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml2(input.redirectUri.guidance)}</p>`}`;
+  const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
+  const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
+  const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
+  const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
+  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>${detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "")}</div>` : ""}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
   const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.credentialFile ? { guided: true, initialStep: hasError ? input.steps.length - 1 : 0, footer: "Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here" } : {}, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {}, ...input.shortcut ? { shortcut: input.shortcut } : {} }) : `${registration}${redirect}${byoForm()}`;
-  const walkthrough = input.credentialFile ? `<div class="setupheader"><h2>${escapeHtml(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml(input.intro)}</p>${walkthroughBody}` : `${input.setupHeading ? `<h4>${escapeHtml(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
-  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml(input.lead.title)}</h4><p>${escapeHtml(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml(note)}</p>`).join("")}</div>` : "";
+  const walkthrough = input.credentialFile ? `<div class="setupheader"><h2>${escapeHtml2(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml2(input.intro)}</p>${walkthroughBody}` : `${input.setupHeading ? `<h4>${escapeHtml2(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
+  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml2(input.lead.title)}</h4><p>${escapeHtml2(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml2(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml2(note)}</p>`).join("")}</div>` : "";
   if (input.publisher) {
     const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
     if (input.credentialFile)
-      return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? " hidden" : ""}><h4>${escapeHtml(input.heading)}</h4>${providerNote}<p>${escapeHtml(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? "" : " hidden"}>${walkthrough}</div></div></div>`;
-    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt"><summary>${escapeHtml(input.publisher.byoSummary)}</summary><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</details>` + `</div>` + `</div>`;
+      return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? " hidden" : ""}><h4>${escapeHtml2(input.heading)}</h4>${providerNote}<p>${escapeHtml2(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml2(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? "" : " hidden"}>${walkthrough}</div></div></div>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt"><summary>${escapeHtml2(input.publisher.byoSummary)}</summary><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</details>` + `</div>` + `</div>`;
   }
   if (input.credentialFile)
     return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content>${lead}<div data-setup-walkthrough${input.lead && !hasError ? " hidden" : ""}>${walkthrough}</div>${cancel}</div></div>`;
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `${lead}<div data-setup-walkthrough${input.lead ? " hidden" : ""}><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</div>` + `${cancel}</div>` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `${lead}<div data-setup-walkthrough${input.lead ? " hidden" : ""}><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</div>` + `${cancel}</div>` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
   if (registration === undefined)
     return "";
-  const uriBlock = `<div class="promptbox" id="${id}-redirect">${escapeHtml(registration.redirect_uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
+  const uriBlock = `<div class="promptbox" id="${id}-redirect">${escapeHtml2(registration.redirect_uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
   if (!registration.required) {
-    return `<p class="hint">${escapeHtml(registration.skip_note ?? "No registration needed on this machine.")}</p>` + `<p class="hint">Redirect URI</p>` + uriBlock;
+    return `<p class="hint">${escapeHtml2(registration.skip_note ?? "No registration needed on this machine.")}</p>` + `<p class="hint">Redirect URI</p>` + uriBlock;
   }
   const consoleUrl = safeExternalHref(registration.console.url);
-  const consoleStep = consoleUrl === undefined ? escapeHtml(registration.console.label) : `${escapeHtml(registration.console.label)}: ` + `<a class="ext" href="${escapeHtml(consoleUrl)}" target="_blank" rel="noreferrer">${escapeHtml(new URL(consoleUrl).host)} →</a>`;
-  return `<ol class="steps">` + `<li>${consoleStep}</li>` + `<li>${escapeHtml(registration.app_requirements)}</li>` + `<li>In <b>${escapeHtml(registration.setting_label)}</b>, add this exact URL:${uriBlock}</li>` + `<li>${escapeHtml(registration.finish)}</li>` + `</ol>`;
+  const consoleStep = consoleUrl === undefined ? escapeHtml2(registration.console.label) : `${escapeHtml2(registration.console.label)}: ` + `<a class="ext" href="${escapeHtml2(consoleUrl)}" target="_blank" rel="noreferrer">${escapeHtml2(new URL(consoleUrl).host)} →</a>`;
+  return `<ol class="steps">` + `<li>${consoleStep}</li>` + `<li>${escapeHtml2(registration.app_requirements)}</li>` + `<li>In <b>${escapeHtml2(registration.setting_label)}</b>, add this exact URL:${uriBlock}</li>` + `<li>${escapeHtml2(registration.finish)}</li>` + `</ol>`;
 }
 function dashboardNeedsSetupSheet(source, action, options = {}) {
   const sheetId = `setup-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
@@ -172144,7 +172371,7 @@ function redirectUriInput(action) {
 }
 function standaloneLockedNotice() {
   const C = DASHBOARD_HOST_GATE_COPY;
-  return `<div class="attncard" data-dashboard-control-gate data-state="locked"><div class="grow">` + `<span class="name">${escapeHtml(C.title)}</span>` + `<span class="why"> — <a href="${escapeHtml(olympusOpenUrl({ kind: "dashboard" }))}">${escapeHtml(C.open)}</a> ` + `${escapeHtml(C.fallbackBefore)}<code>${escapeHtml(C.fallbackCommand)}</code>${escapeHtml(C.fallbackAfter)}</span></div></div>`;
+  return `<div class="attncard" data-dashboard-control-gate data-state="locked"><div class="grow">` + `<span class="name">${escapeHtml2(C.title)}</span>` + `<span class="why"> — <a href="${escapeHtml2(olympusOpenUrl({ kind: "dashboard" }))}">${escapeHtml2(C.open)}</a> ` + `${escapeHtml2(C.fallbackBefore)}<code>${escapeHtml2(C.fallbackCommand)}</code>${escapeHtml2(C.fallbackAfter)}</span></div></div>`;
 }
 function standaloneDashboardControllerScript(input) {
   const mountSource = mountDashboardController.toString().replaceAll("</script", "<\\/script");
@@ -180352,10 +180579,10 @@ function progressLine(install) {
   if (install.state === "running") {
     const phase = fill(C.phase[install.phase], { tool: install.tool });
     const percent = install.phase === "downloading" && install.percent !== undefined ? ` ${fill(C.percent, { percent: String(install.percent) })}` : "";
-    return `<p class="pnote" data-outside-install-progress role="status">${escapeHtml(phase + percent)}</p>`;
+    return `<p class="pnote" data-outside-install-progress role="status">${escapeHtml2(phase + percent)}</p>`;
   }
   if (install.state === "failed") {
-    return `<p class="pnote ohwarn" data-outside-install-failed="${escapeHtml(install.code)}" role="status">${escapeHtml(`${C.failedPrefix} ${install.message}`)}</p>`;
+    return `<p class="pnote ohwarn" data-outside-install-failed="${escapeHtml2(install.code)}" role="status">${escapeHtml2(`${C.failedPrefix} ${install.message}`)}</p>`;
   }
   return "";
 }
@@ -180368,7 +180595,7 @@ function installButton(tools, canEdit, replacing) {
     return "";
   const label = tools.install.state === "failed" ? C.retry : missing ? C.install : outdated.length > 0 ? fill(C.update, { tools: outdated.join(" and ") }) : fill(C.installOwn, { tools: replacing.label });
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
-  return `<form class="ohform" data-outside-tools-form><div class="pbuttons">` + `<button type="submit" class="btn primary"${disabled}>${escapeHtml(label)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return `<form class="ohform" data-outside-tools-form><div class="pbuttons">` + `<button type="submit" class="btn primary"${disabled}>${escapeHtml2(label)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function sourceWords(entry) {
   return fill(C.source[entry.source], { path: entry.path ?? "", installed: entry.installedVersion ?? "", version: entry.version ?? "" });
@@ -180377,21 +180604,21 @@ function renderOutsideHelpTools(tools, input) {
   if (!tools)
     return "";
   const install = tools.install;
-  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml(entry.tool)}" data-outside-tool-source="${escapeHtml(entry.source)}">` + `${escapeHtml(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join("");
+  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml2(entry.tool)}" data-outside-tool-source="${escapeHtml2(entry.source)}">` + `${escapeHtml2(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join("");
   const launcher = input.requireLauncher ? tools.tools.find((entry) => entry.tool === "zkapi-clientd" && entry.offered === true) : undefined;
   const missing = Boolean(launcher) || tools.tools.some(installable);
   const parts = [
-    `<p class="pnote"><strong>${escapeHtml(C.title)}</strong></p>`,
-    `<p class="pnote">${escapeHtml(C.intro)}</p>`,
+    `<p class="pnote"><strong>${escapeHtml2(C.title)}</strong></p>`,
+    `<p class="pnote">${escapeHtml2(C.intro)}</p>`,
     `<ul class="ohfacts" data-outside-tool-list>${lines}</ul>`,
     progressLine(install)
   ];
   if (install.state === "done" && !missing)
-    parts.push(`<p class="pnote" data-outside-install-done role="status">${escapeHtml(C.done)}</p>`);
+    parts.push(`<p class="pnote" data-outside-install-done role="status">${escapeHtml2(C.done)}</p>`);
   if (!missing && install.state !== "running")
-    parts.push(`<p class="pnote ohsmall">${escapeHtml(C.allInstalled)}</p>`);
+    parts.push(`<p class="pnote ohsmall">${escapeHtml2(C.allInstalled)}</p>`);
   parts.push(installButton(tools, input.canEdit, launcher));
-  return `<div class="ohtools" data-outside-tools="setup" data-install-state="${escapeHtml(install.state)}">${parts.join("")}</div>`;
+  return `<div class="ohtools" data-outside-tools="setup" data-install-state="${escapeHtml2(install.state)}">${parts.join("")}</div>`;
 }
 function renderOutsideHelpToolsFix(tools, input) {
   if (!tools || !outsideHelpToolsNeedAttention(tools))
@@ -180403,13 +180630,13 @@ function renderOutsideHelpToolsFix(tools, input) {
     ...outdated.length > 0 ? [fill(C.fixOutdated, { tools: outdated.join(" and ") })] : []
   ];
   const text = said.length === 0 ? C.fixWorking : said.join(" ");
-  return `<li data-outside-tools="fix" data-install-state="${escapeHtml(tools.install.state)}"><span>${escapeHtml(text)}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit)}</li>`;
+  return `<li data-outside-tools="fix" data-install-state="${escapeHtml2(tools.install.state)}"><span>${escapeHtml2(text)}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit)}</li>`;
 }
 function renderOutsideHelpToolsReplace(tools, tool, input) {
   const entry = tools?.tools.find((item) => item.tool === tool);
   if (!tools || entry?.source !== "system" || entry.offered !== true)
     return "";
-  return `<li${input.attrs} data-outside-tools="replace" data-install-state="${escapeHtml(tools.install.state)}"><span>${escapeHtml(fill(C.systemOld, { tool: entry.label, version: entry.version ?? "" }))}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit, entry)}</li>`;
+  return `<li${input.attrs} data-outside-tools="replace" data-install-state="${escapeHtml2(tools.install.state)}"><span>${escapeHtml2(fill(C.systemOld, { tool: entry.label, version: entry.version ?? "" }))}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit, entry)}</li>`;
 }
 function renderOutsideHelpToolsScript(tools, input) {
   if (!tools || !input.canEdit || input.csrfToken === undefined)
@@ -180579,9 +180806,9 @@ function renderOutsideHelpCard(status, input) {
   const unavailable = summary.state === "unavailable";
   const parts = [];
   if (input.untitled !== true)
-    parts.push(`<h2 class="ptitle">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
+    parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
   if (canUnlock && (on || !unavailable || status.confinementInstallRequired)) {
-    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
   const missingRoute = !unavailable && route.state === "not_configured";
@@ -180590,13 +180817,13 @@ function renderOutsideHelpCard(status, input) {
     parts.push(renderProblems(status, access, writerHref));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending)
-    parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
+    parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
   if (unavailable) {
     if (status.confinementInstallRequired)
       parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
     const toolsScript = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} }) : "";
     const script = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
-    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join("")}</div>${script}${toolsScript}`;
+    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}${toolsScript}`;
   }
   if (!missingRoute)
     parts.push(renderProblems(status, access, writerHref));
@@ -180608,7 +180835,7 @@ function renderOutsideHelpCard(status, input) {
   if (input.part === "account") {
     parts.push(savedLanguagesForSwitch(status));
     if (input.otherPartHref)
-      more.push(`<p class="pnote" data-outside-privacy-link><a href="${escapeHtml(input.otherPartHref)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.privacyChoicesLink)}</a></p>`);
+      more.push(`<p class="pnote" data-outside-privacy-link><a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacyChoicesLink)}</a></p>`);
   } else {
     more.push(renderLevel(status, canEdit));
     if (status.standard)
@@ -180626,11 +180853,11 @@ function renderOutsideHelpCard(status, input) {
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
   const script = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
-  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join("")}</div>${script}${toolsScript}`;
+  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}${toolsScript}`;
 }
 function savedLanguagesForSwitch(status) {
   const chosen = new Set(status.settings.languages);
-  return `<div hidden data-outside-saved-languages>${status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => `<input type="checkbox" name="languages" value="${escapeHtml(entry.language)}" checked tabindex="-1" aria-hidden="true">`).join("")}</div>`;
+  return `<div hidden data-outside-saved-languages>${status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => `<input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}" checked tabindex="-1" aria-hidden="true">`).join("")}</div>`;
 }
 function renderOutsideHelpPrivacyPart(status, input) {
   const canEdit = input.csrfToken !== undefined && input.localSession === true;
@@ -180639,12 +180866,12 @@ function renderOutsideHelpPrivacyPart(status, input) {
   const on = status.settings.state === "on";
   const parts = [];
   if (canUnlock) {
-    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
-  parts.push(`<p class="ohstate" data-outside-privacy-state><span class="dot ${tone}" aria-hidden="true"></span><span>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}.</span>` + (input.otherPartHref ? ` <a href="${escapeHtml(input.otherPartHref)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.accountLink)}</a>` : "") + "</p>");
+  parts.push(`<p class="ohstate" data-outside-privacy-state><span class="dot ${tone}" aria-hidden="true"></span><span>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}.</span>` + (input.otherPartHref ? ` <a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accountLink)}</a>` : "") + "</p>");
   if (status.writer?.modelProblem) {
-    parts.push(`<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, canEdit ? "edit" : canUnlock ? "unlock" : "read", { attrs: " data-outside-model-problem" })}</ul>`);
+    parts.push(`<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, canEdit ? "edit" : canUnlock ? "unlock" : "read", { attrs: " data-outside-model-problem" })}</ul>`);
   }
   const more = [renderLevel(status, canEdit)];
   if (status.standard)
@@ -180652,11 +180879,11 @@ function renderOutsideHelpPrivacyPart(status, input) {
   if (status.writer)
     more.push(renderWriter(status.writer, canEdit));
   const invalid = status.settings.state === "invalid";
-  const save = canEdit && !invalid ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const save = canEdit && !invalid ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
   more.push(renderLanguages(status, canEdit).replace(/<\/div><\/details>$/, `${save}</div></details>`));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
   const script = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
-  return `<div class="privacy outside" data-outside-help data-outside-part="privacy" data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join("")}</div>${script}`;
+  return `<div class="privacy outside" data-outside-help data-outside-part="privacy" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}`;
 }
 function outsideHelpScriptConfig(csrfToken) {
   return {
@@ -180682,10 +180909,10 @@ function renderStatusBlock(status, summary, access) {
   const invalid = status.settings.state === "invalid";
   const unavailable = summary.state === "unavailable";
   const blockedReason = invalid ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = access === "read" || unavailable && !on ? "" : access === "unlock" ? unlockFirst(invalid ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const button = access === "read" || unavailable && !on ? "" : access === "unlock" ? unlockFirst(invalid ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
   const usage = !unavailable && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
-  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml(summary.state)}">${escapeHtml(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml(usage)}</p>` : "") + (!unavailable && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
+  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function usageLine(ready) {
@@ -180695,7 +180922,7 @@ function usageLine(ready) {
   return expiry ? `${today} · ${expiry}` : today;
 }
 function unlockFirst(label, primary = true) {
-  return `<button type="button" class="btn${primary ? " primary" : ""}" data-outside-needs-unlock>${escapeHtml(label)}</button>`;
+  return `<button type="button" class="btn${primary ? " primary" : ""}" data-outside-needs-unlock>${escapeHtml2(label)}</button>`;
 }
 function problemLine(words, fix, access, input = {}) {
   const canEdit = access === "edit";
@@ -180703,13 +180930,13 @@ function problemLine(words, fix, access, input = {}) {
   if (fix?.kind === "post" && access === "unlock") {
     action = unlockFirst(fix.label, fix.primary !== false);
   } else if (fix?.kind === "post" && canEdit) {
-    action = `<form class="ohform ohinline" data-outside-form="${escapeHtml(fix.form)}"${fix.attrs ?? ""}>` + `<button type="submit" class="btn${fix.primary === false ? "" : " primary"}">${escapeHtml(fix.label)}</button>` + `${input.extra ?? ""}<span class="actmsg" data-action-message role="status"></span></form>`;
+    action = `<form class="ohform ohinline" data-outside-form="${escapeHtml2(fix.form)}"${fix.attrs ?? ""}>` + `<button type="submit" class="btn${fix.primary === false ? "" : " primary"}">${escapeHtml2(fix.label)}</button>` + `${input.extra ?? ""}<span class="actmsg" data-action-message role="status"></span></form>`;
   } else if (fix?.kind === "open") {
-    action = `<button type="button" class="btn" data-outside-open="${escapeHtml(fix.section)}"${fix.focus ? ` data-outside-focus="${escapeHtml(fix.focus)}"` : ""}>${escapeHtml(fix.label)}</button>`;
+    action = `<button type="button" class="btn" data-outside-open="${escapeHtml2(fix.section)}"${fix.focus ? ` data-outside-focus="${escapeHtml2(fix.focus)}"` : ""}>${escapeHtml2(fix.label)}</button>`;
   } else if (fix?.kind === "recheck") {
-    action = `<button type="button" class="btn" data-outside-recheck>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.checkAgain)}</button>`;
+    action = `<button type="button" class="btn" data-outside-recheck>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.checkAgain)}</button>`;
   }
-  return `<li${input.attrs ?? ""}><span>${escapeHtml(words)}</span>${action}</li>`;
+  return `<li${input.attrs ?? ""}><span>${escapeHtml2(words)}</span>${action}</li>`;
 }
 function renderProblems(status, access, writerHref) {
   const canEdit = access === "edit";
@@ -180719,7 +180946,7 @@ function renderProblems(status, access, writerHref) {
   if (tools)
     items.push(tools);
   if (route.state === "not_configured") {
-    items.push(route.policyWritable ? problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing, { kind: "post", form: "add-route", label: DASHBOARD_OUTSIDE_HELP_COPY.addRoute, attrs: ` data-outside-confirm="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}"` }, access, { attrs: " data-outside-route-missing" }) : problemLine(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile, { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs: " data-outside-route-missing" }));
+    items.push(route.policyWritable ? problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing, { kind: "post", form: "add-route", label: DASHBOARD_OUTSIDE_HELP_COPY.addRoute, attrs: ` data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}"` }, access, { attrs: " data-outside-route-missing" }) : problemLine(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile, { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs: " data-outside-route-missing" }));
   } else if (route.readinessUnavailable || !route.readiness) {
     items.push(problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown, { kind: "recheck" }, access, { attrs: ' data-outside-blocker="readiness_unavailable"' }));
   } else {
@@ -180732,7 +180959,7 @@ function renderProblems(status, access, writerHref) {
         continue;
       if (CAP_BLOCKERS.has(code) && code !== caps[0])
         continue;
-      const attrs = ` data-outside-blocker="${escapeHtml(code)}"`;
+      const attrs = ` data-outside-blocker="${escapeHtml2(code)}"`;
       const tool = TOOL_BLOCKERS.get(code);
       const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
       if (entry?.source === "missing" || entry?.source === "outdated")
@@ -180759,7 +180986,7 @@ function renderProblems(status, access, writerHref) {
         continue;
       }
       if (code === "unresolved_session_other_wallet") {
-        items.push(...ready.fences.filter((fence) => !fence.thisWallet).map((fence) => problemLine(fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session_other_wallet, { at: shortTime(fence.at) }), { kind: "post", form: "abandon", label: DASHBOARD_OUTSIDE_HELP_COPY.abandon, primary: false, attrs: ` data-outside-scope="${escapeHtml(fence.scope)}" data-outside-confirm="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}"` }, access, { attrs })));
+        items.push(...ready.fences.filter((fence) => !fence.thisWallet).map((fence) => problemLine(fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session_other_wallet, { at: shortTime(fence.at) }), { kind: "post", form: "abandon", label: DASHBOARD_OUTSIDE_HELP_COPY.abandon, primary: false, attrs: ` data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}"` }, access, { attrs })));
         continue;
       }
       const words = CAP_BLOCKERS.has(code) && caps.length > 1 ? DASHBOARD_OUTSIDE_HELP_COPY.capsReached : outsideHelpBlockerWords(code);
@@ -180770,30 +180997,30 @@ function renderProblems(status, access, writerHref) {
   if (status.writer?.modelProblem && writerHref === undefined) {
     items.push(problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, access, { attrs: " data-outside-model-problem" }));
   } else if (status.writer?.modelProblem && writerHref !== undefined) {
-    items.push(`<li data-outside-model-problem><span>${escapeHtml(status.writer.modelProblem.message)}</span><a class="btn" href="${escapeHtml(writerHref)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.chooseModel)}</a></li>`);
+    items.push(`<li data-outside-model-problem><span>${escapeHtml2(status.writer.modelProblem.message)}</span><a class="btn" href="${escapeHtml2(writerHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.chooseModel)}</a></li>`);
   }
   if (items.length === 0)
     return "";
-  return `<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${items.join("")}</ul>`;
+  return `<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${items.join("")}</ul>`;
 }
 function renderFenceLine(ready, access) {
   const canEdit = access === "edit";
   const mine = ready.fences.find((fence) => fence.thisWallet);
   const words = fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session, { at: mine ? shortTime(mine.at) : "" });
   if (access === "unlock")
-    return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml(words)}</span>${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</li>`;
-  const abandon = mine && canEdit ? `<form class="ohform ohinline" data-outside-form="abandon" data-outside-scope="${escapeHtml(mine.scope)}" data-outside-confirm="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet" title="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
-  const recover = canEdit ? `<form class="ohform ohinline" data-outside-form="recover" data-outside-confirm="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary" title="${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
-  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml(words)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ""}</li>`;
+    return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words)}</span>${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</li>`;
+  const abandon = mine && canEdit ? `<form class="ohform ohinline" data-outside-form="abandon" data-outside-scope="${escapeHtml2(mine.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const recover = canEdit ? `<form class="ohform ohinline" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ""}</li>`;
 }
 function renderSection(input) {
-  return `<details class="ohsect" id="outside-${escapeHtml(input.id)}" data-outside-section="${escapeHtml(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title">${escapeHtml(input.title)}</span><span class="ohsect-sum">${escapeHtml(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
+  return `<details class="ohsect" id="outside-${escapeHtml2(input.id)}" data-outside-section="${escapeHtml2(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title">${escapeHtml2(input.title)}</span><span class="ohsect-sum">${escapeHtml2(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
 }
 function renderStatements(inputs) {
-  return `<ul class="ohlist" data-outside-statements>${ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<li data-statement="${escapeHtml(entry.id)}">${escapeHtml(entry.statement)}</li>`).join("")}</ul>` + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml(entry.id)}">`).join("") : "");
+  return `<ul class="ohlist" data-outside-statements>${ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<li data-statement="${escapeHtml2(entry.id)}">${escapeHtml2(entry.statement)}</li>`).join("")}</ul>` + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml2(entry.id)}">`).join("") : "");
 }
 function renderStatementsToAccept(access) {
-  return `<form class="ohform ohaccept" data-outside-form="route" data-outside-accept data-outside-acknowledged="no">` + `<div class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>${renderStatements(true)}` + (access === "edit" ? `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : access === "unlock" ? `<div class="pbuttons">${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return `<form class="ohform ohaccept" data-outside-form="route" data-outside-accept data-outside-acknowledged="no">` + `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>${renderStatements(true)}` + (access === "edit" ? `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : access === "unlock" ? `<div class="pbuttons">${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function renderAccepted() {
   return renderSection({
@@ -180808,7 +181035,7 @@ function renderBeforeTurningOn() {
     id: "before",
     title: DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle,
     summary: "",
-    body: `<p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>` + `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>` + `<p class="pnote" data-outside-privacy>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` + `<p class="pnote" data-outside-cost>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.costLine)}</p>`
+    body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>` + `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>` + `<p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` + `<p class="pnote" data-outside-cost>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)}</p>`
   });
 }
 function renderLevel(status, canEdit) {
@@ -180817,9 +181044,9 @@ function renderLevel(status, canEdit) {
   const blocked = !canEdit || invalid ? ' disabled aria-disabled="true"' : "";
   const options = ["unnamed", "general"].map((level) => {
     const copy = DASHBOARD_OUTSIDE_HELP_COPY.levels[level];
-    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
+    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
   }).join("");
-  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml(current)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "level", title: DASHBOARD_OUTSIDE_HELP_COPY.levelTitle, summary: DASHBOARD_OUTSIDE_HELP_COPY.levels[current].short, body });
 }
 function renderStandard(standard, level, canEdit) {
@@ -180827,10 +181054,10 @@ function renderStandard(standard, level, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const options = ["as_written", "light_cleanup", "custom"].map((mode) => {
     const copy = C.modes[mode];
-    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? " checked" : ""}${disabled}>` + `<span><strong>${escapeHtml(copy.title)}</strong> ${escapeHtml(copy.body)}</span></label>`;
+    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? " checked" : ""}${disabled}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
   }).join("");
   const text = standard.mode === "custom" && standard.instruction !== undefined ? standard.instruction : standard.preset;
-  const body = `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml(standard.mode)}" data-outside-preset="${escapeHtml(standard.preset)}">` + `<p class="pnote">${escapeHtml(C.intro)}</p>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml(C.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml(text)}</textarea>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml(C.save)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const body = `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml2(standard.mode)}" data-outside-preset="${escapeHtml2(standard.preset)}">` + `<p class="pnote">${escapeHtml2(C.intro)}</p>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml2(C.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml2(text)}</textarea>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(C.save)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   const summary = level === "general" ? fill(C.unusedAtStrict, { mode: C.modes[standard.mode].short }) : C.modes[standard.mode].short;
   return renderSection({ id: "standard", title: C.title, summary, body });
 }
@@ -180841,7 +181068,7 @@ function renderSetupSteps(secretRef, toolsHtml, daemon) {
     id: "steps",
     title: DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle,
     summary: "",
-    body: `${toolsHtml}<div data-outside-steps><p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></div>`
+    body: `${toolsHtml}<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
   });
 }
 function renderLimits(route, canEdit) {
@@ -180852,9 +181079,9 @@ function renderLimits(route, canEdit) {
     ...route.dailySpendCapUsd !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []
   ].join(", ") : DASHBOARD_OUTSIDE_HELP_COPY.limitsNone;
   const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
-  const noLimit = capped && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
-  const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
-  const body = `<p class="pnote" data-outside-cost-line>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.costLine)} ${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>` + today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const noLimit = capped && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
+  const body = `<p class="pnote" data-outside-cost-line>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)} ${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>` + today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, body });
 }
 function openAiModel(model) {
@@ -180869,11 +181096,11 @@ function renderWriter(writer, canEdit) {
   const choice = writer.choice;
   const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel;
   const effectiveClaudeModel = writer.effectiveClaudeModel ?? writer.claudeFrontierModel;
-  const parts = [`<p class="pnote">${escapeHtml(C.intro)}</p>`];
-  parts.push(`<p class="pnote" data-outside-writer-current="${choice ? "own" : "built_in"}">${escapeHtml(choice ? fill(C.currentOwn, { model: choice.model, address: choice.baseUrl }) : C.currentBuiltIn)}</p>`);
+  const parts = [`<p class="pnote">${escapeHtml2(C.intro)}</p>`];
+  parts.push(`<p class="pnote" data-outside-writer-current="${choice ? "own" : "built_in"}">${escapeHtml2(choice ? fill(C.currentOwn, { model: choice.model, address: choice.baseUrl }) : C.currentBuiltIn)}</p>`);
   if (choice?.secretRef && choice.keyPresent === false)
-    parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml(fill(C.keyMissing, { secretRef: choice.secretRef }))}</p>`);
-  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml(C.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml(choice?.baseUrl ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml(C.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml(choice?.model ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml(C.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml(choice?.secretRef ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml(C.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml(C.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml(writer.effectiveChatgptModel ?? "")}" value="${escapeHtml(writer.chatgptFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml(C.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml(fill(C.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<label class="plabel" for="outside-claude-frontier-model">${escapeHtml(C.claudeFrontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-claude-frontier-model" name="claude_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml(writer.effectiveClaudeModel ?? "")}" value="${escapeHtml(writer.claudeFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml(C.claudeFrontierHint)}</p>` + (anthropicModel(effectiveClaudeModel) ? `<p class="pnote ohwarn" data-outside-writer-anthropic>${escapeHtml(fill(C.anthropicNote, { model: effectiveClaudeModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml(C.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled}>${escapeHtml(C.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
+    parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml2(fill(C.keyMissing, { secretRef: choice.secretRef }))}</p>`);
+  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml2(C.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml2(choice?.baseUrl ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml2(C.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml2(choice?.model ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml2(C.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml2(choice?.secretRef ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml2(C.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveChatgptModel ?? "")}" value="${escapeHtml2(writer.chatgptFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml2(fill(C.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<label class="plabel" for="outside-claude-frontier-model">${escapeHtml2(C.claudeFrontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-claude-frontier-model" name="claude_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveClaudeModel ?? "")}" value="${escapeHtml2(writer.claudeFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C.claudeFrontierHint)}</p>` + (anthropicModel(effectiveClaudeModel) ? `<p class="pnote ohwarn" data-outside-writer-anthropic>${escapeHtml2(fill(C.anthropicNote, { model: effectiveClaudeModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml2(C.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled}>${escapeHtml2(C.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
   parts.push(renderWriterCheck(writer, canEdit));
   const summary = choice ? choice.model : C.builtInShort;
   return renderSection({ id: "writer", title: C.title, summary, open: writer.check.state !== "idle", body: `<div data-outside-writer>${parts.join("")}</div>` });
@@ -180884,16 +181111,16 @@ function renderWriterCheck(writer, canEdit) {
     return "";
   const disabled = canEdit && writer.choice && writer.check.state !== "running" ? "" : ' disabled aria-disabled="true"';
   const check = writer.check;
-  const parts = [`<div class="sect">${escapeHtml(C.testTitle)}</div>`, `<p class="pnote">${escapeHtml(C.testIntro)}</p>`];
+  const parts = [`<div class="sect">${escapeHtml2(C.testTitle)}</div>`, `<p class="pnote">${escapeHtml2(C.testIntro)}</p>`];
   if (!writer.choice)
-    parts.push(`<p class="pnote ohsmall">${escapeHtml(C.testNeedsChoice)}</p>`);
+    parts.push(`<p class="pnote ohsmall">${escapeHtml2(C.testNeedsChoice)}</p>`);
   if (check.state === "running") {
-    parts.push(`<p class="pnote" role="status">${escapeHtml(check.total > 0 ? fill(C.testProgress, { done: String(check.done), total: String(check.total) }) : C.testStarting)}</p>`);
+    parts.push(`<p class="pnote" role="status">${escapeHtml2(check.total > 0 ? fill(C.testProgress, { done: String(check.done), total: String(check.total) }) : C.testStarting)}</p>`);
   } else if (check.state === "failed") {
-    parts.push(`<p class="pnote ohwarn" role="status">${escapeHtml(check.message)}</p>`);
+    parts.push(`<p class="pnote ohwarn" role="status">${escapeHtml2(check.message)}</p>`);
   } else if (check.state === "done") {
     const report = check.report;
-    parts.push(`<p class="pnote" data-outside-writer-summary>${escapeHtml(fill(C.testSummary, {
+    parts.push(`<p class="pnote" data-outside-writer-summary>${escapeHtml2(fill(C.testSummary, {
       cases: String(report.cases),
       written: String(report.written),
       declined: String(report.declined),
@@ -180901,18 +181128,18 @@ function renderWriterCheck(writer, canEdit) {
       passed: String(report.gatePassed),
       refused: String(report.gateRefused)
     }))}</p>`);
-    parts.push(report.canaryLeaks.length === 0 ? `<p class="pnote good" data-outside-writer-leaks="0">${escapeHtml(C.testNoLeaks)}</p>` : `<p class="pnote ohwarn" data-outside-writer-leaks="${report.canaryLeaks.length}">${escapeHtml(fill(C.testLeaks, { n: String(report.canaryLeaks.length) }))}</p>`);
+    parts.push(report.canaryLeaks.length === 0 ? `<p class="pnote good" data-outside-writer-leaks="0">${escapeHtml2(C.testNoLeaks)}</p>` : `<p class="pnote ohwarn" data-outside-writer-leaks="${report.canaryLeaks.length}">${escapeHtml2(fill(C.testLeaks, { n: String(report.canaryLeaks.length) }))}</p>`);
     if (report.documentQuestions.length > 0)
-      parts.push(`<p class="pnote ohwarn" data-outside-writer-document-questions>${escapeHtml(fill(C.testDocumentQuestions, { n: String(report.documentQuestions.length) }))}</p>`);
+      parts.push(`<p class="pnote ohwarn" data-outside-writer-document-questions>${escapeHtml2(fill(C.testDocumentQuestions, { n: String(report.documentQuestions.length) }))}</p>`);
     const rows = report.results.map((result) => {
       const verdict = result.outcome === "questions" ? result.gate === "pass" ? C.testPassed : fill(C.testRefused, { reasons: result.gateReasons.join(", ") }) : result.outcome === "declined" ? C.testDeclined : fill(C.testFailed, { reason: result.reason ?? result.outcome });
-      const questions = result.questions.map((question) => `<li>${escapeHtml(question)}</li>`).join("");
-      return `<li data-outside-writer-case="${escapeHtml(result.id)}"><strong>${escapeHtml(result.id)}</strong>: ${escapeHtml(verdict)}${result.canaryLeak ? ` <span class="attn">${escapeHtml(C.testLeakMark)}</span>` : ""}` + `${result.asksAboutDocuments ? ` <span class="attn">${escapeHtml(C.testDocumentMark)}</span>` : ""}${questions ? `<ul class="ohlist">${questions}</ul>` : ""}</li>`;
+      const questions = result.questions.map((question) => `<li>${escapeHtml2(question)}</li>`).join("");
+      return `<li data-outside-writer-case="${escapeHtml2(result.id)}"><strong>${escapeHtml2(result.id)}</strong>: ${escapeHtml2(verdict)}${result.canaryLeak ? ` <span class="attn">${escapeHtml2(C.testLeakMark)}</span>` : ""}` + `${result.asksAboutDocuments ? ` <span class="attn">${escapeHtml2(C.testDocumentMark)}</span>` : ""}${questions ? `<ul class="ohlist">${questions}</ul>` : ""}</li>`;
     }).join("");
     parts.push(`<ul class="ohfacts" data-outside-writer-results>${rows}</ul>`);
   }
-  parts.push(`<form class="ohform" data-outside-form="writer-test"><div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml(check.state === "done" || check.state === "failed" ? C.testAgain : C.test)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
-  return `<div data-outside-writer-check="${escapeHtml(check.state)}">${parts.join("")}</div>`;
+  parts.push(`<form class="ohform" data-outside-form="writer-test"><div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(check.state === "done" || check.state === "failed" ? C.testAgain : C.test)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  return `<div data-outside-writer-check="${escapeHtml2(check.state)}">${parts.join("")}</div>`;
 }
 function renderLanguages(status, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
@@ -180920,25 +181147,25 @@ function renderLanguages(status, canEdit) {
   const languages = status.languages.map((entry) => {
     const name = LANGUAGE_NAMES[entry.language];
     const off = !entry.installed;
-    return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled}>` + `<span>${escapeHtml(name)}${off ? ` <span class="hint">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
+    return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled}>` + `<span>${escapeHtml2(name)}${off ? ` <span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
   }).join("");
   const domainNames = DASHBOARD_OUTSIDE_HELP_COPY.domainNames;
   const domainsOn = Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => domainNames[key] ?? key);
   const domainsOff = Object.entries(status.settings.domains).filter(([, on]) => !on).map(([key]) => domainNames[key] ?? key);
-  const domains = `<p class="pnote" data-outside-domains="${escapeHtml(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => key).join(","))}">` + `${escapeHtml(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
+  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => key).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
   const named = status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => LANGUAGE_NAMES[entry.language]);
   return renderSection({
     id: "languages",
     title: DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle,
     summary: named.join(", "),
     open: false,
-    body: `<p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`
+    body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`
   });
 }
 function renderDetails(status) {
   const route = status.route;
-  const about = (status.settings.state === "on" ? `<p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p><p class="pnote" data-outside-privacy>${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` : "") + `<p class="pnote ohsmall">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`;
-  const more = `<div class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</div>` + `<ul class="ohlist" data-outside-disclosure-more>${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`;
+  const about = (status.settings.state === "on" ? `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p><p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` : "") + `<p class="pnote ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`;
+  const more = `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</div>` + `<ul class="ohlist" data-outside-disclosure-more>${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
   let facts = "";
   if (route.state === "configured" && route.readiness && !route.readinessUnavailable) {
     const ready = route.readiness;
@@ -180952,7 +181179,7 @@ function renderDetails(status) {
       ...ready.fences.map((fence) => fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: shortTime(fence.at) })),
       ...ready.lastSession ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.lastSession, { at: shortTime(ready.lastSession.at), result: ready.lastSession.result })] : []
     ];
-    facts = `<div class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.factsTitle)}</div><ul class="ohfacts" data-outside-facts>${list.map((fact) => `<li>${escapeHtml(fact)}</li>`).join("")}</ul>`;
+    facts = `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.factsTitle)}</div><ul class="ohfacts" data-outside-facts>${list.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>`;
   }
   return renderSection({ id: "details", title: DASHBOARD_OUTSIDE_HELP_COPY.detailsTitle, summary: "", body: about + more + facts });
 }
@@ -181707,7 +181934,7 @@ function sourceLogoTile(sourceId, status) {
   const brand = BRANDS[sourceId];
   const glyph = GLYPHS[sourceId];
   const letter = LETTERS[sourceId];
-  const inner = brand ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="${brand.color}" d="${brand.path}"/></svg>` : glyph ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="${glyph}"/></svg>` : `<span class="logoletter" style="background:${letter?.color ?? "#5b5bd6"}">${escapeHtml(letter?.letter ?? (sourceId[0] ?? "?").toUpperCase())}</span>`;
+  const inner = brand ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="${brand.color}" d="${brand.path}"/></svg>` : glyph ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="${glyph}"/></svg>` : `<span class="logoletter" style="background:${letter?.color ?? "#5b5bd6"}">${escapeHtml2(letter?.letter ?? (sourceId[0] ?? "?").toUpperCase())}</span>`;
   const kind = brand ? "brand" : glyph ? "glyph" : "letter";
   return `<span class="logotile ${kind}" aria-hidden="true">${inner}${status ? `<span class="logodot ${status}"></span>` : ""}</span>`;
 }
@@ -181773,11 +182000,11 @@ function renderMessagingCard(source, localSession, connection = { paired: false 
   const paired = connection.paired;
   const pairedOnly = paired ? " data-paired-only" : " data-paired-only hidden";
   const unpairedOnly = paired ? " data-unpaired-only hidden" : " data-unpaired-only";
-  const accountLine = paired ? connection.account ? `Linked account: ${escapeHtml(connection.account)}` : `Your linked ${label} account` : "Not paired yet";
+  const accountLine = paired ? connection.account ? `Linked account: ${escapeHtml2(connection.account)}` : `Your linked ${label} account` : "Not paired yet";
   const close = options.closable ? '<button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button>' : "";
   const pairAgain = source === "telegram" ? '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair again</button>' : '<form method="dialog" data-messaging-kind="start"><button class="btn" type="submit">Pair again</button></form>';
   const menu = localSession ? `<details class="rowmenu msgmenu"${pairedOnly}><summary class="btn" aria-label="More actions for ${label}">⋯</summary><div class="menu">` + '<form method="dialog" data-messaging-kind="status"><button class="btn" type="submit">Check connection</button></form>' + pairAgain + "</div></details>" : "";
-  const head = `<div class="msghead">${sourceLogoTile(sourceId)}<div class="msgtitle"><h3>${escapeHtml(label)}</h3><p class="pnote" data-messaging-account>${accountLine}</p></div>${menu}${close}</div>`;
+  const head = `<div class="msghead">${sourceLogoTile(sourceId)}<div class="msgtitle"><h3>${escapeHtml2(label)}</h3><p class="pnote" data-messaging-account>${accountLine}</p></div>${menu}${close}</div>`;
   const intro = source === "telegram" ? "Pair once with your Telegram app keys and a login code. Then choose which chats Olympus reads. Nothing is read until you choose." : "Pair once with a QR code from WhatsApp on your phone. Then choose which chats Olympus reads. Nothing is read until you choose.";
   const open = `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"${paired ? " data-messaging-paired" : ""}>${head}`;
   if (!localSession) {
@@ -181808,8 +182035,8 @@ function dashboardTabHref(tab, token) {
 }
 function dashboardTopNav(input) {
   const tabs = DASHBOARD_TABS.map((tab) => {
-    const href = escapeHtml(dashboardTabHref(tab.id, input.token));
-    return tab.id === input.active ? `<a class="navtab on" aria-current="page" href="${href}">${escapeHtml(tab.label)}</a>` : `<a class="navtab" href="${href}">${escapeHtml(tab.label)}</a>`;
+    const href = escapeHtml2(dashboardTabHref(tab.id, input.token));
+    return tab.id === input.active ? `<a class="navtab on" aria-current="page" href="${href}">${escapeHtml2(tab.label)}</a>` : `<a class="navtab" href="${href}">${escapeHtml2(tab.label)}</a>`;
   }).join("");
   const lock = !input.unlocked ? '<span class="navlock" data-state="locked"><span aria-hidden="true">\uD83D\uDD12</span> Locked</span>' : input.lockable === false ? '<span class="navlock" data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked</span>' : `<div class="navlock" id="${DASHBOARD_CONTROL_GATE_ID}" data-dashboard-control-gate data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked<span class="navsep" aria-hidden="true">·</span>` + '<form class="navlockform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">' + '<button class="navlockbtn" type="submit">Lock</button><span class="actmsg" data-action-message role="status"></span></form></div>';
   return `<header class="topnav"><span class="navbrand">Olympus</span><nav class="navtabs" aria-label="Olympus">${tabs}</nav><span class="navgrow"></span>${lock}</header>`;
@@ -181846,7 +182073,7 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync106, mkdirSync as mkdirSync68, readdirSync as readdirSync30, realpathSync as realpathSync22, renameSync as renameSync27, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync7, utimesSync as utimesSync3 } from "node:fs";
+import { existsSync as existsSync106, mkdirSync as mkdirSync68, readdirSync as readdirSync30, realpathSync as realpathSync22, renameSync as renameSync27, rmSync as rmSync46, statSync as statSync47, statfsSync as statfsSync7, utimesSync as utimesSync3 } from "node:fs";
 import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep23, join as join135, resolve as resolve28 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -181918,7 +182145,7 @@ function createArchiveUploads(options) {
   };
   const drop = (found) => {
     sessions.delete(found.id);
-    rmSync45(found.dir, { recursive: true, force: true });
+    rmSync46(found.dir, { recursive: true, force: true });
   };
   const roomFor = async (found, needed, signal) => {
     let waited = false;
@@ -182068,7 +182295,7 @@ function createArchiveUploads(options) {
           return;
         });
       if (created && existsSync106(target))
-        rmSync45(target, { force: true });
+        rmSync46(target, { force: true });
       found.paths.delete(key);
       found.partials.delete(key);
       found.bytes -= offset + written;
@@ -182134,7 +182361,7 @@ function createArchiveUploads(options) {
           stop();
         sessions.delete(uploadId);
       }
-      rmSync45(dir, { recursive: true, force: true });
+      rmSync46(dir, { recursive: true, force: true });
       return true;
     },
     chosenPath(uploadId) {
@@ -182167,7 +182394,7 @@ function createArchiveUploads(options) {
       if (!dir || keep?.(dir))
         return;
       sessions.delete(uploadId);
-      rmSync45(dir, { recursive: true, force: true });
+      rmSync46(dir, { recursive: true, force: true });
     },
     sweep(needed) {
       if (!rootPath && !existsSync106(options.root))
@@ -183084,17 +183311,17 @@ function renderDashboardPeoplePage(options) {
   const csrf = options?.controlSessionCsrfToken;
   const sourcesHref = dashboardLocalPageHref("connect", token);
   const view = csrf !== undefined && options?.peopleLocalSession === true ? options.people : undefined;
-  const sub = view ? `${escapeHtml(C3.breadcrumbSources)} › ${escapeHtml(C3.title)} · ${escapeHtml(C3.count(view.total, view.sourceCount))}` : `${escapeHtml(C3.breadcrumbSources)} › ${escapeHtml(C3.title)}`;
-  const head = `<div class="pphead"><div class="ppgrow"><h2>${escapeHtml(C3.title)}</h2><p class="ppsub">${sub}</p></div>` + `<a class="ppclose" href="${escapeHtml(sourcesHref)}" aria-label="${escapeHtml(C3.close)}">✕</a></div>`;
+  const sub = view ? `${escapeHtml2(C3.breadcrumbSources)} › ${escapeHtml2(C3.title)} · ${escapeHtml2(C3.count(view.total, view.sourceCount))}` : `${escapeHtml2(C3.breadcrumbSources)} › ${escapeHtml2(C3.title)}`;
+  const head = `<div class="pphead"><div class="ppgrow"><h2>${escapeHtml2(C3.title)}</h2><p class="ppsub">${sub}</p></div>` + `<a class="ppclose" href="${escapeHtml2(sourcesHref)}" aria-label="${escapeHtml2(C3.close)}">✕</a></div>`;
   let inner;
   if (csrf === undefined || options?.peopleLocalSession !== true) {
-    inner = `<p class="ppempty">${escapeHtml(C3.locked)} <a href="${escapeHtml(sourcesHref)}">${escapeHtml(C3.lockedLink)}</a></p>`;
+    inner = `<p class="ppempty">${escapeHtml2(C3.locked)} <a href="${escapeHtml2(sourcesHref)}">${escapeHtml2(C3.lockedLink)}</a></p>`;
   } else if (!view) {
-    inner = `<p class="ppempty">${escapeHtml(C3.unavailable)}</p>`;
+    inner = `<p class="ppempty">${escapeHtml2(C3.unavailable)}</p>`;
   } else {
     inner = peopleBody(view);
   }
-  const body = `<section class="pp" data-people>${`<div class="ppsheet">${head}<div class="ppbody">${inner}` + `<p class="ppmsg" data-pp-msg role="status"></p>` + `<p class="ppnote">${escapeHtml(C3.privacy)}</p></div></div>`}</section>`;
+  const body = `<section class="pp" data-people>${`<div class="ppsheet">${head}<div class="ppbody">${inner}` + `<p class="ppmsg" data-pp-msg role="status"></p>` + `<p class="ppnote">${escapeHtml2(C3.privacy)}</p></div></div>`}</section>`;
   return pageShell({
     title: "Olympus",
     crumb: C3.crumb,
@@ -183107,41 +183334,41 @@ function renderDashboardPeoplePage(options) {
   });
 }
 function dashboardPeopleRow(token) {
-  return `<div class="srow nodot" data-people-row><div class="smain"><b>${escapeHtml(C3.row)}</b><p class="pnote">${escapeHtml(C3.rowLine)}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml(dashboardLocalPageHref("people", token))}">${escapeHtml(C3.rowOpen)}</a></div></div>`;
+  return `<div class="srow nodot" data-people-row><div class="smain"><b>${escapeHtml2(C3.row)}</b><p class="pnote">${escapeHtml2(C3.rowLine)}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("people", token))}">${escapeHtml2(C3.rowOpen)}</a></div></div>`;
 }
 function peopleBody(view) {
   const parts = [];
   if (view.suggestions.length > 0) {
-    const asks = view.suggestions.slice(0, 3).map((suggestion) => `<div class="ppask" data-pp-ask>` + `<p>${escapeHtml(C3.question)} <b>${escapeHtml(suggestion.a.name)}</b> ${escapeHtml(C3.on)} ${escapeHtml(suggestion.a.source)} ${escapeHtml(C3.sameAs)} <b>${escapeHtml(suggestion.b.name)}</b> (${escapeHtml(suggestion.b.detail)}) ${escapeHtml(C3.in)} ${escapeHtml(suggestion.b.source)}?` + `<span class="hint">${escapeHtml(C3.onlyName)}</span></p>` + `<div class="ppaskbtns">` + `<button class="btn" type="button" data-pp-op="not_same" data-identity-a="${escapeHtml(suggestion.identityA)}" data-identity-b="${escapeHtml(suggestion.identityB)}">${escapeHtml(C3.notSame)}</button>` + `<button class="btn primary" type="button" data-pp-op="same" data-identity-a="${escapeHtml(suggestion.identityA)}" data-identity-b="${escapeHtml(suggestion.identityB)}">${escapeHtml(C3.same)}</button>` + `</div></div>`).join("");
-    parts.push(`<div class="ppcard" data-pp-suggestions><h3>${escapeHtml(C3.samePerson)}<span class="hint">${escapeHtml(C3.toCheck(view.suggestions.length))}</span></h3>${asks}</div>`);
+    const asks = view.suggestions.slice(0, 3).map((suggestion) => `<div class="ppask" data-pp-ask>` + `<p>${escapeHtml2(C3.question)} <b>${escapeHtml2(suggestion.a.name)}</b> ${escapeHtml2(C3.on)} ${escapeHtml2(suggestion.a.source)} ${escapeHtml2(C3.sameAs)} <b>${escapeHtml2(suggestion.b.name)}</b> (${escapeHtml2(suggestion.b.detail)}) ${escapeHtml2(C3.in)} ${escapeHtml2(suggestion.b.source)}?` + `<span class="hint">${escapeHtml2(C3.onlyName)}</span></p>` + `<div class="ppaskbtns">` + `<button class="btn" type="button" data-pp-op="not_same" data-identity-a="${escapeHtml2(suggestion.identityA)}" data-identity-b="${escapeHtml2(suggestion.identityB)}">${escapeHtml2(C3.notSame)}</button>` + `<button class="btn primary" type="button" data-pp-op="same" data-identity-a="${escapeHtml2(suggestion.identityA)}" data-identity-b="${escapeHtml2(suggestion.identityB)}">${escapeHtml2(C3.same)}</button>` + `</div></div>`).join("");
+    parts.push(`<div class="ppcard" data-pp-suggestions><h3>${escapeHtml2(C3.samePerson)}<span class="hint">${escapeHtml2(C3.toCheck(view.suggestions.length))}</span></h3>${asks}</div>`);
   }
   const me = view.people.find((person) => person.isOwner);
   if (me)
-    parts.push(`<div class="ppcard" data-pp-you><p class="ppname">${escapeHtml(C3.you)}</p>${chips(me)}</div>`);
+    parts.push(`<div class="ppcard" data-pp-you><p class="ppname">${escapeHtml2(C3.you)}</p>${chips(me)}</div>`);
   const others = view.people.filter((person) => !person.isOwner);
   if (others.length === 0) {
-    parts.push(`<p class="ppempty">${escapeHtml(C3.empty)}</p>`);
+    parts.push(`<p class="ppempty">${escapeHtml2(C3.empty)}</p>`);
     return parts.join("");
   }
-  parts.push(`<input class="ppfind" type="search" data-pp-find placeholder="${escapeHtml(C3.find)}" aria-label="${escapeHtml(C3.find)}">`);
-  const mergeOptions = others.map((person) => `<option value="${escapeHtml(person.identities[0]?.identityKey ?? "")}">${escapeHtml(`${person.displayName} · ${[...new Set(person.identities.map((chip) => chip.source))].join(", ")}`)}</option>`).join("");
+  parts.push(`<input class="ppfind" type="search" data-pp-find placeholder="${escapeHtml2(C3.find)}" aria-label="${escapeHtml2(C3.find)}">`);
+  const mergeOptions = others.map((person) => `<option value="${escapeHtml2(person.identities[0]?.identityKey ?? "")}">${escapeHtml2(`${person.displayName} · ${[...new Set(person.identities.map((chip) => chip.source))].join(", ")}`)}</option>`).join("");
   parts.push(`<template data-pp-merge-options>${mergeOptions}</template>`);
   for (const person of others)
     parts.push(personRow(person));
-  parts.push(`<p class="ppempty" data-pp-nomatch hidden>${escapeHtml(C3.noMatch)}</p>`);
+  parts.push(`<p class="ppempty" data-pp-nomatch hidden>${escapeHtml2(C3.noMatch)}</p>`);
   return parts.join("");
 }
 function chips(person) {
-  return `<div class="ppchips">${person.identities.map((chip) => `<span class="ppchip" title="${escapeHtml(`${chip.source} ${chip.detail}`)}"><i class="ppdot" style="background:${SOURCE_DOTS[chip.provider] ?? "var(--t3)"}"></i><span>${escapeHtml(chip.source === chip.detail ? chip.source : `${chip.source} ${chip.detail}`)}</span></span>`).join("")}</div>`;
+  return `<div class="ppchips">${person.identities.map((chip) => `<span class="ppchip" title="${escapeHtml2(`${chip.source} ${chip.detail}`)}"><i class="ppdot" style="background:${SOURCE_DOTS[chip.provider] ?? "var(--t3)"}"></i><span>${escapeHtml2(chip.source === chip.detail ? chip.source : `${chip.source} ${chip.detail}`)}</span></span>`).join("")}</div>`;
 }
 function personRow(person) {
   const first = person.identities[0]?.identityKey ?? "";
   const linked = linkedSentence(person.linkedBy);
   const why = person.named ? [linked || C3.onlyOneSource, C3.messages(person.messages)].join(" · ") : [C3.noName, ...linked ? [linked] : [], C3.messages(person.messages)].join(" · ");
   const search = [person.displayName, ...person.identities.map((chip) => `${chip.source} ${chip.detail}`)].join(" ").toLowerCase();
-  const splits = person.identities.length > 1 ? person.identities.map((chip) => `<button class="btn" type="button" data-pp-op="split" data-identity="${escapeHtml(chip.identityKey)}">${escapeHtml(C3.split(`${chip.source} ${chip.detail}`))}</button>`).join("") : "";
-  const menu = `<details class="rowmenu"><summary aria-label="${escapeHtml(C3.more)}">⋯</summary><div class="menu">` + `<form class="ppedit" data-pp-rename><label class="hint" for="rn-${escapeHtml(person.personId)}">${escapeHtml(C3.renamePrompt)}</label>` + `<input id="rn-${escapeHtml(person.personId)}" name="name" maxlength="160" value="${escapeHtml(person.named ? person.displayName : "")}">` + `<input type="hidden" name="identity" value="${escapeHtml(first)}"><button class="btn" type="submit">${escapeHtml(C3.rename)}</button></form>` + `<form class="ppedit" data-pp-merge><label class="hint" for="mg-${escapeHtml(person.personId)}">${escapeHtml(C3.mergeWith)}</label>` + `<select id="mg-${escapeHtml(person.personId)}" name="identity_b" required></select>` + `<input type="hidden" name="identity_a" value="${escapeHtml(first)}"><button class="btn" type="submit">${escapeHtml(C3.merge)}</button></form>` + splits + "</div></details>";
-  return `<div class="ppcard pprow" data-pp-person="${escapeHtml(person.personId)}" data-pp-search="${escapeHtml(search)}">` + `<div><p class="ppname">${escapeHtml(person.displayName)}</p>${chips(person)}<p class="ppwhy">${escapeHtml(why)}</p></div>${menu}</div>`;
+  const splits = person.identities.length > 1 ? person.identities.map((chip) => `<button class="btn" type="button" data-pp-op="split" data-identity="${escapeHtml2(chip.identityKey)}">${escapeHtml2(C3.split(`${chip.source} ${chip.detail}`))}</button>`).join("") : "";
+  const menu = `<details class="rowmenu"><summary aria-label="${escapeHtml2(C3.more)}">⋯</summary><div class="menu">` + `<form class="ppedit" data-pp-rename><label class="hint" for="rn-${escapeHtml2(person.personId)}">${escapeHtml2(C3.renamePrompt)}</label>` + `<input id="rn-${escapeHtml2(person.personId)}" name="name" maxlength="160" value="${escapeHtml2(person.named ? person.displayName : "")}">` + `<input type="hidden" name="identity" value="${escapeHtml2(first)}"><button class="btn" type="submit">${escapeHtml2(C3.rename)}</button></form>` + `<form class="ppedit" data-pp-merge><label class="hint" for="mg-${escapeHtml2(person.personId)}">${escapeHtml2(C3.mergeWith)}</label>` + `<select id="mg-${escapeHtml2(person.personId)}" name="identity_b" required></select>` + `<input type="hidden" name="identity_a" value="${escapeHtml2(first)}"><button class="btn" type="submit">${escapeHtml2(C3.merge)}</button></form>` + splits + "</div></details>";
+  return `<div class="ppcard pprow" data-pp-person="${escapeHtml2(person.personId)}" data-pp-search="${escapeHtml2(search)}">` + `<div><p class="ppname">${escapeHtml2(person.displayName)}</p>${chips(person)}<p class="ppwhy">${escapeHtml2(why)}</p></div>${menu}</div>`;
 }
 function linkedSentence(reasons) {
   const prefix = "Linked by ";
@@ -184214,26 +184441,26 @@ function backupWhere(folder) {
 }
 function renderBackupSection(input) {
   const C = BACKUP_COPY;
-  const head = `<h3 class="sect">${escapeHtml(C.title)}</h3><p class="pnote">${escapeHtml(C.intro)}</p>`;
+  const head = `<h3 class="sect">${escapeHtml2(C.title)}</h3><p class="pnote">${escapeHtml2(C.intro)}</p>`;
   const status = input.status;
   if (input.csrfToken !== undefined && !input.local) {
-    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}<form class="bkunlock" data-backup-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(C.unlock)}</button><span class="pnote">${escapeHtml(C.unlockIntro)}</span>` + `<span class="pnote" data-backup-unlock-msg role="status"></span></form>` + `<script>${backupUnlockScript(input.csrfToken)}</script></section>`;
+    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}<form class="bkunlock" data-backup-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(C.unlock)}</button><span class="pnote">${escapeHtml2(C.unlockIntro)}</span>` + `<span class="pnote" data-backup-unlock-msg role="status"></span></form>` + `<script>${backupUnlockScript(input.csrfToken)}</script></section>`;
   }
   if (!input.local || !status || input.csrfToken === undefined) {
-    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}">${head}<p class="pnote" data-backup-locked>${escapeHtml(C.locked)}</p></section>`;
+    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}">${head}<p class="pnote" data-backup-locked>${escapeHtml2(C.locked)}</p></section>`;
   }
-  const last = status.last ? `${escapeHtml(backupWhen(status.last.at, input.now))} · ${escapeHtml(formatBytes3(status.last.bytes))}${status.folder ? ` · ${escapeHtml(backupWhere(status.folder))}` : ""}${status.last.encrypted ? "" : " · not encrypted"}` : escapeHtml(C.none);
-  const error = status.lastError ? `<p class="bkerr" role="alert">The last backup didn't finish (${escapeHtml(backupWhen(status.lastError.at, input.now))}): ${escapeHtml(status.lastError.message)}</p>` : "";
+  const last = status.last ? `${escapeHtml2(backupWhen(status.last.at, input.now))} · ${escapeHtml2(formatBytes3(status.last.bytes))}${status.folder ? ` · ${escapeHtml2(backupWhere(status.folder))}` : ""}${status.last.encrypted ? "" : " · not encrypted"}` : escapeHtml2(C.none);
+  const error = status.lastError ? `<p class="bkerr" role="alert">The last backup didn't finish (${escapeHtml2(backupWhen(status.lastError.at, input.now))}): ${escapeHtml2(status.lastError.message)}</p>` : "";
   const off = status.folder ? "" : " disabled";
-  const lastRow = `<div class="bklast"><p><b>${escapeHtml(C.lastBackup)}</b> — <span data-backup-last>${last}</span></p>` + `<button class="btn primaryline" type="button" data-backup-run${off || (status.running ? " disabled" : "")}>${escapeHtml(status.running ? C.backingUp : C.backUpNow)}</button></div>` + `${error}<p class="pnote" data-backup-msg role="status" aria-live="polite"></p>`;
-  const where = `<h4 class="bkh">${escapeHtml(C.where)}</h4><div class="bkwhere">` + (status.folder ? `<span class="bkpath" data-backup-folder>${escapeHtml(status.folder)}</span>` : `<span class="pnote" data-backup-folder>${escapeHtml(C.noFolder)}</span>`) + `<button class="btn primaryline" type="button" data-backup-browse="folder">${escapeHtml(C.chooseFolder)}</button></div>`;
-  const radio = (value, label) => `<label class="bkradio"><input type="radio" name="schedule" value="${value}"${status.schedule === value ? " checked" : ""}${off}> ${escapeHtml(label)}</label>`;
-  const when = `<fieldset class="bkwhen" data-backup-schedule><legend class="bkh">${escapeHtml(C.when)}</legend>${radio("manual", C.manual)}${radio("nightly", C.nightly)}${radio("weekly", C.weekly)}<p class="pnote">${escapeHtml(C.keep)}</p></fieldset>`;
-  const passphrase = `<h4 class="bkh">${escapeHtml(C.passphrase)}</h4><p>${escapeHtml(C.passphraseLine)}</p>` + `<p>${status.passphraseProblem ? "" : status.passphraseSet ? `✓ ${escapeHtml(C.set)} · ` : `${escapeHtml(C.notSet)} · `}<button class="linkbtn" type="button" data-dialog-open="backup-passphrase">${escapeHtml(status.passphraseProblem ? "Set the passphrase again" : status.passphraseSet ? C.change : C.setOne)}</button></p>` + (status.passphraseProblem ? `<p class="bkerr" role="alert" data-backup-key-problem>The key kept for your passphrase can't be read, so backups stop until you set the passphrase again.</p>` : status.passphraseSet ? `<p class="pnote">${escapeHtml(C.passphraseKept)}</p>` : "");
+  const lastRow = `<div class="bklast"><p><b>${escapeHtml2(C.lastBackup)}</b> — <span data-backup-last>${last}</span></p>` + `<button class="btn primaryline" type="button" data-backup-run${off || (status.running ? " disabled" : "")}>${escapeHtml2(status.running ? C.backingUp : C.backUpNow)}</button></div>` + `${error}<p class="pnote" data-backup-msg role="status" aria-live="polite"></p>`;
+  const where = `<h4 class="bkh">${escapeHtml2(C.where)}</h4><div class="bkwhere">` + (status.folder ? `<span class="bkpath" data-backup-folder>${escapeHtml2(status.folder)}</span>` : `<span class="pnote" data-backup-folder>${escapeHtml2(C.noFolder)}</span>`) + `<button class="btn primaryline" type="button" data-backup-browse="folder">${escapeHtml2(C.chooseFolder)}</button></div>`;
+  const radio = (value, label) => `<label class="bkradio"><input type="radio" name="schedule" value="${value}"${status.schedule === value ? " checked" : ""}${off}> ${escapeHtml2(label)}</label>`;
+  const when = `<fieldset class="bkwhen" data-backup-schedule><legend class="bkh">${escapeHtml2(C.when)}</legend>${radio("manual", C.manual)}${radio("nightly", C.nightly)}${radio("weekly", C.weekly)}<p class="pnote">${escapeHtml2(C.keep)}</p></fieldset>`;
+  const passphrase = `<h4 class="bkh">${escapeHtml2(C.passphrase)}</h4><p>${escapeHtml2(C.passphraseLine)}</p>` + `<p>${status.passphraseProblem ? "" : status.passphraseSet ? `✓ ${escapeHtml2(C.set)} · ` : `${escapeHtml2(C.notSet)} · `}<button class="linkbtn" type="button" data-dialog-open="backup-passphrase">${escapeHtml2(status.passphraseProblem ? "Set the passphrase again" : status.passphraseSet ? C.change : C.setOne)}</button></p>` + (status.passphraseProblem ? `<p class="bkerr" role="alert" data-backup-key-problem>The key kept for your passphrase can't be read, so backups stop until you set the passphrase again.</p>` : status.passphraseSet ? `<p class="pnote">${escapeHtml2(C.passphraseKept)}</p>` : "");
   const restoreState = status.restore;
-  const restoreNote = restoreState?.state === "done" ? `<p class="bkok" role="status" data-backup-restored>Restored ${escapeHtml(backupWhen(restoreState.at, input.now))}.${restoreState.sign_in_again?.length ? ` Sign in again to: ${escapeHtml(restoreState.sign_in_again.join(", "))}.` : ""} <a href="/dashboard?connect">Open Sources</a></p>` : restoreState?.state === "failed" ? `<p class="bkerr" role="alert">The restore didn't finish: ${escapeHtml(restoreState.message ?? "")}</p>` : restoreState?.state === "restarting" ? '<p role="status">Olympus is restarting to restore…</p>' : "";
-  const restore = `<h4 class="bkh">${escapeHtml(C.restore)}</h4><p>${escapeHtml(C.restoreLine)}</p>${restoreNote}` + (status.restoreAvailable ? `<button class="btn primaryline" type="button" data-backup-browse="restore">${escapeHtml(C.restoreButton)}</button>` : `<p class="pnote">On this install Olympus can't restart itself. Stop Olympus, then run <code>olympus data restore --input &lt;file&gt; --passphrase-stdin</code>.</p>`);
-  const dialogs = `<dialog class="adddialog" id="backup-passphrase" data-closable aria-labelledby="backup-passphrase-title"><div class="adddialoghead"><h3 id="backup-passphrase-title">${escapeHtml(status.passphraseSet ? "Change the passphrase" : C.setOne)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<form data-backup-passphrase><p class="pnote">${escapeHtml(C.passphraseLine)}</p><label class="bkfield">New passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="8" required></label><label class="bkfield">Type it again <input type="password" name="again" autocomplete="new-password" minlength="8" required></label>` + `<p class="pnote">${escapeHtml(C.passphraseKept)} Backups made before keep their old passphrase.</p><div class="pickbar"><button class="btn primary" type="submit">Save passphrase</button>${status.passphraseSet ? '<button class="btn" type="button" data-backup-nopass>Back up without a passphrase</button>' : ""}</div><p class="pnote" data-backup-dialog-msg role="status"></p></form></dialog>` + `<dialog class="adddialog bkbrowser" id="backup-browser" data-closable aria-labelledby="backup-browser-title"><div class="adddialoghead"><h3 id="backup-browser-title">Choose a folder</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + '<p class="bkpath" data-browser-path></p><div class="bklist" data-browser-files></div><div class="bklist" data-browser-folders></div><p class="bkmore"><button class="btn" type="button" data-browser-more hidden>Show more</button></p>' + '<form data-backup-restore hidden><label class="bkfield">Passphrase <input type="password" name="passphrase" autocomplete="off"></label><p class="pnote">Restoring stops Olympus, puts the backup in place and starts Olympus again. It only works on a computer that holds no Olympus data yet.</p></form>' + '<div class="pickbar"><button class="btn" type="button" data-browser-up>Up</button><button class="btn primary" type="button" data-browser-use>Use this folder</button></div><p class="pnote" data-backup-dialog-msg role="status"></p></dialog>';
+  const restoreNote = restoreState?.state === "done" ? `<p class="bkok" role="status" data-backup-restored>Restored ${escapeHtml2(backupWhen(restoreState.at, input.now))}.${restoreState.sign_in_again?.length ? ` Sign in again to: ${escapeHtml2(restoreState.sign_in_again.join(", "))}.` : ""} <a href="/dashboard?connect">Open Sources</a></p>` : restoreState?.state === "failed" ? `<p class="bkerr" role="alert">The restore didn't finish: ${escapeHtml2(restoreState.message ?? "")}</p>` : restoreState?.state === "restarting" ? '<p role="status">Olympus is restarting to restore…</p>' : "";
+  const restore = `<h4 class="bkh">${escapeHtml2(C.restore)}</h4><p>${escapeHtml2(C.restoreLine)}</p>${restoreNote}` + (status.restoreAvailable ? `<button class="btn primaryline" type="button" data-backup-browse="restore">${escapeHtml2(C.restoreButton)}</button>` : `<p class="pnote">On this install Olympus can't restart itself. Stop Olympus, then run <code>olympus data restore --input &lt;file&gt; --passphrase-stdin</code>.</p>`);
+  const dialogs = `<dialog class="adddialog" id="backup-passphrase" data-closable aria-labelledby="backup-passphrase-title"><div class="adddialoghead"><h3 id="backup-passphrase-title">${escapeHtml2(status.passphraseSet ? "Change the passphrase" : C.setOne)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<form data-backup-passphrase><p class="pnote">${escapeHtml2(C.passphraseLine)}</p><label class="bkfield">New passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="8" required></label><label class="bkfield">Type it again <input type="password" name="again" autocomplete="new-password" minlength="8" required></label>` + `<p class="pnote">${escapeHtml2(C.passphraseKept)} Backups made before keep their old passphrase.</p><div class="pickbar"><button class="btn primary" type="submit">Save passphrase</button>${status.passphraseSet ? '<button class="btn" type="button" data-backup-nopass>Back up without a passphrase</button>' : ""}</div><p class="pnote" data-backup-dialog-msg role="status"></p></form></dialog>` + `<dialog class="adddialog bkbrowser" id="backup-browser" data-closable aria-labelledby="backup-browser-title"><div class="adddialoghead"><h3 id="backup-browser-title">Choose a folder</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + '<p class="bkpath" data-browser-path></p><div class="bklist" data-browser-files></div><div class="bklist" data-browser-folders></div><p class="bkmore"><button class="btn" type="button" data-browser-more hidden>Show more</button></p>' + '<form data-backup-restore hidden><label class="bkfield">Passphrase <input type="password" name="passphrase" autocomplete="off"></label><p class="pnote">Restoring stops Olympus, puts the backup in place and starts Olympus again. It only works on a computer that holds no Olympus data yet.</p></form>' + '<div class="pickbar"><button class="btn" type="button" data-browser-up>Up</button><button class="btn primary" type="button" data-browser-use>Use this folder</button></div><p class="pnote" data-backup-dialog-msg role="status"></p></dialog>';
   return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}${lastRow}${where}${when}${passphrase}${restore}${dialogs}` + `<script>${backupClientScript(input.csrfToken, status.folder ?? null)}</script></section>`;
 }
 function backupUnlockScript(csrfToken) {
@@ -184801,7 +185028,7 @@ function renderDashboardAgentsSection(input) {
   };
   return [
     '<div class="sect" id="agents">Agents</div>',
-    `<p class="pnote">${escapeHtml(platform === "linux" ? "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules on this computer." : "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules as your OpenClaw agent.")}</p>`,
+    `<p class="pnote">${escapeHtml2(platform === "linux" ? "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules on this computer." : "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules as your OpenClaw agent.")}</p>`,
     remoteAccessRow(view.remoteAccess, view.remoteAccessManual),
     `<div data-agent-connections-list>${connectionList(view, input.now)}</div>`,
     renderConnectionRequests(view),
@@ -184811,10 +185038,10 @@ function renderDashboardAgentsSection(input) {
 }
 function remoteAccessRow(access, manual) {
   const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf2(access.mcpUrl)}.` : access.state === "off" ? "Off. Agents in the cloud cannot ask Olympus. Connections on this computer and your tailnet work separately." : access.state === "not_connected" ? "On, but not connected. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
-  const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml(access.detail)}</span>` : access.state === "on" && access.setBy === "worker_env" ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml(WORKER_ENV_ADDRESS_MESSAGE)}</span>` : "";
+  const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml2(access.detail)}</span>` : access.state === "on" && access.setBy === "worker_env" ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml2(WORKER_ENV_ADDRESS_MESSAGE)}</span>` : "";
   const workerEnv = access.state === "on" && access.setBy === "worker_env";
-  const how = manual !== undefined && !workerEnv ? `<span class="hint" data-remote-manual> ${escapeHtml(manual)}</span>` : "";
-  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml(why)}</span>${next}${how}</div>` + (manual === undefined ? remoteAccessControls(access) : "") + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
+  const how = manual !== undefined && !workerEnv ? `<span class="hint" data-remote-manual> ${escapeHtml2(manual)}</span>` : "";
+  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml2(why)}</span>${next}${how}</div>` + (manual === undefined ? remoteAccessControls(access) : "") + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
 }
 function remoteAccessControls(access) {
   const status = `<span class="actmsg" data-action-message role="status"></span>`;
@@ -184825,7 +185052,7 @@ function remoteAccessControls(access) {
   }
   const review = access.state === "not_connected" && access.needsTerms ? `<form class="rowform" data-agent-kind="remote-on"><button class="btn primary" type="submit">Review agreement</button>${status}</form>` : "";
   const confirmation = "Turn off remote access? Agents in the cloud will no longer reach Olympus until you turn it on again. Agents on this computer are unaffected.";
-  return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml(confirmation)}">` + `<button class="btn" type="submit">Turn off remote access</button>${status}` + `</form>`;
+  return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml2(confirmation)}">` + `<button class="btn" type="submit">Turn off remote access</button>${status}` + `</form>`;
 }
 function termsPanel() {
   return `<div class="remoteterms" data-remote-terms hidden>` + `<p><b>Before remote access turns on</b></p>` + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>` + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You don't sign up for anything or share an email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>` + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>` + `<form class="rowform" data-agent-kind="remote-accept">` + `<button class="btn primary" type="submit">I accept, turn on remote access</button>` + `<button class="btn" type="button" data-remote-terms-cancel>Not now</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
@@ -184850,14 +185077,14 @@ function privateChoices(access) {
   return ["loopback", "tailnet"].map((route) => {
     const status = access[route];
     const label = route === "loopback" ? "Agent on another account of this computer" : "Agent on my tailnet";
-    const body = status.state !== "available" ? `<p>${escapeHtml(status.message ?? "This connection is not ready. Try again.")}</p>` : `<p>${route === "loopback" ? "For an agent using another account on this computer. It does not need access to your Olympus files." : "For an agent on your Tailscale network. Keep Tailscale running on both computers. This address follows this computer’s Tailscale connection."}</p>` + status.urls.map((url, i) => copyBox(`agent-private-${route}-url-${i}`, url, "Copy address")).join("") + "<p>Name the agent, then choose Create key. Creating the key approves this connection. Copy the setup line into your agent; no separate sign-in is needed. Revoke the key below to stop its access.</p>" + `<div data-agent-step><form class="rowform" data-agent-kind="key" data-private-route="${route}">` + `<input class="keyfield" name="name" value="My agent" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button><span class="actmsg" data-action-message role="status"></span></form>` + secretSlot(`agent-private-${route}-key`, "Key", true) + "</div>" + instructionsStep({ id: `private-${route}`, label, method: "key", instructionsWhere: "Paste this wherever the agent keeps its instructions." }, false);
+    const body = status.state !== "available" ? `<p>${escapeHtml2(status.message ?? "This connection is not ready. Try again.")}</p>` : `<p>${route === "loopback" ? "For an agent using another account on this computer. It does not need access to your Olympus files." : "For an agent on your Tailscale network. Keep Tailscale running on both computers. This address follows this computer’s Tailscale connection."}</p>` + status.urls.map((url, i) => copyBox(`agent-private-${route}-url-${i}`, url, "Copy address")).join("") + "<p>Name the agent, then choose Create key. Creating the key approves this connection. Copy the setup line into your agent; no separate sign-in is needed. Revoke the key below to stop its access.</p>" + `<div data-agent-step><form class="rowform" data-agent-kind="key" data-private-route="${route}">` + `<input class="keyfield" name="name" value="My agent" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button><span class="actmsg" data-action-message role="status"></span></form>` + secretSlot(`agent-private-${route}-key`, "Key", true) + "</div>" + instructionsStep({ id: `private-${route}`, label, method: "key", instructionsWhere: "Paste this wherever the agent keeps its instructions." }, false);
     return `<details class="agentchoice" data-poll-key="agent-private-${route}" data-agent="private-${route}">` + `<summary><span class="name">${label}</span></summary><div class="agentbody">${body}</div></details>`;
   }).join("");
 }
 function agentChoice(agent, access, host, privateAvailable) {
   const hints = [agent.detail, needsOwnTunnel(agent, access) ? "needs your own tunnel" : undefined].filter(Boolean).join(" · ");
-  const detail = hints ? ` <span class="hint">${escapeHtml(hints)}</span>` : "";
-  return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access, host, privateAvailable)}</div>` + `</details>`;
+  const detail = hints ? ` <span class="hint">${escapeHtml2(hints)}</span>` : "";
+  return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml2(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access, host, privateAvailable)}</div>` + `</details>`;
 }
 function ownTunnel(access) {
   return access.state === "on" && (access.ownTunnel === true || access.setBy === "worker_env");
@@ -184873,22 +185100,22 @@ function agentBody(agent, access, host, privateAvailable) {
   if (access.state !== "on")
     return remoteUnavailable(access, privateAvailable) + instructionsStep(agent, false);
   if (agent.method === "oauth" && !ownTunnel(access) && agent.approveViaRelay) {
-    return `<ol class="steps">` + `<li>${escapeHtml(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${approvalStep(agent, host)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${approvalStep(agent, host)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
   if (agent.method === "oauth") {
-    return `<ol class="steps">` + `<li>${escapeHtml(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${host.platform === "linux" ? approvalStep(agent, host, true) : escapeHtml(agent.approve ?? "")}</li>` + `<li data-agent-step>On that page, type a pairing code from here.${pairForm(agent.id)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${host.platform === "linux" ? approvalStep(agent, host, true) : escapeHtml2(agent.approve ?? "")}</li>` + `<li data-agent-step>On that page, type a pairing code from here.${pairForm(agent.id)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
   if (agent.method === "key") {
     const url = agent.address === "openapi" ? access.openapiUrl : access.mcpUrl;
-    return `<ol class="steps">` + `<li>${escapeHtml(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, url, "Copy address")}</li>` + `<li data-agent-step>Create a key for it. ${escapeHtml(agent.keyUse ?? "")}${keyForm(agent.id, agent.keyName ?? agent.label)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, url, "Copy address")}</li>` + `<li data-agent-step>Create a key for it. ${escapeHtml2(agent.keyUse ?? "")}${keyForm(agent.id, agent.keyName ?? agent.label)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
   return `<p>If the agent can add a connector that signs in, use the connector address and a pairing code. If it takes an address and a key, create a key.</p>` + `<ol class="steps">` + `<li>Connector (MCP) address:${copyBox("agent-other-url", access.mcpUrl, "Copy address")}` + `OpenAPI address, for agents that read an API description:${copyBox("agent-other-openapi", access.openapiUrl, "Copy address")}</li>` + (host.platform === "linux" ? `<li>${approvalStep(agent, host, true)}</li>` : "") + `<li data-agent-step>Approve a connector with a pairing code.${pairForm(agent.id)}</li>` + `<li data-agent-step>Or create a key and give it to the agent as a bearer token.${keyForm(agent.id, "Agent")}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
 }
 function approvalStep(agent, host, pairing = false) {
   if (host.platform !== "linux")
-    return escapeHtml(agent.approveViaRelay ?? "");
+    return escapeHtml2(agent.approveViaRelay ?? "");
   if (!host.headless)
-    return pairing ? "Open the Olympus approval page in this computer's browser, through the owner's approval route." : escapeHtml(agent.approveViaRelay ?? "");
+    return pairing ? "Open the Olympus approval page in this computer's browser, through the owner's approval route." : escapeHtml2(agent.approveViaRelay ?? "");
   const handoff = host.approvalHandoff?.();
   if (!handoff)
     return "Approval on this computer is not ready. Configure the owner-only SSH socket forward on the Olympus host, then return here.";
@@ -184901,34 +185128,34 @@ function localBody(agent, host) {
 }
 function tunnelNeeded(host, privateAvailable) {
   const text = (host.platform === "linux" ? "Olympus's relay connects ChatGPT, Claude, Grok, Grok Bot and Cursor. " : "Olympus's relay connects only ChatGPT, Claude and Grok. ") + (privateAvailable ? "For OpenClaw, Hermes or another agent on this computer, choose Agent on another account of this computer. " + "For an agent on your Tailscale network, choose Agent on my tailnet. " : "") + "Other agents in the cloud need a tunnel you run yourself; ask the person who manages that agent to connect it. " + "Claude Code and Codex on this computer need no tunnel.";
-  return `<p class="why" data-agent-needs-tunnel>${escapeHtml(text)}</p>`;
+  return `<p class="why" data-agent-needs-tunnel>${escapeHtml2(text)}</p>`;
 }
 function remoteUnavailable(access, privateAvailable) {
   const text = access.state === "not_connected" ? "Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.";
-  return `<p class="why" data-remote-unavailable>${escapeHtml(text)}${privateAvailable ? " For an agent on another account or your Tailscale network, use the choices below." : ""}</p>`;
+  return `<p class="why" data-remote-unavailable>${escapeHtml2(text)}${privateAvailable ? " For an agent on another account or your Tailscale network, use the choices below." : ""}</p>`;
 }
 function instructionsStep(agent, inStep) {
   const lead = inStep ? `Tell it when to ask Olympus. ${agent.instructionsWhere}` : `To have it ask Olympus on its own, ${agent.instructionsWhere.charAt(0).toLowerCase()}${agent.instructionsWhere.slice(1)}`;
-  const body = `${escapeHtml(lead)}${copyBox(`agent-${agent.id}-instructions`, AGENT_INSTRUCTION_TEXT, "Copy instructions", true)}`;
-  const skill = agent.id === "claude" || agent.id === "local" ? `<span class="hint">The Olympus skill is the folder ${escapeHtml(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ""))} inside the plugin folder.</span>` : "";
-  const tip = agent.id === "claude" ? `<span class="hint">${escapeHtml(CLAUDE_NO_TOOLS_TIP)}</span>` : "";
+  const body = `${escapeHtml2(lead)}${copyBox(`agent-${agent.id}-instructions`, AGENT_INSTRUCTION_TEXT, "Copy instructions", true)}`;
+  const skill = agent.id === "claude" || agent.id === "local" ? `<span class="hint">The Olympus skill is the folder ${escapeHtml2(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ""))} inside the plugin folder.</span>` : "";
+  const tip = agent.id === "claude" ? `<span class="hint">${escapeHtml2(CLAUDE_NO_TOOLS_TIP)}</span>` : "";
   return inStep ? `${body}${skill}${tip}` : `<p>${body}</p>${skill}${tip}`;
 }
 function copyBox(id, text, label, primary = false) {
   const prose = text.includes(" ") && !text.startsWith("http") ? " prose" : "";
-  return `<div class="promptbox${prose}" id="${id}">${escapeHtml(text)}</div>` + `<button class="btn${primary ? " primary" : ""}" type="button" data-copy-target="#${id}">${escapeHtml(label)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
+  return `<div class="promptbox${prose}" id="${id}">${escapeHtml2(text)}</div>` + `<button class="btn${primary ? " primary" : ""}" type="button" data-copy-target="#${id}">${escapeHtml2(label)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
 }
 function pairForm(agentId) {
   return `<form class="rowform" data-agent-kind="pair">` + `<button class="btn primary" type="submit">Get pairing code</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-code`, "Pairing code");
 }
 function keyForm(agentId, name) {
-  return `<form class="rowform" data-agent-kind="key">` + `<input class="keyfield" type="text" name="name" value="${escapeHtml(name)}" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-key`, "Key");
+  return `<form class="rowform" data-agent-kind="key">` + `<input class="keyfield" type="text" name="name" value="${escapeHtml2(name)}" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-key`, "Key");
 }
 function secretSlot(id, label, setup = false) {
-  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + (setup ? ["OpenClaw", "Hermes", "Other MCP client"].map((client, i) => `<label>${client}<input class="keyfield" id="${id}-setup-${i}" data-agent-setup="${client}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${client} setup line"></label>` + `<button class="btn" type="button" data-copy-target="#${id}-setup-${i}">Copy setup line</button>`).join("") : "") + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
+  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml2(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + (setup ? ["OpenClaw", "Hermes", "Other MCP client"].map((client, i) => `<label>${client}<input class="keyfield" id="${id}-setup-${i}" data-agent-setup="${client}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${client} setup line"></label>` + `<button class="btn" type="button" data-copy-target="#${id}-setup-${i}">Copy setup line</button>`).join("") : "") + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
 }
 function connectAgentButton(label, primary) {
-  return `<p class="agentconnect"><button class="btn${primary ? " primary" : ""}" type="button" data-sheet-toggle="#${AGENT_CONNECT_SHEET_ID}" aria-controls="${AGENT_CONNECT_SHEET_ID}" aria-expanded="false">${escapeHtml(label)}</button></p>`;
+  return `<p class="agentconnect"><button class="btn${primary ? " primary" : ""}" type="button" data-sheet-toggle="#${AGENT_CONNECT_SHEET_ID}" aria-controls="${AGENT_CONNECT_SHEET_ID}" aria-expanded="false">${escapeHtml2(label)}</button></p>`;
 }
 function connectionList(view, now) {
   if (view.unavailable) {
@@ -184947,7 +185174,7 @@ function connectionRow(connection, now) {
   const route = connection.route === "loopback" ? "another account of this computer" : connection.route === "tailnet" ? "my tailnet" : "relay or own tunnel";
   const why = `${route} · added ${calendarDate(connection.createdAt)} · ${used}`;
   const confirmation = `Revoke ${connection.name}? It will no longer be able to ask Olympus. You can connect it again later.`;
-  return `<div class="attncard plain" data-agent-connection="${escapeHtml(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml(connection.name)}</span><span class="why"> — ${escapeHtml(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml(confirmation)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml(connection.id)}">` + `<button class="btn" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
+  return `<div class="attncard plain" data-agent-connection="${escapeHtml2(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml2(connection.name)}</span><span class="why"> — ${escapeHtml2(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml2(confirmation)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml2(connection.id)}">` + `<button class="btn" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
 }
 function calendarDate(iso) {
   const date = new Date(iso);
@@ -184981,9 +185208,9 @@ function renderConnectionRequests(view) {
   const history = view.requests;
   if (!history)
     return "";
-  const readings = history.readings.map((line) => `<p class="pnote">${escapeHtml(line)}</p>`).join("");
-  const rows = history.requests.map((entry) => `<div class="attncard plain"><div class="grow"><span class="name">${escapeHtml(entry.app)}</span><div class="why"><time datetime="${escapeHtml(entry.at)}">${escapeHtml(new Date(entry.at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))}</time> · ${escapeHtml(entry.asked)} · ${escapeHtml(entry.result)}</div></div></div>`).join("");
-  return `<section data-connection-requests><div class="sect">${escapeHtml(history.title)}</div>${readings}${rows || '<p class="pnote">No requests recorded yet.</p>'}<p class="foot">Showing retained history only. Relay and engine observations appear separately; a relay line alone does not show that the request reached this computer.</p></section>`;
+  const readings = history.readings.map((line) => `<p class="pnote">${escapeHtml2(line)}</p>`).join("");
+  const rows = history.requests.map((entry) => `<div class="attncard plain"><div class="grow"><span class="name">${escapeHtml2(entry.app)}</span><div class="why"><time datetime="${escapeHtml2(entry.at)}">${escapeHtml2(new Date(entry.at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))}</time> · ${escapeHtml2(entry.asked)} · ${escapeHtml2(entry.result)}</div></div></div>`).join("");
+  return `<section data-connection-requests><div class="sect">${escapeHtml2(history.title)}</div>${readings}${rows || '<p class="pnote">No requests recorded yet.</p>'}<p class="foot">Showing retained history only. Relay and engine observations appear separately; a relay line alone does not show that the request reached this computer.</p></section>`;
 }
 var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, CLAUDE_NO_TOOLS_TIP = "If Claude says Olympus has no tools, Claude did not ask Olympus for them. In that chat, turn Olympus off and on in the tools menu under the message box, then ask again.", MONTHS4;
 var init_agents = __esm(() => {
@@ -185338,8 +185565,8 @@ function renderDashboardPrivateAnswersPage(options) {
   });
 }
 function dashboardPrivacyTabs(active, token) {
-  const tab = (id, href, label) => id === active ? `<a class="ptab on" aria-current="page" href="${escapeHtml(href)}">${escapeHtml(label)}</a>` : `<a class="ptab" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
-  return `<nav class="ptabs" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.tabsLabel)}">` + tab("questions", dashboardLocalPageHref("privateAnswers", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabQuestions) + tab("settings", dashboardLocalPageHref("keys", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabSettings) + tab("items", dashboardLocalPageHref("privacyItems", token), DASHBOARD_PRIVACY_ITEMS_COPY.tab) + tab("apps", dashboardLocalPageHref("appsReceived", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabApps) + "</nav>";
+  const tab = (id, href, label) => id === active ? `<a class="ptab on" aria-current="page" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>` : `<a class="ptab" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>`;
+  return `<nav class="ptabs" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.tabsLabel)}">` + tab("questions", dashboardLocalPageHref("privateAnswers", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabQuestions) + tab("settings", dashboardLocalPageHref("keys", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabSettings) + tab("items", dashboardLocalPageHref("privacyItems", token), DASHBOARD_PRIVACY_ITEMS_COPY.tab) + tab("apps", dashboardLocalPageHref("appsReceived", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabApps) + "</nav>";
 }
 function readToken2(basePath) {
   if (!basePath)
@@ -185357,12 +185584,12 @@ function renderPrivateAnswersBody(options) {
   let ready = false;
   if (csrfToken === undefined) {
     const gate = `${dashboardLocalPageHref("keys", readToken2(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
-    notes.push(`<p class="pnote" data-pa-locked>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml(gate)}">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
+    notes.push(`<p class="pnote" data-pa-locked>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
   } else if (!localSession) {
-    notes.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
+    notes.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
     script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
-    notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
+    notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
   } else {
     ready = true;
     script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
@@ -185389,50 +185616,50 @@ function renderAsk(options, enabled, inbox) {
   const cards = destinations.map((d) => {
     const actions = {
       ready: "",
-      not_set_up: `<a class="btn" href="${escapeHtml(d.href)}">${escapeHtml(d.setup)}</a><span class="pareason" role="status">${escapeHtml(d.reason)}</span>`,
-      not_allowed: `<a class="btn" href="${escapeHtml(models + "#private-routing")}">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed)}</span>`,
-      busy: `<span class="pareason" role="status">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy)}</span>`
+      not_set_up: `<a class="btn" href="${escapeHtml2(d.href)}">${escapeHtml2(d.setup)}</a><span class="pareason" role="status">${escapeHtml2(d.reason)}</span>`,
+      not_allowed: `<a class="btn" href="${escapeHtml2(models + "#private-routing")}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed)}</span>`,
+      busy: `<span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy)}</span>`
     };
     const state = d.state;
     const action = enabled ? actions[state] : "";
     const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkPaused ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
     const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
-    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key, text, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml(text)}</span>`).join("");
-    const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
-    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml(d.model)}</span>` : ""}${d.model && enabled ? ` <span class="pamodel">·</span> <a class="pamodelchange" href="${escapeHtml(d.id === "anonymous" ? zkModelHref : `${models}#private-routing`)}">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", `${models}#outside-level`) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join("")}</section>`;
+    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key, text, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml2(text)}</span>`).join("");
+    const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml2(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
+    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml2(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml2(d.model)}</span>` : ""}${d.model && enabled ? ` <span class="pamodel">·</span> <a class="pamodelchange" href="${escapeHtml2(d.id === "anonymous" ? zkModelHref : `${models}#private-routing`)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml2(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", `${models}#outside-level`) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join("")}</section>`;
   }).join("");
   const answeredBy = first ? DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy.replace("{name}", label(first)) : DASHBOARD_PRIVATE_ANSWERS_COPY.noneReady;
-  const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : " disabled"}>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button>`;
-  return `<form class="paask pagrid" data-pa-ask data-pa-answered-template="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy)}">` + `<div class="pamain"><h3 class="sect pahead">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.title)}</h3><p class="pnote paintro">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.intro)}</p>` + `<textarea id="pa-question" name="question" maxlength="2000" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<div class="pasend"><span class="pnote" data-pa-answered-by>${escapeHtml(answeredBy)}</span><span class="pareason" role="status"></span>${enabled ? button : ""}</div>` + `<div class="paout" data-pa-out aria-live="polite"></div>${inbox}</div>` + `<aside class="paside"><p class="pachooser" id="pa-chooser">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.chooserLabel)}</p><div class="paasks" role="radiogroup" aria-labelledby="pa-chooser">${cards}</div></aside>` + "</form>";
+  const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : " disabled"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button>`;
+  return `<form class="paask pagrid" data-pa-ask data-pa-answered-template="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy)}">` + `<div class="pamain"><h3 class="sect pahead">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.title)}</h3><p class="pnote paintro">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.intro)}</p>` + `<textarea id="pa-question" name="question" maxlength="2000" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<div class="pasend"><span class="pnote" data-pa-answered-by>${escapeHtml2(answeredBy)}</span><span class="pareason" role="status"></span>${enabled ? button : ""}</div>` + `<div class="paout" data-pa-out aria-live="polite"></div>${inbox}</div>` + `<aside class="paside"><p class="pachooser" id="pa-chooser">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.chooserLabel)}</p><div class="paasks" role="radiogroup" aria-labelledby="pa-chooser">${cards}</div></aside>` + "</form>";
 }
 function renderLevelChoice(level, settingsHref) {
-  const option = (value, label, hint) => `<label class="palevelopt"><input type="radio" name="level" value="${value}"${value === level ? " checked" : ""}><span><b>${escapeHtml(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
-  const standardHint = escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandardHint).replace("{models}", `<a href="${escapeHtml(settingsHref)}">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.levelModelsLink)}</a>`);
-  return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.levelLegend)}</legend>` + option("strict", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrict, escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrictHint)) + option("standard", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandard, standardHint) + "</fieldset>";
+  const option = (value, label, hint) => `<label class="palevelopt"><input type="radio" name="level" value="${value}"${value === level ? " checked" : ""}><span><b>${escapeHtml2(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
+  const standardHint = escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandardHint).replace("{models}", `<a href="${escapeHtml2(settingsHref)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelModelsLink)}</a>`);
+  return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelLegend)}</legend>` + option("strict", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrict, escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrictHint)) + option("standard", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandard, standardHint) + "</fieldset>";
 }
 function renderFailureNotice(reason) {
   const failure = privateAnswerFailure(reason);
-  return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml(failure.message)} ${failure.href ? `<a href="${escapeHtml(failure.href)}">${escapeHtml(failure.action)}</a>` : escapeHtml(failure.action)}</p>`;
+  return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml2(failure.message)} ${failure.href ? `<a href="${escapeHtml2(failure.href)}">${escapeHtml2(failure.action)}</a>` : escapeHtml2(failure.action)}</p>`;
 }
 function renderWaiting(waiting, now) {
-  const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button>` : "";
-  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>`];
+  const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button>` : "";
+  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>`];
   if (!waiting) {
-    parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
+    parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
     return parts.join("") + "</section>";
   }
-  parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? " hidden" : ""}>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
-  parts.push(`<p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingIntro)}</p>`);
+  parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? " hidden" : ""}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
+  parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingIntro)}</p>`);
   const rows = [...waiting.questions].sort((a, b) => Date.parse(b.askedAt) - Date.parse(a.askedAt)).map((question) => {
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
     const state = question.state ?? (question.unchecked ? "unchecked" : "answering");
     const status = state === "failed" ? "" : state === "changed" ? DASHBOARD_PRIVATE_ANSWERS_COPY.changed : state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
     const from = [question.path === "venice" ? DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName : question.path === "anonymous" ? DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath : DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath, question.from, when, status].filter(Boolean).join(" · ");
-    return `<li class="srow nodot${state === "failed" ? " pa-failed" : ""}${question.unread ? " unread" : ""}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom" title="${escapeHtml(question.askedAt)}"> · ${escapeHtml(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+    return `<li class="srow nodot${state === "failed" ? " pa-failed" : ""}${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button></div>` + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
-  parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
+  parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
   parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join("") + "</section>";
 }
@@ -186014,16 +186241,16 @@ function picker(list, disabled) {
   const radios = list.options.map((option) => {
     const inUse = option.value === list.current;
     const now = inUse && option.value === "strongest" && list.strongestNow ? ` · now ${list.strongestNow}` : "";
-    const note = option.value === "strongest" ? `${inUse ? " · in use" : ""}${now}</span><span class="picknote">${escapeHtml(option.note ?? "")}` : `${inUse && option.note !== "in use" ? " · in use" : ""}${option.note ? ` · ${escapeHtml(option.note)}` : ""}`;
-    return `<label class="pickopt${option.value === "strongest" ? " strong" : ""}"><input type="radio" name="model" value="${escapeHtml(option.value)}"${inUse ? " checked" : ""}${off}> <span><b>${escapeHtml(option.label)}</b><span class="pnote">${note}</span></span></label>`;
+    const note = option.value === "strongest" ? `${inUse ? " · in use" : ""}${now}</span><span class="picknote">${escapeHtml2(option.note ?? "")}` : `${inUse && option.note !== "in use" ? " · in use" : ""}${option.note ? ` · ${escapeHtml2(option.note)}` : ""}`;
+    return `<label class="pickopt${option.value === "strongest" ? " strong" : ""}"><input type="radio" name="model" value="${escapeHtml2(option.value)}"${inUse ? " checked" : ""}${off}> <span><b>${escapeHtml2(option.label)}</b><span class="pnote">${note}</span></span></label>`;
   }).join("");
-  return `<div class="sheet pickpanel" id="${id}" aria-hidden="true"><h4>${escapeHtml(t.pick)}</h4><p class="pnote">${escapeHtml(t.intro)}</p>` + `<form data-model-choice><input type="hidden" name="provider" value="${list.provider}"><fieldset${off}><legend class="sr">${escapeHtml(t.pick)}</legend>${radios}</fieldset>` + `<div class="pickbar"><button class="btn primary" type="submit"${off}>Use this model</button><button class="btn" type="button" data-sheet-toggle="#${id}">Cancel</button>` + `<button class="btn addmodel" type="button" data-add-model-open="${list.provider}"${off}>${escapeHtml(t.add)}</button></div>` + '<span data-action-message role="status"></span></form></div>';
+  return `<div class="sheet pickpanel" id="${id}" aria-hidden="true"><h4>${escapeHtml2(t.pick)}</h4><p class="pnote">${escapeHtml2(t.intro)}</p>` + `<form data-model-choice><input type="hidden" name="provider" value="${list.provider}"><fieldset${off}><legend class="sr">${escapeHtml2(t.pick)}</legend>${radios}</fieldset>` + `<div class="pickbar"><button class="btn primary" type="submit"${off}>Use this model</button><button class="btn" type="button" data-sheet-toggle="#${id}">Cancel</button>` + `<button class="btn addmodel" type="button" data-add-model-open="${list.provider}"${off}>${escapeHtml2(t.add)}</button></div>` + '<span data-action-message role="status"></span></form></div>';
 }
 function addDialog(provider) {
   const t = TITLES[provider];
-  const head = `<dialog class="adddialog" data-add-model="${provider}" aria-labelledby="add-model-${provider}"><div class="adddialoghead"><h3 id="add-model-${provider}">${escapeHtml(t.addTitle)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`;
+  const head = `<dialog class="adddialog" data-add-model="${provider}" aria-labelledby="add-model-${provider}"><div class="adddialoghead"><h3 id="add-model-${provider}">${escapeHtml2(t.addTitle)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`;
   if (provider === "local") {
-    return head + `<p class="pnote">Olympus doesn't install or download models itself.</p>` + '<section class="addbox"><h4>Find a model you already run</h4><p class="pnote">Olympus looks for Ollama and LM Studio on this computer. If your model server uses another port, enter its address.</p>' + '<form data-local-models-discover class="addrow"><button class="btn primary" type="submit">Look on this computer</button><input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1 (optional)" aria-label="Model server address on this computer (optional)"><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><button class="btn primary" type="submit">Test and add</button><span data-action-message role="status"></span></form>' + '<p class="pnote">Olympus tests each model it finds with made-up text before adding it.</p></section>' + `<section class="addbox"><h4>Get a new model with your agent's help</h4><p class="pnote">Your agent can pick a model that fits this computer, download it and connect it. Copy this request into your agent.</p>` + `<div class="promptbox" id="add-model-request" hidden>${escapeHtml(LOCAL_MODEL_AGENT_REQUEST)}</div><button class="btn" type="button" data-copy-target="#add-model-request">Copy request</button><span class="copystatus" data-copy-status aria-live="polite"></span></section>` + "</dialog>";
+    return head + `<p class="pnote">Olympus doesn't install or download models itself.</p>` + '<section class="addbox"><h4>Find a model you already run</h4><p class="pnote">Olympus looks for Ollama and LM Studio on this computer. If your model server uses another port, enter its address.</p>' + '<form data-local-models-discover class="addrow"><button class="btn primary" type="submit">Look on this computer</button><input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1 (optional)" aria-label="Model server address on this computer (optional)"><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><button class="btn primary" type="submit">Test and add</button><span data-action-message role="status"></span></form>' + '<p class="pnote">Olympus tests each model it finds with made-up text before adding it.</p></section>' + `<section class="addbox"><h4>Get a new model with your agent's help</h4><p class="pnote">Your agent can pick a model that fits this computer, download it and connect it. Copy this request into your agent.</p>` + `<div class="promptbox" id="add-model-request" hidden>${escapeHtml2(LOCAL_MODEL_AGENT_REQUEST)}</div><button class="btn" type="button" data-copy-target="#add-model-request">Copy request</button><span class="copystatus" data-copy-status aria-live="polite"></span></section>` + "</dialog>";
   }
   if (provider === "venice") {
     return head + '<p class="pnote">Every private model Venice offers you now. Olympus never sends Private items to a model Venice keeps data on.</p>' + `<form data-model-choice data-addable-list="venice"><input type="hidden" name="provider" value="venice"><div data-addable-models><p class="pnote" role="status">Loading Venice's models…</p></div>` + '<div class="pickbar"><button class="btn primary" type="submit">Use this model</button></div><span data-action-message role="status"></span></form></dialog>';
@@ -186033,7 +186260,7 @@ function addDialog(provider) {
 function pickerRow(list, disabled, extra = "") {
   const t = TITLES[list.provider];
   const id = `model-pick-${list.provider}`;
-  return `<div class="pickrow" data-model-pick="${list.provider}"><div class="pickhead"><span class="dot ok" aria-hidden="true"></span><b>${escapeHtml(t.row)}</b><span class="pnote"> · ${escapeHtml(currentLabel(list))}</span>` + `<span class="grow"></span><button class="btn" type="button" data-sheet-toggle="#${id}" aria-controls="${id}" aria-expanded="false"${disabled ? " disabled" : ""}>Change model</button>${extra}</div>` + picker(list, disabled) + addDialog(list.provider) + "</div>";
+  return `<div class="pickrow" data-model-pick="${list.provider}"><div class="pickhead"><span class="dot ok" aria-hidden="true"></span><b>${escapeHtml2(t.row)}</b><span class="pnote"> · ${escapeHtml2(currentLabel(list))}</span>` + `<span class="grow"></span><button class="btn" type="button" data-sheet-toggle="#${id}" aria-controls="${id}" aria-expanded="false"${disabled ? " disabled" : ""}>Change model</button>${extra}</div>` + picker(list, disabled) + addDialog(list.provider) + "</div>";
 }
 function renderAnswerModelPickers(choices, unlocked) {
   if (!choices)
@@ -186084,7 +186311,7 @@ var init_model_pickers = __esm(() => {
 function renderModelSetup(view, options = {}) {
   if (!view)
     return "";
-  const status = `<span hidden data-model-setup-status="${escapeHtml(JSON.stringify(view))}"></span>`;
+  const status = `<span hidden data-model-setup-status="${escapeHtml2(JSON.stringify(view))}"></span>`;
   if (view.computer_use_pending)
     return status + renderComputerUseChoice(view);
   const engine = renderEngineServerMode(view);
@@ -186105,14 +186332,14 @@ function renderModelSetup(view, options = {}) {
     } else {
       action = modelKeyAction(card, card.state === "applying" ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>' : modelKeyForm(card));
     }
-    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml(card.label)}</b><span role="status">${escapeHtml(state)}</span></header>` + `<p>${escapeHtml(card.detail)}</p>${action}</section>${sheet}`;
+    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml2(card.label)}</b><span role="status">${escapeHtml2(state)}</span></header>` + `<p>${escapeHtml2(card.detail)}</p>${action}</section>${sheet}`;
   }).join("");
   const localCard = view.cards.some((card) => card.id === "local");
   const extras = view.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
-  return status + engine + (view.ready ? privateModelProgress(view) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
+  return status + engine + (view.ready ? privateModelProgress(view) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml2(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view.attention ? `<p role="status">${escapeHtml2(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
 }
 function renderFirstRunPrivacyChoice(options) {
-  const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml(option.description)}</p></label>`).join("");
+  const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p></label>`).join("");
   const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
   const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>' + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
   const verify = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
@@ -186144,7 +186371,7 @@ function firstRunJudgeForm(options) {
   const estimate = judgeArchiveEstimate(1000, options.judgeSetup?.cloudModel ?? DEFAULT_VENICE_JUDGE_MODEL, observed);
   const count = judgeCount(estimate.items);
   const localTime = estimate.measuredHours !== undefined ? `${judgeDuration(estimate.measuredHours)} for ${count} items, measured on this computer (${judgeCount(estimate.measuredPerMinute)} items a minute).` : `Time for ${count} items: not measured yet.${archive?.gpu === false ? " The built-in privacy checker uses only the CPU on this computer and may be slow." : ""}`;
-  return '<form id="first-run-judge-form" method="post" action="/dashboard/models/judge" data-judge-choice data-first-run-judge>' + `<label class="modelcard"><input type="radio" name="choice" value="local"${slow ? "" : " checked"}> <b>This computer</b><p>Free. ${escapeHtml(localTime)}</p></label>` + `<label class="modelcard"><input type="radio" name="choice" value="venice"${slow ? " checked" : ""}> <b>Venice${slow ? " — Recommended" : ""}</b><p>${escapeHtml(judgeDuration(estimate.cloudHours))} and ${escapeHtml(judgeMoney(estimate.cloudDollars).toLowerCase())} for ${count} items, charged to your Venice account.</p></label>` + "<p>Choosing Venice lets it read every item, including Private items, to check privacy. End-to-end encryption is not available yet.</p>" + `<label>Total Venice spending limit in dollars<input class="keyfield" type="number" name="cap_dollars" min="0" step="0.01" value="${judgeDefaultCapDollars(estimate.cloudDollars)}"></label>` + "<p>Olympus stops sending privacy checks to Venice at this limit. You can change your choice and limit later in Privacy settings.</p>" + '<span data-action-message role="status"></span></form>';
+  return '<form id="first-run-judge-form" method="post" action="/dashboard/models/judge" data-judge-choice data-first-run-judge>' + `<label class="modelcard"><input type="radio" name="choice" value="local"${slow ? "" : " checked"}> <b>This computer</b><p>Free. ${escapeHtml2(localTime)}</p></label>` + `<label class="modelcard"><input type="radio" name="choice" value="venice"${slow ? " checked" : ""}> <b>Venice${slow ? " — Recommended" : ""}</b><p>${escapeHtml2(judgeDuration(estimate.cloudHours))} and ${escapeHtml2(judgeMoney(estimate.cloudDollars).toLowerCase())} for ${count} items, charged to your Venice account.</p></label>` + "<p>Choosing Venice lets it read every item, including Private items, to check privacy. End-to-end encryption is not available yet.</p>" + `<label>Total Venice spending limit in dollars<input class="keyfield" type="number" name="cap_dollars" min="0" step="0.01" value="${judgeDefaultCapDollars(estimate.cloudDollars)}"></label>` + "<p>Olympus stops sending privacy checks to Venice at this limit. You can change your choice and limit later in Privacy settings.</p>" + '<span data-action-message role="status"></span></form>';
 }
 function localModelsSheet() {
   const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Olympus tests the answer model before saving it. Your existing search index stays unchanged.</p><button class="btn primary" type="submit">Connect answer model</button><span data-action-message role="status"></span></form>';
@@ -186158,7 +186385,7 @@ function blockerOwnsLocalToggle(view) {
   return card?.id === "local" && card.state === "not_configured";
 }
 function readyModelRow(card) {
-  const label = escapeHtml(card.label);
+  const label = escapeHtml2(card.label);
   const state = card.id === "local" ? "Ready" : "Ready · key connected";
   const head = `<div class="attncard plain modelrow" data-model-card="${card.id}">` + `<div class="grow"><span class="name">${label}</span><span class="why"> — ${state}</span></div>`;
   if (card.id === "local") {
@@ -186166,7 +186393,7 @@ function readyModelRow(card) {
   }
   const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
   const toggle = `<button type="button" class="btn" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button>`;
-  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
+  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml2(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
 }
 function modelStateWord(card) {
   if (card.state === "applying")
@@ -186208,7 +186435,7 @@ function renderModelSetupBlocker(view, options = {}) {
     return blockerBanner({ sentence: card.detail });
   return blockerBanner({
     sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: options.keysHref ? `<a class="btn primary" href="${escapeHtml(`${options.keysHref}#${card.id === "venice" ? "venice-setup" : modelKeyFieldId(card)}`)}">Add ${escapeHtml(card.label)} key</a>` : `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`
+    controlHtml: options.keysHref ? `<a class="btn primary" href="${escapeHtml2(`${options.keysHref}#${card.id === "venice" ? "venice-setup" : modelKeyFieldId(card)}`)}">Add ${escapeHtml2(card.label)} key</a>` : `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
   });
 }
 function modelKeyFieldId(card) {
@@ -186228,13 +186455,13 @@ function modelKeyAction(card, lead) {
 }
 function renderComputerUseChoice(view) {
   const pending = view.engine_server_mode?.pending === true;
-  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml(view.engine_server_mode?.notice ?? "") + "</span></form></section>";
+  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml2(view.engine_server_mode?.notice ?? "") + "</span></form></section>";
 }
 function renderEngineServerMode(view) {
   const mode = view.engine_server_mode;
   if (!mode)
     return "";
-  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml(mode.notice ?? "") + "</span></form></section>";
+  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml2(mode.notice ?? "") + "</span></form></section>";
 }
 function privateModelWords(view) {
   const model = view?.private_model;
@@ -186260,7 +186487,7 @@ function retryPrivateModel() {
 }
 function privateModelProgress(view) {
   const words = privateModelWords(view);
-  return words ? `<div data-private-model-progress role="status"><p>${escapeHtml(words)}</p>${view.private_model?.state === "failed" ? retryPrivateModel() : ""}</div>` : "";
+  return words ? `<div data-private-model-progress role="status"><p>${escapeHtml2(words)}</p>${view.private_model?.state === "failed" ? retryPrivateModel() : ""}</div>` : "";
 }
 var LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer endpoint and its exact model ID on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured answer model, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>', SERVER_MODE_HELP = "Olympus starts by itself after a restart, once the disk is unlocked. Your Mac asks for an administrator's password once.", SERVER_CHECKLIST = "<ul data-server-checklist><li>Use a wired network.</li><li>Give this Mac a fixed network address in System Settings.</li><li>After a restart, someone must unlock the disk in person, or use Screen Sharing or SSH unlock on a wired network. After that, Olympus starts by itself.</li></ul>";
 var init_model_setup2 = __esm(() => {
@@ -186304,10 +186531,10 @@ function renderDashboardKeysPage(view, options) {
   const body = [
     lockedGate2(options),
     dashboardPrivacyTabs("settings", token),
-    `<section id="whats-private"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml(`${home}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_PRIVACY_LANDING}`)}" data-privacy-open>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
-    `<section id="private-routing"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml(mode.id)}"><div class="smain"><b>${escapeHtml(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml(home)}">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view.model_setup) + `<div${view.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view.model_setup, { heading: false, judgeSetup: options?.judgeSetup })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
+    `<section id="whats-private"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml2(`${home}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_PRIVACY_LANDING}`)}" data-privacy-open>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
+    `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml2(mode.id)}"><div class="smain"><b>${escapeHtml2(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml2(home)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view.model_setup) + `<div${view.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view.model_setup, { heading: false, judgeSetup: options?.judgeSetup })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
     renderZkapiPrivacy(options, token),
-    view.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
+    view.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     renderJudgeChoice(view, options)
   ].filter((block) => block !== "").join(`
 `);
@@ -186326,7 +186553,7 @@ function renderZkapiPrivacy(options, token) {
   const card = options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "privacy", otherPartHref: `${dashboardLocalPageHref("settings", token)}#${DASHBOARD_SETTINGS_ZKAPI_ID}` }) : "";
   if (!picker && !card)
     return "";
-  return `<section id="zkapi-model"><h3 class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3>${picker}${card}</section>`;
+  return `<section id="zkapi-model"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3>${picker}${card}</section>`;
 }
 function sourceDomId(sourceId) {
   return sourceId.replace(/[^A-Za-z0-9_-]+/g, "-");
@@ -186350,18 +186577,18 @@ function needsSetupAgain(source) {
 }
 function connectedSourceRow(source, messagingLocalSession, off, kept = false, basePath = "/dashboard") {
   const id = sourceDomId(source.source_id);
-  const label = escapeHtml(source.label);
+  const label = escapeHtml2(source.label);
   const items = [];
   const dialogs = [];
   const sync = kept ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
   if (!kept)
-    items.push(`<a class="menuitem" href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(source.source_id)}`)}" data-source-details>Details</a>`);
+    items.push(`<a class="menuitem" href="${escapeHtml2(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(source.source_id)}`)}" data-source-details>Details</a>`);
   if (sync)
-    items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
+    items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml2(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
   const confirm = (kind, title, line, button, danger, menuLabel = title.endsWith("?") ? title.slice(0, -1) : title) => {
     const dialogId = `${kind === "disconnect_source" ? "disconnect" : "delete"}-${id}`;
-    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-labelledby="${dialogId}-title"><div class="adddialoghead"><h3 id="${dialogId}-title">${escapeHtml(title)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml(line)}</p><form data-source-action="${kind}"><input type="hidden" name="source_id" value="${escapeHtml(source.source_id)}"><div class="pickbar"><button class="btn${danger ? " danger" : " primary"}" type="submit"${off}>${escapeHtml(button)}</button></div><span data-action-message role="status"></span></form></dialog>`);
-    return `<button class="menuitem${danger ? " danger" : ""}" type="button" data-dialog-open="${dialogId}"${off}>${escapeHtml(menuLabel)}${danger ? "…" : ""}</button>`;
+    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-labelledby="${dialogId}-title"><div class="adddialoghead"><h3 id="${dialogId}-title">${escapeHtml2(title)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml2(line)}</p><form data-source-action="${kind}"><input type="hidden" name="source_id" value="${escapeHtml2(source.source_id)}"><div class="pickbar"><button class="btn${danger ? " danger" : " primary"}" type="submit"${off}>${escapeHtml2(button)}</button></div><span data-action-message role="status"></span></form></dialog>`);
+    return `<button class="menuitem${danger ? " danger" : ""}" type="button" data-dialog-open="${dialogId}"${off}>${escapeHtml2(menuLabel)}${danger ? "…" : ""}</button>`;
   };
   if (kept) {} else if (MESSAGING_SOURCES.has(source.source_id)) {
     const dialogId = `pairing-${id}`;
@@ -186373,9 +186600,9 @@ function connectedSourceRow(source, messagingLocalSession, off, kept = false, ba
   if (kept)
     items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
   const fixLabel = kept ? "Reconnect" : source.connection.state === "reauth_required" ? "Sign in" : needsSetupAgain(source) && ("label" in source.connection.action) ? dashboardActionLabel(source.connection.action.label) : "";
-  const needs = fixLabel ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml(source.source_id)}"${off}>${escapeHtml(fixLabel)}</button>` : "";
+  const needs = fixLabel ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${escapeHtml2(fixLabel)}</button>` : "";
   const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString("en-US")} items` : sourceFacts(source);
-  const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
+  const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml2(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml2(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
   return { row, dialogs: dialogs.join("") };
 }
 function renderDashboardConnectPage(view, options) {
@@ -186388,14 +186615,14 @@ function renderDashboardConnectPage(view, options) {
   const setupable = sources.filter((source) => source.connection.state === "reauth_required" || needsSetupAgain(source) || !CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== "none" || MESSAGING_SOURCES.has(source.source_id)));
   const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0 && source.connection.action.kind !== "archive_import");
   const rows = connected.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off, false, basePath)).concat(kept.map((source) => connectedSourceRow(source, false, off, true, basePath)));
-  const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml(source.label)}</b><span class="pnote">${escapeHtml(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
-  const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
-  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable data-open-hash aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>` + panels + "</dialog>";
+  const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
+  const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml2(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
+  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable data-open-hash aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>` + panels + "</dialog>";
   const body = [
     lockedGate2(options),
     renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref("keys", token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join("") || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER} · <a href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER} · <a href="${escapeHtml2(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
     dashboardPeopleRow(token),
     rows.map((entry) => entry.dialogs).join(""),
     sheet,
@@ -186412,8 +186639,8 @@ function renderDashboardConnectPage(view, options) {
   });
 }
 function renderModelsOnComputer(models, token) {
-  const rules = escapeHtml(`${dashboardLocalPageHref("keys", token)}#private-routing`);
-  const row = (key, title, line, extra = "") => `<div class="srow nodot" data-model-row="${key}"><div class="smain"><b>${escapeHtml(title)}</b> — ${escapeHtml(line)}${extra}</div></div>`;
+  const rules = escapeHtml2(`${dashboardLocalPageHref("keys", token)}#private-routing`);
+  const row = (key, title, line, extra = "") => `<div class="srow nodot" data-model-row="${key}"><div class="smain"><b>${escapeHtml2(title)}</b> — ${escapeHtml2(line)}${extra}</div></div>`;
   const rows = [];
   const answers = models?.privateAnswers;
   const change = ` <a href="${rules}">Change on Privacy rules</a>`;
@@ -186453,7 +186680,7 @@ function renderDashboardAgentsPage(options) {
 }
 function connectorDialog() {
   const id = CONNECTOR_DIALOG_ID;
-  return `<dialog class="adddialog" id="${id}" data-closable data-open-hash aria-labelledby="${id}-title">` + `<div class="adddialoghead"><h3 id="${id}-title">${escapeHtml(CONNECTOR_DIALOG_HEADING)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml(CONNECTOR_DIALOG_INTRO)}</p>` + `<div class="promptbox" id="${id}-prompt">${escapeHtml(CONNECTOR_PROMPT)}</div>` + `<div class="pickbar"><button class="btn primary" type="button" data-copy-target="#${id}-prompt">Copy prompt</button>` + '<button class="btn" type="button" data-dialog-close>Close</button>' + '<span class="copystatus" data-copy-status aria-live="polite"></span></div></dialog>';
+  return `<dialog class="adddialog" id="${id}" data-closable data-open-hash aria-labelledby="${id}-title">` + `<div class="adddialoghead"><h3 id="${id}-title">${escapeHtml2(CONNECTOR_DIALOG_HEADING)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml2(CONNECTOR_DIALOG_INTRO)}</p>` + `<div class="promptbox" id="${id}-prompt">${escapeHtml2(CONNECTOR_PROMPT)}</div>` + `<div class="pickbar"><button class="btn primary" type="button" data-copy-target="#${id}-prompt">Copy prompt</button>` + '<button class="btn" type="button" data-dialog-close>Close</button>' + '<span class="copystatus" data-copy-status aria-live="polite"></span></div></dialog>';
 }
 function refusalNotice(source) {
   if (!source.connection.provider_refusal)
@@ -186596,11 +186823,11 @@ function renderDashboardSettingsPage(options) {
   const now = options?.now ?? new Date;
   const token = readToken3(options?.basePath);
   const settings = options?.settings;
-  const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml(section.label)}</a>`).join("")}</nav>`;
+  const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml2(section.label)}</a>`).join("")}</nav>`;
   const agents = `<section class="setpane" id="agents">${options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect">Agents and access</h3>') : '<h3 class="sect">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
   const models = renderModelsOnComputer(settings?.models, token);
   const csrfToken = options?.controlSessionCsrfToken;
-  const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>` + (options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "account", otherPartHref: `${dashboardLocalPageHref("keys", token)}#zkapi-model` }) : `<p class="pnote" data-outside-unavailable>${escapeHtml(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`) + "</section>";
+  const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>` + (options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "account", otherPartHref: `${dashboardLocalPageHref("keys", token)}#zkapi-model` }) : `<p class="pnote" data-outside-unavailable>${escapeHtml2(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`) + "</section>";
   const backup = renderBackupSection({
     ...options?.backup ? { status: options.backup } : {},
     local: options?.outsideHelpLocalSession === true,
@@ -186619,7 +186846,7 @@ function renderDashboardSettingsPage(options) {
     idPrefix: "settings-update"
   }) : update ? renderUpdateNotice({ command: update.command, available: { version: update.version }, selfUpdate: false, idPrefix: "settings-update" }) : "";
   const updates = '<section class="setpane" id="updates"><h3 class="sect">Updates</h3>' + (notice || '<p class="pnote">Olympus is up to date.</p>') + "</section>";
-  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
+  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
   const proposal = renderSettingsProposal(options?.settingsProposal);
   const body = lockedGate2(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${backup}${updates}${help}</div></div>`;
   return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS, BACKUP_SECTION_CSS, UPDATE_NOTICE_CSS], options });
@@ -186627,17 +186854,17 @@ function renderDashboardSettingsPage(options) {
 function renderSettingsProposal(state) {
   const proposal = state?.current;
   if (proposal) {
-    const who = proposal.from ? escapeHtml(proposal.from) : "An agent on this computer";
+    const who = proposal.from ? escapeHtml2(proposal.from) : "An agent on this computer";
     const judge = proposal.input.privacy_judge;
     const veniceJudge = judge?.choice === "venice" ? `$${judge.spending_limit_dollars}` : undefined;
-    const rows = proposal.rows.map((row) => `<tr><th scope="row">${escapeHtml(row.label)}</th><td>${escapeHtml(row.current)}</td><td><b>${escapeHtml(row.proposed)}</b></td></tr>`).join("");
-    const form = (kind, label, primary) => `<form data-settings-proposal="${kind}"><input type="hidden" name="id" value="${escapeHtml(proposal.id)}"><button type="submit" class="btn${primary ? " primary" : ""}">${label}</button><span class="pnote" data-action-message aria-live="polite"></span></form>`;
-    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>` + `<p>${who} proposed ${proposal.rows.length === 1 ? "this change" : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? "it" : "them"}.</p>` + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows}</tbody></table>` + (veniceJudge ? `<p class="propnote"><b>Before you apply:</b> Venice will read each item it sorts, including items it marks Private, and charge your own Venice account, up to the ${escapeHtml(veniceJudge)} limit above. Applying approves this, as Use Venice under Privacy judge does.</p>` : "") + `<div class="pickbar">${form("apply", "Apply all", true)}${form("discard", "Discard", false)}</div></section>`;
+    const rows = proposal.rows.map((row) => `<tr><th scope="row">${escapeHtml2(row.label)}</th><td>${escapeHtml2(row.current)}</td><td><b>${escapeHtml2(row.proposed)}</b></td></tr>`).join("");
+    const form = (kind, label, primary) => `<form data-settings-proposal="${kind}"><input type="hidden" name="id" value="${escapeHtml2(proposal.id)}"><button type="submit" class="btn${primary ? " primary" : ""}">${label}</button><span class="pnote" data-action-message aria-live="polite"></span></form>`;
+    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>` + `<p>${who} proposed ${proposal.rows.length === 1 ? "this change" : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? "it" : "them"}.</p>` + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows}</tbody></table>` + (veniceJudge ? `<p class="propnote"><b>Before you apply:</b> Venice will read each item it sorts, including items it marks Private, and charge your own Venice account, up to the ${escapeHtml2(veniceJudge)} limit above. Applying approves this, as Use Venice under Privacy judge does.</p>` : "") + `<div class="pickbar">${form("apply", "Apply all", true)}${form("discard", "Discard", false)}</div></section>`;
   }
   const applied = state?.lastApplied;
   if (!applied)
     return "";
-  const rows = applied.rows.map((row) => `<tr><th scope="row">${escapeHtml(row.label)}</th><td>${escapeHtml(row.proposed)}</td><td>${row.applied ? "Applied" : `Not applied: ${escapeHtml(row.message ?? "not saved")}`}</td></tr>`).join("");
+  const rows = applied.rows.map((row) => `<tr><th scope="row">${escapeHtml2(row.label)}</th><td>${escapeHtml2(row.proposed)}</td><td>${row.applied ? "Applied" : `Not applied: ${escapeHtml2(row.message ?? "not saved")}`}</td></tr>`).join("");
   return `<section class="propcard" aria-label="Applied settings" id="proposed-settings"><h3 class="sect">${applied.ok ? "Settings applied" : "Some settings were not applied"}</h3>` + `<table class="proptable"><tbody>${rows}</tbody></table></section>`;
 }
 function renderDashboardHelpPage(options) {
@@ -186648,7 +186875,7 @@ function renderDashboardHelpPage(options) {
     meta: "",
     options,
     styles: [],
-    body: lockedGate2(options) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
+    body: lockedGate2(options) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml2(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
   });
 }
 function sourceSupportBlock(source) {
@@ -186656,7 +186883,7 @@ function sourceSupportBlock(source) {
     return "";
   const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, "-")}`;
   const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
-  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
+  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml2(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
 }
 function renderJudgeChoice(view, options) {
   const status = options?.judgeSetup;
@@ -186666,45 +186893,45 @@ function renderJudgeChoice(view, options) {
   const estimate = judgeArchiveEstimate(items, status.cloudModel ?? "", status.observed ?? {});
   const cloud = status.stop !== "storage" && status.cloudAvailable && estimate.cloudDollars !== null;
   const stopped = status.stop === "storage" ? '<p role="alert">The saved spending record cannot be read. Cloud judging is off; local judging can continue. Restore the spending record from a backup or repair its access, then restart Olympus. <a href="/dashboard?help">Open Help</a></p>' : status.stop === "payment" ? '<p role="alert">Venice stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>' : status.stop === "cap" ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with Venice.</p>' : "";
-  const row = (term, value) => `<span class="judgeterm">${escapeHtml(term)}</span><span>${value}</span>`;
-  const note = (text) => `<br><small class="judgenote">${escapeHtml(text)}</small>`;
+  const row = (term, value) => `<span class="judgeterm">${escapeHtml2(term)}</span><span>${value}</span>`;
+  const note = (text) => `<br><small class="judgenote">${escapeHtml2(text)}</small>`;
   const measured = estimate.measuredHours !== undefined;
   const localRange = `About ${judgeHours(estimate.shortHours / 8)} to ${judgeHours(estimate.longHours / 8)} nights`;
   const localTime = measured ? `${judgeDuration(estimate.measuredHours)}${note(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeMeasuredHere.replace("{n}", judgeCount(estimate.measuredPerMinute)))}` : `${localRange} (${judgeHours(estimate.shortHours)} to ${judgeHours(estimate.longHours)} hours)` + note(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeMeasuredElsewhere.replace("{computer}", LOCAL_JUDGE_MEASUREMENT.computer).replace("{date}", LOCAL_JUDGE_MEASUREMENT.date));
   const localThen = measured ? judgeDuration(estimate.measuredHours).replace(/ \(.*\)$/, "") : localRange;
   const second = estimate.secondRound;
-  const option = (id, title, lead, rows, fit, enabled) => `<label class="judgeopt"><span class="judgehead"><input type="radio" name="choice" value="${id}"${status.choice === id ? " checked" : ""}${enabled ? "" : " disabled"}> <b>${escapeHtml(title)}</b>${status.choice === id ? ` <span class="judgenow">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeNow)}</span>` : ""}</span>` + `<span class="judgelead">${escapeHtml(lead)}</span><span class="judgerows">${rows}</span><span class="judgefit">${escapeHtml(fit)}</span></label>`;
-  const local = option("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocal, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, "Free") + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, localTime) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalWhen)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalFit, true);
-  const doubleCheck = option("local-then-venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecond, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${judgeMoney(second.dollars)}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `${localThen}, then ${judgeDuration(second.hours).toLowerCase()}`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondWhen.replace("{n}", judgeCount(second.items))) + note(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondWhenNote)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondFit, cloud);
-  const venice = option("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVenice, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${judgeMoney(estimate.cloudDollars)}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, judgeDuration(estimate.cloudHours)) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceWhen)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceFit, cloud);
+  const option = (id, title, lead, rows, fit, enabled) => `<label class="judgeopt"><span class="judgehead"><input type="radio" name="choice" value="${id}"${status.choice === id ? " checked" : ""}${enabled ? "" : " disabled"}> <b>${escapeHtml2(title)}</b>${status.choice === id ? ` <span class="judgenow">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeNow)}</span>` : ""}</span>` + `<span class="judgelead">${escapeHtml2(lead)}</span><span class="judgerows">${rows}</span><span class="judgefit">${escapeHtml2(fit)}</span></label>`;
+  const local = option("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocal, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, "Free") + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, localTime) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalWhen)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalFit, true);
+  const doubleCheck = option("local-then-venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecond, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${judgeMoney(second.dollars)}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `${localThen}, then ${judgeDuration(second.hours).toLowerCase()}`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondWhen.replace("{n}", judgeCount(second.items))) + note(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondWhenNote)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondFit, cloud);
+  const venice = option("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVenice, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${judgeMoney(estimate.cloudDollars)}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, judgeDuration(estimate.cloudHours)) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceWhen)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceFit, cloud);
   const defaults = { "local-then-venice": judgeDefaultCapDollars(second.dollars), venice: judgeDefaultCapDollars(estimate.cloudDollars) };
   const ownCap = judgeChoiceUsesVenice(status.choice) && !status.uncapped && status.stop !== "storage" ? status.capDollars : undefined;
   const capValue = ownCap ?? (status.uncapped ? undefined : defaults[status.choice === "venice" ? "venice" : "local-then-venice"] ?? undefined);
   const spent = status.uncapped ? "No spending limit is set, so Olympus isn't tracking cloud spending yet. Your Venice account shows what you've spent." : ownCap !== undefined ? `Spent or reserved: ${judgeMoney(status.spentDollars, true)}. Remaining: ${judgeMoney(status.remainingDollars, true)}. ${DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCapStops}` : status.stop === "storage" ? `Spending amounts are unavailable. ${DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCapStops}` : DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCapDefault;
   const capAttrs = ownCap === undefined && !status.uncapped ? ` data-cap-auto="true" data-cap-local-then-venice="${defaults["local-then-venice"] ?? ""}" data-cap-venice="${defaults.venice ?? ""}"` : "";
-  const capBox = `<div class="judgecapbox"><label class="judgecap">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${capValue ?? ""}"${capAttrs}></label>` + `<p class="pnote">${escapeHtml(spent)}</p>${judgeChoiceUsesVenice(status.choice) ? `<button class="btn" type="submit">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSaveLimit)}</button>` : ""}</div>`;
+  const capBox = `<div class="judgecapbox"><label class="judgecap">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${capValue ?? ""}"${capAttrs}></label>` + `<p class="pnote">${escapeHtml2(spent)}</p>${judgeChoiceUsesVenice(status.choice) ? `<button class="btn" type="submit">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSaveLimit)}</button>` : ""}</div>`;
   const idleModeSlot = options?.goEasy === undefined ? "" : `<div class="judgeeasy"><label class="judgecap"><input type="checkbox" data-go-easy${options.goEasy ? " checked" : ""}> <b>Go easy on this computer</b></label><p class="pnote">Sort at full speed only when you're away or it's plugged in overnight, and slowly while you work. Leave it plugged in and open overnight.</p><p class="pnote" data-go-easy-message role="status"></p></div>`;
   const reply = '<span data-action-message role="status"></span>';
-  const dialog = (pick, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml(button)}</button></div></dialog>`;
+  const dialog = (pick, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml2(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml2(button)}</button></div></dialog>`;
   const limitLine = (pick) => {
     const cap = ownCap ?? defaults[pick];
     return `<p>Spending limit: <span data-judge-cap-echo>${judgeMoney(cap, true)}</span> in total. You can change it under the choices at any time.</p>`;
   };
   const found = `the ${items.toLocaleString("en-US")} items found so far`;
-  const dialogs = (status.choice === "local" ? "" : dialog("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocal, `<p>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalLine)}</p>`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalButton)) + (status.choice === "local-then-venice" ? "" : dialog("local-then-venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecond, `<p>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondLine)}</p><p>It charges your Venice account${second.dollars === null ? "" : `: ${judgeMoney(second.dollars).toLowerCase()} for ${found}, about ${judgeCount(second.items)} of them sent to Venice`}.</p>${limitLine("local-then-venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondButton)) + (status.choice === "venice" ? "" : dialog("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? "" : `: ${judgeMoney(estimate.cloudDollars).toLowerCase()} for ${found}`}.</p>${limitLine("venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVeniceButton));
+  const dialogs = (status.choice === "local" ? "" : dialog("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocal, `<p>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalLine)}</p>`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalButton)) + (status.choice === "local-then-venice" ? "" : dialog("local-then-venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecond, `<p>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondLine)}</p><p>It charges your Venice account${second.dollars === null ? "" : `: ${judgeMoney(second.dollars).toLowerCase()} for ${found}, about ${judgeCount(second.items)} of them sent to Venice`}.</p>${limitLine("local-then-venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondButton)) + (status.choice === "venice" ? "" : dialog("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? "" : `: ${judgeMoney(estimate.cloudDollars).toLowerCase()} for ${found}`}.</p>${limitLine("venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVeniceButton));
   const recommended = !cloud ? "the free judge on this computer" : estimate.recommended === "venice" ? "Venice for this archive size, if you choose to send it to the cloud" : "this computer, with Venice double-checking what it keeps Private";
   const held = second.observed ? `On this computer the free judge has kept ${Math.round(second.heldFraction * 100)}% of items Private so far, so about that share goes to Venice.` : `About ${Math.round(second.heldFraction * 100)}% of items go to Venice: the share the free judge kept Private in a test on labelled items (5 Nov 2026). Your archive may differ.`;
-  return `<section id="privacy-judge"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeIntro)}</p>
-    <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? "" : " disabled"}><legend class="judgelegend">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLegend)}</legend>
+  return `<section id="privacy-judge"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeIntro)}</p>
+    <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? "" : " disabled"}><legend class="judgelegend">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLegend)}</legend>
     ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ""}${stopped}
     <div class="judgeopts">${local}${doubleCheck}${venice}</div>
     ${cloud || status.stop === "storage" ? "" : '<p class="pnote">To use Venice, connect your Venice key under How Private items are answered. Venice needs a model with a listed price.</p>'}
     ${idleModeSlot}${capBox}
-    <p class="pnote judgeorder">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeOrder)}</p>
+    <p class="pnote judgeorder">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeOrder)}</p>
     ${dialogs}${reply}
     <p class="pnote">Estimates for ${found}. Recommended: ${recommended}. Cloud stays off until you choose and approve it.</p>
     <details class="judgehow"><summary>How these estimates are made</summary>
-    <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: ${measured ? `measured from its own recent sorting, ${judgeCount(estimate.measuredPerMinute)} items a minute while it sorts.` : `not measured here yet, so the range is from an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ.`} Times assume this computer sorts about 8 hours a night. ${held} Venice${status.cloudModel ? ` (${escapeHtml(status.cloudModel)})` : ""}: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
+    <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: ${measured ? `measured from its own recent sorting, ${judgeCount(estimate.measuredPerMinute)} items a minute while it sorts.` : `not measured here yet, so the range is from an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ.`} Times assume this computer sorts about 8 hours a night. ${held} Venice${status.cloudModel ? ` (${escapeHtml2(status.cloudModel)})` : ""}: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
 }
@@ -186847,19 +187074,19 @@ function readToken4(basePath) {
 function renderBody(options) {
   const csrfToken = options?.controlSessionCsrfToken;
   const local = csrfToken !== undefined && options?.outsideHelpLocalSession === true;
-  const head = `<h3 class="sect arhead">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.title)}</h3><p class="pnote arintro">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.intro)}</p>`;
+  const head = `<h3 class="sect arhead">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.title)}</h3><p class="pnote arintro">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.intro)}</p>`;
   if (csrfToken === undefined) {
     const gate = `${dashboardLocalPageHref("keys", readToken4(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
-    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-locked>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.locked)} <a href="${escapeHtml(gate)}">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.openControls)}</a></p></div>`;
+    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-locked>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.openControls)}</a></p></div>`;
   }
   if (!local) {
-    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript(csrfToken, true)}</script>`;
+    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript(csrfToken, true)}</script>`;
   }
   if (options?.appsReceivedAvailable !== true) {
-    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-unavailable>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unavailable)}</p></div>`;
+    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-unavailable>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unavailable)}</p></div>`;
   }
-  const choices = [7, 30, 90, 0].map((days) => `<option value="${days}"${days === 30 ? " selected" : ""}>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.retention[String(days)])}</option>`).join("");
-  return `<div class="privacy ar" data-apps-received>${head}` + `<div class="arbar"><span class="arkept"><label for="ar-retention">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.keptFor)}</label>` + `<select id="ar-retention" data-ar-retention aria-label="${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.keptLabel)}" disabled>${choices}</select>` + `<span>· ${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.includedInDeleteAll)}</span></span>` + `<button type="button" class="arclear" data-ar-clear hidden>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.clear)}</button></div>` + `<p class="pnote" data-ar-none hidden></p>` + `<ul class="arlist" data-ar-list aria-live="polite"></ul>` + `<p class="armsg" data-ar-msg role="status"></p></div>` + `<script>${clientScript(csrfToken, false)}</script>`;
+  const choices = [7, 30, 90, 0].map((days) => `<option value="${days}"${days === 30 ? " selected" : ""}>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.retention[String(days)])}</option>`).join("");
+  return `<div class="privacy ar" data-apps-received>${head}` + `<div class="arbar"><span class="arkept"><label for="ar-retention">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.keptFor)}</label>` + `<select id="ar-retention" data-ar-retention aria-label="${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.keptLabel)}" disabled>${choices}</select>` + `<span>· ${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.includedInDeleteAll)}</span></span>` + `<button type="button" class="arclear" data-ar-clear hidden>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.clear)}</button></div>` + `<p class="pnote" data-ar-none hidden></p>` + `<ul class="arlist" data-ar-list aria-live="polite"></ul>` + `<p class="armsg" data-ar-msg role="status"></p></div>` + `<script>${clientScript(csrfToken, false)}</script>`;
 }
 function clientScript(csrfToken, unlockOnly) {
   const config = { csrfToken, path: POST_PATH2, unlockPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock, unlockOnly, copy: DASHBOARD_APPS_RECEIVED_COPY };
@@ -187265,15 +187492,15 @@ function readToken5(basePath) {
 }
 function renderBody2(options, token) {
   const csrfToken = options?.controlSessionCsrfToken;
-  const head = `<h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.title)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.intro)}</p>`;
+  const head = `<h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.title)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.intro)}</p>`;
   if (csrfToken === undefined) {
     const gate = `${dashboardLocalPageHref("keys", token)}#${DASHBOARD_CONTROL_GATE_ID}`;
-    return `<div class="pi">${head}<p class="pnote" data-pi-locked>${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.locked)} <a href="${escapeHtml(gate)}">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.openControls)}</a></p></div>`;
+    return `<div class="pi">${head}<p class="pnote" data-pi-locked>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.openControls)}</a></p></div>`;
   }
   if (options?.outsideHelpLocalSession !== true) {
-    return `<div class="pi" data-privacy-items>${head}<form class="paunlock" data-pi-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.unlockIntro)}</span>` + `<span class="pimsg" data-pi-msg role="status"></span></form></div>` + `<script>${privacyItemsClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
+    return `<div class="pi" data-privacy-items>${head}<form class="paunlock" data-pi-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.unlockIntro)}</span>` + `<span class="pimsg" data-pi-msg role="status"></span></form></div>` + `<script>${privacyItemsClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
   }
-  return `<div class="pi" data-privacy-items>${JUDGE_CHECK_MOUNT}<div class="pigrid" id="${PRIVACY_ITEMS_LIST_ID}"><div class="pimain">${head}` + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.searchLabel)}" placeholder="${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.searchPlaceholder)}"></label>` + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.filtersLabel)}">` + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.recentHeading)}</button>` + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>` + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>` + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.changedByYou)}<i data-pi-count="changed"></i></button></div>` + `<p class="picap" data-pi-heading hidden>${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.resultsHeading)}</p>` + `<p class="pimsg" data-pi-msg role="status">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.loading)}</p>` + `<ul class="pilist" data-pi-list></ul>` + `<p class="pnote piapps" data-pi-apps>${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.apps)}</p></div>` + `<div class="piside" data-pi-side></div></div>` + `<dialog class="judgedialog pidialog" data-pi-confirm aria-labelledby="pi-confirm-title"><div class="pidbody">` + `<div class="pidtop"><h3 id="pi-confirm-title">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.confirmTitle)}</h3><button type="button" class="pix" data-pi-confirm-close aria-label="${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.close)}">✕</button></div>` + `<div class="piitem" data-pi-confirm-item></div>` + `<div class="piarrow"><div class="piopt"><b><span class="pipill Private">Private</span> ${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.now)}</b><span>${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.privateLine)}</span></div><i aria-hidden="true">→</i>` + `<div class="piopt on"><b><span class="pipill Personal">Personal</span> ${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.after)}</b><span>${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.afterPersonalLine)}</span></div></div>` + `<p class="pionly">${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.confirmOnly)}</p>` + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.makePersonal)}</button></div>` + `</div></dialog>` + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml(DASHBOARD_PRIVACY_ITEMS_COPY.undo)}</button></div>` + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>` + `<script>${judgeCheckClientScript({ csrfToken, itemsHref: `#${PRIVACY_ITEMS_LIST_ID}` })}</script>`;
+  return `<div class="pi" data-privacy-items>${JUDGE_CHECK_MOUNT}<div class="pigrid" id="${PRIVACY_ITEMS_LIST_ID}"><div class="pimain">${head}` + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchLabel)}" placeholder="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchPlaceholder)}"></label>` + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.filtersLabel)}">` + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.recentHeading)}</button>` + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>` + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>` + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.changedByYou)}<i data-pi-count="changed"></i></button></div>` + `<p class="picap" data-pi-heading hidden>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.resultsHeading)}</p>` + `<p class="pimsg" data-pi-msg role="status">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.loading)}</p>` + `<ul class="pilist" data-pi-list></ul>` + `<p class="pnote piapps" data-pi-apps>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.apps)}</p></div>` + `<div class="piside" data-pi-side></div></div>` + `<dialog class="judgedialog pidialog" data-pi-confirm aria-labelledby="pi-confirm-title"><div class="pidbody">` + `<div class="pidtop"><h3 id="pi-confirm-title">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmTitle)}</h3><button type="button" class="pix" data-pi-confirm-close aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.close)}">✕</button></div>` + `<div class="piitem" data-pi-confirm-item></div>` + `<div class="piarrow"><div class="piopt"><b><span class="pipill Private">Private</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.now)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.privateLine)}</span></div><i aria-hidden="true">→</i>` + `<div class="piopt on"><b><span class="pipill Personal">Personal</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.after)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.afterPersonalLine)}</span></div></div>` + `<p class="pionly">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmOnly)}</p>` + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.makePersonal)}</button></div>` + `</div></dialog>` + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.undo)}</button></div>` + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>` + `<script>${judgeCheckClientScript({ csrfToken, itemsHref: `#${PRIVACY_ITEMS_LIST_ID}` })}</script>`;
 }
 function privacyItemsClientScript(input) {
   const config = {
@@ -188172,7 +188399,7 @@ var init_volume_identity = __esm(() => {
 });
 
 // src/workers/backup-service.ts
-import { existsSync as existsSync108, mkdirSync as mkdirSync69, readFileSync as readFileSync96, readdirSync as readdirSync32, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
+import { existsSync as existsSync108, mkdirSync as mkdirSync69, readFileSync as readFileSync96, readdirSync as readdirSync32, rmSync as rmSync47, statSync as statSync48 } from "node:fs";
 import { dirname as dirname108, join as join136 } from "node:path";
 function defaultBackupServicePaths(env = process.env) {
   return {
@@ -188399,16 +188626,16 @@ function createBackupService(options) {
           ...readStoredBackupKey(options.paths.key) ? { key: readStoredBackupKey(options.paths.key) } : {}
         });
         restoreOlympusData({ input: opened.exportDir, dryRun: true, env: options.env });
-        rmSync46(join136(options.paths.staging, RESTORE_RESULT), { force: true });
+        rmSync47(join136(options.paths.staging, RESTORE_RESULT), { force: true });
         writePrivateJson2(join136(options.paths.staging, PENDING_RESTORE), { export_dir: opened.exportDir, staging, requested_at: now().toISOString() });
       } catch (error) {
-        rmSync46(staging, { recursive: true, force: true });
+        rmSync47(staging, { recursive: true, force: true });
         throw error;
       }
       restoreState = { state: "restarting", at: now().toISOString() };
       if (!options.requestRestart()) {
         removeFileDurablySync(join136(options.paths.staging, PENDING_RESTORE));
-        rmSync46(staging, { recursive: true, force: true });
+        rmSync47(staging, { recursive: true, force: true });
         restoreState = undefined;
         throw new OperationError("invalid_params", "Olympus could not restart to restore. Restore from the command line with Olympus stopped.");
       }
@@ -188438,7 +188665,7 @@ function applyPendingRestoreAtBoot(paths, env, at = () => new Date) {
     for (const name of readdirSync32(paths.staging)) {
       if (name === RESTORE_RESULT)
         continue;
-      rmSync46(join136(paths.staging, name), { recursive: true, force: true });
+      rmSync47(join136(paths.staging, name), { recursive: true, force: true });
     }
   } catch {}
   return result;
@@ -195641,7 +195868,7 @@ function hostnameOf(host) {
     return host;
   }
 }
-function escapeHtml2(value) {
+function escapeHtml3(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 function consentSecurityHeaders(nonce, redirectOrigin, referrerPolicy = "no-referrer") {
@@ -195664,12 +195891,12 @@ function consentSecurityHeaders(nonce, redirectOrigin, referrerPolicy = "no-refe
 }
 function renderConsentPage(input) {
   const nonce = randomBytes32(16).toString("base64");
-  const name = escapeHtml2(input.clientName);
-  const provenance = input.verifiedHost ? `<div class="host">${escapeHtml2(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
+  const name = escapeHtml3(input.clientName);
+  const provenance = input.verifiedHost ? `<div class="host">${escapeHtml3(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
-  const mismatchWarning = input.verifiedHost && !input.loopbackRedirect && redirectHostname !== input.verifiedHost ? `<div class="warn">This app is published by <strong>${escapeHtml2(input.verifiedHost)}</strong> but sends you back to <strong>${escapeHtml2(input.redirectHost)}</strong>. Approve only if you expected that.</div>` : "";
-  const loopbackWarning = input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml2(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : "";
-  const error = input.error ? `<p class="err" role="alert">${escapeHtml2(input.error)}${input.attemptsLeft !== undefined ? ` ${input.attemptsLeft} ${input.attemptsLeft === 1 ? "try" : "tries"} left.` : ""}</p>` : "";
+  const mismatchWarning = input.verifiedHost && !input.loopbackRedirect && redirectHostname !== input.verifiedHost ? `<div class="warn">This app is published by <strong>${escapeHtml3(input.verifiedHost)}</strong> but sends you back to <strong>${escapeHtml3(input.redirectHost)}</strong>. Approve only if you expected that.</div>` : "";
+  const loopbackWarning = input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml3(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : "";
+  const error = input.error ? `<p class="err" role="alert">${escapeHtml3(input.error)}${input.attemptsLeft !== undefined ? ` ${input.attemptsLeft} ${input.attemptsLeft === 1 ? "try" : "tries"} left.` : ""}</p>` : "";
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -195685,13 +195912,13 @@ function renderConsentPage(input) {
 <div class="card">
 <div class="name">${name}</div>
 ${provenance}
-<p class="meta">After you approve, you return to <strong>${escapeHtml2(input.redirectHost)}</strong></p>
+<p class="meta">After you approve, you return to <strong>${escapeHtml3(input.redirectHost)}</strong></p>
 </div>
 ${mismatchWarning}${loopbackWarning}
 <p>${name} will be able to ask Olympus questions under your privacy rules. For Private items it gets only answers written from them, which can repeat what they say, and nothing Olympus recognizes as a Secret. Labels are automatic and can be wrong. You can remove it any time with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
-<input type="hidden" name="request_id" value="${escapeHtml2(input.requestId)}">
-<input type="hidden" name="csrf" value="${escapeHtml2(input.csrf)}">
+<input type="hidden" name="request_id" value="${escapeHtml3(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml3(input.csrf)}">
 ${error}
 <label for="pairing_code">Pairing code</label>
 <input type="text" id="pairing_code" name="pairing_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" maxlength="20" placeholder="ABCD-EFGH-JKMN" required>
@@ -195710,7 +195937,7 @@ ${TERMS_ASSENT}
 }
 function renderLoopbackConsentPage(input) {
   const nonce = randomBytes32(16).toString("base64");
-  const name = escapeHtml2(input.clientName);
+  const name = escapeHtml3(input.clientName);
   const computer = (input.platform ?? process.platform) === "linux" ? "computer" : "Mac";
   const ownerNeeded = input.ownerNeeded ? `<p class="err" role="alert">Open the Olympus dashboard in this browser first, then click Connect again.</p>
 <p>${computer === "Mac" ? '<a href="olympus://open/dashboard">Open the dashboard</a>, or run <code>olympus dashboard</code>.' : "Run <code>olympus dashboard</code> and open its link here."} This shows Olympus that you, not another account on this ${computer}, are approving.</p>
@@ -195729,18 +195956,18 @@ function renderLoopbackConsentPage(input) {
 <h1>Connect ${name} to Olympus?</h1>
 <div class="card">
 <div class="name">${name}</div>
-${input.verifiedHost ? `<div class="host">${escapeHtml2(input.verifiedHost)}</div>` : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
-<p class="meta">After you approve, you return to <strong>${escapeHtml2(input.redirectHost)}</strong></p>
+${input.verifiedHost ? `<div class="host">${escapeHtml3(input.verifiedHost)}</div>` : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
+<p class="meta">After you approve, you return to <strong>${escapeHtml3(input.redirectHost)}</strong></p>
 </div>
-${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml2(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : ""}
+${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml3(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : ""}
 <p><strong>Connecting links Olympus on this ${computer} to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
 <p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
 ${input.chatgpt ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>` : `<p><strong>For Private items, ${name} gets answers written from them by a model on this ${computer} or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
 <p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
-<form method="post" action="${escapeHtml2(input.action ?? "/connect/authorize")}">
-<input type="hidden" name="request_id" value="${escapeHtml2(input.requestId)}">
-<input type="hidden" name="csrf" value="${escapeHtml2(input.csrf)}">
+<form method="post" action="${escapeHtml3(input.action ?? "/connect/authorize")}">
+<input type="hidden" name="request_id" value="${escapeHtml3(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml3(input.csrf)}">
 ${ownerNeeded}${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Connect</button>
@@ -195755,8 +195982,8 @@ ${ownerNeeded}${TERMS_ASSENT}
 }
 function renderDemoSignInPage(input) {
   const nonce = randomBytes32(16).toString("base64");
-  const name = escapeHtml2(input.clientName);
-  const error = input.error ? `<p class="err" role="alert">${escapeHtml2(input.error)}</p>` : "";
+  const name = escapeHtml3(input.clientName);
+  const error = input.error ? `<p class="err" role="alert">${escapeHtml3(input.error)}</p>` : "";
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -195772,11 +195999,11 @@ function renderDemoSignInPage(input) {
 <div class="warn">This is a demo of Olympus with made-up sample data, for reviewers. A real Olympus is approved only on the owner's own Mac, never with a password.</div>
 <div class="card">
 <div class="name">${name}</div>
-<p class="meta">After you sign in, you return to <strong>${escapeHtml2(input.redirectHost)}</strong></p>
+<p class="meta">After you sign in, you return to <strong>${escapeHtml3(input.redirectHost)}</strong></p>
 </div>
-<form method="post" action="${escapeHtml2(`/connect/demo/authorize?${new URLSearchParams({ client_id: input.clientId })}`)}">
-<input type="hidden" name="request_id" value="${escapeHtml2(input.requestId)}">
-<input type="hidden" name="csrf" value="${escapeHtml2(input.csrf)}">
+<form method="post" action="${escapeHtml3(`/connect/demo/authorize?${new URLSearchParams({ client_id: input.clientId })}`)}">
+<input type="hidden" name="request_id" value="${escapeHtml3(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml3(input.csrf)}">
 ${error}
 <label for="username">Username</label>
 <input class="plain" type="text" id="username" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="128" required>
@@ -195806,7 +196033,7 @@ function renderConsentErrorPage(message) {
 <body>
 <main>
 <h1>Olympus could not connect this app</h1>
-<div class="card"><p>${escapeHtml2(message)}</p></div>
+<div class="card"><p>${escapeHtml3(message)}</p></div>
 <p class="small">Close this page and try adding the connector again.</p>
 </main>
 </body>
@@ -196229,30 +196456,30 @@ function dashboardOAuthCompleteHtml(options) {
   });
 }
 function dashboardOAuthLandingHtml(options) {
-  const paragraphs = options.paragraphs.map((paragraph) => `      <p>${escapeHtml3(paragraph)}</p>`).join(`
+  const paragraphs = options.paragraphs.map((paragraph) => `      <p>${escapeHtml4(paragraph)}</p>`).join(`
 `);
   return html2(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml3(options.title)}</title>
+    <title>${escapeHtml4(options.title)}</title>
     <style>${CONSENT_PAGE_STYLE}
 a.back { display: inline-block; margin-top: .5rem; padding: .7rem 1rem; border: 1px solid var(--line); border-radius: 10px;
   color: var(--fg); text-decoration: none; font-weight: 600; }</style>
   </head>
   <body>
     <main>
-      <h1>${escapeHtml3(options.heading)}</h1>
+      <h1>${escapeHtml4(options.heading)}</h1>
 ${paragraphs}
-      <p><a class="back" href="${escapeHtml3(options.returnTo)}">${escapeHtml3(options.returnLabel)}</a></p>
+      <p><a class="back" href="${escapeHtml4(options.returnTo)}">${escapeHtml4(options.returnLabel)}</a></p>
     </main>
   </body>
 </html>`, options.status, {
     "Referrer-Policy": "no-referrer"
   });
 }
-function escapeHtml3(value) {
+function escapeHtml4(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 var init_dashboard_oauth_pages = __esm(() => {
@@ -200159,7 +200386,7 @@ var init_watch_hub = __esm(() => {
 
 // src/workers/local-files/connector.ts
 import { createHash as createHash106, randomUUID as randomUUID37 } from "node:crypto";
-import { realpathSync as realpathSync25, rmSync as rmSync47, readdirSync as readdirSync34 } from "node:fs";
+import { realpathSync as realpathSync25, rmSync as rmSync48, readdirSync as readdirSync34 } from "node:fs";
 import { join as join145, posix as posix4 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
@@ -200460,7 +200687,7 @@ function createLocalFilesSourceConnector(options) {
     try {
       for (const name of readdirSync34(options.watch.snapshotDir)) {
         if (name.startsWith(`${options.connectorId}.`) && name.endsWith(".snap") && !keepNames.has(name)) {
-          rmSync47(join145(options.watch.snapshotDir, name), { force: true });
+          rmSync48(join145(options.watch.snapshotDir, name), { force: true });
         }
       }
     } catch {}
@@ -207394,14 +207621,14 @@ function decodeHTMLEntities(str) {
     return output;
   });
 }
-function escapeHtml4(str) {
+function escapeHtml5(str) {
   return str.trim().replace(/[<>"'?&]/g, (c) => "&#x" + hexByte(c.charCodeAt(0)) + ";");
 }
 function encodeMailto(address) {
   return address.replace(MAILTO_UNSAFE, (run) => Array.from(textEncoder.encode(run), (byte) => PERCENT_ENCODED[byte]).join(""));
 }
 function textToHtml(str) {
-  let html = escapeHtml4(str).replace(/\n/g, "<br />");
+  let html = escapeHtml5(str).replace(/\n/g, "<br />");
   return "<div>" + html + "</div>";
 }
 function createFinder(str, regex) {
@@ -207578,7 +207805,7 @@ function formatTextAddresses(addresses) {
   return parts.join("");
 }
 function formatHtmlAddress(address) {
-  return `<a href="mailto:${escapeHtml4(encodeMailto(address.address))}" class="postal-email-address">${escapeHtml4(address.name || `<${address.address}>`)}</a>`;
+  return `<a href="mailto:${escapeHtml5(encodeMailto(address.address))}" class="postal-email-address">${escapeHtml5(address.name || `<${address.address}>`)}</a>`;
 }
 function formatHtmlAddresses(addresses) {
   let parts = [];
@@ -207587,7 +207814,7 @@ function formatHtmlAddresses(addresses) {
       parts.push('<span class="postal-email-address-separator">, </span>');
     }
     if (address.group) {
-      let groupStart = `<span class="postal-email-address-group">${escapeHtml4(address.name)}:</span>`;
+      let groupStart = `<span class="postal-email-address-group">${escapeHtml5(address.name)}:</span>`;
       let groupEnd = `<span class="postal-email-address-group">;</span>`;
       parts.push(groupStart);
       address.group.forEach(processAddress);
@@ -207676,10 +207903,10 @@ function formatHtmlHeader(message) {
     rows.push(`<div class="postal-email-header-key">From</div><div class="postal-email-header-value">${formatHtmlAddresses([message.from])}</div>`);
   }
   if (message.subject) {
-    rows.push(`<div class="postal-email-header-key">Subject</div><div class="postal-email-header-value postal-email-header-subject">${escapeHtml4(message.subject)}</div>`);
+    rows.push(`<div class="postal-email-header-key">Subject</div><div class="postal-email-header-value postal-email-header-subject">${escapeHtml5(message.subject)}</div>`);
   }
   if (message.date) {
-    rows.push(`<div class="postal-email-header-key">Date</div><div class="postal-email-header-value postal-email-header-date" data-date="${escapeHtml4(message.date)}">${escapeHtml4(formatDate(message.date))}</div>`);
+    rows.push(`<div class="postal-email-header-key">Date</div><div class="postal-email-header-value postal-email-header-date" data-date="${escapeHtml5(message.date)}">${escapeHtml5(formatDate(message.date))}</div>`);
   }
   if (message.to && message.to.length) {
     rows.push(`<div class="postal-email-header-key">To</div><div class="postal-email-header-value">${formatHtmlAddresses(message.to)}</div>`);
@@ -219318,7 +219545,7 @@ var init_installed_tier_classification = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database30 } from "bun:sqlite";
-import { existsSync as existsSync118, rmSync as rmSync48 } from "node:fs";
+import { existsSync as existsSync118, rmSync as rmSync49 } from "node:fs";
 function unrefTimer(timer) {
   timer?.unref?.();
 }
@@ -220114,7 +220341,7 @@ class TierSnifferService {
       if (checkpointRetiredLedger(retired.ledger)) {
         retireStatePath(process.env, TIER_LEDGER_SQLITE_STORE_ID, retired.ledger);
         for (const suffix of ["-wal", "-shm"])
-          rmSync48(`${retired.ledger}${suffix}`, { force: true });
+          rmSync49(`${retired.ledger}${suffix}`, { force: true });
       }
       this.retiredPrefilterCleaned.add(path);
     }
@@ -221024,7 +221251,7 @@ var init_snapshot = __esm(() => {
 // src/workers/engine-split/runtime.ts
 import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
 import { randomUUID as randomUUID40 } from "node:crypto";
-import { lstatSync as lstatSync53, rmSync as rmSync49 } from "node:fs";
+import { lstatSync as lstatSync53, rmSync as rmSync50 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
   if (!path)
@@ -221089,11 +221316,7 @@ async function waitForBackgroundBootDone(input) {
     await sleep(input.pollMs ?? 250);
 }
 function listenWhileStarting(input) {
-  const answer = () => {
-    const heartbeat = readEngineHeartbeat(input.env);
-    const step = heartbeat && engineHeartbeatBeating(heartbeat) ? engineHeartbeatLine(heartbeat) : "starting";
-    return Response.json({ reachable: false, status: "starting", step }, { status: 503, headers: { "retry-after": "5" } });
-  };
+  const answer = (request) => engineStartingResponse(request, input.env);
   try {
     if (releaseSystemdWorkerSocket())
       (input.log ?? console.warn)("[olympus:worker] removed the socket left by the previous worker run");
@@ -221103,7 +221326,7 @@ function listenWhileStarting(input) {
       stop: () => {
         server.stop(true);
         if (socketPath)
-          rmSync49(socketPath, { force: true });
+          rmSync50(socketPath, { force: true });
       }
     };
   } catch (error) {
@@ -221156,7 +221379,11 @@ function createEngineFront(input) {
     relay?.stop();
   } };
 }
-function restartingResponse() {
+function restartingResponse(request) {
+  if ((request.headers.get("accept") ?? "").includes("text/html")) {
+    const answer = engineStartingAnswer({ step: "restarting", acceptsHtml: true });
+    return new Response(answer.body, { status: answer.status, headers: { "content-type": answer.contentType, "retry-after": "5" } });
+  }
   return Response.json({ error: { code: "worker_restarting", message: "Olympus is restarting; try again in a moment." } }, { status: 503 });
 }
 function createFrontGate() {
@@ -221178,7 +221405,7 @@ function createFrontGate() {
     wrap(handler) {
       return async (request, server) => {
         if (!open)
-          return restartingResponse();
+          return restartingResponse(request);
         const started = generation;
         const context = { closedTheGate: false };
         const response = await current.run(context, () => handler(request, server));
@@ -221186,7 +221413,7 @@ function createFrontGate() {
           await response.body?.cancel().catch(() => {
             return;
           });
-          return restartingResponse();
+          return restartingResponse(request);
         }
         return response;
       };
@@ -221245,7 +221472,7 @@ function createEngineFrontRoutes(input) {
       return;
     return (async () => {
       if (!input.gate.isOpen())
-        return restartingResponse();
+        return restartingResponse(request);
       if (path === "/v1/cli/tier" && tierCommandOnlyReads(await request.clone().text()))
         return;
       if (kind !== "delete_source_data")
@@ -221259,7 +221486,7 @@ function createEngineFrontRoutes(input) {
       }
       if (!("answer" in outcome)) {
         input.restartFront();
-        return restartingResponse();
+        return restartingResponse(request);
       }
       const response = new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
       const restarting = response.status === 200 && (await response.clone().json().catch(() => {
@@ -221362,6 +221589,7 @@ var SOURCE_SYNC_WAIT_MS, DATA_EXPORT_WAIT_MS, OWNER_ACTION_WAIT_MS;
 var init_runtime4 = __esm(() => {
   init_boot_progress();
   init_engine_heartbeat();
+  init_worker_front_proxy();
   init_engine_split();
   init_operation_error();
   init_olympus_layout();
@@ -221445,6 +221673,7 @@ function frontModelReload(options) {
       return false;
     if (pending)
       return true;
+    options.closeGate?.();
     pending = options.client.send({ kind: "reload", target: "models", frontPid: options.pid ?? process.pid }, { timeoutMs: 30000 }).then((receipt) => {
       if (receipt.state !== "done" || receipt.result?.restarting !== true) {
         log("[engine-split] the background did not confirm it is restarting for the model change; restart Olympus if the new model does not take effect.");
@@ -251868,7 +252097,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     exit: (code) => process.exit(code)
   });
-  const reloadModels = engineFront ? frontModelReload({ client: engineFront.client, restartSelf: reloadNow, managed: workerRestartsItself(workerLaunch, process.env), log: (line) => console.warn(line) }) : reloadNow;
+  const reloadModels = engineFront ? frontModelReload({ client: engineFront.client, restartSelf: reloadNow, managed: workerRestartsItself(workerLaunch, process.env), closeGate: () => frontGate?.close(), log: (line) => console.warn(line) }) : reloadNow;
   restartFrontOnly = reloadNow;
   requestModelReload = (request) => {
     if (deferredReloads) {
@@ -252560,6 +252789,8 @@ init_native_process_service();
 init_native_worker_service();
 init_worker_auth();
 init_worker_shutdown();
+init_worker_front_proxy();
+init_worker_transport();
 import { randomUUID as randomUUID11 } from "node:crypto";
 var STOP_GRACE_MS = WORKER_SHUTDOWN_DEADLINE_MS + 5000;
 var STARTUP_TIMEOUT_MS = 180000;
@@ -252597,6 +252828,8 @@ async function superviseWorkerServiceSplit(input) {
     ...input.readinessPollMs !== undefined ? { readinessPollMs: input.readinessPollMs } : {},
     ...input.spawn ? { spawn: input.spawn } : {}
   };
+  const frontSocket = workerFrontSocketPath({ env: input.env, platform: "linux" });
+  const proxy = (input.startProxy ?? startWorkerFrontProxy)({ env: input.env, frontSocket, log });
   const background = createNativeProcessService({
     ...shared,
     id: ENGINE_BACKGROUND_SERVICE_ID,
@@ -252622,14 +252855,17 @@ async function superviseWorkerServiceSplit(input) {
     id: "olympus-worker",
     label: "worker front",
     descendantGroupsPath: descendantGroupsPath("olympus-worker", input.env),
-    prepareStart: async () => ({
-      command: input.runtimePath,
-      args,
-      env: { ...launchEnv(), [ENGINE_ROLE_ENV]: "front", [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath },
-      startupTimeoutMs,
-      endpointOccupied: false,
-      readinessProbe: async (child) => child.exitCode === null && child.signalCode === null
-    })
+    prepareStart: async () => {
+      clearLeftFrontSocket(frontSocket);
+      return {
+        command: input.runtimePath,
+        args,
+        env: { ...launchEnv(), [ENGINE_ROLE_ENV]: "front", [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath, [WORKER_LISTEN_SOCKET_ENV]: frontSocket },
+        startupTimeoutMs,
+        endpointOccupied: false,
+        readinessProbe: async (child) => child.exitCode === null && child.signalCode === null
+      };
+    }
   });
   const context = {
     logger: { info: log, warn: log },
@@ -252646,6 +252882,7 @@ async function superviseWorkerServiceSplit(input) {
       }), background.stop().catch(() => {
         return;
       })]);
+      proxy.stop();
       clearInterval(keepAlive);
     })();
     return stopping;
@@ -252677,7 +252914,7 @@ init_open_targets();
 init_package_root();
 init_linux_engine_layout();
 import { spawnSync as spawnSync10 } from "node:child_process";
-import { existsSync as existsSync41, lstatSync as lstatSync24, mkdirSync as mkdirSync27, readFileSync as readFileSync36, renameSync as renameSync10, rmSync as rmSync17, statSync as statSync24, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync41, lstatSync as lstatSync24, mkdirSync as mkdirSync27, readFileSync as readFileSync36, renameSync as renameSync10, rmSync as rmSync18, statSync as statSync24, writeFileSync as writeFileSync9 } from "node:fs";
 import { homedir as homedir24, platform as osPlatform2 } from "node:os";
 import { dirname as dirname47, isAbsolute as isAbsolute20, join as join51 } from "node:path";
 var OPEN_HANDLER_BUNDLE_ID = "ai.olympusplugin.open";
@@ -252796,12 +253033,12 @@ function installMac(options) {
   mkdirSync27(support, { recursive: true, mode: 448 });
   const staging = join51(support, ".Olympus-next.app");
   const scriptPath = join51(support, ".open-handler.applescript");
-  rmSync17(staging, { recursive: true, force: true });
+  rmSync18(staging, { recursive: true, force: true });
   writeFileSync9(scriptPath, script, { mode: 384 });
   try {
     must(exec("/usr/bin/osacompile", ["-o", staging, scriptPath]), "build the link handler");
   } finally {
-    rmSync17(scriptPath, { force: true });
+    rmSync18(scriptPath, { force: true });
   }
   const plist = join51(staging, "Contents", "Info.plist");
   must(exec("/usr/bin/plutil", ["-replace", "CFBundleIdentifier", "-string", OPEN_HANDLER_BUNDLE_ID, plist]), "name the link handler");
@@ -252817,7 +253054,7 @@ function installMac(options) {
   must(exec("/usr/bin/codesign", ["--force", "--sign", "-", staging]), "sign the link handler");
   if (existsSync41(handlerPath)) {
     exec(LSREGISTER_PATH, ["-u", handlerPath]);
-    rmSync17(handlerPath, { recursive: true, force: true });
+    rmSync18(handlerPath, { recursive: true, force: true });
   }
   renameSync10(staging, handlerPath);
   const registered = exec(LSREGISTER_PATH, ["-f", handlerPath]).status === 0;
@@ -252834,14 +253071,14 @@ function uninstallMac(options) {
   const exec = options.exec ?? defaultExec;
   const { handlerPath } = openHandlerPaths("darwin", home(options));
   const staging = join51(dirname47(handlerPath), ".Olympus-next.app");
-  rmSync17(staging, { recursive: true, force: true });
+  rmSync18(staging, { recursive: true, force: true });
   if (!existsSync41(handlerPath))
     return { ok: true, platform: "darwin", action: "absent", path: handlerPath };
   if (!ownedHandler("darwin", handlerPath)) {
     return { ok: false, platform: "darwin", action: "failed", path: handlerPath, detail: `${handlerPath} is not the Olympus link handler, so it was left alone.` };
   }
   exec(LSREGISTER_PATH, ["-u", handlerPath]);
-  rmSync17(handlerPath, { recursive: true, force: true });
+  rmSync18(handlerPath, { recursive: true, force: true });
   return { ok: true, platform: "darwin", action: "removed", path: handlerPath };
 }
 function installLinux(options) {
@@ -252876,7 +253113,7 @@ function uninstallLinux(options) {
   if (!ownedHandler("linux", handlerPath)) {
     return { ok: false, platform: "linux", action: "failed", path: handlerPath, detail: `${handlerPath} was not written by Olympus, so it was left alone.` };
   }
-  rmSync17(handlerPath, { force: true });
+  rmSync18(handlerPath, { force: true });
   exec("update-desktop-database", [dirname47(handlerPath)]);
   return { ok: true, platform: "linux", action: "removed", path: handlerPath };
 }
@@ -253022,7 +253259,7 @@ import {
   readFileSync as readFileSync74,
   readdirSync as readdirSync27,
   renameSync as renameSync20,
-  rmSync as rmSync38,
+  rmSync as rmSync39,
   statSync as statSync41,
   writeFileSync as writeFileSync20
 } from "node:fs";
@@ -253097,10 +253334,10 @@ function prepareWorkerUpgradeArtifact(options) {
       throw new OperationError("config_error", "Could not prepare the Olympus upgrade artifact.", error instanceof Error ? error.message : undefined);
     } finally {
       if (options.dryRun && existsSync87(staging))
-        rmSync38(staging, { recursive: true, force: true });
+        rmSync39(staging, { recursive: true, force: true });
     }
   } finally {
-    rmSync38(snapshotDir, { recursive: true, force: true });
+    rmSync39(snapshotDir, { recursive: true, force: true });
   }
 }
 function assertVersionParentSafety(homeDir, workingDirectory) {
@@ -253349,7 +253586,7 @@ function removeStagingTree(root) {
     if (entry.isDirectory())
       removeStagingTree(join118(root, entry.name));
   }
-  rmSync38(root, { recursive: true, force: true });
+  rmSync39(root, { recursive: true, force: true });
 }
 
 // src/core/lifecycle-lock.ts
@@ -254832,7 +255069,7 @@ init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync20 } from "node:child_process";
-import { existsSync as existsSync99, lstatSync as lstatSync46, mkdirSync as mkdirSync61, mkdtempSync as mkdtempSync6, renameSync as renameSync24, rmSync as rmSync41 } from "node:fs";
+import { existsSync as existsSync99, lstatSync as lstatSync46, mkdirSync as mkdirSync61, mkdtempSync as mkdtempSync6, renameSync as renameSync24, rmSync as rmSync42 } from "node:fs";
 import { homedir as homedir38 } from "node:os";
 import { join as join124, resolve as resolve26 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
@@ -254950,7 +255187,7 @@ function installEngineHelper(options = {}) {
     };
   } finally {
     if (existsSync99(target) || !existsSync99(aside))
-      rmSync41(staging, { recursive: true, force: true });
+      rmSync42(staging, { recursive: true, force: true });
   }
 }
 

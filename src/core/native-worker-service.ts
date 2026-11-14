@@ -4,7 +4,8 @@ import { olympusStoreBytes } from './upgrade-store-copies.ts';
 import { quoteCliArgument, readWorkerCliLauncher, renderWorkerCliLauncher, workerCliLauncherPath, writeWorkerCliLauncher } from './worker-cli-launcher.ts';
 import { WORKER_DATA_OWNER_BUSY_EXIT_CODE } from './data-owner-lock.ts';
 import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
-import { createUnixSocketFetch, removeReleasedWorkerSocket, validateWorkerSocket, workerSocketListenerStopped, workerFetch } from './worker-transport.ts';
+import { createUnixSocketFetch, removeReleasedWorkerSocket, validateWorkerSocket, WORKER_LISTEN_SOCKET_ENV, workerSocketListenerStopped, workerFetch } from './worker-transport.ts';
+import { clearLeftFrontSocket } from './worker-front-proxy.ts';
 import { ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_ROLE_ENV, engineBackgroundSocketPath, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from './engine-split.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -81,6 +82,12 @@ export interface NativeWorkerServiceOptions {
    * off it runs as the one worker, exactly as without this option.
    */
   engineBackground?: { isReady(): boolean };
+  /**
+   * Linux under the engine host with the split on: the host holds the worker
+   * socket and pipes it here (worker-front-proxy.ts), so the worker binds
+   * front.sock, and its occupancy and readiness are checked there.
+   */
+  frontSocket?: string;
   /** Test seams for the front's wait for its background. */
   engineBackgroundWaitMs?: number;
   engineBackgroundPollMs?: number;
@@ -122,7 +129,7 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
   let proofGeneration = 0;
   let lifecycleGeneration = 0;
   const invalidate = () => { proofGeneration += 1; readyChild = undefined; };
-  const fetchWorker = options.fetch ?? workerFetch;
+  const fetchWorker = options.fetch ?? (options.frontSocket ? createUnixSocketFetch(options.frontSocket) : workerFetch);
   const service = createNativeProcessService<WorkerLaunchSettings>({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
@@ -172,6 +179,11 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
         settings.env[ENGINE_ROLE_ENV] = 'front';
         settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = engineBackgroundSocketPath({ env: settings.env });
       }
+      if (options.frontSocket) {
+        // The kernel starts no worker over a live one: a socket left here is the last one's.
+        clearLeftFrontSocket(options.frontSocket);
+        settings.env[WORKER_LISTEN_SOCKET_ENV] = options.frontSocket;
+      } else delete settings.env[WORKER_LISTEN_SOCKET_ENV];
       if (options.ownerBridgeHostSocket) settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
       else delete settings.env[OWNER_BRIDGE_HOST_ENV];
       settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? 'engine' : 'gateway';

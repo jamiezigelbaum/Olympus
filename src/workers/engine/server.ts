@@ -6676,7 +6676,7 @@ export async function main(): Promise<void> {
   // In the split a model change restarts the background too, and the front
   // restarts once the background has acknowledged (front-state.ts).
   const reloadModels = engineFront
-    ? frontModelReload({ client: engineFront.client, restartSelf: reloadNow, managed: workerRestartsItself(workerLaunch, process.env), log: (line) => console.warn(line) })
+    ? frontModelReload({ client: engineFront.client, restartSelf: reloadNow, managed: workerRestartsItself(workerLaunch, process.env), closeGate: () => frontGate?.close(), log: (line) => console.warn(line) })
     : reloadNow;
   restartFrontOnly = reloadNow;
   requestModelReload = (request) => {
