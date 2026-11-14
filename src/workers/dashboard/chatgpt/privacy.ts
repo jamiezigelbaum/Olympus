@@ -185,6 +185,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.answerChoice = data.privateAnswerChoice && data.privateAnswerChoice.pending === true && Array.isArray(data.privateAnswerChoice.options) ? data.privateAnswerChoice
       : data.privateAnswerMode && Array.isArray(data.privateAnswerMode.options) ? data.privateAnswerMode : null;
     if (s.answerChoice && typeof s.answerChoice.id === 'string') s.answerMode = s.answerChoice.id;
+    // A first choice starts on what this computer's memory recommends.
+    else if (s.answerChoice?.pending) { const recommended = s.answerChoice.options.find((option: Any) => option && option.recommended === true); if (recommended && typeof recommended.id === 'string') s.answerMode = recommended.id; }
     s.edited = false;
     s.confirmStep = false;
     // `saved`: removing it lowers protection, so the save needs the owner's confirmation.
@@ -1200,6 +1202,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       input.setAttribute('data-key', 'privacy:answer:' + option.id);
       input.addEventListener('change', () => { if (input.checked) s.answerMode = option.id; });
       add(label, input, el('span', 'strong', option.label + (option.recommended ? ' — Recommended' : '')), el('span', 'muted', option.description));
+      if (typeof option.reason === 'string' && option.reason) add(label, el('span', 'muted', option.reason));
       add(choices, label);
     });
     add(page, choices);

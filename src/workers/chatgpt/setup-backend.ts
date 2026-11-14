@@ -1,7 +1,8 @@
 import { createPrivacyQuestionEngine, type PrivacyQuestionEngine } from '../classification/privacy-questions.ts';
 import { readFileSync } from 'node:fs';
 import { isPendingPrivacyPolicy, savePrivateAnswerMode, privateAnswerMode } from '../../core/first-run-privacy.ts';
-import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
+import { totalmem } from 'node:os';
+import { PRIVACY_PRESET_LABELS, privateAnswerOptions } from '../../core/privacy-language.ts';
 /**
  * The engine side of setup from ChatGPT (setup-tools.ts): each call goes to
  * the worker's own dashboard route in process, so the ChatGPT panel and the
@@ -132,11 +133,11 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
     if (isPendingPrivacyPolicy(current)) return {
       configured: false, description: '', rules: [], pendingCount: 0,
       revision: privacyRevision(undefined) + '.' + policyRevision,
-      privateAnswerChoice: { pending: true, options: PRIVATE_ANSWER_OPTIONS },
+      privateAnswerChoice: { pending: true, options: privateAnswerOptions(totalmem()) },
     };
     const settings = readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
     const id = privateAnswerMode(current);
-    return { ...settings, revision: settings.revision + '.' + policyRevision, privateAnswerMode: { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id], options: PRIVATE_ANSWER_OPTIONS } };
+    return { ...settings, revision: settings.revision + '.' + policyRevision, privateAnswerMode: { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id], options: privateAnswerOptions(totalmem()) } };
   };
 
 

@@ -1,5 +1,6 @@
 import { DASHBOARD_MODELS_BLOCKED_REASON } from './vocabulary.ts';
-import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
+import { totalmem } from 'node:os';
+import { privateAnswerOptions } from '../../core/privacy-language.ts';
 import { VENICE_SETUP_SHORTCUT, VENICE_SETUP_STEPS } from '../source-dashboard.ts';
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
 import { blockerBanner, connectorSheet, escapeHtml, rowMenu, setupStepsSheet } from './components.ts';
@@ -14,6 +15,8 @@ interface FirstRunJudgeSetup {
 }
 interface ModelSetupOptions {
   heading?: boolean;
+  /** Test seam: the machine's memory, which decides the first-run recommendation. */
+  totalMemoryBytes?: number;
   judgeSetup?: FirstRunJudgeSetup | undefined;
   judgeRuntime?: { gpu: boolean } | undefined;
 }
@@ -86,7 +89,7 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: Mode
 }
 
 function renderFirstRunPrivacyChoice(options: ModelSetupOptions): string {
-  const choices = PRIVATE_ANSWER_OPTIONS.map(option => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml(option.id)}"${option.recommended ? ' checked' : ''}> <b>${escapeHtml(option.label)}${option.recommended ? ' — Recommended' : ''}</b><p>${escapeHtml(option.description)}</p></label>`).join('');
+  const choices = privateAnswerOptions(options.totalMemoryBytes ?? totalmem()).map(option => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml(option.id)}"${option.recommended ? ' checked' : ''}> <b>${escapeHtml(option.label)}${option.recommended ? ' — Recommended' : ''}</b><p>${escapeHtml(option.description)}</p>${option.reason ? `<p data-memory-reason>${escapeHtml(option.reason)}</p>` : ''}</label>`).join('');
   const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
   const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>'
     + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;

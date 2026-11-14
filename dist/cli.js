@@ -239,7 +239,14 @@ var init_connection_requests = __esm(() => {
 });
 
 // src/core/privacy-language.ts
-var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS;
+function privateAnswerOptions(totalMemoryBytes) {
+  const short = Number.isFinite(totalMemoryBytes) && totalMemoryBytes > 0 && totalMemoryBytes < LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES;
+  if (!short)
+    return PRIVATE_ANSWER_OPTIONS.map((option) => ({ ...option }));
+  const gb = Math.round(totalMemoryBytes / 1024 ** 3);
+  return PRIVATE_ANSWER_OPTIONS.map((option) => option.id === "private-cloud-only" ? { ...option, recommended: true, reason: `This computer has ${gb} GB of memory; the local private model needs about 3.5 GB on top of Olympus.` } : { ...option, recommended: false });
+}
+var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS, LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES;
 var init_privacy_language = __esm(() => {
   SENSITIVITY_TIER_LABELS = {
     public: "Public",
@@ -259,6 +266,7 @@ var init_privacy_language = __esm(() => {
     { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
     { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.", recommended: false }
   ];
+  LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES = 12 * 1024 ** 3;
 });
 
 // src/core/openclaw-plugin-remote.ts
@@ -179397,6 +179405,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     s.answerChoice = data.privateAnswerChoice && data.privateAnswerChoice.pending === true && Array.isArray(data.privateAnswerChoice.options) ? data.privateAnswerChoice : data.privateAnswerMode && Array.isArray(data.privateAnswerMode.options) ? data.privateAnswerMode : null;
     if (s.answerChoice && typeof s.answerChoice.id === "string")
       s.answerMode = s.answerChoice.id;
+    else if (s.answerChoice?.pending) {
+      const recommended = s.answerChoice.options.find((option) => option && option.recommended === true);
+      if (recommended && typeof recommended.id === "string")
+        s.answerMode = recommended.id;
+    }
     s.edited = false;
     s.confirmStep = false;
     s.rules = data.rules.filter(validRule).map(viewRule);
@@ -180460,6 +180473,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
           s.answerMode = option.id;
       });
       add(label, input, el("span", "strong", option.label + (option.recommended ? " — Recommended" : "")), el("span", "muted", option.description));
+      if (typeof option.reason === "string" && option.reason)
+        add(label, el("span", "muted", option.reason));
       add(choices, label);
     });
     add(page, choices);
@@ -186745,6 +186760,7 @@ var init_model_pickers = __esm(() => {
 });
 
 // src/workers/dashboard/model-setup.ts
+import { totalmem as totalmem5 } from "node:os";
 function renderModelSetup(view, options = {}) {
   if (!view)
     return "";
@@ -186776,7 +186792,7 @@ function renderModelSetup(view, options = {}) {
   return status + engine + (view.ready ? privateModelProgress(view) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml2(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view.attention ? `<p role="status">${escapeHtml2(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
 }
 function renderFirstRunPrivacyChoice(options) {
-  const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p></label>`).join("");
+  const choices = privateAnswerOptions(options.totalMemoryBytes ?? totalmem5()).map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p>${option.reason ? `<p data-memory-reason>${escapeHtml2(option.reason)}</p>` : ""}</label>`).join("");
   const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
   const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>' + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
   const verify = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
@@ -229895,6 +229911,7 @@ var init_zkapi_copy = __esm(() => {
 });
 
 // src/workers/chatgpt/response-builder.ts
+import { totalmem as totalmem6 } from "node:os";
 function limitsToolResult(raw) {
   const record = asRecord20(raw) ?? {};
   if (Array.isArray(record.stops)) {
@@ -230688,9 +230705,9 @@ function copyPrivacySettings(settings) {
       const display = text5(rule.display);
       return [{ kind: "folder", source_id: sourceId, key: opaque(rule.key), ...display ? { display } : {} }];
     }),
-    ...settings.privateAnswerChoice?.pending === true ? { privateAnswerChoice: { pending: true, options: PRIVATE_ANSWER_OPTIONS } } : {},
+    ...settings.privateAnswerChoice?.pending === true ? { privateAnswerChoice: { pending: true, options: privateAnswerOptions(totalmem6()) } } : {},
     ...settings.privateAnswerMode && (settings.privateAnswerMode.id === "custom" || PRIVATE_ANSWER_OPTIONS.some((option) => option.id === settings.privateAnswerMode.id)) ? {
-      privateAnswerMode: { id: settings.privateAnswerMode.id, label: settings.privateAnswerMode.id === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[settings.privateAnswerMode.id], options: PRIVATE_ANSWER_OPTIONS }
+      privateAnswerMode: { id: settings.privateAnswerMode.id, label: settings.privateAnswerMode.id === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[settings.privateAnswerMode.id], options: privateAnswerOptions(totalmem6()) }
     } : {},
     pendingCount: whole(settings.pendingCount),
     ...typeof settings.revision === "string" && settings.revision ? { revision: opaque(settings.revision).slice(0, 64) } : {}
@@ -246113,6 +246130,7 @@ var init_handoff = __esm(() => {
 
 // src/workers/chatgpt/setup-backend.ts
 import { readFileSync as readFileSync106 } from "node:fs";
+import { totalmem as totalmem7 } from "node:os";
 import { createHash as createHash118 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
@@ -246156,11 +246174,11 @@ function createChatGptSetupBackend(options) {
         rules: [],
         pendingCount: 0,
         revision: privacyRevision(undefined) + "." + policyRevision,
-        privateAnswerChoice: { pending: true, options: PRIVATE_ANSWER_OPTIONS }
+        privateAnswerChoice: { pending: true, options: privateAnswerOptions(totalmem7()) }
       };
     const settings = readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
     const id = privateAnswerMode(current);
-    return { ...settings, revision: settings.revision + "." + policyRevision, privateAnswerMode: { id, label: id === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[id], options: PRIVATE_ANSWER_OPTIONS } };
+    return { ...settings, revision: settings.revision + "." + policyRevision, privateAnswerMode: { id, label: id === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[id], options: privateAnswerOptions(totalmem7()) } };
   };
   const post = async (path, body) => {
     const response = await options.workerFetch(new Request(`${WORKER_ORIGIN}${path}`, {
@@ -247847,7 +247865,7 @@ var exports_server = {};
 __export(exports_server, {
   startWorkerWithLaunch: () => startWorkerWithLaunch
 });
-import { release as release2, totalmem as totalmem5 } from "node:os";
+import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile5 } from "node:child_process";
 import { existsSync as existsSync125, readFileSync as readFileSync108 } from "node:fs";
 import { dirname as dirname119, join as join150 } from "node:path";
@@ -248210,7 +248228,7 @@ async function main() {
       }
     })() && !await probeLocalAnalystService(olympusConfig),
     builtInSize: () => workerBuiltInModel?.model.spec.sizeClass,
-    totalMemoryBytes: totalmem5(),
+    totalMemoryBytes: totalmem8(),
     zkapi: {
       available: () => sovereigntyEngine.config.modelProfiles["zkapi-consult"] !== undefined,
       strongest: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT,
@@ -252861,6 +252879,7 @@ init_privacy_language();
 init_source_placement();
 init_linux_owner_bridge();
 init_worker_transport();
+import { totalmem as totalmem9 } from "node:os";
 
 // src/core/interactive-secret.ts
 import { spawnSync as spawnSync4 } from "node:child_process";
@@ -256368,7 +256387,7 @@ async function main2() {
   if (args[0] === "setup") {
     if (args.length === 2 && args[1] === "--privacy-options") {
       const { state } = resolveInstallationPrivacyState();
-      console.log(JSON.stringify({ state, options: PRIVATE_ANSWER_OPTIONS }, null, 2));
+      console.log(JSON.stringify({ state, options: privateAnswerOptions(totalmem9()) }, null, 2));
       return;
     }
     try {

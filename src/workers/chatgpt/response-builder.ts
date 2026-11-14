@@ -1,7 +1,8 @@
 import { limitStopReference, registeredLimits } from '../../core/limit-stops.ts';
 import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { sourceSupportDetails } from '../dashboard/source-failure.ts';
-import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
+import { totalmem } from 'node:os';
+import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS, privateAnswerOptions } from '../../core/privacy-language.ts';
 import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
 import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from '../../core/app-release-capture.ts';
 /**
@@ -1274,9 +1275,9 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       const display = text(rule.display);
       return [{ kind: 'folder', source_id: sourceId, key: opaque(rule.key), ...(display ? { display } : {}) }];
     }),
-    ...(settings.privateAnswerChoice?.pending === true ? { privateAnswerChoice: { pending: true as const, options: PRIVATE_ANSWER_OPTIONS } } : {}),
+    ...(settings.privateAnswerChoice?.pending === true ? { privateAnswerChoice: { pending: true as const, options: privateAnswerOptions(totalmem()) } } : {}),
     ...(settings.privateAnswerMode && (settings.privateAnswerMode.id === 'custom' || PRIVATE_ANSWER_OPTIONS.some(option => option.id === settings.privateAnswerMode!.id)) ? {
-      privateAnswerMode: { id: settings.privateAnswerMode.id, label: settings.privateAnswerMode.id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[settings.privateAnswerMode.id], options: PRIVATE_ANSWER_OPTIONS },
+      privateAnswerMode: { id: settings.privateAnswerMode.id, label: settings.privateAnswerMode.id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[settings.privateAnswerMode.id], options: privateAnswerOptions(totalmem()) },
     } : {}),
     pendingCount: whole(settings.pendingCount),
     ...(typeof settings.revision === 'string' && settings.revision ? { revision: opaque(settings.revision).slice(0, 64) } : {}),

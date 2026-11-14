@@ -1,4 +1,4 @@
-import type { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
+import type { PRIVATE_ANSWER_OPTIONS, PrivateAnswerOption } from '../../core/privacy-language.ts';
 /**
  * The ChatGPT dashboard view-model, version 1: `structuredContent` of the
  * `olympus_dashboard` tool, rendered by `ui://olympus/dashboard`. The engine
@@ -1229,9 +1229,9 @@ export type PrivacyRuleView = PrivacyFolderRule | PrivacyLabelRule | PrivacySend
 /** `olympus_privacy_get {}` → `_meta[PRIVACY_META_KEY]`; also `olympus_privacy_set`'s. */
 export interface PrivacySettings {
   /** First-run only; never returned after either setup path chooses a policy. */
-  privateAnswerChoice?: { pending: true; options: typeof PRIVATE_ANSWER_OPTIONS };
+  privateAnswerChoice?: { pending: true; options: readonly PrivateAnswerOption[] };
   /** Current Private-answer mode and the same choices first run offers. */
-  privateAnswerMode?: { id: typeof PRIVATE_ANSWER_OPTIONS[number]['id'] | 'custom'; label: string; options: typeof PRIVATE_ANSWER_OPTIONS };
+  privateAnswerMode?: { id: typeof PRIVATE_ANSWER_OPTIONS[number]['id'] | 'custom'; label: string; options: readonly PrivateAnswerOption[] };
   /** False until the owner has saved privacy settings once. */
   configured: boolean;
   /** The owner's own words; empty until set. At most 2000 characters. */

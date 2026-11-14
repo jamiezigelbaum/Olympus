@@ -13363,7 +13363,7 @@ var init_source_account_binding = __esm(() => {
 });
 
 // src/core/privacy-language.ts
-var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS;
+var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS, LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES;
 var init_privacy_language = __esm(() => {
   SENSITIVITY_TIER_LABELS = {
     public: "Public",
@@ -13383,6 +13383,7 @@ var init_privacy_language = __esm(() => {
     { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
     { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.", recommended: false }
   ];
+  LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES = 12 * 1024 ** 3;
 });
 
 // src/core/ingestion-throughput.ts

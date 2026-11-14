@@ -33637,6 +33637,7 @@ var PRIVATE_ANSWER_OPTIONS = [
   { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
   { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.", recommended: false }
 ];
+var LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES = 12 * 1024 ** 3;
 // src/core/provider-rate-limits.ts
 registerLimit({ id: "x.rate_limit", kind: "requests", scope: "source", label: "X is limiting requests", unit: "requests", continue: "none" });
 registerLimit({ id: "evernote.rate_limit", kind: "requests", scope: "source", label: "Evernote is limiting requests", unit: "requests", continue: "none" });

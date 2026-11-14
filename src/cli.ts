@@ -1,6 +1,7 @@
 import './core/sqlite-statement-cache.ts';
 import { connectionRequestsPath, connectionRequestsView, readConnectionRequests } from './core/connection-requests.ts';
-import { PRIVATE_ANSWER_OPTIONS } from './core/privacy-language.ts';
+import { totalmem } from 'node:os';
+import { privateAnswerOptions } from './core/privacy-language.ts';
 import { resolvedRawPath } from './core/source-placement.ts';
 import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
 import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
@@ -414,7 +415,7 @@ async function main(): Promise<void> {
   if (args[0] === 'setup') {
     if (args.length === 2 && args[1] === '--privacy-options') {
       const { state } = resolveInstallationPrivacyState();
-      console.log(JSON.stringify({ state, options: PRIVATE_ANSWER_OPTIONS }, null, 2));
+      console.log(JSON.stringify({ state, options: privateAnswerOptions(totalmem()) }, null, 2));
       return;
     }
     try {
