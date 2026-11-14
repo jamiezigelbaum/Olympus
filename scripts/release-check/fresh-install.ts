@@ -60,8 +60,8 @@ export const FRESH_MACHINE_SAMPLE = `{ printf 'clock %s | load %s of %s cpus | '
 export const FRESH_ENGINE_LOG = `{ out=$(systemctl --user cat olympus-engine.service 2>/dev/null | sed -n 's/^StandardOutput=append://p' | head -n 1); log=$(cat "$out" "\${out%.log}.err" 2>/dev/null | grep -iE 'embed|judg|sniffer|classif|privacy check|tier|source-scheduler|gmail' || true); printf 'log %s: matching lines %s (embed %s, judge %s)\\n' "\${out:-not found}" "$(printf '%s\\n' "$log" | grep -c . || true)" "$(printf '%s\\n' "$log" | grep -ic embed || true)" "$(printf '%s\\n' "$log" | grep -icE 'judg|sniffer|classif' || true)"; printf '%s\\n' "$log" | grep -v 'olympus:gmail-list' | tail -n 80 | cut -c1-220; printf 'gmail list pages:\\n'; printf '%s\\n' "$log" | grep 'olympus:gmail-list' | tail -n 60 | cut -c1-260; } || true`;
 
 /** The fresh install's service memory cap (cgroup MemoryMax): the 8 GB case. */
-/** The 8 GB case: 0 runs the ordinary leg (no cap, Recommended choice). Off while 8 GB with Venice for Private answers leaves no answer model. */
-export const FRESH_MEMORY_CAP_GB: number = 0;
+/** The 8 GB case: Olympus held to this many GB, with Venice for Private answers as first run recommends below 12 GB. 0 runs the ordinary leg (no cap, Recommended choice). */
+export const FRESH_MEMORY_CAP_GB: number = 8;
 /** The service cgroup's limit, peaks and out-of-memory kills, and whether the user manager delegates the memory controller at all. */
 export const FRESH_CGROUP_READ = `cg="/sys/fs/cgroup$(systemctl --user show -p ControlGroup --value olympus-engine.service 2>/dev/null)"
 printf 'max %s\\n' "$(cat "$cg/memory.max" 2>/dev/null || echo none)"
@@ -359,8 +359,8 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
     }
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9334'); });
     // Includes the explicit Venice judge choice when first run offers it.
-    // The 8 GB case (cap on) runs as the first run recommends below 12 GB: Venice for Private answers (lane 1, 14 Nov). It is off
-    // while that choice leaves the install with no answer model ("No answer model is set up in Olympus"; runs 43626605016, 43627599232).
+    // The 8 GB case (cap on) runs as the first run recommends below 12 GB: Venice for Private answers (lane 1, 14 Nov).
+    // 78481bd2 gave that choice a Personal answer model; before it, every answer was "No answer model is set up in Olympus".
     await checked('privacy-choice', () => dashboard!.privacyChoice(FRESH_MEMORY_CAP_GB && options.veniceKey !== undefined ? 'private-cloud-only' : undefined));
     for (const source of sources) {
       await checked(`${source.id}.connect`, () => dashboard!.connect(source));
