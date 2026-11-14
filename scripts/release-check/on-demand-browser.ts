@@ -303,7 +303,11 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         const made = await machine.exec(`mkdir -p ${quote(remote)}`, { timeoutMs: 30_000 });
         if (made.code !== 0) throw new Error('could not prepare browser upload scratch');
         const path = `${remote}/${file.name}`;
-        await machine.put(local, path);
+        // The driver takes only plain paths (no spaces); the browser needs the file's own name, so it is renamed there.
+        const staged = `${remote}/upload-${crypto.randomUUID()}.bin`;
+        await machine.put(local, staged);
+        const moved = await machine.exec(`mv ${quote(staged)} ${quote(path)}`, { timeoutMs: 30_000 });
+        if (moved.code !== 0) throw new Error(`could not name the browser upload: ${file.name}`);
         choosers.delete(tab.session);
         await send('Page.setInterceptFileChooserDialog', { enabled: true }, tab.session);
         try {
