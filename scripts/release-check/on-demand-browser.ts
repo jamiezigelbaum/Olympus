@@ -233,8 +233,14 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         }
         const exists = source === 'google_drive' && await evaluate<boolean>(tab.session, `${listing(source)}.includes(${JSON.stringify(name)})`);
         if (!exists) {
-          await click(tab.session, source === 'google_drive' ? ['New', 'Create new'] : ['Create', 'Create new']);
-          await click(tab.session, source === 'google_drive' ? ['New folder'] : ['Folder', 'Create folder']);
+          // Dropbox's top level has its own New folder button; its "Create" names match "Create section" too
+          // (run 43563949333: the seed folder was never made at the top level).
+          if (source === 'google_drive') {
+            await click(tab.session, ['New', 'Create new']);
+            await click(tab.session, ['New folder']);
+          } else {
+            await click(tab.session, ['New folder', 'Create folder']);
+          }
           await fill(tab.session, '[role=dialog] input[type=text], [role=dialog] input:not([type])', name);
           await click(tab.session, ['Create']);
           // Drive's dialog closes once the folder exists; Dropbox moves on to the new folder and may leave other dialogs up.
