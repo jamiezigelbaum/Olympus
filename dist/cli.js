@@ -169445,7 +169445,16 @@ function mountDashboardController(options) {
     });
     slot.after(button);
   }
+  function restartRefusal(result) {
+    if (result.status !== 503)
+      return false;
+    const error = result.body.error;
+    const code = error && typeof error === "object" && !Array.isArray(error) ? error.code : undefined;
+    return code === "worker_restarting" || result.body.status === "starting";
+  }
   function errorMessage(result) {
+    if (restartRefusal(result))
+      return "Olympus is still restarting, so this was not saved. Try again in a minute.";
     const error = result.body.error;
     if (error && typeof error === "object" && !Array.isArray(error)) {
       const message = error.message;
@@ -169738,17 +169747,24 @@ function mountDashboardController(options) {
     await refreshNow(true);
   }
   async function controlThroughRestart(form, params) {
-    const tries = form.closest("[data-first-run-sheet]") ? 12 : 1;
+    const tries = 12;
+    const unansweredTries = form.closest("[data-first-run-sheet]") ? tries : 1;
     const wait = options.restartRetryMs ?? 5000;
     for (let attempt = 1;; attempt += 1) {
+      let result;
       try {
-        return await options.transport.control(params);
+        result = await options.transport.control(params);
       } catch (error) {
-        if (attempt >= tries || disposed || options.signal.aborted)
+        if (attempt >= unansweredTries || disposed || options.signal.aborted)
           throw error;
         say(form, "Olympus is restarting to apply your last choice. Saving when it is back…");
         await new Promise((resolve) => setTimeout(resolve, wait));
+        continue;
       }
+      if (!restartRefusal(result) || attempt >= tries || disposed || options.signal.aborted)
+        return result;
+      say(form, "Olympus is restarting. Saving when it is back…");
+      await new Promise((resolve) => setTimeout(resolve, wait));
     }
   }
   async function submitControl(form, authorizationTab, submittedValues) {
@@ -170094,7 +170110,7 @@ function mountDashboardController(options) {
     setFormPending(form, true, params.action === "revoke_agent_connection" ? "Revoking…" : params.action === "set_remote_access" ? params.enabled ? "Turning on…" : "Turning off…" : "Working…");
     let result;
     try {
-      result = await options.transport.control(params);
+      result = await controlThroughRestart(form, params);
     } catch {
       say(form, "Could not reach Olympus.");
       return;

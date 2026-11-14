@@ -326,7 +326,16 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     slot.after(button);
   }
 
+  /** Olympus's "restarting" (the front's gate) or "starting" (no front yet) answer. */
+  function restartRefusal(result: OlympusDashboardControlResult): boolean {
+    if (result.status !== 503) return false;
+    const error = result.body.error;
+    const code = error && typeof error === 'object' && !Array.isArray(error) ? (error as Record<string, unknown>).code : undefined;
+    return code === 'worker_restarting' || result.body.status === 'starting';
+  }
+
   function errorMessage(result: OlympusDashboardControlResult): string {
+    if (restartRefusal(result)) return 'Olympus is still restarting, so this was not saved. Try again in a minute.';
     const error = result.body.error;
     if (error && typeof error === 'object' && !Array.isArray(error)) {
       const message = (error as Record<string, unknown>).message;
@@ -643,16 +652,27 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
    * instead of telling the owner it could not reach Olympus.
    */
   async function controlThroughRestart(form: HTMLFormElement, params: OlympusDashboardControlParams): Promise<OlympusDashboardControlResult> {
-    const tries = form.closest('[data-first-run-sheet]') ? 12 : 1;
+    // Olympus's own "restarting" or "starting" answer means nothing was done,
+    // so every save waits through it. A request that never got an answer may
+    // have been done; only a first-run step, which sets a choice, sends it again.
+    const tries = 12;
+    const unansweredTries = form.closest('[data-first-run-sheet]') ? tries : 1;
     const wait = options.restartRetryMs ?? 5_000;
     for (let attempt = 1; ; attempt += 1) {
+      let result: OlympusDashboardControlResult;
       try {
-        return await options.transport.control(params);
+        result = await options.transport.control(params);
       } catch (error) {
-        if (attempt >= tries || disposed || options.signal.aborted) throw error;
+        if (attempt >= unansweredTries || disposed || options.signal.aborted) throw error;
         say(form, 'Olympus is restarting to apply your last choice. Saving when it is back…');
         await new Promise(resolve => setTimeout(resolve, wait));
+        continue;
       }
+      // A front that is restarting, or not serving yet, refuses before it does
+      // anything, so the save is sent again: never applied twice.
+      if (!restartRefusal(result) || attempt >= tries || disposed || options.signal.aborted) return result;
+      say(form, 'Olympus is restarting. Saving when it is back…');
+      await new Promise(resolve => setTimeout(resolve, wait));
     }
   }
 
@@ -1022,7 +1042,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         : 'Working…');
     let result: OlympusDashboardControlResult;
     try {
-      result = await options.transport.control(params);
+      result = await controlThroughRestart(form, params);
     } catch {
       say(form, 'Could not reach Olympus.');
       return;

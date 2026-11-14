@@ -12,7 +12,7 @@ import { openFreshDashboard } from '../scripts/release-check/fresh-dashboard.ts'
 import type { Machine } from '../scripts/release-check/machine.ts';
 
 const REFUSAL = 'Choose this on the computer in an unlocked dashboard.';
-for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge-refused', 'judge-unreachable'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : mode === 'unlock' ? 'unlocks on this computer when asked, then saves' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
+for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge-refused', 'judge-unreachable', 'judge-restarting', 'judge-starting'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : mode === 'unlock' ? 'unlocks on this computer when asked, then saves' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
   const losesSave = mode === 'loses';
   const dir = mkdtempSync(join(tmpdir(), 'fresh-dashboard-'));
   const path = join(dir, 'sovereignty.json');
@@ -63,10 +63,13 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge
       transport: { ...(mode === 'unlock' ? { openLocalControls: async () => { unlocks++; unlocked = true; return true; } } : {}), control: async (params: { action: string; choice: string; cap_dollars?: number }) => {
         calls.push(params.action);
         if (params.action === 'save_judge') {
-          expect(params).toEqual({ action: 'save_judge', choice: judgeChoices.length === 0 || mode === 'judge-unreachable' ? 'venice' : 'local', cap_dollars: 1 });
+          expect(params).toEqual({ action: 'save_judge', choice: judgeChoices.length === 0 || ['judge-unreachable', 'judge-restarting', 'judge-starting'].includes(mode) ? 'venice' : 'local', cap_dollars: 1 });
           judgeChoices.push(String(params.choice));
           // The engine is restarting for the answer choice: the request never reaches it.
           if (mode === 'judge-unreachable' && judgeChoices.length === 1) throw new Error('connection refused');
+          // The front's gate after the answer choice, and the worker socket's own answer while no front serves (fresh run 43554460947).
+          if (mode === 'judge-restarting' && judgeChoices.length === 1) return { status: 503, body: { error: { code: 'worker_restarting', message: 'Olympus is restarting; try again in a moment.' } } };
+          if (mode === 'judge-starting' && judgeChoices.length === 1) return { status: 503, body: { reachable: false, status: 'starting', step: 'starting' } };
           if (mode === 'judge-refused' && params.choice === 'venice') return { status: 400, body: { ok: false, error: { message: 'Add your own Venice API key in Keys first.' } } };
           judgeChosen = true;
           return { status: 200, body: { ok: true } };
@@ -146,7 +149,7 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge
       expect(judgeChoices).toEqual(['venice', 'local']);
       return;
     }
-    if (mode === 'judge-unreachable') {
+    if (mode === 'judge-unreachable' || mode === 'judge-restarting' || mode === 'judge-starting') {
       // A judge save sent while Olympus restarts for the answer choice waits for it and saves Venice (the page's own retry).
       expect(await dashboard.privacyChoice()).toBe('Local models with Venice fallback (local-first, Recommended) saved and verified after reload; privacy check: Venice (venice) saved');
       expect(judgeChoices).toEqual(['venice', 'venice']);
