@@ -18493,7 +18493,7 @@ var init_config = __esm(() => {
   ]);
   DEFAULT_CONFIG = {
     worker: {
-      engineSplit: false,
+      engineSplit: process.platform === "linux",
       engineSplitRssRestartMb: ENGINE_RSS_RESTART_DEFAULT_MB,
       service: {
         enabled: false,

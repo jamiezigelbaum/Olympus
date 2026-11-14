@@ -94,7 +94,9 @@ export interface OlympusConfig {
     /**
      * Run the worker as two processes (docs/design/engine-split.md, part 3):
      * a background process that is the only writer and a read-only front
-     * that serves HTTP. Defaults to false: one worker process, as before.
+     * that serves HTTP. On by default on Linux, where the unit's own process
+     * holds the worker socket through a front restart (worker-front-proxy.ts);
+     * off elsewhere until the Mac front's port does the same.
      */
     engineSplit: boolean;
     /**
@@ -241,7 +243,7 @@ export const ENGINE_RSS_RESTART_DEFAULT_MB = 3072;
 
 const DEFAULT_CONFIG: OlympusConfig = {
   worker: {
-    engineSplit: false,
+    engineSplit: process.platform === 'linux',
     engineSplitRssRestartMb: ENGINE_RSS_RESTART_DEFAULT_MB,
     service: {
       enabled: false,

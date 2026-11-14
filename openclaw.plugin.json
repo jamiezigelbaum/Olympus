@@ -60,7 +60,7 @@
           },
           "engineSplit": {
             "type": "boolean",
-            "description": "Experimental: run the worker as a background process that does all writing and a read-only front that serves the dashboard and answers. Defaults to false."
+            "description": "Run the worker as a background process that does all writing and a read-only front that serves the dashboard and answers. Defaults to true on Linux and false elsewhere."
           },
           "engineSplitRssRestartMb": {
             "type": "integer",

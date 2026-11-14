@@ -90,8 +90,9 @@ function background(handlers: EngineCommandHandlers, instanceId = 'background-1'
 }
 
 describe('the switch and roles', () => {
-  test('worker.engineSplit is off by default and parses only a boolean', () => {
-    expect(configFromPluginConfig({}).worker.engineSplit).toBe(false);
+  test('worker.engineSplit is on by default on Linux only, and parses only a boolean', () => {
+    expect(configFromPluginConfig({}).worker.engineSplit).toBe(process.platform === 'linux');
+    expect(configFromPluginConfig({ worker: { engineSplit: false } }).worker.engineSplit).toBe(false);
     expect(configFromPluginConfig({ worker: { engineSplit: true } }).worker.engineSplit).toBe(true);
     expect(() => configFromPluginConfig({ worker: { engineSplit: 'yes' } })).toThrow('worker.engineSplit');
   });
@@ -104,7 +105,7 @@ describe('the switch and roles', () => {
   });
 
   test('switch off: the engine host runs exactly the services it ran before', () => {
-    const config = { worker: { authToken: TOKEN, service: { enabled: true } }, email: { baseUrl: 'http://127.0.0.1:8010/v1' } };
+    const config = { worker: { authToken: TOKEN, engineSplit: false, service: { enabled: true } }, email: { baseUrl: 'http://127.0.0.1:8010/v1' } };
     expect(engineHostServices(config, 'file:///fixture/dist/cli.js').map((service) => service.id)).toEqual([
       'olympus-worker', 'olympus-remote-relay', 'olympus-source-embedding-drain',
     ]);

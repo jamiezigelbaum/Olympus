@@ -5010,7 +5010,7 @@ var NATIVE_EMBEDDING_DRAIN_CREDENTIAL_ENV_NAMES = new Set([
 var ENGINE_RSS_RESTART_DEFAULT_MB = 3072;
 var DEFAULT_CONFIG = {
   worker: {
-    engineSplit: false,
+    engineSplit: process.platform === "linux",
     engineSplitRssRestartMb: ENGINE_RSS_RESTART_DEFAULT_MB,
     service: {
       enabled: false,
