@@ -195455,6 +195455,10 @@ import {
   unlink
 } from "node:fs/promises";
 import { dirname as dirname111 } from "node:path";
+function semanticTimeouts(degradations) {
+  const corpora = [...new Set((degradations ?? []).filter((degradation) => degradation.reason === "semantic_lane_skipped" && semanticSearchTimedOut(degradation.detail)).map((degradation) => degradation.lane_name.replace(/:semantic$/, "")))];
+  return corpora.length > 0 ? { semantic_timeouts: corpora } : {};
+}
 function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
   const audit = result.audit;
   const skipped = audit.skipped_corpora.map((skip) => ({
@@ -195471,6 +195475,7 @@ function buildSourceAnswerLatencyRecord(result, now = () => new Date, caller) {
     searched_corpora: [...audit.searched_corpora],
     skipped_corpora: skipped,
     lane_timeouts: skipped.filter((skip) => skip.reason === "lane_timeout").map((skip) => skip.corpus_id),
+    ...semanticTimeouts(audit.retrieval_degradations),
     analyst_backend: audit.answer_synthesis.analyst_backend,
     ...fallback ? {
       analyst_fallback: {
@@ -195782,6 +195787,7 @@ var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
 var init_answer_latency_log = __esm(() => {
   init_olympus_layout();
   init_answer_latency_trace();
+  init_partial_search();
   DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
 });
 

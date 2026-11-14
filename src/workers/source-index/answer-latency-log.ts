@@ -30,6 +30,7 @@ import type {
   SourceAnswerTraceMainThreadSql,
 } from './answer-latency-trace.ts';
 import { copyQueryStages, sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
+import { semanticSearchTimedOut } from '../../core/source-index/partial-search.ts';
 import type { OperationCallerWire } from '../../core/operation-caller.ts';
 
 export interface SourceAnswerLatencyRecord {
@@ -40,6 +41,9 @@ export interface SourceAnswerLatencyRecord {
   searched_corpora: string[];
   skipped_corpora: Array<{ corpus_id: string; reason: string }>;
   lane_timeouts: string[];
+  // Searched stores whose search by meaning ran out of time, so only their
+  // keyword matches were read. The answer's coverage names them too.
+  semantic_timeouts?: string[];
   analyst_backend: AnalystBackend;
   analyst_fallback?: {
     from: SourceIndexAnalystFallback['from'];
@@ -142,6 +146,13 @@ export interface SourceAnswerLatencyFileLogOptions {
 
 export const DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
 
+function semanticTimeouts(degradations: SourceIndexAnswerResult['audit']['retrieval_degradations']): { semantic_timeouts?: string[] } {
+  const corpora = [...new Set((degradations ?? [])
+    .filter((degradation) => degradation.reason === 'semantic_lane_skipped' && semanticSearchTimedOut(degradation.detail))
+    .map((degradation) => degradation.lane_name.replace(/:semantic$/, '')))];
+  return corpora.length > 0 ? { semantic_timeouts: corpora } : {};
+}
+
 // Strictly allowlisted v1 compatibility record.
 export function buildSourceAnswerLatencyRecord(
   result: SourceIndexAnswerResult,
@@ -163,6 +174,7 @@ export function buildSourceAnswerLatencyRecord(
     searched_corpora: [...audit.searched_corpora],
     skipped_corpora: skipped,
     lane_timeouts: skipped.filter((skip) => skip.reason === 'lane_timeout').map((skip) => skip.corpus_id),
+    ...semanticTimeouts(audit.retrieval_degradations),
     analyst_backend: audit.answer_synthesis.analyst_backend,
     ...(fallback
       ? {

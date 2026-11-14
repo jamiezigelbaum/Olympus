@@ -93,6 +93,18 @@ function answerResultFixture(overrides: {
 }
 
 describe('source_answer latency ledger record', () => {
+  // A store whose search by meaning was cut at its deadline answered from
+  // keyword matches only; the log must say so, not just report it searched.
+  test('a cut meaning search is logged as a semantic timeout', () => {
+    const result = answerResultFixture({ latencyMs: 60_000, searched: ['internal.dropbox.files', 'internal.email'], skipped: [] });
+    const cut = { ...result, audit: { ...result.audit, retrieval_degradations: [
+      { lane_name: 'internal.dropbox.files:semantic', lane_type: 'semantic' as const, reason: 'semantic_lane_skipped' as const, detail: 'vector_scan_deadline_exceeded', occurrences: 1 },
+      { lane_name: 'internal.email:semantic', lane_type: 'semantic' as const, reason: 'semantic_lane_skipped' as const, detail: 'embedding_query_vector_missing', occurrences: 1 },
+    ] } };
+    expect(buildSourceAnswerLatencyRecord(cut).semantic_timeouts).toEqual(['internal.dropbox.files']);
+    expect(buildSourceAnswerLatencyRecord(result).semantic_timeouts).toBeUndefined();
+  });
+
   test('builds a content-free record from phase timings, corpus ids, and skip reasons', () => {
     const record = buildSourceAnswerLatencyRecord(
       answerResultFixture({
