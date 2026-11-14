@@ -60,6 +60,8 @@ printf '%s' ${quote(JSON.stringify(input))} | "$rc_bun" --no-env-file ${quote(re
       if (!cursor) throw new Error('no timing cursor');
       return call({ command: 'finish', file: { providerItemId: file.providerItemId, version: file.version }, cursor });
     },
+    hold: async (file: TimingFile, needsReview: boolean) => JSON.stringify(await call({ command: 'hold',
+      file: { providerItemId: file.providerItemId, question: file.question, needsReview } }, 660_000)),
     close: async () => {
       try {
         const removed = await transport.exec(`rm -f ${quote(remote)}`, { timeoutMs: 30_000 });

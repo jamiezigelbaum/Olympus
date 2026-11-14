@@ -18,6 +18,8 @@ export interface TimingDiagnostics {
   resolve?(file: TimingFile): Promise<TimingFile>;
   begin(file: TimingFile): Promise<void>;
   finish(file: TimingFile): Promise<{ indexed: boolean; jobIds: string[]; log: string; attribution: string }>;
+  /** Tier-ledger row and, for a needs-review reply, its release decision (codes only). */
+  hold?(file: TimingFile, needsReview: boolean): Promise<string>;
   close(): Promise<void>;
 }
 export interface TimingReply {
@@ -28,7 +30,7 @@ export interface OnDemandTimingRow {
   foundFile: boolean; indexed: boolean; foundParagraph: boolean; secondsToAnswer: number | null; elapsedSeconds: number;
   asks: number; firstReply: string; waitMessage: string; replies: TimingReply[];
   jobIds: string[]; steps: Partial<Record<'fetch' | 'extract' | 'judge' | 'embed', number>>;
-  timingLog: string; attribution: string; error?: string;
+  timingLog: string; attribution: string; error?: string; hold?: string;
 }
 export interface OnDemandNotRun { id: string; file: string; source: string; reason: string }
 export interface OnDemandTimingResult { notRun?: OnDemandNotRun[]; rows: OnDemandTimingRow[]; checks: CheckResult[]; preflight?: string }
@@ -128,6 +130,12 @@ export async function timeOnDemandFile(file: TimingFile, engine: EngineMcp, diag
     // Preserve ambiguous raw lines as evidence, without presenting their combined durations as this file's timings.
     row.steps = proof.attribution === 'single read in log interval' ? timingSteps(proof.log) : {};
   } catch (error) { row.error = [row.error, `diagnostics: ${String(error)}`].filter(Boolean).join('; '); }
+  // Every question that missed its paragraph: the needs-review replies and the
+  // read-but-not-answered ones alike, so the two sources can be compared.
+  if (!ownerRead && !row.foundParagraph && diagnostics.hold) {
+    try { row.hold = await diagnostics.hold(file, true); }
+    catch (error) { row.hold = `hold diagnostics failed: ${String(error)}`; }
+  }
   return row;
 }
 

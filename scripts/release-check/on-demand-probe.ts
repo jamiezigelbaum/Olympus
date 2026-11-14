@@ -55,6 +55,28 @@ export function finishRead(file: TimingFile, cursor: ReadCursor, dbPath?: string
   } finally { db.close(); }
 }
 
+/**
+ * Why a question's file was held, for the privacy lane: the item's tier-ledger
+ * row (read-only `olympus tier explain`) and, when the reply was the fixed
+ * needs-review sentence, that answer's release decision reasons. Codes only,
+ * never content.
+ */
+export function holdDiagnostics(file: { providerItemId: string; question: string; needsReview: boolean }) {
+  const olympus = join(homedir(), '.local/bin/olympus');
+  const run = (args: string[], timeout: number) => {
+    const out = Bun.spawnSync([olympus, ...args], { timeout });
+    try { return out.exitCode === 0 ? JSON.parse(out.stdout.toString()) : { error: out.stderr.toString().slice(-300) }; }
+    catch { return { error: 'not JSON' }; }
+  };
+  const explained = run(['tier', 'explain', file.providerItemId], 60_000) as Record<string, unknown>;
+  const rows = (Array.isArray(explained.records) ? explained.records : Array.isArray(explained) ? explained : [explained]) as Array<Record<string, unknown>>;
+  const tier = rows.map(row => Object.fromEntries(['error', 'recorded', 'metadataTier', 'contentTier', 'state', 'decidedBy', 'reasons', 'override', 'snifferModel', 'note']
+    .filter(key => row[key] !== undefined).map(key => [key, row[key]])));
+  if (!file.needsReview) return { tier };
+  const answered = run(['source', 'answer', file.question], 600_000) as { opsec?: { release_decision?: unknown }; error?: string };
+  return { tier, release: answered.opsec?.release_decision ?? (answered.error ? { error: answered.error } : 'no opsec in CLI output') };
+}
+
 /** Names and identities only, from the product's store inventory. Never read a body to prepare the benchmark. */
 export function resolveTimingFile(file: TimingFile, paths = lifecycleStorePaths()): TimingFile {
   const matches = new Map<string, { provider_item_id: string; source_version: string }>();
@@ -103,6 +125,7 @@ if (import.meta.main) {
       console.log(JSON.stringify({ detail: `engine split on; healthy front and background; installed build ${status.engine.build ?? 'unknown'}` }));
     } else if (input.command === 'resolve') console.log(JSON.stringify(resolveTimingFile(input.file)));
     else if (input.command === 'begin') console.log(JSON.stringify(readCursor()));
+    else if (input.command === 'hold') console.log(JSON.stringify(holdDiagnostics(input.file)));
     else if (input.command === 'finish') console.log(JSON.stringify(finishRead(input.file, input.cursor)));
     else throw new Error('unknown timing diagnostic command');
   } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); }

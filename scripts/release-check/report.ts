@@ -48,7 +48,7 @@ export function renderOnDemandTiming(rows: readonly OnDemandTimingRow[] | undefi
       String(row.asks), yes(first?.namesFile ?? false), yes(first?.reading ?? false), row.firstReply, row.waitMessage || '(none)',
       ...(['fetch', 'extract', 'judge', 'embed'] as const).map(step => row.steps[step] === undefined ? 'missing' : String(row.steps[step])),
       row.attribution, row.jobIds.join(', ') || '(none)'];
-    return `<tr>${values.map(value => `<td>${escapeHtml(value)}</td>`).join('')}<td><details><summary>Replies and engine timings</summary><pre>${escapeHtml(JSON.stringify(row.replies, null, 2))}</pre><pre>${escapeHtml(row.timingLog)}</pre>${row.error ? escapeHtml(row.error) : ''}</details></td></tr>`;
+    return `<tr>${values.map(value => `<td>${escapeHtml(value)}</td>`).join('')}<td><details><summary>Replies and engine timings</summary><pre>${escapeHtml(JSON.stringify(row.replies, null, 2))}</pre><pre>${escapeHtml(row.timingLog)}</pre>${row.hold ? `<pre>${escapeHtml(row.hold)}</pre>` : ''}${row.error ? escapeHtml(row.error) : ''}</details></td></tr>`;
   }).join('');
   const headings = ['File', 'Source', 'Action', 't0', 'Found file', 'Read (job indexed)', 'Found paragraph (fact, cited)', 'Seconds to answer', 'Asks', 'First reply names file', 'First reply says reading', 'First reply', 'Wait message shown', 'Fetch ms', 'Extract ms', 'Judge ms', 'Embed ms', 'Timing attribution', 'Read jobs', 'Evidence'];
   return `<h2>Names with read on demand</h2><div style="overflow-x:auto"><table><thead><tr>${headings.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>${skipped}`;
