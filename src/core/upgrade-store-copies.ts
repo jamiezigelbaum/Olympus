@@ -140,7 +140,7 @@ function copyUnderWriteLock(pairs: ReadonlyArray<readonly [string, string]>, bun
     "import { Database } from 'bun:sqlite';",
     "import { closeSync, constants, copyFileSync, fsyncSync, openSync } from 'node:fs';",
     'for (const [path, partial] of JSON.parse(process.argv.at(-1))) {',
-    '  const db = new Database(path, { create: false });',
+    '  const db = new Database(path, { readwrite: true, create: false });',
     '  try {',
     "    db.exec('PRAGMA busy_timeout = 5000;');",
     "    db.query('SELECT COUNT(*) FROM sqlite_master').get();",
@@ -158,9 +158,11 @@ function copyUnderWriteLock(pairs: ReadonlyArray<readonly [string, string]>, bun
   const result = spawnSync(executable, ['-e', script, JSON.stringify(pairs)], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
   if (result.status !== 0) {
     const holders = processesHolding(pairs.map(([file]) => file));
+    const said = (result.stderr ?? '').trim().split('\n').filter(Boolean).slice(-3).join(' ').slice(0, 400);
+    const cause = result.error ? result.error.message : said;
     throw new OperationError(
       'config_error',
-      `The upgrade could not copy a store before updating it; ${holders.length > 0 ? `it is open in ${holders.join(', ')}` : 'another process may still have it open'}.`,
+      `The upgrade could not copy a store before updating it; ${holders.length > 0 ? `it is open in ${holders.join(', ')}` : 'another process may still have it open'}.${cause ? ` The copy said: ${cause}` : ''}`,
       'Run `olympus worker status`, stop anything else using Olympus, then run the upgrade again. Nothing was changed.',
     );
   }

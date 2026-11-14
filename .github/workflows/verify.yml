@@ -173,6 +173,17 @@ jobs:
           export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
           systemctl --user is-system-running || true
           REAL_SYSTEMD_USER_HOME="$HOME" HOME="$(mktemp -d)" bun test test/real-systemd-upgrade-hold.test.ts
+      - name: The upgrade started on the oldest Bun an install can have
+        # Worker-unit installs made before 1.5 run on the machine's own Bun,
+        # 1.3.14 on the gate7 VM and Sparta (rc.12, 14 Nov). The upgrade's first
+        # step starts there and must move onto the pinned Bun or refuse.
+        if: matrix.shard == 1
+        run: |
+          dir="$RUNNER_TEMP/bun-1.3.14"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/bun.zip" https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-baseline.zip
+          unzip -oq "$dir/bun.zip" -d "$dir"
+          OLDEST_INSTALL_BUN="$dir/bun-linux-x64-baseline/bun" HOME="$(mktemp -d)" bun test test/engine-bun.test.ts
       - name: Retain trusted main timing data
         if: ${{ always() && github.event_name == 'push' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

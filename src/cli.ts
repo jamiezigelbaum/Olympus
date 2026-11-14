@@ -8,6 +8,7 @@ import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import { PastedCallbackError, finishPastedOAuthCallback } from './core/oauth-callback-paste.ts';
 import type { WorkerLaunch } from './core/model-key-reload.ts';
 import { randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, openSync, closeSync, writeSync } from 'node:fs';
 import { olympusPackageRoot } from './core/package-root.ts';
 import { pairMessagingSource, type MessagingCaptureScopeApproval } from './core/messaging-pairing.ts';
@@ -241,6 +242,7 @@ import {
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { readThisComputerHandles } from './core/this-computer.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
+import { bunVersionAtLeast, resolveEngineBun, runningBun } from './core/engine-bun.ts';
 import { resolveInstallationPrivacyState, engineDataCustody, engineServicePaths, inspectEngine, restartEngine } from './core/engine-service.ts';
 import {
   reachableLoopbackWorkerOrigin,
@@ -2072,7 +2074,17 @@ async function runWorkerCommand(args: string[]): Promise<void> {
     return;
   }
   if (command === 'install' || command === 'upgrade') {
-    const parsed = parseWorkerInstallArgs(command, args.slice(1));
+    const asked = parseWorkerInstallArgs(command, args.slice(1));
+    // The engine runs on the Bun written into the unit: find one new enough
+    // before anything stops, and move this command onto it first.
+    const engineBun = resolveEngineBun({ ...(asked.bunBin ? { bunBin: asked.bunBin } : {}), ...(asked.homeDir ? { homeDir: asked.homeDir } : {}) });
+    const running = runningBun();
+    if (!running || !bunVersionAtLeast(running.version)) {
+      console.warn(`[olympus] running this ${command} on Bun ${engineBun.version} (${engineBun.path}); this Bun is ${running?.version ?? 'not Bun'}.`);
+      const switched = spawnSync(engineBun.path, [process.argv[1]!, 'worker', ...args, ...(asked.bunBin ? [] : ['--bun', engineBun.path])], { stdio: 'inherit' });
+      process.exit(switched.status ?? 1);
+    }
+    const parsed = { ...asked, bunBin: engineBun.path };
     if (!parsed.dryRun) refuseWorkerServiceBesideEngine(parsed);
     const options = command === 'install' ? withWorkerInstallAuth(parsed) : parsed;
     const result = runWorkerLifecycle(command, options);
@@ -2371,6 +2383,7 @@ interface WorkerInstallCliOptions {
   schedulerEnabled?: boolean;
   dryRun?: boolean;
   artifactPath?: string;
+  bunBin?: string;
 }
 
 function parseWorkerInstallArgs(action: 'install' | 'upgrade', args: string[]): WorkerInstallCliOptions {
@@ -2391,6 +2404,11 @@ function parseWorkerInstallArgs(action: 'install' | 'upgrade', args: string[]): 
       options.schedulerEnabled = true;
     } else if (arg === '--dry-run') {
       options.dryRun = true;
+    } else if (arg === '--bun') {
+      options.bunBin = requireNext(args, index, '--bun');
+      index += 1;
+    } else if (arg?.startsWith('--bun=')) {
+      options.bunBin = arg.slice('--bun='.length);
     } else if (action === 'upgrade' && arg === '--artifact') {
       options.artifactPath = requireNext(args, index, '--artifact');
       index += 1;
