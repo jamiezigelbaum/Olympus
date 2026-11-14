@@ -18,14 +18,17 @@ import {
   preSchemaBackupsOf,
   recordSchemaBackup,
   removeAllSchemaBackups,
+  removeRecordedSchemaBackups,
   removeSchemaBackupsSince,
   removeAbandonedBackupCopies,
   restoreSchemaBackupsSince,
   retiredStateBackupPath,
   retireStatePath,
+  UPGRADE_COPY_SUFFIX,
   type BootProgress,
   type BootStepEvent,
 } from '../src/core/boot-progress.ts';
+import { upgradeInFlight } from './helpers/upgrade-in-flight.ts';
 import { createNativeProcessService } from '../src/core/native-process-service.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../src/core/sqlite-migrations.ts';
 
@@ -35,10 +38,17 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function home(): Record<string, string> {
+/**
+ * A home with a worker upgrade in flight unless `upgrade: false`: the boot
+ * copies a store, and moves retired state aside, only then. The upgrade's own
+ * copy is of a file outside the tests' view, made an hour ago.
+ */
+function home(options: { upgrade?: boolean } = {}): Record<string, string> {
   const root = mkdtempSync(join(tmpdir(), 'olympus-boot-progress-'));
   roots.push(root);
-  return { HOME: root, XDG_DATA_HOME: join(root, '.local', 'share') };
+  const env = { HOME: root, XDG_DATA_HOME: join(root, '.local', 'share') };
+  if (options.upgrade !== false) upgradeInFlight(env);
+  return env;
 }
 
 const HOUR = 60 * 60 * 1000;
@@ -156,7 +166,8 @@ describe('schema updates back up the store first', () => {
     db.close();
     writeFileSync(join(env.HOME!, 'store.sqlite.pre-schema-x.bak'), 'not a copy');
     expect(preSchemaBackupsOf(path)).toEqual([`${path}.pre-schema-1.bak`]);
-    expect(removeSchemaBackupsSince(env, 0)).toBe(1);
+    // This store's copy and the in-flight upgrade's own.
+    expect(removeSchemaBackupsSince(env, 0)).toBe(2);
     expect(preSchemaBackupsOf(path)).toEqual([]);
   });
 
@@ -178,7 +189,7 @@ describe('schema updates back up the store first', () => {
   });
 
   test('a copy a crash left part way is found by a delete and removed by a forget', () => {
-    const env = home();
+    const env = home({ upgrade: false });
     const path = join(env.HOME!, 'shared.sqlite');
     writeFileSync(path, '');
     const partial = `${path}.pre-schema-4.bak.12345.partial`;
@@ -207,6 +218,47 @@ describe('schema updates back up the store first', () => {
     const restored = new Database(path, { readonly: true });
     expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
     restored.close();
+  });
+});
+
+// rc.13's success leg (14 Nov): stores the new engine first opened after the
+// upgrade committed (the sniffers, the retired pre-filter) each left a copy
+// that nothing would ever restore or remove. Whatever store it is, the boot
+// copies only while a worker upgrade is in flight.
+describe('with no worker upgrade in flight the boot leaves no copy', () => {
+  test('a pending schema update takes no copy', () => {
+    const env = home({ upgrade: false });
+    const { path, db } = storeAtVersion1(env);
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
+    expect(readSqliteSchemaVersion(db, 'fixture')).toBe(2);
+    db.close();
+    expect(preSchemaBackupsOf(path)).toEqual([]);
+  });
+
+  test('retired state is removed, not moved aside', () => {
+    const env = home({ upgrade: false });
+    const ledger = join(env.HOME!, 'retired.sqlite');
+    writeFileSync(ledger, 'old');
+    expect(retireStatePath(env, 'retired', ledger)).toBe(true);
+    expect(existsSync(ledger)).toBe(false);
+    expect(existsSync(retiredStateBackupPath(ledger))).toBe(false);
+  });
+
+  test('a commit removes every recorded copy, one an earlier version left included', () => {
+    const env = home();
+    const { path, db } = storeAtVersion1(env);
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
+    db.close();
+    const left = join(env.HOME!, 'left.sqlite');
+    writeFileSync(left, '');
+    writeFileSync(`${left}.pre-schema-6.bak`, 'old');
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    utimesSync(`${left}.pre-schema-6.bak`, weekAgo, weekAgo);
+    recordSchemaBackup(env, { storeId: 'left', dbPath: left, backupPath: `${left}.pre-schema-6.bak` });
+    expect(removeRecordedSchemaBackups(env)).toBe(3);
+    expect(preSchemaBackupsOf(path)).toEqual([]);
+    expect(preSchemaBackupsOf(left)).toEqual([]);
+    expect(existsSync(join(env.HOME!, 'other', `upgraded.sqlite${UPGRADE_COPY_SUFFIX}`))).toBe(false);
   });
 });
 

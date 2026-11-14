@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { afterEach, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { upgradeInFlight } from './helpers/upgrade-in-flight.ts';
 import { restoreSchemaBackupsSince, retiredStateBackupPath } from '../src/core/boot-progress.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -100,6 +101,8 @@ test('worker moves both retired model locations and the retired ledger aside onc
   walOnlyLedger(retired[0]!.ledger, 'kept-in-wal');
   writeFileSync(retired[1]!.ledger, 'old state');
   const startedAt = Date.now() - 1_000;
+  // A worker upgrade is in flight: only then is retired state moved aside rather than removed.
+  upgradeInFlight(process.env, f.dir);
   const installed = new InstalledTierClassification({ env: {} });
   const service = new TierSnifferService({ installed, classificationLedgerPath, lane: BUILT_IN_SNIFFER_LANE,
     stores: () => [{ dbPath: join(f.dir, 'items.sqlite') }], modelAvailable: () => false,

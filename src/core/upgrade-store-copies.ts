@@ -15,12 +15,12 @@
 
 import { spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, statSync, utimesSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { recordSchemaBackup, removeAbandonedBackupCopies } from './boot-progress.ts';
+import { dirname, join, relative } from 'node:path';
+import { recordSchemaBackup, removeAbandonedBackupCopies, UPGRADE_COPY_SUFFIX } from './boot-progress.ts';
 import { olympusDataRoot, type LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
 
-export const UPGRADE_COPY_SUFFIX = '.pre-schema-upgrade.bak';
+export { UPGRADE_COPY_SUFFIX };
 /** Folders under the data root that hold no store: model files and a backup being packed. */
 const SKIPPED_FOLDERS = new Set(['models', 'backup-staging']);
 /** Room kept free on the disk beyond the copies themselves. */
@@ -92,7 +92,7 @@ export function copyStoresBeforeUpgrade(env: LayoutEnv, options: {
       removeAbandonedBackupCopies(upgradeCopyPath(file));
       rmSync(partial, { force: true });
       // Recorded before the copy starts, so a delete or forget finds one a crash left part way.
-      recordSchemaBackup(env, { storeId: 'upgrade', dbPath: file, backupPath: upgradeCopyPath(file) });
+      recordSchemaBackup(env, { storeId: relative(olympusDataRoot(env), file), dbPath: file, backupPath: upgradeCopyPath(file) });
     }
     copyUnderWriteLock(pairs, options.bunBin);
     for (const [file, partial] of pairs) {

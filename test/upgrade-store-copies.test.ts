@@ -78,7 +78,7 @@ describe('the upgrade copies the stores before the new version starts', () => {
     db.close();
     expect(existsSync(`${store}.pre-schema-1.bak`)).toBe(false);
     expect(lines.at(-1)).toMatch(/copied by the upgrade, migrated in \d+ ms$/);
-    expect(restoreSchemaBackupsSince(env, since)).toEqual(['upgrade']);
+    expect(restoreSchemaBackupsSince(env, since)).toEqual(['tier-ledger.sqlite']);
     const back = new Database(store, { readonly: true });
     expect(readSqliteSchemaVersion(back, 'fixture')).toBe(1);
     expect((back.query('SELECT COUNT(*) AS n FROM kept').get() as { n: number }).n).toBe(4);

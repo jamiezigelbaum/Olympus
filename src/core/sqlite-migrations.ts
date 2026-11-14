@@ -1,7 +1,7 @@
 import type { Database } from 'bun:sqlite';
 import { chmodSync, closeSync, existsSync, openSync, renameSync, rmSync, statfsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { preSchemaBackupPath, recordSchemaBackup, removeAbandonedBackupCopies, reportBootStep, type BootStepEvent } from './boot-progress.ts';
+import { preSchemaBackupPath, recordSchemaBackup, removeAbandonedBackupCopies, reportBootStep, workerUpgradeInFlight, type BootStepEvent } from './boot-progress.ts';
 import { setEngineStep } from './engine-heartbeat.ts';
 import { upgradeCopyExists } from './upgrade-store-copies.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
@@ -197,7 +197,11 @@ export function runSqliteMigrations(
     const compatibleWithPrevious = currentVersion > 0
       && storedCompatibleVersion(db, storeId) !== undefined
       && ordered.filter((migration) => migration.version > currentVersion).every(isAdditiveMigration);
+    // With no worker upgrade in flight nothing would ever put a copy back or
+    // remove it, so none is taken (workerUpgradeInFlight). Within one, only a
+    // store the upgrade did not copy is copied here, and the step says so.
     const backupMs = storeOnDisk(db) && !upgradeCopied && !compatibleWithPrevious
+      && workerUpgradeInFlight(env)
       && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId))
       ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes)
       : undefined;

@@ -10247,6 +10247,10 @@ function processAlive(pid) {
 function bootProgressPath(env) {
   return sharedDataPath("boot-progress", env);
 }
+var UPGRADE_COPY_SUFFIX = ".pre-schema-upgrade.bak";
+function workerUpgradeInFlight(env) {
+  return schemaBackups(env).some((entry) => entry.backupPath.endsWith(UPGRADE_COPY_SUFFIX) && existsSync11(entry.backupPath));
+}
 function preSchemaBackupPath(dbPath, version) {
   return `${dbPath}.pre-schema-${version}.bak`;
 }
@@ -10278,6 +10282,27 @@ function recordSchemaBackup(env, entry) {
   mkdirSync8(dirname13(path), { recursive: true, mode: 448 });
   appendFileSync(path, `${JSON.stringify(entry)}
 `, { mode: 384 });
+}
+function schemaBackups(env) {
+  let text;
+  try {
+    text = readFileSync14(sharedDataPath("schema-backups", env), "utf8");
+  } catch {
+    return [];
+  }
+  const entries = new Map;
+  for (const line of text.split(`
+`)) {
+    if (!line.trim())
+      continue;
+    try {
+      const entry = JSON.parse(line);
+      if (typeof entry.storeId === "string" && typeof entry.dbPath === "string" && typeof entry.backupPath === "string") {
+        entries.set(entry.backupPath, entry);
+      }
+    } catch {}
+  }
+  return [...entries.values()];
 }
 
 // src/core/engine-heartbeat.ts
@@ -10328,7 +10353,6 @@ var STARTUP_CAP_BASE_MS = 30 * 60000;
 
 // src/core/upgrade-store-copies.ts
 import { chmodSync as chmodSync3, closeSync as closeSync7, fsyncSync as fsyncSync2, lstatSync as lstatSync7, openSync as openSync7, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9, utimesSync as utimesSync2 } from "node:fs";
-var UPGRADE_COPY_SUFFIX = ".pre-schema-upgrade.bak";
 var SKIPPED_FOLDERS = new Set(["models", "backup-staging"]);
 var SPACE_MARGIN_BYTES = 1024 ** 3;
 function upgradeCopyPath(dbPath) {
@@ -10406,7 +10430,7 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
       log(`${label}: updating`);
     const upgradeCopied = storeOnDisk(db) && upgradeCopyExists(db.filename);
     const compatibleWithPrevious = currentVersion > 0 && storedCompatibleVersion(db, storeId) !== undefined && ordered.filter((migration) => migration.version > currentVersion).every(isAdditiveMigration);
-    const backupMs = storeOnDisk(db) && !upgradeCopied && !compatibleWithPrevious && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId)) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
+    const backupMs = storeOnDisk(db) && !upgradeCopied && !compatibleWithPrevious && workerUpgradeInFlight(env) && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId)) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
     report({ phase: "migrating", storeId });
     setEngineStep(`updating ${storeId}`);
     const migrateStarted = performance.now();

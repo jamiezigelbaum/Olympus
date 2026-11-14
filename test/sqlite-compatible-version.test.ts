@@ -7,6 +7,7 @@ import { Database } from 'bun:sqlite';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { upgradeInFlight } from './helpers/upgrade-in-flight.ts';
 import { finishBootProgress } from '../src/core/boot-progress.ts';
 import {
   additiveMigration,
@@ -31,7 +32,9 @@ afterEach(() => {
 function home(): Record<string, string> {
   const root = mkdtempSync(join(tmpdir(), 'olympus-compatible-version-'));
   roots.push(root);
-  return { HOME: root, XDG_DATA_HOME: join(root, '.local', 'share') };
+  const env = { HOME: root, XDG_DATA_HOME: join(root, '.local', 'share') };
+  upgradeInFlight(env);
+  return env;
 }
 
 const CREATE: SqliteMigration = { version: 1, name: 'create', up: (db) => db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, body TEXT)') };

@@ -19888,6 +19888,9 @@ function processAlive(pid) {
 function bootProgressPath(env) {
   return sharedDataPath("boot-progress", env);
 }
+function workerUpgradeInFlight(env) {
+  return schemaBackups(env).some((entry) => entry.backupPath.endsWith(UPGRADE_COPY_SUFFIX) && existsSync20(entry.backupPath));
+}
 function preSchemaBackupPath(dbPath, version) {
   return `${dbPath}.pre-schema-${version}.bak`;
 }
@@ -19897,6 +19900,10 @@ function retiredStateBackupPath(path) {
 function retireStatePath(env, storeId, path) {
   if (!existsSync20(path))
     return false;
+  if (!workerUpgradeInFlight(env)) {
+    rmSync9(path, { recursive: true, force: true });
+    return true;
+  }
   const backup = retiredStateBackupPath(path);
   rmSync9(backup, { recursive: true, force: true });
   recordSchemaBackup(env, { storeId, dbPath: path, backupPath: backup });
@@ -19990,8 +19997,8 @@ function restoreSchemaBackupsSince(env, sinceMs) {
   pruneSchemaBackupRecord(env);
   return restored;
 }
-function removeSchemaBackupsSince(env, sinceMs) {
-  const removed = backupsSince(env, sinceMs);
+function removeRecordedSchemaBackups(env) {
+  const removed = schemaBackups(env).filter((entry) => existsSync20(entry.backupPath));
   for (const entry of removed)
     rmSync9(entry.backupPath, { recursive: true, force: true });
   removeAbandonedCopiesOfRecorded(env);
@@ -20023,7 +20030,7 @@ function pruneSchemaBackupRecord(env) {
 `) + `
 `);
 }
-var BOOT_PROGRESS_SCHEMA = "olympus.boot-progress.v1", WRITE_INTERVAL_MS = 1000, current2, front;
+var BOOT_PROGRESS_SCHEMA = "olympus.boot-progress.v1", WRITE_INTERVAL_MS = 1000, current2, front, UPGRADE_COPY_SUFFIX = ".pre-schema-upgrade.bak";
 var init_boot_progress = __esm(() => {
   init_atomic_file();
   init_olympus_layout();
@@ -20153,7 +20160,7 @@ self.onmessage = ({ data }) => {
 // src/core/upgrade-store-copies.ts
 import { spawnSync as spawnSync9 } from "node:child_process";
 import { chmodSync as chmodSync5, closeSync as closeSync11, fsyncSync as fsyncSync2, lstatSync as lstatSync15, openSync as openSync11, readdirSync as readdirSync5, readFileSync as readFileSync28, readlinkSync, renameSync as renameSync5, rmSync as rmSync10, statfsSync, statSync as statSync12, utimesSync as utimesSync2 } from "node:fs";
-import { dirname as dirname27, join as join33 } from "node:path";
+import { dirname as dirname27, join as join33, relative as relative7 } from "node:path";
 function upgradeCopyPath(dbPath) {
   return `${dbPath}${UPGRADE_COPY_SUFFIX}`;
 }
@@ -20213,7 +20220,7 @@ function copyStoresBeforeUpgrade(env, options = {}) {
     for (const [file, partial] of pairs) {
       removeAbandonedBackupCopies(upgradeCopyPath(file));
       rmSync10(partial, { force: true });
-      recordSchemaBackup(env, { storeId: "upgrade", dbPath: file, backupPath: upgradeCopyPath(file) });
+      recordSchemaBackup(env, { storeId: relative7(olympusDataRoot(env), file), dbPath: file, backupPath: upgradeCopyPath(file) });
     }
     copyUnderWriteLock(pairs, options.bunBin);
     for (const [file, partial] of pairs) {
@@ -20324,7 +20331,7 @@ function defaultFreeBytes(directory) {
 function formatBytes(bytes) {
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
-var UPGRADE_COPY_SUFFIX = ".pre-schema-upgrade.bak", SKIPPED_FOLDERS, SPACE_MARGIN_BYTES;
+var SKIPPED_FOLDERS, SPACE_MARGIN_BYTES;
 var init_upgrade_store_copies = __esm(() => {
   init_boot_progress();
   init_olympus_layout();
@@ -20392,7 +20399,7 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
       log(`${label}: updating`);
     const upgradeCopied = storeOnDisk(db) && upgradeCopyExists(db.filename);
     const compatibleWithPrevious = currentVersion > 0 && storedCompatibleVersion(db, storeId) !== undefined && ordered.filter((migration) => migration.version > currentVersion).every(isAdditiveMigration);
-    const backupMs = storeOnDisk(db) && !upgradeCopied && !compatibleWithPrevious && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId)) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
+    const backupMs = storeOnDisk(db) && !upgradeCopied && !compatibleWithPrevious && workerUpgradeInFlight(env) && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId)) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
     report({ phase: "migrating", storeId });
     setEngineStep(`updating ${storeId}`);
     const migrateStarted = performance.now();
@@ -34307,7 +34314,7 @@ var init_remote_access = __esm(() => {
 
 // src/core/store-identity.ts
 import { existsSync as existsSync29, realpathSync as realpathSync9, statSync as statSync17 } from "node:fs";
-import { basename as basename7, dirname as dirname37, isAbsolute as isAbsolute14, join as join39, relative as relative7, resolve as resolve11, sep as sep9 } from "node:path";
+import { basename as basename7, dirname as dirname37, isAbsolute as isAbsolute14, join as join39, relative as relative8, resolve as resolve11, sep as sep9 } from "node:path";
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
     return;
@@ -34441,7 +34448,7 @@ function storePlacementView(env = process.env) {
   };
   const folderPlace = (path) => {
     for (const folders of folderRoots()) {
-      const inside = relative7(folders, path);
+      const inside = relative8(folders, path);
       if (inside.startsWith("..") || isAbsolute14(inside))
         continue;
       const [sourceId, slot, stores, file, ...rest] = inside.split(sep9);
@@ -66063,7 +66070,7 @@ var init_continuation_cache = __esm(() => {
 
 // src/workers/archive-import/forget.ts
 import { existsSync as existsSync51, realpathSync as realpathSync12, rmSync as rmSync19 } from "node:fs";
-import { join as join59, relative as relative8, sep as sep11 } from "node:path";
+import { join as join59, relative as relative9, sep as sep11 } from "node:path";
 function forgetSourceArchiveImports(env, sourceIds, options = {}) {
   const path = defaultArchiveImportStatePath(env);
   if (!existsSync51(path))
@@ -66100,7 +66107,7 @@ function stagingCopiesOf(statePath, records) {
     return copies;
   }
   for (const record of records) {
-    const inside = relative8(root, record.root_path);
+    const inside = relative9(root, record.root_path);
     if (inside === "" || inside.startsWith("..") || inside.startsWith(sep11))
       continue;
     copies.add(join59(root, inside.split(sep11)[0]));
@@ -96935,7 +96942,7 @@ var init_on_demand_read = () => {};
 // src/workers/file-extraction/spool.ts
 import { createHash as createHash66 } from "node:crypto";
 import { chmodSync as chmodSync24, existsSync as existsSync62, mkdirSync as mkdirSync41, readdirSync as readdirSync14, rmSync as rmSync25, rmdirSync as rmdirSync5, statSync as statSync30 } from "node:fs";
-import { dirname as dirname70, isAbsolute as isAbsolute26, join as join78, relative as relative9, sep as sep14 } from "node:path";
+import { dirname as dirname70, isAbsolute as isAbsolute26, join as join78, relative as relative10, sep as sep14 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
   return join78(root, corpusFolder(owner.corpusId), accountFolder2(owner.accountScope));
 }
@@ -97106,7 +97113,7 @@ function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
     mkdirSync41(ownerDir, { recursive: true, mode: 448 });
     return;
   }
-  const levels = relative9(anchor, ownerDir);
+  const levels = relative10(anchor, ownerDir);
   if (levels === "" || levels.startsWith("..") || isAbsolute26(levels)) {
     throw new Error("The extraction spool folder is not inside its account folder.");
   }
@@ -97145,7 +97152,7 @@ var init_types2 = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile5, realpath, stat as stat3 } from "node:fs/promises";
-import { relative as relative10, resolve as resolve18, sep as sep15 } from "node:path";
+import { relative as relative11, resolve as resolve18, sep as sep15 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -97296,7 +97303,7 @@ class DropboxExtractionSource {
     if (!rootRealPath)
       return;
     const candidatePath = resolve18(rootRealPath, relativePath);
-    const relativeToRoot = relative10(rootRealPath, candidatePath);
+    const relativeToRoot = relative11(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep15}`)) {
       return;
     }
@@ -97922,7 +97929,7 @@ var init_connector_source = __esm(() => {
 
 // src/workers/whatsapp/child-media.ts
 import { closeSync as closeSync24, constants as constants9, fstatSync as fstatSync5, openSync as openSync24, readSync as readSync7, realpathSync as realpathSync15, rmSync as rmSync27, statSync as statSync31 } from "node:fs";
-import { isAbsolute as isAbsolute27, join as join80, relative as relative11, resolve as resolve20 } from "node:path";
+import { isAbsolute as isAbsolute27, join as join80, relative as relative12, resolve as resolve20 } from "node:path";
 function whatsAppMediaFileLocator(path) {
   return `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
 }
@@ -98021,7 +98028,7 @@ function insideAny(real, roots) {
     } catch {
       return false;
     }
-    const from = relative11(base, real);
+    const from = relative12(base, real);
     return from !== "" && !from.startsWith("..") && !isAbsolute27(from);
   });
 }
@@ -98099,7 +98106,7 @@ var init_child_media = __esm(() => {
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile6, realpath as realpath2, stat as stat4 } from "node:fs/promises";
 import { closeSync as closeSync25, constants as constants10, openSync as openSync25, readSync as readSync8, rmSync as rmSync28 } from "node:fs";
-import { basename as basename13, join as join81, relative as relative12, resolve as resolve21, sep as sep17 } from "node:path";
+import { basename as basename13, join as join81, relative as relative13, resolve as resolve21, sep as sep17 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -98236,7 +98243,7 @@ class WhatsAppExtractionSource {
       } catch {
         continue;
       }
-      const fromRoot = relative12(root, path);
+      const fromRoot = relative13(root, path);
       if (fromRoot === "" || !fromRoot.startsWith(`..${sep17}`) && fromRoot !== "..")
         return true;
     }
@@ -99120,7 +99127,7 @@ var init_spool_reader = __esm(() => {
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { createHash as createHash68 } from "node:crypto";
 import { closeSync as closeSync27, existsSync as existsSync64, fsyncSync as fsyncSync5, lstatSync as lstatSync33, openSync as openSync27, readFileSync as readFileSync52, readdirSync as readdirSync15, realpathSync as realpathSync16, rmSync as rmSync29, statSync as statSync33 } from "node:fs";
-import { basename as basename14, dirname as dirname71, isAbsolute as isAbsolute28, join as join85, relative as relative13 } from "node:path";
+import { basename as basename14, dirname as dirname71, isAbsolute as isAbsolute28, join as join85, relative as relative14 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
     malformedLines: 0,
@@ -100160,7 +100167,7 @@ function deleteSavedMedia(mediaPath, mediaRoots) {
   if (!real)
     return;
   const inside = mediaRoots.some((root) => {
-    const from = relative13(root, real);
+    const from = relative14(root, real);
     return from !== "" && !from.startsWith("..") && !isAbsolute28(from);
   });
   if (!inside)
@@ -100855,7 +100862,7 @@ var init_media_fetch = __esm(() => {
 
 // src/workers/whatsapp/store-sync.ts
 import { readdirSync as readdirSync17 } from "node:fs";
-import { isAbsolute as isAbsolute29, join as join87, relative as relative14 } from "node:path";
+import { isAbsolute as isAbsolute29, join as join87, relative as relative15 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
   return resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp", env);
 }
@@ -100872,7 +100879,7 @@ function defaultWhatsAppMediaRoots(env = process.env) {
   const root = resolvedRawPath(WHATSAPP_SOURCE_ID, "whatsapp-media-root", env);
   const state = defaultWhatsAppStateDir(env);
   const beside = [join87(state, "media", "images"), join87(state, "media", "video"), defaultWhatsAppFetchedMediaDir(env)].filter((dir) => {
-    const from = relative14(root, dir);
+    const from = relative15(root, dir);
     return from === "" || from.startsWith("..") || isAbsolute29(from);
   });
   return [root, ...beside];
@@ -119457,7 +119464,7 @@ import {
   statSync as statSync35
 } from "node:fs";
 import { homedir as homedir29 } from "node:os";
-import { basename as basename15, dirname as dirname85, join as join104, relative as relative15, resolve as resolve22, sep as sep19 } from "node:path";
+import { basename as basename15, dirname as dirname85, join as join104, relative as relative16, resolve as resolve22, sep as sep19 } from "node:path";
 import { rm as rm10 } from "node:fs/promises";
 import { Database as Database27 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
@@ -119947,7 +119954,7 @@ function moveAccountFolderToTrash(folder, env, options) {
   try {
     mkdirSync51(trash, { recursive: true, mode: 448 });
     const dataRoot = olympusDataRoot(env);
-    if (lstatSync37(trash).isDirectory() && canonicalPath2(trash) === join104(canonicalPath2(dataRoot), relative15(resolve22(dataRoot), resolve22(trash)))) {
+    if (lstatSync37(trash).isDirectory() && canonicalPath2(trash) === join104(canonicalPath2(dataRoot), relative16(resolve22(dataRoot), resolve22(trash)))) {
       renameSync16(folder, accountTrashEntry(randomUUID26(), env));
       moved = true;
     }
@@ -120245,7 +120252,7 @@ function rmTargetKeepingOwnerLock(target, lockPath) {
     rmSync33(target.path, { recursive: target.allowRecursive, force: true });
     return;
   }
-  const keep = relative15(root, lock).split(sep19);
+  const keep = relative16(root, lock).split(sep19);
   const clear = (directory, depth) => {
     const inLockDirectory = depth === keep.length - 1;
     for (const name of readdirSync20(directory)) {
@@ -120558,7 +120565,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   return {
     sourceId,
     role,
-    relativePath: relative15(resolve22(exportRoot), resolve22(path)),
+    relativePath: relative16(resolve22(exportRoot), resolve22(path)),
     bytes: stats.size,
     sha256: sha256File3(path)
   };
@@ -120734,7 +120741,7 @@ function assertAccountFolderOwned(target) {
   }
   if (!lstatSync37(target.path).isDirectory())
     refuse("because it is not a folder (it may be a symbolic link)");
-  if (canonicalPath2(lexical) !== join104(canonicalPath2(owned), relative15(owned, lexical))) {
+  if (canonicalPath2(lexical) !== join104(canonicalPath2(owned), relative16(owned, lexical))) {
     refuse("because it, or a folder above it, is a symbolic link");
   }
 }
@@ -120807,7 +120814,7 @@ function assertRawStateTargetsContained(targets, context, selectedSource) {
       }
       continue;
     }
-    const expectedReal = join104(root.real, relative15(root.lexical, lexical));
+    const expectedReal = join104(root.real, relative16(root.lexical, lexical));
     if (canonicalPath2(lexical) !== expectedReal)
       refuse(target.path, "because it, or a directory above it, is a symbolic link");
   }
@@ -120887,7 +120894,7 @@ function assertSourcesFolderTargetsUnlinked(targets, context) {
     const lexical = resolve22(target.path);
     if (!isStrictlyInside(lexical, sources))
       continue;
-    if (canonicalPath2(lexical) !== join104(ownedReal, relative15(owned, lexical))) {
+    if (canonicalPath2(lexical) !== join104(ownedReal, relative16(owned, lexical))) {
       throw new OperationError("invalid_params", `Refusing to delete inside the account folders because it, or a folder above it, is a symbolic link: ${target.path}`, "Check the Olympus data folder, then remove what the link points at by hand. Nothing was deleted.");
     }
   }
@@ -129655,7 +129662,7 @@ var init_engine_service = __esm(() => {
 import { spawnSync as spawnSync15 } from "node:child_process";
 import { chmodSync as chmodSync37, closeSync as closeSync31, constants as constants15, copyFileSync as copyFileSync3, existsSync as existsSync82, fstatSync as fstatSync6, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync41, linkSync as linkSync3, mkdirSync as mkdirSync55, openSync as openSync30, readFileSync as readFileSync69, readlinkSync as readlinkSync5, readdirSync as readdirSync26, realpathSync as realpathSync21, renameSync as renameSync19, rmSync as rmSync38, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync19 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
-import { basename as basename17, dirname as dirname92, join as join113, relative as relative16, resolve as resolve23, sep as sep21 } from "node:path";
+import { basename as basename17, dirname as dirname92, join as join113, relative as relative17, resolve as resolve23, sep as sep21 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
 import { randomBytes as randomBytes20, createHash as createHash82, randomUUID as randomUUID29 } from "node:crypto";
 function linuxEngineExec(command, args) {
@@ -130029,7 +130036,7 @@ function linuxMachineArtifactDigest(path, kind) {
   const walk = (dir) => {
     for (const name of readdirSync26(dir).sort()) {
       const full = join113(dir, name);
-      const rel = relative16(root, full).split(sep21).join("/");
+      const rel = relative17(root, full).split(sep21).join("/");
       const info = lstatSync41(full);
       const entryKind = info.isDirectory() ? "directory" : info.isFile() ? "file" : info.isSymbolicLink() ? "symlink" : undefined;
       if (!entryKind || info.isFile() && info.nlink !== 1)
@@ -130432,7 +130439,7 @@ function assertLegacySettingOverrides(layout, env) {
     });
     if (!moved)
       continue;
-    const destination = join113(layout.configDir, relative16(join113(layout.home, ".olympus"), selected));
+    const destination = join113(layout.configDir, relative17(join113(layout.home, ".olympus"), selected));
     throw new Error(`Set ${key} to ${destination} in ${layout.workerEnvPath} and in any launch environment that sets it, then retry the upgrade. Nothing was changed.`);
   }
 }
@@ -222070,7 +222077,7 @@ var init_remote_access_control = __esm(() => {
 
 // src/core/source-account-migration.ts
 import { linkSync as linkSync5, lstatSync as lstatSync54, mkdirSync as mkdirSync72, readdirSync as readdirSync36, realpathSync as realpathSync30, renameSync as renameSync28, rmdirSync as rmdirSync8, statSync as statSync51, unlinkSync as unlinkSync6 } from "node:fs";
-import { basename as basename23, dirname as dirname116, isAbsolute as isAbsolute41, join as join149, relative as relative17, resolve as resolve31, sep as sep24 } from "node:path";
+import { basename as basename23, dirname as dirname116, isAbsolute as isAbsolute41, join as join149, relative as relative18, resolve as resolve31, sep as sep24 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value === "" || MIGRATION_ON.includes(value);
@@ -222142,7 +222149,7 @@ function lookAt(path) {
 }
 function rootOf(ctx, path) {
   for (const { tag, root } of ctx.roots) {
-    const below = relative17(root, path);
+    const below = relative18(root, path);
     if (below === ".." || below.startsWith(`..${sep24}`) || isAbsolute41(below))
       continue;
     return { tag, root, below };
@@ -222416,7 +222423,7 @@ function makeFolders(ctx, moves) {
         throw Object.assign(new Error("link"), { code: "ELOOP" });
       destinations.add(destination);
       let current = real;
-      for (const part of relative17(ctx.root, destination).split(sep24).filter(Boolean)) {
+      for (const part of relative18(ctx.root, destination).split(sep24).filter(Boolean)) {
         current = join149(current, part);
         const found = lookAt(current);
         if (found.kind === "dir")
@@ -253961,7 +253968,7 @@ function rolledBackUpgradeError(options, error) {
   }
   const notes = [];
   if (rollback.restored.length > 0)
-    notes.push(`Stores put back as they were before the update: ${rollback.restored.join(", ")}.`);
+    notes.push(`Stores put back as they were before the update: ${[...new Set(rollback.restored)].join(", ")}.`);
   if (rollback.reactivated) {
     const health = previousWorkerHealth(options);
     if (!health.healthy) {
@@ -254221,7 +254228,7 @@ function removeUpgradeBackups(options) {
   if (!transaction)
     return;
   try {
-    removeSchemaBackupsSince(lifecycleEnv2(options), Date.parse(transaction.started_at));
+    removeRecordedSchemaBackups(lifecycleEnv2(options));
   } catch {}
 }
 function lifecycleEnv2(options) {

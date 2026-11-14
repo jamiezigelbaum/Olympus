@@ -12,7 +12,7 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
-import { bootProgressLine, readBootProgress, readFrontProgress, removeSchemaBackupsSince, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
+import { bootProgressLine, readBootProgress, readFrontProgress, removeRecordedSchemaBackups, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, startupCapMs, type EngineHeartbeat } from './engine-heartbeat.ts';
 import { copyStoresBeforeUpgrade, olympusStoreBytes } from './upgrade-store-copies.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
@@ -441,7 +441,7 @@ function rolledBackUpgradeError(
     );
   }
   const notes: string[] = [];
-  if (rollback.restored.length > 0) notes.push(`Stores put back as they were before the update: ${rollback.restored.join(', ')}.`);
+  if (rollback.restored.length > 0) notes.push(`Stores put back as they were before the update: ${[...new Set(rollback.restored)].join(', ')}.`);
   if (rollback.reactivated) {
     const health = previousWorkerHealth(options);
     if (!health.healthy) {
@@ -802,11 +802,15 @@ function copyStoresForUpgrade(
   }
 }
 
+/**
+ * The new version is healthy and committed: every recorded copy goes, this
+ * upgrade's and any an earlier version left, since nothing restores them now.
+ */
 function removeUpgradeBackups(options: WorkerLifecycleOptions & { homeDir: string }): void {
   const transaction = readTransaction(options);
   if (!transaction) return;
   try {
-    removeSchemaBackupsSince(lifecycleEnv(options), Date.parse(transaction.started_at));
+    removeRecordedSchemaBackups(lifecycleEnv(options));
   } catch {
     // A copy left behind costs disk, not correctness.
   }

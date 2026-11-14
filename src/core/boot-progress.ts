@@ -245,6 +245,22 @@ function bootProgressPath(env: LayoutEnv): string {
   return sharedDataPath('boot-progress', env);
 }
 
+/** The copy `olympus worker upgrade` takes of each store before the new version starts (upgrade-store-copies.ts). */
+export const UPGRADE_COPY_SUFFIX = '.pre-schema-upgrade.bak';
+
+/**
+ * Whether a worker upgrade is in flight: its copies are on disk, recorded,
+ * until it commits or rolls back. Only then can a copy the boot takes be put
+ * back by anything; otherwise (the upgrade committed, or the version came by
+ * another way) a boot copy is never restored and never removed (rc.13's
+ * success leg: stores the engine first opened after the commit each left a
+ * backup). So the boot copies, and moves retired state aside, only while one
+ * is in flight.
+ */
+export function workerUpgradeInFlight(env: LayoutEnv): boolean {
+  return schemaBackups(env).some((entry) => entry.backupPath.endsWith(UPGRADE_COPY_SUFFIX) && existsSync(entry.backupPath));
+}
+
 /** `<db file>.pre-schema-<version>.bak`: a store as it was before its schema update. */
 export function preSchemaBackupPath(dbPath: string, version: number): string {
   return `${dbPath}.pre-schema-${version}.bak`;
@@ -266,6 +282,11 @@ export function retiredStateBackupPath(path: string): string {
  */
 export function retireStatePath(env: LayoutEnv, storeId: string, path: string): boolean {
   if (!existsSync(path)) return false;
+  // No upgrade in flight to put it back: it goes now (workerUpgradeInFlight).
+  if (!workerUpgradeInFlight(env)) {
+    rmSync(path, { recursive: true, force: true });
+    return true;
+  }
   const backup = retiredStateBackupPath(path);
   // A copy an earlier start left is older than the state here, which a
   // version that still used it wrote since: the newer state is the one kept.
@@ -388,6 +409,18 @@ export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): stri
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return restored;
+}
+
+/**
+ * Removes every recorded backup, whenever it was taken: the committed
+ * upgrade's own and any an earlier version left, since nothing restores them.
+ */
+export function removeRecordedSchemaBackups(env: LayoutEnv): number {
+  const removed = schemaBackups(env).filter((entry) => existsSync(entry.backupPath));
+  for (const entry of removed) rmSync(entry.backupPath, { recursive: true, force: true });
+  removeAbandonedCopiesOfRecorded(env);
+  pruneSchemaBackupRecord(env);
+  return removed.length;
 }
 
 /** Removes the backups taken at or after `sinceMs`: the update they guarded succeeded. */

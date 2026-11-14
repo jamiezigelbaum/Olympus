@@ -6384,7 +6384,7 @@ self.onmessage = ({ data }) => {
 
 // src/core/upgrade-store-copies.ts
 import { chmodSync as chmodSync3, closeSync as closeSync4, fsyncSync as fsyncSync2, lstatSync as lstatSync7, openSync as openSync4, readdirSync as readdirSync2, readFileSync as readFileSync14, readlinkSync, renameSync as renameSync4, rmSync as rmSync5, statfsSync, statSync as statSync6, utimesSync } from "node:fs";
-import { dirname as dirname14, join as join18 } from "node:path";
+import { dirname as dirname14, join as join18, relative as relative4 } from "node:path";
 function olympusStoreFiles(env) {
   const files = [];
   const walk = (directory, top) => {
@@ -9667,7 +9667,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/core/worker-service.ts
-import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute17, join as join32, relative as relative4, sep as sep4 } from "node:path";
+import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute17, join as join32, relative as relative5, sep as sep4 } from "node:path";
 function workerServicePaths(platform, homeDir, env = {}) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform === "darwin") {
@@ -25547,7 +25547,7 @@ init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { chmodSync as chmodSync9, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync14, fstatSync as fstatSync2, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync15, linkSync as linkSync2, mkdirSync as mkdirSync16, openSync as openSync6, readFileSync as readFileSync34, readlinkSync as readlinkSync5, readdirSync as readdirSync8, realpathSync as realpathSync7, renameSync as renameSync7, rmSync as rmSync12, rmdirSync, statSync as statSync18, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
-import { basename as basename6, dirname as dirname29, join as join38, relative as relative5, resolve as resolve9, sep as sep6 } from "node:path";
+import { basename as basename6, dirname as dirname29, join as join38, relative as relative6, resolve as resolve9, sep as sep6 } from "node:path";
 init_linux_engine_layout();
 init_atomic_file();
 init_linux_engine_layout();

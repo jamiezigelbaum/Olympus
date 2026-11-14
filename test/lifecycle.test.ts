@@ -18,6 +18,7 @@ import { describe, expect, setSystemTime, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { readSqliteSchemaVersion, runSqliteMigrations } from '../src/core/sqlite-migrations.ts';
 import { retiredStateBackupPath, retireStatePath } from '../src/core/boot-progress.ts';
+import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import {
   installManagedWorkerFiles,
   lifecycleRecoveryPlan,
@@ -931,7 +932,9 @@ describe('versioned Olympus worker lifecycle', () => {
     const manager = linuxManager('active');
     // The worker's environment file moves its data root: the rollback must look there.
     const env = { HOME: home, XDG_DATA_HOME: join(home, 'worker-data') };
-    const dbPath = join(home, 'ledger.sqlite');
+    // Under the data root, where the upgrade copies every store.
+    const dbPath = join(olympusDataRoot(env), 'ledger.sqlite');
+    mkdirSync(olympusDataRoot(env), { recursive: true });
     const migrations = [
       { version: 1, name: 'create', up: (db: Database) => db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY)') },
       { version: 2, name: 'widen', up: (db: Database) => db.exec('ALTER TABLE items ADD COLUMN tier TEXT') },
@@ -943,6 +946,7 @@ describe('versioned Olympus worker lifecycle', () => {
       seed.close();
       const artifact = createUpgradeArtifact(home, '0.4.3');
       installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      writeFileSync(workerServicePaths('linux', home).envPath, `${readFileSync(workerServicePaths('linux', home).envPath, 'utf8')}XDG_DATA_HOME=${env.XDG_DATA_HOME}\n`);
       let stopped = false;
       let probed = false;
       let atPreviousStart: { version: number; wal: boolean } | undefined;
@@ -951,8 +955,10 @@ describe('versioned Olympus worker lifecycle', () => {
         // The rollback's stop, after the new worker ran: not the stop the upgrade makes to copy the stores.
         if (call === 'systemctl --user stop olympus-worker.service' && probed) stopped = true;
         if (stopped && !atPreviousStart && (call.endsWith('restart olympus-worker.service') || call.endsWith('enable --now olympus-worker.service'))) {
+          // The -wal is looked for before the open: a WAL-mode file opened makes its own.
+          const wal = existsSync(`${dbPath}-wal`) && readFileSync(`${dbPath}-wal`, 'utf8') === 'new version';
           const db = new Database(dbPath, { readonly: true });
-          atPreviousStart = { version: readSqliteSchemaVersion(db, 'tier-ledger'), wal: existsSync(`${dbPath}-wal`) };
+          atPreviousStart = { version: readSqliteSchemaVersion(db, 'tier-ledger'), wal };
           db.close();
         }
         return manager.exec(command, args);
@@ -980,7 +986,7 @@ describe('versioned Olympus worker lifecycle', () => {
         error = caught;
       }
       expect(String(error)).toContain('did not answer its loopback readiness probe');
-      expect((error as { suggestion?: string }).suggestion).toContain('Stores put back as they were before the update: tier-ledger.');
+      expect((error as { suggestion?: string }).suggestion).toContain('Stores put back as they were before the update: ledger.sqlite.');
       expect(atPreviousStart).toEqual({ version: 1, wal: false });
       expect(existsSync(`${dbPath}.pre-schema-1.bak`)).toBe(false);
     } finally {
@@ -1032,6 +1038,9 @@ describe('versioned Olympus worker lifecycle', () => {
       const retired = join(home, 'classification.jsonl.embedding-prefilter.tier-ledger.sqlite');
       try {
         writeFileSync(retired, 'retired ledger');
+        // A store for the upgrade to copy: retired state is moved aside only while an upgrade is in flight.
+        mkdirSync(olympusDataRoot(env), { recursive: true });
+        new Database(join(olympusDataRoot(env), 'store.sqlite'), { create: true }).close();
         const artifact = createUpgradeArtifact(home, '0.4.3');
         installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
         const seenWhileWaiting: boolean[] = [];
