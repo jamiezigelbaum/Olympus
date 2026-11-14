@@ -56,6 +56,7 @@ import {
 } from '../../core/evidence-pack.ts';
 import {
   WITHHELD_ANSWERS,
+  plainTrustWords,
   answerForReleaseDecision,
   buildOpsecReleaseAudit,
   createStructuredEvidenceFact,
@@ -2542,16 +2543,6 @@ function secretLocationCoverageNotes(detail: EvidencePackBuildDetail): string[] 
   const count = detail.secretLocations?.length ?? 0;
   if (count === 0) return [];
   return [secretLocationCoverageNote(count)];
-}
-
-/**
- * The model sees each item's trust label in the evidence and sometimes repeats
- * it ("per the secure_local copy"). The person reads the tier's own name.
- */
-export function plainTrustWords(answer: string): string {
-  return answer
-    .replace(/\bsecure_local(?:\.[a-z0-9_]+)*\b/gi, 'Private')
-    .replace(/\bpublic_safe(?:\.[a-z0-9_]+)*\b/gi, 'Personal');
 }
 
 function composeReleasedAnswer(answer: string, unanswered: readonly string[]): string {

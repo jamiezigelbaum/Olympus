@@ -35473,6 +35473,9 @@ function buildOpsecReleaseAudit(facts, decision) {
     raw_source_exposed: false
   };
 }
+function plainTrustWords(answer) {
+  return answer.replace(/\bsecure_local(?:\.[a-z0-9_]+)*\b/gi, "Private").replace(/\bpublic_safe(?:\.[a-z0-9_]+)*\b/gi, "Personal");
+}
 function answerForReleaseDecision(decision) {
   if ((decision.decision === "allow" || decision.decision === "redact") && decision.allowedText) {
     return decision.allowedText;
@@ -86622,9 +86625,6 @@ function secretLocationCoverageNotes(detail) {
   if (count === 0)
     return [];
   return [secretLocationCoverageNote(count)];
-}
-function plainTrustWords(answer) {
-  return answer.replace(/\bsecure_local(?:\.[a-z0-9_]+)*\b/gi, "Private").replace(/\bpublic_safe(?:\.[a-z0-9_]+)*\b/gi, "Personal");
 }
 function composeReleasedAnswer(answer, unanswered) {
   if (unanswered.length === 0)

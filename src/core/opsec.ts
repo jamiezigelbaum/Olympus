@@ -226,6 +226,16 @@ export const WITHHELD_ANSWERS = {
   noAnswerInText: "I found something that matches, but I couldn't find the answer in its text. If it's a scan or a photo, its text may not have been read clearly; open the item itself to check.",
 } as const;
 
+/**
+ * The model sees each item's trust label in the evidence and sometimes repeats
+ * it ("per the secure_local copy"). The person reads the tier's own name.
+ */
+export function plainTrustWords(answer: string): string {
+  return answer
+    .replace(/\bsecure_local(?:\.[a-z0-9_]+)*\b/gi, 'Private')
+    .replace(/\bpublic_safe(?:\.[a-z0-9_]+)*\b/gi, 'Personal');
+}
+
 /** Whether `answer` is one of the fixed withheld replies (the eval's privacy grade). */
 export function isWithheldAnswer(answer: string): boolean {
   const withheld: string[] = [WITHHELD_ANSWERS.private, WITHHELD_ANSWERS.unclear, WITHHELD_ANSWERS.secret];
