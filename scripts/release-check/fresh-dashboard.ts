@@ -243,6 +243,9 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     let navigationError = '';
     const navigate = async (path: string): Promise<boolean> => {
       frameSessions.clear();
+      // The seed steps open provider tabs; a background dashboard tab is hidden, and a hidden page stops its own refresh
+      // (as it should for a person), so the dashboard comes to the front before each use (run 43626605016).
+      await browser!.send('Page.bringToFront', {}, session).catch(() => undefined);
       const navigation = await browser!.send('Page.navigate', { url: new URL(path, url).href }, session);
       navigationError = navigation.errorText ?? '';
       if (navigation.errorText) return false;
@@ -351,7 +354,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           return;
         } catch {
           const before = await rowShown();
-          await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
+          await reload('/dashboard?connect', `!!(${row})`);
           const afterReload = await rowDone() ? 'Sync now is back after a reload' : `still checking after a reload: ${await rowShown()}`;
           const seen = await card(timingSource(folder)).catch(() => undefined);
           return `the engine finished the press's sync ${Math.round((Date.now() - endedAt) / 1_000)} s earlier (${JSON.stringify(seen?.last_manual_sync ?? null)}), but the open page still said ${before}; ${afterReload}`;

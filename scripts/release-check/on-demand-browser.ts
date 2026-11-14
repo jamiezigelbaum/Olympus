@@ -154,6 +154,8 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
       return { id: targetId as string, session, url };
     };
     const click = async (session: string, labels: string[]) => {
+      // The dashboard steps bring their tab to the front; a provider acts in view, as a person's tab would.
+      await send('Page.bringToFront', {}, session).catch(() => undefined);
       try {
         await until(() => evaluate(session, providerClickExpression(labels)), `provider control unavailable: ${labels.join(' / ')}`);
       } catch (error) {
@@ -341,7 +343,11 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
           doc = (await send('Target.getTargets')).targetInfos.find((t: any) => !baseline.has(t.targetId) && /^https:\/\/docs.google.com\/document\//.test(t.url) && (!t.openerId || t.openerId === tab.id));
           if (!doc && !blankOffered) blankOffered = await evaluate(tab.session, providerClickExpression(['Blank document']));
           return !!doc;
-        }, 'native Google Doc did not open from the seed folder');
+        }, 'native Google Doc did not open from the seed folder').catch(async (error) => {
+          const opened = (await send('Target.getTargets')).targetInfos.filter((t: any) => !baseline.has(t.targetId)).map((t: any) => `${t.type} ${String(t.url).replace(/[?#].*$/, '').slice(0, 80)}`);
+          const shown = await evaluate<string[]>(tab.session, PROVIDER_CONTROL_NAMES).catch(() => undefined);
+          throw new Error(`native Google Doc did not open from the seed folder (new tabs ${JSON.stringify(opened)}; blank offered ${blankOffered}; controls ${JSON.stringify(shown?.slice(0, 15))})`, { cause: error });
+        });
         tabs.add(doc.targetId);
         const session = await attach(doc.targetId);
         await fill(session, '.docs-title-input', file.name);
