@@ -21,6 +21,7 @@ import { sourceCard, sourceConnected } from './source-cards.ts';
 import { archiveStateSiblingPath, olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import { isPendingPrivacyPolicy, readComputerUseState } from '../../src/core/first-run-privacy.ts';
+import { privateAnswerOptions } from '../../src/core/privacy-language.ts';
 import { validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
 import { ENGINE_ROLE_ENV } from '../../src/core/engine-split.ts';
 // Embedded: the bundled agent runs outside the product tree, so the preset file is not on disk beside it.
@@ -29,7 +30,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import type { SourceFamily } from '../../src/core/source-index/types.ts';
 import { archiveConnectorStoreDbPath } from '../../src/workers/archive-import/store.ts';
@@ -398,15 +399,17 @@ async function prepareSource(): Promise<never> {
   // qualified on; the restart below applies it. Upgrades already have a choice.
   const before = readPolicy();
   if (before && isPendingPrivacyPolicy(before.json as Parameters<typeof isPendingPrivacyPolicy>[0])) {
-    // First, the agent-led path must still ask, with local-first recommended.
+    // First, the agent-led path must still ask, recommending what this machine's memory calls for
+    // (local-first, or Venice below 12 GB: privateAnswerOptions).
+    const expected = privateAnswerOptions(totalmem()).filter((option) => option.recommended).map((option) => option.id).join();
     const asked = olympus(['setup', '--privacy-options']);
     let offer: { state?: string; options?: Array<{ id?: string; recommended?: boolean }> } = {};
     try { offer = JSON.parse(asked.stdout); } catch { /* reported below */ }
     const recommended = offer.options?.filter((option) => option.recommended).map((option) => option.id) ?? [];
-    if (asked.code !== 0 || offer.state !== 'pending' || recommended.join() !== 'local-first') {
-      emit({ ok: false, step: 'privacy-choice', detail: `a fresh install did not ask for the privacy choice with local-first recommended: ${asked.stdout.slice(0, 200) || asked.stderr.slice(0, 200)}` });
+    if (asked.code !== 0 || offer.state !== 'pending' || recommended.join() !== expected) {
+      emit({ ok: false, step: 'privacy-choice', detail: `a fresh install did not ask for the privacy choice with ${expected} recommended (it recommended ${recommended.join() || 'nothing'}): ${asked.stdout.slice(0, 200) || asked.stderr.slice(0, 200)}` });
     }
-    say('fresh install asks for the privacy choice, local-first recommended');
+    say(`fresh install asks for the privacy choice, ${expected} recommended`);
     await saveFreshInstallPrivacyChoice({
       workerFetch: p.workerFetch,
       readPolicy: () => readPolicy()?.json,
