@@ -132,8 +132,8 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
       if (result.exceptionDetails) throw new Error('provider page evaluation failed');
       return result.result?.value as T;
     };
-    const until = async (read: () => Promise<boolean>, reason: string) => {
-      const deadline = Date.now() + 120_000;
+    const until = async (read: () => Promise<boolean>, reason: string, ms = 120_000) => {
+      const deadline = Date.now() + ms;
       for (;;) {
         if (await read()) return;
         if (Date.now() >= deadline) throw new Error(reason);
@@ -313,8 +313,18 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         try {
           await click(tab.session, folder.source === 'google_drive' ? ['New', 'Create new'] : ['Upload', 'Upload or drop']);
           await click(tab.session, folder.source === 'google_drive' ? ['File upload'] : ['Files', 'File']);
-          await until(async () => choosers.has(tab.session), 'provider file upload chooser unavailable');
-          await send('DOM.setFileInputFiles', { backendNodeId: choosers.get(tab.session), files: [path] }, tab.session);
+          // A chooser opened from a script click needs user activation the page may not grant (Dropbox, run 43599034232):
+          // then the page's own file input takes the file directly.
+          let input = await until(async () => choosers.has(tab.session), 'chooser', 15_000).then(() => choosers.get(tab.session), () => undefined);
+          if (input === undefined) {
+            const handle = await send('Runtime.evaluate', { expression: `[...document.querySelectorAll('input[type=file]')].find(e=>!e.webkitdirectory && !e.hasAttribute('webkitdirectory') && !e.disabled) || null`, returnByValue: false }, tab.session);
+            if (handle.result?.objectId) input = (await send('DOM.describeNode', { objectId: handle.result.objectId }, tab.session)).node?.backendNodeId;
+          }
+          if (input === undefined) {
+            const shown = await evaluate<Record<string, unknown>>(tab.session, `({path: location.pathname, inputs: document.querySelectorAll('input[type=file]').length, menus: [...document.querySelectorAll('[role=menu] [role=menuitem],[role=menuitem]')].map(e=>(e.textContent||'').trim().slice(0,40)).slice(0,10)})`).catch(() => undefined);
+            throw new Error(`${folder.source}: provider file upload chooser unavailable${shown ? ` (${JSON.stringify(shown)})` : ''}`);
+          }
+          await send('DOM.setFileInputFiles', { backendNodeId: input, files: [path] }, tab.session);
           await until(async () => (await names(folder)).includes(file.name), `upload did not appear: ${file.name}`);
         } finally { await send('Page.setInterceptFileChooserDialog', { enabled: false }, tab.session); }
       },
