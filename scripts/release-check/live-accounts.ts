@@ -254,7 +254,7 @@ export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOp
       checks.push({ id: `live.${spec.id}.fresh`, title: `${spec.label}: a new item is found within the bound`, status: 'skip', detail: `Inconclusive: the plant command failed (exit ${result.code}): ${result.output.slice(-200)}` });
       continue;
     }
-    planted.push({ spec, word, deadline: Date.now() + (spec.plant.withinS ?? 900) * 1000, started, said: result.output.slice(-200) });
+    planted.push({ spec, word, deadline: Date.now() + (spec.plant.withinS ?? 900) * 1000, started, said: result.output.slice(-500) });
   }
   const waiting = new Set(planted);
   const timeline: string[] = [];
