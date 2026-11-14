@@ -271,7 +271,8 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         } else {
           try {
             // A row, not just the name somewhere on the page (a toast, the rename box): the folder must be listed.
-            await until(() => evaluate<boolean>(tab.session, dropboxRowShows(name)), 'Dropbox seed folder was not created');
+            // Dropbox opens a folder it has just made, so being inside it counts too (run 43574832678).
+            await until(() => evaluate<boolean>(tab.session, `decodeURIComponent(location.pathname) === ${JSON.stringify(`/home/${name}`)} || ${dropboxRowShows(name)}`), 'Dropbox seed folder was not created');
           } catch (error) {
             // Test-account folder names and UI labels only: what the top level listed and where the name appears.
             const shown = await evaluate<Record<string, unknown>>(tab.session, `(() => {const name=${JSON.stringify(name)};const v=${visible};return {path: location.pathname, rows: [...document.querySelectorAll('[role=row],tr')].map(r=>(r.innerText||'').trim().split('\\n')[0].slice(0,60)).slice(0,12), nameAt: [...document.querySelectorAll('body *')].filter(e=>e.children.length===0&&(e.textContent||'').includes(name)).map(e=>[e.tagName,e.getAttribute('role'),e.closest('[role=row],tr,[role=dialog],[role=alert],[role=status],nav,header')?.tagName+'/'+(e.closest('[role]')?.getAttribute('role')||'')].join(':')).slice(0,6), inputs: [...document.querySelectorAll('input')].filter(v).map(e=>e.getAttribute('aria-label')||e.placeholder||e.type).slice(0,6), buttons: [...document.querySelectorAll('button,[role=button]')].filter(v).map(e=>(e.getAttribute('aria-label')||e.textContent||'').trim().slice(0,30)).filter(Boolean).slice(0,25), dialogs: [...document.querySelectorAll('[role=dialog],[aria-modal=true]')].filter(v).length};})()`).catch(() => undefined);
