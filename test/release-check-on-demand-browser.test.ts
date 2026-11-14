@@ -130,6 +130,13 @@ describe('fresh read-on-demand without write tokens', () => {
       expect(run(['Upload'])).toBe(false);
       folder.setAttribute('aria-disabled', 'true');
       expect(run(['New folder'])).toBe(false);
+      // A dialog's button wins over a toolbar button with the same name.
+      window.document.body.insertAdjacentHTML('beforeend', `<button id="toolbar-create">Create</button><div role="dialog"><button id="dialog-create">Create</button></div>`);
+      for (const id of ['toolbar-create', 'dialog-create']) sized(window.document.getElementById(id));
+      const pressed: string[] = [];
+      for (const id of ['toolbar-create', 'dialog-create']) window.document.getElementById(id)!.addEventListener('click', () => pressed.push(id));
+      expect(run(['Create'])).toBe(true);
+      expect(pressed).toEqual(['dialog-create']);
     } finally { await window.happyDOM.close(); }
   });
 

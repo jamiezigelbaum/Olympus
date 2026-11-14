@@ -51,8 +51,9 @@ const CONTROL_NAMES = `(e) => [e.getAttribute('aria-label'), e.textContent, (e.i
 
 /** Find the first visible control named by one of `labels` and press it as a person would. Closure menus
  * (Drive) act on mousedown/mouseup, so send those before the click. */
+/** Presses the first visible control with one of these names; one inside an open dialog wins (a dialog's Create, not the toolbar's). */
 export function providerClickExpression(labels: readonly string[]): string {
-  return `(() => {const names=${CONTROL_NAMES};const e=${PROVIDER_CONTROLS}.find(e=>names(e).some(value=>${JSON.stringify(labels)}.some(label=>value===label || value.startsWith(label+' '))));if(!e||e.disabled||e.getAttribute('aria-disabled')==='true')return false;for(const type of ['mousedown','mouseup'])e.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,view:window}));e.click();return true;})()`;
+  return `(() => {const names=${CONTROL_NAMES};const named=${PROVIDER_CONTROLS}.filter(e=>names(e).some(value=>${JSON.stringify(labels)}.some(label=>value===label || value.startsWith(label+' '))));const e=named.find(e=>e.closest('[role=dialog],[role=alertdialog],[aria-modal=true]'))||named[0];if(!e||e.disabled||e.getAttribute('aria-disabled')==='true')return false;for(const type of ['mousedown','mouseup'])e.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,view:window}));e.click();return true;})()`;
 }
 
 /** Visible menu item names, for a failure message: provider UI labels only, never file names. */
@@ -252,7 +253,12 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
             throw new Error(`Drive seed folder did not open${shown ? ` (${JSON.stringify(shown)})` : ''}`, { cause: error });
           }
         } else {
-          await until(async () => (await evaluate<string[]>(tab.session, listing(source))).includes(name), 'Dropbox seed folder was not created');
+          try {
+            await until(async () => (await evaluate<string[]>(tab.session, listing(source))).includes(name), 'Dropbox seed folder was not created');
+          } catch (error) {
+            const shown = await evaluate<Record<string, unknown>>(tab.session, `(() => ({path: location.pathname, rows: document.querySelectorAll('[role=row],tr').length, nameShown: (document.body?.innerText || '').includes(${JSON.stringify(name)}), dialogs: [...document.querySelectorAll('[role=dialog],[aria-modal=true]')].filter(${visible}).length}))()`).catch(() => undefined);
+            throw new Error(`Dropbox seed folder was not created${shown ? ` (${JSON.stringify(shown)})` : ''}`, { cause: error });
+          }
           await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);
         }
         tab.url = await evaluate(tab.session, 'location.href');
