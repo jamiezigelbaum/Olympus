@@ -235,12 +235,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     };
     // Home with no source yet shows only its status card, so either marker means the page drew.
     const reload = async (path = '/dashboard', ready = `!!document.querySelector('.source-name, [data-home-status]')`) => {
-      // A saved setup choice can restart the engine, so a refused load is retried until the engine is back.
-      const stopAt = Date.now() + (timings.timeoutMs ?? 90_000);
-      while (!await navigate(path)) {
-        if (Date.now() >= stopAt) throw new Error(`dashboard navigation to ${path} failed: ${navigationError}`);
-        await sleep(timings.pollMs ?? 1000);
-      }
+      // No retry: a first-run save that takes the page down is a product fault a person would see, so it fails here.
+      if (!await navigate(path)) throw new Error(`dashboard navigation to ${path} failed: ${navigationError}`);
       await until(async () => !!await panel<boolean>(ready, Boolean), `dashboard reload of ${path} failed`);
     };
     const timingSource = (folder: SeedFolder): LiveSourceSpec => ({ id: folder.source, label: folder.source === 'dropbox' ? 'Dropbox' : 'Google Drive' });
