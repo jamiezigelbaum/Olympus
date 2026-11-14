@@ -21751,7 +21751,6 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECT
   };
 }
 var VECTOR_SCAN_BACKSTOP_GRACE_MS = 250;
-var VECTOR_SCAN_EXCLUSION_MAX_AGE_MS = 5000;
 async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit)).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
@@ -22518,7 +22517,6 @@ class LocalConnectorStore {
   visibilityFeedPresent = false;
   visibilitySqlMemo;
   visibilityPending;
-  vectorScanExclusion;
   visibilityPublishing;
   visibilityPublishTimer;
   visibilityRetryDelay = 0;
@@ -28697,15 +28695,11 @@ ${parentKey(ref)}`, { ref, origin });
   vectorScanExcludedItemPks() {
     let value;
     try {
-      value = this.tierHiddenItemPks({ countsMaxAgeMs: VECTOR_SCAN_EXCLUSION_MAX_AGE_MS });
+      value = this.tierHiddenItemPks();
     } catch {
       return;
     }
-    const cached = this.vectorScanExclusion;
-    if (cached?.value === value)
-      return cached.set;
     const set = new Set([...value.hidden, ...value.held, ...value.metadataLayer]);
-    this.vectorScanExclusion = { value, set };
     return set.size > 0 ? set : undefined;
   }
   async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
