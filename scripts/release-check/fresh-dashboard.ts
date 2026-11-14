@@ -121,6 +121,16 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
       }
       return undefined;
     };
+    /** Every frame's answer, for diagnostics: which frames see a control and what each one says. */
+    const panelAll = async <T>(expression: string, accept: (value: T) => boolean): Promise<T[]> => {
+      const session = await attach(dash);
+      const out: T[] = [];
+      for (const sid of [session, ...frameSessions]) for (const id of contexts.get(sid) ?? []) {
+        const value = await evalIn<T>(sid, expression, id).catch(() => undefined);
+        if (value !== undefined && accept(value)) out.push(value);
+      }
+      return out;
+    };
     const until = async (read: () => Promise<boolean>, detail: string, ms = timings.timeoutMs ?? 90_000) => {
       const deadline = Date.now() + ms;
       for (;;) {
@@ -256,7 +266,9 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
       }
     };
     /** Every picker row named like the seed folder, with its segments (* pressed, (disabled)). */
-    const rowSegments = () => panel<string[][]>(`[...document.querySelectorAll('.frow')].filter(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(ON_DEMAND_FOLDER)}).map(row=>[(row.className||'')+'', ...[...row.querySelectorAll('[data-key^="picker:seg:"]')].map(e=>(e.getAttribute('data-key')||'').split(':').pop()+(e.getAttribute('aria-pressed')==='true'?'*':'')+(e.disabled||e.getAttribute('aria-disabled')==='true'?'(disabled)':''))])`, Array.isArray).catch(() => undefined);
+    const rowSegments = () => panel<string[][]>(`[...document.querySelectorAll('.frow')].filter(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(ON_DEMAND_FOLDER)}).map(row=>[(row.className||'')+'', ...[...row.querySelectorAll('[data-key^="picker:seg:"]')].map(e=>(e.getAttribute('data-key')||'').split(':').pop()+(e.getAttribute('aria-pressed')==='true'?'*':'')+(e.disabled||e.getAttribute('aria-disabled')==='true'?'(disabled)':''))])`, (v: string[][]) => Array.isArray(v) && v.length > 0).catch(() => undefined);
+    /** The Save control and any reason line the picker shows, from every frame that has the picker. */
+    const saveState = () => panelAll<string>(`(() => {const b=document.querySelector('[data-key="picker:save"]'); if(!b) return undefined; const why=[...document.querySelectorAll('.reason, [role=alert]')].map(e=>(e.textContent||'').trim().slice(0,160)).filter(Boolean).slice(0,3); return (b.disabled?'disabled ':'enabled ')+JSON.stringify((b.textContent||'').trim())+(why.length?' '+JSON.stringify(why):'');})()`, (v) => typeof v === 'string').catch(() => [] as string[]);
     const pressedMode = async (): Promise<FolderMode> => {
       const mode = await panel<string>(`(() => {const row=${folderRow(ON_DEMAND_FOLDER)}; return row ? (row.querySelector('[aria-pressed=true][data-key^="picker:seg:"]')?.getAttribute('data-key')?.split(':').pop() || '') : null;})()`, value => typeof value === 'string');
       if (mode === undefined) throw new Error('folder mode could not be read');
@@ -281,6 +293,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         } catch (error) {
           throw new Error(`folder mode ${mode || 'inherited'} was not taken in the picker (was ${before || 'inherited'}; segments ${JSON.stringify(await rowSegments())})`, { cause: error });
         }
+        const beforeSave = await saveState();
         await clickKey('picker:save');
         let unlocked = 0;
         await until(async () => {
@@ -288,12 +301,13 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           return !!await panel<boolean>(`!document.querySelector('[data-key="picker:save"]') && !!document.querySelector('.srcrows, .source')`, Boolean);
         }, 'folder mode was not saved');
         // What the page said once the picker closed (the saved line, or a refusal), UI words only.
-        const said = await panel<string[]>(`[...document.querySelectorAll('[role=status],[role=alert],.notice,.toast')].filter(${visible}).map(e=>(e.textContent||'').trim().slice(0,160)).filter(Boolean).slice(0,4)`, Array.isArray).catch(() => undefined);
+        const said = await panel<string[]>(`[...document.querySelectorAll('[role=status],[role=alert],.notice,.toast')].filter(${visible}).map(e=>(e.textContent||'').trim().slice(0,160)).filter(Boolean).slice(0,4)`, (v: string[]) => Array.isArray(v) && v.length > 0).catch(() => undefined);
         await openTimingFolder(folder);
         const saved = await pressedMode();
         const shown = saved !== mode ? await rowSegments() : undefined;
+        const everyFrame = saved !== mode ? await panelAll<string>(`(() => {const row=[...document.querySelectorAll('.frow:not(.jump)')].find(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(ON_DEMAND_FOLDER)}); return row ? (row.querySelector('[aria-pressed=true][data-key^="picker:seg:"]')?.getAttribute('data-key') || 'none') : undefined;})()`, (v) => typeof v === 'string') : [];
         await clickKey('picker:cancel');
-        if (saved !== mode) throw new Error(`folder mode did not persist: expected ${mode || 'inherited'}, saw ${saved || 'inherited'} (rows ${JSON.stringify(shown)}; after save the page said ${JSON.stringify(said)}; unlock pressed ${unlocked}x)`);
+        if (saved !== mode) throw new Error(`folder mode did not persist: expected ${mode || 'inherited'}, saw ${saved || 'inherited'} (rows ${JSON.stringify(shown)}; after save the page said ${JSON.stringify(said)}; unlock pressed ${unlocked}x; save before click ${JSON.stringify(beforeSave)}; pressed per frame ${JSON.stringify(everyFrame)})`);
       },
       sync: async folder => {
         await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
