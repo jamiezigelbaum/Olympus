@@ -1,5 +1,5 @@
 // The upgrade's store copy under a real systemd user manager (CI's deploy
-// shard 1 sets OLYMPUS_REAL_SYSTEMD=1 after enabling lingering; skipped
+// shard 1 sets REAL_SYSTEMD_USER_HOME after enabling lingering; skipped
 // elsewhere). It writes the real worker unit, with its Restart= policy and its
 // hold condition, and runs a stand-in engine that keeps a store open. A
 // restarter keeps asking systemd to start the unit, standing in for whatever
@@ -21,8 +21,11 @@ import { waitFor } from './helpers/test-clock.ts';
 
 // Tests run with a throwaway HOME; the user manager reads units from the
 // runner's own home, which CI passes here.
-const MANAGER_HOME = process.env.OLYMPUS_REAL_SYSTEMD_HOME ?? '';
-const REAL = process.platform === 'linux' && process.env.OLYMPUS_REAL_SYSTEMD === '1' && MANAGER_HOME !== '';
+// (Not OLYMPUS_*: the test preload clears those, and XDG_*, which is why the
+// runtime directory is put back below for systemctl.)
+const MANAGER_HOME = process.env.REAL_SYSTEMD_USER_HOME ?? '';
+const REAL = process.platform === 'linux' && MANAGER_HOME !== '';
+if (REAL) process.env.XDG_RUNTIME_DIR = `/run/user/${process.getuid?.()}`;
 const UNIT = 'olympus-worker.service';
 const systemctl = (...args: string[]) => spawnSync('systemctl', ['--user', ...args], { encoding: 'utf8' });
 const activeState = () => systemctl('show', '-p', 'ActiveState', '--value', UNIT).stdout.trim();
