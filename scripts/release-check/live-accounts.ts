@@ -243,7 +243,7 @@ export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOp
     checks.push({ ...searchCheck(`live.${spec.id}.known`, `${spec.label}: a known item is found and cited as ${spec.label}`, spec.label, spec.known.expect, search), ms: Date.now() - started });
   }
   // Fresh items: every plant first, then one search loop, so the sources' sync intervals overlap instead of adding up.
-  const planted: Array<{ spec: LiveSourceSpec; word: string; deadline: number; started: number }> = [];
+  const planted: Array<{ spec: LiveSourceSpec; word: string; deadline: number; started: number; said: string }> = [];
   for (const spec of options.sources) {
     if (!spec.plant) continue;
     started = Date.now();
@@ -254,7 +254,7 @@ export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOp
       checks.push({ id: `live.${spec.id}.fresh`, title: `${spec.label}: a new item is found within the bound`, status: 'skip', detail: `Inconclusive: the plant command failed (exit ${result.code}): ${result.output.slice(-200)}` });
       continue;
     }
-    planted.push({ spec, word, deadline: Date.now() + (spec.plant.withinS ?? 900) * 1000, started });
+    planted.push({ spec, word, deadline: Date.now() + (spec.plant.withinS ?? 900) * 1000, started, said: result.output.slice(-200) });
   }
   const waiting = new Set(planted);
   const timeline: string[] = [];
@@ -277,7 +277,7 @@ export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOp
       if (found.status === 'pass' || late) {
         const ms = at - row.started;
         const result: CheckResult = found.status === 'pass' && late ? { ...found, status: 'fail', detail: `found only after ${Math.round(ms / 1000)} s, past the bound: ${found.detail}` } : found.status === 'pass' ? { ...found, detail: `found after ${Math.round(ms / 1000)} s: ${found.detail}` } : { ...found, detail: `not found after ${Math.round(ms / 1000)} s: ${found.detail}` };
-        checks.push({ ...result, ms });
+        checks.push({ ...result, ...(row.said ? { detail: `${result.detail} (plant: ${row.said})` } : {}), ms });
         waiting.delete(row);
       }
     }
