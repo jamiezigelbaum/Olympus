@@ -214,10 +214,10 @@ export function timelineLine(seconds: number, structured: unknown, machine: stri
   const rows = corpusRows(structured).filter((row) => row.configured && (row.counts?.indexed_items ?? 0) > 0);
   const counts = rows.map((row) => {
     const c = row.counts as { indexed_items: number; chunks?: number; embedded_chunks?: number };
-    return `${row.label}/${row.corpus_id.split(':').pop()} items ${c.indexed_items} emb ${c.embedded_chunks ?? '?'}/${c.chunks ?? '?'}${row.retrieval?.state === 'degraded' ? ' degraded' : ''}`;
+    return `${row.label}/${row.corpus_id.split(':').pop()} items ${c.indexed_items} emb ${c.embedded_chunks ?? '?'}/${c.chunks ?? '?'}${row.retrieval?.state === 'degraded' ? ' degraded' : ''}${row.last_refresh ? ` refresh ${row.last_refresh.status}${row.last_refresh.completed_at ? `@${row.last_refresh.completed_at.slice(11, 19)}` : ''}` : ''}`;
   }).join('; ');
   const privacy = privacyCheckOf(structured);
-  return `t+${seconds}s | ${counts || 'no items'} | privacy wait ${privacy ? `${privacy.waiting_items}${privacy.waiting_for ? ` (${privacy.waiting_for})` : ''}` : 0} | ${machine}`;
+  return `t+${seconds}s | ${counts || 'no items'} | privacy wait ${privacy ? `${privacy.waiting_items}${privacy.waiting_for ? ` (${privacy.waiting_for})` : ''}` : 0} | ${machine.slice(0, 200)}`;
 }
 
 const defaultPlant = (argv: readonly string[], env: Record<string, string>): { code: number; output: string } => {
