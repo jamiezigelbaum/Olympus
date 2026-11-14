@@ -70464,6 +70464,15 @@ class GoogleGmailSourceConnector {
         ...query ? { query } : {}
       });
       const listed = page.messages.filter((message) => message.id);
+      console.info(`[olympus:gmail-list] ${JSON.stringify({
+        leg: metadataLeg ? "metadata" : "content",
+        after_s: Number(/after:(\d+)/.exec(query ?? "")?.[1]) || null,
+        before_s: Number(/before:(\d+)/.exec(query ?? "")?.[1]) || null,
+        page: listPages,
+        listed: listed.length,
+        resumed_after: pageAfter !== undefined,
+        now_s: Math.floor(nowMs / 1000)
+      })}`);
       const resumedAt = pageAfter ? listed.findIndex((message) => message.id === pageAfter) : -1;
       const baseSkip = resumedAt + 1;
       const examinedIds = resumedAt >= 0 ? [pageAfter] : [];
