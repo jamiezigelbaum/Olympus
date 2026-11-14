@@ -209,8 +209,20 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
     const listing = providerListingExpression;
     const names = async (folder: SeedFolder) => {
       const tab = folders.get(folder.source)!;
-      await until(() => evaluate(tab.session, `!!document.querySelector('[role=grid], [role=table], table, [data-testid="files-table"], [data-testid="empty-folder"]') && (!${BUSY} || !!document.querySelector('[role=row],tr'))`), 'provider folder listing unavailable');
-      return evaluate<string[]>(tab.session, listing(folder.source));
+      // An empty folder (a new seed) can draw no grid at all; a settled page is enough, since the listing reads names anywhere.
+      try {
+        await until(() => evaluate(tab.session, `document.readyState==='complete' && (!!document.querySelector('[role=grid], [role=table], table, [data-testid="files-table"], [data-testid="empty-folder"]') || !${BUSY}) && (!${BUSY} || !!document.querySelector('[role=row],tr'))`), 'provider folder listing unavailable');
+      } catch (error) {
+        const shown = await evaluate<Record<string, unknown>>(tab.session, `({path: location.pathname, ready: document.readyState, busy: !!${BUSY}, grids: document.querySelectorAll('[role=grid],[role=table],table').length, rows: document.querySelectorAll('[role=row],tr').length, testids: [...new Set([...document.querySelectorAll('[data-testid]')].map(e=>e.getAttribute('data-testid')))].slice(0,15)})`).catch(() => undefined);
+        throw new Error(`${folder.source}: provider folder listing unavailable${shown ? ` (${JSON.stringify(shown)})` : ''}`, { cause: error });
+      }
+      // A page that settled before its rows drew reads as empty: an empty answer must hold for a few seconds,
+      // or a seed already uploaded by an earlier run would be uploaded again.
+      for (let tries = 0; ; tries++) {
+        const shown = await evaluate<string[]>(tab.session, listing(folder.source));
+        if (shown.length > 0 || tries >= 5) return shown;
+        await delay(1500);
+      }
     };
     const ui: BrowserSeedUi = {
       folder: async (source, name) => {
