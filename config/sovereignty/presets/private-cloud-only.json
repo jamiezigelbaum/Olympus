@@ -25,7 +25,8 @@
     "secure_local": { "pool": { "members": ["venice-private"] } },
     "internal": {
       "analyst": [
-        "cloud-openclaw-infer"
+        "cloud-openclaw-infer",
+        "venice-private"
       ]
     }
   },

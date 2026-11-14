@@ -479,6 +479,8 @@ describe('sovereignty config engine', () => {
     ]);
     expect(engine.resolveAnalystRoute({ trustDomain: 'internal' }).map((entry) => entry.id)).toEqual([
       'cloud-openclaw-infer',
+      // A standalone engine has no OpenClaw: Personal answers fall back to Venice.
+      'venice-private',
     ]);
     // New installs embed with the built-in model, even here: it is local,
     // so stricter than the private-cloud lane the preset otherwise uses.

@@ -367,13 +367,15 @@ describe('a private analyst outage never costs an ordinary answer', () => {
 
   test('a gated e2ee analyst model excludes default private evidence instead of throwing', async () => {
     const world = answerWorld('private-cloud-only');
-    // The secure gate no longer throws; what remains is this preset's own
-    // ordinary-route answer to a Venice request (no Venice member for
-    // internal), which is unchanged by this default.
+    // The secure gate no longer throws. Venice is this preset's ordinary-route
+    // fallback too (a standalone engine has no OpenClaw), so the request is
+    // answered from ordinary evidence only.
     const outcome = await world.handler.answer({ question: 'What was my LDL?', analyst_model: 'e2ee-glm-5-2-p' })
       .then(() => undefined, (error: unknown) => error);
-    expect(outcome).not.toMatchObject({ code: 'source_index_policy_violation' });
-    expect(world.calls['venice-private']).toHaveLength(0);
+    expect((outcome as { code?: string } | undefined)?.code).not.toBe('source_index_policy_violation');
+    expect((world.calls['venice-private'] ?? []).every((pack) => (
+      pack.candidates.every((candidate) => candidate.trustDomain !== 'secure_local')
+    ))).toBe(true);
     // The same model on an explicit private request is still refused outright.
     await expect(world.handler.answer({
       question: 'What was my LDL?',
