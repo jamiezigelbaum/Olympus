@@ -326,7 +326,9 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           await until(async () => !!await panel<boolean>(`(() => {const row=${row};return !!row && !row.querySelector('button[aria-busy=true]') && [...row.querySelectorAll('button')].some(e=>/^Sync now$/.test(e.textContent.trim()));})()`, Boolean), 'seed metadata sync did not finish', 600_000);
         } catch (error) {
           const shown = await panel<string>(`(() => {const row=${row}; if(!row) return undefined; return JSON.stringify({buttons:[...row.querySelectorAll('button')].map(e=>(e.textContent||'').trim().slice(0,40)+(e.getAttribute('aria-busy')==='true'?'(busy)':'')+(e.disabled?'(disabled)':'')).slice(0,8), text:(row.textContent||'').replace(/\\s+/g,' ').trim().slice(0,300)});})()`, (v) => typeof v === 'string').catch(() => undefined);
-          throw new Error(`seed metadata sync did not finish in 10 min${shown ? ` (row ${shown})` : ' (no source row)'}`, { cause: error });
+          // The engine's own lines for this source (test machine, test account), to tell a slow listing from a stuck one.
+          const log = await machine.exec(`f="$HOME/.local/state/olympus/engine/engine.log"; [ -f "$f" ] && grep -iE ${JSON.stringify(folder.source === 'dropbox' ? 'dropbox' : 'drive')} "$f" | grep -v 'tier sniffer' | tail -25 | cut -c1-240`, { timeoutMs: 30_000 }).then(r => r.stdout.trim().slice(-4000)).catch(() => '');
+          throw new Error(`seed metadata sync did not finish in 10 min${shown ? ` (row ${shown})` : ' (no source row)'}${log ? `; engine log:\n${log}` : ''}`, { cause: error });
         }
       },
       prepareRead: async (name, requireUnread = true) => {
