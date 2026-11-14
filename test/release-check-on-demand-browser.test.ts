@@ -86,6 +86,11 @@ describe('fresh read-on-demand without write tokens', () => {
       expect(new Function('document', `return ${providerListingExpression('google_drive')}`)(window.document)).toEqual([name]);
       window.document.querySelector('[role=grid]')!.append(window.document.querySelector('[role=row]')!.cloneNode(true));
       expect(new Function('document', `return ${providerListingExpression('google_drive')}`)(window.document)).toEqual([name, name]);
+      // Dropbox's top level can name a folder outside any row; a toast that only mentions it does not count.
+      window.document.body.innerHTML = `<table><tr><td>Other</td></tr></table><div><a><span>${ON_DEMAND_FOLDER}</span></a></div>`;
+      expect(new Function('document', `return ${providerListingExpression('dropbox')}`)(window.document)).toEqual([ON_DEMAND_FOLDER]);
+      window.document.body.innerHTML = `<table><tr><td>Other</td></tr></table><div>Created ${ON_DEMAND_FOLDER}</div>`;
+      expect(new Function('document', `return ${providerListingExpression('dropbox')}`)(window.document)).toEqual([]);
     } finally { await window.happyDOM.close(); }
   });
 

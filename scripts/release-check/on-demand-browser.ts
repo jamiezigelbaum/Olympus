@@ -19,11 +19,16 @@ export function providerListingExpression(source: TimingSource): string {
     const titles=${JSON.stringify(titles)};
     let rows=[...document.querySelectorAll('[role=row],tr')];
     if(!rows.length)rows=[...document.querySelectorAll('[data-testid="file-name"],[data-testid="folder-name"],[data-filename]')];
-    return rows.flatMap(row=>{
+    const shows=(e,name)=>[e.getAttribute('data-tooltip'),e.getAttribute('aria-label'),e.getAttribute('data-filename'),e.getAttribute('title'),e.textContent?.trim()].includes(name);
+    const found=rows.flatMap(row=>{
       const elements=[row,...row.querySelectorAll('*')];
-      const title=titles.find(name=>elements.some(e=>[e.getAttribute('data-tooltip'),e.getAttribute('aria-label'),e.getAttribute('data-filename'),e.textContent?.trim()].includes(name)));
+      const title=titles.find(name=>elements.some(e=>shows(e,name)));
       return title ? [title] : [];
     });
+    // A listing that names items outside its rows (Dropbox's top level): an element showing exactly the name counts.
+    const leaves=[...document.querySelectorAll('body *')];
+    for(const name of titles) if(!found.includes(name) && leaves.some(e=>(e.children.length===0 || e.hasAttribute('title') || e.hasAttribute('aria-label')) && shows(e,name))) found.push(name);
+    return found;
   })()`;
 }
 
