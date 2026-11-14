@@ -2627,16 +2627,14 @@ export function connectorStoreVectorDigestPageQuery(
   };
 }
 
+/** Past the deadline, the pool backstop waits this long for the scan's own cut, which keeps its winners. */
+const VECTOR_SCAN_BACKSTOP_GRACE_MS = 250;
 /**
  * The scan on the store's read-pool thread, inside one pool snapshot. Waiting
  * for that thread counts against the lane's deadline: a scan that cannot
  * start in time reports the deadline, and if the thread frees later the
  * snapshot opens and closes at once.
  */
-const VECTOR_SCAN_BACKSTOP_GRACE_MS = 250;
-/** How old the store's visibility set may be when it only pre-filters the vector scan. */
-const VECTOR_SCAN_EXCLUSION_MAX_AGE_MS = 5_000;
-
 async function scanVectorPagesOnPool(
   dbPath: string,
   provider: SourceEmbeddingProvider,
@@ -4458,7 +4456,6 @@ export class LocalConnectorStore {
     from?: { ledger: number; store: number };
     ids: Map<string, TierLedgerIdentity>;
   } | undefined;
-  private vectorScanExclusion: { value: TierLedgerHiddenItemPks; set: ReadonlySet<number> } | undefined;
   private visibilityPublishing: Promise<void> | undefined;
   private visibilityPublishTimer: unknown;
   private visibilityRetryDelay = 0;
@@ -13968,18 +13965,18 @@ export class LocalConnectorStore {
   /**
    * The items the vector scan skips before ranking: those the store's own
    * visibility set already keeps out of content search (hidden, held back
-   * from embedding, metadata only). A set up to a few seconds old is fine
-   * here: it only decides what the scan ranks, and every winner is still
-   * checked against the live ledger. Undefined when nothing is excluded or
+   * from embedding, metadata only). It is the current set (the feed keeps it
+   * incremental), never an aged one: an item judged a moment ago must rank
+   * at once. Every winner is still checked against the live ledger.
+   * Undefined when nothing is excluded or
    * the set cannot be read (the scan then ranks everything, as before).
    */
   private vectorScanExcludedItemPks(): ReadonlySet<number> | undefined {
     let value: TierLedgerHiddenItemPks;
-    try { value = this.tierHiddenItemPks({ countsMaxAgeMs: VECTOR_SCAN_EXCLUSION_MAX_AGE_MS }); } catch { return undefined; }
-    const cached = this.vectorScanExclusion;
-    if (cached?.value === value) return cached.set;
+    try { value = this.tierHiddenItemPks(); } catch { return undefined; }
+    // Built per scan: the set's lists change in place as verdicts land, so
+    // no copy of them can be keyed on the object.
     const set = new Set<number>([...value.hidden, ...value.held, ...value.metadataLayer]);
-    this.vectorScanExclusion = { value, set };
     return set.size > 0 ? set : undefined;
   }
 
