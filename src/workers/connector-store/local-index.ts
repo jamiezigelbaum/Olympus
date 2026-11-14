@@ -100,7 +100,7 @@ import {
   type TierLedgerIdentity,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
-import { conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { arrivalOrderedSniffer, conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import type { SourceItemReadResult, SourceItemReadRefusal } from '../../core/source-item-read.ts';
 import { checkReleaseChunks, chunkCoverageNote, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ReleaseCheck, type ReleaseInput } from '../../core/release-manifest.ts';
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
@@ -3979,7 +3979,7 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sniffer ? { sniffer: conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata) } : {}),
+          ...(inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), inputs.holdContentUntilJudged !== true && ledger.isNewArrival(item.identity)) } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
@@ -10675,6 +10675,7 @@ export class LocalConnectorStore {
     let checkpoint = options?.cursor;
     let sawDonePage = false;
     let consecutiveContentFetchFailures = 0;
+    const listedAccounts = new Map<string, { provider: string; accountScope: string }>();
     const gaps: string[] = [];
     const tierRun = { gaps, ledgerFailed: false };
     const coverageGaps: ConnectorStoreCoverageGap[] = [];
@@ -10719,6 +10720,7 @@ export class LocalConnectorStore {
             break;
           }
           itemsSeen += 1;
+          listedAccounts.set(`${item.identity.provider}\u0000${item.identity.accountScope}`, item.identity);
           if (itemsSeen % VISIBILITY_TICK_ITEMS === 0) this.tickVisibilityWriters();
           // SQLite's item work is synchronous. Return to the event loop once
           // the thread has run a time slice, so a large page cannot starve the
@@ -11163,6 +11165,14 @@ export class LocalConnectorStore {
       );
     }
 
+    // The first listing that reaches the end of an account's data closes its
+    // first import: what arrives after it is judged ahead of that backlog.
+    if (sawDonePage && listedAccounts.size > 0) {
+      try {
+        const ledger = this.tierLedger();
+        for (const account of listedAccounts.values()) ledger?.markListingCaughtUp(account.provider, account.accountScope);
+      } catch { /* Scheduling only: a ledger that cannot record it leaves new items in backlog order. */ }
+    }
     return {
       syncRunId,
       corpusId: this.corpusId,

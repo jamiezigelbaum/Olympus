@@ -28,6 +28,7 @@ import {
   contentDigestReason,
   contentNamesReason,
   tierSnifferInputHash,
+  arrivalOrderedSniffer,
   conversationOrderedSniffer,
   heldUntilJudged,
   type OwnerTierRule,
@@ -238,9 +239,12 @@ export function decideItemTiers(
       return fenced.judge(request);
     },
   };
-  const sniffer = cacheAware && conversationOrderedSniffer(
+  // An archive's items are its import backlog; anything else first seen after
+  // its account's first full listing is a new arrival, judged ahead of it.
+  const archive = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true;
+  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(
     recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata,
-  );
+  ), !archive && ledger !== undefined && ledger.isNewArrival(item.identity));
   // The lane's hold, the item's own (an item built from an archive record
   // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
   // (a store whose recording did not bring the lane's option still holds the

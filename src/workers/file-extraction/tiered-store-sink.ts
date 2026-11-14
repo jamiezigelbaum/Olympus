@@ -29,7 +29,7 @@ import {
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { CONTENT_NAMES_ONLY_LIFTED_REASON, CONTENT_NAMES_ONLY_REASON, classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { CONTENT_NAMES_ONLY_LIFTED_REASON, CONTENT_NAMES_ONLY_REASON, arrivalOrderedSniffer, classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { parentNamesContext } from '../connector-store/parent-context.ts';
@@ -193,6 +193,8 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
         || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
+      // An archive lane's items are its import backlog, never new arrivals.
+      const archiveLane = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged();
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
       const judgeStarted = Date.now();
       const content = classifyContentTier(
@@ -215,7 +217,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           subject: identity,
         },
         {
-          ...(tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity, read) } : {}),
+          ...(tierClassification?.sniffer ? { sniffer: arrivalOrderedSniffer(secretFencedSniffer(tierClassification.sniffer, ledger, identity, read), !archiveLane && ledger.isNewArrival(identity)) } : {}),
           ...(override ? { override } : {}),
           ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },

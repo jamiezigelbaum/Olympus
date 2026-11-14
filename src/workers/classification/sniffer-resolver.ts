@@ -61,7 +61,7 @@ import type {
   StoredSnifferVerdict,
   TierSnifferStore,
 } from './sniffer-store.ts';
-import { TIER_CLASSIFIER_VERSION, type TierDecision, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
+import { NEW_ARRIVAL_PRIORITY, TIER_CLASSIFIER_VERSION, type TierDecision, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
 
 registerLimit({ id: 'judge.daily_calls', kind: 'calls', scope: 'judge', label: 'Privacy judge daily call budget used', unit: 'calls', continue: 'raise' });
@@ -745,7 +745,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       // Priority orders a store's own questions, never one store over another
       // (#866: Dropbox at -1 waited behind all of Gmail at 0). A cloud lane
       // takes turns too.
-      let next = aged[0] ?? raisedNext ?? nextInTurn(pending, options.targets, dispatches);
+      // A live source's new arrival goes ahead of every store's backlog,
+      // newest first; the aged slot above keeps the backlog moving.
+      const arrival = aged.length === 0 && !raisedNext ? newestArrival(pending) : undefined;
+      let next = aged[0] ?? raisedNext ?? arrival ?? nextInTurn(pending, options.targets, dispatches);
       // Within an item, names go first: a Private names verdict can settle both.
       if (next.question.pass === 'content') next = pending.find(item => item.question.pass === 'metadata'
         && item.target === next.target
@@ -895,6 +898,17 @@ function nextInTurn(pending: readonly WorkItem[], targets: readonly SnifferTarge
   // slot for good (with five stores, the fifth would never get a turn).
   const target = waiting[snifferStoreTurn(dispatches) % Math.max(1, waiting.length)];
   return pending.find((item) => item.target === target) ?? pending[0]!;
+}
+
+/** The newest question at NEW_ARRIVAL_PRIORITY in any store, if one waits. */
+function newestArrival(pending: readonly WorkItem[]): WorkItem | undefined {
+  let newest: WorkItem | undefined;
+  for (const item of pending) {
+    if (item.question.priority < NEW_ARRIVAL_PRIORITY) continue;
+    if (!newest || item.question.queuedAt > newest.question.queuedAt
+      || (item.question.queuedAt === newest.question.queuedAt && item.question.sequence > newest.question.sequence)) newest = item;
+  }
+  return newest;
 }
 
 function compareRecent(a: WorkItem, b: WorkItem): number {
