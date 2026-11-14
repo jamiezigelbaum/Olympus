@@ -373,6 +373,12 @@ export class TierSnifferStore {
     return this.db.query(`SELECT 1 FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} LIMIT 1`).get() != null;
   }
 
+  /** The waiting new arrivals' content questions, most urgent first (at most `limit`). */
+  arrivalContentQuestions(limit = 20): SnifferQuestion[] {
+    return (this.db.query(`SELECT * FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} AND pass = 'content'
+      ORDER BY priority DESC LIMIT ?`).all(Math.max(1, Math.trunc(limit))) as QuestionRow[]).map(questionFromRow);
+  }
+
   questionFor(subject: TierSnifferSubject, pass: SnifferPass): SnifferQuestion | undefined {
     const row = this.db.query(`
       SELECT * FROM sniffer_questions

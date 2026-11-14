@@ -17650,6 +17650,10 @@ class TierSnifferStore {
   hasArrivalWaiting() {
     return this.db.query(`SELECT 1 FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} LIMIT 1`).get() != null;
   }
+  arrivalContentQuestions(limit = 20) {
+    return this.db.query(`SELECT * FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} AND pass = 'content'
+      ORDER BY priority DESC LIMIT ?`).all(Math.max(1, Math.trunc(limit))).map(questionFromRow);
+  }
   questionFor(subject, pass) {
     const row = this.db.query(`
       SELECT * FROM sniffer_questions

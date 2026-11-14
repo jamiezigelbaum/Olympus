@@ -69,8 +69,8 @@ export function holdDiagnostics(file: { providerItemId: string; question: string
     catch { return { error: 'not JSON' }; }
   };
   const explained = run(['tier', 'explain', file.providerItemId], 60_000) as Record<string, unknown>;
-  const rows = (Array.isArray(explained.records) ? explained.records : Array.isArray(explained) ? explained : [explained]) as Array<Record<string, unknown>>;
-  const tier = rows.map(row => Object.fromEntries(['error', 'recorded', 'metadataTier', 'contentTier', 'state', 'decidedBy', 'reasons', 'override', 'snifferModel', 'note']
+  const rows = (Array.isArray(explained.stores) ? explained.stores : [explained]) as Array<Record<string, unknown>>;
+  const tier = rows.map(row => Object.fromEntries(['error', 'recorded', 'metadataTier', 'contentTier', 'state', 'decidedBy', 'reasons', 'override', 'snifferModel', 'waitingOnSniffer', 'routed', 'note']
     .filter(key => row[key] !== undefined).map(key => [key, row[key]])));
   if (!file.needsReview) return { tier };
   const answered = run(['source', 'answer', file.question], 600_000) as { opsec?: { release_decision?: unknown }; error?: string };
