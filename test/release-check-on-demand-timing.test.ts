@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createTestClock } from './helpers/test-clock.ts';
 import { onDemandChecks, runOnDemandTiming, timeOnDemandFile, timingReply, timingSteps,
-  type FolderMode, type TimingDashboard, type TimingDiagnostics } from '../scripts/release-check/on-demand-timing.ts';
+  QUESTION_BOUND_MS, type FolderMode, type TimingDashboard, type TimingDiagnostics } from '../scripts/release-check/on-demand-timing.ts';
 import { parseTimingAccounts, scannedPdf, textPdf, type SeedFolder, type TimingFile, type TimingSeeds } from '../scripts/release-check/on-demand-seeds.ts';
 import { renderOnDemandTiming } from '../scripts/release-check/report.ts';
 import { parseCanaryAccounts, renderCanaryHtml, type CanaryReport } from '../scripts/release-check/canary.ts';
@@ -77,13 +77,13 @@ describe('release-check opt-in on-demand timing', () => {
     expect(statusOf(onDemandChecks(row)).silent).toBe('fail');
   });
 
-  test('stops at 180 seconds and caps each MCP request by the remaining wall time', async () => {
+  test('stops at the question bound and caps each MCP request by the remaining wall time', async () => {
     const s = scripted([response('Reading 1 file(s) for this question. Ask again in about a minute.')]);
     const row = await timeOnDemandFile(file, s.engine, proof(), undefined, s.clock);
     expect(row.secondsToAnswer).toBeNull();
-    expect(row.elapsedSeconds).toBe(180);
-    expect(row.asks).toBe(18);
-    expect(s.calls[0]!.timeoutMs).toBe(180_000);
+    expect(row.elapsedSeconds).toBe(QUESTION_BOUND_MS / 1000);
+    expect(row.asks).toBe(QUESTION_BOUND_MS / 10_000);
+    expect(s.calls[0]!.timeoutMs).toBe(QUESTION_BOUND_MS);
     expect(s.calls.at(-1)!.timeoutMs).toBe(10_000);
     expect(statusOf(onDemandChecks(row))).toMatchObject({ slow: 'fail', silent: 'pass', paragraph: 'fail' });
     expect(mcpCallScript('macos', 'token', {}, 10_000)).toContain('--max-time 10');

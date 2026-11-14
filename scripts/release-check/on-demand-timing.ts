@@ -78,6 +78,12 @@ export function onDemandChecks(row: OnDemandTimingRow): CheckResult[] {
   ];
 }
 
+/**
+ * How long one question is followed. The bar is an answer within 30 s; following it to 8 min gives the real time
+ * when it misses (a fresh 4-CPU install took over 3 min per question in run 43634460005) instead of "no answer".
+ */
+export const QUESTION_BOUND_MS = 480_000;
+
 export async function timeOnDemandFile(file: TimingFile, engine: EngineMcp, diagnostics: TimingDiagnostics,
   ownerRead?: () => Promise<string>, clock: TimingClock = realClock): Promise<OnDemandTimingRow> {
   await diagnostics.begin(file);
@@ -99,7 +105,7 @@ export async function timeOnDemandFile(file: TimingFile, engine: EngineMcp, diag
     }
     let pending: string | undefined;
     for (;;) {
-      const remainingMs = 180_000 - (clock.now() - started);
+      const remainingMs = QUESTION_BOUND_MS - (clock.now() - started);
       if (remainingMs <= 0) break;
       const tool = pending ? 'source_answer_result' : 'source_answer';
       if (!pending) row.asks++;
@@ -109,10 +115,10 @@ export async function timeOnDemandFile(file: TimingFile, engine: EngineMcp, diag
       const result = response.structured as { status?: string; job_id?: string } | null;
       pending = response.ok && result?.status === 'working' && typeof result.job_id === 'string' ? result.job_id : undefined;
       const elapsed = clock.now() - started;
-      if (row.secondsToAnswer !== null || elapsed >= 180_000) break;
-      const next = Math.min(180_000, Math.floor(elapsed / 10_000 + 1) * 10_000);
+      if (row.secondsToAnswer !== null || elapsed >= QUESTION_BOUND_MS) break;
+      const next = Math.min(QUESTION_BOUND_MS, Math.floor(elapsed / 10_000 + 1) * 10_000);
       await clock.sleep(next - elapsed);
-      if (clock.now() - started >= 180_000) break;
+      if (clock.now() - started >= QUESTION_BOUND_MS) break;
     }
   } catch (error) { row.error = error instanceof Error ? error.message : String(error); }
   row.elapsedSeconds = (clock.now() - started) / 1000;
