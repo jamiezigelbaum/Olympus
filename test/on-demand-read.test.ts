@@ -255,7 +255,8 @@ describe('read on demand', () => {
       onDemandReadWaitMs: 0,
       analyst: { async analyze(pack) {
         expect(pack.candidates.every(candidate => candidate.chunks.length === 0)).toBe(true);
-        return { answer: 'The sources do not contain the contents.', citations: [], unanswered: ['The requested contents are unread.'] };
+        // Citing a file by name alone is still no answer while it is read.
+        return { answer: 'The sources do not contain the contents.', citations: [{ provenance: pack.candidates[0]!.provenance, claim: 'a is listed' }], unanswered: ['The requested contents are unread.'] };
       } },
       lanes: () => ({
         registry: buildSourceIndexCorpusRegistry([defineSourceIndexCorpus({ corpusId, family: 'file', trustDomain: 'internal' })]),

@@ -805,7 +805,10 @@ export function createAnalystSourceIndexAnswerHandler(
       const heldAnswer = [releasedAnswer, ...[...chunkHoldNotes].filter(note => !releasedAnswer.includes(note))].join('\n\n');
       // Nothing cited yet while files are still being read: the reply is what
       // is being read and when to ask again, never a "not found" for them.
-      const readingOnly = stillReading > 0 && facts.length === 0;
+      // A citation of a file's name alone is no answer: only a cited passage is.
+      const itemKey = (item: { provider: string; accountScope: string; providerItemId: string }) => JSON.stringify([item.provider, item.accountScope, item.providerItemId]);
+      const readContent = new Set(detail.pack.candidates.filter((candidate) => candidate.chunks.length > 0).map((candidate) => itemKey(candidate.provenance.sourceItem)));
+      const readingOnly = stillReading > 0 && !analystResult.citations.some((citation) => readContent.has(itemKey(citation.provenance.sourceItem)));
       const answer = stillReading === 0
         ? heldAnswer
         : [onDemandReadingCoverageNote(stillReading), ...(readingOnly ? onDemandNotes : [heldAnswer])].join('\n\n');

@@ -85556,7 +85556,9 @@ function createAnalystSourceIndexAnswerHandler(options) {
     const heldAnswer = [releasedAnswer, ...[...chunkHoldNotes].filter((note) => !releasedAnswer.includes(note))].join(`
 
 `);
-    const readingOnly = stillReading > 0 && facts.length === 0;
+    const itemKey = (item) => JSON.stringify([item.provider, item.accountScope, item.providerItemId]);
+    const readContent = new Set(detail.pack.candidates.filter((candidate) => candidate.chunks.length > 0).map((candidate) => itemKey(candidate.provenance.sourceItem)));
+    const readingOnly = stillReading > 0 && !analystResult.citations.some((citation) => readContent.has(itemKey(citation.provenance.sourceItem)));
     const answer = stillReading === 0 ? heldAnswer : [onDemandReadingCoverageNote(stillReading), ...readingOnly ? onDemandNotes : [heldAnswer]].join(`
 
 `);
