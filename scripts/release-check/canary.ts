@@ -32,7 +32,8 @@
  */
 import { prepareLinuxLocalBundle } from '../publish-release-to-site.ts';
 import { FRESH_LEG, runFreshInstall, validateFreshSources } from './fresh-install.ts';
-import { parseCdpEndpoint } from './fresh-dashboard.ts';
+import { openFreshDashboard, parseCdpEndpoint } from './fresh-dashboard.ts';
+import { memoryCheck, splitRestartCheck, startRssSampler, type RssSample } from './split-watch.ts';
 import { bundleAgent } from './run.ts';
 import { readAgentKey } from './agents.ts';
 import { randomBytes } from 'node:crypto';
@@ -211,8 +212,24 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
       checks.push({ id: 'live.connection', title: 'A connection to the machine\'s Olympus for the account checks', status: 'fail', detail: error instanceof Error ? error.message : String(error), ms: Date.now() - started });
     }
     if (engine) {
+      // On the Mac the engine split runs behind the engine host (split-watch.ts): memory is sampled while the accounts are checked.
+      const sampler = options.os === 'macos' && !options.sleep ? await startRssSampler(machine).catch(() => undefined) : undefined;
+      const privacyWait = async () => { const s = await engine!.call('source_index_status', {}).catch(() => undefined); return (s?.structured as { privacy_check?: { waiting_items?: number } } | null)?.privacy_check?.waiting_items ?? 0; };
+      const waitBefore = sampler ? await privacyWait() : 0;
       try {
         checks.push(...await runLiveAccounts(engine, { sources: accounts.sources, ...(options.sleep ? { sleep: options.sleep, pollMs: options.pollMs ?? 1 } : {}) }));
+        if (sampler) {
+          let dashboard: Awaited<ReturnType<typeof openFreshDashboard>> | undefined;
+          try {
+            dashboard = await openFreshDashboard(machine, options.cdp ?? '127.0.0.1:9333');
+            checks.push(await splitRestartCheck(machine, { saveAnswerModel: (want) => dashboard!.saveAnswerModel!(want) }));
+          } catch (error) {
+            checks.push({ id: 'split.restart', title: 'Engine split: a model change restarts front and background while the page stays up', status: 'fail', detail: `could not run: ${error instanceof Error ? error.message : String(error)}` });
+          } finally { await dashboard?.close().catch(() => undefined); }
+          const samples: RssSample[] = await sampler.stop().catch(() => []);
+          const waitAfter = await privacyWait();
+          checks.push(memoryCheck(samples, `over the account checks and the model change (items waiting for the privacy check: ${waitBefore} at the start, ${waitAfter} at the end)`));
+        }
         if (options.onDemandTiming) {
           let dashboard;
           let diagnostics;
@@ -235,7 +252,10 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
           }
           checks.push(...onDemandTiming.checks);
         }
-      } finally { await engine.close(); }
+      } finally {
+        await sampler?.stop().catch(() => undefined);
+        await engine.close();
+      }
     }
   }
   if (accounts.clients.length > 0) {

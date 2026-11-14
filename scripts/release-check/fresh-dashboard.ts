@@ -19,6 +19,11 @@ export interface FreshDashboard {
   callback(source: LiveSourceSpec): Promise<void>;
   scope(source: LiveSourceSpec): Promise<void>;
   indexed(source: LiveSourceSpec): Promise<number>;
+  /**
+   * Saves an answer model on Privacy settings (?keys) through the page's own form, as the owner does: the given one, or another
+   * option of the first picker that has two. Says which picker and models; the save itself restarts the engine.
+   */
+  saveAnswerModel?(want?: { provider: string; model: string }): Promise<{ provider: string; from: string; to: string }>;
   close(): Promise<void>;
 }
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
@@ -492,6 +497,29 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await clickKey('picker:cancel');
       },
       indexed: async s => { const c = await card(s); return connected(c) ? Number(c.coverage?.indexed_items ?? 0) : 0; },
+      saveAnswerModel: async want => {
+        await reload('/dashboard?keys', `!!document.querySelector('form[data-model-choice]')`);
+        const pick = `(() => {
+          const want=${JSON.stringify(want ?? null)};
+          const forms=[...document.querySelectorAll('form[data-model-choice]')].filter(f=>f.querySelectorAll('input[name=model][type=radio]').length>0);
+          for (const form of forms) {
+            const provider=form.querySelector('input[name=provider]')?.value||'';
+            if (want && provider!==want.provider) continue;
+            const radios=[...form.querySelectorAll('input[name=model][type=radio]')];
+            const current=radios.find(r=>r.checked);
+            const next=want ? radios.find(r=>r.value===want.model) : radios.find(r=>!r.checked);
+            if (!next || next.disabled) continue;
+            next.checked=true;
+            form.requestSubmit();
+            return JSON.stringify({provider, from: current?.value||'', to: next.value});
+          }
+          return 'no picker with another model: ' + forms.map(f=>(f.querySelector('input[name=provider]')?.value||'?')+' '+f.querySelectorAll('input[name=model][type=radio]').length).join(', ');
+        })()`;
+        const said = await panel<string>(pick, (value) => typeof value === 'string' && value.startsWith('{'))
+          ?? await panel<string>(pick, (value) => typeof value === 'string');
+        if (!said?.startsWith('{')) throw new Error(`answer model could not be changed: ${said ?? 'no Privacy settings page'}`);
+        return JSON.parse(said) as { provider: string; from: string; to: string };
+      },
       close: cleanup,
     };
   } catch (error) { await cleanup(); throw error; }
