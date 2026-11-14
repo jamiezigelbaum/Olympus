@@ -12,20 +12,23 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { copyStoresBeforeUpgrade, upgradeCopyPath } from '../src/core/upgrade-store-copies.ts';
 import { holdLinuxWorkerStopped, installWorkerService, workerServicePaths } from '../src/core/worker-service.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
-const REAL = process.platform === 'linux' && process.env.OLYMPUS_REAL_SYSTEMD === '1';
+// Tests run with a throwaway HOME; the user manager reads units from the
+// runner's own home, which CI passes here.
+const MANAGER_HOME = process.env.OLYMPUS_REAL_SYSTEMD_HOME ?? '';
+const REAL = process.platform === 'linux' && process.env.OLYMPUS_REAL_SYSTEMD === '1' && MANAGER_HOME !== '';
 const UNIT = 'olympus-worker.service';
 const systemctl = (...args: string[]) => spawnSync('systemctl', ['--user', ...args], { encoding: 'utf8' });
 const activeState = () => systemctl('show', '-p', 'ActiveState', '--value', UNIT).stdout.trim();
 
 describe.skipIf(!REAL)('the upgrade copy under a real systemd user unit', () => {
-  const home = homedir();
+  const home = MANAGER_HOME;
   const scratch = mkdtempSync(join(tmpdir(), 'olympus-real-systemd-'));
   const env = { HOME: scratch, XDG_DATA_HOME: join(scratch, 'data') };
   const store = join(olympusDataRoot(env), 'tier-ledger.sqlite');

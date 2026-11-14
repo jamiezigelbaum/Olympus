@@ -172,7 +172,7 @@ jobs:
           for i in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 0.2; done
           export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
           systemctl --user is-system-running || true
-          OLYMPUS_REAL_SYSTEMD=1 bun test test/real-systemd-upgrade-hold.test.ts
+          OLYMPUS_REAL_SYSTEMD=1 OLYMPUS_REAL_SYSTEMD_HOME="$HOME" HOME="$(mktemp -d)" bun test test/real-systemd-upgrade-hold.test.ts
       - name: Retain trusted main timing data
         if: ${{ always() && github.event_name == 'push' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
