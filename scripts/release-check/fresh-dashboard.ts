@@ -502,7 +502,11 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         const pick = `(() => {
           const want=${JSON.stringify(want ?? null)};
           const forms=[...document.querySelectorAll('form[data-model-choice]')].filter(f=>f.querySelectorAll('input[name=model][type=radio]').length>0);
-          for (const form of forms) {
+          const of=f=>f.querySelector('input[name=provider]')?.value||'';
+          // zkAPI's model is read at each question, so only a Venice or built-in change reloads the models; Venice needs no download.
+          const order=['venice','local'];
+          const reloading=forms.filter(f=>order.includes(of(f))).sort((a,b)=>order.indexOf(of(a))-order.indexOf(of(b)));
+          for (const form of want ? forms : reloading) {
             const provider=form.querySelector('input[name=provider]')?.value||'';
             if (want && provider!==want.provider) continue;
             const radios=[...form.querySelectorAll('input[name=model][type=radio]')];
