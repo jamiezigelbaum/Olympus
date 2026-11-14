@@ -5,7 +5,7 @@
 // lane (test/deploy-lane-partition.test.ts). The rest of the split's tests
 // run on the test clock in test/engine-split.test.ts.
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -96,6 +96,51 @@ describe('the host starts the background, then the front', () => {
     }
   }, 30_000);
 
+  test('off Linux the front binds the port the host gives it, and is checked there', async () => {
+    const fixture = fakeWorker(tempRoot());
+    const probe = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
+    const frontPort = probe.port;
+    probe.stop(true);
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: fixture.pluginConfig({ engineSplit: true }), moduleUrl: import.meta.url, workerEnvPath: fixture.envPath,
+      startupTimeoutMs: 10_000, readinessPollMs: 10, stopGraceMs: 50,
+      engineBackground: { isReady: () => true }, frontPort,
+    }));
+    // Nothing listens on the worker's own port here: readiness is the front's port.
+    await service.start({});
+    expect(service.isReady()).toBe(true);
+    expect(JSON.parse(readFileSync(fixture.rolePath, 'utf8')).listenPort).toBe(String(frontPort));
+  }, 30_000);
+
+  test('under the Gateway the service holds the worker endpoint from its start until its stop (holdEndpoint)', async () => {
+    const root = tempRoot();
+    const fixture = fakeWorker(root);
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: fixture.pluginConfig({ engineSplit: true }), moduleUrl: import.meta.url, workerEnvPath: fixture.envPath,
+      startupTimeoutMs: 10_000, readinessPollMs: 10, stopGraceMs: 50, restartDelaysMs: [10],
+      engineBackground: { isReady: () => true }, holdEndpoint: true,
+    }));
+    await service.start({});
+    expect(service.isReady()).toBe(true);
+    const role = JSON.parse(readFileSync(fixture.rolePath, 'utf8'));
+    const ask = async () => {
+      const response = await fetch('http://127.0.0.1/v1/service/readiness', { unix: holdPath, headers: { authorization: `Bearer ${TOKEN}`, connection: 'close' } } as RequestInit);
+      return response.status;
+    };
+    // Linux: the front binds front.sock; the held worker socket pipes to it.
+    const holdPath = process.platform === 'linux' ? join(root, 'run', 'olympus', 'worker.sock') : '';
+    if (process.platform !== 'linux') { expect(role.listenPort).toBeDefined(); return; }
+    expect(role.listenSocket).toBe(join(root, 'run', 'olympus', 'front.sock'));
+    expect(await ask()).toBe(200);
+    // A front that exits is replaced behind the held socket.
+    const firstPid = Number(readFileSync(fixture.pidPath, 'utf8'));
+    process.kill(firstPid, 'SIGKILL');
+    await waitFor(() => service.isReady() && Number(readFileSync(fixture.pidPath, 'utf8')) !== firstPid, { timeoutMs: 20_000 });
+    expect(await ask()).toBe(200);
+    await service.stop();
+    expect(existsSync(holdPath)).toBe(false);
+  }, 30_000);
+
   test('the background is ready on its command socket, and is restarted when it exits', async () => {
     const fixture = fakeWorker(tempRoot());
     const background = createNativeEngineBackgroundService({
@@ -146,7 +191,7 @@ import { rmSync, writeFileSync } from 'node:fs';
 const env = process.env;
 // The real background removes a stopped background's socket after taking the data lock.
 if (env.OLYMPUS_WORKER_ENGINE_ROLE === 'background') rmSync(env.OLYMPUS_ENGINE_BACKGROUND_SOCKET, { force: true });
-writeFileSync(env.FAKE_ROLE_PATH, JSON.stringify({ role: env.OLYMPUS_WORKER_ENGINE_ROLE, socket: env.OLYMPUS_ENGINE_BACKGROUND_SOCKET }));
+writeFileSync(env.FAKE_ROLE_PATH, JSON.stringify({ role: env.OLYMPUS_WORKER_ENGINE_ROLE, socket: env.OLYMPUS_ENGINE_BACKGROUND_SOCKET, listenPort: env.OLYMPUS_WORKER_LISTEN_PORT, listenSocket: env.OLYMPUS_WORKER_LISTEN_SOCKET }));
 writeFileSync(env.FAKE_PID_PATH, String(process.pid));
 const token = env.OLYMPUS_WORKER_AUTH_TOKEN;
 const authed = (request) => request.headers.get('authorization') === 'Bearer ' + token;
@@ -155,7 +200,7 @@ const server = env.OLYMPUS_WORKER_ENGINE_ROLE === 'background'
       if (!authed(request)) return new Response('', { status: 401 });
       return Response.json({ ready: true, schema_current: true, instance_id: env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID });
     } })
-  : Bun.serve({ hostname: '127.0.0.1', port: Number(env.OLYMPUS_EMAIL_SOURCE_PORT), fetch(request) {
+  : Bun.serve({ ...(env.OLYMPUS_WORKER_LISTEN_SOCKET ? { unix: env.OLYMPUS_WORKER_LISTEN_SOCKET } : { hostname: '127.0.0.1', port: Number(env.OLYMPUS_WORKER_LISTEN_PORT || env.OLYMPUS_EMAIL_SOURCE_PORT) }), fetch(request) {
       if (!authed(request)) return new Response('', { status: 401 });
       return Response.json({ instance_id: env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID });
     } });

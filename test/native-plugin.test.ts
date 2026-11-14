@@ -16,6 +16,8 @@ import {
 } from '../src/core/public-surface.ts';
 import type { NativeWorkerServiceDefinition } from '../src/core/native-worker-service.ts';
 
+const SPLIT_BY_DEFAULT = process.platform === 'linux' || process.platform === 'darwin';
+
 const originalFetch = globalThis.fetch;
 const workerTestOrigin = process.platform === 'linux' ? 'http://127.0.0.1:8010' : 'http://source-worker.test';
 let testSocket: ReturnType<typeof Bun.serve> | undefined;
@@ -125,7 +127,8 @@ describe('native OpenClaw plugin adapter', () => {
         registerService(service: NativeWorkerServiceDefinition) { services.push(service); },
       });
       expect(tools.map((tool) => tool.name)).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
-      expect(services).toHaveLength(7);
+      // The engine split is on by default on Linux and macOS: its background registers first.
+      expect(services).toHaveLength(SPLIT_BY_DEFAULT ? 8 : 7);
       const result = await tools.find((tool) => tool.name === 'source_index_status')!.execute('opaque-ref-test', {});
       expect(result).toMatchObject({ isError: true });
       expect(JSON.stringify(result)).toContain('has not been resolved');
@@ -177,6 +180,18 @@ describe('native OpenClaw plugin adapter', () => {
     });
 
     expect(services).toEqual([
+      ...(SPLIT_BY_DEFAULT ? [{
+        id: 'olympus-worker-background',
+        reload: {
+          configPrefixes: [
+            'plugins.entries.olympus.config.worker',
+            'plugins.entries.olympus.config.sourceIndex',
+            'plugins.entries.olympus.config.sovereignty',
+          ],
+        },
+        start: expect.any(Function),
+        stop: expect.any(Function),
+      }] : []),
       {
         id: 'olympus-worker',
         reload: {

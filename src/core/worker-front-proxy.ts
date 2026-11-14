@@ -15,6 +15,7 @@
  * beyond its Accept header, and only when it has to answer "starting" itself.
  */
 import { rmSync } from 'node:fs';
+import { connect as netConnect, createServer as createNetServer, type Socket as NetSocket } from 'node:net';
 import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat } from './engine-heartbeat.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { bindWorkerSocket, prepareWorkerSocket, releaseSystemdWorkerSocket, removeReleasedWorkerSocket, workerFrontSocketPath, workerSocketListenerStopped } from './worker-transport.ts';
@@ -74,6 +75,61 @@ interface Side {
   replay: 'unknown' | 'yes' | 'no';
 }
 
+type Address = { unix: string } | { hostname: string; port: number };
+/** The callbacks of one end, as Bun calls them; the Node adapter below calls them the same way. */
+type Handlers = {
+  open(socket: Socket): void;
+  data(socket: Socket, chunk: Uint8Array): void;
+  drain(socket: Socket): void;
+  close(socket: Socket): void;
+  error(socket: Socket): void;
+};
+
+/**
+ * The same pipe under Node (the OpenClaw Gateway): Node buffers every write,
+ * so a write takes the whole chunk and drain is never needed. Close fires
+ * once, after any error.
+ */
+function nodeSocket(raw: NetSocket, data: Side, handlers: Handlers): Socket {
+  const socket: Socket = { data, write: (chunk) => { raw.write(chunk); return chunk.length; }, end: () => raw.end() };
+  raw.on('data', (chunk: Buffer) => handlers.data(socket, chunk));
+  raw.on('error', () => {});
+  raw.on('close', () => handlers.close(socket));
+  return socket;
+}
+
+function nodeConnect(address: Address, data: Side, handlers: Handlers): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const raw = 'unix' in address ? netConnect({ path: address.unix }) : netConnect({ host: address.hostname, port: address.port });
+    const failed = (error: Error) => reject(error);
+    raw.once('error', failed);
+    raw.once('connect', () => {
+      raw.removeListener('error', failed);
+      handlers.open(nodeSocket(raw, data, handlers));
+      resolve();
+    });
+  });
+}
+
+function nodeListen(address: Address, handlers: Handlers): { stop(force?: boolean): void; listening: Promise<void> } {
+  const open = new Set<NetSocket>();
+  const server = createNetServer((raw) => {
+    open.add(raw);
+    raw.once('close', () => open.delete(raw));
+    const socket = nodeSocket(raw, undefined as unknown as Side, handlers);
+    handlers.open(socket);
+  });
+  // Node binds before listen() returns (a unix socket file exists at once) but
+  // reports a refused bind afterwards: `listening` carries that answer.
+  const listening = new Promise<void>((resolve, reject) => {
+    server.once('listening', () => resolve());
+    server.once('error', reject);
+  });
+  if ('unix' in address) server.listen(address.unix);
+  else server.listen(address.port, address.hostname);
+  return { stop() { server.close(); for (const raw of open) raw.destroy(); }, listening };
+}
+
 /** Only a request that reads may go to a second front: one that writes may have been done by the first. */
 const READS = /^(GET|HEAD|OPTIONS) /;
 
@@ -127,20 +183,34 @@ export function startWorkerFrontProxy(input: {
    * one a listener answers on is kept, and the bind below refuses it.
    */
   clearStale?: boolean;
-}): { socketPath: string; stop(): void } {
+  /**
+   * Off Linux: the worker's loopback port, held here, and the private port
+   * the front binds instead (WORKER_LISTEN_PORT_ENV). No socket file then.
+   */
+  tcp?: { hostname: string; port: number; frontPort: number };
+}): { socketPath: string; stop(): void; listening: Promise<void> } {
   const env = input.env as NodeJS.ProcessEnv;
   const log = input.log ?? ((line: string) => console.warn(line));
-  const frontSocket = input.frontSocket ?? workerFrontSocketPath({ env, platform: 'linux' })!;
+  const tcp = input.tcp;
+  const frontSocket = tcp ? '' : input.frontSocket ?? workerFrontSocketPath({ env, platform: 'linux' })!;
   const waitMs = input.waitMs ?? FRONT_PROXY_WAIT_MS;
   const retryMs = input.retryMs ?? 100;
-  if (releaseSystemdWorkerSocket({ env })) log('[olympus:worker] removed the socket left by the previous worker run');
-  else if (input.clearStale && removeReleasedWorkerSocket({ env, platform: 'linux' }, { previousWorkerReleased: true })) log('removed the worker socket a previous engine left');
-  const socketPath = prepareWorkerSocket({ env, platform: 'linux' })!;
+  if (!tcp) {
+    if (releaseSystemdWorkerSocket({ env })) log('[olympus:worker] removed the socket left by the previous worker run');
+    else if (input.clearStale && removeReleasedWorkerSocket({ env, platform: 'linux' }, { previousWorkerReleased: true })) log('removed the worker socket a previous engine left');
+  }
+  const socketPath = tcp ? `${tcp.hostname}:${tcp.port}` : prepareWorkerSocket({ env, platform: 'linux' })!;
+  const frontAddress: Address = tcp ? { hostname: tcp.hostname, port: tcp.frontPort } : { unix: frontSocket };
+  const listenAddress: Address = tcp ? { hostname: tcp.hostname, port: tcp.port } : { unix: socketPath };
+  const connect = (options: { data: Side; socket: Handlers }) => typeof Bun === 'undefined'
+    ? nodeConnect(frontAddress, options.data, options.socket)
+    : 'unix' in frontAddress
+      ? Bun.connect<Side>({ ...options, unix: frontAddress.unix })
+      : Bun.connect<Side>({ ...options, ...frontAddress });
 
   const connectFront = (client: Socket): void => {
     const side = client.data;
-    void Bun.connect<Side>({
-      unix: frontSocket,
+    void connect({
       data: { queue: [], pending: [], ended: false, startedAt: side.startedAt, unanswered: [], replay: 'no' },
       socket: {
         open(front) {
@@ -185,38 +255,42 @@ export function startWorkerFrontProxy(input: {
     }
   };
 
-  const server = bindWorkerSocket(socketPath, () => Bun.listen<Side>({
-    unix: socketPath,
-    data: undefined as unknown as Side,
-    socket: {
-      open(client) {
-        client.data = { queue: [], pending: [], ended: false, startedAt: performance.now(), unanswered: [], replay: 'unknown' };
-        connectFront(client as unknown as Socket);
-      },
-      data(client, chunk) {
-        const front = client.data.peer;
-        // Until the front answers, the bytes wait here (copied: Bun reuses the buffer).
-        if (!front) client.data.pending.push(Uint8Array.from(chunk));
-        else toFront(client as unknown as Socket, front, Uint8Array.from(chunk));
-      },
-      drain(client) { drain(client as unknown as Socket); },
-      close(client) {
-        client.data.ended = true;
-        if (client.data.timer) clearTimeout(client.data.timer);
-        endWhenSent(client.data.peer);
-      },
-      error(client) {
-        client.data.ended = true;
-        if (client.data.timer) clearTimeout(client.data.timer);
-        endWhenSent(client.data.peer);
-      },
+  const handlers = {
+    open(client) {
+      client.data = { queue: [], pending: [], ended: false, startedAt: performance.now(), unanswered: [], replay: 'unknown' };
+      connectFront(client as unknown as Socket);
     },
-  }));
+    data(client, chunk) {
+      const front = client.data.peer;
+      // Until the front answers, the bytes wait here (copied: Bun reuses the buffer).
+      if (!front) client.data.pending.push(Uint8Array.from(chunk));
+      else toFront(client as unknown as Socket, front, Uint8Array.from(chunk));
+    },
+    drain(client) { drain(client as unknown as Socket); },
+    close(client) {
+      client.data.ended = true;
+      if (client.data.timer) clearTimeout(client.data.timer);
+      endWhenSent(client.data.peer);
+    },
+    error(client) {
+      client.data.ended = true;
+      if (client.data.timer) clearTimeout(client.data.timer);
+      endWhenSent(client.data.peer);
+    },
+  } satisfies Handlers;
+  const listen = () => typeof Bun === 'undefined'
+    ? nodeListen(listenAddress, handlers)
+    : 'unix' in listenAddress
+      ? Bun.listen<Side>({ unix: listenAddress.unix, data: undefined as unknown as Side, socket: handlers })
+      : Bun.listen<Side>({ ...listenAddress, data: undefined as unknown as Side, socket: handlers });
+  const server = tcp ? listen() : bindWorkerSocket(socketPath, listen);
   return {
     socketPath,
+    // Under Bun the bind above threw if refused; under Node it answers here.
+    listening: 'listening' in server ? server.listening : Promise.resolve(),
     stop() {
       server.stop(true);
-      rmSync(socketPath, { force: true });
+      if (!tcp) rmSync(socketPath, { force: true });
     },
   };
 }

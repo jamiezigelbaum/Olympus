@@ -797,6 +797,48 @@ function validateWorkerSocket(options = {}) {
     throw new Error("Worker socket must be owner-owned and 0600.");
   return path;
 }
+function createLoopbackPortFetch(port, fetchImpl = globalThis.fetch) {
+  return (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))
+      throw new Error("Front requests require a loopback HTTP origin.");
+    url.port = String(port);
+    return fetchImpl(input instanceof Request ? new Request(url, input) : url, init);
+  };
+}
+function workerFrontSocketPath(options = {}) {
+  const path = workerSocketPath(options);
+  return path ? join4(dirname5(path), "front.sock") : undefined;
+}
+function workerListenSocketPath(options = {}) {
+  const requested = (options.env ?? process.env)[WORKER_LISTEN_SOCKET_ENV]?.trim();
+  if (!requested)
+    return workerSocketPath(options);
+  const front = workerFrontSocketPath(options);
+  if (requested !== front)
+    throw new Error(`${WORKER_LISTEN_SOCKET_ENV} must name front.sock beside the worker socket.`);
+  return front;
+}
+function prepareWorkerSocket(options = {}) {
+  const path = workerListenSocketPath(options);
+  if (!path)
+    return;
+  try {
+    mkdirSync4(dirname5(path), { mode: 448 });
+  } catch (error) {
+    if (error.code !== "EEXIST")
+      throw error;
+  }
+  validateDirectory(dirname5(path), ownerId(options), true);
+  try {
+    lstatSync3(path);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return path;
+    throw error;
+  }
+  throw new Error("Worker socket path is occupied; stop its owner and resolve the path before starting Olympus.");
+}
 function workerSocketListenerStopped(path) {
   const result = spawnSync(process.execPath, ["-e", `const s=Bun.connect({unix:process.argv[1],socket:{data(){},open(s){s.end();process.exit(1)},error(){process.exit(2)}}});s.catch(e=>process.exit(['ENOENT','ECONNREFUSED'].includes(e.code)?0:2));setTimeout(()=>process.exit(2),1500);`, path], { timeout: 2000 });
   return result.status === 0 ? true : result.status === 1 ? false : undefined;
@@ -819,6 +861,28 @@ function removeReleasedWorkerSocket(options, custody) {
     throw new Error("Worker socket listener custody is live or unknown; the socket was retained.");
   removeFileDurablySync(path);
   return true;
+}
+function releaseSystemdWorkerSocket(options = {}) {
+  const env = options.env ?? process.env;
+  if ((options.platform ?? process.platform) !== "linux" || env.OLYMPUS_MANAGED_WORKER !== "1" || !env.INVOCATION_ID)
+    return false;
+  if (env[WORKER_LISTEN_SOCKET_ENV]?.trim())
+    return false;
+  try {
+    return removeReleasedWorkerSocket(options, { previousWorkerReleased: true });
+  } catch {
+    return false;
+  }
+}
+function bindWorkerSocket(path, bind) {
+  const previous = process.umask(127);
+  try {
+    const server = bind();
+    chmodSync(path, 384);
+    return server;
+  } finally {
+    process.umask(previous);
+  }
 }
 function createWorkerFetch(options = {}, fetchImpl = globalThis.fetch) {
   if ((options.platform ?? process.platform) !== "linux")
@@ -882,7 +946,7 @@ async function nodeWorkerFetch(unix, input, init, options) {
     outgoing.end(body);
   });
 }
-var WORKER_LISTEN_SOCKET_ENV = "OLYMPUS_WORKER_LISTEN_SOCKET", workerFetch = (input, init) => createWorkerFetch()(input, init);
+var WORKER_LISTEN_SOCKET_ENV = "OLYMPUS_WORKER_LISTEN_SOCKET", WORKER_LISTEN_PORT_ENV = "OLYMPUS_WORKER_LISTEN_PORT", workerFetch = (input, init) => createWorkerFetch()(input, init);
 var init_worker_transport = __esm(() => {
   init_linux_engine_layout();
   init_atomic_file();
@@ -5314,7 +5378,7 @@ var init_config = __esm(() => {
   ]);
   DEFAULT_CONFIG = {
     worker: {
-      engineSplit: process.platform === "linux",
+      engineSplit: process.platform === "linux" || process.platform === "darwin",
       engineSplitRssRestartMb: ENGINE_RSS_RESTART_DEFAULT_MB,
       service: {
         enabled: false,
@@ -24098,6 +24162,235 @@ init_worker_transport();
 init_engine_heartbeat();
 init_worker_transport();
 import { rmSync as rmSync6 } from "node:fs";
+import { connect as netConnect, createServer as createNetServer } from "node:net";
+var FRONT_PROXY_WAIT_MS = 2500;
+function engineStartingStep(env) {
+  const heartbeat = readEngineHeartbeat(env);
+  return heartbeat && engineHeartbeatBeating(heartbeat) ? engineHeartbeatLine(heartbeat) : "starting";
+}
+var escapeHtml = (text) => text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+function engineStartingAnswer(input) {
+  if (input.acceptsHtml) {
+    return {
+      status: 503,
+      contentType: "text/html; charset=utf-8",
+      body: `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="3"><title>Olympus is starting</title></head>` + `<body style="font-family:system-ui,sans-serif;margin:3rem"><p>Olympus is starting: ${escapeHtml(input.step)}.</p><p>This page loads again on its own.</p></body></html>`
+    };
+  }
+  return { status: 503, contentType: "application/json", body: JSON.stringify({ reachable: false, status: "starting", step: input.step }) };
+}
+function rawStartingAnswer(head, env) {
+  const accept = /^accept:(.*)$/im.exec(head)?.[1] ?? "";
+  const answer = engineStartingAnswer({ step: engineStartingStep(env), acceptsHtml: accept.includes("text/html") });
+  const body = Buffer.from(answer.body);
+  return Buffer.concat([Buffer.from(`HTTP/1.1 ${answer.status} Service Unavailable\r
+content-type: ${answer.contentType}\r
+content-length: ${body.length}\r
+retry-after: 5\r
+connection: close\r
+\r
+`), body]);
+}
+function nodeSocket(raw, data, handlers) {
+  const socket = { data, write: (chunk) => {
+    raw.write(chunk);
+    return chunk.length;
+  }, end: () => raw.end() };
+  raw.on("data", (chunk) => handlers.data(socket, chunk));
+  raw.on("error", () => {});
+  raw.on("close", () => handlers.close(socket));
+  return socket;
+}
+function nodeConnect(address, data, handlers) {
+  return new Promise((resolve, reject) => {
+    const raw = "unix" in address ? netConnect({ path: address.unix }) : netConnect({ host: address.hostname, port: address.port });
+    const failed = (error) => reject(error);
+    raw.once("error", failed);
+    raw.once("connect", () => {
+      raw.removeListener("error", failed);
+      handlers.open(nodeSocket(raw, data, handlers));
+      resolve();
+    });
+  });
+}
+function nodeListen(address, handlers) {
+  const open = new Set;
+  const server = createNetServer((raw) => {
+    open.add(raw);
+    raw.once("close", () => open.delete(raw));
+    const socket = nodeSocket(raw, undefined, handlers);
+    handlers.open(socket);
+  });
+  const listening = new Promise((resolve, reject) => {
+    server.once("listening", () => resolve());
+    server.once("error", reject);
+  });
+  if ("unix" in address)
+    server.listen(address.unix);
+  else
+    server.listen(address.port, address.hostname);
+  return { stop() {
+    server.close();
+    for (const raw of open)
+      raw.destroy();
+  }, listening };
+}
+var READS = /^(GET|HEAD|OPTIONS) /;
+function send(socket, chunk) {
+  const side = socket.data;
+  if (side.queue.length > 0) {
+    side.queue.push(chunk);
+    return;
+  }
+  const written = socket.write(chunk);
+  if (written < chunk.length)
+    side.queue.push(chunk.subarray(Math.max(written, 0)));
+}
+function drain(socket) {
+  const side = socket.data;
+  while (side.queue.length > 0) {
+    const chunk = side.queue[0];
+    const written = socket.write(chunk);
+    if (written < chunk.length) {
+      side.queue[0] = chunk.subarray(Math.max(written, 0));
+      return;
+    }
+    side.queue.shift();
+  }
+  if (side.ended)
+    socket.end();
+}
+function toFront(client, front, chunk) {
+  const side = client.data;
+  if (side.replay === "unknown")
+    side.replay = READS.test(Buffer.from(chunk.subarray(0, 8)).toString("latin1")) ? "yes" : "no";
+  if (side.replay === "yes")
+    side.unanswered.push(chunk);
+  send(front, chunk);
+}
+function endWhenSent(socket) {
+  if (!socket)
+    return;
+  socket.data.ended = true;
+  if (socket.data.queue.length === 0)
+    socket.end();
+}
+function startWorkerFrontProxy(input) {
+  const env = input.env;
+  const log = input.log ?? ((line) => console.warn(line));
+  const tcp = input.tcp;
+  const frontSocket = tcp ? "" : input.frontSocket ?? workerFrontSocketPath({ env, platform: "linux" });
+  const waitMs = input.waitMs ?? FRONT_PROXY_WAIT_MS;
+  const retryMs = input.retryMs ?? 100;
+  if (!tcp) {
+    if (releaseSystemdWorkerSocket({ env }))
+      log("[olympus:worker] removed the socket left by the previous worker run");
+    else if (input.clearStale && removeReleasedWorkerSocket({ env, platform: "linux" }, { previousWorkerReleased: true }))
+      log("removed the worker socket a previous engine left");
+  }
+  const socketPath = tcp ? `${tcp.hostname}:${tcp.port}` : prepareWorkerSocket({ env, platform: "linux" });
+  const frontAddress = tcp ? { hostname: tcp.hostname, port: tcp.frontPort } : { unix: frontSocket };
+  const listenAddress = tcp ? { hostname: tcp.hostname, port: tcp.port } : { unix: socketPath };
+  const connect = (options) => typeof Bun === "undefined" ? nodeConnect(frontAddress, options.data, options.socket) : ("unix" in frontAddress) ? Bun.connect({ ...options, unix: frontAddress.unix }) : Bun.connect({ ...options, ...frontAddress });
+  const connectFront = (client) => {
+    const side = client.data;
+    connect({
+      data: { queue: [], pending: [], ended: false, startedAt: side.startedAt, unanswered: [], replay: "no" },
+      socket: {
+        open(front) {
+          if (side.ended) {
+            front.end();
+            return;
+          }
+          front.data.peer = client;
+          side.peer = front;
+          for (const chunk of side.pending.splice(0))
+            toFront(client, front, chunk);
+        },
+        data(front, chunk) {
+          side.replay = "no";
+          side.unanswered = [];
+          if (front.data.peer)
+            send(front.data.peer, chunk);
+        },
+        drain(front) {
+          drain(front);
+        },
+        close() {
+          frontGone();
+        },
+        error() {
+          frontGone();
+        }
+      }
+    }).catch(() => {
+      if (side.ended)
+        return;
+      retry();
+    });
+    function frontGone() {
+      side.peer = undefined;
+      const replay = side.replay === "yes" ? side.unanswered.splice(0) : [];
+      if (side.ended || replay.length === 0) {
+        endWhenSent(client);
+        return;
+      }
+      side.pending.unshift(...replay);
+      side.startedAt = performance.now();
+      side.timer = setTimeout(() => connectFront(client), retryMs);
+    }
+    function retry() {
+      if (performance.now() - side.startedAt >= waitMs) {
+        const head = Buffer.concat(side.pending).toString("latin1");
+        side.pending.length = 0;
+        side.ended = true;
+        client.write(rawStartingAnswer(head, env));
+        client.end();
+        return;
+      }
+      side.timer = setTimeout(() => connectFront(client), retryMs);
+    }
+  };
+  const handlers = {
+    open(client) {
+      client.data = { queue: [], pending: [], ended: false, startedAt: performance.now(), unanswered: [], replay: "unknown" };
+      connectFront(client);
+    },
+    data(client, chunk) {
+      const front = client.data.peer;
+      if (!front)
+        client.data.pending.push(Uint8Array.from(chunk));
+      else
+        toFront(client, front, Uint8Array.from(chunk));
+    },
+    drain(client) {
+      drain(client);
+    },
+    close(client) {
+      client.data.ended = true;
+      if (client.data.timer)
+        clearTimeout(client.data.timer);
+      endWhenSent(client.data.peer);
+    },
+    error(client) {
+      client.data.ended = true;
+      if (client.data.timer)
+        clearTimeout(client.data.timer);
+      endWhenSent(client.data.peer);
+    }
+  };
+  const listen = () => typeof Bun === "undefined" ? nodeListen(listenAddress, handlers) : ("unix" in listenAddress) ? Bun.listen({ unix: listenAddress.unix, data: undefined, socket: handlers }) : Bun.listen({ ...listenAddress, data: undefined, socket: handlers });
+  const server = tcp ? listen() : bindWorkerSocket(socketPath, listen);
+  return {
+    socketPath,
+    listening: "listening" in server ? server.listening : Promise.resolve(),
+    stop() {
+      server.stop(true);
+      if (!tcp)
+        rmSync6(socketPath, { force: true });
+    }
+  };
+}
 function clearLeftFrontSocket(frontSocket) {
   if (workerSocketListenerStopped(frontSocket) === true)
     rmSync6(frontSocket, { force: true });
@@ -24112,6 +24405,7 @@ init_olympus_layout();
 init_worker_auth();
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { statSync as statSync8 } from "node:fs";
+import { createServer as createNetServer2 } from "node:net";
 import { basename as basename3, delimiter as delimiter2, isAbsolute as isAbsolute12, join as join20 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 var WORKER_DATA_OWNER_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its data. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. Retrying automatically.";
@@ -24123,6 +24417,42 @@ var READINESS_PROBE_TIMEOUT_MS = 1000;
 var ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250;
 var DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4;
 var DEFAULT_WORKER_STABLE_UPTIME_MS = 30000;
+async function holdWorkerEndpoint(input) {
+  const log = input.log ?? (() => {});
+  if ((input.platform ?? process.platform) === "linux") {
+    const proxy = startWorkerFrontProxy({ env: input.env, ...input.clearStale ? { clearStale: true } : {}, log });
+    try {
+      await proxy.listening;
+    } catch (error) {
+      proxy.stop();
+      throw error;
+    }
+    return { front: { socket: workerFrontSocketPath({ env: input.env, platform: "linux" }) }, stop: () => proxy.stop() };
+  }
+  const host = input.env.OLYMPUS_WORKER_BIND_HOST?.trim() || input.env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+  const port = Number(input.env.OLYMPUS_EMAIL_SOURCE_PORT);
+  if (host !== "127.0.0.1" || !Number.isInteger(port) || port <= 0)
+    return;
+  const frontPort = await freeLoopbackPort();
+  const proxy = startWorkerFrontProxy({ env: input.env, tcp: { hostname: host, port, frontPort }, log });
+  try {
+    await proxy.listening;
+  } catch (error) {
+    proxy.stop();
+    throw error;
+  }
+  return { front: { port: frontPort }, stop: () => proxy.stop() };
+}
+function freeLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const probe = createNetServer2();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      probe.close(() => typeof address === "object" && address ? resolve(address.port) : reject(new Error("No loopback port was given.")));
+    });
+  });
+}
 var WORKER_BACKGROUND_STARTING_MESSAGE = "Olympus worker is waiting for its background engine, which is starting.";
 var DEFAULT_ENGINE_BACKGROUND_WAIT_MS = 30000;
 var WORKER_SUPERVISOR_ENV = "OLYMPUS_WORKER_SUPERVISOR";
@@ -24134,7 +24464,10 @@ function createNativeWorkerService(options) {
     proofGeneration += 1;
     readyChild = undefined;
   };
-  const fetchWorker = options.fetch ?? (options.frontSocket ? createUnixSocketFetch(options.frontSocket) : workerFetch);
+  let held;
+  const front = () => held?.front ?? (options.frontSocket ? { socket: options.frontSocket } : options.frontPort ? { port: options.frontPort } : undefined);
+  const fetchFor = (target) => options.fetch ?? (!target ? workerFetch : ("socket" in target) ? createUnixSocketFetch(target.socket) : createLoopbackPortFetch(target.port));
+  let fetchWorker = fetchFor(front());
   const service = createNativeProcessService({
     id: SERVICE_ID3,
     label: SERVICE_LABEL,
@@ -24177,11 +24510,16 @@ function createNativeWorkerService(options) {
         settings.env[ENGINE_ROLE_ENV] = "front";
         settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = engineBackgroundSocketPath({ env: settings.env });
       }
-      if (options.frontSocket) {
-        clearLeftFrontSocket(options.frontSocket);
-        settings.env[WORKER_LISTEN_SOCKET_ENV] = options.frontSocket;
+      const target = front();
+      if (target && "socket" in target) {
+        clearLeftFrontSocket(target.socket);
+        settings.env[WORKER_LISTEN_SOCKET_ENV] = target.socket;
       } else
         delete settings.env[WORKER_LISTEN_SOCKET_ENV];
+      if (target && "port" in target)
+        settings.env[WORKER_LISTEN_PORT_ENV] = String(target.port);
+      else
+        delete settings.env[WORKER_LISTEN_PORT_ENV];
       if (options.ownerBridgeHostSocket)
         settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
       else
@@ -24220,6 +24558,22 @@ function createNativeWorkerService(options) {
     async start(context) {
       const generation = ++lifecycleGeneration;
       invalidate();
+      if (options.holdEndpoint && !held && options.engineBackground) {
+        const config = freshConfig(context.config, options.initialPluginConfig).config;
+        if (config.worker.service.enabled && config.worker.engineSplit) {
+          try {
+            held = await holdWorkerEndpoint({ env: nativeWorkerEnvironment(config, options.workerEnvPath), log: (line) => context.logger?.info?.(line) });
+          } catch (error) {
+            context.logger?.warn?.(`Olympus worker endpoint could not be held for the front (${error instanceof Error ? error.message : "unknown error"}); the front binds it itself.`);
+          }
+          fetchWorker = fetchFor(front());
+          if (generation !== lifecycleGeneration) {
+            held?.stop();
+            held = undefined;
+            return;
+          }
+        }
+      }
       try {
         await service.start(context);
       } catch (error) {
@@ -24232,6 +24586,9 @@ function createNativeWorkerService(options) {
       lifecycleGeneration += 1;
       invalidate();
       await service.stop();
+      held?.stop();
+      held = undefined;
+      fetchWorker = fetchFor(front());
     }
   };
 }
@@ -31709,13 +32066,11 @@ var plugin = {
   description: "Privacy-aware source ingestion and cited answers across email, files, messaging, bookmarks, and reading sources.",
   register(api) {
     const config = configFromPluginConfig(api.pluginConfig, { requireResolvedWorkerSecrets: false });
-    const workerConfig = api.pluginConfig?.worker;
-    const splitAsked = Boolean(workerConfig && Object.prototype.hasOwnProperty.call(workerConfig, "engineSplit"));
-    const engineBackground = splitAsked && config.worker.engineSplit ? createNativeEngineBackgroundService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url }) : undefined;
+    const engineBackground = config.worker.engineSplit ? createNativeEngineBackgroundService({ initialPluginConfig: api.pluginConfig, moduleUrl: import.meta.url }) : undefined;
     const workerService = createNativeWorkerService({
       initialPluginConfig: api.pluginConfig,
       moduleUrl: import.meta.url,
-      ...engineBackground ? { engineBackground } : {}
+      ...engineBackground ? { engineBackground, holdEndpoint: true } : {}
     });
     const { isReady: workerIsReady, ...workerRegistration } = workerService;
     const telegramService = createNativeTelegramService({

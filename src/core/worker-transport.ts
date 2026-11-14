@@ -74,6 +74,24 @@ export function validateWorkerSocket(options: WorkerTransportOptions = {}): stri
  */
 export const WORKER_LISTEN_SOCKET_ENV = 'OLYMPUS_WORKER_LISTEN_SOCKET';
 
+/**
+ * Off Linux the worker listens on loopback TCP: under the engine split the
+ * engine host holds the worker's port and the front binds this one instead
+ * (worker-front-proxy.ts). Only the bind changes; every URL the front builds
+ * keeps the worker's own port.
+ */
+export const WORKER_LISTEN_PORT_ENV = 'OLYMPUS_WORKER_LISTEN_PORT';
+
+/** A fetch that sends loopback worker requests to the front's own port. */
+export function createLoopbackPortFetch(port: number, fetchImpl: typeof fetch = globalThis.fetch): typeof fetch {
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Front requests require a loopback HTTP origin.');
+    url.port = String(port);
+    return fetchImpl(input instanceof Request ? new Request(url, input) : url, init);
+  }) as typeof fetch;
+}
+
 export function workerFrontSocketPath(options: WorkerTransportOptions = {}): string | undefined {
   const path = workerSocketPath(options);
   return path ? join(dirname(path), 'front.sock') : undefined;

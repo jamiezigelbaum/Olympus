@@ -4367,6 +4367,15 @@ function validateWorkerSocket(options = {}) {
     throw new Error("Worker socket must be owner-owned and 0600.");
   return path;
 }
+function createLoopbackPortFetch(port, fetchImpl = globalThis.fetch) {
+  return (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))
+      throw new Error("Front requests require a loopback HTTP origin.");
+    url.port = String(port);
+    return fetchImpl(input instanceof Request ? new Request(url, input) : url, init);
+  };
+}
 function workerFrontSocketPath(options = {}) {
   const path = workerSocketPath(options);
   return path ? join7(dirname7(path), "front.sock") : undefined;
@@ -4510,7 +4519,7 @@ async function nodeWorkerFetch(unix, input, init, options) {
     outgoing.end(body);
   });
 }
-var WORKER_LISTEN_SOCKET_ENV = "OLYMPUS_WORKER_LISTEN_SOCKET", WORKER_SOCKET_SERVE_OPTIONS, workerFetch = (input, init) => createWorkerFetch()(input, init);
+var WORKER_LISTEN_SOCKET_ENV = "OLYMPUS_WORKER_LISTEN_SOCKET", WORKER_LISTEN_PORT_ENV = "OLYMPUS_WORKER_LISTEN_PORT", WORKER_SOCKET_SERVE_OPTIONS, workerFetch = (input, init) => createWorkerFetch()(input, init);
 var init_worker_transport = __esm(() => {
   init_linux_engine_layout();
   init_atomic_file();
@@ -18494,7 +18503,7 @@ var init_config = __esm(() => {
   ]);
   DEFAULT_CONFIG = {
     worker: {
-      engineSplit: process.platform === "linux",
+      engineSplit: process.platform === "linux" || process.platform === "darwin",
       engineSplitRssRestartMb: ENGINE_RSS_RESTART_DEFAULT_MB,
       service: {
         enabled: false,
@@ -54382,6 +54391,7 @@ var init_linux_owner_bridge_host = __esm(() => {
 
 // src/core/worker-front-proxy.ts
 import { rmSync as rmSync17 } from "node:fs";
+import { connect as netConnect, createServer as createNetServer } from "node:net";
 function engineStartingStep(env) {
   const heartbeat = readEngineHeartbeat(env);
   return heartbeat && engineHeartbeatBeating(heartbeat) ? engineHeartbeatLine(heartbeat) : "starting";
@@ -54411,6 +54421,50 @@ retry-after: 5\r
 connection: close\r
 \r
 `), body]);
+}
+function nodeSocket(raw, data, handlers) {
+  const socket = { data, write: (chunk) => {
+    raw.write(chunk);
+    return chunk.length;
+  }, end: () => raw.end() };
+  raw.on("data", (chunk) => handlers.data(socket, chunk));
+  raw.on("error", () => {});
+  raw.on("close", () => handlers.close(socket));
+  return socket;
+}
+function nodeConnect(address, data, handlers) {
+  return new Promise((resolve, reject) => {
+    const raw = "unix" in address ? netConnect({ path: address.unix }) : netConnect({ host: address.hostname, port: address.port });
+    const failed = (error) => reject(error);
+    raw.once("error", failed);
+    raw.once("connect", () => {
+      raw.removeListener("error", failed);
+      handlers.open(nodeSocket(raw, data, handlers));
+      resolve();
+    });
+  });
+}
+function nodeListen(address, handlers) {
+  const open = new Set;
+  const server = createNetServer((raw) => {
+    open.add(raw);
+    raw.once("close", () => open.delete(raw));
+    const socket = nodeSocket(raw, undefined, handlers);
+    handlers.open(socket);
+  });
+  const listening = new Promise((resolve, reject) => {
+    server.once("listening", () => resolve());
+    server.once("error", reject);
+  });
+  if ("unix" in address)
+    server.listen(address.unix);
+  else
+    server.listen(address.port, address.hostname);
+  return { stop() {
+    server.close();
+    for (const raw of open)
+      raw.destroy();
+  }, listening };
 }
 function send2(socket, chunk) {
   const side = socket.data;
@@ -54454,18 +54508,23 @@ function endWhenSent(socket) {
 function startWorkerFrontProxy(input) {
   const env = input.env;
   const log = input.log ?? ((line) => console.warn(line));
-  const frontSocket = input.frontSocket ?? workerFrontSocketPath({ env, platform: "linux" });
+  const tcp = input.tcp;
+  const frontSocket = tcp ? "" : input.frontSocket ?? workerFrontSocketPath({ env, platform: "linux" });
   const waitMs = input.waitMs ?? FRONT_PROXY_WAIT_MS;
   const retryMs = input.retryMs ?? 100;
-  if (releaseSystemdWorkerSocket({ env }))
-    log("[olympus:worker] removed the socket left by the previous worker run");
-  else if (input.clearStale && removeReleasedWorkerSocket({ env, platform: "linux" }, { previousWorkerReleased: true }))
-    log("removed the worker socket a previous engine left");
-  const socketPath = prepareWorkerSocket({ env, platform: "linux" });
+  if (!tcp) {
+    if (releaseSystemdWorkerSocket({ env }))
+      log("[olympus:worker] removed the socket left by the previous worker run");
+    else if (input.clearStale && removeReleasedWorkerSocket({ env, platform: "linux" }, { previousWorkerReleased: true }))
+      log("removed the worker socket a previous engine left");
+  }
+  const socketPath = tcp ? `${tcp.hostname}:${tcp.port}` : prepareWorkerSocket({ env, platform: "linux" });
+  const frontAddress = tcp ? { hostname: tcp.hostname, port: tcp.frontPort } : { unix: frontSocket };
+  const listenAddress = tcp ? { hostname: tcp.hostname, port: tcp.port } : { unix: socketPath };
+  const connect = (options) => typeof Bun === "undefined" ? nodeConnect(frontAddress, options.data, options.socket) : ("unix" in frontAddress) ? Bun.connect({ ...options, unix: frontAddress.unix }) : Bun.connect({ ...options, ...frontAddress });
   const connectFront = (client) => {
     const side = client.data;
-    Bun.connect({
-      unix: frontSocket,
+    connect({
       data: { queue: [], pending: [], ended: false, startedAt: side.startedAt, unanswered: [], replay: "no" },
       socket: {
         open(front) {
@@ -54522,43 +54581,43 @@ function startWorkerFrontProxy(input) {
       side.timer = setTimeout(() => connectFront(client), retryMs);
     }
   };
-  const server = bindWorkerSocket(socketPath, () => Bun.listen({
-    unix: socketPath,
-    data: undefined,
-    socket: {
-      open(client) {
-        client.data = { queue: [], pending: [], ended: false, startedAt: performance.now(), unanswered: [], replay: "unknown" };
-        connectFront(client);
-      },
-      data(client, chunk) {
-        const front = client.data.peer;
-        if (!front)
-          client.data.pending.push(Uint8Array.from(chunk));
-        else
-          toFront(client, front, Uint8Array.from(chunk));
-      },
-      drain(client) {
-        drain(client);
-      },
-      close(client) {
-        client.data.ended = true;
-        if (client.data.timer)
-          clearTimeout(client.data.timer);
-        endWhenSent(client.data.peer);
-      },
-      error(client) {
-        client.data.ended = true;
-        if (client.data.timer)
-          clearTimeout(client.data.timer);
-        endWhenSent(client.data.peer);
-      }
+  const handlers = {
+    open(client) {
+      client.data = { queue: [], pending: [], ended: false, startedAt: performance.now(), unanswered: [], replay: "unknown" };
+      connectFront(client);
+    },
+    data(client, chunk) {
+      const front = client.data.peer;
+      if (!front)
+        client.data.pending.push(Uint8Array.from(chunk));
+      else
+        toFront(client, front, Uint8Array.from(chunk));
+    },
+    drain(client) {
+      drain(client);
+    },
+    close(client) {
+      client.data.ended = true;
+      if (client.data.timer)
+        clearTimeout(client.data.timer);
+      endWhenSent(client.data.peer);
+    },
+    error(client) {
+      client.data.ended = true;
+      if (client.data.timer)
+        clearTimeout(client.data.timer);
+      endWhenSent(client.data.peer);
     }
-  }));
+  };
+  const listen = () => typeof Bun === "undefined" ? nodeListen(listenAddress, handlers) : ("unix" in listenAddress) ? Bun.listen({ unix: listenAddress.unix, data: undefined, socket: handlers }) : Bun.listen({ ...listenAddress, data: undefined, socket: handlers });
+  const server = tcp ? listen() : bindWorkerSocket(socketPath, listen);
   return {
     socketPath,
+    listening: "listening" in server ? server.listening : Promise.resolve(),
     stop() {
       server.stop(true);
-      rmSync17(socketPath, { force: true });
+      if (!tcp)
+        rmSync17(socketPath, { force: true });
     }
   };
 }
@@ -54577,8 +54636,45 @@ var init_worker_front_proxy = __esm(() => {
 import { homedir as homedir23 } from "node:os";
 import { randomUUID as randomUUID10 } from "node:crypto";
 import { statSync as statSync22 } from "node:fs";
+import { createServer as createNetServer2 } from "node:net";
 import { basename as basename10, delimiter as delimiter3, isAbsolute as isAbsolute20, join as join49 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
+async function holdWorkerEndpoint(input) {
+  const log = input.log ?? (() => {});
+  if ((input.platform ?? process.platform) === "linux") {
+    const proxy = startWorkerFrontProxy({ env: input.env, ...input.clearStale ? { clearStale: true } : {}, log });
+    try {
+      await proxy.listening;
+    } catch (error) {
+      proxy.stop();
+      throw error;
+    }
+    return { front: { socket: workerFrontSocketPath({ env: input.env, platform: "linux" }) }, stop: () => proxy.stop() };
+  }
+  const host = input.env.OLYMPUS_WORKER_BIND_HOST?.trim() || input.env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+  const port = Number(input.env.OLYMPUS_EMAIL_SOURCE_PORT);
+  if (host !== "127.0.0.1" || !Number.isInteger(port) || port <= 0)
+    return;
+  const frontPort = await freeLoopbackPort();
+  const proxy = startWorkerFrontProxy({ env: input.env, tcp: { hostname: host, port, frontPort }, log });
+  try {
+    await proxy.listening;
+  } catch (error) {
+    proxy.stop();
+    throw error;
+  }
+  return { front: { port: frontPort }, stop: () => proxy.stop() };
+}
+function freeLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const probe = createNetServer2();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      probe.close(() => typeof address === "object" && address ? resolve(address.port) : reject(new Error("No loopback port was given.")));
+    });
+  });
+}
 function createNativeWorkerService(options) {
   let readyChild;
   let proofGeneration = 0;
@@ -54587,7 +54683,10 @@ function createNativeWorkerService(options) {
     proofGeneration += 1;
     readyChild = undefined;
   };
-  const fetchWorker = options.fetch ?? (options.frontSocket ? createUnixSocketFetch(options.frontSocket) : workerFetch);
+  let held;
+  const front = () => held?.front ?? (options.frontSocket ? { socket: options.frontSocket } : options.frontPort ? { port: options.frontPort } : undefined);
+  const fetchFor = (target) => options.fetch ?? (!target ? workerFetch : ("socket" in target) ? createUnixSocketFetch(target.socket) : createLoopbackPortFetch(target.port));
+  let fetchWorker = fetchFor(front());
   const service = createNativeProcessService({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
@@ -54630,11 +54729,16 @@ function createNativeWorkerService(options) {
         settings.env[ENGINE_ROLE_ENV] = "front";
         settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = engineBackgroundSocketPath({ env: settings.env });
       }
-      if (options.frontSocket) {
-        clearLeftFrontSocket(options.frontSocket);
-        settings.env[WORKER_LISTEN_SOCKET_ENV] = options.frontSocket;
+      const target = front();
+      if (target && "socket" in target) {
+        clearLeftFrontSocket(target.socket);
+        settings.env[WORKER_LISTEN_SOCKET_ENV] = target.socket;
       } else
         delete settings.env[WORKER_LISTEN_SOCKET_ENV];
+      if (target && "port" in target)
+        settings.env[WORKER_LISTEN_PORT_ENV] = String(target.port);
+      else
+        delete settings.env[WORKER_LISTEN_PORT_ENV];
       if (options.ownerBridgeHostSocket)
         settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
       else
@@ -54673,6 +54777,22 @@ function createNativeWorkerService(options) {
     async start(context) {
       const generation = ++lifecycleGeneration;
       invalidate();
+      if (options.holdEndpoint && !held && options.engineBackground) {
+        const config = freshConfig(context.config, options.initialPluginConfig).config;
+        if (config.worker.service.enabled && config.worker.engineSplit) {
+          try {
+            held = await holdWorkerEndpoint({ env: nativeWorkerEnvironment(config, options.workerEnvPath), log: (line) => context.logger?.info?.(line) });
+          } catch (error) {
+            context.logger?.warn?.(`Olympus worker endpoint could not be held for the front (${error instanceof Error ? error.message : "unknown error"}); the front binds it itself.`);
+          }
+          fetchWorker = fetchFor(front());
+          if (generation !== lifecycleGeneration) {
+            held?.stop();
+            held = undefined;
+            return;
+          }
+        }
+      }
       try {
         await service.start(context);
       } catch (error) {
@@ -54685,6 +54805,9 @@ function createNativeWorkerService(options) {
       lifecycleGeneration += 1;
       invalidate();
       await service.stop();
+      held?.stop();
+      held = undefined;
+      fetchWorker = fetchFor(front());
     }
   };
 }
@@ -82045,7 +82168,7 @@ function createLlamaServerHandle(launch, options = {}) {
       throw new LlamaServerStillExitingError(`A previous built-in model server has not exited yet, so a new one was not started. ${error instanceof Error ? error.message : ""}`.trim());
     }
     superseded();
-    const port = await freeLoopbackPort();
+    const port = await freeLoopbackPort2();
     superseded();
     const token = randomBytes15(24).toString("base64url");
     const alias = `olympus-${randomBytes15(12).toString("hex")}`;
@@ -82319,7 +82442,7 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
     return false;
   }
 }
-function freeLoopbackPort() {
+function freeLoopbackPort2() {
   return new Promise((resolve, reject) => {
     const server = createServer2();
     server.unref();
@@ -160179,11 +160302,11 @@ var init_native_relay_service = __esm(() => {
 // src/core/engine-host.ts
 import { mkdirSync as mkdirSync63 } from "node:fs";
 import { join as join129 } from "node:path";
-function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket, frontSocket) {
+function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket, front) {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
   const split = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false }).worker.engineSplit;
   const background = split ? createNativeEngineBackgroundService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed }) : undefined;
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}, ...background ? { engineBackground: background } : {}, ...background && frontSocket ? { frontSocket } : {} });
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {}, ...background ? { engineBackground: background } : {}, ...background && front ? "socket" in front ? { frontSocket: front.socket } : { frontPort: front.port } : {} });
   return [
     ...background ? [backgroundNativeProcessService((({ isReady: _isReady, ...rest }) => rest)(background))] : [],
     backgroundNativeProcessService(worker),
@@ -160286,15 +160409,15 @@ async function startEngineHost(options) {
     } catch {}
   };
   let frontProxy;
-  if (paths.linux && splitOn && !options.services) {
+  if (splitOn && !options.services) {
     try {
-      frontProxy = startWorkerFrontProxy({ env: dataEnv, clearStale: true, log: (line) => log(`engine: ${line}`) });
+      frontProxy = await holdWorkerEndpoint(paths.linux ? { env: dataEnv, platform: "linux", clearStale: true, log: (line) => log(`engine: ${line}`) } : { env: nativeWorkerEnvironment(configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false })), platform: options.platform ?? process.platform, log: (line) => log(`engine: ${line}`) });
     } catch (error) {
-      log(`engine: the worker socket could not be held for the front (${error instanceof Error ? error.message : "unknown error"}); the front binds it itself.`);
+      log(`engine: the worker endpoint could not be held for the front (${error instanceof Error ? error.message : "unknown error"}); the front binds it itself.`);
     }
   }
-  const frontSocket = frontProxy ? workerFrontSocketPath({ platform: "linux", env: dataEnv }) : undefined;
-  const makeServices = options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths, desktopBridge?.controlPath, frontSocket));
+  const front = frontProxy?.front;
+  const makeServices = options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths, desktopBridge?.controlPath, front));
   let services = [];
   const contextFor = (id) => ({
     config: { plugins: { entries: { olympus: { config: pluginConfig } } } },
@@ -160485,7 +160608,6 @@ var init_engine_host = __esm(() => {
   init_native_worker_service();
   init_remote_access();
   init_worker_transport();
-  init_worker_front_proxy();
   init_engine_service();
 });
 
@@ -247643,7 +247765,7 @@ async function main() {
     frontStarting = listenWhileStarting({
       env: process.env,
       hostname: resolveEmailSourceBindHostFromEnv(process.env),
-      port: parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? "8010")
+      port: workerListenPort(parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? "8010"))
     });
     await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
@@ -251865,7 +251987,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         return Response.json({ ...await value.json(), built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
       });
     return response;
-  } })) : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
+  } })) : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
   if (engineFront) {
     const warming = keepVisibilityCurrent("before ready");
     let bound;
@@ -252353,6 +252475,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }
   console.log(describeSovereigntyPolicy(sovereigntyEngine));
   console.log(connector ? `Connector: gogcli command adapter with Argus local/private reasoning${parseOptionalBooleanEnv(process.env.OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER, "OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER") ? " and retrieval planning" : ""}.` : "Connector: gogcli stub, not configured. Set OLYMPUS_EMAIL_SOURCE_CONNECTOR=gogcli to use the command adapter.");
+}
+function workerListenPort(port) {
+  const requested = process.env[WORKER_LISTEN_PORT_ENV]?.trim();
+  return requested ? parsePort(requested) : port;
 }
 function resolveEmailSourceBindHostFromEnv(env = process.env) {
   return resolveWorkerBindHost(env, ["OLYMPUS_EMAIL_SOURCE_HOST"]);

@@ -85,3 +85,39 @@ describe('the worker socket under the unit split', () => {
     expect(() => workerListenSocketPath({ env: { ...env, [WORKER_LISTEN_SOCKET_ENV]: join(env.HOME, 'elsewhere.sock') }, platform: 'linux' })).toThrow(/front\.sock/);
   });
 });
+
+// On a Mac the engine host holds the worker's loopback port the same way, and
+// the front binds a private loopback port (WORKER_LISTEN_PORT_ENV).
+describe('the worker port under the engine host off Linux', () => {
+  function freePort(): number {
+    const probe = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
+    const { port } = probe;
+    probe.stop(true);
+    return port;
+  }
+
+  test('pipes to the front on its own port, and holds the worker port while the front restarts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-front-proxy-tcp-'));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const port = freePort();
+    const frontPort = freePort();
+    const proxy = startWorkerFrontProxy({ env: { HOME: root }, tcp: { hostname: '127.0.0.1', port, frontPort }, waitMs: 1_000, retryMs: 20, log: () => {} });
+    cleanups.push(() => proxy.stop());
+    const front = (name: string) => {
+      const server = Bun.serve({ hostname: '127.0.0.1', port: frontPort, fetch: (request) => new Response(`${name}:${new URL(request.url).port}:${request.headers.get('host')}`) });
+      return { stop: () => server.stop(true) };
+    };
+    const ask = () => fetch(`http://127.0.0.1:${port}/dashboard`, { keepalive: false } as RequestInit);
+    const a = front('a');
+    // The front sees the worker's own port in the Host header: its URLs keep it.
+    expect(await (await ask()).text()).toBe(`a:${port}:127.0.0.1:${port}`);
+    a.stop();
+    const down = await ask();
+    expect(down.status).toBe(503);
+    expect(await down.json()).toEqual({ reachable: false, status: 'starting', step: 'starting' });
+    const b = front('b');
+    try { expect((await (await ask()).text()).startsWith('b:')).toBe(true); } finally { b.stop(); }
+    proxy.stop();
+    await expect(ask()).rejects.toThrow();
+  }, 10_000);
+});

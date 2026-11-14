@@ -40,7 +40,7 @@ import { parseOlympusOpenUrl, openTargetToken } from '../../core/open-targets.ts
 import { manageLinuxOwnerBridge, DESKTOP_OWNER_OPEN_PATH } from '../../core/linux-owner-bridge.ts';
 import { linuxGraphicalSessionReadinessAsync, openLinuxDesktopPath } from '../../core/linux-desktop-opener.ts';
 import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
-import { workerFetch } from '../../core/worker-transport.ts';
+import { WORKER_LISTEN_PORT_ENV, workerFetch } from '../../core/worker-transport.ts';
 import { linuxModelReadiness } from '../../core/linux-model-readiness.ts';
 import { withEngineWorkerAdmission, EngineMaintenanceInProgressError } from '../../core/engine-maintenance.ts';
 import { prepareWorkerSocket, bindWorkerSocket, releaseSystemdWorkerSocket, workerSocketPath, workerSocketServe } from '../../core/worker-transport.ts';
@@ -664,7 +664,7 @@ export async function main(): Promise<void> {
     frontStarting = listenWhileStarting({
       env: process.env,
       hostname: resolveEmailSourceBindHostFromEnv(process.env),
-      port: parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010'),
+      port: workerListenPort(parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010')),
     });
     await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
@@ -6212,7 +6212,7 @@ export async function main(): Promise<void> {
         });
         return response;
       } }))
-    : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
+    : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
   // Bounded: a set that has to be rebuilt from the ledger (a retention gap)
   // finishes after the front listens, in turns, rather than hold readiness.
   if (engineFront) {
@@ -6731,6 +6731,12 @@ export async function main(): Promise<void> {
       ? `Connector: gogcli command adapter with Argus local/private reasoning${parseOptionalBooleanEnv(process.env.OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER, 'OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER') ? ' and retrieval planning' : ''}.`
       : 'Connector: gogcli stub, not configured. Set OLYMPUS_EMAIL_SOURCE_CONNECTOR=gogcli to use the command adapter.',
   );
+}
+
+/** The port this process binds: the worker's, or the front's own under the engine host's split off Linux. */
+function workerListenPort(port: number): number {
+  const requested = process.env[WORKER_LISTEN_PORT_ENV]?.trim();
+  return requested ? parsePort(requested) : port;
 }
 
 export function resolveEmailSourceBindHostFromEnv(env: Record<string, string | undefined> = process.env): string {

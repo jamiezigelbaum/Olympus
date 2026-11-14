@@ -90,8 +90,8 @@ function background(handlers: EngineCommandHandlers, instanceId = 'background-1'
 }
 
 describe('the switch and roles', () => {
-  test('worker.engineSplit is on by default on Linux only, and parses only a boolean', () => {
-    expect(configFromPluginConfig({}).worker.engineSplit).toBe(process.platform === 'linux');
+  test('worker.engineSplit is on by default on Linux and macOS, and parses only a boolean', () => {
+    expect(configFromPluginConfig({}).worker.engineSplit).toBe(process.platform === 'linux' || process.platform === 'darwin');
     expect(configFromPluginConfig({ worker: { engineSplit: false } }).worker.engineSplit).toBe(false);
     expect(configFromPluginConfig({ worker: { engineSplit: true } }).worker.engineSplit).toBe(true);
     expect(() => configFromPluginConfig({ worker: { engineSplit: 'yes' } })).toThrow('worker.engineSplit');

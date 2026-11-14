@@ -280,9 +280,14 @@ the cause).
   and dropped unanswered goes to the next front. A request that writes
   is never sent twice. The standard answer, a listening socket inherited
   by each front, is not available: Bun 1.4.4's `Bun.serve` ignores `fd`,
-  and a parent that keeps the descriptor accepts on it itself. Mac and
-  OpenClaw-hosted fronts still bind their own socket or port, so a model
-  change drops the page there for the length of the front's restart.
+  and a parent that keeps the descriptor accepts on it itself. On a Mac
+  (on by default from 1.5) the engine host does the same over loopback
+  TCP: it holds the worker's port and the front binds a private loopback
+  port it picks at start (`OLYMPUS_WORKER_LISTEN_PORT`), only when the
+  worker binds 127.0.0.1, so the front still sees every connection from
+  loopback. A worker bound wider binds its own port. OpenClaw-hosted
+  fronts still bind their own port, so a model change drops the page
+  there for the length of the front's restart.
 - **Health (13 Nov 2026).** A slow answer is never read as a dead
   process. Every split install failure on large data was one: the
   background's only thread sat in a long synchronous SQLite call and a

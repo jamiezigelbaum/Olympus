@@ -243,7 +243,7 @@ export const ENGINE_RSS_RESTART_DEFAULT_MB = 3072;
 
 const DEFAULT_CONFIG: OlympusConfig = {
   worker: {
-    engineSplit: process.platform === 'linux',
+    engineSplit: process.platform === 'linux' || process.platform === 'darwin',
     engineSplitRssRestartMb: ENGINE_RSS_RESTART_DEFAULT_MB,
     service: {
       enabled: false,

@@ -4,13 +4,14 @@ import { olympusStoreBytes } from './upgrade-store-copies.ts';
 import { quoteCliArgument, readWorkerCliLauncher, renderWorkerCliLauncher, workerCliLauncherPath, writeWorkerCliLauncher } from './worker-cli-launcher.ts';
 import { WORKER_DATA_OWNER_BUSY_EXIT_CODE } from './data-owner-lock.ts';
 import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
-import { createUnixSocketFetch, removeReleasedWorkerSocket, validateWorkerSocket, WORKER_LISTEN_SOCKET_ENV, workerSocketListenerStopped, workerFetch } from './worker-transport.ts';
-import { clearLeftFrontSocket } from './worker-front-proxy.ts';
+import { createLoopbackPortFetch, createUnixSocketFetch, workerFrontSocketPath, removeReleasedWorkerSocket, WORKER_LISTEN_PORT_ENV, validateWorkerSocket, WORKER_LISTEN_SOCKET_ENV, workerSocketListenerStopped, workerFetch } from './worker-transport.ts';
+import { clearLeftFrontSocket, startWorkerFrontProxy } from './worker-front-proxy.ts';
 import { ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_ROLE_ENV, engineBackgroundSocketPath, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from './engine-split.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { descendantGroupsPath } from './descendant-groups.ts';
 import { statSync } from 'node:fs';
+import { createServer as createNetServer } from 'node:net';
 import { basename, delimiter, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configFromPluginConfig, NATIVE_REMOTE_CONFIG_ENV, type OlympusConfig } from './config.ts';
@@ -88,9 +89,62 @@ export interface NativeWorkerServiceOptions {
    * front.sock, and its occupancy and readiness are checked there.
    */
   frontSocket?: string;
+  /**
+   * Off Linux, the same split over loopback TCP: the host holds the worker's
+   * port and pipes it to this one, which the worker binds instead.
+   */
+  frontPort?: number;
+  /**
+   * Under the OpenClaw Gateway with the split on: the service holds the
+   * worker's endpoint itself (holdWorkerEndpoint) from its first start until
+   * it is stopped, so the front's own restarts happen behind it.
+   */
+  holdEndpoint?: boolean;
   /** Test seams for the front's wait for its background. */
   engineBackgroundWaitMs?: number;
   engineBackgroundPollMs?: number;
+}
+
+/** Where the front listens when its host holds the worker's endpoint: front.sock on Linux, a private loopback port elsewhere. */
+export type EngineFront = { socket: string } | { port: number };
+export interface HeldWorkerEndpoint { front: EngineFront; stop(): void }
+
+/**
+ * Hold the worker's endpoint for the split's front (worker-front-proxy.ts),
+ * under Bun (the engine host) or Node (the OpenClaw Gateway). On Linux, the
+ * worker socket, piped to front.sock. Elsewhere, the worker's loopback port,
+ * piped to a free loopback port picked now: only when the worker binds
+ * 127.0.0.1, so the front still sees each connection from loopback. A
+ * worker bound wider keeps its own bind (undefined). A refused hold throws,
+ * and nothing is left held.
+ */
+export async function holdWorkerEndpoint(input: { env: NodeJS.ProcessEnv; platform?: string; clearStale?: boolean; log?: (line: string) => void }): Promise<HeldWorkerEndpoint | undefined> {
+  const log = input.log ?? (() => {});
+  if ((input.platform ?? process.platform) === 'linux') {
+    const proxy = startWorkerFrontProxy({ env: input.env, ...(input.clearStale ? { clearStale: true } : {}), log });
+    try { await proxy.listening; } catch (error) { proxy.stop(); throw error; }
+    return { front: { socket: workerFrontSocketPath({ env: input.env, platform: 'linux' })! }, stop: () => proxy.stop() };
+  }
+  // The worker's own bind precedence (workers/http.ts resolveWorkerBindHost).
+  const host = input.env.OLYMPUS_WORKER_BIND_HOST?.trim() || input.env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || '127.0.0.1';
+  const port = Number(input.env.OLYMPUS_EMAIL_SOURCE_PORT);
+  if (host !== '127.0.0.1' || !Number.isInteger(port) || port <= 0) return undefined;
+  const frontPort = await freeLoopbackPort();
+  const proxy = startWorkerFrontProxy({ env: input.env, tcp: { hostname: host, port, frontPort }, log });
+  try { await proxy.listening; } catch (error) { proxy.stop(); throw error; }
+  return { front: { port: frontPort }, stop: () => proxy.stop() };
+}
+
+/** A loopback port free now; it stays the front's for as long as its host holds the endpoint. */
+function freeLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createNetServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      probe.close(() => (typeof address === 'object' && address ? resolve(address.port) : reject(new Error('No loopback port was given.'))));
+    });
+  });
 }
 
 /** The front's start while the background engine is not ready yet; the host retries. */
@@ -129,7 +183,12 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
   let proofGeneration = 0;
   let lifecycleGeneration = 0;
   const invalidate = () => { proofGeneration += 1; readyChild = undefined; };
-  const fetchWorker = options.fetch ?? (options.frontSocket ? createUnixSocketFetch(options.frontSocket) : workerFetch);
+  let held: HeldWorkerEndpoint | undefined;
+  const front = (): EngineFront | undefined => held?.front
+    ?? (options.frontSocket ? { socket: options.frontSocket } : options.frontPort ? { port: options.frontPort } : undefined);
+  const fetchFor = (target: EngineFront | undefined) => options.fetch
+    ?? (!target ? workerFetch : 'socket' in target ? createUnixSocketFetch(target.socket) : createLoopbackPortFetch(target.port));
+  let fetchWorker = fetchFor(front());
   const service = createNativeProcessService<WorkerLaunchSettings>({
     id: SERVICE_ID,
     label: SERVICE_LABEL,
@@ -179,11 +238,14 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
         settings.env[ENGINE_ROLE_ENV] = 'front';
         settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = engineBackgroundSocketPath({ env: settings.env });
       }
-      if (options.frontSocket) {
+      const target = front();
+      if (target && 'socket' in target) {
         // The kernel starts no worker over a live one: a socket left here is the last one's.
-        clearLeftFrontSocket(options.frontSocket);
-        settings.env[WORKER_LISTEN_SOCKET_ENV] = options.frontSocket;
+        clearLeftFrontSocket(target.socket);
+        settings.env[WORKER_LISTEN_SOCKET_ENV] = target.socket;
       } else delete settings.env[WORKER_LISTEN_SOCKET_ENV];
+      if (target && 'port' in target) settings.env[WORKER_LISTEN_PORT_ENV] = String(target.port);
+      else delete settings.env[WORKER_LISTEN_PORT_ENV];
       if (options.ownerBridgeHostSocket) settings.env[OWNER_BRIDGE_HOST_ENV] = options.ownerBridgeHostSocket;
       else delete settings.env[OWNER_BRIDGE_HOST_ENV];
       settings.env[WORKER_SUPERVISOR_ENV] = options.engineHosted ? 'engine' : 'gateway';
@@ -223,6 +285,18 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
     async start(context) {
       const generation = ++lifecycleGeneration;
       invalidate();
+      if (options.holdEndpoint && !held && options.engineBackground) {
+        const config = freshConfig(context.config, options.initialPluginConfig).config;
+        if (config.worker.service.enabled && config.worker.engineSplit) {
+          try {
+            held = await holdWorkerEndpoint({ env: nativeWorkerEnvironment(config, options.workerEnvPath), log: (line) => context.logger?.info?.(line) });
+          } catch (error) {
+            context.logger?.warn?.(`Olympus worker endpoint could not be held for the front (${error instanceof Error ? error.message : 'unknown error'}); the front binds it itself.`);
+          }
+          fetchWorker = fetchFor(front());
+          if (generation !== lifecycleGeneration) { held?.stop(); held = undefined; return; }
+        }
+      }
       try { await service.start(context); }
       catch (error) { if (generation === lifecycleGeneration) invalidate(); throw error; }
     },
@@ -230,6 +304,9 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
       lifecycleGeneration += 1;
       invalidate();
       await service.stop();
+      held?.stop();
+      held = undefined;
+      fetchWorker = fetchFor(front());
     },
   };
 }
