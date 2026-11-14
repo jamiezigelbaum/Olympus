@@ -23,7 +23,8 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
-import { LocalConnectorStore, type ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
+import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
+import type { LocalConnectorStore, ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const MODEL_ID = 'vector-lane-timing';
@@ -102,8 +103,11 @@ function connector(count: number): SourceConnector {
   };
 }
 
+/** Through the storage service, with a home of its own beside the store, so its registry is this folder's alone. */
 function open(dbPath: string): LocalConnectorStore {
-  return new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.vector-timing', family: 'file', trustDomain: 'internal', tierLedger: null });
+  const options = { dbPath, corpusId: 'internal.fixture.vector-timing', family: 'file' as const, trustDomain: 'internal' as const, tierLedger: null };
+  const home = join(dbPath, '..', 'home');
+  return openConnectorStore(storageAccountForCorpus(options), options, { ...process.env, HOME: home, XDG_DATA_HOME: join(home, 'data') });
 }
 
 async function build(dir: string, count: number, dimension: number): Promise<void> {
