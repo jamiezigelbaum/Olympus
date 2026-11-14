@@ -26,6 +26,8 @@ export interface ReadwiseScaleSnapshot {
   complete: boolean;
   run: string;
   running: boolean;
+  /** Per store: items, held, the last run's status and whether its cursor ended a sweep (diagnostics only). */
+  stores?: string;
 }
 export interface ScaleHost extends ArchiveHost {
   /** Async CLI so status polling cannot block the front latency sampler. */
@@ -57,6 +59,8 @@ export interface ScaleObservation {
   boundS?: number;
   drained: boolean;
   held?: number | undefined;
+  /** The last Readwise snapshot's per-store line, shown when the import never completes. */
+  stores?: string;
   repeat?: { already: boolean; added: number | null; state?: string };
   renamed?: { already: boolean; added: number | null; state?: string };
   removed: boolean;
@@ -244,6 +248,7 @@ export async function scaleReadwiseStage(host: ScaleHost, seed: string, boundS =
           obs.archive = { id: 'readwise.library', name: 'Readwise', format: 'readwise', status: snapshot.complete ? 'imported' : 'importing', messages: snapshot.items,
             ...(snapshot.earliest ? { earliest: snapshot.earliest } : {}), ...(snapshot.latest ? { latest: snapshot.latest } : {}), waiting: snapshot.held, notImported: [], howRead: [] };
           obs.held = snapshot.held; obs.gaps = snapshot.gaps;
+          if (snapshot.stores) obs.stores = `${snapshot.stores}; running ${snapshot.running}`;
           obs.drained = host.now() <= deadline && snapshot.complete && snapshot.held === 0;
           if ((obs.drained && scaleRowCount(typeof text === 'string' ? { text } : undefined) === snapshot.items) || host.now() >= deadline) break;
           // The product owns its retry and manual-sync rate limits. Retry only when no pass is running.
@@ -288,7 +293,7 @@ export function scaleChecks(format: ScaleFormat, obs: ScaleObservation | undefin
   const expectedLines = format === 'readwise' ? [] : Object.entries(gaps).map(([kind, count]) => gapSentence(kind, count));
   return [
     check('ran', 'The scale import ran through the product', obs.ok, obs.detail ?? (format === 'readwise' ? 'Readwise source connected to the synthetic paginated provider' : 'agent request and dashboard approval')),
-    check('items', 'Imported items equal the designed count', row?.status === 'imported' && row.messages === obs.expected, `${row?.messages ?? 'unknown'} imported; expected ${obs.expected}; state ${row?.status ?? 'missing'}`),
+    check('items', 'Imported items equal the designed count', row?.status === 'imported' && row.messages === obs.expected, `${row?.messages ?? 'unknown'} imported; expected ${obs.expected}; state ${row?.status ?? 'missing'}${row?.status !== 'imported' && obs.stores ? ` (${obs.stores})` : ''}`),
     check('dates', 'Oldest and newest dates are preserved', row?.earliest?.slice(0, 10) === SCALE_FIRST && row?.latest?.slice(0, 10) === SCALE_LAST,
       `${row?.earliest ?? 'unknown'} to ${row?.latest ?? 'unknown'}; expected ${SCALE_FIRST} to ${SCALE_LAST}`),
     check('held', 'Held and awaiting judgement reach zero within the bound', obs.drained && obs.held === 0, `${obs.held ?? 'unknown'} still held; ${Math.round(obs.measurement.wallMs / 1_000)} s observed (bound ${obs.boundS ?? SCALE_BOUND_S} s)`),

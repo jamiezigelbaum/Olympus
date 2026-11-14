@@ -106,7 +106,7 @@ import { SCREEN_THEMES, SCREEN_WIDTHS, screenName } from './visual-capture.ts';
 import { BESIDE_LIVE_FORMATS, EXTRA_FORMATS, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import { checkZkapiConfinement } from './zkapi-confinement.ts';
 import { runServerModeLeg } from './server-mode.ts';
-import { SCALE_FORMATS } from './archive-scale-fixtures.ts';
+import { SCALE_FORMATS, type ScaleFormat } from './archive-scale-fixtures.ts';
 import { SCALE_BOUND_S, SCALE_REPEAT_S, SCALE_REMOVE_S, scaleChecks, type ScaleObservation } from './archive-scale.ts';
 import type { ArchiveScaleMeasurement } from './report.ts';
 import { runFreshLimits, type LimitsResult } from './fresh-limits.ts';
@@ -195,6 +195,8 @@ export interface RunOptions {
   engineSplit?: boolean;
   /** Runtime-generated realistic archives on the split engine. Opt-in; RC_ARCHIVE_SCALE=1 is the harness-only equivalent. */
   archiveScale?: boolean;
+  /** Only these archive scale formats (default all), to rerun one without the whole ~6 h stage. */
+  archiveScaleFormats?: ScaleFormat[];
   budgetMs?: number;
   /** An incremental run (impact.ts): the tested report, its path, and the plan for the change since its commit. The plan's skips are set. */
   carry?: { base: ReleaseReport; path: string; plan: ImpactPlan };
@@ -1428,7 +1430,7 @@ async function runArchiveScaleLeg(run: Run, outDir: string, deadline: number): P
   if (!run.options.archiveScale) return;
   const seed = randomBytes(6).toString('hex');
   try {
-    for (const format of SCALE_FORMATS) {
+    for (const format of run.options.archiveScaleFormats ?? SCALE_FORMATS) {
       if (Date.now() >= deadline) {
         for (const check of scaleChecks(format, undefined)) run.add(check);
         continue;
@@ -1884,7 +1886,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-restore] [--skip-server-mode] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>] [--engine-split] [--archive-scale]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-restore] [--skip-server-mode] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>] [--engine-split] [--archive-scale [--archive-scale-formats <format,format>]]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1919,6 +1921,11 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if (has('--engine-split') && has('--update-baselines')) throw new Error('--engine-split tests a setting that is off by default; it never writes baselines');
   if (archiveScale && has('--update-baselines')) throw new Error('--archive-scale uses the split engine; it never writes baselines');
   if (archiveScale && has('--carry-from')) throw new Error('--archive-scale cannot carry results');
+  const scaleFormats = get('--archive-scale-formats')?.split(',').map((format) => format.trim()).filter(Boolean);
+  if (scaleFormats && !archiveScale) throw new Error('--archive-scale-formats needs --archive-scale');
+  if (scaleFormats?.some((format) => !(SCALE_FORMATS as readonly string[]).includes(format)) || scaleFormats?.length === 0) {
+    throw new Error(`--archive-scale-formats takes a comma list of ${SCALE_FORMATS.join(', ')}`);
+  }
   const onlyJourneys = get('--only-journeys');
   // An incremental run: the plan decides which legs run, so nothing else may change what runs or what the screens show.
   const carryFrom = get('--carry-from');
@@ -1974,6 +1981,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     skipScreenshots: skip('--skip-screenshots'),
     ...(has('--engine-split') || archiveScale ? { engineSplit: true } : {}),
     ...(archiveScale ? { archiveScale: true } : {}),
+    ...(scaleFormats ? { archiveScaleFormats: scaleFormats as ScaleFormat[] } : {}),
     ...(carry ? { carry } : {}),
   };
 }

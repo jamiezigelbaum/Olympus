@@ -2004,13 +2004,16 @@ async function scaleHost(): Promise<ScaleHost> {
       let earliest: string | undefined;
       let latest: string | undefined;
       const runs: Array<{ id: string; complete: boolean }> = [];
-      for (const { path } of readwiseStorePaths()) {
-        if (!existsSync(path)) continue;
+      const stores: string[] = [];
+      for (const { store, path } of readwiseStorePaths()) {
+        if (!existsSync(path)) { stores.push(`${store}: none`); continue; }
         const db = new Database(path, { readonly: true });
         try {
           db.exec('PRAGMA busy_timeout = 10000;');
           const run = db.query('select sync_run_id, status, cursor from sync_runs where connector_id = ? order by started_at desc, rowid desc limit 1').get(READWISE_CONNECTOR_ID) as { sync_run_id: string; status: string; cursor: string | null } | null;
           runs.push({ id: run?.sync_run_id ?? '', complete: run?.status === 'completed' && readwiseCursorIsSweepBoundary(run.cursor ?? undefined) });
+          const live = (db.query('select count(*) as n from items where tombstoned = 0').get() as { n: number }).n;
+          stores.push(`${store}: ${live} items, last run ${run ? `${run.status}${readwiseCursorIsSweepBoundary(run.cursor ?? undefined) ? ' at sweep end' : ' mid-sweep'}` : 'none'}`);
           const row = db.query('select min(authored_at) as earliest, max(authored_at) as latest from items where tombstoned = 0').get() as { earliest: string | null; latest: string | null };
           if (row.earliest && (!earliest || row.earliest < earliest)) earliest = row.earliest;
           if (row.latest && (!latest || row.latest > latest)) latest = row.latest;
@@ -2026,7 +2029,8 @@ async function scaleHost(): Promise<ScaleHost> {
       return { items: card.coverage.indexed_items, held: Number(card.tier_classification?.pending_classification_items ?? 0),
         ...(earliest ? { earliest } : {}), ...(latest ? { latest } : {}), gaps,
         complete: runs.length > 0 && runs.every(run => run.complete) && !running && !card.connection?.provider_refusal,
-        running, run: runs.map(run => run.id).join('/') };
+        running, run: runs.map(run => run.id).join('/'),
+        stores: `${stores.join('; ')}; card held ${Number(card.tier_classification?.pending_classification_items ?? 0)}${card.connection?.provider_refusal ? '; provider refusal' : ''}` };
     },
     async syncReadwise() {
       const response = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
