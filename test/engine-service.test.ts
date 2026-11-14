@@ -544,6 +544,15 @@ if (env.LAUNCH === '0') {
     expect((await report()).ok).toBe(false);
     health('ok', null);
     expect((await report()).ok).toBe(true);
+    // With the split on, the front can answer while the background engine exits in a loop.
+    writeFileSync(path, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: process.pid, state: 'running', services: {
+      'olympus-worker': { state: 'ok', message: null },
+      'olympus-worker-background': { state: 'failing', message: 'Olympus background engine exited unexpectedly.' },
+    } }));
+    const background = await report();
+    expect(background.ok).toBe(false);
+    expect(JSON.stringify(background.missing)).toContain('Olympus background engine exited unexpectedly.');
+    expect(readEngineWorkerProblem(path)).toBe('Olympus background engine exited unexpectedly.');
   });
 
   for (const platform of ['darwin', 'linux']) {

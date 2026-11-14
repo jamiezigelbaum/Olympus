@@ -77,7 +77,24 @@ export interface WorkerServiceInspection {
   command: string[];
   exit_code: number | null;
   detail: string;
+  /**
+   * Linux: systemd counts a unit waiting to restart, or one that restarted
+   * moments ago, as active. Present when the worker keeps exiting and being
+   * restarted, so status does not read as healthy through a crash loop.
+   */
+  restart_loop?: WorkerRestartLoop;
 }
+
+export interface WorkerRestartLoop {
+  restarts: number;
+  last_exit_code: number | null;
+  last_error: string | null;
+}
+
+/** Restarts since the unit was last started by hand that make a crash loop, once the worker has not stayed up. */
+const RESTART_LOOP_MIN_RESTARTS = 3;
+/** A worker up this long since its last restart is past the loop. */
+const RESTART_LOOP_STABLE_SECONDS = 120;
 
 export function installWorkerService(options: WorkerServiceInstallOptions = {}): WorkerServiceInstallResult {
   const platform = normalizePlatform(options.platform ?? osPlatform());
@@ -278,6 +295,9 @@ export function inspectWorkerService(
   const state = nonRegularDetail
     ? 'unknown'
     : classifyWorkerServiceState(platform, result, unitPresent);
+  const loop = platform === 'linux' && (state === 'active' || state === 'transitioning')
+    ? linuxWorkerRestartLoop(options.exec ?? defaultWorkerServiceExec, paths.errorLogPath)
+    : undefined;
   return {
     platform,
     state,
@@ -285,9 +305,49 @@ export function inspectWorkerService(
     env_present: isManagedRegularFile(envPath),
     command,
     exit_code: result.status,
-    detail: nonRegularDetail ?? boundedServiceDetail(result),
+    detail: nonRegularDetail ?? (loop
+      ? `The worker keeps exiting and restarting: ${loop.restarts} restarts, last exit code ${loop.last_exit_code ?? 'unknown'}${loop.last_error ? `; last error: ${loop.last_error}` : ''}. See olympus worker logs.`
+      : boundedServiceDetail(result)),
+    ...(loop ? { restart_loop: loop } : {}),
   };
 }
+
+/**
+ * systemd's own restart record: NRestarts counts automatic restarts since the
+ * last manual start, SubState is auto-restart between them, and the main
+ * process's age says whether the current run has stayed up.
+ */
+export function linuxWorkerRestartLoop(exec: WorkerServiceExec, errorLogPath: string): WorkerRestartLoop | undefined {
+  let shown: WorkerServiceExecResult;
+  try {
+    shown = exec('systemctl', ['--user', 'show', '-p', 'NRestarts', '-p', 'SubState', '-p', 'MainPID', '-p', 'ExecMainStatus', 'olympus-worker.service']);
+  } catch { return undefined; }
+  if (shown.status !== 0) return undefined;
+  const field = (name: string) => new RegExp(`^${name}=(.*)$`, 'm').exec(shown.stdout)?.[1]?.trim();
+  const restarts = Number(field('NRestarts'));
+  if (!Number.isSafeInteger(restarts) || restarts < RESTART_LOOP_MIN_RESTARTS) return undefined;
+  const pid = Number(field('MainPID'));
+  if (field('SubState') !== 'auto-restart') {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+    const age = processAgeSeconds(pid);
+    if (age === undefined || age >= RESTART_LOOP_STABLE_SECONDS) return undefined;
+  }
+  const code = Number(field('ExecMainStatus'));
+  return { restarts, last_exit_code: Number.isSafeInteger(code) ? code : null, last_error: lastLogLine(errorLogPath) ?? null };
+}
+
+function processAgeSeconds(pid: number): number | undefined {
+  try {
+    // /proc/<pid>/stat field 22 is the start time in clock ticks after boot.
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const startTicks = Number(fields[19]);
+    const uptime = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+    if (!Number.isFinite(startTicks) || !Number.isFinite(uptime)) return undefined;
+    return uptime - startTicks / 100;
+  } catch { return undefined; }
+}
+
 
 function runDarwinWorkerServiceInstall(
   paths: ReturnType<typeof workerServicePaths>,

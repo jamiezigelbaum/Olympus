@@ -26084,13 +26084,14 @@ function engineServicePaths(options = {}) {
 function engineStatusPath(env = process.env) {
   return join37(olympusDataDir(env), "engine", "status.json");
 }
-function readEngineWorkerHealth(statusPath) {
+var ENGINE_BACKGROUND_STATUS_ID = "olympus-worker-background";
+function readEngineWorkerHealth(statusPath, serviceId = "olympus-worker") {
   try {
     const status = JSON.parse(readFileSync33(statusPath, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || status.state !== "running" || !Number.isSafeInteger(status.pid) || status.pid <= 0)
       return;
     process.kill(status.pid, 0);
-    const worker = status.services?.["olympus-worker"];
+    const worker = status.services?.[serviceId];
     if (!["off", "starting", "ok", "failing", "stopped"].includes(worker?.state))
       return;
     return { state: worker.state, message: typeof worker.message === "string" ? worker.message : null };
@@ -26100,7 +26101,13 @@ function readEngineWorkerHealth(statusPath) {
 }
 function readEngineWorkerProblem(statusPath) {
   const worker = readEngineWorkerHealth(statusPath);
-  return worker?.state === "failing" ? worker.message ?? "The engine worker failed to become ready." : undefined;
+  if (worker?.state === "failing")
+    return worker.message ?? "The engine worker failed to become ready.";
+  return readEngineBackgroundProblem(statusPath);
+}
+function readEngineBackgroundProblem(statusPath) {
+  const background = readEngineWorkerHealth(statusPath, ENGINE_BACKGROUND_STATUS_ID);
+  return background?.state === "failing" ? background.message ?? "The background engine failed to become ready." : undefined;
 }
 function readEngineConfig(path) {
   if (!existsSync13(path))

@@ -8840,6 +8840,7 @@ function inspectWorkerService(options = {}) {
   const unsafeParentDetail = managedParentSafetyDetail(homeDir, paths.unitPath, envPath);
   const nonRegularDetail = unsafeParentDetail ?? (unitPathPresent && !unitPresent ? "managed worker unit path is not a regular file" : envPathPresent && !isManagedRegularFile(envPath) ? "managed worker environment path is not a regular file" : undefined);
   const state = nonRegularDetail ? "unknown" : classifyWorkerServiceState(platform, result, unitPresent);
+  const loop = platform === "linux" && (state === "active" || state === "transitioning") ? linuxWorkerRestartLoop(options.exec ?? defaultWorkerServiceExec, paths.errorLogPath) : undefined;
   return {
     platform,
     state,
@@ -8847,8 +8848,46 @@ function inspectWorkerService(options = {}) {
     env_present: isManagedRegularFile(envPath),
     command,
     exit_code: result.status,
-    detail: nonRegularDetail ?? boundedServiceDetail(result)
+    detail: nonRegularDetail ?? (loop ? `The worker keeps exiting and restarting: ${loop.restarts} restarts, last exit code ${loop.last_exit_code ?? "unknown"}${loop.last_error ? `; last error: ${loop.last_error}` : ""}. See olympus worker logs.` : boundedServiceDetail(result)),
+    ...loop ? { restart_loop: loop } : {}
   };
+}
+function linuxWorkerRestartLoop(exec, errorLogPath) {
+  let shown;
+  try {
+    shown = exec("systemctl", ["--user", "show", "-p", "NRestarts", "-p", "SubState", "-p", "MainPID", "-p", "ExecMainStatus", "olympus-worker.service"]);
+  } catch {
+    return;
+  }
+  if (shown.status !== 0)
+    return;
+  const field = (name) => new RegExp(`^${name}=(.*)$`, "m").exec(shown.stdout)?.[1]?.trim();
+  const restarts = Number(field("NRestarts"));
+  if (!Number.isSafeInteger(restarts) || restarts < RESTART_LOOP_MIN_RESTARTS)
+    return;
+  const pid = Number(field("MainPID"));
+  if (field("SubState") !== "auto-restart") {
+    if (!Number.isSafeInteger(pid) || pid <= 0)
+      return;
+    const age = processAgeSeconds(pid);
+    if (age === undefined || age >= RESTART_LOOP_STABLE_SECONDS)
+      return;
+  }
+  const code = Number(field("ExecMainStatus"));
+  return { restarts, last_exit_code: Number.isSafeInteger(code) ? code : null, last_error: lastLogLine(errorLogPath) ?? null };
+}
+function processAgeSeconds(pid) {
+  try {
+    const stat = readFileSync15(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const startTicks = Number(fields[19]);
+    const uptime = Number(readFileSync15("/proc/uptime", "utf8").split(" ")[0]);
+    if (!Number.isFinite(startTicks) || !Number.isFinite(uptime))
+      return;
+    return uptime - startTicks / 100;
+  } catch {
+    return;
+  }
 }
 function runDarwinWorkerServiceInstall(paths, exec) {
   const statusCommand = workerServiceCommand("darwin", "status", paths.unitPath);
@@ -9524,7 +9563,7 @@ function removeManagedFile(path, label) {
   assertManagedRegularFile(path, label);
   return removeFileDurablySync(path);
 }
-var WORKER_LOG_TAIL_BYTES, WORKER_LOG_LINE_MAX_CHARS = 300, MANAGED_WORKER_ENV_SECRET_KEYS;
+var RESTART_LOOP_MIN_RESTARTS = 3, RESTART_LOOP_STABLE_SECONDS = 120, WORKER_LOG_TAIL_BYTES, WORKER_LOG_LINE_MAX_CHARS = 300, MANAGED_WORKER_ENV_SECRET_KEYS;
 var init_worker_service = __esm(() => {
   init_linux_engine_layout();
   init_atomic_file();
@@ -128489,13 +128528,13 @@ function engineServicePaths(options = {}) {
 function engineStatusPath(env = process.env) {
   return join112(olympusDataDir(env), "engine", "status.json");
 }
-function readEngineWorkerHealth(statusPath) {
+function readEngineWorkerHealth(statusPath, serviceId = "olympus-worker") {
   try {
     const status = JSON.parse(readFileSync69(statusPath, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || status.state !== "running" || !Number.isSafeInteger(status.pid) || status.pid <= 0)
       return;
     process.kill(status.pid, 0);
-    const worker = status.services?.["olympus-worker"];
+    const worker = status.services?.[serviceId];
     if (!["off", "starting", "ok", "failing", "stopped"].includes(worker?.state))
       return;
     return { state: worker.state, message: typeof worker.message === "string" ? worker.message : null };
@@ -128505,7 +128544,13 @@ function readEngineWorkerHealth(statusPath) {
 }
 function readEngineWorkerProblem(statusPath) {
   const worker = readEngineWorkerHealth(statusPath);
-  return worker?.state === "failing" ? worker.message ?? "The engine worker failed to become ready." : undefined;
+  if (worker?.state === "failing")
+    return worker.message ?? "The engine worker failed to become ready.";
+  return readEngineBackgroundProblem(statusPath);
+}
+function readEngineBackgroundProblem(statusPath) {
+  const background = readEngineWorkerHealth(statusPath, ENGINE_BACKGROUND_STATUS_ID);
+  return background?.state === "failing" ? background.message ?? "The background engine failed to become ready." : undefined;
 }
 function engineBuildIdentity(packageRoot) {
   let version = "unknown";
@@ -129968,7 +130013,7 @@ function saveMacComputerUseChoice(choice) {
   saveComputerUseChoice(engineServicePaths().sovereigntyPath, choice);
   return { ok: true, status_message: "Choice saved. Continue to Private answers." };
 }
-var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, MAINTENANCE_FENCE, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "pending", ENV_POLICY_KEY, SERVER_MODE_MIN_ROLLBACK_VERSION = "1.3.2", ENGINE_HELPER_STAGING_PREFIX = ".helper-", ENGINE_HELPER_ASIDE_NAME = "previous.app", LOG_TAIL_BYTES, MAC_SERVER_MODE_AGENT_LABEL = "ai.olympusplugin.engine-server-mode-off", MAC_SERVER_MODE_HANDOFF_MS = 120000;
+var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, ENGINE_BACKGROUND_STATUS_ID = "olympus-worker-background", MAINTENANCE_FENCE, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "pending", ENV_POLICY_KEY, SERVER_MODE_MIN_ROLLBACK_VERSION = "1.3.2", ENGINE_HELPER_STAGING_PREFIX = ".helper-", ENGINE_HELPER_ASIDE_NAME = "previous.app", LOG_TAIL_BYTES, MAC_SERVER_MODE_AGENT_LABEL = "ai.olympusplugin.engine-server-mode-off", MAC_SERVER_MODE_HANDOFF_MS = 120000;
 var init_engine_service = __esm(() => {
   init_mac_engine_daemon();
   init_mac_engine_daemon();
@@ -255916,9 +255961,12 @@ async function engineStatusReport(deps = {}) {
   const linuxHealth = paths.linux ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ ...deps, homeDir }) }, { ...deps.health, timeoutMs: 0, fetchImpl: deps.fetchImpl, exec: deps.exec }) : undefined;
   const engineWorker = readEngineWorkerHealth(paths.statusPath);
   const workerProblem = agent.state === "running" && engineWorker?.state !== "ok" ? engineWorker?.message ?? "The engine worker is not ready yet: see olympus engine logs." : undefined;
+  const backgroundProblem = agent.state === "running" ? readEngineBackgroundProblem(paths.statusPath) : undefined;
   const missing = [];
   if (workerProblem)
     missing.push(workerProblem);
+  if (backgroundProblem)
+    missing.push(`${backgroundProblem} See olympus engine logs.`);
   if (linuxHealth && !linuxHealth.ok)
     missing.push(linuxHealth.reason ?? "Linux engine health is unknown.");
   if (!agent.installed)
@@ -255944,7 +255992,7 @@ async function engineStatusReport(deps = {}) {
     missing.push("Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.");
   }
   return {
-    ok: !workerProblem && (!linuxHealth || linuxHealth.ok) && agent.state === "running" && worker.reachable && !configError && !helperUnused && !helperGone && (remoteMode.mode !== "relay" || relayRunning),
+    ok: !workerProblem && !backgroundProblem && (!linuxHealth || linuxHealth.ok) && agent.state === "running" && worker.reachable && !configError && !helperUnused && !helperGone && (remoteMode.mode !== "relay" || relayRunning),
     host: openclaw ? { mode: "standalone", openclaw: "installed (optional; not used by the engine)", openclaw_path: openclaw } : { mode: "standalone", openclaw: "not installed (not needed)" },
     agent,
     ...paths.linux ? {} : { helper: { installed: Boolean(helperPath), in_use: helperInUse, ...helperGone ? { missing_but_referenced: true } : {}, ...paths.helperAppPath ? { path: paths.helperAppPath } : {} } },

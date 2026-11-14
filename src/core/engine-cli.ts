@@ -16,6 +16,7 @@ import type { EngineStatusFile } from './engine-host.ts';
 import {
   engineConflictWarnings,
   readEngineWorkerHealth,
+  readEngineBackgroundProblem,
   enginePaths,
   engineServicePaths,
   waitForEngineHealthy,
@@ -273,8 +274,10 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const engineWorker = readEngineWorkerHealth(paths.statusPath);
   const workerProblem = agent.state === 'running' && engineWorker?.state !== 'ok'
     ? engineWorker?.message ?? 'The engine worker is not ready yet: see olympus engine logs.' : undefined;
+  const backgroundProblem = agent.state === 'running' ? readEngineBackgroundProblem(paths.statusPath) : undefined;
   const missing: string[] = [];
   if (workerProblem) missing.push(workerProblem);
+  if (backgroundProblem) missing.push(`${backgroundProblem} See olympus engine logs.`);
   if (linuxHealth && !linuxHealth.ok) missing.push(linuxHealth.reason ?? 'Linux engine health is unknown.');
   if (!agent.installed) missing.push('The engine agent is not installed: run olympus engine install.');
   else if (agent.state === 'not_loaded') missing.push('The engine agent is installed but not loaded: run olympus engine install.');
@@ -297,7 +300,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
     missing.push('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
   }
   return {
-    ok: !workerProblem && (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && !helperGone && (remoteMode.mode !== 'relay' || relayRunning),
+    ok: !workerProblem && !backgroundProblem && (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && !helperGone && (remoteMode.mode !== 'relay' || relayRunning),
     host: openclaw
       ? { mode: 'standalone', openclaw: 'installed (optional; not used by the engine)', openclaw_path: openclaw }
       : { mode: 'standalone', openclaw: 'not installed (not needed)' },

@@ -166,13 +166,16 @@ export function engineStatusPath(env: Record<string, string | undefined> = proce
 }
 
 /** The live host's own worker health; a competing endpoint cannot clear it. */
-export function readEngineWorkerHealth(statusPath: string): { state: string; message: string | null } | undefined {
+/** The background engine's service id in the engine status file (native-worker-service.ts ENGINE_BACKGROUND_SERVICE_ID). */
+const ENGINE_BACKGROUND_STATUS_ID = 'olympus-worker-background';
+
+export function readEngineWorkerHealth(statusPath: string, serviceId = 'olympus-worker'): { state: string; message: string | null } | undefined {
   try {
     const status = JSON.parse(readFileSync(statusPath, 'utf8'));
     if (status?.schema !== 'olympus.engine.status.v1' || status.state !== 'running'
       || !Number.isSafeInteger(status.pid) || status.pid <= 0) return undefined;
     process.kill(status.pid, 0);
-    const worker = status.services?.['olympus-worker'];
+    const worker = status.services?.[serviceId];
     if (!['off', 'starting', 'ok', 'failing', 'stopped'].includes(worker?.state)) return undefined;
     return { state: worker.state, message: typeof worker.message === 'string' ? worker.message : null };
   } catch { return undefined; }
@@ -180,7 +183,18 @@ export function readEngineWorkerHealth(statusPath: string): { state: string; mes
 
 export function readEngineWorkerProblem(statusPath: string): string | undefined {
   const worker = readEngineWorkerHealth(statusPath);
-  return worker?.state === 'failing' ? worker.message ?? 'The engine worker failed to become ready.' : undefined;
+  if (worker?.state === 'failing') return worker.message ?? 'The engine worker failed to become ready.';
+  return readEngineBackgroundProblem(statusPath);
+}
+
+/**
+ * With the engine split on, the front can answer while the background engine
+ * (the writer) exits and restarts in a loop; only the host's record of the
+ * background service says so.
+ */
+export function readEngineBackgroundProblem(statusPath: string): string | undefined {
+  const background = readEngineWorkerHealth(statusPath, ENGINE_BACKGROUND_STATUS_ID);
+  return background?.state === 'failing' ? background.message ?? 'The background engine failed to become ready.' : undefined;
 }
 
 /** What launchd runs: an absolute Bun and the packaged CLI entrypoint. */
