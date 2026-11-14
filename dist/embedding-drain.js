@@ -32266,14 +32266,14 @@ var RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
 // src/workers/source-index/built-in-embedding/provider.ts
 import { isMainThread as isMainThread5 } from "node:worker_threads";
 import { createHash as createHash12 } from "node:crypto";
-import { readFileSync as readFileSync18 } from "node:fs";
+import { readFileSync as readFileSync19 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname24, join as join24 } from "node:path";
 
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { isMainThread as isMainThread4 } from "node:worker_threads";
-import { spawn } from "node:child_process";
-import { closeSync as closeSync12, constants as constants4, existsSync as existsSync22, fstatSync as fstatSync2, openSync as openSync12, readdirSync as readdirSync5, statSync as statSync16 } from "node:fs";
+import { execFileSync as execFileSync2, spawn } from "node:child_process";
+import { closeSync as closeSync12, constants as constants4, existsSync as existsSync22, fstatSync as fstatSync2, openSync as openSync12, readdirSync as readdirSync5, readFileSync as readFileSync17, statSync as statSync16 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname23, isAbsolute as isAbsolute14, join as join22 } from "node:path";
 import { createInterface } from "node:readline";
@@ -32294,7 +32294,40 @@ class LiteRtPictureEngineFaultError extends Error {
     this.name = "LiteRtPictureEngineFaultError";
   }
 }
+
+class LiteRtHelperReplacedError extends Error {
+  done;
+  reason;
+  constructor(message, reason, done) {
+    super(message);
+    this.name = "LiteRtHelperReplacedError";
+    this.reason = reason;
+    this.done = done;
+  }
+}
+var helperReplacements = 0;
 var REQUEST_TIMEOUT_MS = 3 * 60000;
+var HELPER_WORKING_CPU_MS = 1000;
+function helperCpuMs(pid, platform = process.platform) {
+  if (pid === undefined)
+    return;
+  try {
+    if (platform === "linux") {
+      const stat = readFileSync17(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      const ticks = Number(fields[11]) + Number(fields[12]);
+      return Number.isFinite(ticks) ? ticks * 10 : undefined;
+    }
+    if (platform === "darwin") {
+      const text = execFileSync2("/bin/ps", ["-o", "time=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
+      const [days, clock] = text.includes("-") ? text.split("-") : ["0", text];
+      const parts = clock.split(":").map(Number);
+      const seconds = parts.reduce((sum, part) => sum * 60 + part, 0) + Number(days) * 86400;
+      return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+    }
+  } catch {}
+  return;
+}
 function helperEnvironment() {
   const env = {};
   for (const [name, value] of Object.entries(process.env)) {
@@ -32323,10 +32356,12 @@ class HelperProcess {
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.stopTimeoutMs = options.stopTimeoutMs ?? 5000;
   }
-  failAll(reason) {
+  failAll(reason, why = "stopped") {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(reason);
+      helperReplacements += 1;
+      console.warn(`[built-in embedding] helper replaced (${why}) after ${Math.round((Date.now() - pending.startedAt) / 1000)} s on a batch of ${pending.count} item(s), ${pending.pictures} with a picture, ${pending.done.size} already answered; replacement ${helperReplacements} in this process.`);
+      pending.reject(new LiteRtHelperReplacedError(reason.message, why, pending.done));
     }
     this.pending.clear();
   }
@@ -32403,21 +32438,49 @@ class HelperProcess {
           clearTimeout(timer);
           reject(reason);
         }
-        helper.failAll(reason);
+        if (helper.replacing)
+          return;
+        helper.failAll(reason, signal ?? `exit ${code}`);
       });
     });
+  }
+  replacing = false;
+  watch(id) {
+    return setTimeout(() => {
+      const pending = this.pending.get(id);
+      if (!pending)
+        return;
+      const cpuMs = helperCpuMs(this.child.pid);
+      const working = pending.progressed || cpuMs !== undefined && pending.cpuMs !== undefined && cpuMs - pending.cpuMs >= Math.min(HELPER_WORKING_CPU_MS, this.requestTimeoutMs / 4);
+      if (working) {
+        pending.progressed = false;
+        pending.cpuMs = cpuMs;
+        pending.timer = this.watch(id);
+        return;
+      }
+      this.replacing = true;
+      this.exited = true;
+      this.child.kill("SIGKILL");
+      this.failAll(new Error("The built-in search model stopped responding and was restarted."), "no answer and no processor time for a whole window");
+    }, this.requestTimeoutMs);
   }
   embed(items) {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.child.kill("SIGKILL");
-        this.exited = true;
-        this.failAll(new Error("The built-in search model stopped responding and was restarted."));
-      }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve, reject, count: items.length, timer });
+      const pictures = items.filter((item) => typeof item !== "string" && item.image).length;
+      this.pending.set(id, {
+        resolve,
+        reject,
+        count: items.length,
+        pictures,
+        timer: this.watch(id),
+        startedAt: Date.now(),
+        done: new Map,
+        progressed: false,
+        cpuMs: helperCpuMs(this.child.pid)
+      });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
       this.child.stdin.write(`${JSON.stringify(request)}
 `);
@@ -32427,6 +32490,16 @@ class HelperProcess {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
     if (!pending || message.id === undefined)
       return;
+    if (typeof message.progress === "number") {
+      pending.progressed = true;
+      if (message.itemFailed)
+        pending.done.set(message.progress, new Float32Array(0));
+      else if (message.vector) {
+        const bytes = Buffer.from(message.vector, "base64");
+        pending.done.set(message.progress, new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
+      }
+      return;
+    }
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
     if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
@@ -32528,7 +32601,22 @@ async function startLiteRtEmbedder(options) {
       const pictures = items.flatMap((item, index) => typeof item !== "string" && item.image ? [index] : []);
       if (pictures.length > 0 && !helper.vision)
         throw new LiteRtImagesUnavailableError(pictures);
-      return helper.embed(items);
+      try {
+        return await helper.embed(items);
+      } catch (error) {
+        if (!(error instanceof LiteRtHelperReplacedError))
+          throw error;
+        if (helper.device === "gpu")
+          device = "cpu";
+        helper = await HelperProcess.start(options, device);
+        const rest = items.map((_, index) => index).filter((index) => !error.done.has(index));
+        const restPictures = rest.filter((index) => pictures.includes(index));
+        if (restPictures.length > 0 && !helper.vision)
+          throw new LiteRtImagesUnavailableError(restPictures);
+        const vectors = rest.length > 0 ? await helper.embed(rest.map((index) => items[index])) : [];
+        const resumed = new Map(rest.map((index, row) => [index, vectors[row]]));
+        return items.map((_, index) => error.done.get(index) ?? resumed.get(index));
+      }
     },
     async release() {
       process.removeListener("exit", releaseAtExit);
@@ -32585,7 +32673,7 @@ function resolveBun() {
 }
 
 // src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-import { readFileSync as readFileSync17 } from "node:fs";
+import { readFileSync as readFileSync18 } from "node:fs";
 
 class RemoteLiteRtEmbedder {
   options;
@@ -32675,7 +32763,7 @@ class RemoteLiteRtEmbedder {
   async request(path, texts) {
     const headers = {};
     if (this.options.tokenFile) {
-      const token = readFileSync17(this.options.tokenFile, "utf8").trim();
+      const token = readFileSync18(this.options.tokenFile, "utf8").trim();
       if (!token)
         throw new Error("Empty remote token file.");
       headers.Authorization = `Bearer ${token}`;
@@ -33420,7 +33508,7 @@ class BuiltInSourceEmbeddingProvider {
   }
 }
 function loadTokenizer(path) {
-  const tokenizer = new WordPieceTokenizer(readFileSync18(path, "utf8"));
+  const tokenizer = new WordPieceTokenizer(readFileSync19(path, "utf8"));
   return {
     tokenize: (text) => tokenizer.tokenize(text),
     startId: tokenizer.clsId,

@@ -5,8 +5,8 @@
 
 import { isMainThread } from 'node:worker_threads';
 import { modelThread, modelThreadHandleId, type ModelThreadFailure } from '../built-in-reasoning/off-thread.ts';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, statSync } from 'node:fs';
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -49,6 +49,30 @@ export class LiteRtPictureEngineFaultError extends Error {
   }
 }
 
+/**
+ * The helper was replaced while a batch was out: it stopped (a signal or an
+ * exit) or showed no sign of life for a whole window. `done` holds the items
+ * it had already answered, so the batch resumes after them, never from the
+ * start.
+ */
+export class LiteRtHelperReplacedError extends Error {
+  readonly done: ReadonlyMap<number, Float32Array>;
+  readonly reason: string;
+
+  constructor(message: string, reason: string, done: ReadonlyMap<number, Float32Array>) {
+    super(message);
+    this.name = 'LiteRtHelperReplacedError';
+    this.reason = reason;
+    this.done = done;
+  }
+}
+
+/** Helper replacements in this process, said in each replacement's log line. */
+let helperReplacements = 0;
+export function liteRtHelperReplacements(): number {
+  return helperReplacements;
+}
+
 export interface LiteRtEmbedder {
   /** Where the helper runs the model now. */
   readonly device: LiteRtDevice;
@@ -83,19 +107,52 @@ export interface LiteRtEmbedderOptions {
   helperPath?: string;
   /** How long a first start (GPU shader and model cache build) may take. */
   startTimeoutMs?: number;
-  /** How long one batch may take before the helper is presumed stuck and replaced. */
+  /**
+   * How long a batch may go with no answered item and no processor time
+   * used before the helper is presumed stuck and replaced. A helper that is
+   * slow but working (busy processors, a large picture) is never replaced.
+   */
   requestTimeoutMs?: number;
   /** How long `release` waits for the helper to exit before killing it. */
   stopTimeoutMs?: number;
 }
 
 /**
- * A batch is at most 8 inputs of up to 2,048 tokens (longer ones are read in
- * pieces); on an M3's CPU that is under a minute. A native call still running
- * after this is stuck (a GPU or driver stall), and it holds the provider's
- * only slot, so every question would wait behind it.
+ * A window with no answered item and no processor time used: a native call
+ * that neither finishes nor computes is stuck (a GPU or driver stall), and it
+ * holds the provider's only slot, so every question would wait behind it.
+ * Time alone never decides it. On Sparta (rc.13, 14 Nov 2026) a three-minute
+ * limit on the whole batch killed the picture helper mid-batch under busy
+ * processors about every ten minutes, and the batch started over each time.
  */
 const REQUEST_TIMEOUT_MS = 3 * 60_000;
+/** Processor time a helper must have used over a window to count as working. */
+const HELPER_WORKING_CPU_MS = 1_000;
+
+/** The helper's own processor time so far, or undefined where it cannot be read. */
+export function helperCpuMs(pid: number | undefined, platform: NodeJS.Platform = process.platform): number | undefined {
+  if (pid === undefined) return undefined;
+  try {
+    if (platform === 'linux') {
+      // Fields after the command name: utime and stime are the 12th and 13th, in clock ticks.
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      const ticks = Number(fields[11]) + Number(fields[12]);
+      return Number.isFinite(ticks) ? ticks * 10 : undefined;
+    }
+    if (platform === 'darwin') {
+      // [[dd-]hh:]mm:ss.cc
+      const text = execFileSync('/bin/ps', ['-o', 'time=', '-p', String(pid)], { encoding: 'utf8', timeout: 2_000 }).trim();
+      const [days, clock] = text.includes('-') ? text.split('-') as [string, string] : ['0', text];
+      const parts = clock.split(':').map(Number);
+      const seconds = parts.reduce((sum, part) => sum * 60 + part, 0) + Number(days) * 86_400;
+      return Number.isFinite(seconds) ? seconds * 1_000 : undefined;
+    }
+  } catch {
+    // Unreadable: the window then decides on answered items alone.
+  }
+  return undefined;
+}
 
 /** What the helper's environment keeps: enough for Bun to start and for a GPU to be found. */
 function helperEnvironment(): Record<string, string> {
@@ -114,7 +171,13 @@ interface Pending {
   resolve(vectors: Float32Array[]): void;
   reject(error: Error): void;
   count: number;
+  pictures: number;
   timer: ReturnType<typeof setTimeout>;
+  startedAt: number;
+  /** Items the helper answered one at a time (a batch with a picture), by index. */
+  done: Map<number, Float32Array>;
+  progressed: boolean;
+  cpuMs: number | undefined;
 }
 
 class HelperProcess {
@@ -135,10 +198,12 @@ class HelperProcess {
   }
 
   /** Every waiting batch fails with `reason`; the helper is gone or about to be. */
-  private failAll(reason: Error): void {
+  private failAll(reason: Error, why = 'stopped'): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(reason);
+      helperReplacements += 1;
+      console.warn(`[built-in embedding] helper replaced (${why}) after ${Math.round((Date.now() - pending.startedAt) / 1_000)} s on a batch of ${pending.count} item(s), ${pending.pictures} with a picture, ${pending.done.size} already answered; replacement ${helperReplacements} in this process.`);
+      pending.reject(new LiteRtHelperReplacedError(reason.message, why, pending.done));
     }
     this.pending.clear();
   }
@@ -218,22 +283,50 @@ class HelperProcess {
           clearTimeout(timer);
           reject(reason);
         }
-        helper.failAll(reason);
+        if (helper.replacing) return; // Already failed and logged by its own reason.
+        helper.failAll(reason, signal ?? `exit ${code}`);
       });
     });
+  }
+
+  replacing = false;
+
+  /**
+   * Arms the batch's liveness window. When it ends, a helper that answered
+   * an item or used processor time in it is working, and gets another window;
+   * one that did neither is stuck, and is replaced.
+   */
+  private watch(id: number): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      const pending = this.pending.get(id);
+      if (!pending) return;
+      const cpuMs = helperCpuMs(this.child.pid);
+      const working = pending.progressed
+        || (cpuMs !== undefined && pending.cpuMs !== undefined
+          && cpuMs - pending.cpuMs >= Math.min(HELPER_WORKING_CPU_MS, this.requestTimeoutMs / 4));
+      if (working) {
+        pending.progressed = false;
+        pending.cpuMs = cpuMs;
+        pending.timer = this.watch(id);
+        return;
+      }
+      // Replaced, not waited on: the next batch starts a new helper.
+      this.replacing = true;
+      this.exited = true;
+      this.child.kill('SIGKILL');
+      this.failAll(new Error('The built-in search model stopped responding and was restarted.'), 'no answer and no processor time for a whole window');
+    }, this.requestTimeoutMs);
   }
 
   embed(items: readonly LiteRtEmbedItem[]): Promise<Float32Array[]> {
     if (this.exited) return Promise.reject(new Error('The built-in search model is not running.'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        // Replaced, not waited on: the exit handler fails this batch and the next one starts a new helper.
-        this.child.kill('SIGKILL');
-        this.exited = true;
-        this.failAll(new Error('The built-in search model stopped responding and was restarted.'));
-      }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve, reject, count: items.length, timer });
+      const pictures = items.filter((item) => typeof item !== 'string' && item.image).length;
+      this.pending.set(id, {
+        resolve, reject, count: items.length, pictures, timer: this.watch(id),
+        startedAt: Date.now(), done: new Map(), progressed: false, cpuMs: helperCpuMs(this.child.pid),
+      });
       // Text alone keeps the original request shape; a batch with a picture
       // sends items, each its text and the picture's path.
       const request = items.every((item) => typeof item === 'string')
@@ -243,9 +336,19 @@ class HelperProcess {
     });
   }
 
-  private settle(message: { id?: number; error?: string; native?: boolean; pictures?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[] }): void {
+  private settle(message: { id?: number; error?: string; native?: boolean; pictures?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[]; progress?: number; vector?: string; itemFailed?: boolean }): void {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
     if (!pending || message.id === undefined) return;
+    if (typeof message.progress === 'number') {
+      // One item of a picture batch answered: alive, and kept for a resume.
+      pending.progressed = true;
+      if (message.itemFailed) pending.done.set(message.progress, new Float32Array(0));
+      else if (message.vector) {
+        const bytes = Buffer.from(message.vector, 'base64');
+        pending.done.set(message.progress, new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
+      }
+      return;
+    }
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
     if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
@@ -350,7 +453,21 @@ export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promi
       // may have brought back without its image encoder.
       const pictures = items.flatMap((item, index) => (typeof item !== 'string' && item.image ? [index] : []));
       if (pictures.length > 0 && !helper.vision) throw new LiteRtImagesUnavailableError(pictures);
-      return helper.embed(items);
+      try {
+        return await helper.embed(items);
+      } catch (error) {
+        // A replaced helper's batch resumes once, on a new helper, after the
+        // items it had answered; a second replacement fails the batch.
+        if (!(error instanceof LiteRtHelperReplacedError)) throw error;
+        if (helper.device === 'gpu') device = 'cpu';
+        helper = await HelperProcess.start(options, device);
+        const rest = items.map((_, index) => index).filter((index) => !error.done.has(index));
+        const restPictures = rest.filter((index) => pictures.includes(index));
+        if (restPictures.length > 0 && !helper.vision) throw new LiteRtImagesUnavailableError(restPictures);
+        const vectors = rest.length > 0 ? await helper.embed(rest.map((index) => items[index]!)) : [];
+        const resumed = new Map(rest.map((index, row) => [index, vectors[row]!]));
+        return items.map((_, index) => error.done.get(index) ?? resumed.get(index)!);
+      }
     },
     async release() {
       process.removeListener('exit', releaseAtExit);

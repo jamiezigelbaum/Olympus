@@ -10,7 +10,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { deflateRawSync, gzipSync } from 'node:zlib';
 import { loadSovereigntyPreset, SOVEREIGNTY_PRESETS, validateSovereigntyConfig, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import {
@@ -51,6 +51,8 @@ import {
   LiteRtImagesUnavailableError,
   LiteRtPictureEngineFaultError,
   startLiteRtEmbedder,
+  helperCpuMs,
+  liteRtHelperReplacements,
   linuxGpuAvailable,
   type LiteRtEmbedder,
   type LiteRtEmbedderOptions,
@@ -1196,11 +1198,17 @@ describe('built-in embedding with a LiteRT model', () => {
 });
 
 /** A helper script that speaks the LiteRT helper's protocol without LiteRT. */
-function fakeHelper(behaviour: 'ok' | 'no-vision' | 'fatal' | 'crash-first-gpu-batch' | 'native-error-on-gpu' | 'picture-fault' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close'): string {
-  const path = join(temporaryDir(), 'fake-helper.js');
+function fakeHelper(behaviour: 'ok' | 'no-vision' | 'fatal' | 'crash-first-gpu-batch' | 'native-error-on-gpu' | 'picture-fault' | 'crash-on-gpu-start' | 'close-stdin' | 'hang' | 'ignore-stdin-close' | 'slow-pictures' | 'busy-then-answer' | 'die-after-first-picture'): string {
+  const dir = temporaryDir();
+  const path = join(dir, 'fake-helper.js');
   writeFileSync(path, `
     const settings = JSON.parse(process.argv[2]);
     const behaviour = ${JSON.stringify(behaviour)};
+    if (${JSON.stringify(['slow-pictures', 'busy-then-answer', 'die-after-first-picture'].includes(behaviour))}) {
+      // Helpers that answer a picture batch item by item (test/fixtures/litert-progress-helper.js).
+      require(${JSON.stringify(join(import.meta.dir, 'fixtures', 'litert-progress-helper.js'))}).run(behaviour, ${JSON.stringify(join(dir, 'requests.log'))});
+      return;
+    }
     if (behaviour === 'fatal') { console.log(JSON.stringify({ fatal: 'no model here' })); process.exit(1); }
     const vision = settings.visionTokensPerImage !== undefined && behaviour !== 'no-vision';
     const device = settings.device === 'auto' ? 'gpu' : 'cpu';
@@ -1340,9 +1348,8 @@ describe('the LiteRT helper process', () => {
     await expect(startLiteRtEmbedder(helperOptions(fakeHelper('fatal')))).rejects.toThrow('no model here');
   }, 10_000);
 
-  test('a helper that stops on the GPU fails that batch and comes back on the CPU', async () => {
+  test('a helper that stops on the GPU is replaced on the CPU, where the same batch resumes', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('crash-first-gpu-batch')));
-    await expect(embedder.embed(['abc'])).rejects.toThrow('stopped');
     const vectors = await embedder.embed(['abc']);
     expect(embedder.device).toBe('cpu');
     expect(Array.from(vectors[0]!)).toEqual([3, 2]);
@@ -1389,6 +1396,41 @@ describe('the LiteRT helper process', () => {
     // The next batch starts a new helper (on the CPU, since the stuck one was on the GPU); it hangs too, and is abandoned too.
     await expect(embedder.embed(['abc'])).rejects.toThrow('stopped responding');
     expect(embedder.device).toBe('cpu');
+    await embedder.release();
+  }, 10_000);
+
+  test('a slow picture batch that keeps answering items is never replaced', async () => {
+    // Sparta rc.13 (14 Nov 2026): a limit on the whole batch killed a slow,
+    // working picture helper about every ten minutes, and the batch started over.
+    const replaced = liteRtHelperReplacements();
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('slow-pictures'), { requestTimeoutMs: 200, visionTokensPerImage: 140 }));
+    const items = ['a', 'bb', 'ccc', 'dddd'].map((text) => ({ text, image: `/tmp/${text}.jpg` }));
+    const vectors = await embedder.embed(items);
+    expect(vectors.map((vector) => [...vector])).toEqual([[1, 7], [2, 7], [3, 7], [4, 7]]);
+    expect(liteRtHelperReplacements()).toBe(replaced);
+    await embedder.release();
+  }, 10_000);
+
+  test('a helper using its processor with nothing answered yet is working, not stuck', async () => {
+    if (helperCpuMs(process.pid) === undefined) return; // No processor-time reading here.
+    const replaced = liteRtHelperReplacements();
+    const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('busy-then-answer'), { requestTimeoutMs: 200 }));
+    const vectors = await embedder.embed(['abc']);
+    expect([...vectors[0]!]).toEqual([3, 1]);
+    expect(liteRtHelperReplacements()).toBe(replaced);
+    await embedder.release();
+  }, 10_000);
+
+  test('a helper that dies mid-batch is replaced and the batch resumes after the items it answered', async () => {
+    const path = fakeHelper('die-after-first-picture');
+    const replaced = liteRtHelperReplacements();
+    const embedder = await startLiteRtEmbedder(helperOptions(path, { requestTimeoutMs: 5_000, visionTokensPerImage: 140 }));
+    const items = ['a', 'bb', 'ccc'].map((text) => ({ text, image: `/tmp/${text}.jpg` }));
+    const vectors = await embedder.embed(items);
+    expect(vectors.map((vector) => [...vector])).toEqual([[1, 7], [2, 7], [3, 7]]);
+    expect(liteRtHelperReplacements()).toBe(replaced + 1);
+    // The new helper was sent only what the first had not answered.
+    expect(readFileSync(join(dirname(path), 'requests.log'), 'utf8').trim().split('\n')).toEqual(['a,bb,ccc', 'bb,ccc']);
     await embedder.release();
   }, 10_000);
 

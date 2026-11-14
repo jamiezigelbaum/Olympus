@@ -167,6 +167,26 @@ function embedBatch(lib, engine, options, items) {
     vectors.set(vector, index * dimension);
   return { vectors, dimension, failed: [...failed].sort((left, right) => left - right), unsupported };
 }
+function embedItemByItem(lib, engine, options, items, answered) {
+  const ones = items.map((item, index) => {
+    const one = embedBatch(lib, engine, options, [item]);
+    answered(index, one);
+    return one;
+  });
+  const dimension = ones.find((one) => one.dimension > 0)?.dimension ?? 0;
+  const vectors = new Float32Array(dimension * items.length);
+  const failed = [];
+  const unsupported = [];
+  ones.forEach((one, index) => {
+    if (one.unsupported.length > 0)
+      unsupported.push(index);
+    else if (one.failed.length > 0 || one.dimension === 0)
+      failed.push(index);
+    else
+      vectors.set(one.vectors.subarray(0, dimension), index * dimension);
+  });
+  return { vectors, dimension, failed, unsupported };
+}
 function embedRaw(lib, engine, options, items, images) {
   const inputs = [];
   try {
@@ -277,7 +297,12 @@ function main() {
     try {
       const request = JSON.parse(line);
       id = request.id;
-      const { vectors, dimension, failed, unsupported } = embedBatch(lib, engine, options, requestItems(request, vision));
+      const items = requestItems(request, vision);
+      const { vectors, dimension, failed, unsupported } = items.some((item) => item.image) ? embedItemByItem(lib, engine, options, items, (index, one) => send({
+        id: request.id,
+        progress: index,
+        ...one.failed.length > 0 || one.unsupported.length > 0 || one.dimension === 0 ? { itemFailed: true } : { vector: Buffer.from(one.vectors.buffer, one.vectors.byteOffset, one.vectors.byteLength).toString("base64") }
+      })) : embedBatch(lib, engine, options, items);
       send({
         id,
         dimension,

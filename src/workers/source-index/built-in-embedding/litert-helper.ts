@@ -185,6 +185,31 @@ function embedBatch(
   return { vectors, dimension, failed: [...failed].sort((left, right) => left - right), unsupported };
 }
 
+/** embedBatch, one item at a time, telling `answered` after each. */
+function embedItemByItem(
+  lib: LiteRt,
+  engine: Pointer,
+  options: Pointer,
+  items: readonly EmbedItem[],
+  answered: (index: number, one: ReturnType<typeof embedBatch>) => void,
+): ReturnType<typeof embedBatch> {
+  const ones = items.map((item, index) => {
+    const one = embedBatch(lib, engine, options, [item]);
+    answered(index, one);
+    return one;
+  });
+  const dimension = ones.find((one) => one.dimension > 0)?.dimension ?? 0;
+  const vectors = new Float32Array(dimension * items.length);
+  const failed: number[] = [];
+  const unsupported: number[] = [];
+  ones.forEach((one, index) => {
+    if (one.unsupported.length > 0) unsupported.push(index);
+    else if (one.failed.length > 0 || one.dimension === 0) failed.push(index);
+    else vectors.set(one.vectors.subarray(0, dimension), index * dimension);
+  });
+  return { vectors, dimension, failed, unsupported };
+}
+
 function embedRaw(
   lib: LiteRt,
   engine: Pointer,
@@ -306,7 +331,19 @@ function main(): void {
     try {
       const request = JSON.parse(line) as { id: number; texts?: unknown; items?: unknown };
       id = request.id;
-      const { vectors, dimension, failed, unsupported } = embedBatch(lib, engine, options, requestItems(request, vision));
+      const items = requestItems(request, vision);
+      // A batch with a picture runs one item per native call and answers
+      // each as it finishes: the parent judges this helper alive by them, and
+      // a replaced helper's batch resumes after the last one answered.
+      const { vectors, dimension, failed, unsupported } = items.some((item) => item.image)
+        ? embedItemByItem(lib, engine, options, items, (index, one) => send({
+          id: request.id,
+          progress: index,
+          ...(one.failed.length > 0 || one.unsupported.length > 0 || one.dimension === 0
+            ? { itemFailed: true }
+            : { vector: Buffer.from(one.vectors.buffer, one.vectors.byteOffset, one.vectors.byteLength).toString('base64') }),
+        }))
+        : embedBatch(lib, engine, options, items);
       send({
         id,
         dimension,
