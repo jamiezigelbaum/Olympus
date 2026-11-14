@@ -273,6 +273,13 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         if (before === mode) { await clickKey('picker:cancel'); return; }
         // The selected segment toggles off to restore an inherited choice exactly.
         await click(`${folderRow(ON_DEMAND_FOLDER)}?.querySelector('[data-key$=":${mode || before}"]')`);
+        // The tap must take before Save, or a refused choice (a disabled segment) reads as "did not persist".
+        try {
+          await until(async () => (await pressedMode()) === mode, `folder mode ${mode || 'inherited'} was not taken in the picker`, 15_000);
+        } catch (error) {
+          const segs = await panel<string[]>(`(() => {const row=${folderRow(ON_DEMAND_FOLDER)}; return row ? [...row.querySelectorAll('[data-key^="picker:seg:"]')].map(e=>(e.getAttribute('data-key')||'').split(':').pop()+(e.getAttribute('aria-pressed')==='true'?'*':'')+(e.disabled||e.getAttribute('aria-disabled')==='true'?'(disabled)':'')) : null;})()`, Array.isArray).catch(() => undefined);
+          throw new Error(`folder mode ${mode || 'inherited'} was not taken in the picker (was ${before || 'inherited'}; segments ${JSON.stringify(segs)})`, { cause: error });
+        }
         await clickKey('picker:save');
         await until(async () => {
           await panel<boolean>(`(() => {const e=document.querySelector('[data-unlock-here]'); if(e && !e.disabled && (${visible})(e)){e.click();return true;}return false;})()`, Boolean);
