@@ -23872,6 +23872,10 @@ class TierSnifferStore {
   hasArrivalWaiting() {
     return this.db.query(`SELECT 1 FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} LIMIT 1`).get() != null;
   }
+  arrivalContentQuestions(limit = 20) {
+    return this.db.query(`SELECT * FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} AND pass = 'content'
+      ORDER BY priority DESC LIMIT ?`).all(Math.max(1, Math.trunc(limit))).map(questionFromRow);
+  }
   questionFor(subject, pass) {
     const row = this.db.query(`
       SELECT * FROM sniffer_questions
@@ -220774,11 +220778,24 @@ class TierSnifferService {
       this.heldBackSinceMs = held ? this.heldBackSinceMs ?? this.clockMs() : undefined;
     return held;
   }
+  isOnDemandRead(question) {
+    return this.options.stores().some((store) => {
+      const candidate = store.onDemandReadCandidate?.(question.providerItemId);
+      return !!candidate && candidate.identity.provider === question.provider && candidate.identity.accountScope === question.accountScope && store.readOnDemand?.(candidate.identity.localItemId) === true;
+    });
+  }
   arrivalTurnDue() {
-    if (this.heldBackSinceMs === undefined || this.clockMs() - this.heldBackSinceMs < ARRIVAL_STAND_BACK_MS)
+    if (this.heldBackSinceMs === undefined)
       return false;
     if (this.breakerOpen())
       return false;
+    if (this.clockMs() - this.heldBackSinceMs < ARRIVAL_STAND_BACK_MS) {
+      try {
+        return [...this.ledgers.keys()].some((path) => this.options.installed.snifferStoreForLedger(path).arrivalContentQuestions().some((question) => this.isOnDemandRead(question)));
+      } catch {
+        return false;
+      }
+    }
     try {
       return this.ledgerPaths().some((path) => this.options.installed.snifferStoreForLedger(path).hasArrivalWaiting());
     } catch {
@@ -220874,10 +220891,7 @@ class TierSnifferService {
       targets.push({
         ledger,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
-        onDemandRead: (question) => this.options.stores().some((store) => {
-          const candidate = store.onDemandReadCandidate?.(question.providerItemId);
-          return candidate && candidate.identity.provider === question.provider && candidate.identity.accountScope === question.accountScope && store.readOnDemand?.(candidate.identity.localItemId) === true;
-        }),
+        onDemandRead: (question) => this.isOnDemandRead(question),
         ...planner ? { placementFor: planner } : {},
         screenStoredQuestion: (question) => {
           const row = ledger.getCurrent(question);

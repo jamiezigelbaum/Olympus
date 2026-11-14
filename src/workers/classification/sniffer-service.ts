@@ -1,3 +1,4 @@
+import type { SnifferQuestion } from './sniffer-store.ts';
 import { emptyTierMoveTimings, moveTieredItemsLowering, flushTierMoveNotes, type TierMoveOptions } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
@@ -1140,10 +1141,32 @@ export class TierSnifferService {
     return held;
   }
 
-  /** An arrival held back past ARRIVAL_STAND_BACK_MS gets the next pass as its turn. */
+  private isOnDemandRead(question: SnifferQuestion): boolean {
+    return this.options.stores().some(store => {
+      const candidate = store.onDemandReadCandidate?.(question.providerItemId);
+      return !!candidate && candidate.identity.provider === question.provider && candidate.identity.accountScope === question.accountScope
+        && store.readOnDemand?.(candidate.identity.localItemId) === true;
+    });
+  }
+
+  /**
+   * An arrival held back past ARRIVAL_STAND_BACK_MS gets the next pass as its
+   * turn. A file read on demand gets it at once: the question waiting on it is
+   * the answer the judge would otherwise stand back for.
+   */
   private arrivalTurnDue(): boolean {
-    if (this.heldBackSinceMs === undefined || this.clockMs() - this.heldBackSinceMs < ARRIVAL_STAND_BACK_MS) return false;
+    if (this.heldBackSinceMs === undefined) return false;
     if (this.breakerOpen()) return false;
+    if (this.clockMs() - this.heldBackSinceMs < ARRIVAL_STAND_BACK_MS) {
+      try {
+        // The ledgers earlier passes opened: reading the stores again here
+        // would cost every held-back pass a store listing.
+        return [...this.ledgers.keys()].some(path => this.options.installed.snifferStoreForLedger(path)
+          .arrivalContentQuestions().some(question => this.isOnDemandRead(question)));
+      } catch {
+        return false;
+      }
+    }
     try {
       return this.ledgerPaths().some(path => this.options.installed.snifferStoreForLedger(path).hasArrivalWaiting());
     } catch {
@@ -1248,11 +1271,7 @@ export class TierSnifferService {
       targets.push({
         ledger,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
-        onDemandRead: question => this.options.stores().some(store => {
-          const candidate = store.onDemandReadCandidate?.(question.providerItemId);
-          return candidate && candidate.identity.provider === question.provider && candidate.identity.accountScope === question.accountScope
-            && store.readOnDemand?.(candidate.identity.localItemId) === true;
-        }),
+        onDemandRead: question => this.isOnDemandRead(question),
         ...(planner ? { placementFor: planner } : {}),
         screenStoredQuestion: question => {
           const row = ledger.getCurrent(question);
