@@ -320,7 +320,14 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
         await sourceAction(timingSource(folder), '^Sync now$');
         // Sync now acknowledges immediately. Wait for its disabled Checking control to settle before timing archive reads.
-        await until(async () => !!await panel<boolean>(`(() => {const row=[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(timingSource(folder).label)});return !!row && !row.querySelector('button[aria-busy=true]') && [...row.querySelectorAll('button')].some(e=>/^Sync now$/.test(e.textContent.trim()));})()`, Boolean), 'seed metadata sync did not finish');
+        // A first sync of a new folder lists and judges its files, which can take minutes; the report names what the row showed.
+        const row = `[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(timingSource(folder).label)})`;
+        try {
+          await until(async () => !!await panel<boolean>(`(() => {const row=${row};return !!row && !row.querySelector('button[aria-busy=true]') && [...row.querySelectorAll('button')].some(e=>/^Sync now$/.test(e.textContent.trim()));})()`, Boolean), 'seed metadata sync did not finish', 600_000);
+        } catch (error) {
+          const shown = await panel<string>(`(() => {const row=${row}; if(!row) return undefined; return JSON.stringify({buttons:[...row.querySelectorAll('button')].map(e=>(e.textContent||'').trim().slice(0,40)+(e.getAttribute('aria-busy')==='true'?'(busy)':'')+(e.disabled?'(disabled)':'')).slice(0,8), text:(row.textContent||'').replace(/\\s+/g,' ').trim().slice(0,300)});})()`, (v) => typeof v === 'string').catch(() => undefined);
+          throw new Error(`seed metadata sync did not finish in 10 min${shown ? ` (row ${shown})` : ' (no source row)'}`, { cause: error });
+        }
       },
       prepareRead: async (name, requireUnread = true) => {
         await reload('/dashboard?privacy-items', `!!document.querySelector('[data-privacy-items]')`);
