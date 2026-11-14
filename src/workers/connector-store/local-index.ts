@@ -11201,11 +11201,7 @@ export class LocalConnectorStore {
     // first import: what it places after that is judged ahead of the backlog.
     // A one-item handoff (another store's write, an extraction) is no listing.
     if (sawDonePage && connector.id !== TIERED_STORE_SET_HANDOFF_CONNECTOR_ID) {
-      try {
-        if (this.tierLedger()?.markListingCaughtUp(connector.id)) {
-          console.info(`[olympus:tier] first import complete for ${this.corpusId}; later items it lists are judged first.`);
-        }
-      }
+      try { this.tierLedger()?.markListingCaughtUp(connector.id); }
       catch { /* Scheduling only: a ledger that cannot record it leaves new items in backlog order. */ }
     }
     return {

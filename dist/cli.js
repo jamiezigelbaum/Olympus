@@ -48877,9 +48877,7 @@ ${parentKey(ref)}`, { ref, origin });
       }
       if (sawDonePage && connector.id !== TIERED_STORE_SET_HANDOFF_CONNECTOR_ID) {
         try {
-          if (this.tierLedger()?.markListingCaughtUp(connector.id)) {
-            console.info(`[olympus:tier] first import complete for ${this.corpusId}; later items it lists are judged first.`);
-          }
+          this.tierLedger()?.markListingCaughtUp(connector.id);
         } catch {}
       }
       return {
