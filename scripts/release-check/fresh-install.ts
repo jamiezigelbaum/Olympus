@@ -357,7 +357,8 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
     }
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9334'); });
     // Includes the explicit Venice judge choice when first run offers it.
-    await checked('privacy-choice', () => dashboard!.privacyChoice());
+    // The 8 GB leg runs as the first run recommends below 12 GB: Venice for Private answers, no local private model (lane 1, 14 Nov).
+    await checked('privacy-choice', () => dashboard!.privacyChoice(watchSplit && options.veniceKey !== undefined ? 'private-cloud-only' : undefined));
     for (const source of sources) {
       await checked(`${source.id}.connect`, () => dashboard!.connect(source));
       await checked(`${source.id}.consent`, () => dashboard!.consent(source));

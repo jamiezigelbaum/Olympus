@@ -4,7 +4,7 @@ import type { Machine, Tunnel } from './machine.ts';
 import { connectBrowser, startOwnerBridge, type BrowserSession } from './web-clients.ts';
 import type { LiveSourceSpec } from './live-accounts.ts';
 import { consentBlock, FRESH_BRIDGE_PID, FreshInconclusive, type ConsentSnapshot } from './fresh-install.ts';
-import { PRIVATE_ANSWER_OPTIONS } from '../../src/core/privacy-language.ts';
+import { PRIVATE_ANSWER_OPTIONS, type PrivateAnswerOptionId } from '../../src/core/privacy-language.ts';
 import { ON_DEMAND_FOLDER, type SeedFolder } from './on-demand-seeds.ts';
 import type { FolderMode, TimingDashboard } from './on-demand-timing.ts';
 
@@ -12,7 +12,8 @@ import type { FolderMode, TimingDashboard } from './on-demand-timing.ts';
 const sourcePick = (s: LiveSourceSpec) => `[data-source-pick^="${s.id}."]`;
 
 export interface FreshDashboard {
-  privacyChoice(): Promise<string>;
+  /** Saves the Recommended Private-answer choice, or `choice` when the leg names one (the 8 GB leg picks Venice). */
+  privacyChoice(choice?: PrivateAnswerOptionId): Promise<string>;
   connection?(source: LiveSourceSpec): Promise<'connected' | 'web' | 'unavailable'>;
   connect(source: LiveSourceSpec): Promise<void>;
   consent(source: LiveSourceSpec): Promise<void>;
@@ -354,10 +355,10 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           return said;
         };
       },
-      privacyChoice: async () => {
-        const recommended = PRIVATE_ANSWER_OPTIONS.find(option => option.recommended)!;
+      privacyChoice: async (choice?: PrivateAnswerOptionId) => {
+        const recommended = PRIVATE_ANSWER_OPTIONS.find(option => choice ? option.id === choice : option.recommended)!;
         await reload('/dashboard?keys', `!!document.querySelector('form[data-first-run-privacy]')`);
-        await click(`(()=>{const e=document.querySelector('form[data-first-run-privacy] input[value="${recommended.id}"]');return e?.closest('label')?.textContent.includes('Recommended')?e:null;})()`);
+        await click(`(()=>{const e=document.querySelector('form[data-first-run-privacy] input[value="${recommended.id}"]');return ${choice ? 'e' : `e?.closest('label')?.textContent.includes('Recommended')?e:null`};})()`);
         await click(`document.querySelector('button[form="first-run-privacy-choice"]')`);
         // The normal form handler disables the answered choice only after the engine saves it.
         try {
@@ -407,7 +408,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         // release renders it), and a build that shows the answer mode must show this one.
         await until(async () => await navigate('/dashboard?keys') && !!await panel<boolean>(`(() => { const s=document.querySelector('[data-model-setup-status]'); if(!s || document.querySelector('form[data-first-run-privacy]')) return false; let view; try { view=JSON.parse(s.dataset.modelSetupStatus); } catch { return false; } if(view.privacy_choice_pending) return false; const shown=document.querySelector('[data-answer-mode]'); return !shown || shown.getAttribute('data-answer-mode')===${JSON.stringify(recommended.id)}; })()`, Boolean), 'first-run privacy choice did not persist after reload');
         await reload();
-        return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload; privacy check: ${judgeChoice}`;
+        return `${recommended.label} (${recommended.id}, ${choice ? 'chosen by the leg' : 'Recommended'}) saved and verified after reload; privacy check: ${judgeChoice}`;
       },
       connection: async s => {
         await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
