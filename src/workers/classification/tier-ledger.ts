@@ -4286,6 +4286,30 @@ export class TierLedger {
     return row ? { cursor: row.cursor, committedAt: row.committed_at } : undefined;
   }
 
+  /**
+   * Records, once, when a listing of one account first reached the end of
+   * the source's data: everything first seen after it is a new arrival, which
+   * the judge queue asks about ahead of the first import's backlog.
+   */
+  markListingCaughtUp(provider: string, accountScope: string): void {
+    const key = caughtUpKey(provider, accountScope);
+    if (this.readMeta(key) === undefined) this.writeMeta(key, this.now().toISOString());
+  }
+
+  /**
+   * True for an item first seen after its account's first full listing
+   * (`markListingCaughtUp`), including one not recorded yet. Its first history
+   * row is when the ledger first saw it; history is never pruned.
+   */
+  isNewArrival(identity: TierLedgerIdentity): boolean {
+    const caughtUp = this.readMeta(caughtUpKey(identity.provider, identity.accountScope));
+    if (caughtUp === undefined) return false;
+    const first = this.db.query(`SELECT decided_at FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      ORDER BY history_pk LIMIT 1`).get(...idParams(identity)) as { decided_at: string } | null;
+    return first === null || first.decided_at >= caughtUp;
+  }
+
   /** Forgets a tiered set's resume point for one connector (a removed import). */
   deleteSetCursor(setId: string, connectorId: string): boolean {
     return this.db.query('DELETE FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?')
@@ -4457,6 +4481,10 @@ export class TierLedger {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(...idParams(identity), generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
   }
+}
+
+function caughtUpKey(provider: string, accountScope: string): string {
+  return `listing_caught_up:${provider}\u0000${accountScope}`;
 }
 
 export type TierMigrationProposalStatus = 'proposed' | 'moved' | 'rolled_back' | 'skipped' | 'purged';

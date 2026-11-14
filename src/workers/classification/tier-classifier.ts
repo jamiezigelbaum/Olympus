@@ -169,6 +169,14 @@ export const HELD_RECORD_PRIORITY = 10;
  * progress for the oldest questions (sniffer-resolver.ts).
  */
 export const HELD_UNTIL_JUDGED_PRIORITY = -1;
+/**
+ * Queue priority for an item a live source delivered after its account's
+ * first full listing (`TierLedger.isNewArrival`): ahead of the first import's
+ * backlog, own records and archives alike, so a new email is judged within
+ * minutes on any install. The resolver takes these first across stores,
+ * newest first; every fifth local dispatch still goes to the oldest question.
+ */
+export const NEW_ARRIVAL_PRIORITY = 50;
 
 export interface TierSnifferRequest {
   /** Scheduling only; excluded from verdict inputs and cache keys. */
@@ -237,6 +245,18 @@ export function conversationOrderedSniffer(sniffer: TierSniffer, metadata: Reado
     ...(sniffer.rejudgeReady === undefined ? {} : { rejudgeReady: sniffer.rejudgeReady }),
     ...(sniffer.recordedContentVerdict ? { recordedContentVerdict: sniffer.recordedContentVerdict } : {}),
     judge: request => sniffer.judge({ ...request, conversationOrder }),
+  };
+}
+
+/** Queues a new arrival's questions at NEW_ARRIVAL_PRIORITY; any other item's as they are. */
+export function arrivalOrderedSniffer(sniffer: TierSniffer, newArrival: boolean): TierSniffer {
+  if (!newArrival) return sniffer;
+  return {
+    id: sniffer.id,
+    ...(sniffer.rejudgeReady === undefined ? {} : { rejudgeReady: sniffer.rejudgeReady }),
+    ...(sniffer.recordedContentVerdict ? { recordedContentVerdict: sniffer.recordedContentVerdict } : {}),
+    ...(sniffer.cachedVerdict ? { cachedVerdict: request => sniffer.cachedVerdict!(request) } : {}),
+    judge: request => sniffer.judge({ ...request, priority: NEW_ARRIVAL_PRIORITY }),
   };
 }
 

@@ -22517,6 +22517,17 @@ function conversationOrderedSniffer(sniffer, metadata) {
     judge: (request) => sniffer.judge({ ...request, conversationOrder })
   };
 }
+function arrivalOrderedSniffer(sniffer, newArrival) {
+  if (!newArrival)
+    return sniffer;
+  return {
+    id: sniffer.id,
+    ...sniffer.rejudgeReady === undefined ? {} : { rejudgeReady: sniffer.rejudgeReady },
+    ...sniffer.recordedContentVerdict ? { recordedContentVerdict: sniffer.recordedContentVerdict } : {},
+    ...sniffer.cachedVerdict ? { cachedVerdict: (request) => sniffer.cachedVerdict(request) } : {},
+    judge: (request) => sniffer.judge({ ...request, priority: NEW_ARRIVAL_PRIORITY })
+  };
+}
 function contentHeldForJudgment(decision) {
   return decision.contentPending;
 }
@@ -23181,7 +23192,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
 Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, NAMES_INPUT_REASON_PREFIX = "metadata:names_input:", NAMES_INPUT_KEYS, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
@@ -26673,6 +26684,20 @@ class TierLedger {
     `).get(setId, connectorId);
     return row ? { cursor: row.cursor, committedAt: row.committed_at } : undefined;
   }
+  markListingCaughtUp(provider, accountScope) {
+    const key = caughtUpKey(provider, accountScope);
+    if (this.readMeta(key) === undefined)
+      this.writeMeta(key, this.now().toISOString());
+  }
+  isNewArrival(identity) {
+    const caughtUp = this.readMeta(caughtUpKey(identity.provider, identity.accountScope));
+    if (caughtUp === undefined)
+      return false;
+    const first = this.db.query(`SELECT decided_at FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      ORDER BY history_pk LIMIT 1`).get(...idParams(identity));
+    return first === null || first.decided_at >= caughtUp;
+  }
   deleteSetCursor(setId, connectorId) {
     return this.db.query("DELETE FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?").run(setId, connectorId).changes > 0;
   }
@@ -26771,6 +26796,9 @@ class TierLedger {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(...idParams(identity), generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
   }
+}
+function caughtUpKey(provider, accountScope) {
+  return `listing_caught_up:${provider}\x00${accountScope}`;
 }
 function readStoreBindingCursor(storeDbPath, runId, connectorId) {
   if (storeDbPath === ":memory:" || !existsSync24(storeDbPath))
@@ -36557,7 +36585,8 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
       return fenced.judge(request);
     }
   };
-  const sniffer = cacheAware && conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata);
+  const archive = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true;
+  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata), !archive && ledger !== undefined && ledger.isNewArrival(item.identity));
   const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
@@ -43901,7 +43930,7 @@ var init_local_index = __esm(() => {
           ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? "") ? { holdUntilJudged: true } : {},
           subject: item.identity
         }, {
-          ...inputs?.sniffer ? { sniffer: conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata) } : {},
+          ...inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), inputs.holdContentUntilJudged !== true && ledger.isNewArrival(item.identity)) } : {},
           ...override ? { override } : {},
           ...inputs?.retirePublic ? { retirePublic: true } : {}
         });
@@ -48500,6 +48529,7 @@ ${parentKey(ref)}`, { ref, origin });
       let checkpoint = options?.cursor;
       let sawDonePage = false;
       let consecutiveContentFetchFailures = 0;
+      const listedAccounts = new Map;
       const gaps = [];
       const tierRun = { gaps, ledgerFailed: false };
       const coverageGaps = [];
@@ -48528,6 +48558,7 @@ ${parentKey(ref)}`, { ref, origin });
               break;
             }
             itemsSeen += 1;
+            listedAccounts.set(`${item.identity.provider}\x00${item.identity.accountScope}`, item.identity);
             if (itemsSeen % VISIBILITY_TICK_ITEMS === 0)
               this.tickVisibilityWriters();
             await this.controlPath.ingestionTurn();
@@ -48747,6 +48778,13 @@ ${parentKey(ref)}`, { ref, origin });
       }
       if (metadataOnlyTally.unevaluable > 0) {
         gaps.push(`coverage_gap: metadata_only_by_rule; ${metadataOnlyTally.unevaluable} item(s) could not be ` + "evaluated against a metadata-only rule and were admitted without content.");
+      }
+      if (sawDonePage && listedAccounts.size > 0) {
+        try {
+          const ledger = this.tierLedger();
+          for (const account of listedAccounts.values())
+            ledger?.markListingCaughtUp(account.provider, account.accountScope);
+        } catch {}
       }
       return {
         syncRunId,
@@ -110466,6 +110504,7 @@ function createTieredStoreExtractionSink(options) {
       const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
       const settledUnread = !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion) || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
+      const archiveLane = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged();
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
       const judgeStarted = Date.now();
       const content = classifyContentTier({
@@ -110484,7 +110523,7 @@ function createTieredStoreExtractionSink(options) {
         ...parentContext ? { parentContext } : {},
         subject: identity
       }, {
-        ...tierClassification?.sniffer ? { sniffer: secretFencedSniffer(tierClassification.sniffer, ledger, identity, read) } : {},
+        ...tierClassification?.sniffer ? { sniffer: arrivalOrderedSniffer(secretFencedSniffer(tierClassification.sniffer, ledger, identity, read), !archiveLane && ledger.isNewArrival(identity)) } : {},
         ...override ? { override } : {},
         ...tierClassification?.retirePublic ? { retirePublic: true } : {}
       });
@@ -141923,7 +141962,8 @@ async function runSnifferPass(options) {
       try {
         const aged = pending.filter((item) => options.lane.kind !== "venice" && dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
         const raisedNext = aged.length === 0 ? pending.find((item) => boosts.has(item.question)) : undefined;
-        let next = aged[0] ?? raisedNext ?? nextInTurn(pending, options.targets, dispatches);
+        const arrival = aged.length === 0 && !raisedNext ? newestArrival(pending) : undefined;
+        let next = aged[0] ?? raisedNext ?? arrival ?? nextInTurn(pending, options.targets, dispatches);
         if (next.question.pass === "content")
           next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
         pending.splice(pending.indexOf(next), 1);
@@ -142061,6 +142101,16 @@ function nextInTurn(pending, targets, dispatches) {
   const waiting = targets.filter((target) => pending.some((item) => item.target === target));
   const target = waiting[snifferStoreTurn(dispatches) % Math.max(1, waiting.length)];
   return pending.find((item) => item.target === target) ?? pending[0];
+}
+function newestArrival(pending) {
+  let newest;
+  for (const item of pending) {
+    if (item.question.priority < NEW_ARRIVAL_PRIORITY)
+      continue;
+    if (!newest || item.question.queuedAt > newest.question.queuedAt || item.question.queuedAt === newest.question.queuedAt && item.question.sequence > newest.question.sequence)
+      newest = item;
+  }
+  return newest;
 }
 function compareRecent(a, b) {
   return b.question.priority - a.question.priority || (b.question.conversationOrder ?? 0) - (a.question.conversationOrder ?? 0) || b.question.queuedAt.localeCompare(a.question.queuedAt) || b.question.sequence - a.question.sequence;
