@@ -464,6 +464,7 @@ export class TierSnifferService {
   private lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   private backlogCache: { counts: BacklogCounts; atMs: number } | undefined;
   private lowerMovesCache: { count: number; atMs: number; pendingItems: number } | undefined;
+  private lastIdleLowerLogMs = Number.NEGATIVE_INFINITY;
   private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
@@ -1946,7 +1947,12 @@ export class TierSnifferService {
       await flushTierMoveNotes(set.ledger, { timings, shouldStop });
     }
     report.elapsedMs = this.monotonicNow() - started;
-    if (direction === 'lower' || report.moved > 0 || report.failed > 0) {
+    const didWork = report.moved > 0 || report.failed > 0 || (report.abandoned ?? 0) > 0
+      || (report.staleRaises ?? 0) > 0 || (report.retiredAbsent ?? 0) > 0;
+    // An idle lowering drain runs about every second: log it once a minute, not every time.
+    const idleLowerDue = direction === 'lower' && this.clockMs() - this.lastIdleLowerLogMs >= 60_000;
+    if (didWork || idleLowerDue) {
+      if (!didWork) this.lastIdleLowerLogMs = this.clockMs();
       this.options.log?.(
         `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
         + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(', ')})` : ''}`

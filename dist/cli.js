@@ -220046,6 +220046,7 @@ class TierSnifferService {
   lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   backlogCache;
   lowerMovesCache;
+  lastIdleLowerLogMs = Number.NEGATIVE_INFINITY;
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -221324,7 +221325,11 @@ class TierSnifferService {
       await flushTierMoveNotes(set.ledger, { timings, shouldStop });
     }
     report.elapsedMs = this.monotonicNow() - started;
-    if (direction === "lower" || report.moved > 0 || report.failed > 0) {
+    const didWork = report.moved > 0 || report.failed > 0 || (report.abandoned ?? 0) > 0 || (report.staleRaises ?? 0) > 0 || (report.retiredAbsent ?? 0) > 0;
+    const idleLowerDue = direction === "lower" && this.clockMs() - this.lastIdleLowerLogMs >= 60000;
+    if (didWork || idleLowerDue) {
+      if (!didWork)
+        this.lastIdleLowerLogMs = this.clockMs();
       this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs)} ` + (direction === "lower" ? `backlog=${backlog} slice_ms=${Math.round(sliceMs)} ` : "") + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(" ") + ".");
     }
     return report;
