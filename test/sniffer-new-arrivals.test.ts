@@ -115,3 +115,17 @@ test('a store listing that reaches the end of the data closes that connector\'s 
   expect(fixture.ledger.listingCaughtUp('fixture_lane')).toBe(true);
   expect(fixture.ledger.listingCaughtUp(TIERED_STORE_SET_HANDOFF_CONNECTOR_ID)).toBe(false);
 });
+
+test('a new arrival asked about again (a sweep, a re-judge) keeps its place ahead of the backlog', () => {
+  const store = new TierSnifferStore({ dbPath: ':memory:', now });
+  opened.push(store);
+  const subject = identity('mail-fixture', 'new-1');
+  const question = { subject, pass: 'content' as const, material: 'same text', mapRevision: 'none', flags: [] };
+  store.enqueue({ ...question, priority: NEW_ARRIVAL_PRIORITY });
+  store.enqueue({ ...question, priority: -1 });
+  expect(store.questionFor(subject, 'content')?.priority).toBe(NEW_ARRIVAL_PRIORITY);
+  const backlog = identity('mail-fixture', 'backlog-1');
+  store.enqueue({ ...question, subject: backlog, priority: 10 });
+  store.enqueue({ ...question, subject: backlog, priority: -1 });
+  expect(store.questionFor(backlog, 'content')?.priority).toBe(-1);
+});

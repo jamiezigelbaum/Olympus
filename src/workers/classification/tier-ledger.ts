@@ -4293,9 +4293,12 @@ export class TierLedger {
    * every backlog. An archive input is its own connector, so its listing
    * never makes a live arrival of anything.
    */
-  markListingCaughtUp(connectorId: string): void {
+  /** True the first time, when this call recorded it. */
+  markListingCaughtUp(connectorId: string): boolean {
     const key = caughtUpKey(connectorId);
-    if (this.readMeta(key) === undefined) this.writeMeta(key, this.now().toISOString());
+    if (this.readMeta(key) !== undefined) return false;
+    this.writeMeta(key, this.now().toISOString());
+    return true;
   }
 
   listingCaughtUp(connectorId: string): boolean {

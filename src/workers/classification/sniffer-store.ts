@@ -19,7 +19,7 @@ import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-mig
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
-import { HELD_UNTIL_JUDGED_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
+import { HELD_UNTIL_JUDGED_PRIORITY, NEW_ARRIVAL_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
 export const TIER_SNIFFER_SCHEMA_VERSION = 8;
@@ -337,7 +337,9 @@ export class TierSnifferStore {
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
-        priority = excluded.priority,
+        -- A new arrival stays one when a sweep or re-judge asks about it again.
+        priority = CASE WHEN sniffer_questions.priority >= ${NEW_ARRIVAL_PRIORITY}
+          THEN MAX(sniffer_questions.priority, excluded.priority) ELSE excluded.priority END,
         conversation_order = excluded.conversation_order,
         flags_json = excluded.flags_json
     `).run(

@@ -23818,7 +23818,9 @@ class TierSnifferStore {
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
-        priority = excluded.priority,
+        -- A new arrival stays one when a sweep or re-judge asks about it again.
+        priority = CASE WHEN sniffer_questions.priority >= ${NEW_ARRIVAL_PRIORITY}
+          THEN MAX(sniffer_questions.priority, excluded.priority) ELSE excluded.priority END,
         conversation_order = excluded.conversation_order,
         flags_json = excluded.flags_json
     `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority, question.contentHash ?? null, conversationOrder);
@@ -26755,8 +26757,10 @@ class TierLedger {
   }
   markListingCaughtUp(connectorId) {
     const key = caughtUpKey(connectorId);
-    if (this.readMeta(key) === undefined)
-      this.writeMeta(key, this.now().toISOString());
+    if (this.readMeta(key) !== undefined)
+      return false;
+    this.writeMeta(key, this.now().toISOString());
+    return true;
   }
   listingCaughtUp(connectorId) {
     return this.readMeta(caughtUpKey(connectorId)) !== undefined;
@@ -48873,7 +48877,9 @@ ${parentKey(ref)}`, { ref, origin });
       }
       if (sawDonePage && connector.id !== TIERED_STORE_SET_HANDOFF_CONNECTOR_ID) {
         try {
-          this.tierLedger()?.markListingCaughtUp(connector.id);
+          if (this.tierLedger()?.markListingCaughtUp(connector.id)) {
+            console.info(`[olympus:tier] first import complete for ${this.corpusId}; later items it lists are judged first.`);
+          }
         } catch {}
       }
       return {
