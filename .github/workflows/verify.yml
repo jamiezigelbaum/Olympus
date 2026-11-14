@@ -162,6 +162,17 @@ jobs:
       - run: bun scripts/test-lane.ts deploy --shard=${{ matrix.shard }}/4
         env:
           OLYMPUS_OPENCLAW_INSTALL_DIR: ${{ runner.temp }}/openclaw-host/node_modules/openclaw
+      - name: The upgrade's store copy under a real systemd user unit
+        # The runner's own user manager, started by lingering: the real unit,
+        # its Restart= policy and its upgrade hold (gate7 rc.11, 13 Nov).
+        if: matrix.shard == 1
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          for i in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 0.2; done
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          systemctl --user is-system-running || true
+          OLYMPUS_REAL_SYSTEMD=1 bun test test/real-systemd-upgrade-hold.test.ts
       - name: Retain trusted main timing data
         if: ${{ always() && github.event_name == 'push' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

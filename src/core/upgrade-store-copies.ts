@@ -14,7 +14,7 @@
 // its own for that file.
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readdirSync, renameSync, rmSync, statfsSync, statSync, utimesSync } from 'node:fs';
+import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, statSync, utimesSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { recordSchemaBackup, removeAbandonedBackupCopies } from './boot-progress.ts';
 import { olympusDataRoot, type LayoutEnv } from './olympus-layout.ts';
@@ -157,12 +157,35 @@ function copyUnderWriteLock(pairs: ReadonlyArray<readonly [string, string]>, bun
   ].join('\n');
   const result = spawnSync(executable, ['-e', script, JSON.stringify(pairs)], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
   if (result.status !== 0) {
+    const holders = processesHolding(pairs.map(([file]) => file));
     throw new OperationError(
       'config_error',
-      'The upgrade could not copy a store before updating it; another process may still have it open.',
+      `The upgrade could not copy a store before updating it; ${holders.length > 0 ? `it is open in ${holders.join(', ')}` : 'another process may still have it open'}.`,
       'Run `olympus worker status`, stop anything else using Olympus, then run the upgrade again. Nothing was changed.',
     );
   }
+}
+
+/**
+ * The processes that have any of these stores open, as "pid N (name)", read
+ * from /proc on Linux; nothing elsewhere. Names only, never a path.
+ */
+function processesHolding(files: string[]): string[] {
+  if (process.platform !== 'linux') return [];
+  const wanted = new Set(files.flatMap((file) => [file, `${file}-wal`, `${file}-journal`]));
+  const found: string[] = [];
+  let pids: string[];
+  try { pids = readdirSync('/proc').filter((name) => /^[0-9]+$/.test(name)); } catch { return []; }
+  for (const pid of pids) {
+    let fds: string[];
+    try { fds = readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+    const holds = fds.some((fd) => { try { return wanted.has(readlinkSync(`/proc/${pid}/fd/${fd}`)); } catch { return false; } });
+    if (!holds) continue;
+    let name = '?';
+    try { name = readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { /* gone */ }
+    found.push(`pid ${pid} (${name})`);
+  }
+  return found;
 }
 
 function syncDirectory(directory: string): void {

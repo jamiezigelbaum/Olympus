@@ -1,5 +1,5 @@
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, platform as osPlatform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -153,6 +153,9 @@ export function runWorkerServiceAction(
   const exec = options.exec ?? defaultWorkerServiceExec;
   if (platform === 'darwin' && action === 'install') {
     return runDarwinWorkerServiceInstall(paths, exec);
+  }
+  if (platform === 'linux' && (action === 'install' || action === 'start' || action === 'restart')) {
+    releaseAbandonedWorkerHold(homeDir);
   }
   if (platform === 'linux' && action === 'install') {
     return runLinuxWorkerServiceInstall(paths, exec);
@@ -337,6 +340,92 @@ function runLinuxWorkerServiceInstall(
     stdout: `${reloaded.stdout}${installed.stdout}`,
     stderr: `${reloaded.stderr}${installed.stderr}`,
   };
+}
+
+/** The file whose presence holds the Linux worker unit stopped (its ConditionPathExists). */
+export function workerUpgradeHoldPath(unitPath: string): string {
+  return join(dirname(unitPath), 'olympus-worker.upgrade-hold');
+}
+
+/**
+ * Holds the Linux worker stopped for an upgrade's store copies: the hold file
+ * first (the unit's condition, loaded by a daemon-reload, then skips any start
+ * from anyone), then the stop, then a wait until no process of the unit is
+ * left. Returns the release, which only removes the hold: the caller starts
+ * the new version itself.
+ */
+export function holdLinuxWorkerStopped(options: {
+  homeDir: string;
+  exec?: WorkerServiceExec;
+  timeoutMs?: number;
+  sleep?: (ms: number) => void;
+}): { release: () => void } {
+  const exec = options.exec ?? defaultWorkerServiceExec;
+  const paths = workerServicePaths('linux', options.homeDir);
+  const hold = workerUpgradeHoldPath(paths.unitPath);
+  mkdirSync(dirname(hold), { recursive: true, mode: 0o700 });
+  writeFileSync(hold, `${process.pid}\n`, { mode: 0o600 });
+  const release = () => rmSync(hold, { force: true });
+  try {
+    reloadLinuxWorkerServiceManager({ exec });
+    const stopped = runWorkerServiceCommand(['systemctl', '--user', 'stop', 'olympus-worker.service'], exec);
+    if (stopped.status !== 0) throwWorkerServiceActionError('stop', stopped);
+    const deadline = performance.now() + (options.timeoutMs ?? 120_000);
+    const sleep = options.sleep ?? ((ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+    for (;;) {
+      const left = linuxWorkerProcessesLeft(exec);
+      if (left.length === 0) break;
+      if (performance.now() >= deadline) {
+        throw new OperationError(
+          'config_error',
+          `Olympus did not stop for the upgrade: ${left.length} of its processes are still running (${left.slice(0, 5).join(', ')}).`,
+          'Stop them, then run the upgrade again. Nothing was changed.',
+        );
+      }
+      sleep(250);
+    }
+  } catch (error) {
+    release();
+    throw error;
+  }
+  return { release };
+}
+
+/**
+ * The unit's processes still running: its state while it is not inactive or
+ * failed, and the pids in its control group. A manager that cannot say (no
+ * cgroup v2 path) is judged by its state alone.
+ */
+function linuxWorkerProcessesLeft(exec: WorkerServiceExec): string[] {
+  const shown = runWorkerServiceCommand(['systemctl', '--user', 'show', '-p', 'ActiveState', '-p', 'ControlGroup', 'olympus-worker.service'], exec);
+  const state = /^ActiveState=(.*)$/m.exec(shown.stdout)?.[1]?.trim();
+  const group = /^ControlGroup=(.*)$/m.exec(shown.stdout)?.[1]?.trim();
+  const left: string[] = [];
+  if (shown.status === 0 && state && state !== 'inactive' && state !== 'failed') left.push(`the unit is ${state}`);
+  if (shown.status === 0 && group) {
+    try {
+      for (const pid of readFileSync(join('/sys/fs/cgroup', group, 'cgroup.procs'), 'utf8').split('\n')) {
+        if (pid.trim()) left.push(`pid ${pid.trim()}`);
+      }
+    } catch {
+      // No such group: nothing of the unit is left.
+    }
+  }
+  return left;
+}
+
+/**
+ * Removes a hold an upgrade left when it died part way: one whose process is
+ * gone. A start, restart or install would otherwise be skipped for good.
+ */
+export function releaseAbandonedWorkerHold(homeDir: string): void {
+  const hold = workerUpgradeHoldPath(workerServicePaths('linux', homeDir).unitPath);
+  let pid: number;
+  try { pid = Number.parseInt(readFileSync(hold, 'utf8'), 10); } catch { return; }
+  if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+    try { process.kill(pid, 0); return; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'EPERM') return; }
+  }
+  if (pid !== process.pid) rmSync(hold, { force: true });
 }
 
 export function reloadLinuxWorkerServiceManager(
@@ -607,6 +696,9 @@ function renderSystemdWorkerUnit(input: WorkerServiceInstallOptions & {
   return `[Unit]
 Description=Olympus source worker
 After=network-online.target
+# While \`olympus worker upgrade\` copies the stores, nothing may start the
+# engine: a start is skipped, not failed, until the upgrade lets it go.
+ConditionPathExists=!${workerUpgradeHoldPath(input.paths.unitPath)}
 
 [Service]
 Type=simple

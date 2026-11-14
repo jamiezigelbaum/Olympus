@@ -525,7 +525,8 @@ describe('versioned Olympus worker lifecycle', () => {
       expect(readFileSync(paths.unitPath, 'utf8')).toBe(oldUnit);
       expect(readFileSync(paths.envPath, 'utf8')).toBe(oldEnv);
       expect(enableCalls).toBe(2);
-      expect(calls.filter((call) => call === 'systemctl --user daemon-reload')).toHaveLength(2);
+      // The upgrade's hold reloads once before its stop, the install and the rollback once each.
+      expect(calls.filter((call) => call === 'systemctl --user daemon-reload')).toHaveLength(3);
       expect(existsSync(transactionPath(home))).toBe(false);
     } finally {
       makeTreeWritable(home);
@@ -737,7 +738,7 @@ describe('versioned Olympus worker lifecycle', () => {
         readinessProbe: () => Date.now() >= readyAt,
       });
       expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
-      expect(lines[0]).toContain(`its heartbeat was last written at ${stoppedAt}`);
+      expect(lines.find((line) => line.startsWith('Starting Olympus'))).toContain(`its heartbeat was last written at ${stoppedAt}`);
     } finally {
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
@@ -1318,7 +1319,8 @@ describe('versioned Olympus worker lifecycle', () => {
 
       expect(readFileSync(paths.unitPath, 'utf8')).toBe(oldUnit);
       expect(cachedUnit).toBe(oldUnit);
-      expect(calls.filter((call) => call === 'systemctl --user daemon-reload')).toHaveLength(2);
+      // The upgrade's hold reloads once before its stop, the install and the rollback once each.
+      expect(calls.filter((call) => call === 'systemctl --user daemon-reload')).toHaveLength(3);
       expect(calls).toContain('systemctl --user stop olympus-worker.service');
       expect(runWorkerLifecycle('status', {
         platform: 'linux',

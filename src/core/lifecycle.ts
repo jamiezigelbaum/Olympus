@@ -24,6 +24,7 @@ import {
   inspectWorkerService,
   installWorkerService,
   pathIsWithin,
+  holdLinuxWorkerStopped,
   reloadLinuxWorkerServiceManager,
   resetFailedLinuxWorkerService,
   runWorkerServiceAction,
@@ -779,13 +780,26 @@ function copyStoresForUpgrade(
   stopFirst: boolean,
 ): void {
   if (options.copyStores === false) return;
-  if (stopFirst) runWorkerServiceAction('stop', serviceActionOptions(options));
   const progressLine = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
-  const copied = copyStoresBeforeUpgrade(lifecycleEnv(options), {
-    ...(options.bunBin ? { bunBin: options.bunBin } : {}),
-    log: progressLine,
-  });
-  if (copied.stores > 0) progressLine(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);
+  // On Linux the upgrade holds the unit stopped for the whole copy: nothing,
+  // not systemd, a host or another command, may start the engine and open a
+  // store under it (gate7 rc.11, 13 Nov). The install starts the new version.
+  let hold: { release: () => void } | undefined;
+  if (options.platform === 'linux') {
+    hold = holdLinuxWorkerStopped({ homeDir: options.homeDir, ...(options.exec ? { exec: options.exec } : {}) });
+    progressLine('Olympus is stopped, and held stopped while its stores are copied.');
+  } else if (stopFirst) {
+    runWorkerServiceAction('stop', serviceActionOptions(options));
+  }
+  try {
+    const copied = copyStoresBeforeUpgrade(lifecycleEnv(options), {
+      ...(options.bunBin ? { bunBin: options.bunBin } : {}),
+      log: progressLine,
+    });
+    if (copied.stores > 0) progressLine(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);
+  } finally {
+    hold?.release();
+  }
 }
 
 function removeUpgradeBackups(options: WorkerLifecycleOptions & { homeDir: string }): void {

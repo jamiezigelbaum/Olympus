@@ -10327,7 +10327,7 @@ function setEngineStep(step) {
 var STARTUP_CAP_BASE_MS = 30 * 60000;
 
 // src/core/upgrade-store-copies.ts
-import { chmodSync as chmodSync3, closeSync as closeSync7, fsyncSync as fsyncSync2, lstatSync as lstatSync7, openSync as openSync7, readdirSync as readdirSync3, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9, utimesSync as utimesSync2 } from "node:fs";
+import { chmodSync as chmodSync3, closeSync as closeSync7, fsyncSync as fsyncSync2, lstatSync as lstatSync7, openSync as openSync7, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9, utimesSync as utimesSync2 } from "node:fs";
 var UPGRADE_COPY_SUFFIX = ".pre-schema-upgrade.bak";
 var SKIPPED_FOLDERS = new Set(["models", "backup-staging"]);
 var SPACE_MARGIN_BYTES = 1024 ** 3;
@@ -18538,7 +18538,7 @@ import {
   mkdirSync as mkdirSync11,
   lstatSync as lstatSync8,
   openSync as openSync11,
-  readFileSync as readFileSync15,
+  readFileSync as readFileSync16,
   readdirSync as readdirSync4,
   realpathSync as realpathSync5,
   renameSync as renameSync8,
@@ -18967,7 +18967,7 @@ function flushMarker(marker, refs) {
 }
 function readMarker(marker) {
   try {
-    return readFileSync15(marker, "utf8");
+    return readFileSync16(marker, "utf8");
   } catch {
     return;
   }
@@ -32206,7 +32206,7 @@ var RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
 // src/workers/source-index/built-in-embedding/provider.ts
 import { isMainThread as isMainThread5 } from "node:worker_threads";
 import { createHash as createHash12 } from "node:crypto";
-import { readFileSync as readFileSync17 } from "node:fs";
+import { readFileSync as readFileSync18 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname24, join as join24 } from "node:path";
 
@@ -32525,7 +32525,7 @@ function resolveBun() {
 }
 
 // src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-import { readFileSync as readFileSync16 } from "node:fs";
+import { readFileSync as readFileSync17 } from "node:fs";
 
 class RemoteLiteRtEmbedder {
   options;
@@ -32615,7 +32615,7 @@ class RemoteLiteRtEmbedder {
   async request(path, texts) {
     const headers = {};
     if (this.options.tokenFile) {
-      const token = readFileSync16(this.options.tokenFile, "utf8").trim();
+      const token = readFileSync17(this.options.tokenFile, "utf8").trim();
       if (!token)
         throw new Error("Empty remote token file.");
       headers.Authorization = `Bearer ${token}`;
@@ -33360,7 +33360,7 @@ class BuiltInSourceEmbeddingProvider {
   }
 }
 function loadTokenizer(path) {
-  const tokenizer = new WordPieceTokenizer(readFileSync17(path, "utf8"));
+  const tokenizer = new WordPieceTokenizer(readFileSync18(path, "utf8"));
   return {
     tokenize: (text) => tokenizer.tokenize(text),
     startId: tokenizer.clsId,
