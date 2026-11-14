@@ -162,13 +162,22 @@ export async function splitRestartCheck(machine: Machine, dashboard: ModelSaver,
   const stopFile = `/tmp/olympus-split-probe-${tag}.run`;
   await machine.exec(probeLoop(file, stopFile), { timeoutMs: 30_000 });
   let change: { provider: string; from: string; to: string } | undefined;
+  let crashed: string | undefined;
   let after: { host?: number; front?: number } = {};
   let backMs: number | undefined;
   let problem: string | undefined;
   let counts = probeCounts('');
   try {
     await sleep(2_000);
-    change = await dashboard.saveAnswerModel();
+    try { change = await dashboard.saveAnswerModel(); } catch (error) {
+      const said = error instanceof Error ? error.message : String(error);
+      if (!said.includes('no picker with another model')) throw error;
+      // Nothing on this machine reloads without a cloud provider (a zkAPI-only Mac with the local judge): the front is
+      // killed instead, the failure the held port also covers, and the engine host's supervisor starts a new one.
+      const killed = await machine.exec(`kill -9 ${before.front}`, { timeoutMs: 15_000 });
+      if (killed.code !== 0) throw new Error(`the front ${before.front} could not be killed: ${(killed.stdout + killed.stderr).trim().slice(-200)}`);
+      crashed = said.replace(/^answer model could not be changed: /, '');
+    }
     const saved = Date.now();
     const deadline = saved + capS * 1000;
     while (Date.now() < deadline) {
@@ -197,7 +206,7 @@ export async function splitRestartCheck(machine: Machine, dashboard: ModelSaver,
   const other = Object.entries(counts.other).map(([code, n]) => `${n}×${code}`).join(', ');
   const said = `${counts.total} requests: ${counts.ok} 200, ${counts.starting} 503 starting, ${counts.refused} refused${other ? `, other ${other}` : ''}`;
   const pidsSaid = `engine host ${before.host}→${after.host ?? '?'}, front ${before.front}→${after.front ?? '?'}`;
-  const changeSaid = change ? `${change.provider === 'judge' ? 'judge' : `${change.provider} answer model`} ${change.from}→${change.to}` : 'no model change';
+  const changeSaid = crashed ? `front crash, not a settings reload (${crashed})` : change ? `${change.provider === 'judge' ? 'judge' : `${change.provider} answer model`} ${change.from}→${change.to}` : 'no model change';
   const faults = [
     problem,
     counts.refused > 0 ? `${counts.refused} refused connection(s)` : undefined,
