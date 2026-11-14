@@ -237,6 +237,11 @@ export interface SnifferPassReport {
   timing: SnifferPassTiming;
   /** Queued questions read this pass. */
   pendingSeen: number;
+  /** Of those, new arrivals (NEW_ARRIVAL_PRIORITY) waiting when the pass began. */
+  arrivalsWaiting: number;
+  /** New-arrival questions this pass took, and the longest any had waited in the queue. */
+  arrivalsTaken: number;
+  arrivalMaxQueueAgeMs: number;
   calls: number;
   failedCalls: number;
   /** Distinct materials sent to the model. */
@@ -450,6 +455,9 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     maxQueueWaitMs: 0,
     timing: { passMs: 0, setupMs: 0, dispatchMs: 0, slotWaitMs: 0, modelMs: 0, passSwitches: 0 },
     pendingSeen: 0,
+    arrivalsWaiting: 0,
+    arrivalsTaken: 0,
+    arrivalMaxQueueAgeMs: 0,
     calls: 0,
     failedCalls: 0,
     itemsAsked: 0,
@@ -723,6 +731,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   // 2. Ask the model, one distinct material (one item's) per call.
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
+  report.arrivalsWaiting = pending.filter(item => item.question.priority >= NEW_ARRIVAL_PRIORITY).length;
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
   let lastPass: SnifferPass | undefined;
   report.timing.setupMs = Math.max(0, monotonicNow() - passStarted);
@@ -754,6 +763,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         && item.target === next.target
         && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
       pending.splice(pending.indexOf(next), 1);
+      if (next.question.priority >= NEW_ARRIVAL_PRIORITY) {
+        report.arrivalsTaken += 1;
+        report.arrivalMaxQueueAgeMs = Math.max(report.arrivalMaxQueueAgeMs, next.target.sniffer.clockMs() - Date.parse(next.question.queuedAt));
+      }
       const pass = next.question.pass;
       if (!stillOpen(next.target, next.question)) {
         if (!midMove(next.target, next.question)) {
