@@ -865,7 +865,7 @@ describe('sovereignty config engine', () => {
     });
 
     expect(local.calls).toHaveLength(0);
-    expect(result.answer).toContain('could not extract a cited bounded answer');
+    expect(result.answer).toContain("couldn't find the answer in its text");
     expect(result.answer).toContain('Coverage notes');
     expect(result.audit.searched_corpora).toContain(SECURE);
     expect(result.audit.answer_synthesis.secure_local_items_consulted).toBe(1);

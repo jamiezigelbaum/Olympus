@@ -215,14 +215,31 @@ export function buildOpsecReleaseAudit(
   };
 }
 
+/**
+ * The replies when nothing can be released, in plain words: what happened and
+ * what the person can do. They never name a store, path or tier code.
+ */
+export const WITHHELD_ANSWERS = {
+  private: "I found something that matches, but it's Private, so I can't pass what it says to this assistant. It stays on your computer; open it there to read it.",
+  unclear: "I found something that matches, but I couldn't get a clear answer from it here. Its text may be hard to read, as in a scan or a photo; open the item itself to check.",
+  secret: "I found something that matches, but it holds a password, key or other secret, so I won't share it here.",
+  noAnswerInText: "I found something that matches, but I couldn't find the answer in its text. If it's a scan or a photo, its text may not have been read clearly; open the item itself to check.",
+} as const;
+
+/** Whether `answer` is one of the fixed withheld replies (the eval's privacy grade). */
+export function isWithheldAnswer(answer: string): boolean {
+  const withheld: string[] = [WITHHELD_ANSWERS.private, WITHHELD_ANSWERS.unclear, WITHHELD_ANSWERS.secret];
+  return withheld.includes(answer.trim());
+}
+
 export function answerForReleaseDecision(decision: ReleaseDecision): string {
   if ((decision.decision === 'allow' || decision.decision === 'redact') && decision.allowedText) {
     return decision.allowedText;
   }
   if (decision.decision === 'needs_approval') {
-    return 'I found matching source material, but this needs review before I can summarize it in this calling-assistant-safe path.';
+    return decision.reasons.includes('local_answer_insufficient') ? WITHHELD_ANSWERS.unclear : WITHHELD_ANSWERS.private;
   }
-  return 'I found matching source material, but it cannot be summarized in this calling-assistant-safe path.';
+  return decision.reasons.includes('s5_secret_denied_from_ordinary_output') ? WITHHELD_ANSWERS.secret : WITHHELD_ANSWERS.private;
 }
 
 export function detectSourceInstructionFlags(text: string): SourceInstructionFlag[] {

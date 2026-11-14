@@ -35478,9 +35478,9 @@ function answerForReleaseDecision(decision) {
     return decision.allowedText;
   }
   if (decision.decision === "needs_approval") {
-    return "I found matching source material, but this needs review before I can summarize it in this calling-assistant-safe path.";
+    return decision.reasons.includes("local_answer_insufficient") ? WITHHELD_ANSWERS.unclear : WITHHELD_ANSWERS.private;
   }
-  return "I found matching source material, but it cannot be summarized in this calling-assistant-safe path.";
+  return decision.reasons.includes("s5_secret_denied_from_ordinary_output") ? WITHHELD_ANSWERS.secret : WITHHELD_ANSWERS.private;
 }
 function detectSourceInstructionFlags(text) {
   const flags = new Set;
@@ -35528,7 +35528,7 @@ function secretLabelsInText(text) {
   }
   return [...labels];
 }
-var SECRET_PATTERNS;
+var SECRET_PATTERNS, WITHHELD_ANSWERS;
 var init_opsec = __esm(() => {
   init_secret_patterns();
   init_types();
@@ -35542,6 +35542,12 @@ var init_opsec = __esm(() => {
     { label: "github_token", pattern: /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{16,}\b/ },
     { label: "slack_token", pattern: /\bxox[abp]-[A-Za-z0-9-]{16,}\b/ }
   ];
+  WITHHELD_ANSWERS = {
+    private: "I found something that matches, but it's Private, so I can't pass what it says to this assistant. It stays on your computer; open it there to read it.",
+    unclear: "I found something that matches, but I couldn't get a clear answer from it here. Its text may be hard to read, as in a scan or a photo; open the item itself to check.",
+    secret: "I found something that matches, but it holds a password, key or other secret, so I won't share it here.",
+    noAnswerInText: "I found something that matches, but I couldn't find the answer in its text. If it's a scan or a photo, its text may not have been read clearly; open the item itself to check."
+  };
 });
 
 // src/core/parent-label.ts
@@ -86501,7 +86507,7 @@ function releaseAnalystAnswer(input) {
     ...classificationCoverageNotes(input.detail),
     ...secretLocationCoverageNotes(input.detail)
   ]);
-  const safeUnsupportedAnswer = "I found matching source material, but I could not extract a cited bounded answer from it in this pass.";
+  const safeUnsupportedAnswer = WITHHELD_ANSWERS.noAnswerInText;
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer2(input.result);
   const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...input.onDemandNotes ?? []];
   const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);

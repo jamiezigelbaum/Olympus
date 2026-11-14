@@ -55,6 +55,7 @@ import {
   type SelectedEvidenceItem,
 } from '../../core/evidence-pack.ts';
 import {
+  WITHHELD_ANSWERS,
   answerForReleaseDecision,
   buildOpsecReleaseAudit,
   createStructuredEvidenceFact,
@@ -2356,7 +2357,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
       ...secretLocationCoverageNotes(input.detail),
     ],
   );
-  const safeUnsupportedAnswer = 'I found matching source material, but I could not extract a cited bounded answer from it in this pass.';
+  const safeUnsupportedAnswer = WITHHELD_ANSWERS.noAnswerInText;
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer(input.result);
   const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...(input.onDemandNotes ?? [])];
   const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);

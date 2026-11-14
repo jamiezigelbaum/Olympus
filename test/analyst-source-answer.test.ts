@@ -1471,7 +1471,7 @@ describe('analyst-backed source_answer handler', () => {
 
     expect(result.opsec.release_decision.decision).toBe('allow');
     expect(result.opsec.release_decision.reasons).toContain('unsupported_answer_released_without_source_content');
-    expect(result.answer).toContain('could not extract a cited bounded answer');
+    expect(result.answer).toContain("couldn't find the answer in its text");
     expect(result.answer).not.toContain('vaccination schedule');
     expect(result.evidence).toEqual([]);
     expect(result.policy.secure_local_content_exposed).toBe(false);
@@ -1494,7 +1494,7 @@ describe('analyst-backed source_answer handler', () => {
 
     expect(result.opsec.release_decision.decision).toBe('allow');
     expect(result.opsec.release_decision.reasons).toContain('unsupported_answer_released_without_source_content');
-    expect(result.answer).toContain('could not extract a cited bounded answer');
+    expect(result.answer).toContain("couldn't find the answer in its text");
     expect(result.answer).not.toContain(privateDetail);
     expect(JSON.stringify(result)).not.toContain(privateDetail);
     expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
@@ -1562,7 +1562,7 @@ describe('analyst-backed source_answer handler', () => {
 
     expect(result.opsec.release_decision.decision).toBe('allow');
     expect(result.opsec.release_decision.reasons).toContain('unsupported_answer_released_without_source_content');
-    expect(result.answer).toContain('could not extract a cited bounded answer');
+    expect(result.answer).toContain("couldn't find the answer in its text");
     expect(result.answer).not.toContain(privateDetail);
     expect(JSON.stringify(result)).not.toContain(privateDetail);
     expect(JSON.stringify(result)).not.toContain('SECURE-RAW-CHUNK-TEXT');
@@ -2193,7 +2193,7 @@ describe('analyst-backed source_answer handler', () => {
 
     expect(result.opsec.release_decision.decision).toBe('allow');
     expect(result.opsec.release_decision.reasons).toContain('unsupported_answer_released_without_source_content');
-    expect(result.answer).toContain('could not extract a cited bounded answer');
+    expect(result.answer).toContain("couldn't find the answer in its text");
   });
 
   test('default mode releases an uncited-secure answer but the audit records the secure_local context', async () => {
@@ -2686,7 +2686,7 @@ describe('analyst-backed source_answer handler', () => {
     });
 
     expect(result.opsec.release_decision.decision).toBe('allow');
-    expect(result.answer).toContain('I found matching source material');
+    expect(result.answer).toContain('I found something that matches');
     expect(result.answer).toContain('1 source item could not be read or extracted in this pass.');
     expect(result.evidence).toEqual([expect.objectContaining({
       corpus_id: SECURE,
@@ -2721,7 +2721,7 @@ describe('analyst-backed source_answer handler', () => {
 
     expect(result.opsec.release_decision.decision).toBe('allow');
     expect(result.opsec.release_decision.reasons).toContain('analyst_insufficient_no_source_content');
-    expect(result.answer).toContain('could not extract a cited bounded answer');
+    expect(result.answer).toContain("couldn't find the answer in its text");
     // The safe-unsupported release carries only the mechanical corpus-ids
     // note (2026-07-25): honest gap, no analyst-derived notes or content.
     expect(result.answer).toContain(

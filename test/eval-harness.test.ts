@@ -11,6 +11,7 @@ import { gradeAnswer, resolveCitationCorpusId } from '../eval/grade.ts';
 import { runEval } from '../eval/run.ts';
 import type { EvalDataset, EvalQuestion } from '../eval/types.ts';
 import type { SourceIndexProvenance, SourceTrustDomain, SourceTrustTier } from '../src/core/source-index/types.ts';
+import { WITHHELD_ANSWERS } from '../src/core/opsec.ts';
 
 function candidate(
   id: string,
@@ -508,7 +509,7 @@ describe('held-out eval harness wiring', () => {
         id: 'released-answer',
         shape: 'coverage_negative',
         question: 'Can this secure source answer?',
-        expectedAnswerContains: ['could not extract a cited bounded answer'],
+        expectedAnswerContains: ["couldn't find the answer in its text"],
       }],
     };
     const rawModel: AnalystModel = {
@@ -535,7 +536,7 @@ describe('held-out eval harness wiring', () => {
       releaseFor: (_pack, result) => ({
         result: {
           ...result,
-          answer: 'I found matching source material, but I could not extract a cited bounded answer from it in this pass.',
+          answer: WITHHELD_ANSWERS.noAnswerInText,
           citations: [],
           unanswered: [],
         },
@@ -586,7 +587,7 @@ describe('held-out eval harness wiring', () => {
       releaseFor: (_pack, result) => ({
         result: {
           ...result,
-          answer: 'I found matching source material, but this needs review before I can summarize it in this calling-assistant-safe path.',
+          answer: WITHHELD_ANSWERS.private,
           citations: [],
           unanswered: [],
         },
@@ -726,7 +727,7 @@ describe('held-out eval harness wiring', () => {
   });
 
   test('canonical non-release placeholder is allowed when it carries no citations or gaps', async () => {
-    const withheldAnswer = 'I found matching source material, but this needs review before I can summarize it in this calling-assistant-safe path.';
+    const withheldAnswer = WITHHELD_ANSWERS.private;
     const secureDataset: EvalDataset = {
       version: 'test',
       description: 'canonical withheld secure output fixture',
@@ -779,7 +780,7 @@ describe('held-out eval harness wiring', () => {
   });
 
   test('non-release unanswered text fails privacy even with canonical withholding answer', async () => {
-    const withheldAnswer = 'I found matching source material, but this needs review before I can summarize it in this calling-assistant-safe path.';
+    const withheldAnswer = WITHHELD_ANSWERS.private;
     const secureDataset: EvalDataset = {
       version: 'test',
       description: 'withheld secure gap output fixture',
