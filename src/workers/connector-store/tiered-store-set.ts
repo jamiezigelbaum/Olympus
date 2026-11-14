@@ -103,6 +103,7 @@ import {
   type ConnectorStoreTierRouteInput,
   type ConnectorStoreTierRouting,
   type LocalConnectorStore,
+  TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
 } from './local-index.ts';
 import {
   decideItemTiers,
@@ -155,8 +156,7 @@ export const TIER_KEY_TRUST_DOMAIN: Readonly<Record<Exclude<TierKey, 'secrets'>,
  */
 export const SECRET_LOCATION_DOMAIN: SourceTrustDomain = 'secure_local';
 
-/** Connector id recorded on writes the set makes into a leg outside that leg's own traversal. */
-export const TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = 'tiered_store_set_handoff';
+export { TIERED_STORE_SET_HANDOFF_CONNECTOR_ID };
 
 /**
  * The set ledger lives beside the set's secure_local store, where that store's
@@ -1936,6 +1936,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // are the whole decision and the item never waits on it.
     let decision = decideItemTiers(connector, item, text, classification, ledger, {
       namesOnly,
+      afterFirstImport: ledger.listingCaughtUp(connector.id),
       ...(input.contentFetchFailed ? { contentFetchFailed: true } : {}),
       storedContentNames: () => {
         const serving = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');

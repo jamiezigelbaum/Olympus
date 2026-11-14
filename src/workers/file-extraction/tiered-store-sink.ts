@@ -193,8 +193,6 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
         || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
-      // An archive lane's items are its import backlog, never new arrivals.
-      const archiveLane = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged();
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
       const judgeStarted = Date.now();
       const content = classifyContentTier(
@@ -217,7 +215,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           subject: identity,
         },
         {
-          ...(tierClassification?.sniffer ? { sniffer: arrivalOrderedSniffer(secretFencedSniffer(tierClassification.sniffer, ledger, identity, read), !archiveLane && ledger.isNewArrival(identity)) } : {}),
+          ...(tierClassification?.sniffer ? { sniffer: arrivalOrderedSniffer(secretFencedSniffer(tierClassification.sniffer, ledger, identity, read), ledger.newArrival(identity, { consume: true })) } : {}),
           ...(override ? { override } : {}),
           ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },

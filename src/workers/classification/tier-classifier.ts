@@ -170,8 +170,8 @@ export const HELD_RECORD_PRIORITY = 10;
  */
 export const HELD_UNTIL_JUDGED_PRIORITY = -1;
 /**
- * Queue priority for an item a live source delivered after its account's
- * first full listing (`TierLedger.isNewArrival`): ahead of the first import's
+ * Queue priority for an item a source's listing places after that listing's
+ * first full listing (`TierLedger.listingCaughtUp`): ahead of the first import's
  * backlog, own records and archives alike, so a new email is judged within
  * minutes on any install. The resolver takes these first across stores,
  * newest first; every fifth local dispatch still goes to the oldest question.

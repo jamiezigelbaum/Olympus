@@ -4287,27 +4287,35 @@ export class TierLedger {
   }
 
   /**
-   * Records, once, when a listing of one account first reached the end of
-   * the source's data: everything first seen after it is a new arrival, which
-   * the judge queue asks about ahead of the first import's backlog.
+   * Records, once, that one connector's listing reached the end of the
+   * source's data: its first import is done, and what that listing places
+   * from then on is a new arrival, which the judge queue asks about ahead of
+   * every backlog. An archive input is its own connector, so its listing
+   * never makes a live arrival of anything.
    */
-  markListingCaughtUp(provider: string, accountScope: string): void {
-    const key = caughtUpKey(provider, accountScope);
+  markListingCaughtUp(connectorId: string): void {
+    const key = caughtUpKey(connectorId);
     if (this.readMeta(key) === undefined) this.writeMeta(key, this.now().toISOString());
   }
 
+  listingCaughtUp(connectorId: string): boolean {
+    return this.readMeta(caughtUpKey(connectorId)) !== undefined;
+  }
+
   /**
-   * True for an item first seen after its account's first full listing
-   * (`markListingCaughtUp`), including one not recorded yet. Its first history
-   * row is when the ledger first saw it; history is never pruned.
+   * A new arrival whose text is read later (file extraction) keeps that fact
+   * here until its content is judged, so the late question queues ahead too.
    */
-  isNewArrival(identity: TierLedgerIdentity): boolean {
-    const caughtUp = this.readMeta(caughtUpKey(identity.provider, identity.accountScope));
-    if (caughtUp === undefined) return false;
-    const first = this.db.query(`SELECT decided_at FROM tier_history
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      ORDER BY history_pk LIMIT 1`).get(...idParams(identity)) as { decided_at: string } | null;
-    return first === null || first.decided_at >= caughtUp;
+  markNewArrival(identity: TierLedgerIdentity): void {
+    this.writeMeta(newArrivalKey(identity), '1');
+  }
+
+  /** Whether `markNewArrival` holds for this item; clears it when `consume` is set. */
+  newArrival(identity: TierLedgerIdentity, options: { consume?: boolean } = {}): boolean {
+    const key = newArrivalKey(identity);
+    const marked = this.readMeta(key) !== undefined;
+    if (marked && options.consume) this.deleteMeta(key);
+    return marked;
   }
 
   /** Forgets a tiered set's resume point for one connector (a removed import). */
@@ -4483,8 +4491,12 @@ export class TierLedger {
   }
 }
 
-function caughtUpKey(provider: string, accountScope: string): string {
-  return `listing_caught_up:${provider}\u0000${accountScope}`;
+function caughtUpKey(connectorId: string): string {
+  return `listing_caught_up:${connectorId}`;
+}
+
+function newArrivalKey(identity: TierLedgerIdentity): string {
+  return `new_arrival:${tierLedgerIdentityKey(identity)}`;
 }
 
 export type TierMigrationProposalStatus = 'proposed' | 'moved' | 'rolled_back' | 'skipped' | 'purged';

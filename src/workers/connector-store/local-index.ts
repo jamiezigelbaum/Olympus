@@ -230,6 +230,9 @@ import type { ConnectorStoreResultProjector } from './filter-capabilities.ts';
 // second copy of the recipe would drift silently, and the failure mode of that
 // drift is an item whose stored representation reads as current against text
 // that has changed. One definition, two callers.
+/** Connector id recorded on writes a tiered store set makes into a leg outside that leg's own traversal. */
+export const TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = 'tiered_store_set_handoff';
+
 export const DEFAULT_MAX_CHUNK_CHARS = 4_000;
 const MAX_MAX_CHUNK_CHARS = 32_000;
 const MAX_SEARCH_RESULTS = 50;
@@ -3979,7 +3982,7 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), inputs.holdContentUntilJudged !== true && ledger.isNewArrival(item.identity)) } : {}),
+          ...(inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), ledger.newArrival(item.identity, { consume: true })) } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
@@ -7025,7 +7028,7 @@ export class LocalConnectorStore {
       const ledger = this.tierLedger();
       if (!ledger) return;
       const decision = decideItemTiers(connector, item, textFromRawItem(item), tierClassification, ledger,
-        namesOnly ? { namesOnly: true } : {});
+        { ...(namesOnly ? { namesOnly: true } : {}), afterFirstImport: ledger.listingCaughtUp(connector.id) });
       ledger.recordDecision(item.identity, decision, {
         trustDomain: stored.trustDomain,
         trustTier: stored.trustTier,
@@ -10675,7 +10678,6 @@ export class LocalConnectorStore {
     let checkpoint = options?.cursor;
     let sawDonePage = false;
     let consecutiveContentFetchFailures = 0;
-    const listedAccounts = new Map<string, { provider: string; accountScope: string }>();
     const gaps: string[] = [];
     const tierRun = { gaps, ledgerFailed: false };
     const coverageGaps: ConnectorStoreCoverageGap[] = [];
@@ -10720,7 +10722,6 @@ export class LocalConnectorStore {
             break;
           }
           itemsSeen += 1;
-          listedAccounts.set(`${item.identity.provider}\u0000${item.identity.accountScope}`, item.identity);
           if (itemsSeen % VISIBILITY_TICK_ITEMS === 0) this.tickVisibilityWriters();
           // SQLite's item work is synchronous. Return to the event loop once
           // the thread has run a time slice, so a large page cannot starve the
@@ -11165,13 +11166,12 @@ export class LocalConnectorStore {
       );
     }
 
-    // The first listing that reaches the end of an account's data closes its
-    // first import: what arrives after it is judged ahead of that backlog.
-    if (sawDonePage && listedAccounts.size > 0) {
-      try {
-        const ledger = this.tierLedger();
-        for (const account of listedAccounts.values()) ledger?.markListingCaughtUp(account.provider, account.accountScope);
-      } catch { /* Scheduling only: a ledger that cannot record it leaves new items in backlog order. */ }
+    // A connector's first listing that reaches the end of the data closes its
+    // first import: what it places after that is judged ahead of the backlog.
+    // A one-item handoff (another store's write, an extraction) is no listing.
+    if (sawDonePage && connector.id !== TIERED_STORE_SET_HANDOFF_CONNECTOR_ID) {
+      try { this.tierLedger()?.markListingCaughtUp(connector.id); }
+      catch { /* Scheduling only: a ledger that cannot record it leaves new items in backlog order. */ }
     }
     return {
       syncRunId,

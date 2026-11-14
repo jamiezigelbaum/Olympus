@@ -201,6 +201,11 @@ export function decideItemTiers(
     contentFetchFailed?: boolean;
     /** The names the current content copy gives a re-judge, read only on a cache miss. */
     storedContentNames?: () => { title?: string; path?: string; sender?: string } | undefined;
+    /**
+     * The listing connector finished its first import (`TierLedger.listingCaughtUp`):
+     * an item it has not placed before is a new arrival, judged ahead of every backlog.
+     */
+    afterFirstImport?: boolean;
   } = {},
 ): TierDecision {
   const read = ledger?.classificationRead(item.identity);
@@ -239,12 +244,12 @@ export function decideItemTiers(
       return fenced.judge(request);
     },
   };
-  // An archive's items are its import backlog; anything else first seen after
-  // its account's first full listing is a new arrival, judged ahead of it.
-  const archive = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true;
+  const newArrival = extra.afterFirstImport === true && recorded === undefined;
+  // Its text, read later, is judged ahead as well (tiered-store-sink.ts, local-index.ts).
+  if (newArrival && text === undefined) ledger?.markNewArrival(item.identity);
   const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(
     recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata,
-  ), !archive && ledger !== undefined && ledger.isNewArrival(item.identity));
+  ), newArrival);
   // The lane's hold, the item's own (an item built from an archive record
   // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
   // (a store whose recording did not bring the lane's option still holds the

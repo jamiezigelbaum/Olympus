@@ -14627,19 +14627,23 @@ class TierLedger {
     `).get(setId, connectorId);
     return row ? { cursor: row.cursor, committedAt: row.committed_at } : undefined;
   }
-  markListingCaughtUp(provider, accountScope) {
-    const key = caughtUpKey(provider, accountScope);
+  markListingCaughtUp(connectorId) {
+    const key = caughtUpKey(connectorId);
     if (this.readMeta(key) === undefined)
       this.writeMeta(key, this.now().toISOString());
   }
-  isNewArrival(identity) {
-    const caughtUp = this.readMeta(caughtUpKey(identity.provider, identity.accountScope));
-    if (caughtUp === undefined)
-      return false;
-    const first = this.db.query(`SELECT decided_at FROM tier_history
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      ORDER BY history_pk LIMIT 1`).get(...idParams(identity));
-    return first === null || first.decided_at >= caughtUp;
+  listingCaughtUp(connectorId) {
+    return this.readMeta(caughtUpKey(connectorId)) !== undefined;
+  }
+  markNewArrival(identity) {
+    this.writeMeta(newArrivalKey(identity), "1");
+  }
+  newArrival(identity, options = {}) {
+    const key = newArrivalKey(identity);
+    const marked = this.readMeta(key) !== undefined;
+    if (marked && options.consume)
+      this.deleteMeta(key);
+    return marked;
   }
   deleteSetCursor(setId, connectorId) {
     return this.db.query("DELETE FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?").run(setId, connectorId).changes > 0;
@@ -14740,8 +14744,11 @@ class TierLedger {
     `).run(...idParams(identity), generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
   }
 }
-function caughtUpKey(provider, accountScope) {
-  return `listing_caught_up:${provider}\x00${accountScope}`;
+function caughtUpKey(connectorId) {
+  return `listing_caught_up:${connectorId}`;
+}
+function newArrivalKey(identity) {
+  return `new_arrival:${tierLedgerIdentityKey(identity)}`;
 }
 function readStoreBindingCursor(storeDbPath, runId, connectorId) {
   if (storeDbPath === ":memory:" || !existsSync13(storeDbPath))
@@ -19719,8 +19726,10 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
       return fenced.judge(request);
     }
   };
-  const archive = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true;
-  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata), !archive && ledger !== undefined && ledger.isNewArrival(item.identity));
+  const newArrival = extra.afterFirstImport === true && recorded === undefined;
+  if (newArrival && text === undefined)
+    ledger?.markNewArrival(item.identity);
+  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata), newArrival);
   const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
@@ -20878,6 +20887,7 @@ async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_J
 }
 
 // src/workers/connector-store/local-index.ts
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var DEFAULT_MAX_CHUNK_CHARS = 4000;
 var MAX_MAX_CHUNK_CHARS = 32000;
 var MAX_SEARCH_RESULTS = 50;
@@ -22210,7 +22220,7 @@ class LocalConnectorStore {
         ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? "") ? { holdUntilJudged: true } : {},
         subject: item.identity
       }, {
-        ...inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), inputs.holdContentUntilJudged !== true && ledger.isNewArrival(item.identity)) } : {},
+        ...inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), ledger.newArrival(item.identity, { consume: true })) } : {},
         ...override ? { override } : {},
         ...inputs?.retirePublic ? { retirePublic: true } : {}
       });
@@ -24428,7 +24438,7 @@ ${parentKey(ref)}`, { ref, origin });
       const ledger = this.tierLedger();
       if (!ledger)
         return;
-      const decision = decideItemTiers(connector, item, textFromRawItem(item), tierClassification, ledger, namesOnly ? { namesOnly: true } : {});
+      const decision = decideItemTiers(connector, item, textFromRawItem(item), tierClassification, ledger, { ...namesOnly ? { namesOnly: true } : {}, afterFirstImport: ledger.listingCaughtUp(connector.id) });
       ledger.recordDecision(item.identity, decision, {
         trustDomain: stored.trustDomain,
         trustTier: stored.trustTier
@@ -26809,7 +26819,6 @@ ${parentKey(ref)}`, { ref, origin });
     let checkpoint = options?.cursor;
     let sawDonePage = false;
     let consecutiveContentFetchFailures = 0;
-    const listedAccounts = new Map;
     const gaps = [];
     const tierRun = { gaps, ledgerFailed: false };
     const coverageGaps = [];
@@ -26838,7 +26847,6 @@ ${parentKey(ref)}`, { ref, origin });
             break;
           }
           itemsSeen += 1;
-          listedAccounts.set(`${item.identity.provider}\x00${item.identity.accountScope}`, item.identity);
           if (itemsSeen % VISIBILITY_TICK_ITEMS === 0)
             this.tickVisibilityWriters();
           await this.controlPath.ingestionTurn();
@@ -27059,11 +27067,9 @@ ${parentKey(ref)}`, { ref, origin });
     if (metadataOnlyTally.unevaluable > 0) {
       gaps.push(`coverage_gap: metadata_only_by_rule; ${metadataOnlyTally.unevaluable} item(s) could not be ` + "evaluated against a metadata-only rule and were admitted without content.");
     }
-    if (sawDonePage && listedAccounts.size > 0) {
+    if (sawDonePage && connector.id !== TIERED_STORE_SET_HANDOFF_CONNECTOR_ID) {
       try {
-        const ledger = this.tierLedger();
-        for (const account of listedAccounts.values())
-          ledger?.markListingCaughtUp(account.provider, account.accountScope);
+        this.tierLedger()?.markListingCaughtUp(connector.id);
       } catch {}
     }
     return {
