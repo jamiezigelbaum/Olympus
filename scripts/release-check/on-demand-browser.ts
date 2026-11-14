@@ -61,6 +61,11 @@ export function providerClickExpression(labels: readonly string[]): string {
   return `(() => {const names=${CONTROL_NAMES};const named=${PROVIDER_CONTROLS}.filter(e=>names(e).some(value=>${JSON.stringify(labels)}.some(label=>value===label || value.startsWith(label+' '))));const e=named.find(e=>e.closest('[role=dialog],[role=alertdialog],[aria-modal=true]'))||named[0];if(!e||e.disabled||e.getAttribute('aria-disabled')==='true')return false;for(const type of ['mousedown','mouseup'])e.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,view:window}));e.click();return true;})()`;
 }
 
+/** Whether a Dropbox listing row (not a toast or the rename box) names this folder exactly. */
+function dropboxRowShows(name: string): string {
+  return `[...document.querySelectorAll('[role=row],tr')].some(r=>[r,...r.querySelectorAll('*')].some(e=>(e.textContent||'').trim()===${JSON.stringify(name)}||e.getAttribute('title')===${JSON.stringify(name)}||e.getAttribute('aria-label')===${JSON.stringify(name)}))`;
+}
+
 /** Visible menu item names, for a failure message: provider UI labels only, never file names. */
 const PROVIDER_CONTROL_NAMES = `[...document.querySelectorAll('[role=menuitem]')].filter(${visible}).map(e => (${CONTROL_NAMES})(e).at(-1)).slice(0, 20)`;
 
@@ -220,7 +225,7 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
           // the dashboard picker, which lists the account's top level live, never showed the seed folder.
           await send('Page.navigate', { url: 'https://www.dropbox.com/home' }, tab.session);
           await until(() => evaluate(tab.session, `document.readyState==='complete' && !!document.querySelector('[role=grid],[role=table],table,[data-testid="files-table"],[data-testid="empty-folder"]') && (!${BUSY} || !!document.querySelector('[role=row],tr'))`), 'Dropbox top level did not load');
-          if ((await evaluate<string[]>(tab.session, listing(source))).includes(name)) {
+          if (await evaluate<boolean>(tab.session, dropboxRowShows(name))) {
             await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);
             tab.url = await evaluate(tab.session, 'location.href');
             return { source, id: tab.url };
@@ -259,9 +264,11 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
           }
         } else {
           try {
-            await until(async () => (await evaluate<string[]>(tab.session, listing(source))).includes(name), 'Dropbox seed folder was not created');
+            // A row, not just the name somewhere on the page (a toast, the rename box): the folder must be listed.
+            await until(() => evaluate<boolean>(tab.session, dropboxRowShows(name)), 'Dropbox seed folder was not created');
           } catch (error) {
-            const shown = await evaluate<Record<string, unknown>>(tab.session, `(() => ({path: location.pathname, rows: document.querySelectorAll('[role=row],tr').length, nameShown: (document.body?.innerText || '').includes(${JSON.stringify(name)}), dialogs: [...document.querySelectorAll('[role=dialog],[aria-modal=true]')].filter(${visible}).length}))()`).catch(() => undefined);
+            // Test-account folder names and UI labels only: what the top level listed and where the name appears.
+            const shown = await evaluate<Record<string, unknown>>(tab.session, `(() => {const name=${JSON.stringify(name)};const v=${visible};return {path: location.pathname, rows: [...document.querySelectorAll('[role=row],tr')].map(r=>(r.innerText||'').trim().split('\\n')[0].slice(0,60)).slice(0,12), nameAt: [...document.querySelectorAll('body *')].filter(e=>e.children.length===0&&(e.textContent||'').includes(name)).map(e=>[e.tagName,e.getAttribute('role'),e.closest('[role=row],tr,[role=dialog],[role=alert],[role=status],nav,header')?.tagName+'/'+(e.closest('[role]')?.getAttribute('role')||'')].join(':')).slice(0,6), inputs: [...document.querySelectorAll('input')].filter(v).map(e=>e.getAttribute('aria-label')||e.placeholder||e.type).slice(0,6), buttons: [...document.querySelectorAll('button,[role=button]')].filter(v).map(e=>(e.getAttribute('aria-label')||e.textContent||'').trim().slice(0,30)).filter(Boolean).slice(0,25), dialogs: [...document.querySelectorAll('[role=dialog],[aria-modal=true]')].filter(v).length};})()`).catch(() => undefined);
             throw new Error(`Dropbox seed folder was not created${shown ? ` (${JSON.stringify(shown)})` : ''}`, { cause: error });
           }
           await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);
