@@ -12,6 +12,7 @@ import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import { DelphiClient } from '../src/core/delphi.ts';
 import { fitPackToPromptBytes, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_MAX_CHARS_PER_CANDIDATE } from '../src/workers/source-index/analyst-answer.ts';
 import { prepareBuiltInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
+import { createSourceAnswerTrace, observeSourceAnswerRetrievalAttempt, runWithSourceAnswerTrace, snapshotSourceAnswerTrace, type SourceAnswerTraceSnapshot } from '../src/workers/source-index/answer-latency-trace.ts';
 import { openEvalDataRoot, type EvalStoreCount, type EvalSkippedStore } from './data-root.ts';
 import { parseDataRootArgs } from './data-root-args.ts';
 import { buildEvalPack, createEvalSourceLanes, configuredEvalEmbedding, prepareEvalEmbedding, type EvalStoreSearch } from './retrieval.ts';
@@ -429,6 +430,47 @@ export function questionJudge(model: DraftModel) {
   };
 }
 
+/**
+ * Each store's search time across the run, from the same trace an Ask writes
+ * (--trace): mean and max per store, its pool SQL time, and the statements
+ * that took the most of it. Times, counts and statement shapes only.
+ */
+export class StoreTimes {
+  private readonly stores = new Map<string, { searches: number; elapsed: number; max: number; sql: number; timeouts: number;
+    sites: Map<string, { reads: number; sql_ms: number; sql_max_ms: number }> }>();
+  add(trace: SourceAnswerTraceSnapshot): void {
+    for (const query of trace.retrievalAttempts.flatMap((attempt) => attempt.queries)) {
+      for (const timing of query.corpus_timings) {
+        const store = this.stores.get(timing.corpus_id) ?? { searches: 0, elapsed: 0, max: 0, sql: 0, timeouts: 0, sites: new Map() };
+        store.searches += 1;
+        store.elapsed += timing.elapsed_ms;
+        store.max = Math.max(store.max, timing.elapsed_ms);
+        if (timing.outcome === 'timeout') store.timeouts += 1;
+        store.sql += timing.pool?.sql_ms ?? 0;
+        for (const site of timing.pool?.slowest_sql ?? []) {
+          const entry = store.sites.get(site.site) ?? { reads: 0, sql_ms: 0, sql_max_ms: 0 };
+          entry.reads += site.reads;
+          entry.sql_ms += site.sql_ms;
+          entry.sql_max_ms = Math.max(entry.sql_max_ms, site.sql_max_ms);
+          store.sites.set(site.site, entry);
+        }
+        this.stores.set(timing.corpus_id, store);
+      }
+    }
+  }
+  summary(): Record<string, unknown> {
+    return Object.fromEntries([...this.stores].sort((left, right) => right[1].elapsed - left[1].elapsed).map(([corpusId, store]) => [corpusId, {
+      searches: store.searches,
+      meanMs: Math.round(store.elapsed / store.searches),
+      maxMs: Math.round(store.max),
+      meanSqlMs: Math.round(store.sql / store.searches),
+      timeouts: store.timeouts,
+      slowestSql: [...store.sites].sort((left, right) => right[1].sql_ms - left[1].sql_ms).slice(0, 5)
+        .map(([site, entry]) => ({ site, reads: entry.reads, sqlMs: Math.round(entry.sql_ms), sqlMaxMs: Math.round(entry.sql_max_ms) })),
+    }]));
+  }
+}
+
 export async function main(argv = process.argv.slice(2), stage?: EvalStage): Promise<void> {
   const enter = (name: string) => enterStage(stage, name, 'passage eval');
   enter('arguments');
@@ -439,7 +481,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const arg = rest[index]!;
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
-      if (key === '--probe-lanes' || key === '--judge-questions' || key === '--answer') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
+      if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
       if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes'].includes(key!)) throw new Error('Unsupported passage eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Passage eval option requires a value.');
@@ -489,6 +531,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor, onStoreSearch: search => { searches.push(search); } });
     const judge = values.has('--judge-questions') ? questionJudge(localEvalModel(config)) : undefined;
     const probe = values.has('--probe-lanes') ? laneProbe(opened.stores, embedding.embeddingFor) : undefined;
+    const storeTimes = values.has('--trace') ? new StoreTimes() : undefined;
     const itemChunks = storedChunkCounter(opened.stores);
     cleanups.push(itemChunks.close);
     const receipt = await runPassageEval({ dataset, split, maxResults, storeCounts: opened.storeCounts, skippedStores: opened.skipped,
@@ -497,7 +540,13 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       ...(reranker ? { rerankPoolStoreDepth: RERANK_POOL_STORE_DEPTH } : {}),
       buildPack: async q => {
         searches = [];
-        const built = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}) });
+        const build = () => buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}) });
+        let built: Awaited<ReturnType<typeof build>>;
+        if (storeTimes) {
+          const trace = createSourceAnswerTrace();
+          built = await runWithSourceAnswerTrace(trace, () => observeSourceAnswerRetrievalAttempt('hybrid', build));
+          storeTimes.add(snapshotSourceAnswerTrace(trace));
+        } else built = await build();
         return { ...built, storeSearches: searches };
       },
       ...(probe ? { probeLanes: probe } : {}),
@@ -514,6 +563,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     // Store counts lead the line, so a short open never reads as a retrieval miss (#1576).
     console.log(JSON.stringify({ storesOpened: opened.stores.length, storesSkipped: opened.skipped.length, ...receipt.summary }));
     if (probe && receipt.questions) console.log(JSON.stringify({ recallGroups: recallGroups(receipt.questions) }));
+    if (storeTimes) console.log(JSON.stringify({ storeTimes: storeTimes.summary() }));
     if (values.has('--compare')) enter('compare');
     if (values.has('--compare')) console.log(JSON.stringify(comparePassageReceipts(receipt, JSON.parse(readFileSync(values.get('--compare')!, 'utf8')) as PassageReceipt)));
   } finally { for (const cleanup of cleanups) cleanup(); try { opened.checkFileDescriptors(); } finally { opened.close(); } }

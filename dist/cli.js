@@ -29392,13 +29392,23 @@ var init_store_reclaim_admission = __esm(() => {
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 import { createHash as createHash17, randomUUID as randomUUID6 } from "node:crypto";
+function poolSqlSite(sql) {
+  return sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "?").replace(/\b\d+(?:\.\d+)?\b/g, "N").replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)").replace(/\s+/g, " ").trim().slice(0, POOL_SQL_SITE_CHARS);
+}
+function withSlowestSql(reads) {
+  const sites = poolSqlSites.get(reads);
+  if (!sites?.size)
+    return { ...reads };
+  const slowest = [...sites.values()].sort((left, right) => right.sql_ms - left.sql_ms).slice(0, POOL_SQL_SITES_KEPT).map((site) => ({ ...site, sql_ms: Math.round(site.sql_ms), sql_max_ms: Math.round(site.sql_max_ms) }));
+  return { ...reads, slowest_sql: slowest };
+}
 function seatItemHash(corpusId, itemKey) {
   return createHash17("sha256").update(`${corpusId}\x00${itemKey}`).digest("hex").slice(0, SEAT_ITEM_HASH_HEX);
 }
 function runInSourceAnswerLane(corpusId, run) {
   return laneStorage.run(corpusId, run);
 }
-function beginSourceAnswerPoolRead() {
+function beginSourceAnswerPoolRead(site) {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
   if (!query || corpusId === undefined)
@@ -29436,6 +29446,16 @@ function beginSourceAnswerPoolRead() {
     if (snapshot) {
       reads.snapshot_reads += 1;
       reads.snapshot_sql_ms += sql;
+    }
+    if (site !== undefined) {
+      let sites = poolSqlSites.get(reads);
+      if (!sites)
+        poolSqlSites.set(reads, sites = new Map);
+      const entry = sites.get(site) ?? { site, reads: 0, sql_ms: 0, sql_max_ms: 0 };
+      entry.reads += 1;
+      entry.sql_ms += sql;
+      entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
+      sites.set(site, entry);
     }
     if (outcome === "refused")
       reads.refused += 1;
@@ -29597,7 +29617,7 @@ async function observeSourceAnswerRoutedQuery(ordinal, run) {
         ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
         outcome: timing.outcome,
         ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
-        ...query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id) } } : {}
+        ...query.poolByCorpus.has(timing.corpus_id) ? { pool: withSlowestSql(query.poolByCorpus.get(timing.corpus_id)) } : {}
       })),
       ...query.stages ? { stages: { ...query.stages } } : {}
     });
@@ -29733,7 +29753,7 @@ function snapshotSourceAnswerTrace(trace) {
       ...attempt,
       queries: attempt.queries.map((query) => ({
         ...query,
-        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...timing.pool ? { pool: { ...timing.pool } } : {} }))
+        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...timing.pool ? { pool: { ...timing.pool, ...timing.pool.slowest_sql ? { slowest_sql: timing.pool.slowest_sql.map((site) => ({ ...site })) } : {} } } : {} }))
       }))
     })),
     routeResolutionMs: trace.routeResolutionMs,
@@ -29802,9 +29822,10 @@ function nonNegativeCount(value) {
 function nonNegativeMs(value) {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
-var SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, SITE_TALLY_MS = 25, SITE_TALLY_KEPT = 10, SEAT_ITEM_HASH_HEX = 12, storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var POOL_SQL_SITE_CHARS = 120, POOL_SQL_SITES_KEPT = 5, poolSqlSites, SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, SITE_TALLY_MS = 25, SITE_TALLY_KEPT = 10, SEAT_ITEM_HASH_HEX = 12, storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   init_store_reclaim_admission();
+  poolSqlSites = new WeakMap;
   storage = new AsyncLocalStorage3;
   laneStorage = new AsyncLocalStorage3;
   CONTENT_FREE_ERROR_CLASSES = new Set([
@@ -33581,7 +33602,7 @@ async function withOffThreadSnapshot(dbPath, work) {
       return await work(async (query) => {
         if (observeSnapshots)
           observer?.(dbPath, query);
-        const report = beginSourceAnswerPoolRead();
+        const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
         const sentAtMs = clock2.now();
         let sqlMs = 0;
         try {
@@ -33648,7 +33669,7 @@ function readPoolHasWaitingWork() {
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
-  const report = beginSourceAnswerPoolRead();
+  const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
     report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
@@ -195690,7 +195711,13 @@ function copyPoolReads(pool) {
     refused: count(pool.refused),
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),
-    errors: count(pool.errors)
+    errors: count(pool.errors),
+    ...pool.slowest_sql?.length ? { slowest_sql: pool.slowest_sql.map((site) => ({
+      site: String(site.site),
+      reads: count(site.reads),
+      sql_ms: nonNegativeMs2(site.sql_ms),
+      sql_max_ms: nonNegativeMs2(site.sql_max_ms)
+    })) } : {}
   };
 }
 function sumAttemptMs(attempts) {

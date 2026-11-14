@@ -541,3 +541,22 @@ function contentBearingKeys(value: unknown, found: string[] = []): string[] {
   }
   return found;
 }
+
+describe('pool reads name their slowest statements without their values', () => {
+  test('literals and id lists never reach the trace', async () => {
+    const { poolSqlSite, createSourceAnswerTrace, runWithSourceAnswerTrace, observeSourceAnswerRetrievalAttempt, observeSourceAnswerRoutedQuery,
+      runInSourceAnswerLane, beginSourceAnswerPoolRead, recordSourceAnswerCorpusTiming, snapshotSourceAnswerTrace } = await import('../src/workers/source-index/answer-latency-trace.ts');
+    const site = poolSqlSite(`SELECT x FROM chunks_fts WHERE chunks_fts MATCH 'blood work 2026' AND pk IN (12, 13)\n LIMIT 40`);
+    expect(site).toBe('SELECT x FROM chunks_fts WHERE chunks_fts MATCH ? AND pk IN (…) LIMIT N');
+    const trace = createSourceAnswerTrace();
+    await runWithSourceAnswerTrace(trace, () => observeSourceAnswerRetrievalAttempt('hybrid', () => observeSourceAnswerRoutedQuery(1, async () => {
+      runInSourceAnswerLane('internal.a', () => {
+        for (const ms of [5, 30]) beginSourceAnswerPoolRead(site)?.({ queueWaitMs: 0, runMs: ms, sqlMs: ms, outcome: 'rows' });
+        beginSourceAnswerPoolRead('SELECT N')?.({ queueWaitMs: 0, runMs: 1, sqlMs: 1, outcome: 'rows' });
+      });
+      recordSourceAnswerCorpusTiming({ corpus_id: 'internal.a', elapsed_ms: 40, outcome: 'success' });
+    })));
+    const pool = snapshotSourceAnswerTrace(trace).retrievalAttempts[0]!.queries[0]!.corpus_timings[0]!.pool!;
+    expect(pool.slowest_sql).toEqual([{ site, reads: 2, sql_ms: 35, sql_max_ms: 30 }, { site: 'SELECT N', reads: 1, sql_ms: 1, sql_max_ms: 1 }]);
+  });
+});

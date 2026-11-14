@@ -20,7 +20,7 @@
 
 import { errorFromBoundary } from '../../core/log-redaction.ts';
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
-import { beginSourceAnswerPoolRead, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
+import { beginSourceAnswerPoolRead, poolSqlSite, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
 
 /** One query: its SQL, bound values, and whether one row or all are wanted. */
 export interface StoreRead {
@@ -376,7 +376,7 @@ export async function withOffThreadSnapshot<T>(
       return await work(async (query) => {
         if (observeSnapshots) observer?.(dbPath, query);
         // A snapshot read made by a traced Ask lane counts in its pool reads.
-        const report = beginSourceAnswerPoolRead();
+        const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
         const sentAtMs = clock.now();
         let sqlMs = 0;
         try {
@@ -470,7 +470,7 @@ export function setReadPoolWaitingWorkForTests(waiting?: () => boolean): void {
 export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineAtMs?: number } = {}): Promise<unknown> {
   const deadlineAtMs = options.deadlineAtMs ?? clock.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
-  const report = beginSourceAnswerPoolRead();
+  const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock.now() >= deadlineAtMs) {
     report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: 'refused' });
     return Promise.reject(new OffThreadReadBusyError());

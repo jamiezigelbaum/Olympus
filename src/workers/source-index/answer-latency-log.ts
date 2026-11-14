@@ -480,6 +480,12 @@ function copyPoolReads(pool: SourceAnswerTracePoolReads): SourceAnswerTracePoolR
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),
     errors: count(pool.errors),
+    ...(pool.slowest_sql?.length ? { slowest_sql: pool.slowest_sql.map((site) => ({
+      site: String(site.site),
+      reads: count(site.reads),
+      sql_ms: nonNegativeMs(site.sql_ms),
+      sql_max_ms: nonNegativeMs(site.sql_max_ms),
+    })) } : {}),
   };
 }
 

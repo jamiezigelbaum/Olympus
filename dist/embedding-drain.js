@@ -16848,12 +16848,17 @@ function storeOwnerIdleMs(now = Date.now()) {
 }
 
 // src/workers/source-index/answer-latency-trace.ts
+var POOL_SQL_SITE_CHARS = 120;
+var poolSqlSites = new WeakMap;
+function poolSqlSite(sql) {
+  return sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "?").replace(/\b\d+(?:\.\d+)?\b/g, "N").replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)").replace(/\s+/g, " ").trim().slice(0, POOL_SQL_SITE_CHARS);
+}
 var SLOW_MAIN_THREAD_SQL_MS = 250;
 var SLOW_MAIN_THREAD_SQL_KEPT = 20;
 var SITE_TALLY_MS = 25;
 var storage = new AsyncLocalStorage4;
 var laneStorage = new AsyncLocalStorage4;
-function beginSourceAnswerPoolRead() {
+function beginSourceAnswerPoolRead(site) {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
   if (!query || corpusId === undefined)
@@ -16891,6 +16896,16 @@ function beginSourceAnswerPoolRead() {
     if (snapshot) {
       reads.snapshot_reads += 1;
       reads.snapshot_sql_ms += sql;
+    }
+    if (site !== undefined) {
+      let sites = poolSqlSites.get(reads);
+      if (!sites)
+        poolSqlSites.set(reads, sites = new Map);
+      const entry = sites.get(site) ?? { site, reads: 0, sql_ms: 0, sql_max_ms: 0 };
+      entry.reads += 1;
+      entry.sql_ms += sql;
+      entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
+      sites.set(site, entry);
     }
     if (outcome === "refused")
       reads.refused += 1;
@@ -18325,7 +18340,7 @@ async function withOffThreadSnapshot(dbPath, work) {
       return await work(async (query) => {
         if (observeSnapshots)
           observer?.(dbPath, query);
-        const report = beginSourceAnswerPoolRead();
+        const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
         const sentAtMs = clock2.now();
         let sqlMs = 0;
         try {
@@ -18395,7 +18410,7 @@ var waitingWorkForTests;
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
-  const report = beginSourceAnswerPoolRead();
+  const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
     report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);

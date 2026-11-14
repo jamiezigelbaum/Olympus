@@ -8085,9 +8085,10 @@ var init_store_reclaim_admission = __esm(() => {
 
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-var storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var poolSqlSites, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   init_store_reclaim_admission();
+  poolSqlSites = new WeakMap;
   storage2 = new AsyncLocalStorage3;
   laneStorage = new AsyncLocalStorage3;
   CONTENT_FREE_ERROR_CLASSES = new Set([

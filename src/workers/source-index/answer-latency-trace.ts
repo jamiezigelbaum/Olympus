@@ -65,6 +65,42 @@ export interface SourceAnswerTracePoolReads {
   // Still running at the deadline (result abandoned) or back too late.
   past_deadline_running: number;
   errors: number;
+  // The statements that took the most SQL time, by statement shape (the SQL
+  // text with whitespace collapsed, cut short; never its parameters), slowest
+  // first. Code only, no item content.
+  slowest_sql?: SourceAnswerTracePoolSqlSite[];
+}
+
+export interface SourceAnswerTracePoolSqlSite {
+  site: string;
+  reads: number;
+  sql_ms: number;
+  sql_max_ms: number;
+}
+
+const POOL_SQL_SITE_CHARS = 120;
+const POOL_SQL_SITES_KEPT = 5;
+const poolSqlSites = new WeakMap<SourceAnswerTracePoolReads, Map<string, SourceAnswerTracePoolSqlSite>>();
+
+/** A statement's shape for the trace: its SQL text, whitespace collapsed and cut short. */
+export function poolSqlSite(sql: string): string {
+  // Literals go: a statement that inlined a value (a quoted term, an id list)
+  // must not carry it into the trace, which holds counts and code only.
+  return sql
+    .replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, '?')
+    .replace(/\b\d+(?:\.\d+)?\b/g, 'N')
+    .replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, '(…)')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, POOL_SQL_SITE_CHARS);
+}
+
+function withSlowestSql(reads: SourceAnswerTracePoolReads): SourceAnswerTracePoolReads {
+  const sites = poolSqlSites.get(reads);
+  if (!sites?.size) return { ...reads };
+  const slowest = [...sites.values()].sort((left, right) => right.sql_ms - left.sql_ms).slice(0, POOL_SQL_SITES_KEPT)
+    .map((site) => ({ ...site, sql_ms: Math.round(site.sql_ms), sql_max_ms: Math.round(site.sql_max_ms) }));
+  return { ...reads, slowest_sql: slowest };
 }
 
 /** How one pool read ended, for the trace. */
@@ -225,7 +261,7 @@ export function runInSourceAnswerLane<T>(corpusId: string, run: () => T): T {
  * its end, or undefined when no traced Ask lane made it. The lane and query
  * are captured now: the read ends in a pool callback outside their context.
  */
-export function beginSourceAnswerPoolRead():
+export function beginSourceAnswerPoolRead(site?: string):
   | ((report: { queueWaitMs: number; runMs: number; sqlMs: number; outcome: SourceAnswerPoolReadOutcome; snapshot?: boolean }) => void)
   | undefined {
   const query = currentSourceAnswerTrace()?.activeQuery;
@@ -266,6 +302,15 @@ export function beginSourceAnswerPoolRead():
     if (snapshot) {
       reads.snapshot_reads += 1;
       reads.snapshot_sql_ms += sql;
+    }
+    if (site !== undefined) {
+      let sites = poolSqlSites.get(reads);
+      if (!sites) poolSqlSites.set(reads, sites = new Map());
+      const entry = sites.get(site) ?? { site, reads: 0, sql_ms: 0, sql_max_ms: 0 };
+      entry.reads += 1;
+      entry.sql_ms += sql;
+      entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
+      sites.set(site, entry);
     }
     if (outcome === 'refused') reads.refused += 1;
     else if (outcome === 'dropped_queued') reads.dropped_queued += 1;
@@ -455,7 +500,7 @@ export async function observeSourceAnswerRoutedQuery<T>(
           : {}),
         outcome: timing.outcome,
         ...(timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}),
-        ...(query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id)! } } : {}),
+        ...(query.poolByCorpus.has(timing.corpus_id) ? { pool: withSlowestSql(query.poolByCorpus.get(timing.corpus_id)!) } : {}),
       })),
       ...(query.stages ? { stages: { ...query.stages } } : {}),
     });
@@ -614,7 +659,7 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
       ...attempt,
       queries: attempt.queries.map((query) => ({
         ...query,
-        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...(timing.pool ? { pool: { ...timing.pool } } : {}) })),
+        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...(timing.pool ? { pool: { ...timing.pool, ...(timing.pool.slowest_sql ? { slowest_sql: timing.pool.slowest_sql.map((site) => ({ ...site })) } : {}) } } : {}) })),
       })),
     })),
     routeResolutionMs: trace.routeResolutionMs,
