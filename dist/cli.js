@@ -45301,7 +45301,7 @@ var init_local_index = __esm(() => {
       let stable = false;
       try {
         const current = lane.stores();
-        stable = lane.ledger() === ledger && this.visibilityLedger() === ledger && ledger.visibilityChangesSince().cursor === ledgerChanges.cursor && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent && store.itemVisibilityChangesSince().cursor === storeChanges.get(store).cursor);
+        stable = lane.ledger() === ledger && this.visibilityLedger() === ledger && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent);
       } catch {}
       if (!stable) {
         if (full)

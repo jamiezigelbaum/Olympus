@@ -5648,13 +5648,18 @@ export class LocalConnectorStore {
     // Another reader may have advanced the shared memo while this one awaited
     // SQL. Redo against that reader's state, never overwrite it with this delta.
     if (this.hiddenChildMemo !== expected) return yield* this.hiddenChildReadSteps();
+    // Installed when the lane is still the one it was built for, even if
+    // changes landed while it was built: the memo keeps the cursors read
+    // before any of its reads, so the next build replays those changes. A
+    // build that refused to install whenever a cursor moved never installed
+    // on a busy install, and every search and status walked every parent
+    // again on the front's loop (11 s reads on Sparta rc.15, 14 Nov).
     let stable = false;
     try {
       const current = lane.stores();
       stable = lane.ledger() === ledger && this.visibilityLedger() === ledger
-        && ledger.visibilityChangesSince().cursor === ledgerChanges.cursor
         && current.length === stores.length && stores.every(store => current.includes(store)
-          && store.visibilityFeedPresent && store.itemVisibilityChangesSince().cursor === storeChanges.get(store)!.cursor);
+          && store.visibilityFeedPresent);
     } catch { /* An unverifiable build is never installed. */ }
     if (!stable) {
       // Counts retain their start-of-build semantics. The next read consumes
