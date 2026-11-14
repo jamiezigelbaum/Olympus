@@ -319,20 +319,42 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
       },
       sync: async folder => {
         await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
+        const pressedAt = Date.now();
         await sourceAction(timingSource(folder), '^Sync now$');
-        // Sync now acknowledges immediately. Wait for its disabled Checking control to settle before timing archive reads.
-        // A first sync of a new folder lists and judges its files, which can take minutes; the report names what the row showed.
         const row = `[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(timingSource(folder).label)})`;
-        try {
-          await until(async () => !!await panel<boolean>(`(() => {const row=${row};return !!row && !row.querySelector('button[aria-busy=true]') && [...row.querySelectorAll('button')].some(e=>/^Sync now$/.test(e.textContent.trim()));})()`, Boolean), 'seed metadata sync did not finish', 600_000);
-        } catch (error) {
-          const shown = await panel<string>(`(() => {const row=${row}; if(!row) return undefined; return JSON.stringify({buttons:[...row.querySelectorAll('button')].map(e=>(e.textContent||'').trim().slice(0,40)+(e.getAttribute('aria-busy')==='true'?'(busy)':'')+(e.disabled?'(disabled)':'')).slice(0,8), text:(row.textContent||'').replace(/\\s+/g,' ').trim().slice(0,300)});})()`, (v) => typeof v === 'string').catch(() => undefined);
-          // The engine's own lines for this source (test machine, test account), to tell a slow listing from a stuck one.
-          const log = await machine.exec(`f="$HOME/.local/state/olympus/engine/engine.log"; [ -f "$f" ] && grep -iE ${JSON.stringify(folder.source === 'dropbox' ? 'dropbox' : 'drive')} "$f" | grep -v 'tier sniffer' | tail -25 | cut -c1-240`, { timeoutMs: 30_000 }).then(r => r.stdout.trim().slice(-4000)).catch(() => '');
-          // The engine's own view of the source: what its scheduler is running and what the manual sync is waiting on.
+        const rowDone = async () => !!await panel<boolean>(`(() => {const row=${row};return !!row && !row.querySelector('button[aria-busy=true]') && [...row.querySelectorAll('button')].some(e=>/^Sync now$/.test(e.textContent.trim()));})()`, Boolean);
+        // The engine's word decides when the press's sync ended: its result replaces `checking`, no run is going.
+        let endedAt = 0;
+        const engineDone = async () => {
           const seen = await card(timingSource(folder)).catch(() => undefined);
-          const state = seen ? JSON.stringify({ schedule: seen.schedule, last_manual_sync: seen.last_manual_sync, connection: seen.connection, phase: seen.phase, status: seen.status }).slice(0, 2500) : 'card unavailable';
-          throw new Error(`seed metadata sync did not finish in 10 min${shown ? ` (row ${shown})` : ' (no source row)'}; card ${state}${log ? `; engine log:\n${log}` : ''}`, { cause: error });
+          const manual = seen?.last_manual_sync;
+          const done = !!manual && manual.outcome !== 'checking' && Date.parse(manual.at) >= pressedAt - 60_000 && seen?.schedule?.running !== true;
+          if (done && !endedAt) endedAt = Date.now();
+          return done;
+        };
+        const rowShown = async () => {
+          const shown = await panel<string>(`(() => {const row=${row}; if(!row) return undefined; return JSON.stringify({buttons:[...row.querySelectorAll('button')].map(e=>(e.textContent||'').trim().slice(0,40)+(e.getAttribute('aria-busy')==='true'?'(busy)':'')+(e.disabled?'(disabled)':'')).slice(0,8), text:(row.textContent||'').replace(/\\s+/g,' ').trim().slice(0,300)});})()`, (v) => typeof v === 'string').catch(() => undefined);
+          return shown ?? 'no source row';
+        };
+        // A first sync of a new folder lists and judges its files, which can take minutes.
+        try {
+          await until(async () => (await rowDone()) || (await engineDone()), 'seed metadata sync did not finish', 600_000);
+        } catch (error) {
+          const seen = await card(timingSource(folder)).catch(() => undefined);
+          const state = seen ? JSON.stringify({ schedule: seen.schedule, last_manual_sync: seen.last_manual_sync, connection: seen.connection?.state }).slice(0, 1500) : 'card unavailable';
+          throw new Error(`seed metadata sync did not finish in 10 min (row ${await rowShown()}; card ${state})`, { cause: error });
+        }
+        if (await rowDone()) return;
+        // The engine finished; give the page its own refresh (15 s polls) a minute to catch up before calling it stuck.
+        try {
+          await until(rowDone, 'row still checking', 60_000);
+          return;
+        } catch {
+          const before = await rowShown();
+          await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
+          const afterReload = await rowDone() ? 'Sync now is back after a reload' : `still checking after a reload: ${await rowShown()}`;
+          const seen = await card(timingSource(folder)).catch(() => undefined);
+          return `the engine finished the press's sync ${Math.round((Date.now() - endedAt) / 1_000)} s earlier (${JSON.stringify(seen?.last_manual_sync ?? null)}), but the open page still said ${before}; ${afterReload}`;
         }
       },
       prepareRead: async (name, requireUnread = true) => {

@@ -7,7 +7,8 @@ export type FolderMode = '' | 'ingest' | 'metadata_only' | 'on_demand' | 'exclud
 export interface TimingDashboard {
   folderMode(folder: SeedFolder): Promise<FolderMode>;
   setFolderMode(folder: SeedFolder, mode: FolderMode): Promise<void>;
-  sync(folder: SeedFolder): Promise<void>;
+  /** Resolves when the engine says the press's sync ended; a page that still says Checking after that comes back as a finding. */
+  sync(folder: SeedFolder): Promise<string | void>;
   /** Locate the names-only row first; the returned action presses its real Read this file button. */
   prepareRead(name: string, requireUnread?: boolean): Promise<() => Promise<string>>;
 }
@@ -137,7 +138,8 @@ export async function runOnDemandTiming(engine: EngineMcp, seeds: TimingSeeds, d
       restore.push({ folder, mode: await dashboard.folderMode(folder) });
       await dashboard.setFolderMode(folder, 'on_demand');
       files.push(...await seeds.upload(folder));
-      await dashboard.sync(folder);
+      const stale = await dashboard.sync(folder);
+      if (stale) result.checks.push({ id: `ondemand.${folder.source}.sync-shown`, title: `${folder.source}: the row stops saying Checking when Sync now ends`, status: 'fail', detail: stale });
     }
     // On a fresh store, finish listing the entire seed set before the first question can request a read.
     const unavailable = new Map<string, unknown>();
