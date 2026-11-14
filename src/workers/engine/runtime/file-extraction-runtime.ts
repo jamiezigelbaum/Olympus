@@ -612,6 +612,7 @@ export function createFileExtractionRuntime(
     jobs,
     requestOnDemandRead: async (request) => {
       let promoted: ExtractionItemRef | undefined;
+      let judged: (() => boolean) | undefined;
       const result = await requestOnDemandRead(request, {
         jobs,
         limits: {
@@ -626,6 +627,7 @@ export function createFileExtractionRuntime(
             const candidate = holder.onDemandReadCandidate(read.itemRef.providerItemId);
             if (!candidate) continue;
             const { identity, metadata } = candidate;
+            judged = () => holder.tierLedger()?.getCurrent(identity)?.contentPending !== true;
             const policy = options.onDemandPolicy?.(holder, identity.localItemId);
             if (policy && !policy.allowed) return undefined;
             if (lane.accountScopeCurrent && !lane.accountScopeCurrent(identity.accountScope)) return undefined;
@@ -678,6 +680,12 @@ export function createFileExtractionRuntime(
         },
       });
       if (promoted) runRead(promoted);
+      // Read but not yet judged is still being read as far as a question can
+      // tell: its content is held out of answers until the judge decides.
+      if (result.settled && judged && !judged()) {
+        const { settled: _settled, ...reading } = result;
+        return reading;
+      }
       return result;
     },
     stopOnDemandRecovery() { if (recoveryTimer) clearInterval(recoveryTimer); },

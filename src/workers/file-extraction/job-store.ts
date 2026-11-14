@@ -777,7 +777,8 @@ export class LocalFileExtractionJobStore {
         WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId) as { status: string; source_version: string | null } | null;
       // Every dedupe is per source version: a newer version is a new read.
       if (previous && (previous.source_version ?? '') === (job.refs[0]!.sourceVersion ?? '')) {
-        if (previous.status === 'leased' || previous.status === 'indexed') return { state: 'reading', etaSeconds: 60 };
+        if (previous.status === 'indexed') return { state: 'reading', etaSeconds: 60, settled: true };
+        if (previous.status === 'leased') return { state: 'reading', etaSeconds: 60 };
         if (previous.status === 'queued' || previous.status === 'failed_retryable') return { state: 'queued', etaSeconds: 60 };
         // A read stopped by a question's byte allowance is not the file's own
         // failure: the owner, who has no question caps, may read it again.

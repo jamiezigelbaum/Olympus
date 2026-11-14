@@ -23,6 +23,8 @@ export interface OnDemandReadResult {
   state: 'reading' | 'queued' | 'capped' | 'refused';
   etaSeconds?: number;
   reason?: string | OnDemandReadLimit;
+  // The read already finished: its content is in the index (or the file had none).
+  settled?: true;
 }
 
 export type RequestOnDemandRead = (request: OnDemandReadRequest) => Promise<OnDemandReadResult>;

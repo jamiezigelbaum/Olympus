@@ -85161,434 +85161,462 @@ var DEFAULT_SECURE_ANALYST_POOL_SLO_MS = 60000, DEFAULT_SECURE_ANALYST_POOL_RESE
 
 // src/workers/source-index/analyst-answer.ts
 import { randomUUID as randomUUID20 } from "node:crypto";
+async function readNamesOnlyMatches(detail, read, waitMs) {
+  const questionId = randomUUID20();
+  const requests = new Map;
+  for (const index of detail.namesOnlyCandidateIndexes ?? []) {
+    if (index >= 3)
+      continue;
+    const candidate = detail.pack.candidates[index];
+    if (!candidate)
+      continue;
+    const identity = candidate.provenance.sourceItem;
+    const key = JSON.stringify([identity.provider, identity.accountScope, identity.providerConversationId, identity.providerItemId]);
+    if (requests.has(key))
+      continue;
+    requests.set(key, {
+      itemRef: { corpusId: detail.candidateCorpusIds[index] ?? "", providerItemId: identity.providerItemId },
+      requester: "analyst",
+      questionId
+    });
+  }
+  let failed = 0;
+  let limit;
+  let pending = [];
+  for (const request of requests.values()) {
+    const outcome = await read(request).catch(() => {
+      failed++;
+      return;
+    });
+    if (!outcome)
+      continue;
+    if ((outcome.state === "queued" || outcome.state === "reading") && outcome.settled !== true)
+      pending.push(request);
+    if (outcome.state === "capped" && typeof outcome.reason === "object")
+      limit = outcome.reason;
+  }
+  const started = pending.length;
+  const deadline = Date.now() + waitMs;
+  while (pending.length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(ON_DEMAND_READ_POLL_MS, Math.max(0, deadline - Date.now()))));
+    const next = [];
+    for (const request of pending) {
+      const outcome = await read(request).catch(() => {
+        return;
+      });
+      if (outcome && (outcome.state === "queued" || outcome.state === "reading") && outcome.settled !== true)
+        next.push(request);
+    }
+    pending = next;
+  }
+  return { started, pending: pending.length, failed, ...limit ? { limit } : {} };
+}
 function createAnalystSourceIndexAnswerHandler(options) {
   const secureAnalystPoolState = options.secureAnalystPoolState ?? new SecureAnalystPoolState(options.secureAnalystPool);
-  return {
-    async answer(request, local) {
-      const reranker = typeof options.reranker === "function" ? options.reranker() : options.reranker;
-      const startedAt = Date.now();
-      const question = request.question?.trim();
-      if (!question) {
-        throw new Error("source_answer requires a non-empty question.");
-      }
-      const includeInternal = request.include_internal !== false;
-      const releaseSecureContent = request.include_secure_local_content === true || (options.secureDerivativeDefault ?? "allow") === "allow";
-      const releaseConstraints = {
-        secureDerivativeDefault: options.secureDerivativeDefault ?? "allow",
-        includeSecureLocalContent: request.include_secure_local_content === true
+  const answerOnce = async (request, local, readsDone) => {
+    const reranker = typeof options.reranker === "function" ? options.reranker() : options.reranker;
+    const startedAt = Date.now();
+    const question = request.question?.trim();
+    if (!question) {
+      throw new Error("source_answer requires a non-empty question.");
+    }
+    const includeInternal = request.include_internal !== false;
+    const releaseSecureContent = request.include_secure_local_content === true || (options.secureDerivativeDefault ?? "allow") === "allow";
+    const releaseConstraints = {
+      secureDerivativeDefault: options.secureDerivativeDefault ?? "allow",
+      includeSecureLocalContent: request.include_secure_local_content === true
+    };
+    const laneSetupStartedAt = Date.now();
+    const retrievalRequest = request.retrieval_mode === undefined ? { ...request, retrieval_mode: "hybrid" } : request;
+    const lanes = options.lanes(retrievalRequest);
+    const laneSetupMs = Date.now() - laneSetupStartedAt;
+    const requestedAnalystProviderForGate = request.analyst_provider ?? (request.analyst_model?.trim() ? "venice" : "default");
+    const secureLocalChoice = secureLocalInclusion(request, lanes.registry, requestedAnalystProviderForGate, options.secureLocalAnalystRoute);
+    const includeSecureLocal = secureLocalChoice.include;
+    const allowedTrustDomains = ["public_safe"];
+    if (includeInternal)
+      allowedTrustDomains.push("internal");
+    if (includeSecureLocal)
+      allowedTrustDomains.push("secure_local");
+    const requestedCorpusIds = sourceAnswerCorpusIds(request);
+    const bulkGateStartedAt = Date.now();
+    const bulkSecureLocalScope = secureLocalApprovalScopeForBulkRequest(request, includeSecureLocal, lanes.registry);
+    const bulkGateMs = Date.now() - bulkGateStartedAt;
+    if (bulkSecureLocalScope.requiresApproval) {
+      const decision = {
+        decision: "needs_approval",
+        reasons: ["bulk_secure_local_release_requires_approval"],
+        requiredApproval: "s4_release"
       };
-      const laneSetupStartedAt = Date.now();
-      const retrievalRequest = request.retrieval_mode === undefined ? { ...request, retrieval_mode: "hybrid" } : request;
-      const lanes = options.lanes(retrievalRequest);
-      const laneSetupMs = Date.now() - laneSetupStartedAt;
-      const requestedAnalystProviderForGate = request.analyst_provider ?? (request.analyst_model?.trim() ? "venice" : "default");
-      const secureLocalChoice = secureLocalInclusion(request, lanes.registry, requestedAnalystProviderForGate, options.secureLocalAnalystRoute);
-      const includeSecureLocal = secureLocalChoice.include;
-      const allowedTrustDomains = ["public_safe"];
-      if (includeInternal)
-        allowedTrustDomains.push("internal");
-      if (includeSecureLocal)
-        allowedTrustDomains.push("secure_local");
-      const requestedCorpusIds = sourceAnswerCorpusIds(request);
-      const bulkGateStartedAt = Date.now();
-      const bulkSecureLocalScope = secureLocalApprovalScopeForBulkRequest(request, includeSecureLocal, lanes.registry);
-      const bulkGateMs = Date.now() - bulkGateStartedAt;
-      if (bulkSecureLocalScope.requiresApproval) {
-        const decision = {
-          decision: "needs_approval",
-          reasons: ["bulk_secure_local_release_requires_approval"],
-          requiredApproval: "s4_release"
-        };
-        const totalLatencyMs = Date.now() - startedAt;
-        const phaseTimings = {
-          lane_setup_ms: laneSetupMs,
-          bulk_gate_ms: bulkGateMs,
-          total_ms: totalLatencyMs
-        };
-        recordSourceAnswerPhaseTimings(phaseTimings);
-        recordSourceAnswerReleaseDecision(decision.decision);
-        recordReleaseManifest({ inputs: [], constraints: releaseConstraints });
-        return {
-          answer: answerForReleaseDecision(decision),
-          evidence: [],
-          audit: {
-            searched_corpora: bulkSecureLocalScope.corpusIds,
-            skipped_corpora: [],
-            lane_audits: [],
-            answer_synthesis: {
-              private_context_used: true,
-              secure_local_items_consulted: 0,
-              internal_content_used: false,
-              internal_items_consulted: 0,
-              internal_content_failures: 0,
-              analyst_backend: "local",
-              ...requestedAnalystProviderForGate !== "default" ? { requested_analyst_provider: requestedAnalystProviderForGate } : {},
-              ...request.analyst_model?.trim() ? { requested_analyst_model: request.analyst_model.trim() } : {},
-              raw_source_exposed: false
-            },
-            latency_ms: totalLatencyMs,
-            phase_timings: phaseTimings,
-            raw_source_exposed: false
-          },
-          policy: {
-            raw_source_exposed: false,
-            source_packets_exposed: false,
-            internal_content_exposed: false,
-            secure_local_content_exposed: false,
-            castor_safe_bridge: true
-          },
-          opsec: buildOpsecReleaseAudit([], decision)
-        };
-      }
-      const maxCharsPerCandidate = options.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE;
-      const configuredMaxResults = options.defaultMaxResults ?? DEFAULT_MAX_RESULTS;
-      const maxResults = Math.min(MAX_EVIDENCE_CANDIDATES, request.max_results ?? (hasTemporalIntent(`${question} ${request.query ?? ""}`) ? Math.max(configuredMaxResults, TEMPORAL_INTENT_MIN_RESULTS) : configuredMaxResults));
-      const evidenceByteBudget = options.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET;
-      const evidencePackStartedAt = Date.now();
-      const buildDetail = (activeLanes, attempt, build = {}) => observeSourceAnswerRetrievalAttempt(attempt, () => buildEvidencePackDetailed({
-        question,
-        ...build,
-        ...request.query?.trim() ? { searchQuery: request.query.trim() } : {},
-        ...request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {},
-        ...options.queryPlanner ? { queryPlanner: options.queryPlanner } : {},
-        ...reranker ? { reranker } : {},
-        maxResults,
-        ...requestedCorpusIds ? { corpusIds: requestedCorpusIds } : {},
-        searchContext: {
-          allowedTrustDomains,
-          allowCloudQueries: includeInternal,
-          ...requestedCorpusIds ? { allowedCorpusIds: requestedCorpusIds } : {}
-        },
-        limitStops: activeLanes.limitStops ?? [],
-        registry: activeLanes.registry,
-        adapters: activeLanes.adapters,
-        contentProviders: activeLanes.contentProviders,
-        maxCharsPerCandidate,
-        evidenceByteBudget,
-        ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {},
-        ...activeLanes.visibilityGate ? { visibilityGate: activeLanes.visibilityGate } : {},
-        ...activeLanes.secretLocations ? { secretLocations: activeLanes.secretLocations } : {},
-        ...activeLanes.classificationCoverage ? { classificationCoverage: activeLanes.classificationCoverage } : {},
-        ...activeLanes.parentLabels ? { parentLabels: activeLanes.parentLabels } : {}
-      }));
-      const initialAttempt = request.selected_items?.length ? "selected" : retrievalRequest.retrieval_mode ?? "hybrid";
-      let detail = await buildDetail(lanes, initialAttempt);
-      let evidencePackMs = Date.now() - evidencePackStartedAt;
-      let selfHealAudit;
-      let selfHealMs;
-      if ((options.selfHealEnabled ?? true) && options.selfHeal) {
-        const selfHealStartedAt = Date.now();
-        const selfHeal = await options.selfHeal({
-          request,
-          detail,
-          maxBudgetMs: options.selfHealMaxMs ?? DEFAULT_SELF_HEAL_MAX_MS
-        });
-        selfHealMs = Date.now() - selfHealStartedAt;
-        selfHealAudit = selfHeal.audit;
-        if (selfHeal.healed) {
-          const rebuildStartedAt = Date.now();
-          const preRebuild = detail;
-          const rebuilt = await buildDetail(lanes, "self_heal_rebuild");
-          detail = {
-            ...rebuilt,
-            skippedCorpora: mergeSkippedCorpora(preRebuild, rebuilt),
-            degradations: mergeRetrievalDegradations(preRebuild.degradations, rebuilt.degradations),
-            laneAudits: [...preRebuild.laneAudits, ...rebuilt.laneAudits],
-            secureLaneAudits: [...preRebuild.secureLaneAudits, ...rebuilt.secureLaneAudits]
-          };
-          evidencePackMs += Date.now() - rebuildStartedAt;
-        }
-      }
-      if (secureLocalChoice.exclusion) {
-        detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
-      }
-      let pack = detail.pack;
-      const analyzedInputs = [];
-      const chunkHoldNotes = new Set;
-      const assertDispatchAllowed = async (analysisDetail) => {
-        if (options.releaseCheck) {
-          const reason = await answerReleaseWithheldReasonOffThread([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
-          if (reason)
-            throw new OperationError("source_index_policy_violation", reason);
-        }
-        if (lanes.visibilityGate) {
-          const hits = analysisDetail.pack.candidates.map((candidate, index) => ({
-            corpusId: analysisDetail.candidateCorpusIds[index] ?? "",
-            servingLayer: candidate.chunks.length > 0 || (candidate.tables?.length ?? 0) > 0 || (candidate.facts?.length ?? 0) > 0 ? "content" : "metadata",
-            sourceItem: candidate.provenance.sourceItem,
-            provenance: candidate.provenance,
-            trustDomain: candidate.trustDomain,
-            trustTier: candidate.trustTier,
-            rawExposed: false
-          }));
-          const kept = new Set(await applySourceIndexVisibilityGate(lanes.visibilityGate, hits));
-          if (hits.some((hit) => !kept.has(hit))) {
-            throw new OperationError("source_index_policy_violation", "Olympus withheld this answer because an item changed privacy tier before analysis.");
-          }
-        }
-      };
-      const legFitting = (analysisDetail) => {
-        const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
-          candidate,
-          analysisDetail.candidateCorpusIds[index] ?? ""
-        ]));
-        const candidateGaps = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
-          candidate.provenance,
-          analysisDetail.candidateExtractionGapIndexes?.[index] ?? []
-        ]));
-        recordSourceAnswerRerank(analysisDetail.rerank);
-        recordSourceAnswerPackSeats(analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ""), analysisDetail.recencySeats ?? 0, analysisDetail.pack.candidates.map((candidate) => candidate.provenance.sourceItem.localItemId));
-        const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1]));
-        const guarded = (analyst, remote = false) => ({
-          analyze: async (dispatchPack, analyzeOptions) => {
-            if (remote) {
-              const checked = await checkedRemotePack(dispatchPack, (candidate) => candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex((original) => original.provenance === candidate.provenance)] ?? "", options.releaseCheck);
-              dispatchPack = checked.pack;
-              const note = chunkCoverageNote(checked.report);
-              if (note)
-                chunkHoldNotes.add(note);
-            }
-            await assertDispatchAllowed(analysisDetail);
-            const result = await analyst.analyze(dispatchPack, analyzeOptions);
-            analyzedInputs.push(...dispatchPack.candidates.map((candidate) => candidateReleaseInput(candidate, candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex((original) => original.provenance === candidate.provenance)] ?? "")));
-            return result;
-          }
-        });
-        return {
-          localLeg: (analyst) => fitLocalAnalystRoutes(analyst, (leaf) => promptBudgetedAnalyst(guarded(leaf), options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "local", seatOf, analystEvidenceFormat(leaf), candidateGaps, (outputChars) => localAnalystPromptBudget(options.localAnalystPromptByteBudget, localAnalystWindow(leaf), localAnalystWindow(leaf)?.source === "manifest" ? builtInAnalystMaxTokensForChars(outputChars) : maxTokensForChars(outputChars)))),
-          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst, true), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "cloud", seatOf, analystEvidenceFormat(analyst), candidateGaps),
-          trustedLeg: (analyst) => guarded({ analyze: (dispatchPack, analyzeOptions) => {
-            const skip = new Set([...analysisDetail.namesOnlyCandidateIndexes ?? [], ...analysisDetail.contentPrivateCandidateIndexes ?? []]);
-            const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
-            const sentPack = local ? { ...dispatchPack, candidates: dispatchPack.candidates.filter((candidate) => !omitted.has(candidate)) } : dispatchPack;
-            local?.beforeVeniceDispatch(sentPack, sentPack.candidates.map((candidate) => candidateCorpus.get(candidate) ?? ""));
-            return analyst.analyze(sentPack, analyzeOptions);
-          } })
-        };
-      };
-      assertEvidencePackModelEligible(pack);
-      const policyDeniedEmptyPack = pack.candidates.length === 0 && (detail.policyDeniedCandidates ?? 0) > 0;
-      let localOnly = pack.candidates.some((candidate) => isSecureSensitivity(candidate));
-      const requestedAnalystModel = request.analyst_model?.trim();
-      const requestedAnalystProvider = request.analyst_provider ?? (requestedAnalystModel ? "venice" : "default");
-      if (localOnly && requestedAnalystProvider === "venice" && requestedAnalystModel) {
-        assertSecureAnalystPoolModelIdAllowed("requested-venice", requestedAnalystModel);
-      }
-      const veniceAnalyst = policyDeniedEmptyPack ? undefined : createOptionalVeniceAnalyst(options, request).analyst;
-      const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
-      const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
-      const analyze = (analysisDetail, analysisLocalOnly) => {
-        const { localLeg, cloudLeg, trustedLeg } = legFitting(analysisDetail);
-        const guard = async () => {
-          try {
-            await options.inferenceGuard?.(analysisDetail.pack, request, analysisDetail.candidateCorpusIds);
-          } catch {
-            currentAnalystAbortSignal()?.throwIfAborted();
-            throw new OperationError("source_index_policy_violation", "Source evidence is no longer allowed.", "Ask again under the current source policy.");
-          }
-          await assertDispatchAllowed(analysisDetail);
-        };
-        const live = (analyst) => options.inferenceGuard ? {
-          async analyze(legPack, legOptions) {
-            await guard();
-            return analyst.analyze(legPack, legOptions);
-          }
-        } : analyst;
-        const dispatch = () => routeAnalysis({
-          pack: analysisDetail.pack,
-          localOnly: analysisLocalOnly,
-          requestedProvider: requestedAnalystProvider,
-          local: live(localLeg(options.analyst)),
-          ...options.cloudAnalyst ? { cloud: live(cloudLeg(options.cloudAnalyst)) } : {},
-          ...veniceAnalyst ? { venice: live(trustedLeg(veniceAnalyst)) } : {},
-          trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
-          localAnalystTimeoutMs,
-          cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
-          ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(local ? (input) => options.sovereigntyAnalystRoute({ ...input, localOnly: true }) : options.sovereigntyAnalystRoute, (analyst) => live(localLeg(analyst)), (analyst) => live(cloudLeg(analyst)), (analyst) => live(trustedLeg(analyst))) } : {},
-          secureAnalystPoolState,
-          ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
-          ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
-          secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs
-        });
-        if (!options.inferenceGuard)
-          return dispatch();
-        return runWithLocalInferenceGuard(guard, async () => {
-          await guard();
-          return dispatch();
-        });
-      };
-      const analystStartedAt = Date.now();
-      let routedAnalysis;
-      if (policyDeniedEmptyPack) {
-        routedAnalysis = { result: noEvidenceAnalystResult(pack), backend: "local" };
-      } else {
-        const privateDefaulted = secureLocalChoice.defaulted === true && localOnly;
-        try {
-          routedAnalysis = await analyze(detail, localOnly);
-        } catch (error) {
-          if (!privateDefaulted || !isPrivateRouteUnavailable(error))
-            throw error;
-          const secureIndex = allowedTrustDomains.indexOf("secure_local");
-          if (secureIndex >= 0)
-            allowedTrustDomains.splice(secureIndex, 1);
-          const rebuilt = await buildDetail(lanes, initialAttempt, { excludeSecureSensitivity: true });
-          detail = withSecureLocalExclusionReason({
-            ...rebuilt,
-            skippedCorpora: mergeSkippedCorpora(detail, rebuilt),
-            degradations: mergeRetrievalDegradations(detail.degradations, rebuilt.degradations),
-            laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits],
-            secureLaneAudits: [...detail.secureLaneAudits, ...rebuilt.secureLaneAudits]
-          }, "private_analyst_unavailable");
-          pack = detail.pack;
-          assertEvidencePackModelEligible(pack);
-          localOnly = pack.candidates.some((candidate) => isSecureSensitivity(candidate));
-          if (localOnly)
-            throw error;
-          routedAnalysis = await analyze(detail, false);
-        }
-      }
-      const secureCandidates = pack.candidates.filter((c) => isSecureSensitivity(c));
-      const internalCandidates = pack.candidates.filter((c) => c.trustDomain === "internal");
-      const {
-        result: analystResult,
-        backend: analystBackend,
-        fallback: analystFallback,
-        synthesizedGap
-      } = routedAnalysis;
-      const analystMs = Date.now() - analystStartedAt;
-      const onDemandNotes = [];
-      const onDemandLimits = [];
-      if (options.requestOnDemandRead && analystResult.unanswered.length > 0) {
-        const questionId = randomUUID20();
-        let reading = 0;
-        let failed = 0;
-        const requested = new Set;
-        for (const index of detail.namesOnlyCandidateIndexes ?? []) {
-          if (index >= 3)
-            continue;
-          const candidate = detail.pack.candidates[index];
-          if (!candidate)
-            continue;
-          const identity = candidate.provenance.sourceItem;
-          const key = JSON.stringify([identity.provider, identity.accountScope, identity.providerConversationId, identity.providerItemId]);
-          if (requested.has(key))
-            continue;
-          requested.add(key);
-          const outcome = await options.requestOnDemandRead({
-            itemRef: { corpusId: detail.candidateCorpusIds[index] ?? "", providerItemId: candidate.provenance.sourceItem.providerItemId },
-            requester: "analyst",
-            questionId
-          }).catch(() => {
-            failed++;
-            return;
-          });
-          if (!outcome)
-            continue;
-          if (outcome.state === "queued" || outcome.state === "reading")
-            reading++;
-          if (outcome.state === "capped" && typeof outcome.reason === "object")
-            onDemandLimits[0] = outcome.reason;
-        }
-        if (failed > 0)
-          onDemandNotes.push(onDemandFailedCoverageNote(failed));
-        if (reading > 0)
-          onDemandNotes.push(onDemandReadingCoverageNote(reading));
-        if (onDemandLimits.length > 0)
-          onDemandNotes.push(onDemandCappedCoverageNote());
-      }
-      const releaseGateStartedAt = Date.now();
-      const { decision, facts, opsec, answer: releasedAnswer } = releaseAnalystAnswer({
-        detail,
-        result: analystResult,
-        onDemandNotes,
-        releaseSecureContent,
-        ...synthesizedGap ? { synthesizedGap } : {}
-      });
-      const answer = [releasedAnswer, ...[...chunkHoldNotes].filter((note) => !releasedAnswer.includes(note))].join(`
-
-`);
-      const releaseGateMs = Date.now() - releaseGateStartedAt;
-      recordSourceAnswerReleaseDecision(decision.decision);
-      const released = decision.decision === "allow" || decision.decision === "redact";
       const totalLatencyMs = Date.now() - startedAt;
       const phaseTimings = {
         lane_setup_ms: laneSetupMs,
         bulk_gate_ms: bulkGateMs,
-        evidence_pack_ms: evidencePackMs,
-        ...selfHealMs !== undefined ? { self_heal_ms: selfHealMs } : {},
-        analyst_ms: analystMs,
-        release_gate_ms: releaseGateMs,
         total_ms: totalLatencyMs
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
-      recordReleaseManifest({ inputs: [
-        ...analyzedInputs,
-        ...unreadableMatchedReleaseInputs(detail, releaseSecureContent),
-        ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])
-      ], constraints: releaseConstraints });
+      recordSourceAnswerReleaseDecision(decision.decision);
+      recordReleaseManifest({ inputs: [], constraints: releaseConstraints });
       return {
-        answer,
-        evidence: released ? releasedEvidence(analystResult.citations, detail, releaseSecureContent) : [],
-        ...(detail.secretLocations ?? []).length > 0 ? {
-          secret_locations: (detail.secretLocations ?? []).map((location) => ({
-            source: location.source,
-            ref: location.ref,
-            ...location.locator ? { locator: location.locator } : {},
-            ...location.title ? { title: location.title } : {},
-            finding_kinds: [...location.findingKinds]
-          }))
-        } : {},
+        answer: answerForReleaseDecision(decision),
+        evidence: [],
         audit: {
-          searched_corpora: [...pack.coverage.searchedCorpora],
-          skipped_corpora: detail.skippedCorpora.map((skip) => ({
-            corpus_id: skip.corpusId,
-            trust_domain: skip.trustDomain,
-            reason: skip.reason
-          })),
-          lane_audits: localOnly || policyDeniedEmptyPack ? [...detail.laneAudits] : withoutSecureLaneAudits(detail.laneAudits, detail.secureLaneAudits),
-          ...detail.degradations.length > 0 ? { retrieval_degradations: detail.degradations.map(answerRetrievalDegradation) } : {},
-          ...(detail.corpusReadabilityGaps ?? []).length > 0 ? {
-            corpus_readability: (detail.corpusReadabilityGaps ?? []).map((gap) => ({
-              corpus_id: gap.corpusId,
-              partial_documents: gap.partialDocuments,
-              unread_documents: gap.unreadDocuments
-            }))
-          } : {},
-          ...selfHealAudit ? { self_heal: selfHealAudit } : {},
-          ...(detail.classificationCoverage ?? []).length > 0 ? {
-            classification_coverage: (detail.classificationCoverage ?? []).map((note) => ({
-              corpus_id: note.corpusId,
-              pending_classification_items: note.pendingClassificationItems
-            }))
-          } : {},
+          searched_corpora: bulkSecureLocalScope.corpusIds,
+          skipped_corpora: [],
+          lane_audits: [],
           answer_synthesis: {
-            private_context_used: localOnly,
-            secure_local_items_consulted: secureCandidates.length,
-            internal_content_used: internalCandidates.some((c) => c.chunks.length > 0),
-            internal_items_consulted: internalCandidates.length,
+            private_context_used: true,
+            secure_local_items_consulted: 0,
+            internal_content_used: false,
+            internal_items_consulted: 0,
             internal_content_failures: 0,
-            analyst_backend: analystBackend,
-            ...requestedAnalystProvider !== "default" ? { requested_analyst_provider: requestedAnalystProvider } : {},
-            ...requestedAnalystModel ? { requested_analyst_model: requestedAnalystModel } : {},
-            ...analystFallback ? { analyst_fallback: analystFallback } : {},
+            analyst_backend: "local",
+            ...requestedAnalystProviderForGate !== "default" ? { requested_analyst_provider: requestedAnalystProviderForGate } : {},
+            ...request.analyst_model?.trim() ? { requested_analyst_model: request.analyst_model.trim() } : {},
             raw_source_exposed: false
           },
           latency_ms: totalLatencyMs,
-          ...onDemandLimits.length > 0 ? { on_demand_limits: onDemandLimits } : {},
           phase_timings: phaseTimings,
           raw_source_exposed: false
         },
         policy: {
           raw_source_exposed: false,
           source_packets_exposed: false,
-          internal_content_exposed: released && facts.some((fact) => fact.sensitivity.trustDomain === "internal"),
-          secure_local_content_exposed: released && facts.some((fact) => isSecureSensitivity(fact.sensitivity) && fact.releaseSurface === "castor_answer"),
+          internal_content_exposed: false,
+          secure_local_content_exposed: false,
           castor_safe_bridge: true
         },
-        opsec
+        opsec: buildOpsecReleaseAudit([], decision)
       };
     }
+    const maxCharsPerCandidate = options.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE;
+    const configuredMaxResults = options.defaultMaxResults ?? DEFAULT_MAX_RESULTS;
+    const maxResults = Math.min(MAX_EVIDENCE_CANDIDATES, request.max_results ?? (hasTemporalIntent(`${question} ${request.query ?? ""}`) ? Math.max(configuredMaxResults, TEMPORAL_INTENT_MIN_RESULTS) : configuredMaxResults));
+    const evidenceByteBudget = options.evidenceByteBudget ?? DEFAULT_EVIDENCE_BYTE_BUDGET;
+    const evidencePackStartedAt = Date.now();
+    const buildDetail = (activeLanes, attempt, build = {}) => observeSourceAnswerRetrievalAttempt(attempt, () => buildEvidencePackDetailed({
+      question,
+      ...build,
+      ...request.query?.trim() ? { searchQuery: request.query.trim() } : {},
+      ...request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {},
+      ...options.queryPlanner ? { queryPlanner: options.queryPlanner } : {},
+      ...reranker ? { reranker } : {},
+      maxResults,
+      ...requestedCorpusIds ? { corpusIds: requestedCorpusIds } : {},
+      searchContext: {
+        allowedTrustDomains,
+        allowCloudQueries: includeInternal,
+        ...requestedCorpusIds ? { allowedCorpusIds: requestedCorpusIds } : {}
+      },
+      limitStops: activeLanes.limitStops ?? [],
+      registry: activeLanes.registry,
+      adapters: activeLanes.adapters,
+      contentProviders: activeLanes.contentProviders,
+      maxCharsPerCandidate,
+      evidenceByteBudget,
+      ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {},
+      ...activeLanes.visibilityGate ? { visibilityGate: activeLanes.visibilityGate } : {},
+      ...activeLanes.secretLocations ? { secretLocations: activeLanes.secretLocations } : {},
+      ...activeLanes.classificationCoverage ? { classificationCoverage: activeLanes.classificationCoverage } : {},
+      ...activeLanes.parentLabels ? { parentLabels: activeLanes.parentLabels } : {}
+    }));
+    const initialAttempt = request.selected_items?.length ? "selected" : retrievalRequest.retrieval_mode ?? "hybrid";
+    let detail = await buildDetail(lanes, initialAttempt);
+    let evidencePackMs = Date.now() - evidencePackStartedAt;
+    let selfHealAudit;
+    let selfHealMs;
+    if ((options.selfHealEnabled ?? true) && options.selfHeal) {
+      const selfHealStartedAt = Date.now();
+      const selfHeal = await options.selfHeal({
+        request,
+        detail,
+        maxBudgetMs: options.selfHealMaxMs ?? DEFAULT_SELF_HEAL_MAX_MS
+      });
+      selfHealMs = Date.now() - selfHealStartedAt;
+      selfHealAudit = selfHeal.audit;
+      if (selfHeal.healed) {
+        const rebuildStartedAt = Date.now();
+        const preRebuild = detail;
+        const rebuilt = await buildDetail(lanes, "self_heal_rebuild");
+        detail = {
+          ...rebuilt,
+          skippedCorpora: mergeSkippedCorpora(preRebuild, rebuilt),
+          degradations: mergeRetrievalDegradations(preRebuild.degradations, rebuilt.degradations),
+          laneAudits: [...preRebuild.laneAudits, ...rebuilt.laneAudits],
+          secureLaneAudits: [...preRebuild.secureLaneAudits, ...rebuilt.secureLaneAudits]
+        };
+        evidencePackMs += Date.now() - rebuildStartedAt;
+      }
+    }
+    if (secureLocalChoice.exclusion) {
+      detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
+    }
+    const onDemandNotes = [];
+    const onDemandLimits = [];
+    let stillReading = 0;
+    if (options.requestOnDemandRead && !readsDone) {
+      const reads = await readNamesOnlyMatches(detail, options.requestOnDemandRead, options.onDemandReadWaitMs ?? DEFAULT_ON_DEMAND_READ_WAIT_MS);
+      if (reads.started > 0 && reads.pending === 0)
+        return answerOnce(request, local, true);
+      stillReading = reads.pending;
+      if (reads.failed > 0)
+        onDemandNotes.push(onDemandFailedCoverageNote(reads.failed));
+      if (reads.limit) {
+        onDemandLimits.push(reads.limit);
+        onDemandNotes.push(onDemandCappedCoverageNote());
+      }
+    }
+    let pack = detail.pack;
+    const analyzedInputs = [];
+    const chunkHoldNotes = new Set;
+    const assertDispatchAllowed = async (analysisDetail) => {
+      if (options.releaseCheck) {
+        const reason = await answerReleaseWithheldReasonOffThread([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
+        if (reason)
+          throw new OperationError("source_index_policy_violation", reason);
+      }
+      if (lanes.visibilityGate) {
+        const hits = analysisDetail.pack.candidates.map((candidate, index) => ({
+          corpusId: analysisDetail.candidateCorpusIds[index] ?? "",
+          servingLayer: candidate.chunks.length > 0 || (candidate.tables?.length ?? 0) > 0 || (candidate.facts?.length ?? 0) > 0 ? "content" : "metadata",
+          sourceItem: candidate.provenance.sourceItem,
+          provenance: candidate.provenance,
+          trustDomain: candidate.trustDomain,
+          trustTier: candidate.trustTier,
+          rawExposed: false
+        }));
+        const kept = new Set(await applySourceIndexVisibilityGate(lanes.visibilityGate, hits));
+        if (hits.some((hit) => !kept.has(hit))) {
+          throw new OperationError("source_index_policy_violation", "Olympus withheld this answer because an item changed privacy tier before analysis.");
+        }
+      }
+    };
+    const legFitting = (analysisDetail) => {
+      const candidateCorpus = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
+        candidate,
+        analysisDetail.candidateCorpusIds[index] ?? ""
+      ]));
+      const candidateGaps = new Map(analysisDetail.pack.candidates.map((candidate, index) => [
+        candidate.provenance,
+        analysisDetail.candidateExtractionGapIndexes?.[index] ?? []
+      ]));
+      recordSourceAnswerRerank(analysisDetail.rerank);
+      recordSourceAnswerPackSeats(analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ""), analysisDetail.recencySeats ?? 0, analysisDetail.pack.candidates.map((candidate) => candidate.provenance.sourceItem.localItemId));
+      const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1]));
+      const guarded = (analyst, remote = false) => ({
+        analyze: async (dispatchPack, analyzeOptions) => {
+          if (remote) {
+            const checked = await checkedRemotePack(dispatchPack, (candidate) => candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex((original) => original.provenance === candidate.provenance)] ?? "", options.releaseCheck);
+            dispatchPack = checked.pack;
+            const note = chunkCoverageNote(checked.report);
+            if (note)
+              chunkHoldNotes.add(note);
+          }
+          await assertDispatchAllowed(analysisDetail);
+          const result = await analyst.analyze(dispatchPack, analyzeOptions);
+          analyzedInputs.push(...dispatchPack.candidates.map((candidate) => candidateReleaseInput(candidate, candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex((original) => original.provenance === candidate.provenance)] ?? "")));
+          return result;
+        }
+      });
+      return {
+        localLeg: (analyst) => fitLocalAnalystRoutes(analyst, (leaf) => promptBudgetedAnalyst(guarded(leaf), options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "local", seatOf, analystEvidenceFormat(leaf), candidateGaps, (outputChars) => localAnalystPromptBudget(options.localAnalystPromptByteBudget, localAnalystWindow(leaf), localAnalystWindow(leaf)?.source === "manifest" ? builtInAnalystMaxTokensForChars(outputChars) : maxTokensForChars(outputChars)))),
+        cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst, true), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "cloud", seatOf, analystEvidenceFormat(analyst), candidateGaps),
+        trustedLeg: (analyst) => guarded({ analyze: (dispatchPack, analyzeOptions) => {
+          const skip = new Set([...analysisDetail.namesOnlyCandidateIndexes ?? [], ...analysisDetail.contentPrivateCandidateIndexes ?? []]);
+          const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
+          const sentPack = local ? { ...dispatchPack, candidates: dispatchPack.candidates.filter((candidate) => !omitted.has(candidate)) } : dispatchPack;
+          local?.beforeVeniceDispatch(sentPack, sentPack.candidates.map((candidate) => candidateCorpus.get(candidate) ?? ""));
+          return analyst.analyze(sentPack, analyzeOptions);
+        } })
+      };
+    };
+    assertEvidencePackModelEligible(pack);
+    const policyDeniedEmptyPack = pack.candidates.length === 0 && (detail.policyDeniedCandidates ?? 0) > 0;
+    let localOnly = pack.candidates.some((candidate) => isSecureSensitivity(candidate));
+    const requestedAnalystModel = request.analyst_model?.trim();
+    const requestedAnalystProvider = request.analyst_provider ?? (requestedAnalystModel ? "venice" : "default");
+    if (localOnly && requestedAnalystProvider === "venice" && requestedAnalystModel) {
+      assertSecureAnalystPoolModelIdAllowed("requested-venice", requestedAnalystModel);
+    }
+    const veniceAnalyst = policyDeniedEmptyPack ? undefined : createOptionalVeniceAnalyst(options, request).analyst;
+    const localAnalystTimeoutMs = options.localAnalystTimeoutMs ?? DEFAULT_LOCAL_ANALYST_TIMEOUT_MS;
+    const lastLegTimeoutMs = options.secureAnalystPool?.lastLegTimeoutMs ?? DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS;
+    const analyze = (analysisDetail, analysisLocalOnly) => {
+      const { localLeg, cloudLeg, trustedLeg } = legFitting(analysisDetail);
+      const guard = async () => {
+        try {
+          await options.inferenceGuard?.(analysisDetail.pack, request, analysisDetail.candidateCorpusIds);
+        } catch {
+          currentAnalystAbortSignal()?.throwIfAborted();
+          throw new OperationError("source_index_policy_violation", "Source evidence is no longer allowed.", "Ask again under the current source policy.");
+        }
+        await assertDispatchAllowed(analysisDetail);
+      };
+      const live = (analyst) => options.inferenceGuard ? {
+        async analyze(legPack, legOptions) {
+          await guard();
+          return analyst.analyze(legPack, legOptions);
+        }
+      } : analyst;
+      const dispatch = () => routeAnalysis({
+        pack: analysisDetail.pack,
+        localOnly: analysisLocalOnly,
+        requestedProvider: requestedAnalystProvider,
+        local: live(localLeg(options.analyst)),
+        ...options.cloudAnalyst ? { cloud: live(cloudLeg(options.cloudAnalyst)) } : {},
+        ...veniceAnalyst ? { venice: live(trustedLeg(veniceAnalyst)) } : {},
+        trustedAnalystTimeoutMs: options.trustedAnalystTimeoutMs ?? DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS,
+        localAnalystTimeoutMs,
+        cloudAnalystTimeoutMs: options.cloudAnalystTimeoutMs ?? DEFAULT_CLOUD_ANALYST_TIMEOUT_MS,
+        ...options.sovereigntyAnalystRoute ? { sovereigntyAnalystRoute: withLegPromptBudgets(local ? (input) => options.sovereigntyAnalystRoute({ ...input, localOnly: true }) : options.sovereigntyAnalystRoute, (analyst) => live(localLeg(analyst)), (analyst) => live(cloudLeg(analyst)), (analyst) => live(trustedLeg(analyst))) } : {},
+        secureAnalystPoolState,
+        ...options.secureAnalystPool?.sloMs !== undefined ? { secureAnalystPoolSloMs: options.secureAnalystPool.sloMs } : {},
+        ...options.secureAnalystPool?.reserveMs !== undefined ? { secureAnalystPoolReserveMs: options.secureAnalystPool.reserveMs } : {},
+        secureAnalystPoolLastLegTimeoutMs: lastLegTimeoutMs
+      });
+      if (!options.inferenceGuard)
+        return dispatch();
+      return runWithLocalInferenceGuard(guard, async () => {
+        await guard();
+        return dispatch();
+      });
+    };
+    const analystStartedAt = Date.now();
+    let routedAnalysis;
+    if (policyDeniedEmptyPack) {
+      routedAnalysis = { result: noEvidenceAnalystResult(pack), backend: "local" };
+    } else {
+      const privateDefaulted = secureLocalChoice.defaulted === true && localOnly;
+      try {
+        routedAnalysis = await analyze(detail, localOnly);
+      } catch (error) {
+        if (!privateDefaulted || !isPrivateRouteUnavailable(error))
+          throw error;
+        const secureIndex = allowedTrustDomains.indexOf("secure_local");
+        if (secureIndex >= 0)
+          allowedTrustDomains.splice(secureIndex, 1);
+        const rebuilt = await buildDetail(lanes, initialAttempt, { excludeSecureSensitivity: true });
+        detail = withSecureLocalExclusionReason({
+          ...rebuilt,
+          skippedCorpora: mergeSkippedCorpora(detail, rebuilt),
+          degradations: mergeRetrievalDegradations(detail.degradations, rebuilt.degradations),
+          laneAudits: [...detail.laneAudits, ...rebuilt.laneAudits],
+          secureLaneAudits: [...detail.secureLaneAudits, ...rebuilt.secureLaneAudits]
+        }, "private_analyst_unavailable");
+        pack = detail.pack;
+        assertEvidencePackModelEligible(pack);
+        localOnly = pack.candidates.some((candidate) => isSecureSensitivity(candidate));
+        if (localOnly)
+          throw error;
+        routedAnalysis = await analyze(detail, false);
+      }
+    }
+    const secureCandidates = pack.candidates.filter((c) => isSecureSensitivity(c));
+    const internalCandidates = pack.candidates.filter((c) => c.trustDomain === "internal");
+    const {
+      result: analystResult,
+      backend: analystBackend,
+      fallback: analystFallback,
+      synthesizedGap
+    } = routedAnalysis;
+    const analystMs = Date.now() - analystStartedAt;
+    const releaseGateStartedAt = Date.now();
+    const { decision, facts, opsec, answer: releasedAnswer } = releaseAnalystAnswer({
+      detail,
+      result: analystResult,
+      onDemandNotes,
+      releaseSecureContent,
+      ...synthesizedGap ? { synthesizedGap } : {}
+    });
+    const heldAnswer = [releasedAnswer, ...[...chunkHoldNotes].filter((note) => !releasedAnswer.includes(note))].join(`
+
+`);
+    const readingOnly = stillReading > 0 && facts.length === 0;
+    const answer = stillReading === 0 ? heldAnswer : [onDemandReadingCoverageNote(stillReading), ...readingOnly ? onDemandNotes : [heldAnswer]].join(`
+
+`);
+    const releaseGateMs = Date.now() - releaseGateStartedAt;
+    recordSourceAnswerReleaseDecision(decision.decision);
+    const released = decision.decision === "allow" || decision.decision === "redact";
+    const totalLatencyMs = Date.now() - startedAt;
+    const phaseTimings = {
+      lane_setup_ms: laneSetupMs,
+      bulk_gate_ms: bulkGateMs,
+      evidence_pack_ms: evidencePackMs,
+      ...selfHealMs !== undefined ? { self_heal_ms: selfHealMs } : {},
+      analyst_ms: analystMs,
+      release_gate_ms: releaseGateMs,
+      total_ms: totalLatencyMs
+    };
+    recordSourceAnswerPhaseTimings(phaseTimings);
+    recordReleaseManifest({ inputs: [
+      ...analyzedInputs,
+      ...unreadableMatchedReleaseInputs(detail, releaseSecureContent),
+      ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])
+    ], constraints: releaseConstraints });
+    return {
+      answer,
+      evidence: released && !readingOnly ? releasedEvidence(analystResult.citations, detail, releaseSecureContent) : [],
+      ...(detail.secretLocations ?? []).length > 0 ? {
+        secret_locations: (detail.secretLocations ?? []).map((location) => ({
+          source: location.source,
+          ref: location.ref,
+          ...location.locator ? { locator: location.locator } : {},
+          ...location.title ? { title: location.title } : {},
+          finding_kinds: [...location.findingKinds]
+        }))
+      } : {},
+      audit: {
+        searched_corpora: [...pack.coverage.searchedCorpora],
+        skipped_corpora: detail.skippedCorpora.map((skip) => ({
+          corpus_id: skip.corpusId,
+          trust_domain: skip.trustDomain,
+          reason: skip.reason
+        })),
+        lane_audits: localOnly || policyDeniedEmptyPack ? [...detail.laneAudits] : withoutSecureLaneAudits(detail.laneAudits, detail.secureLaneAudits),
+        ...detail.degradations.length > 0 ? { retrieval_degradations: detail.degradations.map(answerRetrievalDegradation) } : {},
+        ...(detail.corpusReadabilityGaps ?? []).length > 0 ? {
+          corpus_readability: (detail.corpusReadabilityGaps ?? []).map((gap) => ({
+            corpus_id: gap.corpusId,
+            partial_documents: gap.partialDocuments,
+            unread_documents: gap.unreadDocuments
+          }))
+        } : {},
+        ...selfHealAudit ? { self_heal: selfHealAudit } : {},
+        ...(detail.classificationCoverage ?? []).length > 0 ? {
+          classification_coverage: (detail.classificationCoverage ?? []).map((note) => ({
+            corpus_id: note.corpusId,
+            pending_classification_items: note.pendingClassificationItems
+          }))
+        } : {},
+        answer_synthesis: {
+          private_context_used: localOnly,
+          secure_local_items_consulted: secureCandidates.length,
+          internal_content_used: internalCandidates.some((c) => c.chunks.length > 0),
+          internal_items_consulted: internalCandidates.length,
+          internal_content_failures: 0,
+          analyst_backend: analystBackend,
+          ...requestedAnalystProvider !== "default" ? { requested_analyst_provider: requestedAnalystProvider } : {},
+          ...requestedAnalystModel ? { requested_analyst_model: requestedAnalystModel } : {},
+          ...analystFallback ? { analyst_fallback: analystFallback } : {},
+          raw_source_exposed: false
+        },
+        latency_ms: totalLatencyMs,
+        ...onDemandLimits.length > 0 ? { on_demand_limits: onDemandLimits } : {},
+        phase_timings: phaseTimings,
+        raw_source_exposed: false
+      },
+      policy: {
+        raw_source_exposed: false,
+        source_packets_exposed: false,
+        internal_content_exposed: released && facts.some((fact) => fact.sensitivity.trustDomain === "internal"),
+        secure_local_content_exposed: released && facts.some((fact) => isSecureSensitivity(fact.sensitivity) && fact.releaseSurface === "castor_answer"),
+        castor_safe_bridge: true
+      },
+      opsec
+    };
   };
+  return { answer: (request, local) => answerOnce(request, local, false) };
 }
 function releaseInputs(detail) {
   const items = detail.pack.candidates.map((candidate, index) => candidateReleaseInput(candidate, detail.candidateCorpusIds[index] ?? ""));
@@ -87317,7 +87345,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_analyst_built_in();
   init_local_analyst_window();
@@ -101776,7 +101804,9 @@ class LocalFileExtractionJobStore {
         JOIN extraction_jobs j ON j.job_id = r.job_id
         WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId);
       if (previous && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? "")) {
-        if (previous.status === "leased" || previous.status === "indexed")
+        if (previous.status === "indexed")
+          return { state: "reading", etaSeconds: 60, settled: true };
+        if (previous.status === "leased")
           return { state: "reading", etaSeconds: 60 };
         if (previous.status === "queued" || previous.status === "failed_retryable")
           return { state: "queued", etaSeconds: 60 };
@@ -111579,6 +111609,7 @@ function createFileExtractionRuntime(options) {
     jobs,
     requestOnDemandRead: async (request) => {
       let promoted;
+      let judged;
       const result = await requestOnDemandRead(request, {
         jobs,
         limits: {
@@ -111594,6 +111625,7 @@ function createFileExtractionRuntime(options) {
             if (!candidate)
               continue;
             const { identity, metadata } = candidate;
+            judged = () => holder.tierLedger()?.getCurrent(identity)?.contentPending !== true;
             const policy = options.onDemandPolicy?.(holder, identity.localItemId);
             if (policy && !policy.allowed)
               return;
@@ -111655,6 +111687,10 @@ function createFileExtractionRuntime(options) {
       });
       if (promoted)
         runRead(promoted);
+      if (result.settled && judged && !judged()) {
+        const { settled: _settled, ...reading } = result;
+        return reading;
+      }
       return result;
     },
     stopOnDemandRecovery() {

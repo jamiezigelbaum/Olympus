@@ -246,16 +246,16 @@ describe('read on demand', () => {
     expect(calls.map(call => call.requester)).toEqual(['analyst', 'remote_app']);
   });
 
-  test('analyst uses only top-three names hits when it reports a gap, with a note and no evidence', async () => {
+  test('analyst reads only the top-three names hits and leads with a note and no evidence while they run', async () => {
     const calls: OnDemandReadRequest[] = [];
     const corpusId = 'internal.fixture.files';
     const identity = (id: string) => ({ family: 'file' as const, provider: 'fixture', accountScope: 'one', providerItemId: id, localItemId: id });
-    let gap = true;
     const handler = createAnalystSourceIndexAnswerHandler({
       requestOnDemandRead: async request => { calls.push(request); return { state: 'queued', etaSeconds: 60 }; },
+      onDemandReadWaitMs: 0,
       analyst: { async analyze(pack) {
         expect(pack.candidates.every(candidate => candidate.chunks.length === 0)).toBe(true);
-        return { answer: 'There is not enough evidence.', citations: [], unanswered: gap ? ['The requested contents are unread.'] : [] };
+        return { answer: 'The sources do not contain the contents.', citations: [], unanswered: ['The requested contents are unread.'] };
       } },
       lanes: () => ({
         registry: buildSourceIndexCorpusRegistry([defineSourceIndexCorpus({ corpusId, family: 'file', trustDomain: 'internal' })]),
@@ -267,11 +267,37 @@ describe('read on demand', () => {
     expect(calls).toHaveLength(3);
     expect(new Set(calls.map(call => call.questionId)).size).toBe(1);
     expect(calls.every(call => call.requester === 'analyst')).toBe(true);
-    expect(answer.answer).toContain('Reading 3 files for this question. Ask again in about a minute.');
+    expect(answer.answer.startsWith('Reading 3 files for this question. Ask again in about a minute.')).toBe(true);
+    expect(answer.answer).not.toContain('do not contain');
     expect(answer.evidence).toEqual([]);
-    gap = false; calls.length = 0;
-    await handler.answer({ question: 'What is in these files?', include_internal: true });
-    expect(calls).toEqual([]);
+  });
+
+  test('a question that starts a read waits for it and answers once from the content', async () => {
+    const corpusId = 'internal.fixture.files';
+    const identity = (id: string) => ({ family: 'file' as const, provider: 'fixture', accountScope: 'one', providerItemId: id, localItemId: id });
+    let asks = 0;
+    const packs: string[][] = [];
+    const handler = createAnalystSourceIndexAnswerHandler({
+      // The store reports a finished read as settled; until then it is queued.
+      requestOnDemandRead: async () => (++asks >= 3 ? { state: 'reading', etaSeconds: 60, settled: true } : { state: 'queued', etaSeconds: 60 }),
+      onDemandReadWaitMs: 10_000,
+      analyst: { async analyze(pack) {
+        packs.push(pack.candidates.flatMap(candidate => candidate.chunks));
+        return { answer: 'The code is 4417.', citations: [], unanswered: [] };
+      } },
+      lanes: () => ({
+        registry: buildSourceIndexCorpusRegistry([defineSourceIndexCorpus({ corpusId, family: 'file', trustDomain: 'internal' })]),
+        adapters: { [corpusId]: () => ({ hits: [{ sourceItem: identity('a'), provenance: { sourceItem: identity('a'), citation: { title: 'a' } }, score: 1, rawExposed: false as const }], latencyMs: 0, rawExposed: false as const }) },
+        contentProviders: { [corpusId]: { async fetchLocalContent() {
+          const sensitivity = buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' });
+          return asks >= 3 ? { sensitivity, chunks: ['The code is 4417.'] } : { sensitivity, chunks: [], namesOnly: true };
+        } } },
+      }),
+    });
+    const answer = await handler.answer({ question: 'What is the code?', include_internal: true });
+    expect(packs).toEqual([['The code is 4417.']]);
+    expect(answer.answer).not.toContain('Reading 1 file');
+    expect(asks).toBe(3);
   });
 
   test('a names-only scope starts one real extraction immediately and uses its persisted size', async () => {
@@ -326,6 +352,8 @@ describe('read on demand', () => {
     expect(f.store.contentServedNow(item.identity.localItemId)).toBe(false);
     expect(f.store.localContent(item.identity.localItemId)?.chunks ?? []).toEqual([]);
     expect(f.store.itemMetadataSnapshot(item.identity)?.read_on_demand).toBe(true);
+    // Read but not judged: a question still waits for it.
+    expect(await f.read('a', requester)).toEqual({ state: 'reading', etaSeconds: 60 });
     for (const step of ['fetch', 'extract']) {
       expect(timing.mock.calls.some(([line]) => String(line).includes(`[olympus:on-demand] step=${step} count=1 ms=`))).toBe(true);
     }
@@ -337,6 +365,7 @@ describe('read on demand', () => {
     expect(timing.mock.calls.some(([line]) => String(line).includes('[olympus:on-demand] step=judge count=1 ms='))).toBe(true);
     expect(f.store.contentServedNow(item.identity.localItemId)).toBe(true);
     expect(f.store.localContent(item.identity.localItemId)?.chunks).toEqual([f.text]);
+    expect(await f.read('a', requester)).toMatchObject({ state: 'reading', settled: true });
     if (requester === 'analyst') expect(f.used()).toEqual({ files: 1, bytes: f.size });
   });
 

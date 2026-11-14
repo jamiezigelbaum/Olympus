@@ -169,6 +169,8 @@ export interface AnalystAnswerLanes {
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
   requestOnDemandRead?: RequestOnDemandRead;
+  // How long a question waits for the reads it started before it answers.
+  onDemandReadWaitMs?: number;
   // Live authorization repeated after a shared model-slot wait, for synthesis and audit.
   inferenceGuard?: (pack: EvidencePack, request: SourceIndexAnswerRequest, corpusIds: readonly string[]) => Promise<void>;
   // The local analyst (Argus on Delphi/local models).
@@ -311,14 +313,70 @@ const DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600_000;
 // abort-aware, and honest in the trace.
 const DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120_000;
 const DEFAULT_SELF_HEAL_MAX_MS = 20_000;
+const DEFAULT_ON_DEMAND_READ_WAIT_MS = 20_000;
+const ON_DEMAND_READ_POLL_MS = 1_000;
+
+/**
+ * Reads the top Names-only matches for one question and waits up to `waitMs`
+ * for them to finish. Asking again for a read already started only reports
+ * its state (the store dedupes it), so the wait spends no allowance.
+ */
+async function readNamesOnlyMatches(
+  detail: EvidencePackBuildDetail,
+  read: RequestOnDemandRead,
+  waitMs: number,
+): Promise<{ started: number; pending: number; failed: number; limit?: OnDemandReadLimit }> {
+  const questionId = randomUUID();
+  const requests = new Map<string, Parameters<RequestOnDemandRead>[0]>();
+  for (const index of detail.namesOnlyCandidateIndexes ?? []) {
+    if (index >= 3) continue;
+    const candidate = detail.pack.candidates[index];
+    if (!candidate) continue;
+    const identity = candidate.provenance.sourceItem;
+    const key = JSON.stringify([identity.provider, identity.accountScope, identity.providerConversationId, identity.providerItemId]);
+    if (requests.has(key)) continue;
+    requests.set(key, {
+      itemRef: { corpusId: detail.candidateCorpusIds[index] ?? '', providerItemId: identity.providerItemId },
+      requester: 'analyst', questionId,
+    });
+  }
+  let failed = 0;
+  let limit: OnDemandReadLimit | undefined;
+  let pending: Array<Parameters<RequestOnDemandRead>[0]> = [];
+  for (const request of requests.values()) {
+    const outcome = await read(request).catch(() => { failed++; return undefined; });
+    if (!outcome) continue;
+    if ((outcome.state === 'queued' || outcome.state === 'reading') && outcome.settled !== true) pending.push(request);
+    if (outcome.state === 'capped' && typeof outcome.reason === 'object') limit = outcome.reason;
+  }
+  const started = pending.length;
+  const deadline = Date.now() + waitMs;
+  while (pending.length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(ON_DEMAND_READ_POLL_MS, Math.max(0, deadline - Date.now()))));
+    const next: typeof pending = [];
+    for (const request of pending) {
+      const outcome = await read(request).catch(() => undefined);
+      // A read that failed or was refused has settled too: the answer says
+      // what it found without it.
+      if (outcome && (outcome.state === 'queued' || outcome.state === 'reading') && outcome.settled !== true) next.push(request);
+    }
+    pending = next;
+  }
+  return { started, pending: pending.length, failed, ...(limit ? { limit } : {}) };
+}
 
 export function createAnalystSourceIndexAnswerHandler(
   options: AnalystSourceIndexAnswerHandlerOptions,
 ): SourceIndexAnswerHandler {
   const secureAnalystPoolState = options.secureAnalystPoolState
     ?? new SecureAnalystPoolState(options.secureAnalystPool);
-  return {
-    async answer(request: SourceIndexAnswerRequest, local?: Parameters<SourceIndexAnswerHandler['answer']>[1]): Promise<SourceIndexAnswerResult> {
+  // `readsDone` is the second pass after this question's reads finished: it
+  // answers from what was read and starts no reads of its own.
+  const answerOnce = async (
+    request: SourceIndexAnswerRequest,
+    local: Parameters<SourceIndexAnswerHandler['answer']>[1] | undefined,
+    readsDone: boolean,
+  ): Promise<SourceIndexAnswerResult> => {
       const reranker = typeof options.reranker === 'function' ? options.reranker() : options.reranker;
       const startedAt = Date.now();
       const question = request.question?.trim();
@@ -504,6 +562,24 @@ export function createAnalystSourceIndexAnswerHandler(
       }
       if (secureLocalChoice.exclusion) {
         detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
+      }
+      // Matches in Names-only folders are read for this question before it is
+      // answered: wait a short while for the reads, then answer once from
+      // their content. A read still running when the wait ends leads the reply
+      // instead of a "not found" for a file nobody has read yet.
+      const onDemandNotes: string[] = [];
+      const onDemandLimits: OnDemandReadLimit[] = [];
+      let stillReading = 0;
+      if (options.requestOnDemandRead && !readsDone) {
+        const reads = await readNamesOnlyMatches(detail, options.requestOnDemandRead,
+          options.onDemandReadWaitMs ?? DEFAULT_ON_DEMAND_READ_WAIT_MS);
+        if (reads.started > 0 && reads.pending === 0) return answerOnce(request, local, true);
+        stillReading = reads.pending;
+        if (reads.failed > 0) onDemandNotes.push(onDemandFailedCoverageNote(reads.failed));
+        if (reads.limit) {
+          onDemandLimits.push(reads.limit);
+          onDemandNotes.push(onDemandCappedCoverageNote());
+        }
       }
       let pack = detail.pack;
       const analyzedInputs: ReleaseInput[] = [];
@@ -718,33 +794,6 @@ export function createAnalystSourceIndexAnswerHandler(
       } = routedAnalysis;
       const analystMs = Date.now() - analystStartedAt;
 
-      const onDemandNotes: string[] = [];
-      const onDemandLimits: OnDemandReadLimit[] = [];
-      if (options.requestOnDemandRead && analystResult.unanswered.length > 0) {
-        const questionId = randomUUID();
-        let reading = 0;
-        let failed = 0;
-        const requested = new Set<string>();
-        for (const index of detail.namesOnlyCandidateIndexes ?? []) {
-          if (index >= 3) continue;
-          const candidate = detail.pack.candidates[index];
-          if (!candidate) continue;
-          const identity = candidate.provenance.sourceItem;
-          const key = JSON.stringify([identity.provider, identity.accountScope, identity.providerConversationId, identity.providerItemId]);
-          if (requested.has(key)) continue;
-          requested.add(key);
-          const outcome = await options.requestOnDemandRead({
-            itemRef: { corpusId: detail.candidateCorpusIds[index] ?? '', providerItemId: candidate.provenance.sourceItem.providerItemId },
-            requester: 'analyst', questionId,
-          }).catch(() => { failed++; return undefined; });
-          if (!outcome) continue;
-          if (outcome.state === 'queued' || outcome.state === 'reading') reading++;
-          if (outcome.state === 'capped' && typeof outcome.reason === 'object') onDemandLimits[0] = outcome.reason;
-        }
-        if (failed > 0) onDemandNotes.push(onDemandFailedCoverageNote(failed));
-        if (reading > 0) onDemandNotes.push(onDemandReadingCoverageNote(reading));
-        if (onDemandLimits.length > 0) onDemandNotes.push(onDemandCappedCoverageNote());
-      }
       const releaseGateStartedAt = Date.now();
       const { decision, facts, opsec, answer: releasedAnswer } = releaseAnalystAnswer({
         detail,
@@ -753,7 +802,13 @@ export function createAnalystSourceIndexAnswerHandler(
         releaseSecureContent,
         ...(synthesizedGap ? { synthesizedGap } : {}),
       });
-      const answer = [releasedAnswer, ...[...chunkHoldNotes].filter(note => !releasedAnswer.includes(note))].join('\n\n');
+      const heldAnswer = [releasedAnswer, ...[...chunkHoldNotes].filter(note => !releasedAnswer.includes(note))].join('\n\n');
+      // Nothing cited yet while files are still being read: the reply is what
+      // is being read and when to ask again, never a "not found" for them.
+      const readingOnly = stillReading > 0 && facts.length === 0;
+      const answer = stillReading === 0
+        ? heldAnswer
+        : [onDemandReadingCoverageNote(stillReading), ...(readingOnly ? onDemandNotes : [heldAnswer])].join('\n\n');
       const releaseGateMs = Date.now() - releaseGateStartedAt;
       recordSourceAnswerReleaseDecision(decision.decision);
 
@@ -778,7 +833,7 @@ export function createAnalystSourceIndexAnswerHandler(
       ], constraints: releaseConstraints });
       return {
         answer,
-        evidence: released
+        evidence: released && !readingOnly
           ? releasedEvidence(analystResult.citations, detail, releaseSecureContent)
           : [],
         ...((detail.secretLocations ?? []).length > 0
@@ -867,8 +922,8 @@ export function createAnalystSourceIndexAnswerHandler(
         },
         opsec,
       };
-    },
   };
+  return { answer: (request, local) => answerOnce(request, local, false) };
 }
 
 /**
