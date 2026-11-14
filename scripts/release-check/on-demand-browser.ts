@@ -210,14 +210,15 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         if (source === 'google_drive') {
           await driveSearch(tab.session, name);
         } else {
-          // Direct folder navigation is the same address as opening this path in Dropbox's Files view.
-          await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);
-          await until(() => evaluate(tab.session, `document.readyState==='complete' && (!!document.querySelector('[role=grid],table,[data-testid="empty-folder"]') || /doesn.t exist|not found|can.t find/i.test(document.body.innerText))`), 'Dropbox folder did not load');
-          if (!await evaluate<boolean>(tab.session, `/doesn.t exist|not found|can.t find/i.test(document.body.innerText)`)) {
+          // Existence is read from the top level's own listing, not from how /home/<name> looks: in run 43547436148
+          // the dashboard picker, which lists the account's top level live, never showed the seed folder.
+          await send('Page.navigate', { url: 'https://www.dropbox.com/home' }, tab.session);
+          await until(() => evaluate(tab.session, `document.readyState==='complete' && !!document.querySelector('[role=grid],[role=table],table,[data-testid="files-table"],[data-testid="empty-folder"]') && (!${BUSY} || !!document.querySelector('[role=row],tr'))`), 'Dropbox top level did not load');
+          if ((await evaluate<string[]>(tab.session, listing(source))).includes(name)) {
+            await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);
             tab.url = await evaluate(tab.session, 'location.href');
             return { source, id: tab.url };
           }
-          await send('Page.navigate', { url: 'https://www.dropbox.com/home' }, tab.session);
         }
         const exists = source === 'google_drive' && await evaluate<boolean>(tab.session, `${listing(source)}.includes(${JSON.stringify(name)})`);
         if (!exists) {
@@ -251,6 +252,7 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
             throw new Error(`Drive seed folder did not open${shown ? ` (${JSON.stringify(shown)})` : ''}`, { cause: error });
           }
         } else {
+          await until(async () => (await evaluate<string[]>(tab.session, listing(source))).includes(name), 'Dropbox seed folder was not created');
           await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);
         }
         tab.url = await evaluate(tab.session, 'location.href');
