@@ -230671,7 +230671,7 @@ function copyScopeList(list) {
 function copySelection(selection) {
   return {
     key: opaque(selection.key),
-    state: selection.state === "ingest" || selection.state === "metadata_only" ? selection.state : "exclude",
+    state: selection.state === "ingest" || selection.state === "metadata_only" || selection.state === "on_demand" ? selection.state : "exclude",
     ...selection.ancestor_keys?.length ? { ancestor_keys: selection.ancestor_keys.slice(0, 64).map(opaque) } : {}
   };
 }
