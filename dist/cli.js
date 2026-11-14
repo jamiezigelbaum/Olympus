@@ -19898,6 +19898,14 @@ function markWorkerUpgradeInFlight(env, startedAt) {
   writePrivateFileAtomicSync(path, `${JSON.stringify({ started_at: startedAt })}
 `);
 }
+function readWorkerUpgradeInFlight(env) {
+  try {
+    const mark = JSON.parse(readFileSync26(sharedDataPath("upgrade-in-flight", env), "utf8"));
+    return typeof mark.started_at === "string" && Number.isFinite(Date.parse(mark.started_at)) ? mark.started_at : "";
+  } catch (error) {
+    return error.code === "ENOENT" ? undefined : "";
+  }
+}
 function clearWorkerUpgradeInFlight(env) {
   rmSync9(sharedDataPath("upgrade-in-flight", env), { force: true });
 }
@@ -122799,6 +122807,39 @@ var init_first_run_privacy = __esm(() => {
   init_sovereignty();
 });
 
+// src/core/engine-store-copies.ts
+function copyEngineStores(env, options = {}) {
+  markWorkerUpgradeInFlight(env, new Date().toISOString());
+  try {
+    const copied = copyStoresBeforeUpgrade(env, options);
+    if (copied.stores > 0)
+      options.log?.(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);
+  } catch (error) {
+    clearWorkerUpgradeInFlight(env);
+    throw error;
+  }
+}
+function restoreEngineStores(env) {
+  const startedAt = readWorkerUpgradeInFlight(env);
+  if (startedAt === undefined)
+    return [];
+  const restored = startedAt === "" ? [] : restoreSchemaBackupsSince(env, Date.parse(startedAt));
+  clearWorkerUpgradeInFlight(env);
+  return restored;
+}
+function commitEngineStores(env) {
+  if (readWorkerUpgradeInFlight(env) === undefined)
+    return;
+  clearWorkerUpgradeInFlight(env);
+  try {
+    removeRecordedSchemaBackups(env);
+  } catch {}
+}
+var init_engine_store_copies = __esm(() => {
+  init_boot_progress();
+  init_upgrade_store_copies();
+});
+
 // src/core/engine-helper-names.ts
 var ENGINE_HELPER_BUNDLE_ID = "ai.olympusplugin.engine-host", ENGINE_HELPER_APP_NAME = "Olympus Engine.app", ENGINE_HELPER_EXECUTABLE = "OlympusEngineHost";
 
@@ -128694,6 +128735,7 @@ async function installEngineVerified(options = {}) {
   }
   const now = options.health?.now ?? Date.now;
   const since = now();
+  const copied = options.dryRun ? undefined : copyMacStoresBeforeReplacing(options);
   const result = installEngine(options);
   if (result.action === "dry_run")
     return result;
@@ -128702,7 +128744,44 @@ async function installEngineVerified(options = {}) {
     expectedBuild: result.program.build ?? null,
     ...result.action === "unchanged" ? {} : { since }
   }, { ...options.health, exec: options.exec ?? options.health?.exec });
-  return health.ok ? { ...result, ok: true, health } : { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? "unknown"} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.` };
+  if (health.ok) {
+    if (copied)
+      commitEngineStores(copied.env);
+    return { ...result, ok: true, health };
+  }
+  const restored = copied ? putMacStoresBack(copied) : [];
+  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? "unknown"} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` Its stores were put back as they were before it (${restored.length}), and it was stopped.` : ""}` };
+}
+function copyMacStoresBeforeReplacing(options) {
+  const homeDir = absolute2(options.homeDir ?? homedir32(), "home directory");
+  const paths = engineServicePaths({ ...options, homeDir, platform: "darwin" });
+  if (paths.engineManager === "daemon")
+    return;
+  const program = resolveEngineProgram({
+    ...options.fromCheckout !== undefined ? { fromCheckout: options.fromCheckout } : {},
+    ...options.bunBin ? { bunBin: options.bunBin } : {},
+    ...options.cwd ? { cwd: options.cwd } : {}
+  });
+  const exec = options.exec ?? defaultExec2;
+  const target = serviceTarget(options.uid, paths.engineManager);
+  if (!launchctlLoaded(exec, target) || !runningBuildDiffers(paths.statusPath, program.build))
+    return;
+  waitForQuietEngine(options);
+  mustSucceed(exec("launchctl", ["bootout", target]), "stop the previous engine to copy its stores");
+  for (let waited = 0;waited < 1e4 && launchctlLoaded(exec, target); waited += 250)
+    sleepSync4(250);
+  const env = { HOME: homeDir, OLYMPUS_ENGINE_HOST: "1" };
+  copyEngineStores(env, { bunBin: program.runtimePath, log: (line) => process.stderr.write(`${line}
+`) });
+  return { env, exec, target };
+}
+function putMacStoresBack(copied) {
+  const result = copied.exec("launchctl", ["bootout", copied.target]);
+  if (result.status !== 0 && !isNotLoaded(result))
+    throw new OperationError("config_error", `Could not stop the new engine to put its stores back: ${boundedDetail(result)}`);
+  for (let waited = 0;waited < 1e4 && launchctlLoaded(copied.exec, copied.target); waited += 250)
+    sleepSync4(250);
+  return restoreEngineStores(copied.env);
 }
 function installedEngineBuild(plistPath) {
   try {
@@ -129667,6 +129746,7 @@ var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olymp
 var init_engine_service = __esm(() => {
   init_mac_engine_daemon();
   init_mac_engine_daemon();
+  init_engine_store_copies();
   init_linux_desktop_entry();
   init_engine_maintenance();
   init_linux_engine_service();
@@ -130647,6 +130727,7 @@ function restoreInstallTransaction(layout, exec, options) {
   const stoppedFacts = inspectSystemdEngine(layout, exec);
   assertKnown(stoppedFacts);
   removeReleasedWorkerSocket2(layout, currentFacts, stoppedFacts, options);
+  restoreEngineStores(engineDataEnv(layout));
   removeNewUnitLinks(layout, transaction);
   restoreLegacySettings(layout, transaction);
   for (const [path, snapshot] of Object.entries(transaction.before.files))
@@ -130673,6 +130754,9 @@ function restoreInstallTransaction(layout, exec, options) {
   transaction.phase = "rollback_required";
   writeInstallTransaction(layout, transaction);
   return transaction;
+}
+function engineDataEnv(l) {
+  return { ...linuxEngineEnvironment(l), OLYMPUS_ENGINE_HOST: "1" };
 }
 function currentProgram(l) {
   try {
@@ -130899,6 +130983,10 @@ function installLinuxEngine(options) {
       if (before.state !== "not_loaded")
         systemdMust(exec, ["stop", SYSTEMD_ENGINE_UNIT]);
       removeReleasedWorkerSocket2(l, before, inspectSystemdEngine(l, exec), options);
+      const replacing = currentProgram(l);
+      if (before.state !== "not_loaded" && replacing && replacing.build !== program.build)
+        copyEngineStores(engineDataEnv(l), { bunBin: program.runtimePath, log: (line) => process.stderr.write(`${line}
+`) });
       transaction.phase = "activating";
       writeInstallTransaction(l, transaction);
       lifecycleCheckpoint(options, "activating_published");
@@ -130997,6 +131085,7 @@ async function recoverInterruptedLinuxEngineInstall(options) {
       return { recovered: false };
     assertDesktopTransactionTargets(layout, transaction);
     if (transaction.phase === "qualified") {
+      commitEngineStores(engineDataEnv(layout));
       cleanupLegacySettingsDirectories(layout);
       pruneOldGenerations(layout);
       refreshMachineArtifacts(layout, false);
@@ -131055,6 +131144,7 @@ async function settleLinuxEngineInstall(options, health) {
       transaction.phase = "qualified";
       writeInstallTransaction(layout, transaction);
       lifecycleCheckpoint(options, "qualified_published");
+      commitEngineStores(engineDataEnv(layout));
       cleanupLegacySettingsDirectories(layout);
       pruneOldGenerations(layout);
       refreshMachineArtifacts(layout, false);
@@ -131301,6 +131391,7 @@ function linuxEngineCustody(l, facts, options = {}) {
 }
 var SYSTEMD_ENGINE_UNIT = "olympus-engine.service", runtimeRequire4, heldLifecycleLocks, LOCK_EX2 = 2, LOCK_NB2 = 4, LOCK_UN2 = 8, F_SETFD = 2, FD_CLOEXEC = 1, flockSymbols, LEGACY_CONSULT_LEASE_FILES;
 var init_linux_engine_service = __esm(() => {
+  init_engine_store_copies();
   init_file_lease();
   init_worker_auth();
   init_linux_desktop_entry();

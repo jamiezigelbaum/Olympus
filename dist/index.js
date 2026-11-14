@@ -25541,6 +25541,10 @@ function telegramDependencyHint(packageRoot = telegramRequirementsRoot()) {
 var TELEGRAM_DEPENDENCY_HINT = telegramDependencyHint();
 var installing = new Map;
 
+// src/core/engine-store-copies.ts
+init_boot_progress();
+init_upgrade_store_copies();
+
 // src/core/linux-engine-service.ts
 init_file_lease();
 init_worker_auth();

@@ -1,3 +1,4 @@
+import { commitEngineStores, copyEngineStores, restoreEngineStores } from './engine-store-copies.ts';
 import { FileLeaseBusyError, isFileLeaseSidecarName, parseProcessInstanceIdentity, recordedProcessOwnerIsAlive, withFileLeaseSync } from './file-lease.ts';
 import { environmentWithWorkerSetupEnv } from './worker-auth.ts';
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
@@ -763,6 +764,8 @@ function restoreInstallTransaction(layout: LinuxEngineLayout, exec: EngineExec, 
  if (currentFacts.state !== 'not_loaded'||currentFacts.enabled!==false) systemdMust(exec, ['disable', '--now', SYSTEMD_ENGINE_UNIT]);
  const stoppedFacts=inspectSystemdEngine(layout,exec);assertKnown(stoppedFacts);
  removeReleasedWorkerSocket(layout,currentFacts,stoppedFacts,options);
+ // The new version is stopped: the stores go back as they were before it (#1639).
+ restoreEngineStores(engineDataEnv(layout));
  removeNewUnitLinks(layout, transaction);
  restoreLegacySettings(layout,transaction);
  for (const [path, snapshot] of Object.entries(transaction.before.files)) restoreOptionalFile(path, snapshot);
@@ -777,6 +780,10 @@ function restoreInstallTransaction(layout: LinuxEngineLayout, exec: EngineExec, 
  else if (transaction.before.files[layout.unitPath]!.present) systemdMust(exec, ['stop', SYSTEMD_ENGINE_UNIT]);
  transaction.phase='rollback_required';writeInstallTransaction(layout,transaction);
  return transaction;
+}
+/** The environment the engine resolves its data root in. */
+function engineDataEnv(l: LinuxEngineLayout): Record<string, string> {
+ return { ...linuxEngineEnvironment(l), OLYMPUS_ENGINE_HOST: '1' };
 }
 function currentProgram(l: LinuxEngineLayout): EngineProgram | undefined {
  try { return JSON.parse(readFileSync(join(l.stateDir,'service-current.json'),'utf8')).program; } catch(e) { if((e as NodeJS.ErrnoException).code==='ENOENT') return undefined; throw e; }
@@ -933,6 +940,10 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    if(before.active || before.state==='loaded') waitForQuietEngine(options);
    if(before.state!=='not_loaded') systemdMust(exec,['stop',SYSTEMD_ENGINE_UNIT]);
    removeReleasedWorkerSocket(l,before,inspectSystemdEngine(l,exec),options);
+   // Replacing a running version: its stores are copied while it is stopped,
+   // and put back if the new one does not prove healthy (#1639).
+   const replacing=currentProgram(l);
+   if(before.state!=='not_loaded' && replacing && replacing.build!==program.build) copyEngineStores(engineDataEnv(l),{bunBin:program.runtimePath,log:line=>process.stderr.write(`${line}\n`)});
    transaction.phase='activating'; writeInstallTransaction(l,transaction);
    lifecycleCheckpoint(options,'activating_published');
    migrateLegacySettings(l,transaction,options);
@@ -1014,6 +1025,7 @@ export async function recoverInterruptedLinuxEngineInstall(
   if(!transaction)return {recovered:false};
   assertDesktopTransactionTargets(layout,transaction);
   if(transaction.phase==='qualified'){
+   commitEngineStores(engineDataEnv(layout));
    cleanupLegacySettingsDirectories(layout);
    pruneOldGenerations(layout);refreshMachineArtifacts(layout,false);cleanupTransactionBackup(transaction);removeFileDurablySync(transactionPath(layout));return {recovered:true};
   }
@@ -1053,6 +1065,7 @@ export async function settleLinuxEngineInstall(
   if (health.ok) {
    transaction.phase='qualified';writeInstallTransaction(layout,transaction);
    lifecycleCheckpoint(options,'qualified_published');
+   commitEngineStores(engineDataEnv(layout));
    cleanupLegacySettingsDirectories(layout);
    pruneOldGenerations(layout);
    refreshMachineArtifacts(layout,false);

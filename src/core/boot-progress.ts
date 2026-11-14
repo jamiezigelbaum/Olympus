@@ -267,6 +267,20 @@ export function markWorkerUpgradeInFlight(env: LayoutEnv, startedAt: string): vo
   writePrivateFileAtomicSync(path, `${JSON.stringify({ started_at: startedAt })}\n`);
 }
 
+/**
+ * When the upgrade in flight started: undefined when none is, '' when its
+ * mark cannot be read (then nothing is put back: an earlier copy left on disk
+ * would be older than the store).
+ */
+export function readWorkerUpgradeInFlight(env: LayoutEnv): string | undefined {
+  try {
+    const mark = JSON.parse(readFileSync(sharedDataPath('upgrade-in-flight', env), 'utf8')) as { started_at?: unknown };
+    return typeof mark.started_at === 'string' && Number.isFinite(Date.parse(mark.started_at)) ? mark.started_at : '';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : '';
+  }
+}
+
 export function clearWorkerUpgradeInFlight(env: LayoutEnv): void {
   rmSync(sharedDataPath('upgrade-in-flight', env), { force: true });
 }

@@ -41,6 +41,8 @@ import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lif
 import { runDoctor, type DoctorDeps, type DoctorHostFacts } from '../src/core/doctor.ts';
 import { emptyRemoteAccessStatus, remoteAccessDir, writeRemoteAccessStatus } from '../src/core/remote-access.ts';
 import { workerServicePaths } from '../src/core/worker-service.ts';
+import { olympusDataRoot } from '../src/core/olympus-layout.ts';
+import { Database } from 'bun:sqlite';
 import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
@@ -808,7 +810,7 @@ describe('engine upgrades restart the engine on the new build', () => {
     expect(restarted.health.reason).toContain('worker is not ready');
   });
 
-  test('rollback swaps in the previous app and reloads the agent onto it; a second rollback swaps back', async () => {
+  test('rollback swaps in the previous app and loads the agent onto it; a second rollback swaps back', async () => {
     const { root, home, bun } = fixture();
     const launchctl = launchingLaunchctl(home);
     const paths = enginePaths(home);
@@ -828,8 +830,9 @@ describe('engine upgrades restart the engine on the new build', () => {
     expect(back.health).toMatchObject({ ok: true, running_build: back.running_build, worker: 'ok' });
     expect(back.running_build).toMatch(/^1\.0\.0\+/);
     expect(back.previous_build).toMatch(/^2\.0\.0\+/);
-    expect(back.action).toBe('reloaded');
-    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'bootout', 'enable', 'print', 'bootstrap']);
+    expect(back.action).toBe('bootstrapped');
+    // Stopped first so its stores are copied (#1639), then loaded on the previous build.
+    expect(launchctl.calls.map((call) => call[1])).toEqual(['print', 'bootout', 'print', 'print', 'enable', 'bootstrap']);
     expect(readFileSync(join(paths.appDir, 'dist', 'cli.js'), 'utf8')).toBe('// 1.0.0\n');
     expect(readFileSync(join(paths.previousAppDir, 'dist', 'cli.js'), 'utf8')).toBe('// 2.0.0\n');
     expect(readFileSync(paths.plistPath, 'utf8')).toContain(back.running_build);
@@ -940,6 +943,43 @@ describe('install and rollback succeed only on proof the new build is healthy', 
     expect(result.action).toBe('bootstrapped');
     expect(result.reason).toContain('the worker is not ready yet: Olympus worker exited during startup.');
   });
+
+  // #1639: an upgrade across a schema change that is not additive must not
+  // leave the previous build to start on stores it refuses.
+  for (const healthy of [false, true]) {
+    test(`replacing a running build copies its stores first, and ${healthy ? 'removes the copies once the new one proves healthy' : 'puts them back when it does not'}`, async () => {
+      const { root, home, checkout } = fixture();
+      let bad = false;
+      const launchctl = launchingLaunchctl(home, () => bad);
+      const dataEnv = { HOME: home, OLYMPUS_ENGINE_HOST: '1' };
+      const store = join(olympusDataRoot(dataEnv), 'ledger.sqlite');
+      const exec: EngineExec = (command, args) => {
+        const result = launchctl.exec(command, args);
+        // The new build's boot updates the store as it starts.
+        if (args[0] === 'bootstrap' && existsSync(store) && marked()) {
+          const db = new Database(store); db.exec("UPDATE kept SET body = 'new'"); db.close();
+        }
+        return result;
+      };
+      const marked = () => existsSync(join(olympusDataRoot(dataEnv), 'upgrade-in-flight.json'));
+      installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec, fromCheckout: checkout, bunBin: process.execPath });
+      mkdirSync(dirname(store), { recursive: true });
+      const seed = new Database(store, { create: true }); seed.exec("CREATE TABLE kept (body TEXT); INSERT INTO kept VALUES ('old')"); seed.close();
+      bad = !healthy;
+      const next = makeCheckout(root, 'next');
+      writeFileSync(join(next, 'dist', 'cli.js'), '// the next build\n');
+      const result = await installEngineVerified({
+        platform: 'darwin', homeDir: home, uid: 501, exec, fromCheckout: next, bunBin: process.execPath, health: fastHealth(),
+      });
+      expect(result.ok).toBe(healthy);
+      const db = new Database(store, { readonly: true });
+      expect(db.query('SELECT body FROM kept').get()).toEqual({ body: healthy ? 'new' : 'old' });
+      db.close();
+      if (!healthy) expect(result.reason).toContain('Its stores were put back as they were before it (1), and it was stopped.');
+      expect(existsSync(`${store}.pre-schema-upgrade.bak`)).toBe(false);
+      expect(marked()).toBe(false);
+    }, 30_000);
+  }
 
   test('a status file from before the restart, another build, a dead pid, or a silent worker is not proof', async () => {
     const { home } = fixture();

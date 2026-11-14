@@ -1,5 +1,6 @@
 import { MAC_ENGINE_DAEMON_PLIST, MAC_SERVER_MODE_SIGN_IN, macEngineManager, authorizeMacServerMode, currentMacUserName } from './mac-engine-daemon.ts';
 export { macEngineManager, macServerModeScript, validateMacEngineOwner } from './mac-engine-daemon.ts';
+import { commitEngineStores, copyEngineStores, restoreEngineStores } from './engine-store-copies.ts';
 import { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE } from './engine-helper-names.ts';
 export { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE };
 import { linuxDesktopEntryStatus } from './linux-desktop-entry.ts';
@@ -833,6 +834,7 @@ export async function installEngineVerified(options: EngineInstallOptions & { he
   }
   const now = options.health?.now ?? Date.now;
   const since = now();
+  const copied = options.dryRun ? undefined : copyMacStoresBeforeReplacing(options);
   const result = installEngine(options);
   if (result.action === 'dry_run') return result;
   const health = await waitForEngineHealthy({
@@ -841,9 +843,50 @@ export async function installEngineVerified(options: EngineInstallOptions & { he
     // Nothing was restarted for an unchanged agent: the running host is the proof.
     ...(result.action === 'unchanged' ? {} : { since }),
   }, { ...options.health, exec: options.exec ?? options.health?.exec });
-  return health.ok
-    ? { ...result, ok: true, health }
-    : { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.` };
+  if (health.ok) {
+    if (copied) commitEngineStores(copied.env);
+    return { ...result, ok: true, health };
+  }
+  // The new version is stopped before the stores go back, so the previous
+  // one the installer puts back next opens them as they were (#1639).
+  const restored = copied ? putMacStoresBack(copied) : [];
+  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` Its stores were put back as they were before it (${restored.length}), and it was stopped.` : ''}` };
+}
+
+interface MacStoreCopies { env: Record<string, string>; exec: EngineExec; target: string }
+
+/**
+ * Replacing a running engine with another build (an upgrade or a reinstall of
+ * a different package): stop it, then copy its stores and mark the upgrade in
+ * flight, as `olympus worker upgrade` does (#1639). The install then starts
+ * the new build. Server mode's daemon is left to its own restart: its stores
+ * are not copied.
+ */
+function copyMacStoresBeforeReplacing(options: EngineInstallOptions): MacStoreCopies | undefined {
+  const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
+  const paths = engineServicePaths({ ...options, homeDir, platform: 'darwin' });
+  if (paths.engineManager === 'daemon') return undefined;
+  const program = resolveEngineProgram({
+    ...(options.fromCheckout !== undefined ? { fromCheckout: options.fromCheckout } : {}),
+    ...(options.bunBin ? { bunBin: options.bunBin } : {}),
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+  });
+  const exec = options.exec ?? defaultExec;
+  const target = serviceTarget(options.uid, paths.engineManager);
+  if (!launchctlLoaded(exec, target) || !runningBuildDiffers(paths.statusPath, program.build)) return undefined;
+  waitForQuietEngine(options);
+  mustSucceed(exec('launchctl', ['bootout', target]), 'stop the previous engine to copy its stores');
+  for (let waited = 0; waited < 10_000 && launchctlLoaded(exec, target); waited += 250) sleepSync(250);
+  const env = { HOME: homeDir, OLYMPUS_ENGINE_HOST: '1' };
+  copyEngineStores(env, { bunBin: program.runtimePath, log: (line) => process.stderr.write(`${line}\n`) });
+  return { env, exec, target };
+}
+
+function putMacStoresBack(copied: MacStoreCopies): string[] {
+  const result = copied.exec('launchctl', ['bootout', copied.target]);
+  if (result.status !== 0 && !isNotLoaded(result)) throw new OperationError('config_error', `Could not stop the new engine to put its stores back: ${boundedDetail(result)}`);
+  for (let waited = 0; waited < 10_000 && launchctlLoaded(copied.exec, copied.target); waited += 250) sleepSync(250);
+  return restoreEngineStores(copied.env);
 }
 
 /** The agent's build stamp, or the daemon's account-owned installed app on disk. */
