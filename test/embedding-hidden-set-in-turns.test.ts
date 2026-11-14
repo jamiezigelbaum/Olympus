@@ -160,6 +160,44 @@ describe('embedding pass over a tiered store', () => {
     expect(pooled).toBe(VISIBILITY_CHANGE_RETRIES);
     expect(here).toBe(1);
   });
+
+  test('a write during one read retakes that read, never the whole build', async () => {
+    // The whole build used to be retried as one unit, and after three it ran
+    // in full on the front's loop: counted by builds started and reads here.
+    const { dir, cleanup } = tempDir();
+    const fixture = openTierFixture(dir, { embed: false });
+    cleanups.push(() => {
+      fixture.close();
+      cleanup();
+    });
+    const specs: FixtureSpec[] = [{ id: 'garden', name: 'garden.txt', text: 'Weekly notes about the vegetable garden.' }];
+    await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const internal = fixture.stores.internal!;
+    let builds = 0;
+    let pooled = 0;
+    let here = 0;
+    (internal as unknown as { hiddenChildReadSteps: () => Generator<VisibilityRead, number[], unknown> }).hiddenChildReadSteps = function* () {
+      builds += 1;
+      for (let step = 0; step < 5; step += 1) {
+        // Step 2 meets a write on every pooled try; the others on their first.
+        let tries = 0;
+        yield {
+          here: () => { here += 1; return undefined; },
+          offThread: async () => {
+            pooled += 1;
+            tries += 1;
+            if (step === 2 || tries === 1) throw new VisibilityChangedError();
+            return undefined;
+          },
+        };
+      }
+      return [];
+    };
+    expect(await internal.missingEmbeddingItemIdsInTurns(fixture.cloud, 10)).toEqual(['personal:garden']);
+    expect(builds).toBe(1);
+    expect(here).toBe(1);
+    expect(pooled).toBe(4 * 2 + VISIBILITY_CHANGE_RETRIES);
+  });
 });
 
 describe('child sweep paging', () => {

@@ -22479,15 +22479,19 @@ class LocalConnectorStore {
     return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
   }
   async hiddenChildItemPksInTurns() {
-    for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    const steps = this.hiddenChildReadSteps();
+    let next = steps.next();
+    while (!next.done) {
+      let result;
       try {
-        return await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false });
+        result = await visibilityStepAwaited(next.value);
       } catch (error) {
-        if (!(error instanceof VisibilityChangedError))
-          throw error;
+        next = steps.throw(error);
+        continue;
       }
+      next = steps.next(result);
     }
-    return runStepsInTurns(this.hiddenChildSteps());
+    return next.value;
   }
   tierLedgerHiddenItemPks() {
     return runSteps(this.tierLedgerHiddenSteps());

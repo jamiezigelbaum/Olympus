@@ -121,14 +121,11 @@ import {
   memoVisibilityItemsHere,
   visibilityRead,
   visibilityHere,
-  visibilityOffThread,
   visibilityAwaited,
   judgedAwaited,
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
   hiddenChildKeysSteps,
-  VISIBILITY_CHANGE_RETRIES,
-  VisibilityChangedError,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
   type VisibilityRead,
@@ -4372,19 +4369,24 @@ export class LocalConnectorStore {
    * every pooled build met one, so the embedding pass failed, its memo never
    * filled and every retry started the full build again (Sparta rc.13,
    * 14 Nov 2026: telegram.messages_embeddings failed every 1-3 minutes and
-   * kept the disk busy). After VISIBILITY_CHANGE_RETRIES such tries the build
-   * runs on this thread in turns, where a step's reads cannot be torn, and
-   * the memo it leaves makes the next build incremental.
+   * kept the disk busy). A read that meets a write is taken again by itself,
+   * up to VISIBILITY_CHANGE_RETRIES times on the pool and then once here,
+   * never the whole build: a store-sized build retried as one unit fails
+   * again under constant writes and then ran in full on the front's loop.
+   * One slice-sized read here is the most this thread ever pays, and the
+   * memo it leaves (installed at the start-of-build cursors) makes the next
+   * build incremental.
    */
   private async hiddenChildItemPksInTurns(): Promise<number[]> {
-    for (let tries = 0; tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
-      try {
-        return await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false });
-      } catch (error) {
-        if (!(error instanceof VisibilityChangedError)) throw error;
-      }
+    const steps = this.hiddenChildReadSteps();
+    let next = steps.next();
+    while (!next.done) {
+      let result: unknown;
+      try { result = await visibilityStepAwaited(next.value); }
+      catch (error) { next = steps.throw(error); continue; }
+      next = steps.next(result);
     }
-    return runStepsInTurns(this.hiddenChildSteps());
+    return next.value;
   }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
