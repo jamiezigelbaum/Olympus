@@ -33,6 +33,7 @@ out=$(ps axeww -o pid=,rss=,command= 2>/dev/null | awk -v host="$host" '
     if (cmd ~ /ps axeww|awk -v host=/) next;
     if (cmd ~ /litert-helper\\.js/) role = "embedding-model";
     else if (cmd ~ /model-worker\\.js/) role = "answer-model";
+    else if (base($3) == "llama-server") role = "private-model";
     else if (cmd ~ /embedding-drain\\.js/) role = "embedding-drain";
     else if (cmd ~ /secret-scan-worker\\.js/) role = "secret-scan";
     else if (cmd ~ /__relay-service-run/) role = "relay";

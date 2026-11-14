@@ -45,7 +45,7 @@ import { openEngineMcp, runLiveAccounts, type LiveSourceSpec } from './live-acco
 import { parseTimingAccounts, parseTimingSeedConfig, realTimingSeeds, type TimingAccounts } from './on-demand-seeds.ts';
 import { runOnDemandTiming, type OnDemandTimingResult } from './on-demand-timing.ts';
 import { openTimingDashboard, openTimingDiagnostics } from './on-demand-machine.ts';
-import { isInconclusive, openForSignIn, parseClientQuestions, runWebClients, WEB_CLIENT_IDS, type ClientQuestion, type WebClientId } from './web-clients.ts';
+import { isInconclusive, openForSignIn, parseClientQuestions, runWebClients, startBrowserScript, WEB_CLIENT_IDS, WEB_DEBUG_PORT, type ClientQuestion, type WebClientId } from './web-clients.ts';
 
 export type CanaryOs = 'linux' | 'macos';
 
@@ -221,7 +221,13 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
         if (sampler) {
           let dashboard: Awaited<ReturnType<typeof openFreshDashboard>> | undefined;
           try {
-            dashboard = await openFreshDashboard(machine, options.cdp ?? '127.0.0.1:9333');
+            // Without --cdp the page opens in the canary's Chrome on the Mac itself, which this run starts when it is not already up.
+            const cdp = options.cdp ?? `127.0.0.1:${WEB_DEBUG_PORT}`;
+            if (!options.cdp) {
+              const launched = await machine.exec(startBrowserScript('macos', WEB_DEBUG_PORT), { timeoutMs: 90_000 });
+              if (launched.code !== 0) throw new Error(`the canary browser did not start: ${(launched.stdout + launched.stderr).trim().slice(-300)}`);
+            }
+            dashboard = await openFreshDashboard(machine, cdp);
             checks.push(await splitRestartCheck(machine, { saveAnswerModel: (want) => dashboard!.saveAnswerModel!(want) }));
           } catch (error) {
             checks.push({ id: 'split.restart', title: 'Engine split: a model change restarts front and background while the page stays up', status: 'fail', detail: `could not run: ${error instanceof Error ? error.message : String(error)}` });
