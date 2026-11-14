@@ -139,8 +139,11 @@ export async function reconcileWorkerCaptures(input: {
       delete input.failures[source];
     } catch {
       // Not reconciled: the last status is no longer a fact about the helper.
+      // Said once when it starts failing, not on every 10 s pass (Sparta,
+      // 14 Nov: 53 lines in 10 minutes); the dashboard keeps showing it.
+      const first = !input.failures[source];
       input.failures[source] = true;
-      warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.');
+      if (first) warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.');
     }
   }));
 }

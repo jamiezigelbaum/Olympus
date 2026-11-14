@@ -591,6 +591,9 @@ describe('a capture helper that cannot be started is reported, not hidden by the
     expect(statuses.whatsapp).toEqual({ source: 'whatsapp', state: 'running' });
     expect(warnings).toEqual(['An Olympus messaging capture process needs attention. Check pairing and its approved scope.']);
     expect(warnings.join(' ')).not.toContain('Python');
+    // Still failing: said once, not on every pass.
+    await reconcileWorkerCaptures({ captures, statuses, failures, warn: (message) => warnings.push(message) });
+    expect(warnings).toHaveLength(1);
 
     telegramThrows = false;
     await reconcileWorkerCaptures({ captures, statuses, failures, warn: (message) => warnings.push(message) });

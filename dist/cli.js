@@ -224770,8 +224770,10 @@ async function reconcileWorkerCaptures(input) {
       input.statuses[source] = await capture.reconcile();
       delete input.failures[source];
     } catch {
+      const first = !input.failures[source];
       input.failures[source] = true;
-      warn("An Olympus messaging capture process needs attention. Check pairing and its approved scope.");
+      if (first)
+        warn("An Olympus messaging capture process needs attention. Check pairing and its approved scope.");
     }
   }));
 }
