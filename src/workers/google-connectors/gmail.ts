@@ -448,6 +448,16 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         ...(query ? { query } : {}),
       });
       const listed = page.messages.filter((message) => message.id);
+      // Numbers only (the query can name skipped senders and labels): what a pass asked for and got.
+      console.info(`[olympus:gmail-list] ${JSON.stringify({
+        leg: metadataLeg ? 'metadata' : 'content',
+        after_s: Number(/after:(\d+)/.exec(query ?? '')?.[1]) || null,
+        before_s: Number(/before:(\d+)/.exec(query ?? '')?.[1]) || null,
+        page: listPages,
+        listed: listed.length,
+        resumed_after: pageAfter !== undefined,
+        now_s: Math.floor(nowMs / 1_000),
+      })}`);
       const resumedAt = pageAfter ? listed.findIndex((message) => message.id === pageAfter) : -1;
       const baseSkip = resumedAt + 1;
       // The messages this pass handled on this page, in order: the cursor resumes after the last of them.
