@@ -255,6 +255,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         }
       }
     };
+    /** Every picker row named like the seed folder, with its segments (* pressed, (disabled)). */
+    const rowSegments = () => panel<string[][]>(`[...document.querySelectorAll('.frow')].filter(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(ON_DEMAND_FOLDER)}).map(row=>[(row.className||'')+'', ...[...row.querySelectorAll('[data-key^="picker:seg:"]')].map(e=>(e.getAttribute('data-key')||'').split(':').pop()+(e.getAttribute('aria-pressed')==='true'?'*':'')+(e.disabled||e.getAttribute('aria-disabled')==='true'?'(disabled)':''))])`, Array.isArray).catch(() => undefined);
     const pressedMode = async (): Promise<FolderMode> => {
       const mode = await panel<string>(`(() => {const row=${folderRow(ON_DEMAND_FOLDER)}; return row ? (row.querySelector('[aria-pressed=true][data-key^="picker:seg:"]')?.getAttribute('data-key')?.split(':').pop() || '') : null;})()`, value => typeof value === 'string');
       if (mode === undefined) throw new Error('folder mode could not be read');
@@ -277,18 +279,21 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         try {
           await until(async () => (await pressedMode()) === mode, `folder mode ${mode || 'inherited'} was not taken in the picker`, 15_000);
         } catch (error) {
-          const segs = await panel<string[]>(`(() => {const row=${folderRow(ON_DEMAND_FOLDER)}; return row ? [...row.querySelectorAll('[data-key^="picker:seg:"]')].map(e=>(e.getAttribute('data-key')||'').split(':').pop()+(e.getAttribute('aria-pressed')==='true'?'*':'')+(e.disabled||e.getAttribute('aria-disabled')==='true'?'(disabled)':'')) : null;})()`, Array.isArray).catch(() => undefined);
-          throw new Error(`folder mode ${mode || 'inherited'} was not taken in the picker (was ${before || 'inherited'}; segments ${JSON.stringify(segs)})`, { cause: error });
+          throw new Error(`folder mode ${mode || 'inherited'} was not taken in the picker (was ${before || 'inherited'}; segments ${JSON.stringify(await rowSegments())})`, { cause: error });
         }
         await clickKey('picker:save');
+        let unlocked = 0;
         await until(async () => {
-          await panel<boolean>(`(() => {const e=document.querySelector('[data-unlock-here]'); if(e && !e.disabled && (${visible})(e)){e.click();return true;}return false;})()`, Boolean);
+          if (await panel<boolean>(`(() => {const e=document.querySelector('[data-unlock-here]'); if(e && !e.disabled && (${visible})(e)){e.click();return true;}return false;})()`, Boolean)) unlocked += 1;
           return !!await panel<boolean>(`!document.querySelector('[data-key="picker:save"]') && !!document.querySelector('.srcrows, .source')`, Boolean);
         }, 'folder mode was not saved');
+        // What the page said once the picker closed (the saved line, or a refusal), UI words only.
+        const said = await panel<string[]>(`[...document.querySelectorAll('[role=status],[role=alert],.notice,.toast')].filter(${visible}).map(e=>(e.textContent||'').trim().slice(0,160)).filter(Boolean).slice(0,4)`, Array.isArray).catch(() => undefined);
         await openTimingFolder(folder);
         const saved = await pressedMode();
+        const shown = saved !== mode ? await rowSegments() : undefined;
         await clickKey('picker:cancel');
-        if (saved !== mode) throw new Error(`folder mode did not persist: expected ${mode || 'inherited'}, saw ${saved || 'inherited'}`);
+        if (saved !== mode) throw new Error(`folder mode did not persist: expected ${mode || 'inherited'}, saw ${saved || 'inherited'} (rows ${JSON.stringify(shown)}; after save the page said ${JSON.stringify(said)}; unlock pressed ${unlocked}x)`);
       },
       sync: async folder => {
         await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
