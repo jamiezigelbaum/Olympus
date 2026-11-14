@@ -3,7 +3,7 @@ import { DelphiClient } from './delphi.ts';
 import { noteLocalAgentAnswer } from './app-release-agent.ts';
 import { defaultDoctorHostProbe, runDoctor, type DoctorHostFacts } from './doctor.ts';
 import { checkOcrReadiness, type OcrReadiness } from './ocr-readiness.ts';
-import { EmailClient, type SourceAnswerSelectedItemOption, CONSULT_ASK_CLIENT_TIMEOUT_MS } from './email.ts';
+import { EmailClient, type SourceAnswerSelectedItemOption, type SourceIndexSearchResult, CONSULT_ASK_CLIENT_TIMEOUT_MS } from './email.ts';
 import { defaultConfig, type OlympusConfig } from './config.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
 import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
@@ -142,7 +142,7 @@ const ARGUS_PROFILE_ENUM = [
 
 const SOURCE_INDEX_SEARCH_PARAMS = {
   query: { type: 'string', required: true, description: 'Keyword query for local safe source-index search.' },
-  corpus_id: { type: 'string', required: true, description: 'Source-index corpus to search.' },
+  corpus_id: { type: 'string', description: 'Optional source-index corpus to search. Omit to search every source; the source filters below need it.' },
   retrieval_mode: { type: 'string', enum: ['keyword', 'hybrid'], description: 'Retrieval mode. Omit for hybrid when the corpus has current embeddings, else keyword; keyword forces exact/FTS.' },
   account: { type: 'string', description: 'Optional source account. Dropbox: omit or use personal; never a credential handle (dropbox.personal) or invented alias.' },
   folder_id: { type: 'string', description: 'Optional X bookmark folder id filter.' },
@@ -536,6 +536,9 @@ export const operations: Operation[] = [
     handler: async (ctx, params) => {
       assertNoUndeclaredSourceIndexSearchParams(params);
       const query = asString(params.query, 'query');
+      if (params.corpus_id === undefined || params.corpus_id === null || params.corpus_id === '') {
+        return searchEverySource(ctx, query, params);
+      }
       const corpusId = asSourceIndexSearchCorpusId(params.corpus_id, ctx.config);
       const retrievalMode = optionalRetrievalMode(params.retrieval_mode);
       const account = optionalSourceAccount(
@@ -970,6 +973,76 @@ export function operationToolSchema(
     required: Object.entries(operation.params)
       .filter(([, param]) => param.required)
       .map(([name]) => name),
+  };
+}
+
+// The narrowing parameters that only mean something inside one source.
+const SOURCE_SPECIFIC_SEARCH_PARAMS = ['account', 'folder_id', 'folder_name', 'approved_scope_key', 'chat_scope', 'trust_domain',
+  'conversation_id', 'sender_id', 'sender_label', 'participant_id', 'attachment_type', 'all_tiers'] as const;
+
+/**
+ * source_index_search without corpus_id: every configured source, one search
+ * per source (each covers that source's tiers), hits interleaved by rank. An
+ * agent that does not know the store ids still gets a search, not a refusal.
+ */
+async function searchEverySource(ctx: OperationContext, query: string, params: Record<string, unknown>): Promise<SourceIndexSearchResult & { corpus_ids: string[] }> {
+  const narrowed = SOURCE_SPECIFIC_SEARCH_PARAMS.filter((name) => params[name] !== undefined);
+  if (narrowed.length > 0) {
+    throw new OperationError('invalid_params', `${narrowed.join(', ')} ${narrowed.length === 1 ? 'needs' : 'need'} corpus_id: name the source to narrow.`);
+  }
+  const retrievalMode = optionalRetrievalMode(params.retrieval_mode);
+  const maxResults = optionalNumber(params.max_results, 'max_results');
+  const includeLocators = optionalBoolean(params.include_locators, 'include_locators');
+  const bySource = new Map<string, string>();
+  for (const corpus of publicSourceCorpusRegistry(ctx.config).list('search')) if (!bySource.has(corpus.sourceId)) bySource.set(corpus.sourceId, corpus.corpusId);
+  const settled = await Promise.allSettled([...bySource.values()].map((corpusId) => ctx.email.sourceIndexSearch({
+    query,
+    corpusId: corpusId as SourceIndexSearchCorpusId,
+    ...(retrievalMode !== undefined ? { retrievalMode } : {}),
+    ...(maxResults !== undefined ? { maxResults } : {}),
+    ...(includeLocators !== undefined ? { includeLocators } : {}),
+  })));
+  const results = settled.flatMap((outcome) => (outcome.status === 'fulfilled' ? [outcome.value] : []));
+  if (results.length === 0) {
+    const failed = settled.find((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+    throw failed?.reason ?? new OperationError('invalid_params', 'No source is configured for search.');
+  }
+  const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
+  const hits: unknown[] = [];
+  for (let rank = 0; hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
+    for (const result of results) if (result.hits[rank] !== undefined && hits.length < limit) hits.push(result.hits[rank]);
+  }
+  const domains = results.map((result) => result.policy.trust_domain);
+  const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
+  const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
+  const unsearched = settled.length - results.length;
+  return {
+    kind: 'source_index_search',
+    corpus_id: results[0]!.corpus_id,
+    corpus_ids: results.map((result) => result.corpus_id),
+    retrieval_source: 'local_index',
+    hits,
+    ...(secretLocations.length > 0 ? { secret_locations: secretLocations } : {}),
+    ...(notes.length > 0 || unsearched > 0
+      ? { coverage_notes: [...notes, ...(unsearched > 0 ? [`${unsearched} source${unsearched === 1 ? ' was' : 's were'} not searched this time.`] : [])] }
+      : {}),
+    audit: {
+      request_id: 'all-sources:connector-store-search',
+      retrieval_source: 'local_index',
+      queries_attempted: results.reduce((total, result) => total + result.audit.queries_attempted, 0),
+      searched_corpora: results.flatMap((result) => result.audit.searched_corpora ?? [result.corpus_id]),
+      metadata_hits: hits.length,
+      items_returned: hits.length,
+      latency_ms: Math.max(...results.map((result) => result.audit.latency_ms)),
+      raw_source_exposed: false,
+      source_text_returned: false,
+    },
+    policy: {
+      ...results[0]!.policy,
+      local_only: results.some((result) => result.policy.local_only),
+      trust_domain: domains.includes('secure_local') ? 'secure_local' : domains.includes('internal') ? 'internal' : 'public_safe',
+      ...(results.some((result) => result.policy.locators_exposed) ? { locators_exposed: true, locator_release: 'explicit_request' as const } : {}),
+    },
   };
 }
 

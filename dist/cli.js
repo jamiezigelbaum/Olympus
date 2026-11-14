@@ -137717,6 +137717,68 @@ function operationToolSchema(operation, options = {}) {
     required: Object.entries(operation.params).filter(([, param]) => param.required).map(([name]) => name)
   };
 }
+async function searchEverySource(ctx, query, params) {
+  const narrowed = SOURCE_SPECIFIC_SEARCH_PARAMS.filter((name) => params[name] !== undefined);
+  if (narrowed.length > 0) {
+    throw new OperationError("invalid_params", `${narrowed.join(", ")} ${narrowed.length === 1 ? "needs" : "need"} corpus_id: name the source to narrow.`);
+  }
+  const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
+  const maxResults = optionalNumber4(params.max_results, "max_results");
+  const includeLocators = optionalBoolean2(params.include_locators, "include_locators");
+  const bySource = new Map;
+  for (const corpus of publicSourceCorpusRegistry(ctx.config).list("search"))
+    if (!bySource.has(corpus.sourceId))
+      bySource.set(corpus.sourceId, corpus.corpusId);
+  const settled = await Promise.allSettled([...bySource.values()].map((corpusId) => ctx.email.sourceIndexSearch({
+    query,
+    corpusId,
+    ...retrievalMode !== undefined ? { retrievalMode } : {},
+    ...maxResults !== undefined ? { maxResults } : {},
+    ...includeLocators !== undefined ? { includeLocators } : {}
+  })));
+  const results = settled.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
+  if (results.length === 0) {
+    const failed = settled.find((outcome) => outcome.status === "rejected");
+    throw failed?.reason ?? new OperationError("invalid_params", "No source is configured for search.");
+  }
+  const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
+  const hits = [];
+  for (let rank = 0;hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
+    for (const result of results)
+      if (result.hits[rank] !== undefined && hits.length < limit)
+        hits.push(result.hits[rank]);
+  }
+  const domains = results.map((result) => result.policy.trust_domain);
+  const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
+  const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
+  const unsearched = settled.length - results.length;
+  return {
+    kind: "source_index_search",
+    corpus_id: results[0].corpus_id,
+    corpus_ids: results.map((result) => result.corpus_id),
+    retrieval_source: "local_index",
+    hits,
+    ...secretLocations.length > 0 ? { secret_locations: secretLocations } : {},
+    ...notes.length > 0 || unsearched > 0 ? { coverage_notes: [...notes, ...unsearched > 0 ? [`${unsearched} source${unsearched === 1 ? " was" : "s were"} not searched this time.`] : []] } : {},
+    audit: {
+      request_id: "all-sources:connector-store-search",
+      retrieval_source: "local_index",
+      queries_attempted: results.reduce((total, result) => total + result.audit.queries_attempted, 0),
+      searched_corpora: results.flatMap((result) => result.audit.searched_corpora ?? [result.corpus_id]),
+      metadata_hits: hits.length,
+      items_returned: hits.length,
+      latency_ms: Math.max(...results.map((result) => result.audit.latency_ms)),
+      raw_source_exposed: false,
+      source_text_returned: false
+    },
+    policy: {
+      ...results[0].policy,
+      local_only: results.some((result) => result.policy.local_only),
+      trust_domain: domains.includes("secure_local") ? "secure_local" : domains.includes("internal") ? "internal" : "public_safe",
+      ...results.some((result) => result.policy.locators_exposed) ? { locators_exposed: true, locator_release: "explicit_request" } : {}
+    }
+  };
+}
 function assertNoUndeclaredSourceIndexSearchParams(params) {
   assertNoUndeclaredParams(SOURCE_INDEX_SEARCH_PARAMS, params, "Source-index search");
 }
@@ -137875,7 +137937,7 @@ async function revalidateStdioSourceAnswer(ctx, result) {
     return result;
   return typeof ctx.email.revalidateSourceAnswer === "function" ? ctx.email.revalidateSourceAnswer(result) : withheldSourceAnswer(ANSWER_RELEASE_UNVERIFIED);
 }
-var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, ASK_ANONYMOUSLY_PARAMS, ARCHIVE_IMPORT_PARAMS, PRIVACY_ITEM_FIND_PARAMS, PRIVACY_ITEM_SET_PARAMS, operations;
+var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, ASK_ANONYMOUSLY_PARAMS, ARCHIVE_IMPORT_PARAMS, PRIVACY_ITEM_FIND_PARAMS, PRIVACY_ITEM_SET_PARAMS, operations, SOURCE_SPECIFIC_SEARCH_PARAMS;
 var init_operations = __esm(() => {
   init_release_manifest();
   init_app_release_agent();
@@ -137903,7 +137965,7 @@ var init_operations = __esm(() => {
   ];
   SOURCE_INDEX_SEARCH_PARAMS = {
     query: { type: "string", required: true, description: "Keyword query for local safe source-index search." },
-    corpus_id: { type: "string", required: true, description: "Source-index corpus to search." },
+    corpus_id: { type: "string", description: "Optional source-index corpus to search. Omit to search every source; the source filters below need it." },
     retrieval_mode: { type: "string", enum: ["keyword", "hybrid"], description: "Retrieval mode. Omit for hybrid when the corpus has current embeddings, else keyword; keyword forces exact/FTS." },
     account: { type: "string", description: "Optional source account. Dropbox: omit or use personal; never a credential handle (dropbox.personal) or invented alias." },
     folder_id: { type: "string", description: "Optional X bookmark folder id filter." },
@@ -138278,6 +138340,9 @@ var init_operations = __esm(() => {
       handler: async (ctx, params) => {
         assertNoUndeclaredSourceIndexSearchParams(params);
         const query = asString(params.query, "query");
+        if (params.corpus_id === undefined || params.corpus_id === null || params.corpus_id === "") {
+          return searchEverySource(ctx, query, params);
+        }
         const corpusId = asSourceIndexSearchCorpusId(params.corpus_id, ctx.config);
         const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
         const account = optionalSourceAccount(optionalNarrowingString(params.account, "account"), corpusId);
@@ -138564,6 +138629,20 @@ var init_operations = __esm(() => {
       cliHints: { name: "open remote" },
       handler: async (ctx, params) => openRemote(ctx, params)
     }
+  ];
+  SOURCE_SPECIFIC_SEARCH_PARAMS = [
+    "account",
+    "folder_id",
+    "folder_name",
+    "approved_scope_key",
+    "chat_scope",
+    "trust_domain",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "participant_id",
+    "attachment_type",
+    "all_tiers"
   ];
 });
 
