@@ -44222,7 +44222,18 @@ var init_local_index = __esm(() => {
     }
     async tierHiddenItemPksInTurns() {
       const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
-      return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false }));
+      return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
+    }
+    async hiddenChildItemPksInTurns() {
+      for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+        try {
+          return await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false });
+        } catch (error) {
+          if (!(error instanceof VisibilityChangedError))
+            throw error;
+        }
+      }
+      return runStepsInTurns(this.hiddenChildSteps());
     }
     tierLedgerHiddenItemPks() {
       return runSteps(this.tierLedgerHiddenSteps());

@@ -127,6 +127,8 @@ import {
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
   hiddenChildKeysSteps,
+  VISIBILITY_CHANGE_RETRIES,
+  VisibilityChangedError,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
   type VisibilityRead,
@@ -4357,9 +4359,30 @@ export class LocalConnectorStore {
     // Keep the counts' start-of-build semantics during continuous intake.
     // Search and embedding recheck served rows; requiring the whole lane to
     // stay unchanged across this full scan would prevent its memo ever filling.
-    // Not voided on a change: this set keeps its start-of-build semantics (above),
-    // and a change met inside one step is that step's to fail or hide.
-    return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false }));
+    // Not voided on a change: this set keeps its start-of-build semantics (above).
+    return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
+  }
+
+  /**
+   * The hidden children, read on the pool. A pooled read that meets a write
+   * to the store or its ledger throws VisibilityChangedError; on a store that
+   * is written all the time (a live Telegram import beside the judge) nearly
+   * every pooled build met one, so the embedding pass failed, its memo never
+   * filled and every retry started the full build again (Sparta rc.13,
+   * 14 Nov 2026: telegram.messages_embeddings failed every 1-3 minutes and
+   * kept the disk busy). After VISIBILITY_CHANGE_RETRIES such tries the build
+   * runs on this thread in turns, where a step's reads cannot be torn, and
+   * the memo it leaves makes the next build incremental.
+   */
+  private async hiddenChildItemPksInTurns(): Promise<number[]> {
+    for (let tries = 0; tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+      try {
+        return await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false });
+      } catch (error) {
+        if (!(error instanceof VisibilityChangedError)) throw error;
+      }
+    }
+    return runStepsInTurns(this.hiddenChildSteps());
   }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {

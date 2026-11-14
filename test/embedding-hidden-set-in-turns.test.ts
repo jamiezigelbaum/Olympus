@@ -10,6 +10,7 @@ import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { VISIBILITY_CHANGE_RETRIES, VisibilityChangedError, type VisibilityRead } from '../src/workers/connector-store/child-visibility.ts';
 import type { SourceEmbeddingInput } from '../src/workers/source-index/embeddings.ts';
 import {
   CORPORA,
@@ -131,6 +132,33 @@ describe('embedding pass over a tiered store', () => {
     const inTurns = await internal.missingEmbeddingItemIdsInTurns(fixture.cloud, 10);
     expect(inTurns).toEqual(sync);
     expect(inTurns).toEqual(['personal:garden']);
+  });
+
+  test('a store written during every pooled read still finishes its hidden-child set', async () => {
+    // Sparta rc.13 (14 Nov 2026): on a store a live import writes all the
+    // time, every pooled hidden-child read met a write and threw, so the
+    // embedding pass failed and restarted the full build every few minutes.
+    const { dir, cleanup } = tempDir();
+    const fixture = openTierFixture(dir, { embed: false });
+    cleanups.push(() => {
+      fixture.close();
+      cleanup();
+    });
+    const specs: FixtureSpec[] = [{ id: 'garden', name: 'garden.txt', text: 'Weekly notes about the vegetable garden.' }];
+    await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const internal = fixture.stores.internal!;
+    let pooled = 0;
+    let here = 0;
+    (internal as unknown as { hiddenChildReadSteps: () => Generator<VisibilityRead, number[], unknown> }).hiddenChildReadSteps = function* () {
+      yield {
+        here: () => { here += 1; return undefined; },
+        offThread: async () => { pooled += 1; throw new VisibilityChangedError(); },
+      };
+      return [];
+    };
+    expect(await internal.missingEmbeddingItemIdsInTurns(fixture.cloud, 10)).toEqual(['personal:garden']);
+    expect(pooled).toBe(VISIBILITY_CHANGE_RETRIES);
+    expect(here).toBe(1);
   });
 });
 
