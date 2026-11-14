@@ -51,7 +51,7 @@ test('the cleared-override fingerprint moves with overrides, undo requests and m
   ledger.clearOverride(a);
   expect(ledger.clearedOverrideFingerprint()).not.toBe(set);
   const cleared = ledger.clearedOverrideFingerprint();
-  ledger.recordRoutedPlacement(b, { ...decision, decidedBy: 'sniffer', reasons: ['content:sniffer:test:private'], state: 'moving' } as TierDecision, placement);
+  ledger.recordRoutedPlacement(b, { ...decision, decidedBy: 'sniffer', reasons: ['content:sniffer:test:private'], state: 'moving' } as unknown as TierDecision, placement);
   expect(ledger.clearedOverrideFingerprint()).not.toBe(cleared);
   ledger.close();
 });
