@@ -62,12 +62,12 @@ export function parsePids(text: string): { host?: number; front?: number } {
   return { ...(host ? { host } : {}), ...(front ? { front } : {}) };
 }
 
-/** A machine-side loop that asks the port's health every quarter second and writes one code a line: 200, 503s ("starting"), 503, 000 (refused) or other. */
+/** A machine-side loop that asks the port's health every quarter second and writes one code a line: 200, 503s (the host's "starting" or the front's "worker_restarting" gate answer), 503, 000 (refused) or other. */
 export function probeLoop(file: string, stopFile: string): string {
   return `touch ${quote(stopFile)}
 nohup sh -c ${quote(`while [ -e ${quote(stopFile)} ]; do
   body=$(curl -s --max-time 3 -w '\\n%{http_code}' http://127.0.0.1:${SPLIT_PORT}/v1/health 2>/dev/null); code=$(printf '%s' "$body" | tail -n 1)
-  case "$code" in 503) printf '%s' "$body" | grep -q '"starting"' && code=503s;; esac
+  case "$code" in 503) printf '%s' "$body" | grep -qE '"(starting|worker_restarting)"' && code=503s;; esac
   echo "$code" >> ${quote(file)}; sleep 0.25
 done`)} > /dev/null 2>&1 < /dev/null &`;
 }
