@@ -129,3 +129,17 @@ test('a new arrival asked about again (a sweep, a re-judge) keeps its place ahea
   store.enqueue({ ...question, subject: backlog, priority: -1 });
   expect(store.questionFor(backlog, 'content')?.priority).toBe(-1);
 });
+
+test('an answer that comes back as the pass is preempted is still applied', async () => {
+  const mail = source('mail-fixture');
+  mail.caughtUp();
+  mail.place('new-1');
+  const abort = new AbortController();
+  const model: AnalystModel = { async complete() {
+    abort.abort();
+    return recordingModel([]).complete({ prompt: '' } as never);
+  } };
+  const report = await runSnifferPass({ targets: [{ ledger: mail.ledger, sniffer: mail.sniffer }], lane, model, maxCallsPerPass: 3, signal: abort.signal });
+  expect(report).toMatchObject({ stoppedBy: 'preempted', calls: 1, verdictsApplied: 1 });
+  expect(mail.ledger.getCurrent(identity('mail-fixture', 'new-1'))?.state).not.toBe('pending');
+});

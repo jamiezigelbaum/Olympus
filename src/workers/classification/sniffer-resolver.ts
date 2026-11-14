@@ -858,7 +858,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         report.timing.slotWaitMs += waited;
         report.timing.modelMs += turnCallMs - waited;
       }
-      if (options.signal?.aborted) { report.stoppedBy = 'preempted'; return; }
+      // A preemption that lands after the model answered frees nothing: the
+      // call is over. Apply the answer, then stop (a dropped answer cost a
+      // new arrival its whole judgment on test-mac, 2026-11-14).
+      const preemptedAfterAnswer = options.signal?.aborted === true;
       consecutiveTransportFailures = 0;
       report.responseChars += text.length;
       const decoded = snifferCompletionVerdict({ text, decisionVerdict });
@@ -888,6 +891,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
           }
         }
       }
+      if (preemptedAfterAnswer) { report.stoppedBy = 'preempted'; return; }
     } finally {
       report.timing.dispatchMs += Math.max(0, monotonicNow() - turnStarted - turnCallMs);
     }

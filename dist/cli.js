@@ -142427,10 +142427,7 @@ async function runSnifferPass(options) {
           report.timing.slotWaitMs += waited;
           report.timing.modelMs += turnCallMs - waited;
         }
-        if (options.signal?.aborted) {
-          report.stoppedBy = "preempted";
-          return;
-        }
+        const preemptedAfterAnswer = options.signal?.aborted === true;
         consecutiveTransportFailures = 0;
         report.responseChars += text.length;
         const decoded = snifferCompletionVerdict({ text, decisionVerdict });
@@ -142460,6 +142457,10 @@ async function runSnifferPass(options) {
               apply(item, failSafe);
             }
           }
+        }
+        if (preemptedAfterAnswer) {
+          report.stoppedBy = "preempted";
+          return;
         }
       } finally {
         report.timing.dispatchMs += Math.max(0, monotonicNow() - turnStarted - turnCallMs);
