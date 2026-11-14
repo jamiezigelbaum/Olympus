@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn as spawnProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -24,7 +24,6 @@ import {
   restoreSchemaBackupsSince,
   retiredStateBackupPath,
   retireStatePath,
-  UPGRADE_COPY_SUFFIX,
   type BootProgress,
   type BootStepEvent,
 } from '../src/core/boot-progress.ts';
@@ -169,8 +168,7 @@ describe('schema updates back up the store first', () => {
     db.close();
     writeFileSync(join(env.HOME!, 'store.sqlite.pre-schema-x.bak'), 'not a copy');
     expect(preSchemaBackupsOf(path)).toEqual([`${path}.pre-schema-1.bak`]);
-    // This store's copy and the in-flight upgrade's own.
-    expect(removeSchemaBackupsSince(env, 0)).toBe(2);
+    expect(removeSchemaBackupsSince(env, 0)).toBe(1);
     expect(preSchemaBackupsOf(path)).toEqual([]);
   });
 
@@ -258,30 +256,46 @@ describe('with no worker upgrade in flight the boot leaves no copy', () => {
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     utimesSync(`${left}.pre-schema-6.bak`, weekAgo, weekAgo);
     recordSchemaBackup(env, { storeId: 'left', dbPath: left, backupPath: `${left}.pre-schema-6.bak` });
-    expect(removeRecordedSchemaBackups(env)).toBe(3);
+    expect(removeRecordedSchemaBackups(env)).toBe(2);
     expect(preSchemaBackupsOf(path)).toEqual([]);
     expect(preSchemaBackupsOf(left)).toEqual([]);
-    expect(existsSync(join(env.HOME!, 'other', `upgraded.sqlite${UPGRADE_COPY_SUFFIX}`))).toBe(false);
   });
 });
 
-describe('a commit and a restore touch only the product\'s own copies in the live data root', () => {
-  test('a recorded line naming a kept whole-root backup, or a file not named as a copy, is left alone', () => {
+describe('a commit and a restore touch only the product\'s own copies', () => {
+  test('a recorded line reached through a link, or naming a file not named as a copy, is left alone', () => {
     const env = home();
-    // A whole-root backup kept beside the live root, as an owner keeps one before an install.
+    // A whole-root backup an owner keeps beside the root, reached from inside it through a link.
     const kept = join(env.XDG_DATA_HOME!, 'openclaw', 'olympus.pre-06f7f555');
     mkdirSync(kept, { recursive: true });
     writeFileSync(join(kept, 'store.sqlite'), 'kept');
     writeFileSync(join(kept, 'store.sqlite.pre-schema-7.bak'), 'kept copy');
-    recordSchemaBackup(env, { storeId: 'kept', dbPath: join(kept, 'store.sqlite'), backupPath: join(kept, 'store.sqlite.pre-schema-7.bak') });
-    // Inside the root, but not a copy's name.
+    symlinkSync(kept, join(env.HOME!, 'linked'));
+    recordSchemaBackup(env, { storeId: 'kept', dbPath: join(env.HOME!, 'linked', 'store.sqlite'), backupPath: join(env.HOME!, 'linked', 'store.sqlite.pre-schema-7.bak') });
+    // A copy that is itself a link.
+    writeFileSync(join(env.HOME!, 'a.sqlite'), 'live');
+    symlinkSync(join(kept, 'store.sqlite'), join(env.HOME!, 'a.sqlite.pre-schema-2.bak'));
+    recordSchemaBackup(env, { storeId: 'a', dbPath: join(env.HOME!, 'a.sqlite'), backupPath: join(env.HOME!, 'a.sqlite.pre-schema-2.bak') });
+    // Not a copy's name.
     writeFileSync(join(env.HOME!, 'notes.sqlite'), 'live');
     recordSchemaBackup(env, { storeId: 'odd', dbPath: join(env.HOME!, 'notes'), backupPath: join(env.HOME!, 'notes.sqlite') });
-    expect(removeRecordedSchemaBackups(env)).toBe(1);
+    expect(removeRecordedSchemaBackups(env)).toBe(0);
     expect(restoreSchemaBackupsSince(env, 0)).toEqual([]);
     expect(readFileSync(join(kept, 'store.sqlite.pre-schema-7.bak'), 'utf8')).toBe('kept copy');
     expect(readFileSync(join(kept, 'store.sqlite'), 'utf8')).toBe('kept');
+    expect(readFileSync(join(env.HOME!, 'a.sqlite'), 'utf8')).toBe('live');
     expect(readFileSync(join(env.HOME!, 'notes.sqlite'), 'utf8')).toBe('live');
+  });
+
+  test('a store outside the data root is a copy like any other', () => {
+    const env = home();
+    const outside = join(env.XDG_DATA_HOME!, 'whatsapp-live');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'connector-store.db'), 'new');
+    writeFileSync(join(outside, 'connector-store.db.pre-schema-3.bak'), 'old');
+    recordSchemaBackup(env, { storeId: 'whatsapp', dbPath: join(outside, 'connector-store.db'), backupPath: join(outside, 'connector-store.db.pre-schema-3.bak') });
+    expect(restoreSchemaBackupsSince(env, 0)).toEqual(['whatsapp']);
+    expect(readFileSync(join(outside, 'connector-store.db'), 'utf8')).toBe('old');
   });
 });
 

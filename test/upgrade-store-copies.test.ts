@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utim
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { removeSchemaBackupsSince, restoreSchemaBackupsSince } from '../src/core/boot-progress.ts';
+import { upgradeInFlight } from './helpers/upgrade-in-flight.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../src/core/sqlite-migrations.ts';
 import { copyStoresBeforeUpgrade, olympusStoreFiles, upgradeCopyExists, upgradeCopyPath } from '../src/core/upgrade-store-copies.ts';
@@ -124,6 +125,7 @@ describe('the upgrade copies the stores before the new version starts', () => {
     const { env, root } = fixture();
     const store = join(root, 'tier-ledger.sqlite');
     storeAtV1(store, 2);
+    upgradeInFlight(env);
     copyStoresBeforeUpgrade(env, { bunBin: process.execPath });
     expect(upgradeCopyExists(store)).toBe(true);
     // The store has been written since: the copy protects nothing now.

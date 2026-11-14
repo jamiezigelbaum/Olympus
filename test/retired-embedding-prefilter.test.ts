@@ -102,7 +102,7 @@ test('worker moves both retired model locations and the retired ledger aside onc
   writeFileSync(retired[1]!.ledger, 'old state');
   const startedAt = Date.now() - 1_000;
   // A worker upgrade is in flight: only then is retired state moved aside rather than removed.
-  upgradeInFlight(process.env, f.dir);
+  upgradeInFlight(process.env);
   const installed = new InstalledTierClassification({ env: {} });
   const service = new TierSnifferService({ installed, classificationLedgerPath, lane: BUILT_IN_SNIFFER_LANE,
     stores: () => [{ dbPath: join(f.dir, 'items.sqlite') }], modelAvailable: () => false,

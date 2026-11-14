@@ -12,7 +12,7 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
-import { bootProgressLine, readBootProgress, readFrontProgress, removeRecordedSchemaBackups, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
+import { bootProgressLine, clearWorkerUpgradeInFlight, markWorkerUpgradeInFlight, readBootProgress, readFrontProgress, removeRecordedSchemaBackups, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, startupCapMs, type EngineHeartbeat } from './engine-heartbeat.ts';
 import { copyStoresBeforeUpgrade, olympusStoreBytes } from './upgrade-store-copies.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
@@ -792,6 +792,9 @@ function copyStoresForUpgrade(
     runWorkerServiceAction('stop', serviceActionOptions(options));
   }
   try {
+    // From here until it commits or rolls back, the new version's boot copies
+    // what this did not (a store outside the data root) and keeps retired state.
+    markWorkerUpgradeInFlight(lifecycleEnv(options), readTransaction(options)?.started_at ?? new Date().toISOString());
     const copied = copyStoresBeforeUpgrade(lifecycleEnv(options), {
       ...(options.bunBin ? { bunBin: options.bunBin } : {}),
       log: progressLine,
@@ -809,8 +812,11 @@ function copyStoresForUpgrade(
 function removeUpgradeBackups(options: WorkerLifecycleOptions & { homeDir: string }): void {
   const transaction = readTransaction(options);
   if (!transaction) return;
+  const env = lifecycleEnv(options);
   try {
-    removeRecordedSchemaBackups(lifecycleEnv(options));
+    // Cleared first: a store the engine opens from here on takes no copy.
+    clearWorkerUpgradeInFlight(env);
+    removeRecordedSchemaBackups(env);
   } catch {
     // A copy left behind costs disk, not correctness.
   }
@@ -964,6 +970,11 @@ function readTransaction(options: { homeDir?: string }): LifecycleTransactionV1 
 }
 
 function clearTransaction(options: { homeDir?: string }): void {
+  try {
+    clearWorkerUpgradeInFlight(lifecycleEnv({ ...options, homeDir: validateHomeDir(options.homeDir ?? homedir()) }));
+  } catch {
+    // A mark left behind costs a copy at a later boot, which the next commit removes.
+  }
   const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir()));
   assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir()), paths);
   for (const path of [paths.unitBackup, paths.envBackup, paths.launcherBackup, paths.transaction]) {

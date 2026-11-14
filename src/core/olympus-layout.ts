@@ -96,6 +96,8 @@ export const SHARED_DATA_FILES = {
   // The engine's heartbeat, written by a thread its loop cannot hold (core/engine-heartbeat.ts).
   'engine-heartbeat': 'engine-heartbeat.json',
   'schema-backups': 'schema-backups.jsonl',
+  // Written by `olympus worker upgrade` from its store copy until it commits or rolls back (core/boot-progress.ts).
+  'upgrade-in-flight': 'upgrade-in-flight.json',
   models: 'models',
   'built-in-embedding': 'models/built-in-embedding',
   'built-in-reasoning': 'models/built-in-reasoning',

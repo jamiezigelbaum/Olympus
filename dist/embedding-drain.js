@@ -653,6 +653,7 @@ var SHARED_DATA_FILES = {
   "front-progress": "front-progress.json",
   "engine-heartbeat": "engine-heartbeat.json",
   "schema-backups": "schema-backups.jsonl",
+  "upgrade-in-flight": "upgrade-in-flight.json",
   models: "models",
   "built-in-embedding": "models/built-in-embedding",
   "built-in-reasoning": "models/built-in-reasoning",
@@ -2315,7 +2316,7 @@ function withSqliteFiles(path) {
 
 // scripts/source-embedding-drain.ts
 import { createHash as createHash13 } from "node:crypto";
-import { existsSync as existsSync23, lstatSync as lstatSync11, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync12, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname25, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
@@ -10187,8 +10188,8 @@ import { chmodSync as chmodSync4, closeSync as closeSync8, existsSync as existsS
 import { dirname as dirname14 } from "node:path";
 
 // src/core/boot-progress.ts
-import { appendFileSync, existsSync as existsSync11, mkdirSync as mkdirSync8, readdirSync as readdirSync2, readFileSync as readFileSync14, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync8, utimesSync } from "node:fs";
-import { basename as basename3, dirname as dirname13, isAbsolute as isAbsolute9, join as join16, relative as relative5, resolve as resolve6 } from "node:path";
+import { appendFileSync, existsSync as existsSync11, lstatSync as lstatSync7, mkdirSync as mkdirSync8, readdirSync as readdirSync2, readFileSync as readFileSync14, realpathSync as realpathSync4, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync8, utimesSync } from "node:fs";
+import { basename as basename3, dirname as dirname13, isAbsolute as isAbsolute9, join as join16, resolve as resolve6 } from "node:path";
 var WRITE_INTERVAL_MS = 1000;
 var current2;
 var front;
@@ -10249,7 +10250,7 @@ function bootProgressPath(env) {
 }
 var UPGRADE_COPY_SUFFIX = ".pre-schema-upgrade.bak";
 function workerUpgradeInFlight(env) {
-  return schemaBackups(env).some((entry) => entry.backupPath.endsWith(UPGRADE_COPY_SUFFIX) && existsSync11(entry.backupPath));
+  return existsSync11(sharedDataPath("upgrade-in-flight", env));
 }
 function preSchemaBackupPath(dbPath, version) {
   return `${dbPath}.pre-schema-${version}.bak`;
@@ -10282,37 +10283,6 @@ function recordSchemaBackup(env, entry) {
   mkdirSync8(dirname13(path), { recursive: true, mode: 448 });
   appendFileSync(path, `${JSON.stringify(entry)}
 `, { mode: 384 });
-}
-function schemaBackups(env, owned = true) {
-  let text;
-  try {
-    text = readFileSync14(sharedDataPath("schema-backups", env), "utf8");
-  } catch {
-    return [];
-  }
-  const entries = new Map;
-  for (const line of text.split(`
-`)) {
-    if (!line.trim())
-      continue;
-    try {
-      const entry = JSON.parse(line);
-      if (typeof entry.storeId === "string" && typeof entry.dbPath === "string" && typeof entry.backupPath === "string" && (!owned || ownedBackup(env, entry.dbPath, entry.backupPath))) {
-        entries.set(entry.backupPath, entry);
-      }
-    } catch {}
-  }
-  return [...entries.values()];
-}
-var BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade)\.bak$/;
-function ownedBackup(env, dbPath, backupPath) {
-  if (!isAbsolute9(dbPath) || !isAbsolute9(backupPath))
-    return false;
-  const suffix = backupPath.slice(dbPath.length);
-  if (!backupPath.startsWith(dbPath) || !BACKUP_NAME.test(suffix) || suffix !== BACKUP_NAME.exec(suffix)[0])
-    return false;
-  const inside = relative5(resolve6(olympusDataRoot(env)), resolve6(backupPath));
-  return inside !== "" && !inside.startsWith("..") && !isAbsolute9(inside);
 }
 
 // src/core/engine-heartbeat.ts
@@ -10362,7 +10332,7 @@ function setEngineStep(step) {
 var STARTUP_CAP_BASE_MS = 30 * 60000;
 
 // src/core/upgrade-store-copies.ts
-import { chmodSync as chmodSync3, closeSync as closeSync7, fsyncSync as fsyncSync2, lstatSync as lstatSync7, openSync as openSync7, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9, utimesSync as utimesSync2 } from "node:fs";
+import { chmodSync as chmodSync3, closeSync as closeSync7, fsyncSync as fsyncSync2, lstatSync as lstatSync8, openSync as openSync7, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9, utimesSync as utimesSync2 } from "node:fs";
 var SKIPPED_FOLDERS = new Set(["models", "backup-staging"]);
 var SPACE_MARGIN_BYTES = 1024 ** 3;
 function upgradeCopyPath(dbPath) {
@@ -18594,7 +18564,7 @@ function hasImmutableAccountLabel(id) {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID7 } from "node:crypto";
-import { existsSync as existsSync21, lstatSync as lstatSync10, mkdirSync as mkdirSync13, statSync as statSync15, statfsSync as statfsSync3 } from "node:fs";
+import { existsSync as existsSync21, lstatSync as lstatSync11, mkdirSync as mkdirSync13, statSync as statSync15, statfsSync as statfsSync3 } from "node:fs";
 import { dirname as dirname22 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
@@ -18606,11 +18576,11 @@ import {
   existsSync as existsSync17,
   fsyncSync as fsyncSync3,
   mkdirSync as mkdirSync11,
-  lstatSync as lstatSync8,
+  lstatSync as lstatSync9,
   openSync as openSync11,
   readFileSync as readFileSync16,
   readdirSync as readdirSync4,
-  realpathSync as realpathSync5,
+  realpathSync as realpathSync6,
   renameSync as renameSync8,
   rmSync as rmSync9,
   rmdirSync,
@@ -18660,8 +18630,8 @@ function olympusDataDir(env = process.env) {
 }
 
 // src/core/store-identity.ts
-import { existsSync as existsSync16, realpathSync as realpathSync4, statSync as statSync13 } from "node:fs";
-import { basename as basename4, dirname as dirname17, isAbsolute as isAbsolute10, join as join18, relative as relative6, resolve as resolve7, sep as sep5 } from "node:path";
+import { existsSync as existsSync16, realpathSync as realpathSync5, statSync as statSync13 } from "node:fs";
+import { basename as basename4, dirname as dirname17, isAbsolute as isAbsolute10, join as join18, relative as relative5, resolve as resolve7, sep as sep5 } from "node:path";
 var LAYOUTS2 = ["folder", "legacy"];
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
@@ -18674,12 +18644,12 @@ function layoutPath(identity, layout, env) {
 }
 function storePathKey(path) {
   try {
-    return realpathSync4(path);
+    return realpathSync5(path);
   } catch {}
   const folder = dirname17(path);
   let real = resolve7(folder);
   try {
-    real = realpathSync4(folder);
+    real = realpathSync5(folder);
   } catch {}
   return join18(real, basename4(path));
 }
@@ -18687,7 +18657,7 @@ function registryKey(env = process.env) {
   const path = sourceRegistryPath(env);
   let folder = resolve7(dirname17(path));
   try {
-    folder = realpathSync4.native(folder);
+    folder = realpathSync5.native(folder);
   } catch {}
   return join18(folder, basename4(path));
 }
@@ -18780,13 +18750,13 @@ function storePlacementView(env = process.env) {
     try {
       roots.add(resolve7(accountFoldersRoot(env)));
       if (root !== undefined)
-        roots.add(join18(realpathSync4(root), ACCOUNT_FOLDERS_DIR));
+        roots.add(join18(realpathSync5(root), ACCOUNT_FOLDERS_DIR));
     } catch {}
     return [...roots];
   };
   const folderPlace = (path) => {
     for (const folders of folderRoots()) {
-      const inside = relative6(folders, path);
+      const inside = relative5(folders, path);
       if (inside.startsWith("..") || isAbsolute10(inside))
         continue;
       const [sourceId, slot, stores, file, ...rest] = inside.split(sep5);
@@ -18907,7 +18877,7 @@ function isMediaCachePath(path, sha256, dir) {
   if (dir !== undefined && dirname18(path) !== resolve8(dir))
     return false;
   try {
-    const stat = lstatSync8(path);
+    const stat = lstatSync9(path);
     if (!stat.isFile())
       return false;
   } catch {}
@@ -18917,7 +18887,7 @@ function mediaHolderName(holder) {
   if (holder.startsWith("staging:") || holder.startsWith("memory:"))
     return holder;
   try {
-    return realpathSync5(holder);
+    return realpathSync6(holder);
   } catch {
     return resolve8(holder);
   }
@@ -19823,7 +19793,7 @@ import { existsSync as existsSync20 } from "node:fs";
 // src/core/app-release-log.ts
 import { Database as Database5 } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync8, existsSync as existsSync19, lstatSync as lstatSync9, mkdirSync as mkdirSync12 } from "node:fs";
+import { chmodSync as chmodSync8, existsSync as existsSync19, lstatSync as lstatSync10, mkdirSync as mkdirSync12 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { dirname as dirname21, isAbsolute as isAbsolute13, join as join21 } from "node:path";
 
@@ -20150,12 +20120,12 @@ function hardenPrivatePath(dbPath) {
     throw new Error("The AI apps log must live inside a dedicated private directory.");
   }
   mkdirSync12(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync9(leafDir);
+  const dirStat = lstatSync10(leafDir);
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
     throw new Error("The AI apps log must live in a real private directory.");
   chmodSync8(leafDir, 448);
   if (existsSync19(dbPath)) {
-    const fileStat = lstatSync9(dbPath);
+    const fileStat = lstatSync10(dbPath);
     if (fileStat.isSymbolicLink() || !fileStat.isFile())
       throw new Error("The AI apps log must be a regular file, not a symlink.");
   }
@@ -21898,7 +21868,7 @@ class LocalConnectorStore {
       throw new Error("Connector store read-only mode requires an existing database path.");
     }
     if (options.readOnly === true) {
-      const stat = lstatSync10(this.dbPath);
+      const stat = lstatSync11(this.dbPath);
       if (!stat.isFile() || stat.isSymbolicLink()) {
         throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
       }
@@ -32717,7 +32687,7 @@ class RemoteLiteRtEmbedder {
 }
 
 // src/workers/source-index/built-in-embedding/runtime.ts
-import { realpathSync as realpathSync6 } from "node:fs";
+import { realpathSync as realpathSync7 } from "node:fs";
 import { createRequire as createRequire5 } from "node:module";
 import { join as join23, sep as sep6 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
@@ -32771,8 +32741,8 @@ function requireOnnxRuntimeFromPack(runtimeDir) {
   let resolved;
   const requireFromPack = createRequire5(join23(runtimeDir, "olympus-runtime.json"));
   try {
-    root = realpathSync6(join23(runtimeDir, "node_modules"));
-    resolved = realpathSync6(requireFromPack.resolve("onnxruntime-node"));
+    root = realpathSync7(join23(runtimeDir, "node_modules"));
+    resolved = realpathSync7(requireFromPack.resolve("onnxruntime-node"));
   } catch {
     throw missing();
   }
@@ -36403,7 +36373,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   }
   const directory = dirname25(readinessPath);
   mkdirSync14(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync11(directory);
+  const parent = lstatSync12(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }

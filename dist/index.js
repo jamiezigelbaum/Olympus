@@ -2723,6 +2723,7 @@ var init_olympus_layout = __esm(() => {
     "front-progress": "front-progress.json",
     "engine-heartbeat": "engine-heartbeat.json",
     "schema-backups": "schema-backups.jsonl",
+    "upgrade-in-flight": "upgrade-in-flight.json",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
     "built-in-reasoning": "models/built-in-reasoning",

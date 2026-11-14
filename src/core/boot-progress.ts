@@ -13,10 +13,10 @@
 // The store backups each schema update takes are recorded beside it, so a
 // failed upgrade can put them back before the previous version starts.
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
-import { olympusDataRoot, sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
 export const BOOT_PROGRESS_SCHEMA = 'olympus.boot-progress.v1';
 
@@ -249,16 +249,26 @@ function bootProgressPath(env: LayoutEnv): string {
 export const UPGRADE_COPY_SUFFIX = '.pre-schema-upgrade.bak';
 
 /**
- * Whether a worker upgrade is in flight: its copies are on disk, recorded,
- * until it commits or rolls back. Only then can a copy the boot takes be put
- * back by anything; otherwise (the upgrade committed, or the version came by
- * another way) a boot copy is never restored and never removed (rc.13's
- * success leg: stores the engine first opened after the commit each left a
- * backup). So the boot copies, and moves retired state aside, only while one
- * is in flight.
+ * Whether a worker upgrade is in flight: `olympus worker upgrade` marks it
+ * before it copies the stores and clears it when it commits or rolls back.
+ * Only then can a copy the boot takes be put back by anything; otherwise (the
+ * upgrade committed, or the version came by another way) a boot copy is never
+ * restored and never removed (rc.13's success leg: stores the engine first
+ * opened after the commit each left a backup). So the boot copies, and moves
+ * retired state aside, only while one is in flight.
  */
 export function workerUpgradeInFlight(env: LayoutEnv): boolean {
-  return schemaBackups(env).some((entry) => entry.backupPath.endsWith(UPGRADE_COPY_SUFFIX) && existsSync(entry.backupPath));
+  return existsSync(sharedDataPath('upgrade-in-flight', env));
+}
+
+export function markWorkerUpgradeInFlight(env: LayoutEnv, startedAt: string): void {
+  const path = sharedDataPath('upgrade-in-flight', env);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writePrivateFileAtomicSync(path, `${JSON.stringify({ started_at: startedAt })}\n`);
+}
+
+export function clearWorkerUpgradeInFlight(env: LayoutEnv): void {
+  rmSync(sharedDataPath('upgrade-in-flight', env), { force: true });
 }
 
 /** `<db file>.pre-schema-<version>.bak`: a store as it was before its schema update. */
@@ -370,7 +380,7 @@ function schemaBackups(env: LayoutEnv, owned = true): SchemaBackupEntry[] {
     try {
       const entry = JSON.parse(line) as Partial<SchemaBackupEntry>;
       if (typeof entry.storeId === 'string' && typeof entry.dbPath === 'string' && typeof entry.backupPath === 'string'
-        && (!owned || ownedBackup(env, entry.dbPath, entry.backupPath))) {
+        && (!owned || ownedBackup(entry.dbPath, entry.backupPath))) {
         entries.set(entry.backupPath, entry as SchemaBackupEntry);
       }
     } catch {
@@ -384,17 +394,35 @@ function schemaBackups(env: LayoutEnv, owned = true): SchemaBackupEntry[] {
 const BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade)\.bak$/;
 
 /**
- * Whether a recorded copy is one this product made of a store in the live data
- * root: named exactly `<store>` plus a copy suffix, beside its store, inside
- * the root. A line naming anything else (a whole-root backup kept beside the
- * root, a path outside it) is never restored or removed, whatever wrote it.
+ * Whether a recorded copy is one this product made: named exactly its store
+ * plus a copy suffix, beside that store with no link in between, and itself
+ * a file or folder, not a link. Records are written only as a copy is taken,
+ * naming the live store's own path, so a whole-root backup an owner keeps
+ * beside the root is never named; a line naming anything else is ignored by
+ * the restore and the commit. Stores outside the data root (a legacy WhatsApp
+ * store, a relocated Telegram one) are copies like any other.
  */
-function ownedBackup(env: LayoutEnv, dbPath: string, backupPath: string): boolean {
-  if (!isAbsolute(dbPath) || !isAbsolute(backupPath)) return false;
+function ownedBackup(dbPath: string, backupPath: string): boolean {
+  if (!ownedBackupName(dbPath, backupPath)) return false;
+  try {
+    const stat = lstatSync(backupPath);
+    return !stat.isSymbolicLink() && (stat.isFile() || stat.isDirectory());
+  } catch {
+    // Gone already: nothing to restore or remove, and the record keeps the line for a forget.
+    return false;
+  }
+}
+
+/** The name and place half of ownedBackup: a copy's own name, beside its store, no link in between. */
+function ownedBackupName(dbPath: string, backupPath: string): boolean {
+  if (!isAbsolute(dbPath) || !isAbsolute(backupPath) || !backupPath.startsWith(dbPath)) return false;
   const suffix = backupPath.slice(dbPath.length);
-  if (!backupPath.startsWith(dbPath) || !BACKUP_NAME.test(suffix) || suffix !== BACKUP_NAME.exec(suffix)![0]) return false;
-  const inside = relative(resolve(olympusDataRoot(env)), resolve(backupPath));
-  return inside !== '' && !inside.startsWith('..') && !isAbsolute(inside);
+  if (BACKUP_NAME.exec(suffix)?.[0] !== suffix) return false;
+  try {
+    return realpathSync(dirname(backupPath)) === resolve(dirname(backupPath));
+  } catch {
+    return false;
+  }
 }
 
 function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
@@ -456,7 +484,9 @@ export function removeSchemaBackupsSince(env: LayoutEnv, sinceMs: number): numbe
 }
 
 function removeAbandonedCopiesOfRecorded(env: LayoutEnv): void {
-  for (const backup of new Set(schemaBackups(env).map((entry) => entry.backupPath))) removeAbandonedBackupCopies(backup);
+  // A killed copy's partial outlives its copy, so only the name and place are checked here.
+  const named = schemaBackups(env, false).filter((entry) => ownedBackupName(entry.dbPath, entry.backupPath));
+  for (const backup of new Set(named.map((entry) => entry.backupPath))) removeAbandonedBackupCopies(backup);
 }
 
 /**
