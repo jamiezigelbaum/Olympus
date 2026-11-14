@@ -307,7 +307,9 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         const shown = saved !== mode ? await rowSegments() : undefined;
         const everyFrame = saved !== mode ? await panelAll<string>(`(() => {const row=[...document.querySelectorAll('.frow:not(.jump)')].find(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(ON_DEMAND_FOLDER)}); return row ? (row.querySelector('[aria-pressed=true][data-key^="picker:seg:"]')?.getAttribute('data-key') || 'none') : undefined;})()`, (v) => typeof v === 'string') : [];
         await clickKey('picker:cancel');
-        if (saved !== mode) throw new Error(`folder mode did not persist: expected ${mode || 'inherited'}, saw ${saved || 'inherited'} (rows ${JSON.stringify(shown)}; after save the page said ${JSON.stringify(said)}; unlock pressed ${unlocked}x; save before click ${JSON.stringify(beforeSave)}; pressed per frame ${JSON.stringify(everyFrame)})`);
+        // What the engine stored for the seed folder (test machine, test account: the folder's saved rule only).
+        const stored = saved !== mode ? await machine.exec(`for f in $(find "$HOME" -name file-source-scopes.json 2>/dev/null | head -3); do echo "$f"; grep -i -B1 -A3 ${JSON.stringify(JSON.stringify(ON_DEMAND_FOLDER.toLowerCase()).slice(1, -1))} "$f" | tr -s ' \n' ' ' | cut -c1-600; echo; done`, { timeoutMs: 30_000 }).then(r => r.stdout.trim().slice(0, 1500)).catch((e: unknown) => `unread: ${String(e).slice(0, 120)}`) : '';
+        if (saved !== mode) throw new Error(`folder mode did not persist: expected ${mode || 'inherited'}, saw ${saved || 'inherited'} (rows ${JSON.stringify(shown)}; after save the page said ${JSON.stringify(said)}; unlock pressed ${unlocked}x; save before click ${JSON.stringify(beforeSave)}; pressed per frame ${JSON.stringify(everyFrame)}; stored ${JSON.stringify(stored)})`);
       },
       sync: async folder => {
         await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
