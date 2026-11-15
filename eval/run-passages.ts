@@ -57,6 +57,15 @@ export interface PassageAnswer {
   outcome: 'answered' | 'failed'; cited?: boolean; coverage?: number; right?: boolean; answerMs?: number; code?: string;
   /** How the citation matched: the expected item itself, or another copy of it (grade.ts citedCopyOfExpected). */
   citedBy?: 'item' | 'copy';
+  /** The answer's length in characters and its number of citations (counts only). */
+  answerChars?: number; citations?: number;
+  /**
+   * For an expected item seated in the fitted prompt: its text in characters
+   * as packed and as fitted, and whether the packed text held the expected
+   * passage. Packed without it, the pack chose other parts of the item;
+   * packed with it and fitted without it, the fit cut it.
+   */
+  seat?: { packedChars: number; fittedChars: number; passageInPacked: boolean };
 }
 export interface PassageSummary {
   /** Questions scored; a degraded question is counted in `degraded` instead. */
@@ -235,6 +244,8 @@ export async function runPassageEval(input: {
       'compact', new Map(original.candidates.map((candidate, index) => [candidate.provenance, detail.candidateExtractionGapIndexes?.[index] ?? []])));
     let objectRank: number | null = null;
     let passageRank: number | null = null;
+    const seatText = (seat: EvidencePack['candidates'][number]) => [...seat.chunks, ...(seat.facts ?? []).map(fact => fact.claim), ...(seat.tables ?? []).flatMap(table => [table.caption ?? '', ...table.columns, ...table.rows.map(row => row.join(' '))])].join('\n');
+    let seated: { packedChars: number; fittedChars: number; passageInPacked: boolean } | undefined;
     for (const [index, seat] of pack.candidates.entries()) {
       const originalIndex = original.candidates.findIndex(candidate => candidate.provenance === seat.provenance);
       const corpusId = detail.candidateCorpusIds[originalIndex];
@@ -242,7 +253,12 @@ export async function runPassageEval(input: {
         const identities = [expected, ...(expected.alternates ?? [])];
         if (!identities.some(item => item.corpusId === corpusId && item.providerItemId === seat.provenance.sourceItem.providerItemId)) continue;
         objectRank ??= index + 1;
-        if (expected.quote && passageContainsQuote([...seat.chunks, ...(seat.facts ?? []).map(fact => fact.claim), ...(seat.tables ?? []).flatMap(table => [table.caption ?? '', ...table.columns, ...table.rows.map(row => row.join(' '))])].join('\n'), expected.quote)) passageRank ??= index + 1;
+        if (!seated) {
+          const packed = original.candidates[originalIndex];
+          seated = { packedChars: packed ? seatText(packed).length : 0, fittedChars: seatText(seat).length,
+            passageInPacked: Boolean(packed && expected.quote && passageContainsQuote(seatText(packed), expected.quote)) };
+        }
+        if (expected.quote && passageContainsQuote(seatText(seat), expected.quote)) passageRank ??= index + 1;
       }
     }
     // Retrieval and fitting end here; answer and diagnostic calls have separate timings.
@@ -254,7 +270,7 @@ export async function runPassageEval(input: {
       try {
         const result = await input.answer(question, pack);
         const answerMs = performance.now() - answerStarted;
-        answer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs };
+        answer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs, answerChars: result.answer.length, citations: result.citations.length, ...(seated ? { seat: seated } : {}) };
       } catch (error) { answer = { outcome: 'failed', code: failureCode(error) ?? 'UNKNOWN' }; }
     }
     const expectedStores = (question.expectedEvidence ?? []).map(e => stores.get(e.corpusId));

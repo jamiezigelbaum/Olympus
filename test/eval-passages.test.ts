@@ -234,7 +234,8 @@ test('answer grading requires an expected citation and at least four of five con
     ] as const) {
       const receipt = await runPassageEval({ dataset: answerDataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
         answer: async () => { await clock.advance(17); return answered(text, cited); } });
-      expect(receipt.questions![0]!.answer).toEqual({ outcome: 'answered', cited, coverage, right, answerMs: 17, ...(cited ? { citedBy: 'item' } : {}) });
+      expect(receipt.questions![0]!.answer).toMatchObject({ outcome: 'answered', cited, coverage, right, answerMs: 17, answerChars: text.length, citations: cited ? 1 : 0, ...(cited ? { citedBy: 'item' } : {}) });
+      expect(receipt.questions![0]!.answer!.seat).toEqual({ packedChars: passage.length, fittedChars: passage.length, passageInPacked: false });
     }
   } finally { now.mockRestore(); }
 });
