@@ -181,13 +181,21 @@ export class CommandDriver {
   };
 
   async provision(args: { runId: string; candidateDir: string; workdir: string; timeoutMs: number }): Promise<Machine> {
+    // A driver names a failure's cause on lines with "] problem: ": the run's summary carries them.
+    const problems: string[] = [];
     const result = await run(
       [...this.options.argv, 'provision', '--run-id', args.runId, '--candidate', args.candidateDir, '--workdir', args.workdir],
-      { timeoutMs: args.timeoutMs, onStderr: this.log },
+      { timeoutMs: args.timeoutMs, onStderr: (text) => {
+        for (const line of text.split(/[\r\n]+/)) {
+          const at = line.indexOf('] problem: ');
+          if (at >= 0 && problems.length < 5) problems.push(line.slice(at + '] problem: '.length).trim());
+        }
+        this.log(text);
+      } },
     );
     if (result.code !== 0) {
       // A failed provision may have left a machine behind; the caller destroys it by run id.
-      throw new Error(`driver provision failed (exit ${result.code}${result.timedOut ? ', timed out' : ''})`);
+      throw new Error(`driver provision failed (exit ${result.code}${result.timedOut ? ', timed out' : ''})${problems.length ? `: ${problems.join('; ')}` : ''}`);
     }
     return { ...this.machineFor(parseProvisionLine(result.stdout)), disposable: true };
   }
