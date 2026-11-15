@@ -14508,6 +14508,20 @@ function tryDataOwnerLock(env = process.env) {
     throw error;
   }
 }
+function withDataOwnerLock(env, run, options = {}) {
+  const lock = holdDataOwnerLock(env, options);
+  let result;
+  try {
+    result = run();
+  } catch (error) {
+    lock.release();
+    throw error;
+  }
+  if (isPromiseLike(result))
+    return Promise.resolve(result).finally(() => lock.release());
+  lock.release();
+  return result;
+}
 function takeWorkerDataOwnerLock(env = process.env, options = {}) {
   if (options.engineRole === "front")
     return;
@@ -14519,6 +14533,9 @@ function takeWorkerDataOwnerLock(env = process.env, options = {}) {
     (options.report ?? console.error)(`Another Olympus already owns its data at ${error.root}, so this worker is exiting. Stop the running one first (${STOP_OLYMPUS_HINT}).`);
     return (options.exit ?? ((code) => process.exit(code)))(WORKER_DATA_OWNER_BUSY_EXIT_CODE);
   }
+}
+function isPromiseLike(value) {
+  return typeof value === "object" && value !== null && typeof value.then === "function";
 }
 var runtimeRequire2, LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8, O_CLOEXEC, STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", WORKER_OWNER_LOCK_WAIT_MS = 1e4, WORKER_DATA_OWNER_BUSY_EXIT_CODE = 73, DataOwnerBusyError, library;
 var init_data_owner_lock = __esm(() => {
@@ -123902,24 +123919,37 @@ var init_first_run_privacy = __esm(() => {
 });
 
 // src/core/engine-store-copies.ts
-function copyEngineStores(env, options = {}) {
-  markWorkerUpgradeInFlight(env, new Date().toISOString());
+function withStoppedEngine(env, what, step, waitMs) {
   try {
-    const copied = copyStoresBeforeUpgrade(env, options);
-    if (copied.stores > 0)
-      options.log?.(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);
+    return withDataOwnerLock(env, step, { waitMs });
   } catch (error) {
-    clearWorkerUpgradeInFlight(env);
-    throw error;
+    if (!(error instanceof DataOwnerBusyError))
+      throw error;
+    throw new OperationError("config_error", `The engine was stopped, but an Olympus process still owns its data after ${Math.round(waitMs / 1000)} s, so its stores were not ${what}.`, "Run olympus engine stop, then run the installer again. Nothing was changed.");
   }
 }
-function restoreEngineStores(env) {
+function copyEngineStores(env, options = {}) {
+  withStoppedEngine(env, "copied", () => {
+    markWorkerUpgradeInFlight(env, new Date().toISOString());
+    try {
+      const copied = copyStoresBeforeUpgrade(env, options);
+      if (copied.stores > 0)
+        options.log?.(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);
+    } catch (error) {
+      clearWorkerUpgradeInFlight(env);
+      throw error;
+    }
+  }, options.ownerWaitMs ?? ENGINE_STORES_OWNER_WAIT_MS);
+}
+function restoreEngineStores(env, options = {}) {
   const startedAt = readWorkerUpgradeInFlight(env);
   if (startedAt === undefined)
     return [];
-  const restored = startedAt === "" ? [] : restoreSchemaBackupsSince(env, Date.parse(startedAt));
-  clearWorkerUpgradeInFlight(env);
-  return restored;
+  return withStoppedEngine(env, "put back", () => {
+    const restored = startedAt === "" ? [] : restoreSchemaBackupsSince(env, Date.parse(startedAt));
+    clearWorkerUpgradeInFlight(env);
+    return restored;
+  }, options.ownerWaitMs ?? ENGINE_STORES_OWNER_WAIT_MS);
 }
 function commitEngineStores(env) {
   if (readWorkerUpgradeInFlight(env) === undefined)
@@ -123929,8 +123959,11 @@ function commitEngineStores(env) {
     removeRecordedSchemaBackups(env);
   } catch {}
 }
+var ENGINE_STORES_OWNER_WAIT_MS = 60000;
 var init_engine_store_copies = __esm(() => {
   init_boot_progress();
+  init_data_owner_lock();
+  init_operation_error();
   init_upgrade_store_copies();
 });
 
@@ -129850,7 +129883,7 @@ async function installEngineVerified(options = {}) {
     return { ...result, ok: true, health };
   }
   const restored = copied ? putMacStoresBack(copied) : [];
-  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? "unknown"} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` Its stores were put back as they were before it (${restored.length}), and it was stopped.` : ""}` };
+  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? "unknown"} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` It was stopped. Stores put back as they were before the update: ${[...new Set(restored)].join(", ")}.` : ""}` };
 }
 function copyMacStoresBeforeReplacing(options) {
   const homeDir = absolute2(options.homeDir ?? homedir32(), "home directory");

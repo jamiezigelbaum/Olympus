@@ -26063,6 +26063,8 @@ var installing = new Map;
 
 // src/core/engine-store-copies.ts
 init_boot_progress();
+init_data_owner_lock();
+init_operation_error();
 init_upgrade_store_copies();
 
 // src/core/linux-engine-service.ts
