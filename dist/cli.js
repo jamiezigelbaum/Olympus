@@ -34422,6 +34422,7 @@ async function startCpuSampleLog(env = process.env) {
   const path = env[CPU_SAMPLE_LOG_ENV]?.trim();
   if (!path)
     return;
+  const role = env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() || "single";
   const jsc = await import("bun:jsc");
   if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces)
     return;
@@ -34461,7 +34462,7 @@ async function startCpuSampleLog(env = process.env) {
         maxMs: Math.round(window2.reduce((max, stall) => Math.max(max, stall.endMs - stall.startMs), 0)),
         ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? [])
       };
-      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
+      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
 `, { mode: 384 });
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : "error"}`);
