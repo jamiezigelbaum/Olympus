@@ -58753,9 +58753,8 @@ class LocalXBookmarksReconcileStateStore {
           traversalCardinality: verifyCount
         });
         naturalWindowBoundaryVerified = matches && row.global_boundary_fingerprint_sha256 === verificationFingerprint;
-        if (!naturalWindowBoundaryVerified) {
-          throw new ReconcileWindowBoundaryMismatchError("mixed_termination");
-        }
+        if (!naturalWindowBoundaryVerified)
+          matches = false;
       }
       this.db.query(`
         UPDATE x_reconcile_runs
@@ -59063,7 +59062,7 @@ class LocalXBookmarksReconcileStateStore {
       const verificationDigestSha256 = this.globalTraversalDigest(account, true);
       const traversalCardinality = this.globalObservedCount(account);
       const verificationCardinality = providerCounts.verifyPosts;
-      if (coverageScope === "recency_window" && (run.window_boundary_verified !== 1 || traversalDigestSha256 !== verificationDigestSha256 || traversalCardinality !== verificationCardinality)) {
+      if (coverageScope === "recency_window" && run.global_removal_authoritative === 1 && (run.window_boundary_verified !== 1 || traversalDigestSha256 !== verificationDigestSha256 || traversalCardinality !== verificationCardinality)) {
         throw new ReconcileWindowBoundaryMismatchError("unverified_promotion");
       }
       if (run.global_removal_authoritative !== 1) {
@@ -59777,7 +59776,7 @@ class LocalXBookmarksReconcileStateStore {
     const coverageScope = requireCoverageScope(snapshot.coverage_scope);
     normalizeRequiredSha256(snapshot.traversal_digest_sha256, "X traversal digest");
     normalizeRequiredSha256(snapshot.verification_digest_sha256, "X verification digest");
-    if (coverageScope === "recency_window" && (snapshot.window_boundary_verified !== 1 || snapshot.window_boundary_algorithm_version < 1 || snapshot.traversal_digest_sha256 !== snapshot.verification_digest_sha256 || snapshot.traversal_cardinality !== snapshot.verification_cardinality || snapshot.traversal_cardinality !== snapshot.items_seen)) {
+    if (coverageScope === "recency_window" && snapshot.global_removal_authoritative === 1 && (snapshot.window_boundary_verified !== 1 || snapshot.window_boundary_algorithm_version < 1 || snapshot.traversal_digest_sha256 !== snapshot.verification_digest_sha256 || snapshot.traversal_cardinality !== snapshot.verification_cardinality || snapshot.traversal_cardinality !== snapshot.items_seen)) {
       throw new Error("X completed reconciliation window-boundary receipt is corrupt.");
     }
     if (memberships.length !== snapshot.memberships_seen) {
@@ -89816,7 +89815,7 @@ function completedReconciliationAcquisition(completed, apiRequests, prefixWarnin
         ...completed.folderPostsAbsentFromGlobal > 0 ? ["x_reconcile_folder_post_absent_from_global_ignored"] : [],
         ...!completed.globalRemovalAuthoritative ? ["x_reconcile_global_silent_window_removals_preserved"] : [],
         ...!completed.globalVerificationMatched ? ["x_reconcile_global_verification_mismatch_removals_preserved"] : [],
-        ...completed.coverageScope === "recency_window" ? ["x_reconcile_provider_window_boundary_verified"] : [],
+        ...completed.coverageScope === "recency_window" && completed.windowBoundaryVerified ? ["x_reconcile_provider_window_boundary_verified"] : [],
         ...completed.truncationRetries > 0 ? ["x_reconcile_truncation_suspected_smaller_page_retry"] : [],
         ...completed.folderMembershipCoverageGaps > 0 ? ["x_reconcile_folder_membership_coverage_partial_preserved"] : [],
         ...completed.folderInventoryCoverageGaps > 0 ? ["x_reconcile_folder_inventory_coverage_partial_preserved"] : [],
