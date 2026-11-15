@@ -9,6 +9,7 @@ import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceIndexCorpusSearchAdapter } from '../src/core/source-index/router.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import type { ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
 import { DROPBOX_APPROVED_SCOPE_FILTER_CODEC } from '../src/workers/dropbox-files/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import { assertTierLedgerInDirectory, tierLedgerIsWithin } from '../src/workers/classification/tier-set-binding.ts';
@@ -148,6 +149,8 @@ export function createEvalDropboxLanes(input: {
   ledger?: TierLedger;
   scopes?: readonly TierVisibilityScope[];
   scope: { accountScope?: string; locatorPathScope?: string };
+  /** One store's own read scope (the owner's live folder scope), in place of `scope` for that store. */
+  storeScope?: (store: LocalConnectorStore) => { accountScope?: string; filters?: ConnectorStoreSearchFilters } | undefined;
   embeddingFor?: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined;
   localEmbedding?: (provider: SourceEmbeddingProvider) => SourceEmbeddingProvider | undefined;
   /** Told each store search's returned item ids, in order (the report's expectedStoreRanks). */
@@ -169,14 +172,19 @@ export function createEvalDropboxLanes(input: {
     }))),
     embeddingProvider: (store) => input.embeddingFor?.(store.trustDomain),
     localEmbedding: input.localEmbedding ?? loadedBuiltInEmbedding,
-    readScope: () => ({
-      allowed: true,
-      contentAllowed: true,
-      ...(input.scope.accountScope ? { accountScope: input.scope.accountScope } : {}),
-      ...(filters ? { filters, contentFilters: filters } : {}),
-    }),
+    readScope: (store) => {
+      const own = input.storeScope?.(store);
+      const account = own ? own.accountScope : input.scope.accountScope;
+      const scoped = own ? own.filters : filters;
+      return {
+        allowed: true,
+        contentAllowed: true,
+        ...(account ? { accountScope: account } : {}),
+        ...(scoped ? { filters: scoped, contentFilters: scoped } : {}),
+      };
+    },
     answerScope: () => ({ kind: 'search' }),
-    accountScope: () => input.scope.accountScope,
+    accountScope: (store) => input.storeScope?.(store)?.accountScope ?? input.scope.accountScope,
     visibilityGate: createTierVisibilityGate(scopes),
     parentLabels: createParentLabelResolver({ stores, scopes }),
   });
@@ -203,6 +211,7 @@ export function createEvalSourceLanes(input: {
   stores: readonly LocalConnectorStore[];
   onStoreSearch?: (search: EvalStoreSearch) => void;
   scopes?: readonly TierVisibilityScope[];
+  storeScope?: (store: LocalConnectorStore) => { accountScope?: string; filters?: ConnectorStoreSearchFilters } | undefined;
   embeddingFor?: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined;
 }): (question: string) => AnalystAnswerLanes {
   return createEvalDropboxLanes({ ...input, scope: {} });
