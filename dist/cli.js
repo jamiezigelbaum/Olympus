@@ -220915,7 +220915,8 @@ class TierSnifferService {
       return false;
     if (this.clockMs() - this.heldBackSinceMs < ARRIVAL_STAND_BACK_MS) {
       try {
-        return [...this.ledgers.keys()].some((path) => this.options.installed.snifferStoreForLedger(path).arrivalContentQuestions().some((question) => this.isOnDemandRead(question)));
+        const paths = this.ledgers.size > 0 ? [...this.ledgers.keys()] : this.ledgerPaths();
+        return paths.some((path) => this.options.installed.snifferStoreForLedger(path).arrivalContentQuestions().some((question) => this.isOnDemandRead(question)));
       } catch {
         return false;
       }

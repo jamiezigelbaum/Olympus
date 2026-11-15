@@ -1161,7 +1161,9 @@ export class TierSnifferService {
       try {
         // The ledgers earlier passes opened: reading the stores again here
         // would cost every held-back pass a store listing.
-        return [...this.ledgers.keys()].some(path => this.options.installed.snifferStoreForLedger(path)
+        // Before any pass opened one, the stores are read once.
+        const paths = this.ledgers.size > 0 ? [...this.ledgers.keys()] : this.ledgerPaths();
+        return paths.some(path => this.options.installed.snifferStoreForLedger(path)
           .arrivalContentQuestions().some(question => this.isOnDemandRead(question)));
       } catch {
         return false;
