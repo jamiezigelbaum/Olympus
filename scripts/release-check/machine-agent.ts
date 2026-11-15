@@ -591,8 +591,10 @@ export function isSettled(s: SettleSnapshot | undefined, config: AgentConfig, pr
   if (!s) return false;
   const stored = config.expectedItems - config.expectedSecrets;
   const embeddable = stored - (privateEmbedded ? 0 : config.expectedPrivate);
+  // Seen counts the latest pass only: a later incremental pass (live sources are checked every 5 minutes) sees
+  // just what changed, often nothing. Every item stored, and every Secret located, covers the same ground.
   return s.lastRun === 'completed'
-    && s.seen >= config.expectedItems
+    && (s.seen >= config.expectedItems || (s.indexed >= stored && s.secretsLocated >= config.expectedSecrets))
     && s.indexed >= stored
     && s.contentReady >= stored
     && s.embedded >= embeddable

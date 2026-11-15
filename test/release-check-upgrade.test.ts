@@ -172,12 +172,14 @@ describe('upgrade comparisons', () => {
     expect(unreadable.find((c) => c.id === 'upgrade.items-kept')!.detail).toContain('database is locked');
   });
 
-  test('counts: equal counts pass and embedded may grow; a changed count, or embedded falling, fails', () => {
+  test('counts: equal counts pass and embedded may grow; a changed count, or embedded falling, fails; seen is the latest pass, not kept', () => {
     const was = { seen: 4, indexed: 4, contentReady: 3, embedded: 2, secretsLocated: 1, personal: 2, privateItems: 1 };
     const ok = evaluateCounts(was, { ...was, embedded: 3 });
     expect(ok[0]!.status).toBe('pass');
     expect(ok[0]!.detail).toContain('embedded 2 -> 3');
-    expect(evaluateCounts(was, { ...was, seen: 5 })[0]!.status).toBe('fail');
+    // The upgraded engine's own incremental pass found nothing new (mac-upgrade run 43730130383).
+    expect(evaluateCounts(was, { ...was, seen: 0 })[0]!.status).toBe('pass');
+    expect(evaluateCounts(was, { ...was, indexed: 5 })[0]!.status).toBe('fail');
     expect(evaluateCounts(was, { ...was, privateItems: 0 })[0]!.status).toBe('fail');
     expect(evaluateCounts(was, { ...was, embedded: 1 })[0]!.status).toBe('fail');
     expect(evaluateCounts(null, was)[0]!.status).toBe('fail');
@@ -220,6 +222,9 @@ describe('what "settled" means under each privacy policy', () => {
     expect(isSettled({ ...settled, embedded: 3 }, config, true)).toBe(true);
     // The default argument is the fresh-install rule that existed before the upgrade leg.
     expect(isSettled({ ...settled, embedded: 3 }, config)).toBe(true);
+    // A later incremental pass that found nothing new still settles; an unseen Secret does not.
+    expect(isSettled({ ...settled, embedded: 3, seen: 0 }, config, true)).toBe(true);
+    expect(isSettled({ ...settled, embedded: 3, seen: 0, secretsLocated: 0 }, config, true)).toBe(false);
   });
 
   test('anything still pending is not settled under either policy', () => {
