@@ -1142,6 +1142,8 @@ function olympusDataPath(env, ...segments) {
 }
 var SHARED_DATA_FILES = {
   registry: "registry.json",
+  "tinfoil-cache-seed": "tinfoil-cache-seed",
+  "tinfoil-status": "tinfoil-status.json",
   "data-owner-lock": "data-owner.lock",
   "engine-process-lock": "engine-process.lock",
   "remote-connections": "remote-connections.sqlite",

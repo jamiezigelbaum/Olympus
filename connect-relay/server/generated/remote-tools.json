@@ -126,6 +126,7 @@
               "default",
               "local",
               "venice",
+              "tinfoil",
               "cloud"
             ]
           },

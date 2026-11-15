@@ -626,6 +626,8 @@ function olympusDataPath(env, ...segments) {
 }
 var SHARED_DATA_FILES = {
   registry: "registry.json",
+  "tinfoil-cache-seed": "tinfoil-cache-seed",
+  "tinfoil-status": "tinfoil-status.json",
   "data-owner-lock": "data-owner.lock",
   "engine-process-lock": "engine-process.lock",
   "remote-connections": "remote-connections.sqlite",
@@ -17392,6 +17394,16 @@ function* profileSteps(db) {
   profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
   return languages;
 }
+// src/core/analyst-tinfoil.ts
+var TINFOIL_MODELS = ["kimi-k3-1-pro", "glm-5-3", "deepseek-v4-1-flash"];
+var DEFAULT_TINFOIL_MODEL = TINFOIL_MODELS[0];
+var TINFOIL_PRICES = Object.freeze({
+  "kimi-k3-1-pro": { input: 4, output: 20, cached: 0.4 },
+  "glm-5-3": { input: 1.8, output: 5.75, cached: 0.45 },
+  "deepseek-v4-1-flash": { input: 0.6, output: 1.45, cached: 0.01 },
+  "decision-medium": { input: 0.06, output: 0 }
+});
+
 // src/workers/classification/sniffer.ts
 import { createHash as createHash9 } from "node:crypto";
 

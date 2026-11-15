@@ -713,7 +713,8 @@
             "type": "string",
             "enum": [
               "local",
-              "venice"
+              "venice",
+              "tinfoil"
             ]
           }
         },
