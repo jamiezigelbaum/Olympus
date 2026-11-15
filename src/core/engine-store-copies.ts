@@ -22,8 +22,8 @@ import { copyStoresBeforeUpgrade } from './upgrade-store-copies.ts';
  */
 export const ENGINE_STORES_OWNER_WAIT_MS = 60_000;
 
-/** Runs `step` once no Olympus process owns the data, holding that until it returns: one rule for Linux and the Mac. */
-function withStoppedEngine<T>(env: LayoutEnv, what: string, step: () => T, waitMs: number): T {
+/** Runs `step` once no Olympus process owns the data, holding that until it returns: one rule for Linux and the Mac, and for `olympus worker upgrade`. */
+export function withStoppedEngine<T>(env: LayoutEnv, what: string, step: () => T, waitMs: number = ENGINE_STORES_OWNER_WAIT_MS): T {
   try {
     return withNoEngineProcess(env, step, waitMs);
   } catch (error) {

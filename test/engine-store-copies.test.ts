@@ -6,7 +6,7 @@ import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { failedUpdateSetAsidePath, workerUpgradeInFlight } from '../src/core/boot-progress.ts';
+import { failedUpdateSetAsidePath, readWorkerUpgradeInFlight, recordSchemaBackup, workerUpgradeInFlight } from '../src/core/boot-progress.ts';
 import { commitEngineStores, copyEngineStores, restoreEngineStores } from '../src/core/engine-store-copies.ts';
 import { olympusDataRoot, sharedDataPath } from '../src/core/olympus-layout.ts';
 
@@ -45,6 +45,7 @@ describe('the store copies an engine install takes', () => {
     const ledger = join(root, 'classification-ledger.jsonl');
     writeFileSync(ledger, '{"kept":1}\n');
     copyEngineStores(env, { bunBin: process.execPath });
+    const startedMs = Date.parse(readWorkerUpgradeInFlight(env)!);
     update();
     // A file that was there before the mark, written by the new version, keeps its place and its bytes.
     writeFileSync(ledger, '{"kept":1}\n{"later":2}\n');
@@ -63,16 +64,42 @@ describe('the store copies an engine install takes', () => {
     ]);
     expect(body()).toBe('old');
     expect(existsSync(made) || existsSync(`${made}-wal`) || existsSync(join(root, 'embedding-ledger.jsonl'))).toBe(false);
-    expect(readFileSync(failedUpdateSetAsidePath(made)).equals(madeBytes)).toBe(true);
-    expect(readFileSync(`${failedUpdateSetAsidePath(made)}-wal`, 'utf8')).toBe('wal bytes');
+    const aside = failedUpdateSetAsidePath(made, startedMs);
+    expect(readFileSync(aside).equals(madeBytes)).toBe(true);
+    expect(readFileSync(`${aside}-wal`, 'utf8')).toBe('wal bytes');
     expect(readFileSync(ledger, 'utf8')).toBe('{"kept":1}\n{"later":2}\n');
-    // The next upgrade neither copies nor puts back what was set aside, and its commit clears it with the copies.
+
+    // A second failure makes the store again: its own set-aside sits beside the first, which keeps its bytes.
     copyEngineStores(env, { bunBin: process.execPath });
-    expect(restoreEngineStores(env)).toEqual(['ledger.sqlite']);
-    expect(existsSync(made)).toBe(false);
+    const secondMs = Date.parse(readWorkerUpgradeInFlight(env)!);
+    new Database(made, { create: true }).close();
+    expect(restoreEngineStores(env)).toEqual([
+      'ledger.sqlite',
+      'sources/archive.imports/1/stores/email.secure_local.sqlite (made by the update, set aside)',
+    ]);
+    expect(readFileSync(aside).equals(madeBytes)).toBe(true);
+    expect(existsSync(failedUpdateSetAsidePath(made, secondMs))).toBe(true);
+
+    // The next committed upgrade clears every set-aside with the copies.
     copyEngineStores(env, { bunBin: process.execPath });
     commitEngineStores(env);
-    expect(existsSync(failedUpdateSetAsidePath(made)) || existsSync(`${failedUpdateSetAsidePath(made)}-wal`)).toBe(false);
+    expect(existsSync(aside) || existsSync(`${aside}-wal`) || existsSync(failedUpdateSetAsidePath(made, secondMs))).toBe(false);
+  }, 30_000);
+
+  test('a store file the failed update made and a second store then joined is set aside, not put back to its first state', () => {
+    const { env } = setup();
+    const root = olympusDataRoot(env);
+    copyEngineStores(env, { bunBin: process.execPath });
+    const startedMs = Date.parse(readWorkerUpgradeInFlight(env)!);
+    const made = join(root, 'joined.sqlite');
+    new Database(made, { create: true }).close();
+    // The second store's update copies the file the first one made, as a schema update does.
+    const copy = `${made}.pre-schema-3.bak`;
+    writeFileSync(copy, readFileSync(made));
+    recordSchemaBackup(env, { storeId: 'second', dbPath: made, backupPath: copy });
+    expect(restoreEngineStores(env)).toEqual(['ledger.sqlite', 'joined.sqlite (made by the update, set aside)']);
+    expect(existsSync(made)).toBe(false);
+    expect(existsSync(failedUpdateSetAsidePath(made, startedMs))).toBe(true);
   }, 30_000);
 
   test('a healthy new version: its changes stay, and the copies and the mark go', () => {

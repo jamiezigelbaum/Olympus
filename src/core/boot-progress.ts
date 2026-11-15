@@ -264,29 +264,39 @@ export function workerUpgradeInFlight(env: LayoutEnv): boolean {
 /** Folders under the data root that hold no store: model files and a backup being packed. */
 const STORELESS_FOLDERS = new Set(['models', 'backup-staging']);
 
-/** Every file under the data root whose name `keep` accepts, links and the store-less folders left out. */
-export function dataRootFiles(env: LayoutEnv, keep: (name: string) => boolean): string[] {
+/**
+ * Every file under the data root whose name `keep` accepts, links and the store-less folders left out. `strict` throws
+ * on a folder or entry it cannot read (a missing data root is empty), for a list whose gaps would read as files made later.
+ */
+export function dataRootFiles(env: LayoutEnv, keep: (name: string) => boolean, options: { strict?: boolean } = {}): string[] {
   const files: string[] = [];
+  const root = olympusDataRoot(env);
   const walk = (directory: string, top: boolean) => {
     let names: string[];
-    try { names = readdirSync(directory); } catch { return; }
+    try { names = readdirSync(directory); } catch (error) {
+      if (options.strict && !(top && (error as NodeJS.ErrnoException).code === 'ENOENT')) throw error;
+      return;
+    }
     for (const name of names) {
       if (top && STORELESS_FOLDERS.has(name)) continue;
       const path = join(directory, name);
       let stat;
-      try { stat = lstatSync(path); } catch { continue; }
+      try { stat = lstatSync(path); } catch (error) {
+        if (options.strict && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        continue;
+      }
       if (stat.isDirectory()) walk(path, false);
       else if (stat.isFile() && keep(name)) files.push(path);
     }
   };
-  walk(olympusDataRoot(env), true);
+  walk(root, true);
   return files.sort();
 }
 
 /** The files a version keeps state in: stores, lock databases and ledgers. The record of copies is the put-back's own. */
-function stateFiles(env: LayoutEnv): string[] {
+function stateFiles(env: LayoutEnv, strict = false): string[] {
   const record = basename(sharedDataPath('schema-backups', env));
-  return dataRootFiles(env, (name) => /\.(sqlite|db|jsonl)$/.test(name) && name !== record);
+  return dataRootFiles(env, (name) => /\.(sqlite|db|jsonl)$/.test(name) && name !== record, { strict });
 }
 
 /**
@@ -298,38 +308,52 @@ export function markWorkerUpgradeInFlight(env: LayoutEnv, startedAt: string): vo
   const path = sharedDataPath('upgrade-in-flight', env);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const root = olympusDataRoot(env);
-  const stateNow = stateFiles(env).map((file) => relative(root, file));
+  // A list with a gap would set aside a file that was there: one the scan could not read stops the mark.
+  const stateNow = stateFiles(env, true).map((file) => relative(root, file));
   writePrivateFileAtomicSync(path, `${JSON.stringify({ started_at: startedAt, state_files: stateNow })}\n`);
 }
 
-/** `<path>.pre-schema-failed.bak`: a state file a failed update made, set aside by its put-back until the next committed upgrade. */
-export function failedUpdateSetAsidePath(path: string): string {
-  return `${path}.pre-schema-failed.bak`;
+/**
+ * `<path>.pre-schema-<ms>.bak`, `<ms>` the failed update's start: a state file it made, set aside by its put-back until
+ * the next committed upgrade. One name per attempt, so a later failure never lands on an earlier one's, and a numbered
+ * copy's name, so an earlier version's forget and commit reach it too (they know numbered, retired and upgrade copies).
+ */
+export function failedUpdateSetAsidePath(path: string, startedMs: number): string {
+  return `${path}.pre-schema-${startedMs}.bak`;
 }
 
 const COMPANIONS = ['-wal', '-shm', '-journal'] as const;
 
+/** The state files the mark listed, relative to the data root; undefined for a mark without the list (an earlier build's). */
+function markedStateFiles(env: LayoutEnv): Set<string> | undefined {
+  let listed: unknown;
+  try { listed = (JSON.parse(readFileSync(sharedDataPath('upgrade-in-flight', env), 'utf8')) as { state_files?: unknown }).state_files; } catch { return undefined; }
+  return Array.isArray(listed) ? new Set(listed.filter((entry): entry is string => typeof entry === 'string')) : undefined;
+}
+
 /**
  * Sets aside the state files made since the mark, each with its -wal, -shm and -journal under the same new name, and
  * records them with the copies: a forget reaches them, and the next committed upgrade removes them with the copies.
- * Never deleted here, since they can hold what the owner imported while the update ran. None when the mark has no list.
+ * Never deleted here, since they can hold what the owner imported while the update ran. The companions move first and
+ * nothing already there is replaced, so a put-back cut short and run again finishes the move without losing a part.
  */
-function setAsideStateFilesMadeSinceMark(env: LayoutEnv, putBack: ReadonlySet<string>): string[] {
-  let listed: unknown;
-  try { listed = (JSON.parse(readFileSync(sharedDataPath('upgrade-in-flight', env), 'utf8')) as { state_files?: unknown }).state_files; } catch { return []; }
-  if (!Array.isArray(listed)) return [];
-  const before = new Set(listed.filter((entry): entry is string => typeof entry === 'string'));
+function setAsideStateFilesMadeSinceMark(env: LayoutEnv, before: ReadonlySet<string>, startedMs: number): string[] {
   const root = olympusDataRoot(env);
   const setAside: string[] = [];
   for (const file of stateFiles(env)) {
     const id = relative(root, file);
-    if (before.has(id) || putBack.has(file)) continue;
-    const target = failedUpdateSetAsidePath(file);
-    recordSchemaBackup(env, { storeId: id, dbPath: file, backupPath: target });
-    for (const suffix of COMPANIONS) rmSync(`${target}${suffix}`, { force: true });
+    if (before.has(id)) continue;
+    const target = failedUpdateSetAsidePath(file, startedMs);
+    if (existsSync(target)) {
+      setAside.push(`${id} (made by the update, not set aside: ${basename(target)} is already there)`);
+      continue;
+    }
+    recordSchemaBackup(env, { storeId: id, dbPath: file, backupPath: target, setAside: true });
+    for (const suffix of COMPANIONS) {
+      if (existsSync(`${file}${suffix}`) && !existsSync(`${target}${suffix}`)) renameSync(`${file}${suffix}`, `${target}${suffix}`);
+    }
     renameSync(file, target);
-    for (const suffix of COMPANIONS) if (existsSync(`${file}${suffix}`)) renameSync(`${file}${suffix}`, `${target}${suffix}`);
-    setAside.push(id);
+    setAside.push(`${id} (made by the update, set aside)`);
   }
   return setAside;
 }
@@ -424,7 +448,7 @@ export function preSchemaBackupsOf(dbPath: string): string[] {
   const prefix = `${basename(dbPath)}.pre-schema-`;
   try {
     return readdirSync(dirname(dbPath))
-      .filter((name) => name.startsWith(prefix) && /^(?:\d+|retired|upgrade|failed)\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length)))
+      .filter((name) => name.startsWith(prefix) && /^(?:\d+|retired|upgrade)\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length)))
       .map((name) => join(dirname(dbPath), name));
   } catch {
     return [];
@@ -435,13 +459,14 @@ export function preSchemaBackupsOf(dbPath: string): string[] {
  * Records a backup taken before a schema update, so the upgrade that caused it
  * can put it back. One line per backup; a line is appended in one write.
  */
-export function recordSchemaBackup(env: LayoutEnv, entry: { storeId: string; dbPath: string; backupPath: string }): void {
+export function recordSchemaBackup(env: LayoutEnv, entry: SchemaBackupEntry): void {
   const path = sharedDataPath('schema-backups', env);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   appendFileSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 }
 
-interface SchemaBackupEntry { storeId: string; dbPath: string; backupPath: string }
+/** `setAside`: a file a failed update made, kept until the next commit and never put back over a store. */
+interface SchemaBackupEntry { storeId: string; dbPath: string; backupPath: string; setAside?: boolean }
 
 /**
  * The recorded copies. `owned` (the restore and the commit) keeps only the
@@ -472,7 +497,7 @@ function schemaBackups(env: LayoutEnv, owned = true): SchemaBackupEntry[] {
 }
 
 /** The product's own names for a copy: `<store>.pre-schema-<n|retired|upgrade>.bak`. */
-const BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade|failed)\.bak$/;
+const BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade)\.bak$/;
 
 /**
  * Whether a recorded copy is one this product made: named exactly its store
@@ -509,7 +534,7 @@ function ownedBackupName(dbPath: string, backupPath: string): boolean {
 function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
   return schemaBackups(env).filter((entry) => {
     // What a put-back set aside is never put back over a store.
-    if (entry.backupPath === failedUpdateSetAsidePath(entry.dbPath)) return false;
+    if (entry.setAside === true) return false;
     try {
       return statSync(entry.backupPath).mtimeMs >= sinceMs;
     } catch {
@@ -529,19 +554,26 @@ function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
  */
 export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): string[] {
   const restored: string[] = [];
+  // A file the mark did not list was made by the update: a copy of it is a state the update made too (a second store
+  // joining it), so it is not put back; the file is set aside below, and the copy stays recorded until the next commit.
+  const before = markedStateFiles(env);
+  const root = olympusDataRoot(env);
   // Two stores in one file each copy it before their update: the earliest
   // copy is the file as it was, and the later ones are dropped.
   const byFile = new Map<string, SchemaBackupEntry[]>();
-  for (const entry of backupsSince(env, sinceMs)) byFile.set(entry.dbPath, [...(byFile.get(entry.dbPath) ?? []), entry]);
+  for (const entry of backupsSince(env, sinceMs)) {
+    if (before && !before.has(relative(root, entry.dbPath))) continue;
+    byFile.set(entry.dbPath, [...(byFile.get(entry.dbPath) ?? []), entry]);
+  }
   for (const [dbPath, entries] of byFile) {
     const [earliest, ...later] = entries.sort((a, b) => statSync(a.backupPath).mtimeMs - statSync(b.backupPath).mtimeMs);
-    for (const suffix of ['-wal', '-shm', '-journal']) rmSync(`${dbPath}${suffix}`, { force: true });
+    for (const suffix of COMPANIONS) rmSync(`${dbPath}${suffix}`, { force: true });
     renameSync(earliest!.backupPath, dbPath);
     for (const entry of later) rmSync(entry.backupPath, { recursive: true, force: true });
     restored.push(...entries.map((entry) => entry.storeId));
   }
   // What the new version made did not exist before it: the earlier version would open it at a schema it does not know.
-  for (const id of setAsideStateFilesMadeSinceMark(env, new Set(byFile.keys()))) restored.push(`${id} (made by the update, set aside)`);
+  if (before) restored.push(...setAsideStateFilesMadeSinceMark(env, before, sinceMs));
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return restored;
@@ -552,7 +584,7 @@ export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): stri
  * upgrade's own and any an earlier version left, since nothing restores them.
  */
 export function removeRecordedSchemaBackups(env: LayoutEnv): number {
-  const removed = schemaBackups(env).filter((entry) => existsSync(entry.backupPath));
+  const removed = schemaBackups(env).filter((entry) => copyOrPartLeft(entry.backupPath));
   for (const entry of removed) removeCopy(entry.backupPath);
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
@@ -580,7 +612,12 @@ function removeAbandonedCopiesOfRecorded(env: LayoutEnv): void {
  * how many there are; a dry run removes nothing.
  */
 export function removeAllSchemaBackups(env: LayoutEnv, dryRun: boolean): number {
-  const copies = [...new Set(schemaBackups(env, false).flatMap((entry) => preSchemaBackupsOf(entry.dbPath)))];
+  const recorded = schemaBackups(env, false);
+  const copies = [...new Set([
+    ...recorded.flatMap((entry) => preSchemaBackupsOf(entry.dbPath)),
+    // A set-aside store's companions, its base already gone.
+    ...recorded.filter((entry) => entry.setAside === true && copyOrPartLeft(entry.backupPath)).map((entry) => entry.backupPath),
+  ])];
   if (dryRun) return copies.length;
   for (const copy of copies) removeCopy(copy);
   pruneSchemaBackupRecord(env);
@@ -589,14 +626,19 @@ export function removeAllSchemaBackups(env: LayoutEnv, dryRun: boolean): number 
 
 /** A copy, with the -wal, -shm and -journal a set-aside store keeps under its name. */
 function removeCopy(path: string): void {
-  rmSync(path, { recursive: true, force: true });
+  // The companions first: one cut short leaves the base, which the record still names, never an orphan -wal.
   for (const suffix of COMPANIONS) rmSync(`${path}${suffix}`, { force: true });
+  rmSync(path, { recursive: true, force: true });
+}
+
+function copyOrPartLeft(path: string): boolean {
+  return existsSync(path) || COMPANIONS.some((suffix) => existsSync(`${path}${suffix}`));
 }
 
 function pruneSchemaBackupRecord(env: LayoutEnv): void {
   const path = sharedDataPath('schema-backups', env);
   if (!existsSync(path)) return;
-  const kept = schemaBackups(env, false).filter((entry) => existsSync(entry.backupPath));
+  const kept = schemaBackups(env, false).filter((entry) => copyOrPartLeft(entry.backupPath));
   if (kept.length === 0) rmSync(path, { force: true });
   else writePrivateFileAtomicSync(path, kept.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
 }

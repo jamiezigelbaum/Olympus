@@ -15,6 +15,7 @@ import {
 import { bootProgressLine, clearWorkerUpgradeInFlight, markWorkerUpgradeInFlight, readBootProgress, readFrontProgress, removeRecordedSchemaBackups, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, startupCapMs, type EngineHeartbeat } from './engine-heartbeat.ts';
 import { copyStoresBeforeUpgrade, olympusStoreBytes } from './upgrade-store-copies.ts';
+import { withStoppedEngine } from './engine-store-copies.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
 import { OperationError } from './operation-error.ts';
@@ -723,8 +724,9 @@ function rollbackTransaction(
   if (intent.touchServiceManager) quiesceAttemptedWorker(options);
   // The attempted worker is stopped: the stores it updated go back to the
   // copies taken before, so the previous version can open them (#1494).
+  // Under the engine locks: a service manager that reports the worker stopped has not proved its process gone.
   const restored = intent.touchServiceManager
-    ? restoreSchemaBackupsSince(lifecycleEnv(options), Date.parse(transaction.started_at))
+    ? withStoppedEngine(lifecycleEnv(options), 'put back', () => restoreSchemaBackupsSince(lifecycleEnv(options), Date.parse(transaction.started_at)))
     : [];
   restoreManagedFile(options.homeDir, transaction.unit_path, paths.unitBackup, transaction.previous_unit_present, transaction.previous_unit_sha256);
   restoreManagedFile(options.homeDir, transaction.env_path, paths.envBackup, transaction.previous_env_present, transaction.previous_env_sha256);
@@ -794,10 +796,12 @@ function copyStoresForUpgrade(
   try {
     // From here until it commits or rolls back, the new version's boot copies
     // what this did not (a store outside the data root) and keeps retired state.
-    markWorkerUpgradeInFlight(lifecycleEnv(options), readTransaction(options)?.started_at ?? new Date().toISOString());
-    const copied = copyStoresBeforeUpgrade(lifecycleEnv(options), {
-      ...(options.bunBin ? { bunBin: options.bunBin } : {}),
-      log: progressLine,
+    const copied = withStoppedEngine(lifecycleEnv(options), 'copied', () => {
+      markWorkerUpgradeInFlight(lifecycleEnv(options), readTransaction(options)?.started_at ?? new Date().toISOString());
+      return copyStoresBeforeUpgrade(lifecycleEnv(options), {
+        ...(options.bunBin ? { bunBin: options.bunBin } : {}),
+        log: progressLine,
+      });
     });
     if (copied.stores > 0) progressLine(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);
   } finally {
