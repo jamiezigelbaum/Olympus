@@ -14,15 +14,13 @@
 // its own for that file.
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, statSync, utimesSync } from 'node:fs';
+import { chmodSync, closeSync, fsyncSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, statSync, utimesSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
-import { recordSchemaBackup, removeAbandonedBackupCopies, UPGRADE_COPY_SUFFIX } from './boot-progress.ts';
+import { dataRootFiles, recordSchemaBackup, removeAbandonedBackupCopies, UPGRADE_COPY_SUFFIX } from './boot-progress.ts';
 import { olympusDataRoot, type LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
 
 export { UPGRADE_COPY_SUFFIX };
-/** Folders under the data root that hold no store: model files and a backup being packed. */
-const SKIPPED_FOLDERS = new Set(['models', 'backup-staging']);
 /** Room kept free on the disk beyond the copies themselves. */
 const SPACE_MARGIN_BYTES = 1024 ** 3;
 
@@ -33,21 +31,7 @@ export function upgradeCopyPath(dbPath: string): string {
 
 /** Every store file under the data root: `*.sqlite`, not a copy, a journal or a link. */
 export function olympusStoreFiles(env: LayoutEnv): string[] {
-  const files: string[] = [];
-  const walk = (directory: string, top: boolean) => {
-    let names: string[];
-    try { names = readdirSync(directory); } catch { return; }
-    for (const name of names) {
-      if (top && SKIPPED_FOLDERS.has(name)) continue;
-      const path = join(directory, name);
-      let stat;
-      try { stat = lstatSync(path); } catch { continue; }
-      if (stat.isDirectory()) walk(path, false);
-      else if (stat.isFile() && name.endsWith('.sqlite')) files.push(path);
-    }
-  };
-  walk(olympusDataRoot(env), true);
-  return files.sort();
+  return dataRootFiles(env, (name) => name.endsWith('.sqlite'));
 }
 
 /** The stores' size on disk, their WAL files included. */

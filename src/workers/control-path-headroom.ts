@@ -256,6 +256,8 @@ export function summarizeCpuSamples(
 export async function startCpuSampleLog(env: Record<string, string | undefined> = process.env): Promise<(() => void) | undefined> {
   const path = env[CPU_SAMPLE_LOG_ENV]?.trim();
   if (!path) return undefined;
+  // Front and background write one file: each line names its process.
+  const role = env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() || 'single';
   const jsc = await import('bun:jsc') as unknown as {
     startSamplingProfiler?: () => void;
     samplingProfilerStackTraces?: () => { traces?: SampledTrace[]; sources?: { sourceID?: number; url?: string }[] };
@@ -302,7 +304,7 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
         maxMs: Math.round(window.reduce((max, stall) => Math.max(max, stall.endMs - stall.startMs), 0)),
         ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? []),
       };
-      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}\n`, { mode: 0o600 });
+      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}\n`, { mode: 0o600 });
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : 'error'}`);
     }

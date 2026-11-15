@@ -80,6 +80,28 @@ function timeStatement<T>(statement: T): T {
       }
     };
   }
+  // A scan read row by row holds the loop one step at a time: each step is timed.
+  const iterate = held.iterate;
+  if (typeof iterate === 'function') held.iterate = function (this: unknown, ...args: unknown[]) {
+    const iterator = iterate.apply(this, args) as IterableIterator<unknown>;
+    if (!sliceTiming && !slowLog) return iterator;
+    return (function* () {
+      try {
+        for (;;) {
+          const started = performance.now();
+          let next: IteratorResult<unknown>;
+          try { next = iterator.next(); }
+          finally {
+            const ms = performance.now() - started;
+            if (sliceTiming) sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
+            if (slowLog && ms >= slowLog.thresholdMs) noteSlowStatement(ms, typeof held[SQL] === 'string' ? held[SQL] as string : undefined);
+          }
+          if (next.done) return;
+          yield next.value;
+        }
+      } finally { iterator.return?.(); }
+    })();
+  };
   held[TIMED] = true;
   return statement;
 }
@@ -210,11 +232,12 @@ export interface SlowMainThreadSqlHealth {
 /** The engine's slow-log threshold: a statement holding a loop this long is named in the log and in health. */
 export const LOOP_SLOW_SQL_MS = 100;
 
-let slowLog: { thresholdMs: number; count: number; maxMs: number; recent: SlowMainThreadSqlHealth['recent']; log: (line: string) => void } | undefined;
+type SlowEntry = SlowMainThreadSqlHealth['recent'][number];
+let slowLog: { thresholdMs: number; count: number; maxMs: number; recent: SlowEntry[]; log: (line: string, entry: SlowEntry) => void } | undefined;
 const SLOW_RECENT = 10;
 
 /** Times every statement on this thread from now on and names each one at or past `thresholdMs`. */
-export function startSlowMainThreadSqlLog(thresholdMs: number, log: (line: string) => void = (line) => console.warn(line)): void {
+export function startSlowMainThreadSqlLog(thresholdMs: number, log: (line: string, entry: SlowEntry) => void = (line) => console.warn(line)): void {
   installMainThreadSqlTrace();
   if (!isMainThread) return;
   slowLog = { thresholdMs, count: 0, maxMs: 0, recent: [], log };
@@ -234,9 +257,10 @@ function noteSlowStatement(ms: number, sql: string | undefined): void {
   log.maxMs = Math.max(log.maxMs, ms);
   const site = slowSite();
   const sqlId = sql === undefined ? 'exec' : shortHash(sql.replace(/\s+/g, ' ').trim());
-  log.recent.push({ at: new Date().toISOString(), ms: Math.round(ms), site, sql_id: sqlId });
+  const entry = { at: new Date().toISOString(), ms: Math.round(ms), site, sql_id: sqlId };
+  log.recent.push(entry);
   if (log.recent.length > SLOW_RECENT) log.recent.shift();
-  log.log(`[olympus] slow loop sql: ${Math.round(ms)} ms at ${site} (sql ${sqlId})`);
+  log.log(`[olympus] slow loop sql: ${Math.round(ms)} ms at ${site} (sql ${sqlId})`, entry);
 }
 
 // The caller's frames past this module's own wrappers. Bun may name a frame

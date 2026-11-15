@@ -14,9 +14,9 @@
 // failed upgrade can put them back before the previous version starts.
 
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
-import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { olympusDataRoot, sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
 export const BOOT_PROGRESS_SCHEMA = 'olympus.boot-progress.v1';
 
@@ -261,10 +261,77 @@ export function workerUpgradeInFlight(env: LayoutEnv): boolean {
   return existsSync(sharedDataPath('upgrade-in-flight', env));
 }
 
+/** Folders under the data root that hold no store: model files and a backup being packed. */
+const STORELESS_FOLDERS = new Set(['models', 'backup-staging']);
+
+/** Every file under the data root whose name `keep` accepts, links and the store-less folders left out. */
+export function dataRootFiles(env: LayoutEnv, keep: (name: string) => boolean): string[] {
+  const files: string[] = [];
+  const walk = (directory: string, top: boolean) => {
+    let names: string[];
+    try { names = readdirSync(directory); } catch { return; }
+    for (const name of names) {
+      if (top && STORELESS_FOLDERS.has(name)) continue;
+      const path = join(directory, name);
+      let stat;
+      try { stat = lstatSync(path); } catch { continue; }
+      if (stat.isDirectory()) walk(path, false);
+      else if (stat.isFile() && keep(name)) files.push(path);
+    }
+  };
+  walk(olympusDataRoot(env), true);
+  return files.sort();
+}
+
+/** The files a version keeps state in: stores, lock databases and ledgers. The record of copies is the put-back's own. */
+function stateFiles(env: LayoutEnv): string[] {
+  const record = basename(sharedDataPath('schema-backups', env));
+  return dataRootFiles(env, (name) => /\.(sqlite|db|jsonl)$/.test(name) && name !== record);
+}
+
+/**
+ * Marks an upgrade in flight, with the engine stopped. The mark lists the state files there are now, so a put-back
+ * also takes away the ones the new version made: on the Mac forced-failure leg (run 43751182260, 15 Nov 2026) the new
+ * version went on with an mbox import and made its archive store at its own schema, which the restored 1.4.4 refused.
+ */
 export function markWorkerUpgradeInFlight(env: LayoutEnv, startedAt: string): void {
   const path = sharedDataPath('upgrade-in-flight', env);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writePrivateFileAtomicSync(path, `${JSON.stringify({ started_at: startedAt })}\n`);
+  const root = olympusDataRoot(env);
+  const stateNow = stateFiles(env).map((file) => relative(root, file));
+  writePrivateFileAtomicSync(path, `${JSON.stringify({ started_at: startedAt, state_files: stateNow })}\n`);
+}
+
+/** `<path>.pre-schema-failed.bak`: a state file a failed update made, set aside by its put-back until the next committed upgrade. */
+export function failedUpdateSetAsidePath(path: string): string {
+  return `${path}.pre-schema-failed.bak`;
+}
+
+const COMPANIONS = ['-wal', '-shm', '-journal'] as const;
+
+/**
+ * Sets aside the state files made since the mark, each with its -wal, -shm and -journal under the same new name, and
+ * records them with the copies: a forget reaches them, and the next committed upgrade removes them with the copies.
+ * Never deleted here, since they can hold what the owner imported while the update ran. None when the mark has no list.
+ */
+function setAsideStateFilesMadeSinceMark(env: LayoutEnv, putBack: ReadonlySet<string>): string[] {
+  let listed: unknown;
+  try { listed = (JSON.parse(readFileSync(sharedDataPath('upgrade-in-flight', env), 'utf8')) as { state_files?: unknown }).state_files; } catch { return []; }
+  if (!Array.isArray(listed)) return [];
+  const before = new Set(listed.filter((entry): entry is string => typeof entry === 'string'));
+  const root = olympusDataRoot(env);
+  const setAside: string[] = [];
+  for (const file of stateFiles(env)) {
+    const id = relative(root, file);
+    if (before.has(id) || putBack.has(file)) continue;
+    const target = failedUpdateSetAsidePath(file);
+    recordSchemaBackup(env, { storeId: id, dbPath: file, backupPath: target });
+    for (const suffix of COMPANIONS) rmSync(`${target}${suffix}`, { force: true });
+    renameSync(file, target);
+    for (const suffix of COMPANIONS) if (existsSync(`${file}${suffix}`)) renameSync(`${file}${suffix}`, `${target}${suffix}`);
+    setAside.push(id);
+  }
+  return setAside;
 }
 
 /**
@@ -357,7 +424,7 @@ export function preSchemaBackupsOf(dbPath: string): string[] {
   const prefix = `${basename(dbPath)}.pre-schema-`;
   try {
     return readdirSync(dirname(dbPath))
-      .filter((name) => name.startsWith(prefix) && /^(?:\d+|retired|upgrade)\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length)))
+      .filter((name) => name.startsWith(prefix) && /^(?:\d+|retired|upgrade|failed)\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length)))
       .map((name) => join(dirname(dbPath), name));
   } catch {
     return [];
@@ -405,7 +472,7 @@ function schemaBackups(env: LayoutEnv, owned = true): SchemaBackupEntry[] {
 }
 
 /** The product's own names for a copy: `<store>.pre-schema-<n|retired|upgrade>.bak`. */
-const BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade)\.bak$/;
+const BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade|failed)\.bak$/;
 
 /**
  * Whether a recorded copy is one this product made: named exactly its store
@@ -441,6 +508,8 @@ function ownedBackupName(dbPath: string, backupPath: string): boolean {
 
 function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
   return schemaBackups(env).filter((entry) => {
+    // What a put-back set aside is never put back over a store.
+    if (entry.backupPath === failedUpdateSetAsidePath(entry.dbPath)) return false;
     try {
       return statSync(entry.backupPath).mtimeMs >= sinceMs;
     } catch {
@@ -471,6 +540,8 @@ export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): stri
     for (const entry of later) rmSync(entry.backupPath, { recursive: true, force: true });
     restored.push(...entries.map((entry) => entry.storeId));
   }
+  // What the new version made did not exist before it: the earlier version would open it at a schema it does not know.
+  for (const id of setAsideStateFilesMadeSinceMark(env, new Set(byFile.keys()))) restored.push(`${id} (made by the update, set aside)`);
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return restored;
@@ -482,7 +553,7 @@ export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): stri
  */
 export function removeRecordedSchemaBackups(env: LayoutEnv): number {
   const removed = schemaBackups(env).filter((entry) => existsSync(entry.backupPath));
-  for (const entry of removed) rmSync(entry.backupPath, { recursive: true, force: true });
+  for (const entry of removed) removeCopy(entry.backupPath);
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return removed.length;
@@ -491,7 +562,7 @@ export function removeRecordedSchemaBackups(env: LayoutEnv): number {
 /** Removes the backups taken at or after `sinceMs`: the update they guarded succeeded. */
 export function removeSchemaBackupsSince(env: LayoutEnv, sinceMs: number): number {
   const removed = backupsSince(env, sinceMs);
-  for (const entry of removed) rmSync(entry.backupPath, { recursive: true, force: true });
+  for (const entry of removed) removeCopy(entry.backupPath);
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return removed.length;
@@ -511,9 +582,15 @@ function removeAbandonedCopiesOfRecorded(env: LayoutEnv): void {
 export function removeAllSchemaBackups(env: LayoutEnv, dryRun: boolean): number {
   const copies = [...new Set(schemaBackups(env, false).flatMap((entry) => preSchemaBackupsOf(entry.dbPath)))];
   if (dryRun) return copies.length;
-  for (const copy of copies) rmSync(copy, { recursive: true, force: true });
+  for (const copy of copies) removeCopy(copy);
   pruneSchemaBackupRecord(env);
   return copies.length;
+}
+
+/** A copy, with the -wal, -shm and -journal a set-aside store keeps under its name. */
+function removeCopy(path: string): void {
+  rmSync(path, { recursive: true, force: true });
+  for (const suffix of COMPANIONS) rmSync(`${path}${suffix}`, { force: true });
 }
 
 function pruneSchemaBackupRecord(env: LayoutEnv): void {

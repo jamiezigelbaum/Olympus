@@ -10,6 +10,7 @@
 // a step label made of store ids, never a path, a source name or item content.
 // The Worker never touches SQLite or anything else that can block.
 
+import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
@@ -30,6 +31,8 @@ export interface EngineHeartbeat {
   writtenAt: string;
   /** How long the engine's loop has gone without a turn. */
   blockedMs: number;
+  /** Fine-grained loop measurement, enabled only by the profiling harness. */
+  loop_lag?: { max_ms: number; over_budget: number; beats: number };
   /** What the engine says it is doing ("backing up tier-ledger"), and since when. */
   step?: string;
   stepSince?: string;
@@ -42,11 +45,12 @@ const HEARTBEAT_WORKER_SOURCE = `
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 self.onmessage = ({ data }) => {
-  const { sab, path, pid, role, writeMs, startedAt } = data;
-  const ints = new Int32Array(sab, 0, 4);
-  const bytes = new Uint8Array(sab, 16);
+  const { sab, path, pid, role, writeMs, startedAt, metrics, tickMs, budgetMs } = data;
+  const ints = new Int32Array(sab, 0, 8);
+  const bytes = new Uint8Array(sab, 32);
   const decoder = new TextDecoder();
   let lastTick = -1, lastTickAt = Date.now(), lastChange = -1, stepSince = Date.now();
+  let maxLag = 0;
   const write = () => {
     const now = Date.now();
     const tick = Atomics.load(ints, 0);
@@ -55,7 +59,12 @@ self.onmessage = ({ data }) => {
     if (change !== lastChange) { lastChange = change; stepSince = now; }
     const length = Atomics.load(ints, 1);
     const step = length > 0 ? decoder.decode(bytes.slice(0, length)) : undefined;
+    // The open interval matters too: a loop may still be frozen when the
+    // harness ends. The low 32 wall-clock bits wrap safely over this short run.
+    const openLag = metrics ? Math.max(0, ((now - Atomics.load(ints, 6)) >>> 0) - tickMs) : 0;
+    maxLag = Math.max(maxLag, openLag, Atomics.load(ints, 3) / 1000);
     const body = { schema: '${ENGINE_HEARTBEAT_SCHEMA}', pid, role, startedAt, writtenAt: new Date(now).toISOString(),
+      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5) } } : {}),
       blockedMs: Math.max(0, now - lastTickAt - ${LOOP_TICK_MS}),
       ...(step ? { step, stepSince: new Date(stepSince).toISOString() } : {}) };
     try {
@@ -74,14 +83,29 @@ self.onmessage = ({ data }) => {
 export function startEngineHeartbeat(env: LayoutEnv, role: string): void {
   if (beat || typeof Worker === 'undefined') return;
   try {
-    const sab = new SharedArrayBuffer(16 + STEP_BYTES);
-    const ints = new Int32Array(sab, 0, 4);
-    const bytes = new Uint8Array(sab, 16);
+    const sab = new SharedArrayBuffer(32 + STEP_BYTES);
+    const ints = new Int32Array(sab, 0, 8);
+    const bytes = new Uint8Array(sab, 32);
     const worker = new Worker(URL.createObjectURL(new Blob([HEARTBEAT_WORKER_SOURCE], { type: 'text/javascript' })));
     // It must never hold the process open: it goes when the process goes.
     (worker as Worker & { unref?: () => void }).unref?.();
-    worker.postMessage({ sab, path: sharedDataPath('engine-heartbeat', env), pid: process.pid, role, writeMs: HEARTBEAT_WRITE_MS, startedAt: new Date().toISOString() });
-    const tick = setInterval(() => { Atomics.add(ints, 0, 1); }, LOOP_TICK_MS);
+    const metrics = env.OLYMPUS_ENGINE_LOOP_METRICS_DIR;
+    Atomics.store(ints, 6, Date.now());
+    worker.postMessage({ sab, tickMs: metrics ? 25 : LOOP_TICK_MS, budgetMs: role === 'front' ? 100 : 250, metrics: Boolean(metrics), path: metrics ? join(metrics, role + '.json') : sharedDataPath('engine-heartbeat', env), pid: process.pid, role, writeMs: metrics ? 100 : HEARTBEAT_WRITE_MS, startedAt: new Date().toISOString() });
+    const interval = metrics ? 25 : LOOP_TICK_MS;
+    let expected = performance.now() + interval;
+    const tick = setInterval(() => {
+      Atomics.add(ints, 0, 1);
+      if (metrics) {
+        Atomics.store(ints, 6, Date.now());
+        const now = performance.now();
+        const lag = Math.max(0, now - expected);
+        expected = now + interval;
+        Atomics.store(ints, 3, Math.max(Atomics.load(ints, 3), Math.round(lag * 1000)));
+        if (lag >= (role === 'front' ? 100 : 250)) Atomics.add(ints, 4, 1);
+        Atomics.add(ints, 5, 1);
+      }
+    }, interval);
     tick.unref?.();
     beat = { ints, bytes, tick, worker };
   } catch {

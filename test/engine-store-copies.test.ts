@@ -3,10 +3,10 @@
 // removes the copies when it does, the way `olympus worker upgrade` does.
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { workerUpgradeInFlight } from '../src/core/boot-progress.ts';
+import { failedUpdateSetAsidePath, workerUpgradeInFlight } from '../src/core/boot-progress.ts';
 import { commitEngineStores, copyEngineStores, restoreEngineStores } from '../src/core/engine-store-copies.ts';
 import { olympusDataRoot, sharedDataPath } from '../src/core/olympus-layout.ts';
 
@@ -37,6 +37,42 @@ describe('the store copies an engine install takes', () => {
     expect(restoreEngineStores(env)).toEqual(['ledger.sqlite']);
     expect(body()).toBe('old');
     expect(workerUpgradeInFlight(env)).toBe(false);
+  }, 30_000);
+
+  test('a failed new version: the stores and ledgers it made are set aside intact, and nothing that was there before is touched (run 43751182260)', () => {
+    const { env, body, update } = setup();
+    const root = olympusDataRoot(env);
+    const ledger = join(root, 'classification-ledger.jsonl');
+    writeFileSync(ledger, '{"kept":1}\n');
+    copyEngineStores(env, { bunBin: process.execPath });
+    update();
+    // A file that was there before the mark, written by the new version, keeps its place and its bytes.
+    writeFileSync(ledger, '{"kept":1}\n{"later":2}\n');
+    const made = join(root, 'sources', 'archive.imports', '1', 'stores', 'email.secure_local.sqlite');
+    mkdirSync(join(made, '..'), { recursive: true });
+    const db = new Database(made, { create: true });
+    db.exec("CREATE TABLE imported (body TEXT); INSERT INTO imported VALUES ('mail')");
+    db.close();
+    writeFileSync(`${made}-wal`, 'wal bytes');
+    const madeBytes = readFileSync(made);
+    writeFileSync(join(root, 'embedding-ledger.jsonl'), '{}\n');
+    expect(restoreEngineStores(env)).toEqual([
+      'ledger.sqlite',
+      'embedding-ledger.jsonl (made by the update, set aside)',
+      'sources/archive.imports/1/stores/email.secure_local.sqlite (made by the update, set aside)',
+    ]);
+    expect(body()).toBe('old');
+    expect(existsSync(made) || existsSync(`${made}-wal`) || existsSync(join(root, 'embedding-ledger.jsonl'))).toBe(false);
+    expect(readFileSync(failedUpdateSetAsidePath(made)).equals(madeBytes)).toBe(true);
+    expect(readFileSync(`${failedUpdateSetAsidePath(made)}-wal`, 'utf8')).toBe('wal bytes');
+    expect(readFileSync(ledger, 'utf8')).toBe('{"kept":1}\n{"later":2}\n');
+    // The next upgrade neither copies nor puts back what was set aside, and its commit clears it with the copies.
+    copyEngineStores(env, { bunBin: process.execPath });
+    expect(restoreEngineStores(env)).toEqual(['ledger.sqlite']);
+    expect(existsSync(made)).toBe(false);
+    copyEngineStores(env, { bunBin: process.execPath });
+    commitEngineStores(env);
+    expect(existsSync(failedUpdateSetAsidePath(made)) || existsSync(`${failedUpdateSetAsidePath(made)}-wal`)).toBe(false);
   }, 30_000);
 
   test('a healthy new version: its changes stay, and the copies and the mark go', () => {

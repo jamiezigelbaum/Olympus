@@ -146,7 +146,19 @@ export function createSourceAnswerLanes(
     const searchScopes = new Map<string, { accountScope?: string; filters?: ConnectorStoreSearchFilters }>();
     // Each store's embedding provider for THIS request, memoized so the
     // vector lane and passage ranking embed the query once between them.
+    // The memo is shared by every store on the same provider: a per-store
+    // memo embedded the one question once per store, one forward pass at a
+    // time, and that queue was 2.0 to 3.8 s of a live Ask before any lane
+    // ran (rc.17, 11 to 14 stores).
     const requestEmbeddings = new Map<string, SourceEmbeddingProvider | undefined>();
+    const sharedMemos = new Map<SourceEmbeddingProvider, SourceEmbeddingProvider>();
+    // Keyed by the configured provider: the built-in-only view is a new
+    // object per store over the same model.
+    const memoized = (key: SourceEmbeddingProvider, provider: SourceEmbeddingProvider): SourceEmbeddingProvider => {
+      let memo = sharedMemos.get(key);
+      if (!memo) sharedMemos.set(key, memo = memoizeQueryEmbeddings(provider));
+      return memo;
+    };
     const requestEmbedding = (store: LocalConnectorStore): SourceEmbeddingProvider | undefined => {
       if (!requestEmbeddings.has(store.corpusId)) {
         const configured = deps.embeddingProvider(store);
@@ -161,7 +173,7 @@ export function createSourceAnswerLanes(
           // for Private: the question of a private answer never reaches a
           // cloud embedder.
           provider && ((store.trustDomain !== 'secure_local' && mode !== 'private_search') || isApprovedSecureSourceEmbeddingProvider(provider))
-            ? memoizeQueryEmbeddings(provider)
+            ? memoized(configured!, provider)
             : undefined,
         );
       }

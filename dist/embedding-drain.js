@@ -2320,7 +2320,7 @@ function withSqliteFiles(path) {
 
 // scripts/source-embedding-drain.ts
 import { createHash as createHash13 } from "node:crypto";
-import { existsSync as existsSync24, lstatSync as lstatSync13, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync24, lstatSync as lstatSync12, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname26, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
@@ -10207,7 +10207,7 @@ import { dirname as dirname14 } from "node:path";
 
 // src/core/boot-progress.ts
 import { appendFileSync, existsSync as existsSync11, lstatSync as lstatSync7, mkdirSync as mkdirSync8, readdirSync as readdirSync2, readFileSync as readFileSync14, realpathSync as realpathSync4, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync8, utimesSync } from "node:fs";
-import { basename as basename3, dirname as dirname13, isAbsolute as isAbsolute9, join as join16, resolve as resolve6 } from "node:path";
+import { basename as basename3, dirname as dirname13, isAbsolute as isAbsolute9, join as join16, relative as relative5, resolve as resolve6 } from "node:path";
 var WRITE_INTERVAL_MS = 1000;
 var current2;
 var front;
@@ -10270,6 +10270,7 @@ var UPGRADE_COPY_SUFFIX = ".pre-schema-upgrade.bak";
 function workerUpgradeInFlight(env) {
   return existsSync11(sharedDataPath("upgrade-in-flight", env));
 }
+var STORELESS_FOLDERS = new Set(["models", "backup-staging"]);
 function preSchemaBackupPath(dbPath, version) {
   return `${dbPath}.pre-schema-${version}.bak`;
 }
@@ -10312,11 +10313,12 @@ var HEARTBEAT_WORKER_SOURCE = `
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 self.onmessage = ({ data }) => {
-  const { sab, path, pid, role, writeMs, startedAt } = data;
-  const ints = new Int32Array(sab, 0, 4);
-  const bytes = new Uint8Array(sab, 16);
+  const { sab, path, pid, role, writeMs, startedAt, metrics, tickMs, budgetMs } = data;
+  const ints = new Int32Array(sab, 0, 8);
+  const bytes = new Uint8Array(sab, 32);
   const decoder = new TextDecoder();
   let lastTick = -1, lastTickAt = Date.now(), lastChange = -1, stepSince = Date.now();
+  let maxLag = 0;
   const write = () => {
     const now = Date.now();
     const tick = Atomics.load(ints, 0);
@@ -10325,7 +10327,12 @@ self.onmessage = ({ data }) => {
     if (change !== lastChange) { lastChange = change; stepSince = now; }
     const length = Atomics.load(ints, 1);
     const step = length > 0 ? decoder.decode(bytes.slice(0, length)) : undefined;
+    // The open interval matters too: a loop may still be frozen when the
+    // harness ends. The low 32 wall-clock bits wrap safely over this short run.
+    const openLag = metrics ? Math.max(0, ((now - Atomics.load(ints, 6)) >>> 0) - tickMs) : 0;
+    maxLag = Math.max(maxLag, openLag, Atomics.load(ints, 3) / 1000);
     const body = { schema: '${ENGINE_HEARTBEAT_SCHEMA}', pid, role, startedAt, writtenAt: new Date(now).toISOString(),
+      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5) } } : {}),
       blockedMs: Math.max(0, now - lastTickAt - ${LOOP_TICK_MS}),
       ...(step ? { step, stepSince: new Date(stepSince).toISOString() } : {}) };
     try {
@@ -10350,8 +10357,7 @@ function setEngineStep(step) {
 var STARTUP_CAP_BASE_MS = 30 * 60000;
 
 // src/core/upgrade-store-copies.ts
-import { chmodSync as chmodSync3, closeSync as closeSync7, fsyncSync as fsyncSync2, lstatSync as lstatSync8, openSync as openSync7, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9, utimesSync as utimesSync2 } from "node:fs";
-var SKIPPED_FOLDERS = new Set(["models", "backup-staging"]);
+import { chmodSync as chmodSync3, closeSync as closeSync7, fsyncSync as fsyncSync2, openSync as openSync7, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9, utimesSync as utimesSync2 } from "node:fs";
 var SPACE_MARGIN_BYTES = 1024 ** 3;
 function upgradeCopyPath(dbPath) {
   return `${dbPath}${UPGRADE_COPY_SUFFIX}`;
@@ -17267,6 +17273,35 @@ function timeStatement(statement) {
       }
     };
   }
+  const iterate = held.iterate;
+  if (typeof iterate === "function")
+    held.iterate = function(...args) {
+      const iterator = iterate.apply(this, args);
+      if (!sliceTiming && !slowLog)
+        return iterator;
+      return function* () {
+        try {
+          for (;; ) {
+            const started = performance.now();
+            let next;
+            try {
+              next = iterator.next();
+            } finally {
+              const ms = performance.now() - started;
+              if (sliceTiming)
+                sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
+              if (slowLog && ms >= slowLog.thresholdMs)
+                noteSlowStatement(ms, typeof held[SQL] === "string" ? held[SQL] : undefined);
+            }
+            if (next.done)
+              return;
+            yield next.value;
+          }
+        } finally {
+          iterator.return?.();
+        }
+      }();
+    };
   held[TIMED] = true;
   return statement;
 }
@@ -17343,10 +17378,11 @@ function noteSlowStatement(ms, sql) {
   log.maxMs = Math.max(log.maxMs, ms);
   const site = slowSite();
   const sqlId = sql === undefined ? "exec" : shortHash(sql.replace(/\s+/g, " ").trim());
-  log.recent.push({ at: new Date().toISOString(), ms: Math.round(ms), site, sql_id: sqlId });
+  const entry = { at: new Date().toISOString(), ms: Math.round(ms), site, sql_id: sqlId };
+  log.recent.push(entry);
   if (log.recent.length > SLOW_RECENT)
     log.recent.shift();
-  log.log(`[olympus] slow loop sql: ${Math.round(ms)} ms at ${site} (sql ${sqlId})`);
+  log.log(`[olympus] slow loop sql: ${Math.round(ms)} ms at ${site} (sql ${sqlId})`, entry);
 }
 function slowSite() {
   const frames = (new Error().stack ?? "").split(`
@@ -18963,7 +18999,7 @@ function hasImmutableAccountLabel(id) {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID7 } from "node:crypto";
-import { existsSync as existsSync21, lstatSync as lstatSync11, mkdirSync as mkdirSync13, statSync as statSync15, statfsSync as statfsSync3 } from "node:fs";
+import { existsSync as existsSync21, lstatSync as lstatSync10, mkdirSync as mkdirSync13, statSync as statSync15, statfsSync as statfsSync3 } from "node:fs";
 import { dirname as dirname22 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
@@ -18975,7 +19011,7 @@ import {
   existsSync as existsSync17,
   fsyncSync as fsyncSync3,
   mkdirSync as mkdirSync11,
-  lstatSync as lstatSync9,
+  lstatSync as lstatSync8,
   openSync as openSync11,
   readFileSync as readFileSync16,
   readdirSync as readdirSync4,
@@ -19030,7 +19066,7 @@ function olympusDataDir(env = process.env) {
 
 // src/core/store-identity.ts
 import { existsSync as existsSync16, realpathSync as realpathSync5, statSync as statSync13 } from "node:fs";
-import { basename as basename4, dirname as dirname17, isAbsolute as isAbsolute10, join as join18, relative as relative5, resolve as resolve7, sep as sep5 } from "node:path";
+import { basename as basename4, dirname as dirname17, isAbsolute as isAbsolute10, join as join18, relative as relative6, resolve as resolve7, sep as sep5 } from "node:path";
 var LAYOUTS2 = ["folder", "legacy"];
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
@@ -19155,7 +19191,7 @@ function storePlacementView(env = process.env) {
   };
   const folderPlace = (path) => {
     for (const folders of folderRoots()) {
-      const inside = relative5(folders, path);
+      const inside = relative6(folders, path);
       if (inside.startsWith("..") || isAbsolute10(inside))
         continue;
       const [sourceId, slot, stores, file, ...rest] = inside.split(sep5);
@@ -19276,7 +19312,7 @@ function isMediaCachePath(path, sha256, dir) {
   if (dir !== undefined && dirname18(path) !== resolve8(dir))
     return false;
   try {
-    const stat = lstatSync9(path);
+    const stat = lstatSync8(path);
     if (!stat.isFile())
       return false;
   } catch {}
@@ -20192,7 +20228,7 @@ import { existsSync as existsSync20 } from "node:fs";
 // src/core/app-release-log.ts
 import { Database as Database5 } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync8, existsSync as existsSync19, lstatSync as lstatSync10, mkdirSync as mkdirSync12 } from "node:fs";
+import { chmodSync as chmodSync8, existsSync as existsSync19, lstatSync as lstatSync9, mkdirSync as mkdirSync12 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { dirname as dirname21, isAbsolute as isAbsolute13, join as join21 } from "node:path";
 
@@ -20519,12 +20555,12 @@ function hardenPrivatePath(dbPath) {
     throw new Error("The AI apps log must live inside a dedicated private directory.");
   }
   mkdirSync12(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync10(leafDir);
+  const dirStat = lstatSync9(leafDir);
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
     throw new Error("The AI apps log must live in a real private directory.");
   chmodSync8(leafDir, 448);
   if (existsSync19(dbPath)) {
-    const fileStat = lstatSync10(dbPath);
+    const fileStat = lstatSync9(dbPath);
     if (fileStat.isSymbolicLink() || !fileStat.isFile())
       throw new Error("The AI apps log must be a regular file, not a symlink.");
   }
@@ -22335,7 +22371,7 @@ class LocalConnectorStore {
       throw new Error("Connector store read-only mode requires an existing database path.");
     }
     if (options.readOnly === true) {
-      const stat = lstatSync11(this.dbPath);
+      const stat = lstatSync10(this.dbPath);
       if (!stat.isFile() || stat.isSymbolicLink()) {
         throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
       }
@@ -35917,9 +35953,9 @@ var PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 var reporter = createLimitStopReporter();
 
 // src/core/notes-app-folders.ts
-import { existsSync as existsSync23, lstatSync as lstatSync12, readdirSync as readdirSync6, readFileSync as readFileSync20 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync11, readdirSync as readdirSync6, readFileSync as readFileSync20 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
-import { dirname as dirname25, join as join26, relative as relative6, sep as sep7 } from "node:path";
+import { dirname as dirname25, join as join26, relative as relative7, sep as sep7 } from "node:path";
 var OBSIDIAN_SETTINGS_FOLDER = ".obsidian";
 var REFLECT_SETTINGS_FOLDER = ".reflect";
 var NOTES_APPS = Object.freeze([
@@ -35929,7 +35965,7 @@ var NOTES_APPS = Object.freeze([
 var NOTES_APP_SETTINGS_FOLDERS = Object.freeze([OBSIDIAN_SETTINGS_FOLDER, REFLECT_SETTINGS_FOLDER]);
 function realFolder(path) {
   try {
-    const stat = lstatSync12(path);
+    const stat = lstatSync11(path);
     return stat.isDirectory() && !stat.isSymbolicLink();
   } catch {
     return false;
@@ -37222,7 +37258,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   }
   const directory = dirname26(readinessPath);
   mkdirSync14(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync13(directory);
+  const parent = lstatSync12(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
