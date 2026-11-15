@@ -2288,6 +2288,39 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
+  if (options.chunkPks) {
+    // A re-score names its chunks: the plan must start from that list and
+    // seek each chunk's vector by key. Left to the planner, an account scope
+    // or provider filter made it walk every item of the account through the
+    // items index and match the list afterwards: about 2 s per 256-row page
+    // on the live Dropbox store, cut at the deadline (ops#151 WORKER SAMPLE,
+    // 15 Nov). CROSS JOIN fixes SQLite's join order to the order written.
+    return {
+      sql: `
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+        FROM json_each(?) pick
+        CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
+        CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+        CROSS JOIN items i ON i.item_pk = emb.item_pk
+        WHERE i.tombstoned = 0
+          AND emb.content_hash = c.embedding_input_hash
+          ${page ? 'AND emb.chunk_pk > ?' : ''}
+          ${accountScope ? 'AND i.account_scope = ?' : ''}
+          ${selectedFilters.sql}
+          ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ''}
+        ${page ? 'ORDER BY emb.chunk_pk ASC LIMIT ?' : ordered ? 'ORDER BY emb.item_pk ASC, emb.chunk_pk ASC' : ''}
+      `,
+      params: [
+        JSON.stringify(options.chunkPks),
+        modelId,
+        ...(page ? [page.afterChunkPk] : []),
+        ...(accountScope ? [accountScope] : []),
+        ...selectedFilters.params,
+        ...metadataOnly.params,
+        ...(page ? [Math.max(1, Math.floor(page.limit))] : []),
+      ],
+    };
+  }
   return {
     sql: `
       SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
@@ -2295,7 +2328,6 @@ function connectorStoreCurrentEmbeddingRowsQuery(
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? '+emb.model_id' : 'emb.model_id'} = ?
         ${page ? 'AND emb.chunk_pk > ?' : ''}
-        ${options.chunkPks ? 'AND emb.chunk_pk IN (SELECT value FROM json_each(?))' : ''}
         ${accountScope ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
         ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ''}
@@ -2304,7 +2336,6 @@ function connectorStoreCurrentEmbeddingRowsQuery(
     params: [
       modelId,
       ...(page ? [page.afterChunkPk] : []),
-      ...(options.chunkPks ? [JSON.stringify(options.chunkPks)] : []),
       ...(accountScope ? [accountScope] : []),
       ...selectedFilters.params,
       ...metadataOnly.params,
@@ -2542,12 +2573,14 @@ export async function scanDigestPages(
       digestScores.set(heap.pop(), score);
     }
     candidates += digestScores.size;
-    const chunkPks = [...digestScores.keys()];
-    let after = 0;
-    let rePages = 0;
-    while (true) {
+    // Each page names only its own 256 chunks, so a page reads those
+    // vectors by key and nothing else (a filtered-out chunk shortens a page
+    // without ending the batch).
+    const chunkPks = [...digestScores.keys()].sort((a, b) => a - b);
+    for (let at = 0, rePages = 0; at < chunkPks.length; at += CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, rePages++) {
       if (expired()) return cutWith();
-      const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks }, after);
+      const pagePks = chunkPks.slice(at, at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+      const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
       const rows = await read({ mode: 'all', ...page }) as VectorScoreRow[];
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired()) return cutWith();
@@ -2557,9 +2590,7 @@ export async function scanDigestPages(
         const digestScore = digestScores.get(row.chunk_pk);
         if (folded.score !== undefined && digestScore !== undefined) underestimate = Math.max(underestimate, folded.score - digestScore);
       }
-      if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
-      after = rows.at(-1)!.chunk_pk;
-      if (rePages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
+      if (rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
     }
   }
   return { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
@@ -2569,10 +2600,12 @@ const VECTOR_DIGEST_PAGE_ROWS = 4096;
 /** The least the digest is assumed to underestimate an exact cosine by. */
 const VECTOR_DIGEST_MIN_MARGIN = 0.05;
 /**
- * Re-scored chunks per digest pass once enough items qualify: about 60 MB
- * of 768-dimension vectors, a few percent of a 600K-chunk exact scan.
+ * Re-scored chunks per digest pass once enough items qualify: about 15 MB
+ * of 768-dimension vectors. On 83 real questions against his Dropbox store
+ * 5,000 kept the exact top 24 of every one, in about a third of the reads
+ * of 20,000 (eval/vector-rescore-cap.ts, 15 Nov).
  */
-const VECTOR_DIGEST_MAX_CANDIDATES = 20_000;
+const VECTOR_DIGEST_MAX_CANDIDATES = 5_000;
 
 /** The K-th best item's exact cosine so far; -Infinity with fewer than K items. */
 function kthBestCosine(bestByItem: VectorWinners, k: number): number {

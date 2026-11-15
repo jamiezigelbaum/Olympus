@@ -69,7 +69,7 @@ async function main(): Promise<void> {
       for (const cap of caps) {
         let rescoreReads = 0;
         const read = async (query: StoreRead): Promise<unknown> => {
-          if (query.sql.includes('emb.chunk_pk IN')) rescoreReads += 1;
+          if (query.sql.includes('FROM json_each(?) pick')) rescoreReads += 1;
           const params = query.params as Array<string | number | null>;
           return query.mode === 'all' ? db.query(query.sql).all(...params) : db.query(query.sql).get(...params);
         };

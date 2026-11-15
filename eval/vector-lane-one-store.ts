@@ -2,10 +2,15 @@
 // by read. Counts, ids and timings only: no item text is printed.
 //   bun eval/vector-lane-one-store.ts --data-root <copy> --corpus internal.dropbox.files \
 //     --query-file <file with the question> [--trials 3] [--max-results 24] [--deadline-ms 54000]
-//     [--live-scope --registry <connected handle registry> [--source dropbox.files] [--account personal]]
-// --live-scope searches with the account scope and filters the live Ask
+//     --registry <connected handle registry> [--source dropbox.files] [--account personal] | --no-live-scope
+// By default it searches with the account scope and filters the live Ask
 // passes (the source's approved folder scope, as the engine builds them),
-// and prints the re-score page's EXPLAIN QUERY PLAN with them.
+// and prints the re-score page's EXPLAIN QUERY PLAN with them: a speed
+// number taken without the owner's real scope does not count (15 Nov).
+// --no-live-scope searches the whole store, for comparison only.
+// --writer runs a writer on the copy's store during the trials (a no-op
+// update in its own transaction every 50 ms, from another thread), so a
+// read is timed while the WAL grows, as it does during ingest.
 // Read-only. Each read's time is measured from when it is sent to when the
 // next read of that store is sent; the scan's reads run one at a time.
 import { Database } from 'bun:sqlite';
@@ -44,9 +49,9 @@ async function main(): Promise<void> {
   if (!provider) throw new Error('No embedding provider for that store.');
   let accountScope: string | undefined;
   let filters: ConnectorStoreSearchFilters | undefined;
-  if (rest.includes('--live-scope')) {
+  if (!rest.includes('--no-live-scope')) {
     const registryPath = values.get('registry');
-    if (!registryPath) throw new Error('--live-scope needs --registry.');
+    if (!registryPath) throw new Error('--registry is required (or --no-live-scope, for a comparison that does not count).');
     const approval = new FileSourceScopeAuthority({ registryPath }).snapshot(values.get('source') ?? 'dropbox.files');
     const scope = fileSourceScopeMetadataFilters(approval);
     if (!scope.allowed) throw new Error(`The source scope is not approved (${approval.status}).`);
@@ -61,6 +66,15 @@ async function main(): Promise<void> {
       console.log(JSON.stringify({ liveScope: true, filterKeys: Object.keys(filters).sort(), onDemandReadsTablePresent, plan: plan.map(row => row.detail) }));
     } finally { db.close(); }
   }
+  const writer = rest.includes('--writer') ? new Worker(URL.createObjectURL(new Blob([`
+    const { Database } = require('bun:sqlite');
+    const db = new Database(${JSON.stringify(store.dbPath)});
+    db.exec('PRAGMA busy_timeout = 5000');
+    const touch = db.query('UPDATE items SET tombstoned = tombstoned WHERE item_pk = (SELECT max(item_pk) FROM items)');
+    let writes = 0;
+    setInterval(() => { db.transaction(() => touch.run())(); writes += 1; }, 50);
+    self.onmessage = () => { postMessage(writes); db.close(); };
+  `], { type: 'application/javascript' }))) : undefined;
   let reads: Array<{ site: string; sentAt: number }> = [];
   setReadPoolObserverForTests((dbPath, read) => { if (dbPath === store.dbPath) reads.push({ site: poolSqlSite(read.sql), sentAt: performance.now() }); }, { snapshots: true });
   for (let trial = 1; trial <= trials; trial++) {
@@ -84,6 +98,11 @@ async function main(): Promise<void> {
     }));
   }
   setReadPoolObserverForTests();
+  if (writer) {
+    const writes = await new Promise<number>(resolve => { writer.onmessage = event => resolve(event.data as number); writer.postMessage('stop'); });
+    writer.terminate();
+    console.log(JSON.stringify({ writer: true, writes }));
+  }
   for (const opened_ of opened.stores) opened_.close();
 }
 
