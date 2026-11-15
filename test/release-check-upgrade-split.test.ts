@@ -125,7 +125,8 @@ describe('store files', () => {
   });
 
   test('backups, partial copies and journals are counted as leftovers, stores are not', () => {
-    for (const path of ['stores/a.sqlite', 'stores/a.sqlite.pre-schema-12.bak', 'stores/b.sqlite.partial-1', 'jobs.db-journal', 'jobs.db']) {
+    // A model the new release is still downloading is not a store left behind.
+    for (const path of ['stores/a.sqlite', 'stores/a.sqlite.pre-schema-12.bak', 'stores/b.sqlite.partial-1', 'jobs.db-journal', 'jobs.db', 'models/built-in-embedding/m/model.litertlm.partial-1101-x']) {
       mkdirSync(join(dir, path, '..'), { recursive: true });
       writeFileSync(join(dir, path), '');
     }

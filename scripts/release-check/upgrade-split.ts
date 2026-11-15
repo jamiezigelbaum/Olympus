@@ -125,7 +125,11 @@ export function leftoverFiles(root: string): number {
   return leftoverFileNames(root).length;
 }
 
-/** The same files, by their path under `root`, so a failed check names what was left. */
+/**
+ * The same files, by their path under `root`, so a failed check names what was left.
+ * The models folder is not a store: a model the new release is still
+ * downloading has a `.partial` file there (mac-upgrade, run 43736059061).
+ */
 export function leftoverFileNames(root: string): string[] {
   const names: string[] = [];
   const walk = (dir: string): void => {
@@ -133,6 +137,7 @@ export function leftoverFileNames(root: string): string[] {
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       const path = join(dir, entry.name);
+      if (entry.isDirectory() && dir === root && entry.name === 'models') continue;
       if (entry.isDirectory()) walk(path);
       else if (/\.pre-schema-.*\.bak$|\.partial|-journal$/.test(entry.name)) names.push(relative(root, path));
     }
