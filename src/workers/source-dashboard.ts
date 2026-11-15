@@ -3812,7 +3812,10 @@ function tierClassificationFromCorpora(
   const counts = corpora.map(numericCounts);
   const sum = (key: string) => counts.reduce((total, entry) => total + (entry[key] ?? 0), 0);
   const secrets = sum('secret_locations');
-  const pending = sum('pending_classification_items');
+  // An item waiting in two tier stores is one item to the owner: each store
+  // reports the ones it counts for its set (`_once`), so the sum is items.
+  const pending = counts.reduce((total, entry) =>
+    total + (entry.pending_classification_items_once ?? entry.pending_classification_items ?? 0), 0);
   const superseded = sum('superseded_chunks');
   const namesOnlyKept = sum('names_only_kept_chunks');
   const ids = new Set(corpora.map((corpus) => corpus.corpus_id));

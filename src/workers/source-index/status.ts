@@ -775,6 +775,8 @@ function connectorStoreStatus(
       ...(status.tier
         ? {
             pending_classification_items: status.tier.pendingClassificationItems,
+            ...(status.tier.pendingClassificationItemsOnce !== undefined
+              ? { pending_classification_items_once: status.tier.pendingClassificationItemsOnce } : {}),
             superseded_chunks: status.tier.supersededChunks,
             tier_move_in_progress: status.tier.tierMoveInProgress,
             ...(status.tier.namesOnlyKeptChunks ? { names_only_kept_chunks: status.tier.namesOnlyKeptChunks } : {}),

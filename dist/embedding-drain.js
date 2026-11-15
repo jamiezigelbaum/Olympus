@@ -22300,6 +22300,24 @@ class LocalConnectorStore {
       return false;
     }
   }
+  *heldCountedHereSteps(heldPks) {
+    const ledger = this.visibilityLedger();
+    if (!ledger)
+      return [...heldPks];
+    const rows = yield { sql: `SELECT item_pk, provider, account_scope, provider_conversation_id, provider_item_id
+      FROM items WHERE item_pk IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(heldPks)], mode: "all" };
+    const identities = rows.map((row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+    }));
+    const copies = ledger.copiesForMany(identities);
+    return rows.filter((row, index) => {
+      const held = (copies.get(tierLedgerIdentityKey(identities[index])) ?? []).filter((copy) => copy.state === "current" && copy.embedHold).map((copy) => copy.corpusId).sort();
+      return held.length === 0 || held[0] === this.corpusId || !held.includes(this.corpusId);
+    }).map((row) => row.item_pk);
+  }
   visibilityLedger() {
     const binding = this.tierSetBinding();
     if (binding)
@@ -29884,6 +29902,10 @@ ${parentKey(ref)}`, { ref, origin });
     const digestByModel = new Map(digestRows.map((row) => [row.model_id, row.completed === 1 ? 1 : row.last_rowid ? Math.min(0.999, row.cursor_rowid / row.last_rowid) : 0]));
     const tierStatus = tier.hidden.length > 0 || tier.held.length > 0 || tier.moving > 0 || tier.metadataLayer.length > 0 ? {
       pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
+      ...tier.held.length > 0 ? { pendingClassificationItemsOnce: new Set([
+        ...yield* this.heldCountedHereSteps(tier.held),
+        ...unreadHolds.waitingPks
+      ]).size } : {},
       supersededChunks: tier.hidden.length > 0 ? (yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
               `, params: [JSON.stringify(tier.hidden)], mode: "get" }).n : 0,

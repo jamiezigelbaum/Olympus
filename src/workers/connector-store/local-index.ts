@@ -1484,6 +1484,13 @@ export interface ConnectorStoreItemCopyImportSummary {
 export interface ConnectorStoreTierStatus {
   /** Items whose tier is not final yet: stored and searchable by keyword; vectors stay out of search. */
   pendingClassificationItems: number;
+  /**
+   * The same items, counted once across a tiered store set: an item whose
+   * copies wait in two tier stores is counted only in the first (by corpus
+   * id) that holds it. What a source's card adds up, so it says how many
+   * items the owner has waiting, not how many copies.
+   */
+  pendingClassificationItemsOnce?: number;
   /** Chunks of superseded or staged copies: kept, never searched, counted or served. */
   supersededChunks: number;
   /** Items with a copy here that are mid-move. */
@@ -4052,6 +4059,29 @@ export class LocalConnectorStore {
    * exist yet cannot hold a routed copy, so everything in it is legacy and
    * visible exactly as before P1b.
    */
+  /**
+   * Of the held items here, those this store counts for its tier set: an item
+   * also held in another tier store of the set is counted in the first one
+   * (by corpus id) of its held copies. Without a ledger every held item is
+   * counted here.
+   */
+  private *heldCountedHereSteps(heldPks: readonly number[]): Generator<StoreRead, number[], unknown> {
+    const ledger = this.visibilityLedger();
+    if (!ledger) return [...heldPks];
+    const rows = (yield { sql: `SELECT item_pk, provider, account_scope, provider_conversation_id, provider_item_id
+      FROM items WHERE item_pk IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(heldPks)], mode: 'all' }) as Array<{
+        item_pk: number; provider: string; account_scope: string; provider_conversation_id: string | null; provider_item_id: string }>;
+    const identities = rows.map((row) => ({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}) }));
+    const copies = ledger.copiesForMany(identities);
+    return rows.filter((row, index) => {
+      const held = (copies.get(tierLedgerIdentityKey(identities[index]!)) ?? [])
+        .filter((copy) => copy.state === 'current' && copy.embedHold)
+        .map((copy) => copy.corpusId).sort();
+      return held.length === 0 || held[0] === this.corpusId || !held.includes(this.corpusId);
+    }).map((row) => row.item_pk);
+  }
+
   private visibilityLedger(): TierLedger | undefined {
     // A store that has received routed copies is BOUND to its tiered store
     // set's ledger. Every handle on it — a set leg, a read-only reader, an
@@ -15753,6 +15783,12 @@ export class LocalConnectorStore {
       || tier.moving > 0 || tier.metadataLayer.length > 0
       ? {
           pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
+          ...(tier.held.length > 0
+            ? { pendingClassificationItemsOnce: new Set([
+              ...(yield* this.heldCountedHereSteps(tier.held)),
+              ...unreadHolds.waitingPks,
+            ]).size }
+            : {}),
           supersededChunks: tier.hidden.length > 0
             ? ((yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
