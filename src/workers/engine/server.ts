@@ -791,6 +791,8 @@ export async function main(): Promise<void> {
   // Set once the judge's model is built (below): a lane whose model cannot be
   // built queues questions nothing answers, the same as no judge (#1316).
   let snifferModelBuilt: boolean | undefined;
+  // Stops of the privacy check the owner can look into: waiting items then need them (Home's Needs you).
+  const DASHBOARD_JUDGE_STOP_REASONS: ReadonlySet<string> = new Set(['model_not_answering', 'cloud_stopped', 'failed']);
   const judgeMissing = (): 'no_model' | 'turned_off' | undefined => (
     !tierSnifferServiceEnv(process.env).enabled ? 'turned_off'
       : snifferRuntime.source === 'off' || snifferModelBuilt === false ? 'no_model'
@@ -6007,6 +6009,11 @@ export async function main(): Promise<void> {
     },
     privacy: () => {
       const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
+      // The local judge's measured speed, for Home's time left on the waiting items.
+      const judgePerMinute = (): number | undefined => {
+        const rate = judgeObservations.observed().localItemsPerMinute;
+        return rate !== undefined && Number.isFinite(rate) && rate > 0 ? rate : undefined;
+      };
       const backlog = tierSnifferBacklog?.();
       const missing = judgeMissing();
       return {
@@ -6014,6 +6021,9 @@ export async function main(): Promise<void> {
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         // No judge: every new item waits, held, until one is set up (#1316).
         ...(missing ? { judgeMissing: missing } : {}),
+        ...(backlog?.waiting && DASHBOARD_JUDGE_STOP_REASONS.has(backlog.waiting.reason)
+          ? { judgeStopped: backlog.waiting.reason as 'model_not_answering' | 'cloud_stopped' | 'failed' } : {}),
+        ...((rate) => (rate !== undefined ? { judgePerMinute: rate } : {}))(judgePerMinute()),
         ...(backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}),
       };
     },

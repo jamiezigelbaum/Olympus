@@ -2815,7 +2815,7 @@ export function chatgptDashboardClient(
     page.className += ' home-page';
     const all = Array.isArray(data.sources) ? data.sources : [];
     const needs = Array.isArray(data.needsYou) ? data.needsYou.filter((item: Any) => !!item) : [];
-    const extra = [privacyPendingRow(data), transcriptionNeedRow(data.models)].filter((row) => !!row) as HTMLElement[];
+    const extra = [transcriptionNeedRow(data.models)].filter((row) => !!row) as HTMLElement[];
     const waiting = waitingRow() ? 1 : 0;
     add(page, homeStatus(data, needs.length + extra.length + waiting + (data.blocker ? 1 : 0), all.filter((source: Any) => !isArchivesCard(source))));
     add(page, staleLine());
@@ -2836,17 +2836,22 @@ export function chatgptDashboardClient(
     return null;
   }
 
-  /** Privacy items waiting to be checked: one Needs you line that opens Privacy (#1085). */
+  /**
+   * Items waiting for the private model: machine work, so an In progress
+   * line with its time left, never a Needs you line (rc.17: 753 waiting
+   * items read as 753 files to check). The view model raises Needs you only
+   * when the check has stopped (privacy:judge_stopped).
+   */
   function privacyPendingRow(data: Any): HTMLElement | null {
     const info = data && data.privacy && typeof data.privacy === 'object' ? data.privacy : null;
     if (!info || !privacy || info.configured !== true) return null;
     const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
     if (pending < 1) return null;
     const W = config.privacy.copy;
-    const blocked = globalReason();
-    const open = button(P.home.openPrivacy, 'need:privacy-pending', blocked ? null : () => openPrivacy('need:privacy-pending'), 'plain');
-    const body = add(el('div', 'need-body'), el('p', 'row-text', fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })), add(el('span', 'fix'), open));
-    const row = add(el('li', 'row need'), body);
+    const facts = [fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })];
+    const rate = typeof info.judgePerMinute === 'number' && isFinite(info.judgePerMinute) && info.judgePerMinute > 0 ? info.judgePerMinute : 0;
+    if (rate > 0) facts.push(fill(P.home.left, { duration: duration(Math.ceil(pending / rate) * 60) }));
+    const row = add(el('li', 'row home-line'), add(el('div', 'need-body'), el('p', 'row-text', facts.join(' · '))));
     row.setAttribute('data-privacy-pending', String(pending));
     return row;
   }
@@ -2877,6 +2882,8 @@ export function chatgptDashboardClient(
     if (data.models) for (const entry of installLines(data.models)) if (entry.state !== 'failed') rows.push(add(el('li', 'row home-line'), installLine(entry)));
     const waits = Array.isArray(data.waits) ? data.waits : [];
     for (const wait of waits) { const row = waitRow(wait); if (row) rows.push(row); }
+    const pending = privacyPendingRow(data);
+    if (pending) rows.push(pending);
     if (!rows.length) return null;
     const section = add(el('section', 'section home-progress'), el('h2', '', P.home.progress));
     const list = el('ul', 'rows');

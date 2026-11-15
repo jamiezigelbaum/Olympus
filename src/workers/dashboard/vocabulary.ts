@@ -1297,6 +1297,7 @@ function freshLine(source: DashboardSourceCard, now: Date): string {
   if (source.connection.action.kind === 'archive_import') return source.connection.label;
   const waiting = dashboardWaitingToReadPhrase(source);
   const unreadable = dashboardUnreadablePhrase(source);
+  const unreadableUnsupported = dashboardUnreadableUnsupportedPhrase(source);
   const unsupportedKind = dashboardUnsupportedKindPhrase(source);
   const pictures = dashboardPicturesNotReadHerePhrase(source);
   // The owner's own Sync now press, while it is the latest word, says what it
@@ -1304,7 +1305,7 @@ function freshLine(source: DashboardSourceCard, now: Date): string {
   const manual = dashboardManualSyncLine(source, now);
   const capture = dashboardCaptureClause(source);
   const pass = dashboardLivePassClause(source);
-  const tail = [pass, waiting, unreadable, unsupportedKind, pictures, capture].filter((part): part is string => !!part).join(' · ');
+  const tail = [pass, waiting, unreadable, unreadableUnsupported, unsupportedKind, pictures, capture].filter((part): part is string => !!part).join(' · ');
   if (manual) return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
   if (typeof hours !== 'number' || !Number.isFinite(hours)) return tail;
@@ -1381,8 +1382,24 @@ function itemsPhrase(source: Pick<DashboardSourceCard, 'family'>, count: number,
  * DASHBOARD_UNREADABLE_ALARM_SHARE). Counts only; no file is ever named.
  */
 export function dashboardUnreadablePhrase(source: DashboardSourceCard): string | undefined {
-  const count = Math.max(0, Math.trunc(source.coverage.unreadable_items ?? 0));
+  const count = Math.max(0, Math.trunc(source.coverage.unreadable_items ?? 0) - dashboardUnreadableUnsupportedCount(source));
   return count > 0 ? `${itemsPhrase(source, count)} can't be read` : undefined;
+}
+
+/** Of the unreadable files, those in a format with no reader (coverage.unreadable_unsupported_items). */
+function dashboardUnreadableUnsupportedCount(source: DashboardSourceCard): number {
+  return Math.max(0, Math.min(Math.trunc(source.coverage.unreadable_items ?? 0), Math.trunc(source.coverage.unreadable_unsupported_items ?? 0)));
+}
+
+/**
+ * "836 files in formats Olympus can't read yet (.heic, .key, .numbers)": a
+ * known gap, its own plain count beside the damaged ones, never an alarm.
+ */
+export function dashboardUnreadableUnsupportedPhrase(source: DashboardSourceCard): string | undefined {
+  const count = dashboardUnreadableUnsupportedCount(source);
+  if (count <= 0) return undefined;
+  const formats = (source.coverage.unsupported_formats ?? []).filter((format) => /^[.a-z0-9+-]{1,41}$/i.test(format));
+  return `${itemsPhrase(source, count)} in formats Olympus can't read yet${formats.length ? ` (${formats.join(', ')})` : ''}`;
 }
 
 // Waiting is the unaccounted-for remainder of a defensible summary.
@@ -1414,12 +1431,14 @@ export function dashboardPhaseUnreadableWords(read: number, unreadable: number):
  */
 export function dashboardUnreadableSentence(source: DashboardSourceCard): string | undefined {
   const phrase = dashboardUnreadablePhrase(source);
-  if (!phrase) return undefined;
+  const unsupported = dashboardUnreadableUnsupportedPhrase(source);
+  if (!phrase) return unsupported ? `${unsupported[0]!.toUpperCase()}${unsupported.slice(1)}. ${DASHBOARD_UNREADABLE_NOTE}` : undefined;
   if ((source.coverage.settled_unreadable_items ?? 0) > 0) {
     return `${phrase[0]!.toUpperCase()}${phrase.slice(1)}. Some items were kept Private because Olympus couldn't read them. See why lists the files and their reasons.`;
   }
-  const lead = `${phrase[0]!.toUpperCase()}${phrase.slice(1)}: extraction failed permanently — the file is damaged`
-    + " or in a format Olympus can't read.";
+  const lead = `${phrase[0]!.toUpperCase()}${phrase.slice(1)}: extraction failed permanently`
+    + (unsupported ? ' — the file is damaged or Olympus could not open it.' : " — the file is damaged or in a format Olympus can't read.")
+    + (unsupported ? ` Also ${unsupported}.` : '');
   // Past the alarm share the row says Needs you, so this sentence must not say
   // nothing is waiting — and the rest of the source still answers.
   return source.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL
@@ -1471,7 +1490,7 @@ export const DASHBOARD_UNREADABLE_NOTE_MANY =
  * a count per code (names travel beside it, never in a reason); the panel
  * holds these words.
  */
-export const DASHBOARD_UNREADABLE_REASON_CODES = ['damaged_or_unsupported', 'privacy_check_missing'] as const;
+export const DASHBOARD_UNREADABLE_REASON_CODES = ['damaged_or_unsupported', 'unsupported_format', 'privacy_check_missing'] as const;
 export type DashboardUnreadableReasonCode = (typeof DASHBOARD_UNREADABLE_REASON_CODES)[number];
 
 export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
@@ -1484,6 +1503,10 @@ export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
   damaged_or_unsupported: {
     one: "{count} file Olympus can't read at all",
     other: "{count} files Olympus can't read at all",
+  },  // A format with no reader yet: a known gap, not damage (coverage.unreadable_unsupported_items).
+  unsupported_format: {
+    one: "{count} file in a format Olympus can't read yet",
+    other: "{count} files in formats Olympus can't read yet",
   },
 };
 
@@ -1679,8 +1702,7 @@ function workingLine(source: DashboardSourceCard): string {
   if (typeof eta === 'number' && Number.isFinite(eta) && eta > 0) {
     parts.push(`~${dashboardDuration(eta * 60)} left`);
   }
-  const unreadable = dashboardUnreadablePhrase(source);
-  if (unreadable) parts.push(unreadable);
+  for (const phrase of [dashboardUnreadablePhrase(source), dashboardUnreadableUnsupportedPhrase(source)]) if (phrase) parts.push(phrase);
   return parts.join(' · ');
 }
 
@@ -1923,8 +1945,6 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     progress: 'In progress',
     /** A first index's time left, after its percent: "about 40 min left". */
     left: 'about {duration} left',
-    /** Privacy items waiting to be checked: the Needs you line's button (#1085). */
-    openPrivacy: 'Open Privacy',
     /** A source Olympus parked on its own budget (#1044), and when it resumes. */
     waitBudget: 'daily {api} API budget used',
     waitRateLimit: '{api} rate limit reached',
@@ -3152,10 +3172,27 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   descriptionEmpty: 'You haven\'t said what\'s private yet.',
   descriptionStart: 'Describe what\'s private',
   editLabel: 'Edit what\'s private',
+  /** Home's In progress line for items waiting for the private model: machine work, no button. */
   dashboardPending: {
-    one: '{n} item waiting to be checked',
-    many: '{n} items waiting to be checked',
+    one: '{n} item waiting for the private model',
+    many: '{n} items waiting for the private model',
   },
+} as const;
+
+/**
+ * The privacy check stopped while items wait (sniffer-service `waiting`):
+ * {n} waiting items, {reason} the check's own plain sentence. Only this makes
+ * waiting items a Needs you line; waiting alone is In progress.
+ */
+export const DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY = {
+  sentence: '{n} items are waiting because the privacy check stopped: {reason}',
+  /** One closed reason per stop the owner can look into (sniffer-service TierSnifferWaitReason). */
+  reason: {
+    model_not_answering: 'the private model is not answering',
+    cloud_stopped: 'cloud privacy checking is stopped; check the spending limit or the Venice account',
+    failed: 'its last pass failed',
+  },
+  label: 'Check the private model',
 } as const;
 
 /** The dashboard's prompt to set up privacy, until the person has said what's private for them. */

@@ -310,6 +310,8 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
       configured: view.privacy.configured === true,
       pendingCount: whole(view.privacy.pendingCount),
       ruleCount: whole(view.privacy.ruleCount),
+      ...(typeof view.privacy.judgePerMinute === 'number' && Number.isFinite(view.privacy.judgePerMinute) && view.privacy.judgePerMinute > 0
+        ? { judgePerMinute: Math.round(view.privacy.judgePerMinute * 10) / 10 } : {}),
     };
   }
   const remote = view.remote;

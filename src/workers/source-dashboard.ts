@@ -35,6 +35,8 @@ import {
   ITEMS_WITH_TEXT_COUNT_KEY,
   UNREADABLE_ITEMS_COUNT_KEY,
   UNSUPPORTED_KIND_COUNT_KEY,
+  UNREADABLE_UNSUPPORTED_COUNT_KEY,
+  UNSUPPORTED_FORMATS_SHOWN,
   PICTURES_NOT_READ_HERE_COUNT_KEY,
   aggregateAnswerReadyEligibleItems,
   answerReadyEligibleItems,
@@ -993,6 +995,13 @@ export interface DashboardSourceCard {
     unreadable_items?: number;
     // In-scope items whose kind Olympus has no reader for yet.
     unsupported_kind_items?: number;
+    /**
+     * Of `unreadable_items`, the files whose format has no reader: a known
+     * gap stated as its own count, never part of the many-unreadable alarm.
+     */
+    unreadable_unsupported_items?: number;
+    /** Those files' commonest formats (".heic"), most first; names a format, never a file. */
+    unsupported_formats?: string[];
     // In-scope pictures with no reader on this computer.
     pictures_not_read_here_items?: number;
     settled_unreadable_items?: number;
@@ -1505,7 +1514,7 @@ export interface SourceDashboardBuildOptions {
    * Applied before any card is built, so the count, its names and the
    * coverage math agree, and a file that became Secrets is never counted.
    */
-  unreadableRecheck?: (corpusId: string) => { unreadable: number; blocked: number } | undefined;
+  unreadableRecheck?: (corpusId: string) => { unreadable: number; blocked: number; unsupported?: number; unsupportedFormats?: string[] } | undefined;
   credentialHealth?: CredentialHealthReport;
   oauthClientIds?: Partial<Record<DashboardOAuthSource | 'google', string>>;
   /** Per card; a Google entry is true only for a secret paired with that card's client id. */
@@ -2792,7 +2801,7 @@ function recheckedUnreadableCorpora(
     const counts = 'counts' in corpus ? corpus.counts : undefined;
     const counted = counts?.[UNREADABLE_ITEMS_COUNT_KEY];
     if (!counts || typeof counted !== 'number' || !(counted > 0)) return corpus;
-    let now: { unreadable: number; blocked: number } | undefined;
+    let now: ReturnType<NonNullable<SourceDashboardBuildOptions['unreadableRecheck']>>;
     try {
       now = recheck(corpus.corpus_id);
     } catch {
@@ -2801,15 +2810,18 @@ function recheckedUnreadableCorpora(
     if (!now) return corpus;
     const unreadable = Math.min(counted, Math.max(0, Math.trunc(now.unreadable)));
     const moved = Math.min(counted - unreadable, Math.max(0, Math.trunc(now.blocked)));
-    if (unreadable === counted) return corpus;
+    const unsupported = Math.min(unreadable, Math.max(0, Math.trunc(now.unsupported ?? 0)));
+    if (unreadable === counted && unsupported === 0) return corpus;
     const blocked = counts[BLOCKED_BY_POLICY_COUNT_KEY];
     return {
       ...corpus,
       counts: {
         ...counts,
         [UNREADABLE_ITEMS_COUNT_KEY]: unreadable,
+        ...(unsupported > 0 ? { [UNREADABLE_UNSUPPORTED_COUNT_KEY]: unsupported } : {}),
         ...(moved > 0 ? { [BLOCKED_BY_POLICY_COUNT_KEY]: (typeof blocked === 'number' ? blocked : 0) + moved } : {}),
       },
+      ...(unsupported > 0 && now.unsupportedFormats?.length ? { unsupported_formats: now.unsupportedFormats } : {}),
     } as SourceIndexStatusCorpus;
   });
 }
@@ -3640,6 +3652,8 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     const value = card.coverage.pictures_not_read_here_items;
     return value === undefined ? sum : (sum ?? 0) + value;
   }, undefined);
+  const unreadableUnsupported = cards.reduce((sum, card) => sum + (card.coverage.unreadable_unsupported_items ?? 0), 0);
+  const unsupportedFormats = [...new Set(cards.flatMap((card) => card.coverage.unsupported_formats ?? []))].slice(0, UNSUPPORTED_FORMATS_SHOWN);
   // The per-file embedding count is present on the card only when EVERY
   // corpus holding items measures it. A partial sum over the card's whole
   // in-scope population would print an exact percentage the unmeasured
@@ -3676,6 +3690,8 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
       ? { settled_unreadable_items: cards.reduce((sum, card) => sum + (card.coverage.settled_unreadable_items ?? 0), 0) } : {}),
     ...(unreadable !== undefined ? { unreadable_items: unreadable } : {}),
     ...(unsupportedKind !== undefined ? { unsupported_kind_items: unsupportedKind } : {}),
+    ...(unreadableUnsupported > 0 ? { unreadable_unsupported_items: unreadableUnsupported } : {}),
+    ...(unsupportedFormats.length > 0 ? { unsupported_formats: unsupportedFormats } : {}),
     ...(picturesNotReadHere !== undefined ? { pictures_not_read_here_items: picturesNotReadHere } : {}),
     ...(cards.some((card) => card.coverage.stored_items !== undefined)
       ? { stored_items: cards.reduce((sum, card) => sum + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}),
@@ -4837,7 +4853,12 @@ function sourceCardFromCorpus(
   const provider = stringProperty(corpus, 'provider') ?? providerFromCorpusId(corpus.corpus_id);
   const sourceId = scheduler?.source_id ?? corpus.corpus_id;
   const queue = queueHealth(counts, scheduler);
-  const coverage = coverageFromCounts(counts);
+  const formats = (corpus as { unsupported_formats?: unknown }).unsupported_formats;
+  const coverage = {
+    ...coverageFromCounts(counts),
+    ...(Array.isArray(formats) && formats.every((format) => typeof format === 'string') && formats.length > 0
+      ? { unsupported_formats: (formats as string[]).slice(0, UNSUPPORTED_FORMATS_SHOWN) } : {}),
+  };
   const metadataSync = metadataSyncFromCounts(counts);
   const freshness = freshnessFrom(corpus, scheduler);
   const answerReadiness = answerReadinessFrom(
@@ -4972,6 +4993,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   const unsupportedKind = counts[UNSUPPORTED_KIND_COUNT_KEY];
+  const unreadableUnsupported = Math.min(unreadable ?? 0, counts[UNREADABLE_UNSUPPORTED_COUNT_KEY] ?? 0);
   const picturesNotReadHere = counts[PICTURES_NOT_READ_HERE_COUNT_KEY];
   return {
     indexed_items: corpusOwnIndexedItems(counts, indexedItems),
@@ -4984,6 +5006,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
     ...(counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items }),
     ...(unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {}),
     ...(unsupportedKind !== undefined ? { unsupported_kind_items: Math.max(0, Math.trunc(unsupportedKind)) } : {}),
+    ...(unreadableUnsupported > 0 ? { unreadable_unsupported_items: unreadableUnsupported } : {}),
     ...(picturesNotReadHere !== undefined ? { pictures_not_read_here_items: Math.max(0, Math.trunc(picturesNotReadHere)) } : {}),
     ...(counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }),
   };
@@ -5367,7 +5390,9 @@ function answerReadinessFrom(
 export const DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05;
 
 function unreadableShareTooHigh(coverage: DashboardSourceCard['coverage']): boolean {
-  const unreadable = coverage.unreadable_items ?? 0;
+  // A format with no reader is a known gap, not a reader that broke: it is
+  // stated as its own count and never raises the alarm, for every source alike.
+  const unreadable = (coverage.unreadable_items ?? 0) - (coverage.unreadable_unsupported_items ?? 0);
   if (unreadable <= 0) return false;
   const eligible = answerReadyEligibleItems(
     coverage.indexed_items,

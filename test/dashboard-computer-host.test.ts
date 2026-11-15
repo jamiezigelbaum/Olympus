@@ -613,10 +613,10 @@ describe('the panel on the computer', () => {
     expect(page.win.document.querySelector('.home-progress')).toBeNull();
   });
 
-  test('privacy items waiting and a transcription that needs a hand are Needs you lines, each with one button', async () => {
+  test('privacy items waiting are In progress with no button, and a transcription that needs a hand is a Needs you line with one', async () => {
     const data = model({
       sources: [TELEGRAM],
-      privacy: { configured: true, ruleCount: 2, pendingCount: 2 },
+      privacy: { configured: true, ruleCount: 2, pendingCount: 2, judgePerMinute: 1 },
       models: { embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'load_failed', download: { label: 'Try again', tool: 'olympus_model_retry', args: { model: 'transcription' } } } },
     } as unknown as Partial<DashboardViewModelV1>);
     const page = await onHost(COMPUTER, data);
@@ -624,11 +624,12 @@ describe('the panel on the computer', () => {
     expect(doc.querySelector('section.privacy-row')).toBeNull();
     expect(doc.querySelector('details[data-open-key="models"]')).toBeNull();
     const pending = doc.querySelector('[data-privacy-pending]')!;
-    expect(pending.textContent).toContain('2 items waiting to be checked');
-    expect(Array.from(pending.querySelectorAll('button')).map((node) => node.textContent)).toEqual(['Open Privacy']);
+    expect(pending.textContent).toBe('2 items waiting for the private model · about 2 min left');
+    expect(pending.closest('.row.need')).toBeNull();
+    expect(pending.querySelectorAll('button')).toHaveLength(0);
     const needs = Array.from(doc.querySelectorAll('.row.need')).map((node) => node.textContent);
     expect(needs.some((line) => line!.startsWith('Transcription:') && line!.endsWith('Try again'))).toBe(true);
-    expect(doc.querySelector('[data-home-status]')!.textContent).toContain('2 things need you');
+    expect(doc.querySelector('[data-home-status]')!.textContent).toContain('1 thing needs you');
   });
 
   test('a transcription model not needed yet is not Needs you: its optional Download now stays in Settings, and Home stays up to date (#1163 review)', async () => {

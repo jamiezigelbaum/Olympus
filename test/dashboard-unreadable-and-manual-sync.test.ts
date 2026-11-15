@@ -86,6 +86,25 @@ describe('unreadable files are stated, not alarmed', () => {
     expect(dashboardAttentionLine(dropbox)).toBe("many files can't be read");
   });
 
+  // rc.17: 836 of Dropbox's 883 unreadable files were formats with no reader, which raised the alarm meant for a broken reader.
+  test('files in a format with no reader are their own count, with formats, and never re-alarm', () => {
+    const view = realView({ extraction_items_unreadable: 20 }, {
+      unreadableRecheck: () => ({ unreadable: 20, blocked: 0, unsupported: 18, unsupportedFormats: ['.heic', '.key'] }),
+    });
+    const dropbox = view.sources.find((source) => source.source_id === 'dropbox.files')!;
+    expect(dropbox.coverage.unreadable_items).toBe(20);
+    expect(dropbox.coverage.unreadable_unsupported_items).toBe(18);
+    expect(dropbox.coverage.unsupported_formats).toEqual(['.heic', '.key']);
+    expect(dropbox.answer_readiness.label).not.toBe('Many files cannot be read');
+    const line = dashboardSubLine(dropbox, { now: NOW });
+    expect(line).toContain("2 files can't be read");
+    expect(line).toContain("18 files in formats Olympus can't read yet (.heic, .key)");
+    // The same damaged share still alarms: only the format gap leaves it.
+    const damaged = realView({ extraction_items_unreadable: 20 }, { unreadableRecheck: () => ({ unreadable: 20, blocked: 0, unsupported: 2 }) })
+      .sources.find((source) => source.source_id === 'dropbox.files')!;
+    expect(damaged.answer_readiness.label).toBe('Many files cannot be read');
+  });
+
   test('a fresh row adds the clause, singular and plural, in the source noun', () => {
     expect(dashboardSubLine(card({ coverage: { ...card().coverage, unreadable_items: 1 } }), { now: NOW }))
       .toBe("synced 40m ago · 1 file can't be read");
