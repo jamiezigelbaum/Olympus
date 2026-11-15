@@ -757,6 +757,9 @@ function withGuard(
       : reason === 'daily_cost_guard'
         ? { limit_stop_limit: usage.hard_budgets.estimated_spend_microusd, limit_stop_used: usage.estimated_spend_microusd }
         : {};
+  // Near the budget is advice, not a park: the lane keeps running at its
+  // degraded cadence, so Home must not show it as a stop (owner, 2026-11-15).
+  if (retry === guardRetry && usage.guard.state === 'approaching' && Object.keys(amounts).length > 0) amounts.limit_stop_advisory = 1;
   return { ...result, counts: { ...result.counts, ...amounts }, ...(retry ? { retry_at: retry } : {}), api_usage: usage };
 }
 

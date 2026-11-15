@@ -22832,6 +22832,21 @@ function normalizedContentHash(text) {
   return createHash11("sha256").update(text.normalize("NFC").replace(/\r\n?/g, `
 `).trim()).digest("hex");
 }
+function frontMatterMarksPrivate(text) {
+  const plain = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+  if (!/^---[ \t]*\r?\n/.test(plain))
+    return false;
+  const lines = plain.split(/\r?\n/, FRONT_MATTER_MAX_LINES + 1);
+  let marked = false;
+  for (let index = 1;index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^(?:---|\.\.\.)\s*$/.test(line))
+      return marked;
+    if (/^private\s*:\s*(["']?)(?:true|yes)\1\s*(?:#.*)?$/i.test(line))
+      marked = true;
+  }
+  return false;
+}
 function trivialContentRule(text, parentContext) {
   const own = text.trim();
   if (!own)
@@ -23173,6 +23188,14 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
+  if (frontMatterMarksPrivate(text)) {
+    return {
+      tier: maxTier(metadata.tier, "secure"),
+      decidedBy: "content_rule",
+      reasons: [FRONT_MATTER_PRIVATE_REASON, ...mark],
+      pending: false
+    };
+  }
   if (isBareShareLink(text)) {
     const recorded = args.sniffer.recordedContentVerdict;
     if (recorded && recorded.mapRevision === args.mapRevision) {
@@ -23411,7 +23434,7 @@ function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
 var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
-Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, NAMES_INPUT_REASON_PREFIX = "metadata:names_input:", NAMES_INPUT_KEYS, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, NAMES_INPUT_REASON_PREFIX = "metadata:names_input:", NAMES_INPUT_KEYS, FRONT_MATTER_PRIVATE_REASON = "content:rule:front_matter_private", FRONT_MATTER_MAX_LINES = 100, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -28181,7 +28204,7 @@ function readOwnerLimitOverride(key, now, path = ownerLimitSettingsPath(), heldI
   const value = readSettings(path)[group]?.[name];
   if (!value)
     return;
-  const valid = (n) => Number.isFinite(n) && n >= 0 && (key === "zkapi.dailySpend" || Number.isSafeInteger(n));
+  const valid = (n) => Number.isFinite(n) && n >= 0 && (key === "zkapi.dailySpend" || key === "x.dailySpend" || Number.isSafeInteger(n));
   if (!valid(value.to) || typeof value.keep !== "boolean" || value.base !== undefined && !valid(value.base))
     throw new Error(`Owner ${key} setting is invalid.`);
   if (isSizeLimitKey(key)) {
@@ -28193,7 +28216,7 @@ function readOwnerLimitOverride(key, now, path = ownerLimitSettingsPath(), heldI
   return value.keep || value.day === now.toISOString().slice(0, 10) ? value.to : value.base;
 }
 function saveOwnerLimitOverride(key, to, keep, now, path = ownerLimitSettingsPath(), heldItems) {
-  if (!Number.isFinite(to) || to < 0 || key !== "zkapi.dailySpend" && !Number.isSafeInteger(to))
+  if (!Number.isFinite(to) || to < 0 || key !== "zkapi.dailySpend" && key !== "x.dailySpend" && !Number.isSafeInteger(to))
     throw new TypeError("Invalid owner limit amount.");
   mkdirSync16(dirname34(path), { recursive: true, mode: 448 });
   withFileLeaseSync(path, () => {
@@ -68120,7 +68143,9 @@ var init_vocabulary = __esm(() => {
       openPrivacy: "Open Privacy",
       waitBudget: "daily {api} API budget used",
       waitRateLimit: "{api} rate limit reached",
-      resumes: "resumes at {local} ({utc} UTC)"
+      resumes: "resumes at {local} ({utc} UTC)",
+      resumesUtc: "resumes at {utc} UTC",
+      amountUsed: "{used} of {limit} {unit}"
     },
     needsYou: "Needs you",
     sources: "Sources",
@@ -88147,6 +88172,16 @@ import { Database as Database17 } from "bun:sqlite";
 function xApiInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
 }
+function withOwnerXSpend(config, now) {
+  let usd;
+  try {
+    usd = readOwnerLimitOverride("x.dailySpend", now);
+  } catch {
+    return config;
+  }
+  const raised = usd === undefined || !(usd > 0) ? 0 : usdToMicrousd(usd);
+  return raised > config.dailyEstimatedSpendMicrousd ? { ...config, dailyEstimatedSpendMicrousd: raised } : config;
+}
 function defaultXBookmarksLiveSyncConfig(env = process.env) {
   const headIntervalMs = positiveIntegerEnv2(env.OLYMPUS_SOURCE_INDEX_X_HEAD_INTERVAL_SECONDS, X_BOOKMARKS_HEAD_INTERVAL_MS / 1000) * 1000;
   const dailyHeadPolls = Math.ceil(24 * 60 * 60000 / headIntervalMs);
@@ -88392,6 +88427,7 @@ class LocalXBookmarksApiUsageStore {
   reserveRequest(input) {
     const account = requireAccount4(input.account);
     const now = validDate4(input.now ?? new Date);
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     providerStops.resume(now);
     const utcDay = utcDayFrom(now);
     const requestedMaxResources = boundedResourceCount(input.requestedMaxResources);
@@ -88462,6 +88498,7 @@ class LocalXBookmarksApiUsageStore {
   }
   markRequestDispatched(input) {
     const now = validDate4(input.now ?? new Date);
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     providerStops.resume(now);
     this.db.transaction(() => {
       this.reapExpiredReservations(now, input.config);
@@ -88527,6 +88564,7 @@ class LocalXBookmarksApiUsageStore {
   }
   settleSuccess(input) {
     const now = validDate4(input.now ?? new Date);
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     this.db.transaction(() => {
       const reservation = this.reservationRow(input.reservation.reservationId);
       if (!reservation)
@@ -88572,6 +88610,7 @@ class LocalXBookmarksApiUsageStore {
   }
   settleFailure(input) {
     const now = validDate4(input.now ?? new Date);
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     providerStops.resume(now);
     this.db.transaction(() => {
       const reservation = this.reservationRow(input.reservation.reservationId);
@@ -88601,6 +88640,7 @@ class LocalXBookmarksApiUsageStore {
   status(input) {
     const account = requireAccount4(input.account);
     const now = validDate4(input.now ?? new Date);
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     const utcDay = utcDayFrom(now);
     this.reapExpiredReservations(now, input.config);
     this.ensureDay(account, utcDay, now.toISOString());
@@ -89092,6 +89132,7 @@ var init_live_control2 = __esm(() => {
   init_provider_rate_limits();
   init_olympus_layout();
   init_sqlite_migrations();
+  init_owner_limit_settings();
   init_connector();
   providerStops = createProviderRateLimitReporter("x");
   X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
@@ -91163,6 +91204,8 @@ function withGuard(result, usage, config) {
   const retry = !result.retry_at ? guardRetry : !guardRetry || Date.parse(result.retry_at.at) >= Date.parse(guardRetry.at) ? result.retry_at : guardRetry;
   const reason = retry?.degraded_reason;
   const amounts = reason === "daily_api_request_guard" ? { limit_stop_limit: usage.hard_budgets.api_requests, limit_stop_used: usage.api_requests } : reason === "daily_resource_read_guard" ? { limit_stop_limit: usage.hard_budgets.resource_reads, limit_stop_used: usage.resource_reads + usage.reserved_resource_reads } : reason === "daily_cost_guard" ? { limit_stop_limit: usage.hard_budgets.estimated_spend_microusd, limit_stop_used: usage.estimated_spend_microusd } : {};
+  if (retry === guardRetry && usage.guard.state === "approaching" && Object.keys(amounts).length > 0)
+    amounts.limit_stop_advisory = 1;
   return { ...result, counts: { ...result.counts, ...amounts }, ...retry ? { retry_at: retry } : {}, api_usage: usage };
 }
 function validAttemptedAt(value, now) {
@@ -91205,7 +91248,7 @@ function schedulerLimitSubject(state) {
 }
 function syncSchedulerLimitStop(db, previousReason, state) {
   const previous = previousReason ? DAILY_LIMITS.get(previousReason) : undefined;
-  const current = state.degradedReason ? DAILY_LIMITS.get(state.degradedReason) : undefined;
+  const current = state.degradedReason && state.lastCounts?.limit_stop_advisory !== 1 ? DAILY_LIMITS.get(state.degradedReason) : undefined;
   if (!previous && !current)
     return;
   const subject = schedulerLimitSubject(state);
@@ -91227,7 +91270,7 @@ function dailyResume(since, notBeforeAt) {
   const retry = notBeforeAt ? Date.parse(notBeforeAt) : NaN;
   return new Date(Number.isFinite(retry) && retry < midnight ? retry : midnight).toISOString();
 }
-var DAILY_LIMITS;
+var DAILY_LIMITS, RAISABLE_SPEND_LIMITS;
 var init_scheduler_limit_stops = __esm(() => {
   init_limit_stops();
   DAILY_LIMITS = new Map(Object.entries({
@@ -91241,8 +91284,9 @@ var init_scheduler_limit_stops = __esm(() => {
     gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
     google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
   }));
+  RAISABLE_SPEND_LIMITS = new Set(["x.daily_cost", "x.head_reserve_cost"]);
   for (const limit of DAILY_LIMITS.values()) {
-    registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+    registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: RAISABLE_SPEND_LIMITS.has(limit.id) ? "raise" : "run_once" });
   }
 });
 
@@ -143154,7 +143198,7 @@ async function ownerLimits2(params, deps = {}) {
     const minimum = size ? stop.limit ?? 0 : Math.max(stop.limit ?? 0, stop.used ?? 0);
     if (typeof params.to !== "number" || !Number.isFinite(params.to) || integer && !Number.isSafeInteger(params.to) || params.to <= minimum || !size && params.to < (stop.toContinue?.raiseTo ?? 0))
       throw new OperationError("invalid_params", size ? "--to must be a whole number greater than the current file size limit, in bytes." : "--to must cover the next step and be greater than the current limit and usage, in the reported unit.");
-    const keys = { "judge.daily_calls": "judge.dailyCalls", "zkapi.daily_requests": "zkapi.dailyRequests", "zkapi.daily_spend": "zkapi.dailySpend", "gmail.import_allowance": "gmail.dailyRequests" };
+    const keys = { "judge.daily_calls": "judge.dailyCalls", "zkapi.daily_requests": "zkapi.dailyRequests", "zkapi.daily_spend": "zkapi.dailySpend", "gmail.import_allowance": "gmail.dailyRequests", "x.daily_cost": "x.dailySpend", "x.head_reserve_cost": "x.dailySpend" };
     if (size) {
       raiseSourceSizeLimit(stop.id, params.to, params.keep === true, now, deps.extractionJobs?.());
     } else if (stop.id === "judge.spend_cap") {
@@ -174828,6 +174872,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       }
       const failed = inlineError(result, name);
       if (failed) {
+        if (name === "olympus_limits")
+          state.syncPressed = {};
         if (name === config.syncTool) {
           state.syncPressed = {};
           if (key.indexOf("menu:") === 0)
@@ -174869,6 +174915,17 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       }
       if ((name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool) && result && !result.isError) {
         const said = archiveNotice(name, args, result);
+        refresh();
+        state.notice = said;
+        redraw();
+        return;
+      }
+      if (name === "olympus_limits") {
+        const parts = result && Array.isArray(result.content) ? result.content : [];
+        const first = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+        if (result && result.isError)
+          state.syncPressed = {};
+        const said = first ? String(first.text) : "";
         refresh();
         state.notice = said;
         redraw();
@@ -175213,6 +175270,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       action = () => {
         state.syncPressed[source.id] = true;
         state.open["menu:" + source.id] = false;
+        callTool(fix.tool, fix.args || {}, key);
+      };
+    } else if (fix.runsSource === true && source && typeof fix.tool === "string" && fix.tool) {
+      action = () => {
+        state.syncPressed[source.id] = true;
         callTool(fix.tool, fix.args || {}, key);
       };
     } else if (typeof fix.tool === "string" && fix.tool)
@@ -176913,7 +176975,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const two = (value) => (value < 10 ? "0" : "") + String(value);
     const local = two(at.getHours()) + ":" + two(at.getMinutes());
     const utc = two(at.getUTCHours()) + ":" + two(at.getUTCMinutes());
-    return fill(P.home.resumes, { local, utc });
+    return local === utc ? fill(P.home.resumesUtc, { utc }) : fill(P.home.resumes, { local, utc });
+  }
+  function amountWords(used, limit, unit) {
+    const usd = unit === "usd";
+    const say = (value) => typeof value === "number" && isFinite(value) ? usd ? "$" + value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : Math.round(value).toLocaleString("en-US") : "?";
+    return fill(P.home.amountUsed, { used: say(used), limit: say(limit), unit: usd ? "" : unit }).replace(/\s+$/, "");
   }
   function waitRow(wait) {
     if (!wait || typeof wait.label !== "string")
@@ -176921,9 +176988,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const api = String(wait.api || wait.label);
     const facts = [wait.reason === "limit" ? String(wait.limitLabel || "") : fill(wait.reason === "rate_limit" ? P.home.waitRateLimit : P.home.waitBudget, { api })];
     if (wait.reason === "limit" && (wait.limit != null || wait.used != null))
-      facts.push(String(wait.used ?? "?") + " / " + String(wait.limit ?? "?") + " " + String(wait.unit || ""));
-    if (wait.reason === "limit" && wait.since)
-      facts.push("since " + String(wait.since));
+      facts.push(amountWords(wait.used, wait.limit, String(wait.unit || "")));
+    const source = (state.data?.sources || []).find((entry) => entry.id === wait.sourceId);
+    const runs = !!(wait.fix && wait.fix.runsSource === true && source);
+    if (runs && syncChecking(source))
+      facts.push(fill(P.syncCheckingLine, { source: String(source.syncNoun || source.label || "") }));
+    else if (runs && syncResult(source) && typeof source.detail === "string" && source.detail)
+      facts.push(capitalise(source.detail));
     if (wait.waiting?.items !== undefined)
       facts.push(String(wait.waiting.items) + " items waiting");
     if (wait.waiting?.runs !== undefined)
@@ -176935,9 +177006,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const body = add(el("div", "need-body"), line);
     const row = add(el("li", "row home-line"), body);
     if (wait.fix) {
-      const source = (state.data?.sources || []).find((entry) => entry.id === wait.sourceId);
       const key = "limit:" + String(wait.fix.args?.id || wait.sourceId) + ":" + String(wait.fix.args?.subject || "");
-      add(body, add(el("div", "source-actions"), wait.fix.tool === config.syncTool && source && syncChecking(source) ? checkingControl(key) : fixControl(wait.fix, key, "plain", false, { id: wait.sourceId, label: wait.label })));
+      add(body, add(el("div", "source-actions"), (wait.fix.tool === config.syncTool || runs) && source && syncChecking(source) ? checkingControl(key) : fixControl(wait.fix, key, "plain", false, { id: wait.sourceId, label: wait.label })));
     }
     row.setAttribute("data-source-wait", String(wait.sourceId || ""));
     return row;
@@ -201692,14 +201762,16 @@ function createLocalFilesSourceConnector(options) {
   const absentFromWalk = (seenIds, deletedSeen, unreadable, topLevel) => {
     const store = options.store;
     if (!store?.activeItemsUnderLocatorIfIndexed)
-      return [];
+      return { absent: [], indexed: 0 };
     if (store.lookupsReady && !store.lookupsReady())
-      return [];
+      return { absent: [], indexed: 0 };
     const bases = root === "/" ? [...new Set([...topLevel, ...options.scope.roots().map((entry) => entry.scopePath).filter((path) => path !== "/")])] : [root];
     const absent = [];
+    let indexed = 0;
     const judge = (stored, base) => {
       if (base !== undefined && !pathIsAtOrBelow(stored.locatorUri, base))
         return;
+      indexed += 1;
       if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId))
         return;
       if (unreadable.some((path) => pathIsAtOrBelow(stored.locatorUri, path)))
@@ -201725,7 +201797,7 @@ function createLocalFilesSourceConnector(options) {
         judge(stored, base);
       }
     }
-    return absent;
+    return { absent, indexed };
   };
   const leadsToSelection = (scopePath) => options.scope.roots().some((entry) => entry.scopePath !== root && pathIsAtOrBelow(entry.scopePath, scopePath));
   async function* walk(scopeRoot, startRel, decide, stats, emitted) {
@@ -201930,7 +202002,11 @@ function createLocalFilesSourceConnector(options) {
             }
           }
           if (!events) {
-            for (const deletion of absentFromWalk(seenIds, deletedSeen, stats.unreadablePaths ?? [], stats.topLevel ?? [])) {
+            const found = absentFromWalk(seenIds, deletedSeen, stats.unreadablePaths ?? [], stats.topLevel ?? []);
+            const applied = options.deletionGuard && found.absent.length > 0 ? options.deletionGuard({ absent: found.absent, indexed: found.indexed }) : found.absent;
+            if (applied.length < found.absent.length)
+              stats.deletionsHeld = found.absent.length - applied.length;
+            for (const deletion of applied) {
               page.push(deletion);
               if (page.length >= pageSize) {
                 options.scope.assertCurrent();
@@ -202091,6 +202167,44 @@ var init_connector6 = __esm(() => {
   };
 });
 
+// src/workers/local-files/deletion-guard.ts
+function createLocalFilesDeletionGuards(options = {}) {
+  const share = options.share ?? LOCAL_FILES_DELETION_SHARE;
+  const minHeld = options.minHeld ?? LOCAL_FILES_DELETION_MIN_HELD;
+  const confirmAfterMs = options.confirmAfterMs ?? LOCAL_FILES_DELETION_CONFIRM_MS;
+  const now = options.now ?? Date.now;
+  const waiting = new Map;
+  return {
+    forFolder(connectorId) {
+      return ({ absent, indexed }) => {
+        const small = absent.length <= minHeld || absent.length <= indexed * share;
+        if (small) {
+          waiting.delete(connectorId);
+          return absent;
+        }
+        const everything = absent.length >= indexed;
+        const prior = waiting.get(connectorId);
+        const at = now();
+        if (!everything && prior && at - prior.since >= confirmAfterMs) {
+          const agreed = absent.filter((item) => prior.ids.has(item.identity.providerItemId));
+          if (agreed.length === absent.length) {
+            waiting.delete(connectorId);
+            return absent;
+          }
+          waiting.set(connectorId, {
+            ids: new Set(absent.filter((item) => !prior.ids.has(item.identity.providerItemId)).map((item) => item.identity.providerItemId)),
+            since: at
+          });
+          return agreed;
+        }
+        waiting.set(connectorId, { ids: new Set(absent.map((item) => item.identity.providerItemId)), since: prior?.since ?? at });
+        return [];
+      };
+    }
+  };
+}
+var LOCAL_FILES_DELETION_SHARE = 0.2, LOCAL_FILES_DELETION_MIN_HELD = 5, LOCAL_FILES_DELETION_CONFIRM_MS = 60000;
+
 // src/workers/local-files/provider-store-sync.ts
 import { createHash as createHash107 } from "node:crypto";
 function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
@@ -202145,6 +202259,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
     throw new Error("Local files secure_local embeddings require a local/private or approved Venice embedding provider.");
   }
   const tierSet = options.tierSet;
+  const deletionGuards = options.deletionGuards ?? createLocalFilesDeletionGuards();
   if (tierSet.legSpec("secure_local")?.store !== options.store) {
     throw new Error("The local files tier set's secure leg must be the lane's own store.");
   }
@@ -202175,7 +202290,8 @@ function createLocalFilesProviderStoreSyncHandler(options) {
           ...options.pageSize !== undefined ? { pageSize: options.pageSize } : {},
           onWalk: (stats) => {
             Object.assign(walk, stats);
-          }
+          },
+          deletionGuard: deletionGuards.forFolder(connectorId)
         }));
         const full = cursor === undefined;
         const syncOptions = {
@@ -202223,6 +202339,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
       const warnings = [...new Set([
         ...run.legs.flatMap((leg) => leg.gaps),
         ...run.walk.unreadable > 0 ? ["local_files_unreadable_folders"] : [],
+        ...(run.walk.deletionsHeld ?? 0) > 0 ? ["local_files_deletions_held"] : [],
         ...problems.some((problem) => problem.kind === "watch_limit_reached") ? ["local_files_watch_limit_reached"] : [],
         ...liveUpdatesOff ? ["local_files_live_updates_off"] : []
       ])];
@@ -202243,6 +202360,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
           history_reset: Number(historyReset),
           folders_walked: run.walk.directories,
           unreadable_folders: run.walk.unreadable,
+          deletions_held: run.walk.deletionsHeld ?? 0,
           live_updates_off: Number(liveUpdatesOff),
           ...run.tiered ?? {}
         },
@@ -205037,7 +205155,8 @@ var init_source_scheduler = __esm(() => {
   LOCAL_FILES_SCHEDULER_WARNINGS = [
     "local_files_unreadable_folders",
     "local_files_watch_limit_reached",
-    "local_files_live_updates_off"
+    "local_files_live_updates_off",
+    "local_files_deletions_held"
   ];
   VERBATIM_SCHEDULER_WARNINGS = new Set([
     EXTRACTION_JOBS_REFUSED_WARNING,
@@ -227278,16 +227397,17 @@ function buildChatGptDashboardViewModel(view, options = {}) {
       continue;
     const limit = { ...registered, ...stop.continue ? { continue: stop.continue } : {} };
     const row = rows.find(({ definition }) => limitStopSubjects(stop).some((subject) => subject === definition.source_id || subject === definition.primary_corpus_id || definition.corpus_source_ids.includes(subject)));
-    const raiseTo = stop.toContinue?.raiseTo ?? Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1);
+    const raiseTo = stop.toContinue?.raiseTo ?? Math.ceil(Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1));
     const fix = limit.continue === "none" ? undefined : {
-      label: limit.continue === "raise" ? `Raise to ${raiseTo.toLocaleString("en-US")} ${limit.unit === "calls" && raiseTo === 1 ? "call" : limit.unit}` : limit.continue === "refill" ? "Refill — re-check" : "Run once",
+      label: limit.continue === "raise" ? limit.unit === "usd" ? `Raise to $${raiseTo.toLocaleString("en-US")} today` : `Raise to ${raiseTo.toLocaleString("en-US")} ${limit.unit === "calls" && raiseTo === 1 ? "call" : limit.unit}` : limit.continue === "refill" ? "Refill — re-check" : "Run once",
       tool: "olympus_limits",
       args: {
         action: "continue",
         id: stop.id,
         subject: limitStopReference(stop),
         ...limit.continue === "raise" ? { to: raiseTo } : {}
-      }
+      },
+      ...limit.continue === "run_once" && row ? { runsSource: true } : {}
     };
     const label = row?.definition.label ?? { source: "Sources", judge: "Privacy check", answer: "Answers", outside_help: "Outside help", extraction: "Reading" }[limit.scope];
     waits.push({
@@ -227305,6 +227425,10 @@ function buildChatGptDashboardViewModel(view, options = {}) {
       ...fix ? { fix } : {}
     });
   }
+  const resumes = (wait) => wait.resumesAt ? Date.parse(wait.resumesAt) : Number.POSITIVE_INFINITY;
+  const sourceIds = new Set(rows.map(({ definition }) => definition.source_id));
+  const sourceWaits = waits.filter((wait, index) => !sourceIds.has(wait.sourceId) || !waits.some((other, otherIndex) => otherIndex !== index && other.sourceId === wait.sourceId && (resumes(other) > resumes(wait) || resumes(other) === resumes(wait) && otherIndex < index)));
+  waits.splice(0, waits.length, ...sourceWaits);
   const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").flatMap(({ definition, card, actionKind, connecting, progress, sync }) => card.connection.imports_attention?.length ? card.connection.imports_attention.map(importAttentionItem) : [attentionItem(definition, card, actionKind, degraded, connecting, progress, sync)]).filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index);
   if (embedding.state === "failed") {
     needsYou.push({
@@ -230747,7 +230871,7 @@ function limitsToolResult(raw) {
   }
   const ok = record.ok === true;
   const status = asRecord20(record.result)?.status;
-  const message = record.action === "raise" && ok ? `${record.unit === "calls" ? "Call limit" : "Limit"} raised to ${finite2(record.to) ? record.to : 0} ${["usd", "requests", "calls"].includes(String(record.unit)) ? record.unit : "calls"}${record.keep === true || record.id === "judge.spend_cap" ? " for good" : " for this UTC day"}. ${record.unit === "calls" ? "Judging" : "Work"} can continue.` : record.action === "refill" ? ok ? record.id === "judge.payment" ? "Payment stop lifted. The next judge call will re-check payment." : "Venice can consume again. Work can continue." : "Venice billing has not confirmed canConsume=true. The stop remains; Olympus will re-check automatically." : record.action === "run_once" ? ok ? "One operator run requested. Usage stays counted." : status === "busy" ? "This source already has a run in progress." : status === "too_soon" ? "This source was just started. Check its progress on Home." : "The operator run remains stopped. Check its result and source status." : "Olympus could not continue this stop. Refresh Home and try again.";
+  const message = record.action === "raise" && ok && record.unit === "usd" && record.keep !== true && record.id !== "judge.spend_cap" ? `Raised to $${finite2(record.to) ? record.to.toLocaleString("en-US") : 0} for today (UTC). Work continues now.` : record.action === "raise" && ok ? `${record.unit === "calls" ? "Call limit" : "Limit"} raised to ${finite2(record.to) ? record.to : 0} ${["usd", "requests", "calls"].includes(String(record.unit)) ? record.unit : "calls"}${record.keep === true || record.id === "judge.spend_cap" ? " for good" : " for this UTC day"}. ${record.unit === "calls" ? "Judging" : "Work"} can continue.` : record.action === "refill" ? ok ? record.id === "judge.payment" ? "Payment stop lifted. The next judge call will re-check payment." : "Venice can consume again. Work can continue." : "Venice billing has not confirmed canConsume=true. The stop remains; Olympus will re-check automatically." : record.action === "run_once" ? ok ? "Running once now, past the budget. The row shows what it found when it finishes." : status === "busy" ? "This source already has a run in progress." : status === "too_soon" ? "This source was just started. Check its progress on Home." : "The operator run remains stopped. Check its result and source status." : "Olympus could not continue this stop. Refresh Home and try again.";
   return { content: [{ type: "text", text: message }], ...!ok ? { isError: true } : {} };
 }
 function dashboardToolResult(view) {
@@ -230977,6 +231101,8 @@ function copyFix(fix) {
     out.deletesCopies = fix.deletesCopies;
   if (fix?.openHref === true && href)
     out.openHref = true;
+  if (fix?.runsSource === true && tool === "olympus_limits")
+    out.runsSource = true;
   return out;
 }
 function copyLimitFixArgs(args) {
@@ -251830,6 +251956,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           sourceScheduler?.wakeTasksOfKind("extract");
         if (id === "gmail.import_allowance")
           sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.archiveImports).catch((error) => console.warn("Gmail import resume failed:", error instanceof Error ? error.name : "unknown"));
+        if (id === "x.daily_cost" || id === "x.head_reserve_cost")
+          sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.xBookmarks).catch((error) => console.warn("X resume failed:", error instanceof Error ? error.name : "unknown"));
       }
     }),
     consultAsk: async ({ caller, ...input }, signal) => askAnonymouslyNow ? askWithAnonymousInbox({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }, {

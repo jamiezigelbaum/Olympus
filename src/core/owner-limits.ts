@@ -63,7 +63,7 @@ export async function ownerLimits(params: Record<string, unknown>, deps: OwnerLi
       || (!size && params.to < (stop.toContinue?.raiseTo ?? 0))) throw new OperationError('invalid_params', size
         ? '--to must be a whole number greater than the current file size limit, in bytes.'
         : '--to must cover the next step and be greater than the current limit and usage, in the reported unit.');
-    const keys: Record<string, OwnerLimitKey> = { 'judge.daily_calls': 'judge.dailyCalls', 'zkapi.daily_requests': 'zkapi.dailyRequests', 'zkapi.daily_spend': 'zkapi.dailySpend', 'gmail.import_allowance': 'gmail.dailyRequests' };
+    const keys: Record<string, OwnerLimitKey> = { 'judge.daily_calls': 'judge.dailyCalls', 'zkapi.daily_requests': 'zkapi.dailyRequests', 'zkapi.daily_spend': 'zkapi.dailySpend', 'gmail.import_allowance': 'gmail.dailyRequests', 'x.daily_cost': 'x.dailySpend', 'x.head_reserve_cost': 'x.dailySpend' };
     if (size) {
       raiseSourceSizeLimit(stop.id, params.to, params.keep === true, now, deps.extractionJobs?.());
     } else if (stop.id === 'judge.spend_cap') {

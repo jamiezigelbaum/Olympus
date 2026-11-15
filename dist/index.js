@@ -9875,7 +9875,7 @@ function readOwnerLimitOverride(key, now, path = ownerLimitSettingsPath(), heldI
   const value = readSettings(path)[group]?.[name];
   if (!value)
     return;
-  const valid = (n) => Number.isFinite(n) && n >= 0 && (key === "zkapi.dailySpend" || Number.isSafeInteger(n));
+  const valid = (n) => Number.isFinite(n) && n >= 0 && (key === "zkapi.dailySpend" || key === "x.dailySpend" || Number.isSafeInteger(n));
   if (!valid(value.to) || typeof value.keep !== "boolean" || value.base !== undefined && !valid(value.base))
     throw new Error(`Owner ${key} setting is invalid.`);
   if (isSizeLimitKey(key)) {
@@ -13843,7 +13843,9 @@ var init_vocabulary = __esm(() => {
       openPrivacy: "Open Privacy",
       waitBudget: "daily {api} API budget used",
       waitRateLimit: "{api} rate limit reached",
-      resumes: "resumes at {local} ({utc} UTC)"
+      resumes: "resumes at {local} ({utc} UTC)",
+      resumesUtc: "resumes at {utc} UTC",
+      amountUsed: "{used} of {limit} {unit}"
     },
     needsYou: "Needs you",
     sources: "Sources",
@@ -17217,6 +17219,7 @@ var init_live_control2 = __esm(() => {
   init_provider_rate_limits();
   init_olympus_layout();
   init_sqlite_migrations();
+  init_owner_limit_settings();
   init_connector2();
   providerStops = createProviderRateLimitReporter("x");
   X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
@@ -17296,7 +17299,7 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/scheduler-limit-stops.ts
-var DAILY_LIMITS;
+var DAILY_LIMITS, RAISABLE_SPEND_LIMITS;
 var init_scheduler_limit_stops = __esm(() => {
   init_limit_stops();
   DAILY_LIMITS = new Map(Object.entries({
@@ -17310,8 +17313,9 @@ var init_scheduler_limit_stops = __esm(() => {
     gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
     google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
   }));
+  RAISABLE_SPEND_LIMITS = new Set(["x.daily_cost", "x.head_reserve_cost"]);
   for (const limit of DAILY_LIMITS.values()) {
-    registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+    registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: RAISABLE_SPEND_LIMITS.has(limit.id) ? "raise" : "run_once" });
   }
 });
 

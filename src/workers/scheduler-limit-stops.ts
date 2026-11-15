@@ -21,8 +21,12 @@ export const DAILY_LIMITS = new Map<string, { id: string; kind: 'cost' | 'reques
   google_drive_daily_api_request_guard: { id: 'drive.daily_requests', kind: 'requests', label: 'daily Google Drive API budget used' },
 }));
 
+// X's spending budgets are Olympus's own and the owner can raise them for the
+// day in one press (owner, 2026-11-15: guards never block silently and are
+// quickly reversible); the rest offer one run past the budget.
+export const RAISABLE_SPEND_LIMITS = new Set(['x.daily_cost', 'x.head_reserve_cost']);
 for (const limit of DAILY_LIMITS.values()) {
-  registerLimit({ ...limit, scope: 'source', unit: limit.kind === 'cost' ? 'usd' : 'requests', continue: 'run_once' });
+  registerLimit({ ...limit, scope: 'source', unit: limit.kind === 'cost' ? 'usd' : 'requests', continue: RAISABLE_SPEND_LIMITS.has(limit.id) ? 'raise' : 'run_once' });
 }
 
 /** A scheduler stop's subject: `[source_id, corpus_id, task_id]` as JSON. */
@@ -36,7 +40,8 @@ export function syncSchedulerLimitStop(db: Database, previousReason: string | un
   degradedReason?: string; notBeforeAt?: string; lastCounts?: Record<string, number>;
 }): void {
   const previous = previousReason ? DAILY_LIMITS.get(previousReason) : undefined;
-  const current = state.degradedReason ? DAILY_LIMITS.get(state.degradedReason) : undefined;
+  // An advisory (X near its budget, still running) is not a stop.
+  const current = state.degradedReason && state.lastCounts?.limit_stop_advisory !== 1 ? DAILY_LIMITS.get(state.degradedReason) : undefined;
   if (!previous && !current) return;
   // Tasks sharing a source can park and resume independently.
   const subject = schedulerLimitSubject(state);

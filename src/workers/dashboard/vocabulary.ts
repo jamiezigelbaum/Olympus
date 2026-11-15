@@ -1929,6 +1929,8 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     waitBudget: 'daily {api} API budget used',
     waitRateLimit: '{api} rate limit reached',
     resumes: 'resumes at {local} ({utc} UTC)',
+    resumesUtc: 'resumes at {utc} UTC',
+    amountUsed: '{used} of {limit} {unit}',
   },
   needsYou: 'Needs you',
   sources: 'Sources',

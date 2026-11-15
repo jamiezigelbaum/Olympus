@@ -538,6 +538,7 @@ export function chatgptDashboardClient(
       }
       const failed = inlineError(result, name);
       if (failed) {
+        if (name === 'olympus_limits') state.syncPressed = {};
         if (name === config.syncTool) {
           state.syncPressed = {};
           // Pressed from the ⋯ menu, which closed: open it again so the reason shows beside Sync now.
@@ -593,6 +594,17 @@ export function chatgptDashboardClient(
         const said = archiveNotice(name, args, result);
         refresh();
         // refresh() clears the notice as it starts; the read's answer leaves it.
+        state.notice = said;
+        redraw();
+        return;
+      }
+      if (name === 'olympus_limits') {
+        // Raise and Run once say what they did; the row itself updates with the read.
+        const parts = result && Array.isArray(result.content) ? result.content : [];
+        const first = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
+        if (result && result.isError) state.syncPressed = {};
+        const said = first ? String(first.text) : '';
+        refresh();
         state.notice = said;
         redraw();
         return;
@@ -976,6 +988,12 @@ export function chatgptDashboardClient(
       action = () => {
         state.syncPressed[source.id] = true;
         state.open['menu:' + source.id] = false;
+        callTool(fix.tool, fix.args || {}, key);
+      };
+    } else if (fix.runsSource === true && source && typeof fix.tool === 'string' && fix.tool) {
+      // Run once: "Checking…" on the row at once, and its result with a later read, as Sync now.
+      action = () => {
+        state.syncPressed[source.id] = true;
         callTool(fix.tool, fix.args || {}, key);
       };
     } else if (typeof fix.tool === 'string' && fix.tool) action = () => callTool(fix.tool, fix.args || {}, key);
@@ -2973,7 +2991,17 @@ export function chatgptDashboardClient(
     const two = (value: number) => (value < 10 ? '0' : '') + String(value);
     const local = two(at.getHours()) + ':' + two(at.getMinutes());
     const utc = two(at.getUTCHours()) + ':' + two(at.getUTCMinutes());
-    return fill(P.home.resumes, { local, utc });
+    // Said once when this computer keeps UTC: "resumes at 00:00 UTC".
+    return local === utc ? fill(P.home.resumesUtc, { utc }) : fill(P.home.resumes, { local, utc });
+  }
+
+  /** "$1.95 of $2.00" or "3,980 of 4,000 requests": rounded the way people read them. */
+  function amountWords(used: Any, limit: Any, unit: string): string {
+    const usd = unit === 'usd';
+    const say = (value: Any) => (typeof value === 'number' && isFinite(value)
+      ? usd ? '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : Math.round(value).toLocaleString('en-US')
+      : '?');
+    return fill(P.home.amountUsed, { used: say(used), limit: say(limit), unit: usd ? '' : unit }).replace(/\s+$/, '');
   }
 
   /** "X bookmarks · daily X API budget used · resumes at 01:00 (00:00 UTC)": no button (#1044). */
@@ -2982,8 +3010,12 @@ export function chatgptDashboardClient(
     const api = String(wait.api || wait.label);
     const facts = [wait.reason === 'limit' ? String(wait.limitLabel || '')
       : fill(wait.reason === 'rate_limit' ? P.home.waitRateLimit : P.home.waitBudget, { api })];
-    if (wait.reason === 'limit' && (wait.limit != null || wait.used != null)) facts.push(String(wait.used ?? '?') + ' / ' + String(wait.limit ?? '?') + ' ' + String(wait.unit || ''));
-    if (wait.reason === 'limit' && wait.since) facts.push('since ' + String(wait.since));
+    if (wait.reason === 'limit' && (wait.limit != null || wait.used != null)) facts.push(amountWords(wait.used, wait.limit, String(wait.unit || '')));
+    const source = (state.data?.sources || []).find((entry: Any) => entry.id === wait.sourceId);
+    const runs = !!(wait.fix && wait.fix.runsSource === true && source);
+    // Run once says it is running, then what it found (the source's own Sync now line).
+    if (runs && syncChecking(source)) facts.push(fill(P.syncCheckingLine, { source: String(source.syncNoun || source.label || '') }));
+    else if (runs && syncResult(source) && typeof source.detail === 'string' && source.detail) facts.push(capitalise(source.detail));
     if (wait.waiting?.items !== undefined) facts.push(String(wait.waiting.items) + ' items waiting');
     if (wait.waiting?.runs !== undefined) facts.push(String(wait.waiting.runs) + ' runs waiting');
     const when = typeof wait.resumesAt === 'string' ? resumeWords(wait.resumesAt) : '';
@@ -2992,9 +3024,8 @@ export function chatgptDashboardClient(
     const body = add(el('div', 'need-body'), line);
     const row = add(el('li', 'row home-line'), body);
     if (wait.fix) {
-      const source = (state.data?.sources || []).find((entry: Any) => entry.id === wait.sourceId);
       const key = 'limit:' + String(wait.fix.args?.id || wait.sourceId) + ':' + String(wait.fix.args?.subject || '');
-      add(body, add(el('div', 'source-actions'), wait.fix.tool === config.syncTool && source && syncChecking(source)
+      add(body, add(el('div', 'source-actions'), (wait.fix.tool === config.syncTool || runs) && source && syncChecking(source)
         ? checkingControl(key) : fixControl(wait.fix, key, 'plain', false, { id: wait.sourceId, label: wait.label })));
     }
     row.setAttribute('data-source-wait', String(wait.sourceId || ''));

@@ -53,6 +53,11 @@ export interface DashboardFix {
    * that predates this field.
    */
   openHref?: true;
+  /**
+   * The control runs its source once (a budget's Run once): the row reads
+   * "Checking…" until that run's result arrives, as Sync now does.
+   */
+  runsSource?: true;
   /** Shown on a disabled control. */
   disabledReason?: string;
   /** The UI confirms first; matches the tool's destructive annotation. */

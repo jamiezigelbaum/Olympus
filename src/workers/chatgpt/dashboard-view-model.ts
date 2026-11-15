@@ -322,11 +322,15 @@ export function buildChatGptDashboardViewModel(
     const limit = { ...registered, ...(stop.continue ? { continue: stop.continue } : {}) };
     const row = rows.find(({ definition }) => limitStopSubjects(stop).some((subject) =>
       subject === definition.source_id || subject === definition.primary_corpus_id || definition.corpus_source_ids.includes(subject)));
-    const raiseTo = stop.toContinue?.raiseTo ?? Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1);
+    // Whole units: the Raise argument is a whole number, dollars included.
+    const raiseTo = stop.toContinue?.raiseTo ?? Math.ceil(Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1));
     const fix: DashboardFix | undefined = limit.continue === 'none' ? undefined : {
-      label: limit.continue === 'raise' ? `Raise to ${raiseTo.toLocaleString('en-US')} ${limit.unit === 'calls' && raiseTo === 1 ? 'call' : limit.unit}` : limit.continue === 'refill' ? 'Refill — re-check' : 'Run once',
+      label: limit.continue === 'raise'
+        ? limit.unit === 'usd' ? `Raise to $${raiseTo.toLocaleString('en-US')} today` : `Raise to ${raiseTo.toLocaleString('en-US')} ${limit.unit === 'calls' && raiseTo === 1 ? 'call' : limit.unit}`
+        : limit.continue === 'refill' ? 'Refill — re-check' : 'Run once',
       tool: 'olympus_limits', args: { action: 'continue', id: stop.id, subject: limitStopReference(stop),
         ...(limit.continue === 'raise' ? { to: raiseTo } : {}) },
+      ...(limit.continue === 'run_once' && row ? { runsSource: true as const } : {}),
     };
     const label = row?.definition.label ?? ({ source: 'Sources', judge: 'Privacy check', answer: 'Answers', outside_help: 'Outside help', extraction: 'Reading' } as const)[limit.scope];
     waits.push({ sourceId: row?.definition.source_id ?? limit.scope, label, api: label,
@@ -335,6 +339,15 @@ export function buildChatGptDashboardViewModel(
       ...(stop.waiting ? { waiting: stop.waiting } : {}),
       ...(stop.resumesAt ? { resumesAt: stop.resumesAt } : {}), ...(fix ? { fix } : {}) });
   }
+
+  // One row per source (owner, 2026-11-15): a source's tasks can each stop
+  // on a budget, and one fix moves the whole source. The row shows the stop
+  // that holds it longest.
+  const resumes = (wait: DashboardSourceWait) => (wait.resumesAt ? Date.parse(wait.resumesAt) : Number.POSITIVE_INFINITY);
+  const sourceIds = new Set(rows.map(({ definition }) => definition.source_id));
+  const sourceWaits = waits.filter((wait, index) => !sourceIds.has(wait.sourceId) || !waits.some((other, otherIndex) => otherIndex !== index
+    && other.sourceId === wait.sourceId && (resumes(other) > resumes(wait) || (resumes(other) === resumes(wait) && otherIndex < index))));
+  waits.splice(0, waits.length, ...sourceWaits);
 
   const needsYou: DashboardItem[] = rows
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')

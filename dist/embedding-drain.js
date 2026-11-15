@@ -11393,6 +11393,23 @@ function normalizedContentHash(text) {
   return createHash5("sha256").update(text.normalize("NFC").replace(/\r\n?/g, `
 `).trim()).digest("hex");
 }
+var FRONT_MATTER_PRIVATE_REASON = "content:rule:front_matter_private";
+var FRONT_MATTER_MAX_LINES = 100;
+function frontMatterMarksPrivate(text) {
+  const plain = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+  if (!/^---[ \t]*\r?\n/.test(plain))
+    return false;
+  const lines = plain.split(/\r?\n/, FRONT_MATTER_MAX_LINES + 1);
+  let marked = false;
+  for (let index = 1;index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^(?:---|\.\.\.)\s*$/.test(line))
+      return marked;
+    if (/^private\s*:\s*(["']?)(?:true|yes)\1\s*(?:#.*)?$/i.test(line))
+      marked = true;
+  }
+  return false;
+}
 function trivialContentRule(text, parentContext) {
   const own = text.trim();
   if (!own)
@@ -11737,6 +11754,14 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
+  if (frontMatterMarksPrivate(text)) {
+    return {
+      tier: maxTier(metadata.tier, "secure"),
+      decidedBy: "content_rule",
+      reasons: [FRONT_MATTER_PRIVATE_REASON, ...mark],
+      pending: false
+    };
+  }
   if (isBareShareLink(text)) {
     const recorded = args.sniffer.recordedContentVerdict;
     if (recorded && recorded.mapRevision === args.mapRevision) {
@@ -34731,8 +34756,9 @@ var DAILY_LIMITS = new Map(Object.entries({
   gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
   google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
 }));
+var RAISABLE_SPEND_LIMITS = new Set(["x.daily_cost", "x.head_reserve_cost"]);
 for (const limit of DAILY_LIMITS.values()) {
-  registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+  registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: RAISABLE_SPEND_LIMITS.has(limit.id) ? "raise" : "run_once" });
 }
 
 // src/workers/x-bookmarks/content-recovery.ts
@@ -35707,7 +35733,8 @@ var EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused";
 var LOCAL_FILES_SCHEDULER_WARNINGS = [
   "local_files_unreadable_folders",
   "local_files_watch_limit_reached",
-  "local_files_live_updates_off"
+  "local_files_live_updates_off",
+  "local_files_deletions_held"
 ];
 var VERBATIM_SCHEDULER_WARNINGS = new Set([
   EXTRACTION_JOBS_REFUSED_WARNING,

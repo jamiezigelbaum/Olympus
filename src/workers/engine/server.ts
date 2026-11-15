@@ -4872,6 +4872,8 @@ export async function main(): Promise<void> {
         else tierSniffer?.wake();
         if (id === 'dropbox.max_file_bytes' || id === 'local_files.max_file_bytes' || id === 'telegram.media_quota') sourceScheduler?.wakeTasksOfKind('extract');
         if (id === 'gmail.import_allowance') void sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.archiveImports).catch(error => console.warn('Gmail import resume failed:', error instanceof Error ? error.name : 'unknown'));
+        // A raised X spending budget resumes X now, not at its parked retry time.
+        if (id === 'x.daily_cost' || id === 'x.head_reserve_cost') void sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.xBookmarks).catch(error => console.warn('X resume failed:', error instanceof Error ? error.name : 'unknown'));
       },
     }),
     // Bound late: the consult block below sets askAnonymouslyNow.
