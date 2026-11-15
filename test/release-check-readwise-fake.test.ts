@@ -33,4 +33,16 @@ describe('Readwise stand-in', () => {
     expect(JSON.stringify(fake.requests)).not.toContain('tok"');
     expect(JSON.stringify(fake.requests)).not.toContain(PRIVATE_MARKER);
   });
+
+  test('a later sweep gets only what changed after its watermark, like Readwise', async () => {
+    const documents = [{ id: 'old', updated_at: '2025-01-01T12:00:00Z' }, { id: 'new', updated_at: '2025-02-01T12:00:00Z' }];
+    const books = [{ user_book_id: 1, highlights: [{ id: 1, updated_at: '2025-01-01T12:00:00Z' }, { id: 2, updated_at: '2025-03-01T12:00:00Z' }] },
+      { user_book_id: 2, highlights: [{ id: 3, updated_at: '2025-01-01T12:00:00Z' }] }];
+    fake = startFakeReadwise({ port: 0, token: 'tok', documents: documents as never, books: books as never });
+    const get = async (path: string) => (await (await fetch(`http://127.0.0.1:${fake!.port}${path}`, { headers: { authorization: 'Token tok' } })).json()) as { results: Array<Record<string, unknown>> };
+    expect((await get('/api/v3/list/')).results).toHaveLength(2);
+    expect((await get('/api/v3/list/?updatedAfter=2025-01-01T12:00:00Z')).results.map(d => d.id)).toEqual(['new']);
+    expect((await get('/api/v2/export/?updatedAfter=2025-01-01T12:00:00Z')).results).toEqual([{ user_book_id: 1, highlights: [{ id: 2, updated_at: '2025-03-01T12:00:00Z' }] }]);
+    expect((await get('/api/v3/list/?updatedAfter=2025-03-01T12:00:00Z')).results).toEqual([]);
+  });
 });

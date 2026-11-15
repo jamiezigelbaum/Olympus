@@ -54,7 +54,20 @@ export function startFakeReadwise(options: FakeReadwiseOptions = {}): FakeReadwi
           throttled = true;
           return new Response('synthetic rate limit', { status: 429, headers: { 'retry-after': '1' } });
         }
-        const rows = url.pathname === '/api/v3/list/' ? documents : books;
+        // Honor updatedAfter the way Readwise does: a later sweep asks only for
+        // what changed since the last one. Ignoring it made every sweep after
+        // the first walk the whole library again, so a scale run never left
+        // "importing" (run 43648133408).
+        const after = Date.parse(url.searchParams.get('updatedAfter') ?? '');
+        const newer = (value: unknown) => !Number.isFinite(after) || (typeof value === 'string' && Date.parse(value) > after);
+        const rows = url.pathname === '/api/v3/list/'
+          ? documents.filter(document => newer((document as Record<string, unknown>).updated_at))
+          : books.flatMap(book => {
+            if (!Number.isFinite(after)) return [book];
+            const highlights = (Array.isArray(book.highlights) ? book.highlights : []) as Array<Record<string, unknown>>;
+            const changed = highlights.filter(highlight => newer(highlight.updated_at ?? highlight.highlighted_at));
+            return changed.length > 0 ? [{ ...book, highlights: changed }] : [];
+          });
         const start = Number(url.searchParams.get('pageCursor') ?? 0);
         if (!Number.isSafeInteger(start) || start < 0 || start > rows.length) return new Response('bad cursor', { status: 400 });
         const size = Math.max(1, Math.min(options.pageSize ?? Math.max(1, rows.length), Number(url.searchParams.get('limit')) || Infinity));
