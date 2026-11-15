@@ -18235,8 +18235,9 @@ function busy(reader) {
 function runtimeHasWorkers() {
   return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
 }
-function startThread(store) {
-  if (threads.filter((reader) => reader.store === store).length >= READ_POOL_SIZE || !runtimeHasWorkers())
+function startThread(store, lane = "shared") {
+  const limit = lane === "shared" ? READ_POOL_SIZE : 1;
+  if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
     const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
@@ -18246,7 +18247,7 @@ function startThread(store) {
     if (startedStores.has(store))
       counters.restarts += 1;
     startedStores.add(store);
-    const started = { store, worker, pending: new Map, snapshots: 0 };
+    const started = { store, lane, worker, pending: new Map, snapshots: 0 };
     worker.onmessage = (event) => {
       const message = event.data;
       const diagnostic = message;
@@ -18327,11 +18328,12 @@ function send(reader, message, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS, sqlMs) {
     }
   });
 }
-async function withOffThreadSnapshot(dbPath, work) {
+async function withOffThreadSnapshot(dbPath, work, options = {}) {
+  const lane = options.lane ?? "shared";
   if (!runtimeHasWorkers())
     throw new Error("off-thread reads are unavailable");
   const generation = releases.get(dbPath) ?? 0;
-  const reader = await snapshotThread(dbPath);
+  const reader = await snapshotThread(dbPath, lane);
   if ((releases.get(dbPath) ?? 0) !== generation) {
     reader.snapshots -= 1;
     dispatch();
@@ -18372,11 +18374,11 @@ async function withOffThreadSnapshot(dbPath, work) {
 }
 var snapshotWaiters = [];
 var releases = new Map;
-function snapshotThreadNow(store) {
-  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && !reader.job) ?? startThread(store);
+function snapshotThreadNow(store, lane) {
+  return live().find((reader) => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job) ?? startThread(store, lane);
 }
-function snapshotThread(store) {
-  const reader = snapshotThreadNow(store);
+function snapshotThread(store, lane) {
+  const reader = snapshotThreadNow(store, lane);
   if (reader) {
     reader.snapshots += 1;
     return Promise.resolve(reader);
@@ -18384,6 +18386,7 @@ function snapshotThread(store) {
   return new Promise((resolve, reject) => {
     const waiter = {
       store,
+      lane,
       resolve,
       reject,
       timer: setTimeout(() => {
@@ -18398,7 +18401,7 @@ function snapshotThread(store) {
 }
 function serveSnapshotWaiters() {
   for (const waiter of [...snapshotWaiters]) {
-    const reader = snapshotThreadNow(waiter.store);
+    const reader = snapshotThreadNow(waiter.store, waiter.lane);
     if (!reader)
       continue;
     snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
@@ -18495,7 +18498,7 @@ function missedDeadline(job) {
     waiting.splice(at, 1);
 }
 function freeThread(store) {
-  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && !reader.job && reader.pending.size === 0) ?? startThread(store);
+  return live().find((reader) => reader.store === store && reader.lane === "shared" && !reader.releaseWhenIdle && !reader.job && reader.pending.size === 0) ?? startThread(store);
 }
 function dispatch() {
   for (const reader of live()) {
@@ -21752,7 +21755,7 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECT
 }
 var VECTOR_SCAN_BACKSTOP_GRACE_MS = 250;
 async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit)).catch((error) => {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit), { lane: "scan" }).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;

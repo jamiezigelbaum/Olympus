@@ -57,6 +57,23 @@ const SLOW: StoreRead = {
 const COUNT: StoreRead = { mode: 'get', sql: 'SELECT COUNT(*) AS c FROM items', params: [] };
 
 describe('read pool', () => {
+  test('a scan snapshot runs on its own worker of the store, never queued behind a slow shared read', async () => {
+    const path = storeFile();
+    const started: string[] = [];
+    setReadPoolObserverForTests((_, read) => started.push(read.sql));
+    let slowDone = false;
+    const slow = readOnPool(path, SLOW).then(() => { slowDone = true; });
+    await waitFor(() => started.length === 1, { description: 'the slow shared read running' });
+    const scanned = await withOffThreadSnapshot(path, async (read) => read(COUNT), { lane: 'scan' }) as { c: number };
+    expect(scanned.c).toBe(3);
+    expect(slowDone).toBe(false);
+    expect(readPoolThreadsForTests().live).toBe(2);
+    await slow;
+    // Releasing the store stops both of its workers.
+    releaseOffThreadReads(path);
+    await waitFor(() => readPoolThreadsForTests().live === 0, { description: 'both workers released' });
+  });
+
   test('abandoned queries fail busy, retain their store executor until SQL ends, and the next query then runs', async () => {
     const path = storeFile();
     const clock = createTestClock();
