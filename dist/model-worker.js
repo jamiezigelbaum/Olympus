@@ -1283,7 +1283,7 @@ var CONTROL_PATH_SLICE_MS = 20;
 var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
 var CONTROL_PATH_REST_MS = 25;
 var HEARTBEAT_MS = 50;
-var CONTROL_PATH_LAG_BUDGET_MS = 250;
+var CONTROL_PATH_LAG_COUNTED_MS = 250;
 var CONTROL_PATH_FREEZE_LOG_MS = 2000;
 function controlPathFreezeSubject(role, mainThread = true) {
   if (!mainThread)
@@ -1393,7 +1393,7 @@ class ControlPathHeadroom {
       this.expectedBeatAt = now + HEARTBEAT_MS;
       if (this.lastLagMs > this.maxLagMs)
         this.maxLagMs = this.lastLagMs;
-      if (this.lastLagMs >= CONTROL_PATH_LAG_BUDGET_MS)
+      if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)
         this.overBudget += 1;
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;

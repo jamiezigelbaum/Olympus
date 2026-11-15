@@ -3167,7 +3167,7 @@ class ControlPathHeadroom {
       this.expectedBeatAt = now + HEARTBEAT_MS;
       if (this.lastLagMs > this.maxLagMs)
         this.maxLagMs = this.lastLagMs;
-      if (this.lastLagMs >= CONTROL_PATH_LAG_BUDGET_MS)
+      if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)
         this.overBudget += 1;
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
@@ -3178,7 +3178,7 @@ class ControlPathHeadroom {
     this.heartbeat.unref?.();
   }
 }
-var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_LAG_BUDGET_MS = 250, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
+var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_LAG_COUNTED_MS = 250, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
 var init_control_path_headroom = __esm(() => {
   init_engine_split();
   controlPathHeadroom = new ControlPathHeadroom;

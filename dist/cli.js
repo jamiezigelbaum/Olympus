@@ -15622,7 +15622,7 @@ class ControlPathHeadroom {
       this.expectedBeatAt = now + HEARTBEAT_MS;
       if (this.lastLagMs > this.maxLagMs)
         this.maxLagMs = this.lastLagMs;
-      if (this.lastLagMs >= CONTROL_PATH_LAG_BUDGET_MS)
+      if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)
         this.overBudget += 1;
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
@@ -15722,7 +15722,7 @@ async function startCpuSampleLog(env = process.env) {
     clearInterval(lag);
   };
 }
-var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_LAG_BUDGET_MS = 250, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom, CPU_SAMPLE_LOG_ENV = "OLYMPUS_CPU_SAMPLE_LOG", CPU_SAMPLE_FLUSH_MS = 30000, CPU_SAMPLE_TOP = 30, CPU_SAMPLE_STALL_MS = 1000, CPU_SAMPLE_LAG_TICK_MS = 100;
+var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_LAG_COUNTED_MS = 250, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom, CPU_SAMPLE_LOG_ENV = "OLYMPUS_CPU_SAMPLE_LOG", CPU_SAMPLE_FLUSH_MS = 30000, CPU_SAMPLE_TOP = 30, CPU_SAMPLE_STALL_MS = 1000, CPU_SAMPLE_LAG_TICK_MS = 100;
 var init_control_path_headroom = __esm(() => {
   init_engine_split();
   controlPathHeadroom = new ControlPathHeadroom;
