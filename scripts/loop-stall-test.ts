@@ -2,11 +2,18 @@
 /**
  * Synthetic engine-freeze gate (step-back section 7).
  *
- * build --dir PATH [--items 300000] [--chunks-per-item 5]
- * run --dir PATH [--seconds 300]
+ * build --dir PATH [--items 600000] [--chunks-per-item 1]
+ * run --dir PATH [--seconds 300] [--memory-max 2G]
  *
  * Build once, outside the cap. Run on Linux under:
- * systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0 -- bun scripts/loop-stall-test.ts run --dir PATH
+ * systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0 -- bun scripts/loop-stall-test.ts run --dir PATH --memory-max 2G
+ * For the warm-cache regression use MemoryMax=8G and run --memory-max 8G.
+ * Sparta: 28 GiB RAM (~15 GB free), 681k items / 629k chunks, 4.9 GB
+ * Personal + 3.6 GB Private + 4.6 GB ledger + 0.7 GB sniffer. Recount
+ * read 265 GB via pread (rchar), only 4.7 GB from disk (read_bytes),
+ * across 130+ open SQLite files (28-46 per corpus/process, 7 corpora).
+ * Preserve SQLite's default connection page caches: the 8G run must fail
+ * on the affected engine even when the OS page cache is warm.
  * The measured interval includes cold engine startup (hidden-set construction),
  * then concurrent sync, embedding, judge/settle, paced recount and front Asks.
  * Owner: Olympus engine maintainers. Runtime: 5 minutes, excluding one-time
@@ -36,7 +43,11 @@ import type { SourceEmbeddingProvider } from '../src/workers/source-index/embedd
 import { startPacedStatusRecount } from '../src/workers/engine/status-recount.ts';
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
 
-const VERSION = 4;
+const VERSION = 5;
+// Sized from 10k-item seeds to match Telegram's store bytes per identity.
+const CHUNK_WORDS = 168;
+const LEDGER_PASSES = 4;
+const LEDGER_REASON_BYTES = 1024;
 const MODEL = 'loop-stall-384';
 const DIMENSION = 384;
 const DOMAINS = ['internal', 'secure_local', 'public_safe'] as const;
@@ -50,7 +61,7 @@ function random(seed: number): () => number {
 }
 function text(id: number, chunk: number): string {
   const next = random(id * 7919 + chunk + 1);
-  return `Synthetic orchard ${id} part ${chunk}. ` + Array.from({ length: 65 }, () => words[Math.floor(next() * words.length)]).join(' ');
+  return `Synthetic orchard ${id} part ${chunk}. ` + Array.from({ length: CHUNK_WORDS }, () => words[Math.floor(next() * words.length)]).join(' ');
 }
 function vector(seed: number): number[] {
   const next = random(seed + 17);
@@ -63,7 +74,7 @@ const embedder: SourceEmbeddingProvider = {
   async embed(inputs) { return inputs.map(input => vector(input.text.length)); },
 };
 function environment(dir: string): Record<string, string> {
-  const home = join(dir, 'home');
+  const home = join(dir, `home-v${VERSION}`);
   return { HOME: home, XDG_DATA_HOME: join(home, 'd'), XDG_STATE_HOME: join(home, 's'), XDG_CONFIG_HOME: join(home, 'c'), NODE_ENV: 'test' };
 }
 const dataDir = (dir: string) => olympusDataRoot(environment(dir));
@@ -81,7 +92,7 @@ function openStores(dir: string) {
   return { ledger, stores };
 }
 const placement = () => buildSourceSensitivity({ trustTier: 'S3', trustDomain: 'internal' });
-function connector(ids: number[], chunkCount = 5): SourceConnector {
+function connector(ids: number[], chunkCount = 1): SourceConnector {
   const item = (id: number): RawItem => ({ identity: identity(id), mimeType: 'text/plain', content: { kind: 'text', text: Array.from({ length: chunkCount }, (_, c) => text(id, c)).join('\n\n') },
     metadata: { name: `orchard-${id}.txt`, locatorUri: `/synthetic/${id % 100}/orchard-${id}.txt` }, fetchedAt: new Date().toISOString() });
   return { id: 'loop-stall-sync', family: 'file', async authenticate() {},
@@ -101,13 +112,17 @@ function tierSet(stores: LocalConnectorStore[], ledger: ReturnType<typeof openTi
 }
 
 async function build(dir: string, items: number, chunks: number): Promise<void> {
-  const shape = { version: VERSION, items, chunksPerItem: chunks, dimension: DIMENSION, seed: 99991 };
+  const shape = { version: VERSION, items, chunksPerItem: chunks, chunkWords: CHUNK_WORDS, dimension: DIMENSION, seed: 99991, secureFraction: 0.4, ledgerPasses: LEDGER_PASSES, ledgerReasonBytes: LEDGER_REASON_BYTES };
   const marker = join(dir, 'shape.json');
   if (existsSync(marker)) {
     const saved = JSON.parse(readFileSync(marker, 'utf8'));
-    if (JSON.stringify(saved.shape) !== JSON.stringify(shape)) throw new Error('Shape differs; use a new synthetic folder. Existing fixtures are never silently replaced.');
-    for (const path of saved.files as string[]) if (!existsSync(join(dir, path))) throw new Error(`Incomplete fixture: ${path}`);
-    console.log(JSON.stringify({ phase: 'build', reused: true, ...saved })); return;
+    if (saved.shape.version === VERSION) {
+      if (JSON.stringify(saved.shape) !== JSON.stringify(shape)) throw new Error('Shape differs; use a new synthetic folder. Existing fixtures are never silently replaced.');
+      for (const path of saved.files as string[]) if (!existsSync(join(dir, path))) throw new Error(`Incomplete fixture: ${path}`);
+      console.log(JSON.stringify({ phase: 'build', reused: true, ...saved })); return;
+    }
+    // Versioned homes rebuild automatically without deleting an older fixture.
+    console.error(`Rebuilding shape v${saved.shape.version} as v${VERSION}; retaining the previous synthetic home.`);
   }
   mkdirSync(dataDir(dir), { recursive: true });
   if (existsSync(storePath(dir, 'internal'))) throw new Error('Unfinished build; use a new folder or explicitly remove the unfinished synthetic fixture.');
@@ -116,6 +131,7 @@ async function build(dir: string, items: number, chunks: number): Promise<void> 
   const jobs = new LocalFileExtractionJobStore(defaultFileExtractionJobsDbPath(environment(dir)));
   try {
     const big = stores[0]!;
+    const secure = stores[1]!;
     // Product sync creates the template and its embedding authority. Copies below
     // go through importItemCopy, exactly as tier moves do, never raw INSERTs.
     await big.syncFromConnector(connector([-1], 1), { fetchContent: true, placement });
@@ -130,7 +146,7 @@ async function build(dir: string, items: number, chunks: number): Promise<void> 
     const base = baseDecision();
     let unreadable = 0;
     for (let from = 0; from < items; from += 250) {
-      db(ledger).transaction(() => db(big).transaction(() => {
+      db(ledger).transaction(() => db(big).transaction(() => db(secure).transaction(() => {
         for (const id of order.slice(from, from + 250)) {
           const parts = Array.from({ length: chunks }, (_, chunkIndex) => {
             const boundedText = text(id, chunkIndex);
@@ -143,35 +159,45 @@ async function build(dir: string, items: number, chunks: number): Promise<void> 
               title: `orchard-${id}.txt`, locator_uri: `/synthetic/${id % 100}/orchard-${id}.txt`, search_text: parts[0]!.boundedText,
               parent_local_item_id: id % 10 === 5 ? identity(id - 1).localItemId : null },
             chunks: parts, vectors: parts.map(part => ({ chunkIndex: part.chunkIndex, modelId: MODEL, contentHash: part.contentHash, embedding })) };
-          const imported = big.importItemCopy(copy, { trustTier: 'S3', syncConnectorId: 'loop-stall-build', vectorProvider: embedder, sourceTextCurrent: true });
+          // 60/40 Personal/Private by identity; both legs contain full text and vectors.
+          const destination = id % 10 >= 6 ? secure : big;
+          const imported = destination.importItemCopy(copy, { trustTier: destination === secure ? 'S4' : 'S3', syncConnectorId: 'loop-stall-build', vectorProvider: embedder, sourceTextCurrent: true });
           if (imported.vectorsCopied !== chunks) throw new Error('Seed lost vectors');
           const metadataOnly = id % 20 < 2;
           const held = id % 20 === 2;
-          const decision: TierDecision = { ...base, ...(metadataOnly ? { contentRead: false, contentTier: 'secure', reasons: ['content:sniffer:synthetic:fail_safe:unread'] } : {}),
+          const decision: TierDecision = { ...base, ...(destination === secure ? { metadataTier: 'secure', contentTier: 'secure' } : {}), ...(metadataOnly ? { contentRead: false, contentTier: 'secure', reasons: ['content:sniffer:synthetic:fail_safe:unread'] } : {}),
             ...(held ? { contentPending: true, state: 'pending', contentTier: 'secure', reasons: ['content:sniffer:old:undecided'] } : {}) };
-          ledger.recordRoutedPlacement(identity(id), decision, { copies: [{ corpusId: big.corpusId, trustDomain: 'internal', layers: metadataOnly ? 'metadata' : 'both' }], embedHold: held || metadataOnly });
+          const plan = { copies: [{ corpusId: destination.corpusId, trustDomain: destination.trustDomain, layers: metadataOnly ? 'metadata' as const : 'both' as const }], embedHold: held || metadataOnly };
+          // Real routed decisions populate one tier_items row plus history per
+          // identity. Content-free synthetic reason codes give the ledger real
+          // multi-GB live pages, not a padding table that scans never touch.
+          for (let pass = 0; pass < LEDGER_PASSES; pass++) {
+            const reason = `content:sniffer:synthetic:pass-${pass}:` + hash(String(id)).repeat(Math.ceil(LEDGER_REASON_BYTES / 64)).slice(0, LEDGER_REASON_BYTES);
+            ledger.recordRoutedPlacement(identity(id), { ...decision, reasons: [...decision.reasons, reason] }, plan);
+          }
           if (id % 20 === 3) ledger.recordRoutedPlacement(identity(id), { ...base, metadataTier: 'secure', contentTier: 'secure' }, set.placementFor({ ...base, metadataTier: 'secure', contentTier: 'secure' }));
           if (id % 100 === 0) {
-            const queued = jobs.enqueue({ refs: [{ ...identity(id), corpusId: big.corpusId, approvedScopeKey: '/synthetic', sizeBytes: 100, name: `orchard-${id}.txt` }], extractorKind: 'synthetic', extractorVersion: '1', maxBytesPerFile: 1 });
+            const queued = jobs.enqueue({ refs: [{ ...identity(id), corpusId: destination.corpusId, approvedScopeKey: '/synthetic', sizeBytes: 100, name: `orchard-${id}.txt` }], extractorKind: 'synthetic', extractorVersion: '1', maxBytesPerFile: 1 });
             // A product size refusal is settled-unreadable, with no lease needed.
             // sizeBytes on the reference makes enqueue settle it immediately.
             if (!queued.jobRefs.length) throw new Error('Missing job row');
             unreadable++;
           }
         }
-      })())();
+      })())())();
       if (from % 10_000 === 0) console.error(`seed ${from}/${items}`);
       await Bun.sleep(0);
     }
-    for (let i = 1; i < stores.length; i++) await stores[i]!.syncFromConnector(connector([items + i], 1), { fetchContent: true, placement: () => buildSourceSensitivity({ trustTier: i === 1 ? 'S4' : 'S2', trustDomain: DOMAINS[i]! }) });
+    for (let i = 2; i < stores.length; i++) await stores[i]!.syncFromConnector(connector([items + i], 1), { fetchContent: true, placement: () => buildSourceSensitivity({ trustTier: 'S2', trustDomain: DOMAINS[i]! }) });
     ledger.setOverride(identity(0), { kind: 'tier', tier: 'secure' });
     ledger.clearOverride(identity(0));
     big.tombstoneCopy(identity(-1), { connectorId: 'loop-stall-build' });
     console.error(`seeded ${items} items, ${items * chunks} chunks/vectors, ${unreadable} extraction jobs`);
   } finally { jobs.close(); for (const store of stores) store.close(); ledger.close(); }
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite')).map(name => relative(dir, join(dataDir(dir), name)));
-  const bytes = files.reduce((n, path) => n + statSync(join(dir, path)).size, 0);
-  const receipt = { shape, files, bytes, build_ms: Date.now() - started };
+  const fileBytes = Object.fromEntries(files.map(path => [path, statSync(join(dir, path)).size]));
+  const bytes = Object.values(fileBytes).reduce((n, size) => n + size, 0);
+  const receipt = { shape, files, file_bytes: fileBytes, bytes, build_ms: Date.now() - started };
   writeFileSync(marker, JSON.stringify(receipt));
   console.log(JSON.stringify({ phase: 'build', reused: false, ...receipt }));
 }
@@ -255,11 +281,17 @@ export function gate(input: { background: Loop; front: Loop; slow_sql: Array<{ s
   return input.workload_ok && input.background.beats > 0 && input.front.beats > 0 && input.background.max_ms < 250 && input.front.max_ms < 100
     && input.slow_sql.every(row => allowed.includes(row.sql_id));
 }
-function capped(): boolean {
+export function memoryMaxBytes(value: string): number {
+  const match = /^(\d+)([KMGT]?)$/i.exec(value);
+  const bytes = match ? Number(match[1]) * 1024 ** (['', 'K', 'M', 'G', 'T'].indexOf(match[2]!.toUpperCase())) : NaN;
+  if (!Number.isSafeInteger(bytes) || bytes < 1) throw new Error('Invalid --memory-max; use bytes or a K/M/G/T suffix (for example 2G or 8G).');
+  return bytes;
+}
+function capped(memoryMax: number): boolean {
   try {
     const relative = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find(line => line.startsWith('0::'))!.slice(3);
     const root = join('/sys/fs/cgroup', relative);
-    return Number(readFileSync(join(root, 'memory.max'), 'utf8')) <= 2 * 1024 ** 3 && readFileSync(join(root, 'memory.swap.max'), 'utf8').trim() === '0';
+    return Number(readFileSync(join(root, 'memory.max'), 'utf8')) <= memoryMax && readFileSync(join(root, 'memory.swap.max'), 'utf8').trim() === '0';
   } catch { return false; }
 }
 function coldFiles(dir: string) {
@@ -271,11 +303,11 @@ function coldFiles(dir: string) {
     if (result.status !== 0) throw new Error(`Cannot evict synthetic pages: ${result.stderr}`);
   }
 }
-async function run(dir: string, seconds: number) {
+async function run(dir: string, seconds: number, memoryMax: string) {
   const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
-  const isCapped = capped();
-  if (!isCapped) console.error('WARNING: run is not under MemoryMax<=2G and MemorySwapMax=0; this is not a qualified cold-store receipt.');
+  const isCapped = capped(memoryMaxBytes(memoryMax));
+  if (!isCapped) console.error(`WARNING: run is not under MemoryMax<=${memoryMax} and MemorySwapMax=0; this is not a qualified receipt. Use: systemd-run --user --scope -p MemoryMax=${memoryMax} -p MemorySwapMax=0 -- bun scripts/loop-stall-test.ts run --dir ${JSON.stringify(dir)} --memory-max ${memoryMax}`);
   const runDir = mkdtempSync('/tmp/ols-'); // Unix socket path must remain short.
   const metrics = join(runDir, 'metrics'); mkdirSync(metrics);
   for (const name of ['start', 'workloads.json']) rmSync(join(dir, name), { force: true });
@@ -371,7 +403,7 @@ async function run(dir: string, seconds: number) {
   const allowed = JSON.parse(readFileSync(join(import.meta.dir, 'loop-stall-allowlist.json'), 'utf8')) as string[];
   const pass = gate({ background, front, slow_sql, workload_ok }, allowed);
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', sha, pass, qualified: isCapped, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors };
+  const receipt = { phase: 'run', sha, pass, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
   console.log(JSON.stringify(receipt));
   console.log(`${pass ? 'PASS' : 'FAIL'}: background ${background.max_ms} ms (<250), front ${front.max_ms} ms (<100), ${slow_sql.length} slow SQL statements, workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}`);
@@ -383,8 +415,8 @@ if (import.meta.main) {
   const flag = (name: string, fallback?: string) => { const at = args.indexOf(`--${name}`); return at < 0 ? fallback : args[at + 1]; };
   const dir = flag('dir');
   const number = (name: string, fallback: string) => { const n = Number(flag(name, fallback)); if (!Number.isSafeInteger(n) || n < 1) throw new Error(`Invalid --${name}`); return n; };
-  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N]');
-  if (command === 'build') await build(resolve(dir), number('items', '300000'), number('chunks-per-item', '5'));
-  else process.exitCode = await run(resolve(dir), number('seconds', '300')) ? 0 : 1;
+  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G]');
+  if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
+  else process.exitCode = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!) ? 0 : 1;
   process.exit(process.exitCode ?? 0);
 }

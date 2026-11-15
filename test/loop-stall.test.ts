@@ -2,8 +2,9 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
-import { gate } from '../scripts/loop-stall-test.ts';
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { gate, memoryMaxBytes } from '../scripts/loop-stall-test.ts';
 import { join } from 'node:path';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -17,10 +18,56 @@ function invoke(args: string[], timeout = 10 * 60_000) {
   if (result.error) throw result.error;
   return result.status;
 }
-test.skipIf(!enabled)('cold split engine stays within loop and main-thread SQLite budgets', () => {
+test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-thread SQLite budgets', () => {
   expect(invoke(['bun', script, 'build', '--dir', dir], 60 * 60_000)).toBe(0);
-  expect(invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=2G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300'])).toBe(0);
+  // More RAM must not hide repeated scans through SQLite's small connection caches.
+  expect(invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G'])).toBe(0);
 }, 70 * 60_000);
+
+test('memory cap accepts the default and warm-cache sizes and rejects invalid caps', () => {
+  expect(memoryMaxBytes('2G')).toBe(2 * 1024 ** 3);
+  expect(memoryMaxBytes('8G')).toBe(8 * 1024 ** 3);
+  expect(memoryMaxBytes('8192M')).toBe(8 * 1024 ** 3);
+  expect(memoryMaxBytes('2048')).toBe(2048);
+  for (const value of ['0', '-1G', 'max', '2GB', 'bogus', '9007199254740992']) expect(() => memoryMaxBytes(value)).toThrow();
+});
+
+test('fixture rebuilds an old shape with substantial embedded Personal and Private legs and ledger history', () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'loop-stall-shape-'));
+  try {
+    // An old version is retained, while build creates the current version's home.
+    mkdirSync(join(fixture, 'home'));
+    const old = join(fixture, 'home', 'old-synthetic-store');
+    writeFileSync(old, 'previous fixture');
+    writeFileSync(join(fixture, 'shape.json'), JSON.stringify({ shape: { version: 4 } }));
+    const args = ['bun', script, 'build', '--dir', fixture, '--items', '200'];
+    expect(invoke(args)).toBe(0);
+    const receipt = JSON.parse(readFileSync(join(fixture, 'shape.json'), 'utf8'));
+    expect(receipt.shape.version).toBeGreaterThan(4);
+    expect(receipt.shape.chunksPerItem).toBe(1);
+    expect(readFileSync(old, 'utf8')).toBe('previous fixture');
+    const database = (name: string) => new Database(join(fixture, receipt.files.find((path: string) => path.endsWith(`/${name}.sqlite`))), { readonly: true });
+    for (const [name, count] of [['internal', 120], ['secure_local', 80]] as const) {
+      const store = database(name);
+      try {
+        expect(store.query('SELECT COUNT(*) AS n FROM items WHERE tombstoned = 0').get()).toEqual({ n: count });
+        expect((store.query('SELECT COUNT(*) AS n FROM chunks').get() as { n: number }).n).toBeGreaterThanOrEqual(count);
+        expect((store.query('SELECT COUNT(*) AS n FROM chunk_embeddings').get() as { n: number }).n).toBeGreaterThanOrEqual(count);
+      } finally { store.close(); }
+    }
+    const ledgerPath = receipt.files.find((path: string) => path.endsWith('/set.tier-ledger.sqlite'));
+    expect(receipt.file_bytes[ledgerPath]).toBeGreaterThan(200 * 7000);
+    const ledger = database('set.tier-ledger');
+    try {
+      expect((ledger.query('SELECT COUNT(*) AS n FROM tier_items').get() as { n: number }).n).toBeGreaterThanOrEqual(200);
+      expect((ledger.query('SELECT COUNT(*) AS n FROM tier_history').get() as { n: number }).n).toBeGreaterThanOrEqual(800);
+      expect((ledger.query('SELECT length(reasons_json) AS n FROM tier_items WHERE provider_item_id = ?').get('6') as { n: number }).n).toBeGreaterThan(1024);
+    } finally { ledger.close(); }
+    // Same-version builds reuse their complete seed rather than duplicating it.
+    expect(invoke(args)).toBe(0);
+    expect(JSON.parse(readFileSync(join(fixture, 'shape.json'), 'utf8'))).toEqual(receipt);
+  } finally { rmSync(fixture, { recursive: true, force: true }); }
+}, 60_000);
 
 // A red engine may never become green by adding an allowance or losing a
 // sampler/workload. The allowance was introduced empty and can only shrink.
