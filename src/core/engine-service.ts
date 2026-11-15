@@ -891,9 +891,15 @@ function copyMacStoresBeforeReplacing(options: EngineInstallOptions): MacStoreCo
   waitForQuietEngine(options);
   mustSucceed(exec('launchctl', ['bootout', target]), 'stop the previous engine to copy its stores');
   for (let waited = 0; waited < 10_000 && launchctlLoaded(exec, target); waited += 250) sleepSync(250);
-  const env = { HOME: homeDir, OLYMPUS_ENGINE_HOST: '1' };
+  // The data root the engine's workers resolve: their worker.env can move it (XDG_DATA_HOME), so the copies, the put-back
+  // and the locks they hold read it too, never only the default under HOME (Codex, 15 Nov 2026).
+  const env = definedValues(environmentWithWorkerSetupEnv({ env: { HOME: homeDir, OLYMPUS_ENGINE_HOST: '1' }, workerEnvPath: paths.workerEnvPath }));
   copyEngineStores(env, { bunBin: program.runtimePath, log: (line) => process.stderr.write(`${line}\n`) });
   return { env, exec, target };
+}
+
+function definedValues(env: Record<string, string | undefined>): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
 }
 
 function putMacStoresBack(copied: MacStoreCopies): string[] {

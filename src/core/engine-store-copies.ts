@@ -9,7 +9,7 @@
  * previous build on stores it refuses.
  */
 import { clearWorkerUpgradeInFlight, markWorkerUpgradeInFlight, readWorkerUpgradeInFlight, removeRecordedSchemaBackups, restoreSchemaBackupsSince } from './boot-progress.ts';
-import { DataOwnerBusyError, withDataOwnerLock } from './data-owner-lock.ts';
+import { DataOwnerBusyError, withNoEngineProcess } from './data-owner-lock.ts';
 import { OperationError } from './operation-error.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { copyStoresBeforeUpgrade } from './upgrade-store-copies.ts';
@@ -18,14 +18,14 @@ import { copyStoresBeforeUpgrade } from './upgrade-store-copies.ts';
  * How long the copy and the put-back wait for the engine that was stopped to let go of its data. A stop the service
  * manager reports done is not a stopped process: launchd's bootout returns while the engine is still shutting down, and on
  * the Mac forced-failure leg (run 43736059061, 15 Nov 2026) the stopping new version opened a store the put-back had just
- * restored and migrated it again, so the restored 1.4.4 refused it. The owner lock is held until the last store owner exits.
+ * restored and migrated it again, so the restored 1.4.4 refused it. The locks are held until the last engine process exits.
  */
 export const ENGINE_STORES_OWNER_WAIT_MS = 60_000;
 
 /** Runs `step` once no Olympus process owns the data, holding that until it returns: one rule for Linux and the Mac. */
 function withStoppedEngine<T>(env: LayoutEnv, what: string, step: () => T, waitMs: number): T {
   try {
-    return withDataOwnerLock(env, step, { waitMs });
+    return withNoEngineProcess(env, step, waitMs);
   } catch (error) {
     if (!(error instanceof DataOwnerBusyError)) throw error;
     throw new OperationError('config_error', `The engine was stopped, but an Olympus process still owns its data after ${Math.round(waitMs / 1000)} s, so its stores were not ${what}.`, 'Run olympus engine stop, then run the installer again. Nothing was changed.');

@@ -59,6 +59,9 @@ function olympusDataPath(env: LayoutEnv, ...segments: string[]): string {
 export const SHARED_DATA_FILES = {
   registry: 'registry.json',
   'data-owner-lock': 'data-owner.lock',
+  // Held shared by every engine process for its life, the split's front included, which holds no owner lock; an update's
+  // put-back takes it exclusive, so no process of the version being removed still has a store open (core/engine-store-copies.ts).
+  'engine-process-lock': 'engine-process.lock',
   'remote-connections': 'remote-connections.sqlite',
   'source-dashboard': 'source-dashboard.sqlite',
   'source-scheduler': 'source-scheduler.sqlite',

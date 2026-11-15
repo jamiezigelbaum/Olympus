@@ -64,13 +64,15 @@ describe('the store copies an engine install takes', () => {
 describe('the copy and the put-back wait for the stopped engine to let go of its data', () => {
   // Mac forced-failure leg, 15 Nov 2026: launchd reported the new version stopped while it was still shutting down, it
   // opened a store the put-back had just restored and migrated it again, and the restored previous version refused it.
-  test('while another process still owns the data, nothing is put back and the refusal says so', () => {
+  // The owner (the background or a single engine), and the split's front, which holds only the engine process share.
+  for (const [who, take] of [['the data owner', 'holdDataOwnerLock(env)'], ['the split front', "takeWorkerDataOwnerLock(env, { engineRole: 'front' })"]] as const) test(`while ${who} is still alive, nothing is put back and the refusal says so`, () => {
     const { env, body, update } = setup();
     copyEngineStores(env, { bunBin: process.execPath });
     update();
     const owner = Bun.spawn([process.execPath, '-e', `
-      const { holdDataOwnerLock } = await import(${JSON.stringify(join(import.meta.dir, '..', 'src', 'core', 'data-owner-lock.ts'))});
-      holdDataOwnerLock(${JSON.stringify(env)});
+      const { holdDataOwnerLock, takeWorkerDataOwnerLock } = await import(${JSON.stringify(join(import.meta.dir, '..', 'src', 'core', 'data-owner-lock.ts'))});
+      const env = ${JSON.stringify(env)};
+      ${take};
       console.log('held');
       await new Promise(() => {});
     `], { stdout: 'pipe' });
