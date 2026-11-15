@@ -42,7 +42,7 @@ import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { PEOPLE_AUTHORED_FAMILIES } from '../../core/people-index.ts';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
@@ -284,6 +284,12 @@ export interface SourceIndexStatusHandler {
   status(request?: SourceIndexStatusRequest, snapshot?: { countsMaxAgeMs?: number }): Promise<SourceIndexStatusResult>;
   /** Resolves once every status refresh running behind a snapshot caller has finished. */
   settled?(): Promise<void>;
+  /**
+   * The split's background only (`snapshotRole: 'writer'`): recount the status
+   * a snapshot caller with this request gets, and keep it for the front. The
+   * background's paced recount calls it; no request does.
+   */
+  refreshSnapshot?(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number }): Promise<SourceIndexStatusResult>;
 }
 
 export interface SourceIndexStatusHandlerOptions {
@@ -292,6 +298,16 @@ export interface SourceIndexStatusHandlerOptions {
    * a restarted engine answers its first dashboard read at once from it.
    */
   snapshotPath?: string;
+  /**
+   * The engine split. 'writer' (the background): snapshot reads are served
+   * from what it kept and never start a recount; only `refreshSnapshot` (its
+   * paced recount) counts, and writes `snapshotPath`. 'reader' (the front):
+   * snapshot reads are served from the background's `snapshotPath`, never
+   * counted here; a request the background has not counted yet (a first
+   * start) is counted once in memory. Left out: one engine serves and
+   * refreshes behind each read.
+   */
+  snapshotRole?: 'writer' | 'reader';
   /** Live, deduplicated unreadable population when the problem list is wired. */
   // Undefined: no recount yet, so the ledger's own count stands.
   unreadableCount?: (corpusId: string) => number | undefined;
@@ -371,6 +387,18 @@ export type SourceIndexStatusRetrievalAvailability =
  * whole-corpus counts while preserving live reads for callers that omit it.
  */
 export const DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120_000;
+
+/**
+ * The two status reads a snapshot caller makes, so the split's background
+ * counts exactly what its front will ask for: the plain one (the scheduler's
+ * ingestion record, `olympus status`) and the dashboard's.
+ */
+export const PLAIN_STATUS_REQUEST: Readonly<SourceIndexStatusRequest> = Object.freeze({ include_items: false });
+export const DASHBOARD_STATUS_REQUEST: Readonly<SourceIndexStatusRequest> = Object.freeze({
+  include_items: false,
+  include_readiness_ledger: true,
+  readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
+});
 /**
  * How long a snapshot caller reuses a store's counts (never longer than its
  * own `countsMaxAgeMs`). Five minutes, the snapshot allowance itself: at one
@@ -489,36 +517,64 @@ export function createSourceIndexStatusHandler(
   // call for a request waits. Sparta rc.17, 15 Nov 2026: with imports, the
   // judge and a backup running, every dashboard poll recounted each store
   // whose counts had expired, inline and one after another (30-69 s).
-  const snapshots = new Map<string, { atMs: number; result: SourceIndexStatusResult }>(readStatusSnapshots(options.snapshotPath));
+  type KeptStatus = { atMs: number; result: SourceIndexStatusResult };
+  const role = options.snapshotRole;
+  const snapshots = new Map<string, KeptStatus>(role === 'reader' ? [] : readStatusSnapshots(options.snapshotPath));
+  // The front re-reads the background's file only when it changed.
+  // Each write is atomic (a new file renamed in), so a new inode is a new write.
+  let published: { version: string; entries: Map<string, KeptStatus> } | undefined;
+  const publishedStatus = (key: string): KeptStatus | undefined => {
+    if (role !== 'reader' || !options.snapshotPath) return undefined;
+    try {
+      const file = statSync(options.snapshotPath);
+      const version = `${file.ino}:${file.mtimeMs}:${file.size}`;
+      if (published?.version !== version) published = { version, entries: new Map(readStatusSnapshots(options.snapshotPath)) };
+    } catch {
+      return published?.entries.get(key);
+    }
+    return published.entries.get(key);
+  };
   const persistSnapshots = (): void => {
-    if (!options.snapshotPath) return;
+    if (!options.snapshotPath || role === 'reader') return;
     try {
       writePrivateFileAtomicSync(options.snapshotPath, `${JSON.stringify({ schema: STATUS_SNAPSHOT_SCHEMA, entries: [...snapshots] })}\n`);
     } catch { /* the in-memory snapshot still serves; the next refresh writes again */ }
   };
   const snapshotRefreshes = new Map<string, Promise<SourceIndexStatusResult>>();
+  // Keyed by each store's scope too: a status counted under folders the owner
+  // has since taken out is never served (they leave the counts at once).
+  const snapshotKey = (request: SourceIndexStatusRequest, countsMaxAgeMs: number): string => JSON.stringify([
+    request, countsMaxAgeMs,
+    (options.connectorStores ?? []).map((store) => [store.corpusId, options.connectorStoreStatusScope?.(store) ?? null]),
+  ]);
+  const refreshKept = (key: string, compute: () => Promise<SourceIndexStatusResult>): Promise<SourceIndexStatusResult> => {
+    const running = snapshotRefreshes.get(key);
+    if (running) return running;
+    const started = compute().then((result) => {
+      if (snapshots.size > 64) snapshots.clear();
+      snapshots.set(key, { atMs: nowMs(), result });
+      persistSnapshots();
+      return result;
+    }).finally(() => snapshotRefreshes.delete(key));
+    snapshotRefreshes.set(key, started);
+    return started;
+  };
   const snapshotStatus = (
     compute: () => Promise<SourceIndexStatusResult>,
     request: SourceIndexStatusRequest,
     countsMaxAgeMs: number,
   ): Promise<SourceIndexStatusResult> => {
-    const key = JSON.stringify([request, countsMaxAgeMs]);
-    const refresh = (): Promise<SourceIndexStatusResult> => {
-      const running = snapshotRefreshes.get(key);
-      if (running) return running;
-      const started = compute().then((result) => {
-        if (snapshots.size > 64) snapshots.clear();
-        snapshots.set(key, { atMs: nowMs(), result });
-        persistSnapshots();
-        return result;
-      }).finally(() => snapshotRefreshes.delete(key));
-      snapshotRefreshes.set(key, started);
-      return started;
-    };
-    const last = snapshots.get(key);
-    if (!last) return refresh();
+    const key = snapshotKey(request, countsMaxAgeMs);
+    const fromBackground = publishedStatus(key);
+    const last = fromBackground ?? snapshots.get(key);
+    if (!last) return refreshKept(key, compute);
     const age = Math.max(0, nowMs() - last.atMs);
-    if (age >= STATUS_SNAPSHOT_REFRESH_MS) void refresh().catch(() => undefined);
+    // The split's background recounts on its own pace and never behind a
+    // read; its front never counts what the background counts. A request the
+    // background does not count (a filtered status command) is refreshed
+    // behind the read, as in a single engine.
+    const refreshBehind = role === undefined || (role === 'reader' && !fromBackground);
+    if (refreshBehind && age >= STATUS_SNAPSHOT_REFRESH_MS) void refreshKept(key, compute).catch(() => undefined);
     return Promise.resolve({ ...last.result, snapshot_age_ms: age });
   };
 
@@ -693,6 +749,12 @@ export function createSourceIndexStatusHandler(
     async settled() {
       while (snapshotRefreshes.size > 0) await Promise.allSettled([...snapshotRefreshes.values()]);
     },
+    ...(role === 'writer' ? {
+      refreshSnapshot(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number }) {
+        assertSupportedStatusRequest(request);
+        return refreshKept(snapshotKey(request, snapshot.countsMaxAgeMs), () => computeStatus(request, snapshot));
+      },
+    } : {}),
   };
 }
 

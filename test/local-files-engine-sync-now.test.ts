@@ -168,8 +168,10 @@ for (const split of [false, true]) for (const tier of ['private', 'secure'] as c
     await waitFor(() => f.judged() === 3, { timeoutMs: 30_000 });
     // The first refresh after the allowed cache age must count the new copies,
     // rather than caching an expired held projection for another five minutes.
+    // The dashboard answers from its last status at once and counts behind
+    // it, so the new copies show on a following read, not a minutes-old one.
     await f.expireCounts();
-    const card = await f.card();
+    const card = await waitFor(async () => { const shown = await f.card(); return shown.coverage.indexed_items === 3 ? shown : undefined; }, { timeoutMs: 20_000, intervalMs: 100 });
     expect(card.coverage.indexed_items, JSON.stringify(card)).toBe(3);
     expect(card.coverage.not_read_by_policy_items, JSON.stringify(card)).toBe(0);
 

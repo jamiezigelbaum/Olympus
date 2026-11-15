@@ -48,9 +48,10 @@ import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/mo
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import {
+  type MessagingCaptureStartFailure,
   type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
-import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
+import { readyWhatsAppBridge } from '../../core/messaging-pairing.ts';
 import { unlinkHelper } from './dashboard/dashboard-messaging-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
@@ -97,7 +98,10 @@ import {
   createSourceIndexStatusHandler,
   DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
   type SourceIndexStatusRetrievalAvailability,
+  DASHBOARD_STATUS_REQUEST,
+  PLAIN_STATUS_REQUEST,
 } from '../source-index/status.ts';
+import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
 import {
   dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
@@ -461,7 +465,7 @@ import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classificati
 import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { controlPathHeadroom, ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
@@ -835,6 +839,8 @@ export async function main(): Promise<void> {
   // private-match probe hold it too (the probe past its own timeout), and
   // counting them held imports for most of an hour (lane 6 archive-scale
   // leg, 15 Nov).
+  // The split background's paced status recount, once it starts (health shows it).
+  let statusRecount: PacedStatusRecount | undefined;
   const standBack = createStandBack({
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
   });
@@ -864,13 +870,13 @@ export async function main(): Promise<void> {
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
-  const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+  const captureFailures: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStartFailure>> = {};
   // What each supervisor last reported, for the dashboard. Absent for a source
   // whose capture the native service owns: this worker runs nothing there.
   const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
-    onResumeFailure: (source) => { captureFailures[source] = true; },
+    onResumeFailure: (source, kind) => { captureFailures[source] = kind; },
     onResumeSuccess: (source, status) => { delete captureFailures[source]; captureStatuses[source] = status; },
     registryPath: connectedHandleRegistryPath!,
     packageRoot,
@@ -903,8 +909,8 @@ export async function main(): Promise<void> {
   const stopMessagingCapture = engineFront
     ? frontCaptureStop(engineFront.client)
     : async (source: 'telegram' | 'whatsapp') => { await captureOwnership.stopForUnpair(source); };
-  const unlinkWhatsAppDevice = (stateDir: string) => unlinkHelper(
-    whatsappBridgePathForPackage(packageRoot, { env: process.env }),
+  const unlinkWhatsAppDevice = async (stateDir: string) => unlinkHelper(
+    await readyWhatsAppBridge({ env: process.env }, packageRoot),
     { ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: stateDir },
   );
 
@@ -3677,8 +3683,10 @@ export async function main(): Promise<void> {
   const unreadableFiles = engineFront ? frontUnreadableFiles(localUnreadableFiles, () => engineFront!.status()) : localUnreadableFiles;
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
-      // The engine that serves the dashboard keeps its last status on disk; the split's background serves none.
-      ...(engineRole !== 'background' ? { snapshotPath: sharedDataPath('source-status-snapshot') } : {}),
+      // The last status each snapshot caller got, on disk. In the split the
+      // background counts and writes it and the front only reads it.
+      snapshotPath: sharedDataPath('source-status-snapshot'),
+      ...(engineRole === 'background' ? { snapshotRole: 'writer' as const } : engineFront ? { snapshotRole: 'reader' as const } : {}),
       // Read per request: a per-tier store its tier set creates while the
       // runtime is up is reported from that moment, with no restart.
       corpusDefinitions: () => {
@@ -4359,7 +4367,9 @@ export async function main(): Promise<void> {
             afterTick: async (schedulerStatus) => {
               // A sync that just completed brings new senders: link them now.
               refreshPeople();
-              const status = await sourceIndexStatus.status({ include_items: false }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
+              // And new counts: the split's background counts them at its next paced turn.
+              statusRecount?.soon();
+              const status = await sourceIndexStatus.status({ ...PLAIN_STATUS_REQUEST }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
               sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
                 schedulerStatus,
                 sourceCorpusRegistry,
@@ -4874,6 +4884,8 @@ export async function main(): Promise<void> {
         else tierSniffer?.wake();
         if (id === 'dropbox.max_file_bytes' || id === 'local_files.max_file_bytes' || id === 'telegram.media_quota') sourceScheduler?.wakeTasksOfKind('extract');
         if (id === 'gmail.import_allowance') void sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.archiveImports).catch(error => console.warn('Gmail import resume failed:', error instanceof Error ? error.name : 'unknown'));
+        // A raised X spending budget resumes X now, not at its parked retry time.
+        if (id === 'x.daily_cost' || id === 'x.head_reserve_cost') void sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.xBookmarks).catch(error => console.warn('X resume failed:', error instanceof Error ? error.name : 'unknown'));
       },
     }),
     // Bound late: the consult block below sets askAnonymouslyNow.
@@ -6184,7 +6196,12 @@ export async function main(): Promise<void> {
     const localPromptBudgets = localAnalystWindowReports();
     const standBackCounts = standBack.counts();
     const standBackSeen = Object.keys(standBackCounts).length > 0;
-    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront || rerankOutcomes || localPromptBudgets.length || standBackSeen)) {
+    const statusRecountHealth = statusRecount?.health();
+    // How late this process's loop turned: the last beat, the worst since start, and how many beats missed the 250 ms budget.
+    const loopLag = (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot());
+    const backgroundSnapshot = engineFront?.status()?.snapshot;
+    const backgroundLoopLag = backgroundSnapshot?.loop_lag;
+    if ((path === '/v1/health' || path === '/health') && response?.ok) {
       return Response.json({
         ...await response.json() as object,
         ...(rerankOutcomes ? {
@@ -6202,6 +6219,10 @@ export async function main(): Promise<void> {
         ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
         // Background work that stood back for the owner's Ask: never silent.
         ...(standBackSeen ? { stand_back: standBackCounts } : {}),
+        // The background's paced recount of what the dashboard shows: how long the last took and how old it is.
+        ...(statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {}),
+        loop_lag: loopLag,
+        ...(backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {}),
         // The front answers while its background restarts or crash-loops: an
         // upgrade or rollback reads this before it calls the engine healthy
         // (#1563 review).
@@ -6459,6 +6480,8 @@ export async function main(): Promise<void> {
       sourceScheduler?.updateSources(schedulerSourcesForHandles(
         activeLaneHandles(readActiveConnectedHandles(process.env), process.env),
       ).sources);
+      // A source connected or removed shows on the dashboard at the next count, not after the rest.
+      statusRecount?.soon();
     };
     // A forwarded owner action runs as the route that served it before, behind
     // the front's authorization: the route's handler checks the body itself.
@@ -6618,6 +6641,8 @@ export async function main(): Promise<void> {
         } : {}),
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
+        loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
+        ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
       }),
     });
     // A delete the front forwarded: stop answering ready (so no new front
@@ -6632,7 +6657,21 @@ export async function main(): Promise<void> {
     commands.markReady();
     finishBootProgress();
     setEngineStep(undefined);
-    engineBackground = { stop: () => { rssRestart.stop(); status.stop(); commands.stop(); } };
+    // What the dashboard and status show, recounted here on its own pace and
+    // kept for the front, which never counts (status-recount.ts).
+    const refreshSnapshot = sourceIndexStatus?.refreshSnapshot;
+    statusRecount = refreshSnapshot
+      ? startPacedStatusRecount({
+          holds: () => standBack.holds('status'),
+          recount: async () => {
+            for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
+              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
+            }
+          },
+          log: (line) => console.warn(line),
+        })
+      : undefined;
+    engineBackground = { stop: () => { statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
   }
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)

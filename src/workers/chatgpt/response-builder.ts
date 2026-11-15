@@ -207,12 +207,14 @@ export function limitsToolResult(raw: unknown): ChatGptToolResult {
   }
   const ok = record.ok === true;
   const status = asRecord(record.result)?.status;
-  const message = record.action === 'raise' && ok
+  const message = record.action === 'raise' && ok && record.unit === 'usd' && record.keep !== true && record.id !== 'judge.spend_cap'
+    ? `Raised to $${finite(record.to) ? record.to.toLocaleString('en-US') : 0} for today (UTC). Work continues now.`
+    : record.action === 'raise' && ok
     ? `${record.unit === 'calls' ? 'Call limit' : 'Limit'} raised to ${finite(record.to) ? record.to : 0} ${['usd', 'requests', 'calls'].includes(String(record.unit)) ? record.unit : 'calls'}${record.keep === true || record.id === 'judge.spend_cap' ? ' for good' : ' for this UTC day'}. ${record.unit === 'calls' ? 'Judging' : 'Work'} can continue.`
     : record.action === 'refill'
       ? ok ? record.id === 'judge.payment' ? 'Payment stop lifted. The next judge call will re-check payment.' : 'Venice can consume again. Work can continue.' : 'Venice billing has not confirmed canConsume=true. The stop remains; Olympus will re-check automatically.'
       : record.action === 'run_once'
-        ? ok ? 'One operator run requested. Usage stays counted.' : status === 'busy' ? 'This source already has a run in progress.' : status === 'too_soon' ? 'This source was just started. Check its progress on Home.' : 'The operator run remains stopped. Check its result and source status.'
+        ? ok ? 'Running once now, past the budget. The row shows what it found when it finishes.' : status === 'busy' ? 'This source already has a run in progress.' : status === 'too_soon' ? 'This source was just started. Check its progress on Home.' : 'The operator run remains stopped. Check its result and source status.'
         : 'Olympus could not continue this stop. Refresh Home and try again.';
   return { content: [{ type: 'text', text: message }], ...(!ok ? { isError: true } : {}) };
 }
@@ -478,6 +480,7 @@ function copyFix(fix: DashboardFix): DashboardFix {
   if (fix?.destructive === true) out.destructive = true;
   if (tool === DELETE_SOURCE_DATA_TOOL_NAME && (fix?.deletesCopies === 'messages' || fix?.deletesCopies === 'messages_and_media')) out.deletesCopies = fix.deletesCopies;
   if (fix?.openHref === true && href) out.openHref = true;
+  if (fix?.runsSource === true && tool === 'olympus_limits') out.runsSource = true;
   return out;
 }
 
@@ -1364,6 +1367,7 @@ function copyScopeList(list: ScopeList): ScopeList {
         ...(finite(node.file_count) ? { file_count: whole(node.file_count) } : {}),
         ...(copyAccess(node.access) ? { access: copyAccess(node.access)! } : {}),
         ...(node.is_disk === true ? { is_disk: true as const } : {}),
+        ...(node.notes_app === 'obsidian' || node.notes_app === 'reflect' ? { notes_app: node.notes_app } : {}),
       })),
       ...(list.next_cursor ? { next_cursor: opaque(list.next_cursor) } : {}),
       ...(copyAccess(list.access) ? { access: copyAccess(list.access)! } : {}),

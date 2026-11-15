@@ -429,14 +429,17 @@ describe.each(['whatsapp', 'telegram'] as const)('%s: a helper that is not runni
   const spec = SOURCES[which];
   const runtime = (supervisor: NonNullable<DashboardCaptureRuntime['supervisor']>) => ({ [spec.sourceId]: { supervisor } });
 
-  const unexpected: Array<[string, NonNullable<DashboardCaptureRuntime['supervisor']>, string]> = [
+  // A helper that never started is not fixed by pairing again: its route is Check again, never the re-pair.
+  const unexpected: Array<[string, NonNullable<DashboardCaptureRuntime['supervisor']>, string, string?]> = [
     ['its approval is gone', { state: 'stopped', reason: 'grant_missing' }, 'capture stopped: its approval is missing'],
     ['its sign-in is gone', { state: 'stopped', reason: 'handle_unavailable' }, 'capture stopped: its sign-in is no longer available'],
-    ['its helper would not start', { state: 'blocked', reason: 'start_failed' }, 'capture cannot start: its helper would not start'],
+    ['its helper would not start', { state: 'blocked', reason: 'start_failed' }, 'capture cannot start: its helper would not start', 'Check again'],
+    ['its helper is not installed', { state: 'blocked', reason: 'helper_missing' }, "capture cannot start: this version's helper is not installed on this computer", 'Check again'],
+    ['its helper could not be built', { state: 'blocked', reason: 'helper_build_failed' }, "capture cannot start: this version's helper could not be built on this computer", 'Check again'],
     ['its helper keeps exiting', { state: 'blocked', reason: 'helper_exited' }, 'capture keeps stopping: its helper exits soon after it starts'],
   ];
 
-  for (const [name, supervisor, words] of unexpected) {
+  for (const [name, supervisor, words, fix = 'Check capture'] of unexpected) {
     test(`${name}: Needs you with its reason and a route, even while the last message is recent`, () => {
       const { card, row, needsYou } = build({ which, counts: receiptCounts(fresh(600)), captureRuntime: runtime(supervisor) });
       expect(card.freshness.capture?.state).toBe('fresh');
@@ -444,10 +447,10 @@ describe.each(['whatsapp', 'telegram'] as const)('%s: a helper that is not runni
       expect(dashboardStatus({ source: card })).toBe('Needs you');
       expect(row.status).toBe('Needs you');
       expect(row.detail).toBe(words);
-      expect(row.primary?.label).toBe('Check capture');
+      expect(row.primary?.label).toBe(fix);
       expect(needsYou).toHaveLength(1);
       expect(needsYou[0]!.sentence).toBe(`${spec.label} — ${words}`);
-      expect(needsYou[0]!.fix.label).toBe('Check capture');
+      expect(needsYou[0]!.fix.label).toBe(fix);
     });
   }
 

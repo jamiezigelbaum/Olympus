@@ -17,6 +17,7 @@
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { NOTES_APP_SETTINGS_FOLDERS } from '../../core/notes-app-folders.ts';
 import type { DefaultExclusionContext } from './paths.ts';
 
 export interface WatchEvent {
@@ -59,6 +60,7 @@ export interface WatchHubOptions {
 
 const IGNORE_SEGMENTS = [
   '.git', 'node_modules', '.Trash', '.Trashes', '.cache', '__pycache__', '.venv', 'DerivedData', '.next', '.gradle',
+  ...NOTES_APP_SETTINGS_FOLDERS,
 ];
 
 /** Paths a live watch never reports: the folders that are off by default, and Olympus's own data. */

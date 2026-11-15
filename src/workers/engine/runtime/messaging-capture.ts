@@ -3,12 +3,13 @@ import {
   NativeMessagingCaptureOwnerError,
   defaultMessagingCaptureGrantPath,
   effectiveMessagingCaptureStatus,
+  messagingCaptureStartFailure,
   readMessagingCaptureGrantFacts,
   revokeMessagingCaptureGrant,
   type MessagingCaptureLiveness,
+  type MessagingCaptureStartFailure,
   type MessagingCaptureStatus,
 } from '../../../core/messaging-capture.ts';
-import { whatsappBridgePathForPackage } from '../../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../../core/native-worker-service.ts';
 import { parseOptionalBooleanEnv } from '../../../core/config.ts';
 import { type DashboardCaptureRuntime } from '../../source-dashboard.ts';
@@ -25,7 +26,7 @@ export function createWorkerMessagingCaptureOwnership(options: {
   createSupervisor?: (source: MessagingCaptureSource) => WorkerMessagingCaptureSupervisor;
   revokeGrant?: (path: string) => void;
   shouldResumeCapture?: () => boolean;
-  onResumeFailure?: (source: MessagingCaptureSource) => void;
+  onResumeFailure?: (source: MessagingCaptureSource, kind: MessagingCaptureStartFailure) => void;
   /** A resume after a pause worked: a failure recorded earlier no longer holds (#687). */
   onResumeSuccess?: (source: MessagingCaptureSource, status: MessagingCaptureStatus) => void;
 }): {
@@ -48,12 +49,8 @@ export function createWorkerMessagingCaptureOwnership(options: {
   const createSupervisor = options.createSupervisor ?? ((source: MessagingCaptureSource) => (
     source === 'telegram'
       ? new MessagingCaptureSupervisor({ source, registryPath: options.registryPath, packageRoot: options.packageRoot })
-      : new MessagingCaptureSupervisor({
-          source,
-          registryPath: options.registryPath,
-          packageRoot: options.packageRoot,
-          whatsappBridgePath: whatsappBridgePathForPackage(options.packageRoot, { env }),
-        })
+      // The supervisor makes this package's bridge ready at each start (readyWhatsAppBridge), as pairing does.
+      : new MessagingCaptureSupervisor({ source, registryPath: options.registryPath, packageRoot: options.packageRoot })
   ));
   const captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
   const rawCaptures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
@@ -108,7 +105,7 @@ export function createWorkerMessagingCaptureOwnership(options: {
           if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
             let resumed: MessagingCaptureStatus | undefined;
             try { resumed = await capture.reconcile(); }
-            catch { options.onResumeFailure?.(source); }
+            catch (error) { options.onResumeFailure?.(source, messagingCaptureStartFailure(error)); }
             if (resumed) options.onResumeSuccess?.(source, resumed);
           }
         }
@@ -128,7 +125,7 @@ export function createWorkerMessagingCaptureOwnership(options: {
 export async function reconcileWorkerCaptures(input: {
   captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
   statuses: Partial<Record<MessagingCaptureSource, MessagingCaptureStatus>>;
-  failures: Partial<Record<MessagingCaptureSource, true>>;
+  failures: Partial<Record<MessagingCaptureSource, MessagingCaptureStartFailure>>;
   warn?: (message: string) => void;
 }): Promise<void> {
   const warn = input.warn ?? ((message: string) => console.warn(message));
@@ -137,13 +134,16 @@ export async function reconcileWorkerCaptures(input: {
     try {
       input.statuses[source] = await capture.reconcile();
       delete input.failures[source];
-    } catch {
+    } catch (error) {
       // Not reconciled: the last status is no longer a fact about the helper.
-      // Said once when it starts failing, not on every 10 s pass (Sparta,
-      // 14 Nov: 53 lines in 10 minutes); the dashboard keeps showing it.
-      const first = !input.failures[source];
-      input.failures[source] = true;
-      if (first) warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.');
+      // Said once when it starts failing or its kind changes, not on every 10 s
+      // pass (Sparta, 14 Nov: 53 lines in 10 minutes); the dashboard keeps
+      // showing it. The kind is named: a bridge that is not installed is not a
+      // pairing problem (Sparta, 15 Nov).
+      const kind = messagingCaptureStartFailure(error);
+      const changed = input.failures[source] !== kind;
+      input.failures[source] = kind;
+      if (changed) warn(`An Olympus ${source} capture could not start: ${kind}.`);
     }
   }));
 }
@@ -162,7 +162,7 @@ export function workerCaptureRuntime(input: {
   statuses: Partial<Record<MessagingCaptureSource, MessagingCaptureStatus>>;
   registryPath: string | undefined;
   liveness?: Partial<Record<MessagingCaptureSource, MessagingCaptureLiveness | undefined>>;
-  failures?: Partial<Record<MessagingCaptureSource, boolean>>;
+  failures?: Partial<Record<MessagingCaptureSource, MessagingCaptureStartFailure | boolean>>;
 }): Record<string, DashboardCaptureRuntime> {
   const runtime: Record<string, DashboardCaptureRuntime> = {};
   for (const source of input.sources) {
@@ -170,7 +170,7 @@ export function workerCaptureRuntime(input: {
       const status = effectiveMessagingCaptureStatus({
         status: input.statuses[source],
         liveness: input.liveness?.[source],
-        reconcileFailed: input.failures?.[source] === true,
+        reconcileFailed: input.failures?.[source],
       });
       const facts = readMessagingCaptureGrantFacts(source, defaultMessagingCaptureGrantPath(source, input.registryPath));
       if (!status && !facts.scope && !facts.pairedAt) continue;

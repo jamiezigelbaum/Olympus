@@ -4,6 +4,7 @@
 // change snapshot, not a provider cursor) and what a lost one means (list the
 // folder again and treat the listing as a complete snapshot).
 
+import { createLocalFilesDeletionGuards, type LocalFilesDeletionGuards } from './deletion-guard.ts';
 import { createHash } from 'node:crypto';
 import type { SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../core/contracts.ts';
 import { isApprovedSecureSourceEmbeddingProvider, type SourceEmbeddingProvider } from '../source-index/embeddings.ts';
@@ -62,6 +63,8 @@ export interface LocalFilesProviderStoreReceipt {
     folders_walked: number;
     /** Folders the pass could not read (permission, a disk that went away). */
     unreadable_folders: number;
+    /** Deletions a complete walk held back because the folder suddenly looked empty or much smaller. */
+    deletions_held: number;
     /** 1 when live change notifications are off and the folder is found on the poll. */
     live_updates_off: number;
   } & TieredLaneReceiptCounts;
@@ -104,6 +107,8 @@ export interface LocalFilesProviderStoreSyncHandlerOptions {
   beforePull?: () => Promise<unknown>;
   /** Test seam. */
   pageSize?: number;
+  /** Test seam: the walk's deletion hold (deletion-guard.ts); one per handler by default. */
+  deletionGuards?: LocalFilesDeletionGuards;
 }
 
 /** The scope path inside an approved-scope key (`local_files.this_computer:/path`). */
@@ -171,6 +176,7 @@ export function createLocalFilesProviderStoreSyncHandler(
     throw new Error('Local files secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
   const tierSet = options.tierSet;
+  const deletionGuards = options.deletionGuards ?? createLocalFilesDeletionGuards();
   if (tierSet.legSpec('secure_local')?.store !== options.store) {
     throw new Error('The local files tier set\'s secure leg must be the lane\'s own store.');
   }
@@ -209,6 +215,7 @@ export function createLocalFilesProviderStoreSyncHandler(
             : {}),
           ...(options.pageSize !== undefined ? { pageSize: options.pageSize } : {}),
           onWalk: (stats) => { Object.assign(walk, stats); },
+          deletionGuard: deletionGuards.forFolder(connectorId),
         }));
         const full = cursor === undefined;
         const syncOptions = {
@@ -258,6 +265,7 @@ export function createLocalFilesProviderStoreSyncHandler(
       const warnings = [...new Set([
         ...run.legs.flatMap((leg) => leg.gaps),
         ...(run.walk.unreadable > 0 ? ['local_files_unreadable_folders'] : []),
+        ...((run.walk.deletionsHeld ?? 0) > 0 ? ['local_files_deletions_held'] : []),
         ...(problems.some((problem) => problem.kind === 'watch_limit_reached') ? ['local_files_watch_limit_reached'] : []),
         ...(liveUpdatesOff ? ['local_files_live_updates_off'] : []),
       ])];
@@ -278,6 +286,7 @@ export function createLocalFilesProviderStoreSyncHandler(
           history_reset: Number(historyReset),
           folders_walked: run.walk.directories,
           unreadable_folders: run.walk.unreadable,
+          deletions_held: run.walk.deletionsHeld ?? 0,
           live_updates_off: Number(liveUpdatesOff),
           ...(run.tiered ?? {}),
         },

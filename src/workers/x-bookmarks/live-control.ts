@@ -11,6 +11,7 @@ import {
 } from '../../core/sqlite-migrations.ts';
 import type { XApiRateLimit } from './api.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { readOwnerLimitOverride } from '../../core/owner-limit-settings.ts';
 import { X_BOOKMARKS_SOURCE_ID } from './connector.ts';
 
 const providerStops = createProviderRateLimitReporter('x');
@@ -239,6 +240,19 @@ interface ReservationRow {
   api_request_counted: number;
   dispatch_by: string | null;
   provenance: string;
+}
+
+/**
+ * The owner's raise of the day's X spending budget (Home's Raise, `olympus
+ * limits continue`), in USD. It only ever raises: a lower setting never
+ * tightens the configured budget. An unreadable settings file keeps the
+ * configured budget rather than stopping X.
+ */
+export function withOwnerXSpend(config: XBookmarksLiveSyncConfig, now: Date): XBookmarksLiveSyncConfig {
+  let usd: number | undefined;
+  try { usd = readOwnerLimitOverride('x.dailySpend', now); } catch { return config; }
+  const raised = usd === undefined || !(usd > 0) ? 0 : usdToMicrousd(usd);
+  return raised > config.dailyEstimatedSpendMicrousd ? { ...config, dailyEstimatedSpendMicrousd: raised } : config;
 }
 
 export function defaultXBookmarksLiveSyncConfig(
@@ -727,6 +741,7 @@ export class LocalXBookmarksApiUsageStore {
   }): XApiUsageReservation {
     const account = requireAccount(input.account);
     const now = validDate(input.now ?? new Date());
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     providerStops.resume(now);
     const utcDay = utcDayFrom(now);
     const requestedMaxResources = boundedResourceCount(input.requestedMaxResources);
@@ -857,6 +872,7 @@ export class LocalXBookmarksApiUsageStore {
     now?: Date;
   }): void {
     const now = validDate(input.now ?? new Date());
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     providerStops.resume(now);
     this.db.transaction(() => {
       this.reapExpiredReservations(now, input.config);
@@ -970,6 +986,7 @@ export class LocalXBookmarksApiUsageStore {
     now?: Date;
   }): void {
     const now = validDate(input.now ?? new Date());
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     this.db.transaction(() => {
       const reservation = this.reservationRow(input.reservation.reservationId);
       if (!reservation) return;
@@ -1042,6 +1059,7 @@ export class LocalXBookmarksApiUsageStore {
     now?: Date;
   }): void {
     const now = validDate(input.now ?? new Date());
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     providerStops.resume(now);
     this.db.transaction(() => {
       const reservation = this.reservationRow(input.reservation.reservationId);
@@ -1095,6 +1113,7 @@ export class LocalXBookmarksApiUsageStore {
   }): XApiUsageStatus {
     const account = requireAccount(input.account);
     const now = validDate(input.now ?? new Date());
+    input = { ...input, config: withOwnerXSpend(input.config, now) };
     const utcDay = utcDayFrom(now);
     this.reapExpiredReservations(now, input.config);
     this.ensureDay(account, utcDay, now.toISOString());

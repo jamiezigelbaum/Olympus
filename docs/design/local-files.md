@@ -127,9 +127,45 @@ The user can turn any of these back on in the picker:
 - `~/Library`, caches, `.Trash`
 - `.git`, `node_modules`, build output
 - app bundles
+- notes apps' own settings folders inside a folder of notes: an Obsidian
+  vault's `.obsidian` (plugin settings can hold a plugin's API key, and its
+  layout file is rewritten on every click) and Reflect's `.reflect` (a second
+  copy of every note, its index and AI chats). Obsidian's `.trash` is Trash.
 - The local Dropbox folder, and Google Drive for desktop
   (`~/Library/CloudStorage`). These are already indexed through their own
   sources, so this avoids duplicates.
+
+### Notes apps (Obsidian, Reflect Open)
+
+An Obsidian vault and a Reflect Open graph are folders of Markdown notes, so it is read as files on this
+computer: no separate source, sign-in or per-source pipeline. Live updates,
+deletions, a missing vault never removing anything, and per-note judging are
+the local files rules above. What notes apps add lives in
+`core/notes-app-folders.ts` (one `NOTES_APPS` entry per app):
+
+- The picker tags a vault ("Obsidian vault") wherever it lists one, and offers
+  the vaults Obsidian lists in its `obsidian.json` at the top level, so a vault
+  kept in iCloud (deep inside `~/Library`) is one click away. A vault Obsidian
+  remembers but that is no longer on disk is not offered.
+- A cited Markdown note inside a vault (looked for no higher than the chosen
+  folder) opens in Obsidian through `obsidian://open?path=` on a Mac with the
+  app installed; otherwise it opens as any other file.
+- Reflect Open graphs (a folder holding `.reflect`, with `daily/` and `notes/`)
+  are tagged "Reflect graph"; on a Mac the picker offers the graphs in the
+  app's `recent-graphs.json` and in its iCloud folder
+  (`~/Library/Mobile Documents/iCloud~app~reflect/Documents`). A cited note
+  opens in Reflect Open (bundle `app.reflect.desktop`, not the older Reflect
+  app) as `reflect://daily/<date>` or `reflect://note/<path in the graph>`.
+  The older Reflect app keeps notes end-to-end encrypted behind an
+  append-only API, so it has no live reader; its export is an archive import.
+- A note whose own front matter says `private: true` (both apps use it) is
+  Private by content rule, from any source (`frontMatterMarksPrivate` in the
+  tier classifier); only Secrets ranks higher.
+- A walk that would remove every indexed file under a chosen folder, or more
+  than 20% of them (and more than 5), holds the deletions until a walk a
+  minute later agrees (`deletion-guard.ts`, warning
+  `local_files_deletions_held`), so an unmounted disk or a half-copied mirror
+  never empties the index.
 
 ### Never indexed: Olympus's own folders
 

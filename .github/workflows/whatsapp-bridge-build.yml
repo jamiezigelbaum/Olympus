@@ -11,14 +11,12 @@ on:
       ref:
         description: Full 40-character commit SHA of the release
         required: true
-  # Every release branch and tag push whose bridge source or build may have changed.
+  # Every main, release branch and tag push, so every test build from main has the bridge its
+  # installer places (Sparta 2026-11-15: a main build changed the bridge fingerprint and shipped none,
+  # and WhatsApp capture never started). The release check fetches whatsapp-bridge-<platform>-<sha>.
   push:
-    branches: ['claude/**']
+    branches: [main, 'claude/**']
     tags: ['v*']
-    paths:
-      - tools/whatsapp-bridge/**
-      - src/core/whatsapp-bridge-name.ts
-      - .github/workflows/whatsapp-bridge-build.yml
 
 permissions:
   contents: read

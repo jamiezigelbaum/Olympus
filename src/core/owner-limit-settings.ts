@@ -6,7 +6,7 @@ import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
 
 export interface DailyCallOverride { to: number; day?: string; keep: boolean; base?: number; heldItems?: Record<string, number> }
-export type OwnerLimitKey = 'judge.dailyCalls' | 'zkapi.dailyRequests' | 'zkapi.dailySpend' | 'gmail.dailyRequests' | 'dropbox.max_file_bytes' | 'local_files.max_file_bytes' | 'telegram.media_quota';
+export type OwnerLimitKey = 'judge.dailyCalls' | 'zkapi.dailyRequests' | 'zkapi.dailySpend' | 'x.dailySpend' | 'gmail.dailyRequests' | 'dropbox.max_file_bytes' | 'local_files.max_file_bytes' | 'telegram.media_quota';
 type Settings = Record<string, Record<string, DailyCallOverride>>;
 export function ownerLimitSettingsPath(): string { return sharedDataPath('limit-settings'); }
 let settingsCache: { path: string; stamp: string; value: Settings } | undefined;
@@ -26,7 +26,7 @@ export function readOwnerLimitOverride(key: OwnerLimitKey, now: Date, path = own
   const [group, name] = key.split('.') as [string, string];
   const value = readSettings(path)[group]?.[name];
   if (!value) return undefined;
-  const valid = (n: number) => Number.isFinite(n) && n >= 0 && (key === 'zkapi.dailySpend' || Number.isSafeInteger(n));
+  const valid = (n: number) => Number.isFinite(n) && n >= 0 && (key === 'zkapi.dailySpend' || key === 'x.dailySpend' || Number.isSafeInteger(n));
   if (!valid(value.to) || typeof value.keep !== 'boolean' || (value.base !== undefined && !valid(value.base))) throw new Error(`Owner ${key} setting is invalid.`);
   if (isSizeLimitKey(key)) {
     const granted = heldItem === undefined ? undefined : value.heldItems?.[heldItem];
@@ -36,7 +36,7 @@ export function readOwnerLimitOverride(key: OwnerLimitKey, now: Date, path = own
   return value.keep || value.day === now.toISOString().slice(0, 10) ? value.to : value.base;
 }
 export function saveOwnerLimitOverride(key: OwnerLimitKey, to: number, keep: boolean, now: Date, path = ownerLimitSettingsPath(), heldItems?: string[]): void {
-  if (!Number.isFinite(to) || to < 0 || (key !== 'zkapi.dailySpend' && !Number.isSafeInteger(to))) throw new TypeError('Invalid owner limit amount.');
+  if (!Number.isFinite(to) || to < 0 || (key !== 'zkapi.dailySpend' && key !== 'x.dailySpend' && !Number.isSafeInteger(to))) throw new TypeError('Invalid owner limit amount.');
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   withFileLeaseSync(path, () => {
     const raw = readSettings(path);

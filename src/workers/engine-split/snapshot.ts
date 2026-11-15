@@ -40,6 +40,10 @@ export interface EngineStatusSnapshot {
   manual_syncs?: Record<string, EngineManualSyncRun>;
   /** How many times a background restarted itself on memory, carried from one to the next (rss-restart.ts). */
   rss_restarts?: { count: number; last?: { at: string; rss_mb: number } };
+  /** How late the background's loop turned (control-path-headroom.ts): the last beat, the worst since start, beats over 250 ms. */
+  loop_lag?: { last_ms: number; max_ms: number; over_budget: number };
+  /** The background's paced status recount (status-recount.ts). */
+  status_recount?: { runs: number; failures: number; last_ms?: number; age_ms?: number; counting: boolean };
 }
 
 export interface EngineManualSyncRun {

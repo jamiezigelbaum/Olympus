@@ -11,6 +11,7 @@ import {
   readMessagingCaptureScope,
   saveMessagingCaptureGrant,
   type CaptureChild,
+  type MessagingCaptureStartFailure,
   type MessagingCaptureStatus,
   type SpawnCapture,
 } from '../src/core/messaging-capture.ts';
@@ -570,7 +571,7 @@ describe('a capture helper that cannot be started is reported, not hidden by the
 
   test('a reconcile that throws is recorded per source and clears when a later one succeeds', async () => {
     const statuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
-    const failures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+    const failures: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStartFailure>> = {};
     let telegramThrows = false;
     const warnings: string[] = [];
     const captures = {
@@ -587,9 +588,9 @@ describe('a capture helper that cannot be started is reported, not hidden by the
     telegramThrows = true;
     await reconcileWorkerCaptures({ captures, statuses, failures, warn: (message) => warnings.push(message) });
     // WhatsApp is still reconciled; Telegram's failure is recorded and its old status is left to be corrected.
-    expect(failures).toEqual({ telegram: true });
+    expect(failures).toEqual({ telegram: 'start_failed' });
     expect(statuses.whatsapp).toEqual({ source: 'whatsapp', state: 'running' });
-    expect(warnings).toEqual(['An Olympus messaging capture process needs attention. Check pairing and its approved scope.']);
+    expect(warnings).toEqual(['An Olympus telegram capture could not start: start_failed.']);
     expect(warnings.join(' ')).not.toContain('Python');
     // Still failing: said once, not on every pass.
     await reconcileWorkerCaptures({ captures, statuses, failures, warn: (message) => warnings.push(message) });

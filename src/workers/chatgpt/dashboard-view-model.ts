@@ -59,6 +59,7 @@ import {
   DASHBOARD_ARCHIVE_COPY,
   DASHBOARD_CAPTURE_BLOCKED_LABEL,
   DASHBOARD_CAPTURE_COPY,
+  dashboardCaptureHelperNeverStarted,
   DASHBOARD_CAPTURE_STALE_LABEL,
   dashboardAttentionLine,
   dashboardAttentionParts,
@@ -332,11 +333,15 @@ export function buildChatGptDashboardViewModel(
     const limit = { ...registered, ...(stop.continue ? { continue: stop.continue } : {}) };
     const row = rows.find(({ definition }) => limitStopSubjects(stop).some((subject) =>
       subject === definition.source_id || subject === definition.primary_corpus_id || definition.corpus_source_ids.includes(subject)));
-    const raiseTo = stop.toContinue?.raiseTo ?? Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1);
+    // Whole units: the Raise argument is a whole number, dollars included.
+    const raiseTo = stop.toContinue?.raiseTo ?? Math.ceil(Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1));
     const fix: DashboardFix | undefined = limit.continue === 'none' ? undefined : {
-      label: limit.continue === 'raise' ? `Raise to ${raiseTo.toLocaleString('en-US')} ${limit.unit === 'calls' && raiseTo === 1 ? 'call' : limit.unit}` : limit.continue === 'refill' ? 'Refill — re-check' : 'Run once',
+      label: limit.continue === 'raise'
+        ? limit.unit === 'usd' ? `Raise to $${raiseTo.toLocaleString('en-US')} today` : `Raise to ${raiseTo.toLocaleString('en-US')} ${limit.unit === 'calls' && raiseTo === 1 ? 'call' : limit.unit}`
+        : limit.continue === 'refill' ? 'Refill — re-check' : 'Run once',
       tool: 'olympus_limits', args: { action: 'continue', id: stop.id, subject: limitStopReference(stop),
         ...(limit.continue === 'raise' ? { to: raiseTo } : {}) },
+      ...(limit.continue === 'run_once' && row ? { runsSource: true as const } : {}),
     };
     const label = row?.definition.label ?? ({ source: 'Sources', judge: 'Privacy check', answer: 'Answers', outside_help: 'Outside help', extraction: 'Reading' } as const)[limit.scope];
     waits.push({ sourceId: row?.definition.source_id ?? limit.scope, label, api: label,
@@ -345,6 +350,15 @@ export function buildChatGptDashboardViewModel(
       ...(stop.waiting ? { waiting: stop.waiting } : {}),
       ...(stop.resumesAt ? { resumesAt: stop.resumesAt } : {}), ...(fix ? { fix } : {}) });
   }
+
+  // One row per source (owner, 2026-11-15): a source's tasks can each stop
+  // on a budget, and one fix moves the whole source. The row shows the stop
+  // that holds it longest.
+  const resumes = (wait: DashboardSourceWait) => (wait.resumesAt ? Date.parse(wait.resumesAt) : Number.POSITIVE_INFINITY);
+  const sourceIds = new Set(rows.map(({ definition }) => definition.source_id));
+  const sourceWaits = waits.filter((wait, index) => !sourceIds.has(wait.sourceId) || !waits.some((other, otherIndex) => otherIndex !== index
+    && other.sourceId === wait.sourceId && (resumes(other) > resumes(wait) || (resumes(other) === resumes(wait) && otherIndex < index))));
+  waits.splice(0, waits.length, ...sourceWaits);
 
   const needsYou: DashboardItem[] = rows
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')
@@ -578,12 +592,12 @@ function sourceEntry(
       : scopePending(card) || missingScope(card)
         ? scopeFix(definition, card)
         : reconnect ?? (late && captureOnly
-          ? captureFix(definition)
+          ? captureFix(definition, card)
           : late && mediaStorageOnly(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) })
             ? checkAgainFix()
           // Beside another problem the other problem's fix leads when it has
           // one; a chat source has no Sync now, so Check capture is then the row's fix.
-          : late ? sync ?? (capture ? captureFix(definition) : undefined)
+          : late ? sync ?? (capture ? captureFix(definition, card) : undefined)
             : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu: DashboardFix[] = [];
   // Sync now sits first in the ⋯ menu of every connected source that can
@@ -592,7 +606,7 @@ function sourceEntry(
   if (sync) menu.push(sync);
   // Check capture, for a live feed in trouble beside some other problem; the
   // panel drops it from the menu when it is the row's own fix.
-  if (capture && !connecting && status !== 'Off') menu.push(captureFix(definition));
+  if (capture && !connecting && status !== 'Off') menu.push(captureFix(definition, card));
   // Another archive is imported the way the first was: from the dashboard on
   // the computer it is on. Never over a record that cannot be read, which an
   // import would write over.
@@ -731,10 +745,10 @@ function attentionItem(
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
       ? reconnectFix(definition, card)
       : captureOnly
-        ? captureFix(definition)
+        ? captureFix(definition, card)
         : mediaOnly
           ? onComputer
-          : sync ?? (captureProblem(card) ? captureFix(definition) : onComputer);
+          : sync ?? (captureProblem(card) ? captureFix(definition, card) : onComputer);
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 
@@ -792,7 +806,10 @@ function mediaStorageOnly(card: DashboardSourceCard, options: Parameters<typeof 
   return card.media_storage !== undefined && !captureProblem(card) && dashboardAttentionParts(card, options).reason === '';
 }
 
-function captureFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
+function captureFix(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard): DashboardFix {
+  // A helper that never started is not a link problem: Check capture would open the re-pair for nothing. The card's
+  // line names the step (reinstall or restart); the control checks again after it.
+  if (dashboardCaptureHelperNeverStarted(card)) return checkAgainFix();
   return helpLinkFix(DASHBOARD_CAPTURE_COPY.fixLabel, openOnComputer(definition, 'reconnect'));
 }
 
@@ -1659,6 +1676,8 @@ const CAPTURE_SUPERVISOR_REASONS: ReadonlySet<string> = new Set([
   'session_missing',
   'secret_missing',
   'start_failed',
+  'helper_missing',
+  'helper_build_failed',
   'helper_exited',
   'restarting',
   'helper_running',

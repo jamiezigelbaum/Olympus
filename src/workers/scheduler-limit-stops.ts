@@ -16,13 +16,19 @@ export const DAILY_LIMITS = new Map<string, { id: string; kind: 'cost' | 'reques
   head_api_request_reserve_guard: { id: 'x.head_reserve_requests', kind: 'requests', label: 'X request reserve for new bookmarks reached' },
   head_resource_read_reserve_guard: { id: 'x.head_reserve_reads', kind: 'requests', label: 'X resource-read reserve for new bookmarks reached' },
   head_cost_reserve_guard: { id: 'x.head_reserve_cost', kind: 'cost', label: 'X spending reserve for new bookmarks reached' },
+  // A scheduled full check that would not finish inside today's budget waits for Run once.
+  reconcile_cost_to_finish_guard: { id: 'x.reconcile_to_finish', kind: 'cost', label: 'X full bookmark check costs more than today\'s budget left' },
   readwise_daily_api_request_guard: { id: 'readwise.daily_requests', kind: 'requests', label: 'daily Readwise API budget used' },
   gmail_daily_api_request_guard: { id: 'gmail.daily_requests', kind: 'requests', label: 'daily Gmail API budget used' },
   google_drive_daily_api_request_guard: { id: 'drive.daily_requests', kind: 'requests', label: 'daily Google Drive API budget used' },
 }));
 
+// X's spending budgets are Olympus's own and the owner can raise them for the
+// day in one press (owner, 2026-11-15: guards never block silently and are
+// quickly reversible); the rest offer one run past the budget.
+export const RAISABLE_SPEND_LIMITS = new Set(['x.daily_cost', 'x.head_reserve_cost']);
 for (const limit of DAILY_LIMITS.values()) {
-  registerLimit({ ...limit, scope: 'source', unit: limit.kind === 'cost' ? 'usd' : 'requests', continue: 'run_once' });
+  registerLimit({ ...limit, scope: 'source', unit: limit.kind === 'cost' ? 'usd' : 'requests', continue: RAISABLE_SPEND_LIMITS.has(limit.id) ? 'raise' : 'run_once' });
 }
 
 /** A scheduler stop's subject: `[source_id, corpus_id, task_id]` as JSON. */
@@ -36,7 +42,8 @@ export function syncSchedulerLimitStop(db: Database, previousReason: string | un
   degradedReason?: string; notBeforeAt?: string; lastCounts?: Record<string, number>;
 }): void {
   const previous = previousReason ? DAILY_LIMITS.get(previousReason) : undefined;
-  const current = state.degradedReason ? DAILY_LIMITS.get(state.degradedReason) : undefined;
+  // An advisory (X near its budget, still running) is not a stop.
+  const current = state.degradedReason && state.lastCounts?.limit_stop_advisory !== 1 ? DAILY_LIMITS.get(state.degradedReason) : undefined;
   if (!previous && !current) return;
   // Tasks sharing a source can park and resume independently.
   const subject = schedulerLimitSubject(state);
@@ -45,6 +52,9 @@ export function syncSchedulerLimitStop(db: Database, previousReason: string | un
     id: current.id, subject, since: state.updatedAt,
     limit: state.lastCounts?.limit_stop_limit === undefined ? null : state.lastCounts.limit_stop_limit / (current.kind === 'cost' ? 1_000_000 : 1),
     used: state.lastCounts?.limit_stop_used === undefined ? null : state.lastCounts.limit_stop_used / (current.kind === 'cost' ? 1_000_000 : 1),
+    ...(state.lastCounts?.limit_stop_to_continue === undefined ? {} : {
+      toContinue: { cost: state.lastCounts.limit_stop_to_continue / (current.kind === 'cost' ? 1_000_000 : 1) },
+    }),
     resumesAt: dailyResume(state.updatedAt, state.notBeforeAt),
   }, db);
 }
