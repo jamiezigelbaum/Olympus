@@ -292,6 +292,33 @@ describe('removing an archive starts within one scheduler tick', () => {
   });
 });
 
+describe('an import still reading after a restart or an update', () => {
+  test('gets its next pass within one tick, not at the slot its last pass left', async () => {
+    const f = fixture();
+    const clock: Clock = { now: T0 };
+    const id = f.start('Slow.mbox', mbox([mail(0, 's'), mail(1, 's')]));
+    const first = engine(f, clock);
+    await first.scheduler.runDueTasks(new Date(clock.now));
+    first.scheduler.stop();
+    // What run 43736059061 left: a pass ended with the import still reading, and the durable schedule says 30 minutes on.
+    f.runtime.state.update(id, (entry) => { entry.status = 'importing'; delete entry.completed_at; });
+    const row = f.stateStore.list().find((entry) => entry.taskId === archiveImportTaskId(id))!;
+    f.stateStore.recordSuccess({ sourceId: row.sourceId, corpusId: row.corpusId, taskId: row.taskId, completedAt: new Date(clock.now).toISOString(),
+      resultStatus: 'progress', notBeforeAt: new Date(clock.now + 30 * 60_000).toISOString() });
+    clock.now += 60_000;
+    expect(durableNextPassMs(f, id, clock)).toBeGreaterThan(20 * 60_000);
+
+    const second = engine(f, clock);
+    second.scheduler.start();
+    expect(second.pendingWakes()).toBe(1);
+    const startedAt = clock.now;
+    clock.now += 1_000;
+    second.fireTimers();
+    await waitFor(() => f.runtime.state.get(id)?.status === 'imported', { description: 'the import finished on the restarted engine' });
+    expect(clock.now - startedAt).toBeLessThanOrEqual(TICK_MS);
+  });
+});
+
 describe('with the engine split on', () => {
   test('a Remove pressed on the front runs on the background within one tick', async () => {
     const f = fixture();
@@ -354,6 +381,8 @@ describe('the wake leaves the ordinary cadence alone', () => {
   test('a subscriber hears a removal asked for and not after it unsubscribes, and a failing one does not silence the rest', () => {
     const f = fixture();
     const id = f.start('Done.mbox', mbox([mail(0, 'u')]));
+    // Finished, so subscribing finds nothing waiting (an import still reading would wake at once).
+    f.runtime.state.update(id, (entry) => { entry.status = 'imported'; });
     const heard: string[] = [];
     const stopFirst = f.runtime.subscribeWork(() => { heard.push('first'); });
     f.runtime.subscribeWork(() => { throw new Error('a subscriber that fails'); });

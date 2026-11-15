@@ -215292,9 +215292,9 @@ function createArchiveImportRuntime(options = {}) {
     return built;
   };
   const subscribers = new Set;
-  const removalWaiting = () => {
+  const workWaiting = () => {
     try {
-      return state.list().some((record) => record.status === "removing");
+      return state.list().some((record) => record.status === "removing" || record.status === "importing");
     } catch {
       return false;
     }
@@ -215322,8 +215322,11 @@ function createArchiveImportRuntime(options = {}) {
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
       subscribers.add(wake);
-      if (removalWaiting())
-        wake();
+      if (workWaiting()) {
+        try {
+          wake();
+        } catch {}
+      }
       return () => {
         subscribers.delete(wake);
       };

@@ -68,8 +68,9 @@ export interface ArchiveImportRuntime {
    * The scheduler's push wake (`subscribeChanges`) for the archive tasks:
    * `wake` runs them now, not at their cadence. One function for the life of
    * the runtime, so the scheduler subscribes once. It also wakes at once when
-   * subscribed while a removal is waiting, which is a restart in the middle of
-   * one, or the archive source coming back to the roster for it.
+   * subscribed while a removal or an import is waiting, which is a restart or
+   * an update in the middle of one, or the archive source coming back to the
+   * roster for it.
    */
   readonly subscribeWork: (wake: () => void) => () => void;
   /**
@@ -138,9 +139,11 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
   };
 
   const subscribers = new Set<() => void>();
-  const removalWaiting = (): boolean => {
+  // An import still reading is work waiting too: the durable schedule of its last pass says the source's interval (30 minutes)
+  // after it, and that slot outlives a restart or an update, which held a 2-message mbox for 30 minutes (run 43736059061).
+  const workWaiting = (): boolean => {
     try {
-      return state.list().some((record) => record.status === 'removing');
+      return state.list().some((record) => record.status === 'removing' || record.status === 'importing');
     } catch {
       return false;
     }
@@ -171,7 +174,13 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
       subscribers.add(wake);
-      if (removalWaiting()) wake();
+      if (workWaiting()) {
+        try {
+          wake();
+        } catch {
+          // A subscriber that fails is not this caller's failure.
+        }
+      }
       return () => { subscribers.delete(wake); };
     },
     notifyWork: () => {
