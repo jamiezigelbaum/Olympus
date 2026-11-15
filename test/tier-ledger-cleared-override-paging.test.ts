@@ -55,3 +55,27 @@ test('the cleared-override fingerprint moves with overrides, undo requests and m
   expect(ledger.clearedOverrideFingerprint()).not.toBe(cleared);
   ledger.close();
 });
+
+test('the cleared-override search reads the overridden rows and saved undos, never every routed row', () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  // Many items the judge decided and one an override decided.
+  for (let index = 0; index < 300; index += 1) {
+    ledger.recordRoutedPlacement({ provider: 'gmail', accountScope: 'acct', providerItemId: `judged-${index}` },
+      { ...decision, decidedBy: 'sniffer', reasons: ['content:sniffer:test:personal'] }, placement);
+  }
+  ledger.recordRoutedPlacement({ provider: 'gmail', accountScope: 'acct', providerItemId: 'owner' }, decision, placement);
+  const db = (ledger as unknown as { db: { query(sql: string): { all(...params: unknown[]): unknown[] } } }).db;
+  const seen: string[] = [];
+  const query = db.query.bind(db);
+  db.query = (sql: string) => { seen.push(sql); return query(sql); };
+  expect(ledger.listClearedOverrideRows().map((row) => row.providerItemId)).toEqual(['owner']);
+  db.query = query;
+  const search = seen.find((sql) => sql.includes('tier_items_override_rows'))!;
+  const plan = (query(`EXPLAIN QUERY PLAN ${search}`).all('[]', null, null, null, null, null, 100) as Array<{ detail: string }>)
+    .map((row) => row.detail).join('\n');
+  expect(plan).toContain('tier_items_override_rows');
+  // tier_items (alias i) is reached only through the override index or by its whole key, never scanned or walked by state.
+  const reads = plan.split('\n').filter((line) => /^(SCAN|SEARCH) i\b/.test(line));
+  expect(reads.length).toBe(2);
+  for (const line of reads) expect(line.includes('tier_items_override_rows') || line.includes('provider_item_id=?')).toBe(true);
+});

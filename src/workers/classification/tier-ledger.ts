@@ -564,6 +564,11 @@ export class TierLedger {
       }
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      // The owner's overridden items, for the cleared-override search
+      // (listClearedOverrideRows). An index only, with no schema version:
+      // an older build opens the file as before and ignores it.
+      db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
+        ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       settleStaleEmbedHolds(db, this.now().toISOString());
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
@@ -3000,25 +3005,41 @@ export class TierLedger {
 
   listClearedOverrideRows(limit = 100, after?: Pick<TierLedgerRecord, 'provider' | 'accountScope' | 'conversationKey' | 'providerItemId'>): TierLedgerRecord[] {
     // `after` pages past rows a pass could not restore, so they never block the rest.
+    // Driven from the two small sets that can hold a cleared override (rows an
+    // override decided, through their partial index, and saved undo requests),
+    // never from every routed row: that read held the background's loop for
+    // up to 4 s, several times a minute while the judge moved items (Sparta,
+    // rc.17, 15 Nov 2026).
+    const restoreKeys = this.db.query(`
+      SELECT key FROM tier_ledger_meta
+      WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;' AND value <> ''
+    `).all() as Array<{ key: string }>;
+    const restoreIdentities = restoreKeys.flatMap(({ key }) => {
+      const parts = key.slice('tier-owner-restore:'.length).split('\0');
+      return parts.length === 4 ? [parts] : [];
+    });
     const rows = this.db.query(`
-      SELECT i.* FROM tier_items i
-      WHERE i.routed = 1 AND i.state = 'current'
-        AND i.metadata_tier <> 'secrets' AND i.content_tier <> 'secrets'
-        AND (i.decided_by = 'override' OR EXISTS (
-          SELECT 1 FROM tier_ledger_meta m
-          WHERE m.key = 'tier-owner-restore:' || i.provider || char(0) || i.account_scope || char(0)
-            || i.conversation_key || char(0) || i.provider_item_id
-            AND m.value <> ''
-        ))
-        AND (? IS NULL OR (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?))
+      SELECT * FROM (
+        SELECT i.* FROM tier_items i INDEXED BY tier_items_override_rows
+        WHERE i.decided_by = 'override'
+        UNION
+        -- CROSS JOIN keeps the saved undos outer: each is a primary-key lookup.
+        SELECT i.* FROM json_each(?) j
+        CROSS JOIN tier_items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
+          AND i.conversation_key = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
+      ) cleared
+      WHERE cleared.routed = 1 AND cleared.state = 'current'
+        AND cleared.metadata_tier <> 'secrets' AND cleared.content_tier <> 'secrets'
+        AND (? IS NULL OR (cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id) > (?, ?, ?, ?))
         AND NOT EXISTS (
           SELECT 1 FROM tier_overrides o
-          WHERE o.provider = i.provider AND o.account_scope = i.account_scope
-            AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+          WHERE o.provider = cleared.provider AND o.account_scope = cleared.account_scope
+            AND o.conversation_key = cleared.conversation_key AND o.provider_item_id = cleared.provider_item_id
         )
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+      ORDER BY cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id
       LIMIT ?
     `).all(
+      JSON.stringify(restoreIdentities),
       after ? 1 : null,
       after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null,
       Math.max(1, Math.min(limit, 1_000)),
