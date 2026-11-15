@@ -47177,11 +47177,17 @@ function recordPlan(held) {
   const site = sourceSite();
   if (site === "")
     return;
+  if (inMemory(db) && /OffThread\b/.test(site))
+    return;
   for (const scan of scans) {
     const key = `${site}|${scan.table}`;
     if (!recorder.finders.has(key))
       recorder.finders.set(key, { ...scan, site, sql: sql.replace(/\s+/g, " ").trim().slice(0, 160) });
   }
+}
+function inMemory(db) {
+  const name = db.filename;
+  return name === undefined || name === "" || name === ":memory:";
 }
 function tableAliases(sql) {
   const aliases = new Map;
@@ -95136,9 +95142,11 @@ function* ownerRuleRaisesPass(options) {
   const resume = progress?.after;
   const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
   const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...resume ? { after: resume } : {}, limit }));
-  for (const record of rows) {
+  for (const found of rows) {
     yield* turn();
-    attempt(record);
+    const record = ledger.getCurrent(identityOf4(found));
+    if (record?.routed)
+      attempt(record);
   }
   if (rows.length < limit) {
     if (held.length === 0 && !overflow) {
@@ -95440,9 +95448,12 @@ function* imageContentSweepPass(options) {
     return report;
   const limit = Math.max(1, options.limit ?? DEFAULT_IMAGE_CONTENT_SWEEP_ROWS);
   const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...state.after ? { after: state.after } : {}, limit }));
-  for (const record of rows) {
+  for (const found of rows) {
     yield* turn();
     report.scanned += 1;
+    const record = ledger.getCurrent(identityOf5(found));
+    if (!record?.routed)
+      continue;
     try {
       if (raiseIfImage(set, record))
         report.raised += 1;

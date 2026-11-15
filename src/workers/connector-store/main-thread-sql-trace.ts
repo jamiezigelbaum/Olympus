@@ -192,10 +192,19 @@ function recordPlan(held: Record<string, unknown>): void {
   const site = sourceSite();
   // A statement no source frame ran (a test's own query) is not the engine's.
   if (site === '') return;
+  // An off-thread finder's fallback on an in-memory store (tests only: the
+  // read worker can't open one, and the engine's stores are all files) is
+  // not a loop finder. Only that case: any other in-memory statement counts.
+  if (inMemory(db) && /OffThread\b/.test(site)) return;
   for (const scan of scans) {
     const key = `${site}|${scan.table}`;
     if (!recorder.finders.has(key)) recorder.finders.set(key, { ...scan, site, sql: sql.replace(/\s+/g, ' ').trim().slice(0, 160) });
   }
+}
+
+function inMemory(db: Database): boolean {
+  const name = (db as unknown as { filename?: string }).filename;
+  return name === undefined || name === '' || name === ':memory:';
 }
 
 /** alias -> table for each FROM or JOIN in the text. */

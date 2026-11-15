@@ -157,9 +157,12 @@ function* ownerRuleRaisesPass(options: { set: TieredStoreSet; limit?: number }):
   const resume = progress?.after;
   const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
   const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...(resume ? { after: resume } : {}), limit }));
-  for (const record of rows) {
+  for (const found of rows) {
     yield* turn();
-    attempt(record);
+    // Found on an older snapshot: the raise is judged from the row as it is
+    // now, read by key, so a decision made since is never written over.
+    const record = ledger.getCurrent(identityOf(found));
+    if (record?.routed) attempt(record);
   }
   if (rows.length < limit) {
     if (held.length === 0 && !overflow) {

@@ -56,9 +56,12 @@ function* imageContentSweepPass(options: { set: TieredStoreSet; limit?: number }
   if (state.done) return report;
   const limit = Math.max(1, options.limit ?? DEFAULT_IMAGE_CONTENT_SWEEP_ROWS);
   const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...(state.after ? { after: state.after } : {}), limit }));
-  for (const record of rows) {
+  for (const found of rows) {
     yield* turn();
     report.scanned += 1;
+    // Found on an older snapshot: judged from the row as it is now, by key.
+    const record = ledger.getCurrent(identityOf(found));
+    if (!record?.routed) continue;
     try {
       if (raiseIfImage(set, record)) report.raised += 1;
     } catch {

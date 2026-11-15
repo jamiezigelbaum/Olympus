@@ -17462,11 +17462,17 @@ function recordPlan(held) {
   const site = sourceSite();
   if (site === "")
     return;
+  if (inMemory(db) && /OffThread\b/.test(site))
+    return;
   for (const scan of scans) {
     const key = `${site}|${scan.table}`;
     if (!recorder.finders.has(key))
       recorder.finders.set(key, { ...scan, site, sql: sql.replace(/\s+/g, " ").trim().slice(0, 160) });
   }
+}
+function inMemory(db) {
+  const name = db.filename;
+  return name === undefined || name === "" || name === ":memory:";
 }
 function tableAliases(sql) {
   const aliases = new Map;
