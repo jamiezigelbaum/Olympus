@@ -390,6 +390,7 @@ export async function withOffThreadSnapshot<T>(
   const generation = releases.get(dbPath) ?? 0;
   // noWait: a helper that is only worth having now (a re-score reader)
   // takes a free worker or none.
+  const askedAtMs = clock.now();
   const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
   if (options.noWait && !free) throw new OffThreadReadBusyError();
   if (free) free.snapshots += 1;
@@ -400,6 +401,9 @@ export async function withOffThreadSnapshot<T>(
     throw new OffThreadReadBusyError();
   }
   const snapshot = nextId++;
+  // The wait for the store's worker, counted once, on the snapshot's first
+  // read: a lane's time behind other snapshots shows in its queue wait.
+  let reserveWaitMs = clock.now() - askedAtMs;
   try {
     await send(reader, { op: 'open', snapshot, path: dbPath });
     try {
@@ -408,15 +412,17 @@ export async function withOffThreadSnapshot<T>(
         // A snapshot read made by a traced Ask lane counts in its pool reads.
         const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
         const sentAtMs = clock.now();
+        const queueWaitMs = reserveWaitMs;
+        reserveWaitMs = 0;
         let sqlMs = 0;
         try {
           const rows = await send(reader, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
             sqlMs = ms;
           });
-          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows', snapshot: true });
+          report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows', snapshot: true });
           return rows;
         } catch (error) {
-          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error', snapshot: true });
+          report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error', snapshot: true });
           throw error;
         } finally {
           // A search waiting for this thread takes its turn before the next read.

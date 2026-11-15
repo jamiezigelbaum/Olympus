@@ -18343,6 +18343,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
   if (!runtimeHasWorkers())
     throw new Error("off-thread reads are unavailable");
   const generation = releases.get(dbPath) ?? 0;
+  const askedAtMs = clock2.now();
   const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
   if (options.noWait && !free)
     throw new OffThreadReadBusyError;
@@ -18355,6 +18356,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
     throw new OffThreadReadBusyError;
   }
   const snapshot = nextId++;
+  let reserveWaitMs = clock2.now() - askedAtMs;
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
     try {
@@ -18363,15 +18365,17 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
           observer?.(dbPath, query);
         const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
         const sentAtMs = clock2.now();
+        const queueWaitMs = reserveWaitMs;
+        reserveWaitMs = 0;
         let sqlMs = 0;
         try {
           const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
             sqlMs = ms;
           });
-          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
-          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
           throw error;
         } finally {
           dispatch();
