@@ -712,7 +712,7 @@ describe('answers on this computer, with every outbound request denied', () => {
     expect(JSON.stringify(outcome.body.citations)).not.toContain('/Files/');
   });
 
-  test('stores searched with one model embed the question once between them', async () => {
+  test('per request, each model embeds the question once, whatever the number of stores it searches', async () => {
     // A memo per store embedded the one question once per store, one forward
     // pass at a time: 2.0 to 3.8 s of a live Ask before any lane ran (rc.17).
     const local = await localFixture({ oneModel: true });
