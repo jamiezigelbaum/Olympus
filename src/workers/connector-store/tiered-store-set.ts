@@ -122,8 +122,8 @@ import {
   type ChildVisibilityLane,
   type ParentRef,
 } from './child-visibility.ts';
-import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
-import { settlePersonalFirstItems } from './tier-held-settle.ts';
+import { settleNamesOnlyItemsOffThread } from './tier-names-only-settle.ts';
+import { settlePersonalFirstItemsOffThread } from './tier-held-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
 import { sweepAutomaticSupersededCopies } from './tier-auto-prune-sweep.ts';
 import { flushTierMoveNotes, moveTieredItem, type TierMoveOptions } from './tier-move.ts';
@@ -133,10 +133,10 @@ export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
 /** Time the one-time superseded-copy sweep may take on each maintenance call. */
 export const SUPERSEDED_SWEEP_SLICE_MS = 100;
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
-import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
-import { applyOwnerOverrides } from './tier-override-settle.ts';
-import { sweepImageContentToPrivate } from './tier-image-content-sweep.ts';
-import { applyMediaJudgments } from './tier-media-judgment-sweep.ts';
+import { sweepOwnerRuleRaisesOffThread } from './tier-rules-sweep.ts';
+import { applyOwnerOverridesOffThread } from './tier-override-settle.ts';
+import { sweepImageContentToPrivateOffThread } from './tier-image-content-sweep.ts';
+import { applyMediaJudgmentsOffThread } from './tier-media-judgment-sweep.ts';
 import { sweepSecretsFloor } from './tier-secrets-floor-sweep.ts';
 
 
@@ -914,38 +914,38 @@ export class TieredStoreSet {
   private async settleStoredItems(): Promise<void> {
     void this.repairLowerContent();
     try {
-      applyOwnerOverrides({ set: this });
+      await applyOwnerOverridesOffThread({ set: this, turn: ingestionTurn });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }
     try {
-      sweepOwnerRuleRaises({ set: this });
+      await sweepOwnerRuleRaisesOffThread({ set: this, turn: ingestionTurn });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }
     try {
-      settleNamesOnlyItems({ set: this });
+      await settleNamesOnlyItemsOffThread({ set: this, turn: ingestionTurn });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }
     try {
       // Text recorded Personal-first before every open question held it
       // (#1316) is hidden from Personal and moved to the Private store.
-      settlePersonalFirstItems({ set: this });
+      await settlePersonalFirstItemsOffThread({ set: this, turn: ingestionTurn });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }
     try {
       // Picture content stored in a Personal or Public store before pictures
       // were Private-only moves to the Private store (once).
-      sweepImageContentToPrivate({ set: this });
+      await sweepImageContentToPrivateOffThread({ set: this, turn: ingestionTurn });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }
     try {
       // The photo judge's verdicts: ordinary photos are queued to leave the
       // Private store; the moves run where moves run (never here).
-      applyMediaJudgments({ set: this });
+      await applyMediaJudgmentsOffThread({ set: this, turn: ingestionTurn });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }

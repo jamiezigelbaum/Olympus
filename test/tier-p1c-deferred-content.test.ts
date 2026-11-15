@@ -23,6 +23,7 @@ import { createOwnerTierItems } from '../src/workers/classification/tier-owner-i
 import { LocalFileExtractionJobStore, type ItemExtractionOutcome } from '../src/workers/file-extraction/job-store.ts';
 import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { tieredExtractionView } from '../src/workers/connector-store/tiered-extraction.ts';
+import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import {
   createTieredLaneSet,
   onDemandTierStore,
@@ -574,6 +575,30 @@ describe('settled names copies', () => {
     await lane.sink.accept(request(NEW[1]!.id, NEW[1]!.body));
     expect(store.settledUnreadableItems()).toEqual([]);
     expect(store.status().counts.contentElsewhereItems).toBe(1);
+  });
+
+  // Family 2 of the loop-thread rule (loop-stall step-back, 15 Nov 2026).
+  test('in turns, the settled-unreadable walk runs on the read worker and finds what the writer finds', async () => {
+    const lane = openLane(workspace());
+    cleanups.unshift(() => { setReadPoolObserverForTests(); lane.close(); });
+    await listAll(lane, [NEW[1]!]);
+    const identity = identityOf(NEW[1]!.id);
+    const decision = { ...classifyItemTiers({ signals: { title: NEW[1]!.name } }), state: 'current' as const,
+      decidedBy: 'sniffer' as const, snifferId: 'fixture',
+      contentTier: 'secure' as const, contentRead: false, contentPending: false, metadataPending: false,
+      reasons: ['content:sniffer:fixture:fail_safe:missing_question'] };
+    lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
+    const store = lane.stores.internal!;
+    store.setExtractionOutcomeProbe(() => ({ status: 'failed_terminal', lastErrorKind: 'pdf_damaged', warnings: [], policyDecision: 'index_allowed' }));
+    const pooled: string[] = [];
+    setReadPoolObserverForTests((path, read) => { pooled.push(`${path === lane.ledger.dbPath ? 'ledger' : path === store.dbPath ? 'store' : 'other'}: ${read.sql}`); }, { snapshots: true });
+    const offThread = await store.settledUnreadableItemsInTurns();
+    expect(pooled.some((sql) => sql.startsWith('ledger:') && sql.includes('FROM tier_copies'))).toBe(true);
+    expect(pooled.some((sql) => sql.startsWith('store:') && sql.includes('CROSS JOIN items i'))).toBe(true);
+    expect(offThread.map(item => item.ref.name)).toEqual(['scan-0413.pdf']);
+    expect(offThread).toEqual(store.settledUnreadableItems());
+    await store.prepareStatusCounts();
+    expect(store.status(undefined, { countsMaxAgeMs: 60_000 }).counts.settledUnreadableItems).toBe(1);
   });
 
   test('a child whose source has no bytes for it is not listed as a file Olympus could not read', async () => {

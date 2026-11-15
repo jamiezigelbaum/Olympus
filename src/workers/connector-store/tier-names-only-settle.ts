@@ -21,6 +21,7 @@
 import { CONTENT_NAMES_ONLY_REASON, type TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, parseTierLedgerIdentity, tierLedgerIdentityOfRecord, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { CONTAINER_MIME_TYPES } from './local-index.ts';
+import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export const DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500;
@@ -33,7 +34,17 @@ export interface TierNamesOnlySettleReport {
   settled: number;
 }
 
+/** The settle on its caller's connection (a direct caller, not the engine's loop). */
 export function settleNamesOnlyItems(options: { set: TieredStoreSet; limit?: number }): TierNamesOnlySettleReport {
+  return runPassHere(namesOnlySettlePass(options));
+}
+
+/** The settle on the engine's loop: its window is read on the ledger's read worker, a turn between rows. */
+export function settleNamesOnlyItemsOffThread(options: { set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined }): Promise<TierNamesOnlySettleReport> {
+  return runPassOffThread(namesOnlySettlePass(options), options.turn ? { turn: options.turn } : {});
+}
+
+function* namesOnlySettlePass(options: { set: TieredStoreSet; limit?: number }): LoopPass<TierNamesOnlySettleReport> {
   const report: TierNamesOnlySettleReport = { checked: 0, settled: 0 };
   const { set } = options;
   // Only a lane whose text arrives after listing routes an unread item.
@@ -42,8 +53,9 @@ export function settleNamesOnlyItems(options: { set: TieredStoreSet; limit?: num
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
   const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   // A bounded window of the ledger per call, matching or not (listAwaitingTextWindow).
-  const { records: rows, resumeAfter } = ledger.listAwaitingTextWindow({ limit, ...(after ? { after } : {}) });
+  const { records: rows, resumeAfter } = yield* findInLedger(ledger, () => ledger.listAwaitingTextWindowSteps({ limit, ...(after ? { after } : {}) }));
   for (const record of rows) {
+    yield* turn();
     report.checked += 1;
     try {
       if (settleOne(set, record)) report.settled += 1;

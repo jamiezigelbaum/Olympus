@@ -1,5 +1,6 @@
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from '../connector-store/sqlite-mmap.ts';
+import { offThreadReadsSupported, withOffThreadSnapshot, type StoreRead } from '../connector-store/off-thread-reads.ts';
 import type { OnDemandReadRequest, OnDemandReadResult } from './on-demand-read.ts';
 /**
  * The generic extraction job side database.
@@ -1885,8 +1886,13 @@ export class LocalFileExtractionJobStore {
   ): ExtractionCorpusReadiness {
     const steps = this.scopedReadinessSteps(lanes, options);
     let step = steps.next();
-    while (!step.done) step = steps.next();
+    while (!step.done) step = steps.next(step.value ? this.readHere(step.value) : undefined);
     return step.value;
+  }
+
+  private readHere(read: StoreRead): unknown {
+    const query = this.db.query(read.sql);
+    return read.mode === 'get' ? query.get(...(read.params as never[])) : query.all(...(read.params as never[]));
   }
 
   /**
@@ -1898,47 +1904,55 @@ export class LocalFileExtractionJobStore {
     lanes: readonly ExtractionLaneKey[],
     options: ExtractionScopedReadinessOptions & { turn: () => Promise<void> | undefined },
   ): Promise<ExtractionCorpusReadiness> {
-    const steps = this.scopedReadinessSteps(lanes, options);
-    let step = steps.next();
-    while (!step.done) {
-      await options.turn();
-      step = steps.next();
-    }
-    return step.value;
+    // The lane pages are finders (loop-stall step-back, family 4): on a file
+    // store they are read on the read worker, over one snapshot, and the
+    // loop only tallies them, a turn between lanes and slices.
+    const drive = async (read: (query: StoreRead) => Promise<unknown>): Promise<ExtractionCorpusReadiness> => {
+      const steps = this.scopedReadinessSteps(lanes, options);
+      let step = steps.next();
+      while (!step.done) {
+        if (step.value) {
+          step = steps.next(await read(step.value));
+          continue;
+        }
+        await options.turn();
+        step = steps.next();
+      }
+      return step.value;
+    };
+    if (!offThreadReadsSupported(this.dbPath)) return drive(async (query) => this.readHere(query));
+    return withOffThreadSnapshot(this.dbPath, drive);
   }
 
   private *scopedReadinessSteps(
     lanes: readonly ExtractionLaneKey[],
     options: ExtractionScopedReadinessOptions,
-  ): Generator<void, ExtractionCorpusReadiness> {
+  ): Generator<StoreRead | undefined, ExtractionCorpusReadiness, unknown> {
     const uniqueLanes = new Map<string, ExtractionLaneKey>();
     for (const lane of lanes) {
       const key = requireLaneKey(lane);
       uniqueLanes.set(JSON.stringify(key), key);
     }
-    const select = this.db.query(`
+    const selectSql = `
       SELECT * FROM extraction_jobs
       WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
-    `);
-    const selectUnroutable = unroutableItemsTableExists(this.db) && this.db.query(`
+    `;
+    const unroutableSql = unroutableItemsTableExists(this.db) && `
       SELECT u.* FROM extraction_unroutable_items u
       WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
         AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
           WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
             AND j.source_version IS u.source_version)
-    `);
+    `;
     const unsupportedByItem = new Map<string, ExtractionItemRef>();
     const byJobId = new Map<string, ExtractionJobSqlRow>();
     for (const lane of uniqueLanes.values()) {
-      const rows = select.all(
-        lane.corpusId,
-        lane.provider,
-        lane.accountScope,
-        lane.approvedScopeKey,
-      ) as ExtractionJobSqlRow[];
+      const params = [lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey];
+      const rows = (yield { sql: selectSql, params, mode: 'all' }) as ExtractionJobSqlRow[];
       for (const row of rows) byJobId.set(row.job_id, row);
-      const unroutable = selectUnroutable ? selectUnroutable.all(lane.corpusId, lane.provider, lane.accountScope,
-        lane.approvedScopeKey) as ExtractionUnroutableSqlRow[] : [];
+      const unroutable = unroutableSql
+        ? (yield { sql: unroutableSql, params, mode: 'all' }) as ExtractionUnroutableSqlRow[]
+        : [];
       for (const row of unroutable) {
         unsupportedByItem.set(JSON.stringify([row.corpus_id, row.local_item_id]), refFromRow(row));
       }

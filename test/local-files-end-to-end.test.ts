@@ -323,7 +323,9 @@ describe('local files from Connect to an answer', () => {
 
     // The release check loses the folder before Disconnect and Delete.
     renameSync(folder, `${folder}-away`);
-    await expect(first.sync()).rejects.toMatchObject({ errorKind: 'scope_root_missing' });
+    // Not `expect(...).rejects`: Bun's matcher waits in a nested loop that
+    // can miss the read worker's reply the sync's settle step awaits.
+    expect(await first.sync().then(() => undefined, (error: unknown) => error)).toMatchObject({ errorKind: 'scope_root_missing' });
     expect(disconnectThisComputerSource(registryPath, LOCAL_FILES_SOURCE_ID)).toBe(true);
     expect(() => first.scope.assertCurrent()).toThrow();
     if (deleteAtRestart) {

@@ -322,6 +322,243 @@ export interface TierLedgerWindow {
   resumeAfter?: TierLedgerIdentity;
 }
 
+const AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`;
+const PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1 AND state != 'moving'
+        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
+
+/**
+ * At most `examine` rows in key order after `after` are looked at, matching
+ * `where` or not, and the result says where the next call resumes.
+ */
+function* windowSteps(
+  where: string,
+  params: readonly string[],
+  options: { limit?: number; after?: TierLedgerIdentity; examine?: number },
+): Generator<LedgerRead, TierLedgerWindow, unknown> {
+  const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
+  const examine = Math.max(limit, options.examine ?? 20_000);
+  const after = options.after
+    ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+    : undefined;
+  const keyAfter = after ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : '';
+  const rows = (yield {
+    sql: `
+      SELECT * FROM (
+        SELECT * FROM tier_items ${keyAfter}
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+        LIMIT ?
+      )
+      WHERE ${where}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?
+    `,
+    params: [...(after ?? []), examine, ...params, limit], mode: 'all',
+  }) as TierItemRow[];
+  const records = rows.map(recordFromRow);
+  if (rows.length >= limit) return { records, resumeAfter: identityOfRow(rows[rows.length - 1]!) };
+  const windowEnd = (yield {
+    sql: `
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT 1 OFFSET ?
+    `,
+    params: [...(after ?? []), examine - 1], mode: 'get',
+  }) as Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'> | null;
+  return windowEnd ? { records, resumeAfter: identityOfRow(windowEnd) } : { records };
+}
+
+function listMovingRead(options: { limit?: number; direction?: 'raise' | 'lower' }): LedgerRead {
+  const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+  return {
+    sql: `
+      SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
+      ${tierMovingDirectionClause(options.direction)}
+      ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
+      LIMIT ?
+    `,
+    params: [limit], mode: 'all',
+  };
+}
+
+function listRoutedRead(options: { after?: TierLedgerIdentity; limit?: number }): LedgerRead {
+  const limit = Math.max(1, Math.min(options.limit ?? 500, 50_000));
+  const after = options.after
+    ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+    : null;
+  return {
+    sql: `
+      SELECT * FROM tier_items
+      WHERE routed = 1
+        AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?
+    `,
+    params: [after ? 1 : null, ...(after ?? [null, null, null, null]), limit], mode: 'all',
+  };
+}
+
+const LIST_ROUTED_OVERRIDES_SQL = `
+      SELECT i.*, o.override_json AS override_json FROM tier_overrides o
+      CROSS JOIN tier_items i
+        ON i.provider = o.provider AND i.account_scope = o.account_scope
+        AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
+      WHERE i.routed = 1
+      ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
+    `;
+
+function routedOverridesFromRows(rows: Array<TierItemRow & { override_json: string }>): Array<{ record: TierLedgerRecord; override: ItemTierOverride }> {
+  const result: Array<{ record: TierLedgerRecord; override: ItemTierOverride }> = [];
+  for (const row of rows) {
+    let parsed: ItemTierOverride;
+    try {
+      parsed = JSON.parse(row.override_json) as ItemTierOverride;
+    } catch {
+      continue;
+    }
+    if (parsed.kind === 'tier' && !TIER_KEYS.includes(parsed.tier)) continue;
+    if (parsed.kind !== 'tier' && parsed.kind !== 'not_secret') continue;
+    result.push({ record: recordFromRow(row), override: parsed });
+  }
+  return result;
+}
+
+const CLEARED_OVERRIDE_FINGERPRINT_SQL = `
+      SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
+        || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
+          FROM tier_ledger_meta WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;')
+        || '|' || (SELECT count(*) FROM tier_items WHERE state > 'current' OR state < 'current') AS f
+    `;
+
+const CLEARED_RESTORE_KEYS_SQL = `
+      SELECT key FROM tier_ledger_meta
+      WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;' AND value <> ''
+    `;
+
+function clearedOverrideRowsRead(
+  restoreKeys: ReadonlyArray<{ key: string }>,
+  limit: number,
+  after?: Pick<TierLedgerRecord, 'provider' | 'accountScope' | 'conversationKey' | 'providerItemId'>,
+): LedgerRead {
+  const restoreIdentities = restoreKeys.flatMap(({ key }) => {
+    const parts = key.slice('tier-owner-restore:'.length).split('\0');
+    return parts.length === 4 ? [parts] : [];
+  });
+  return {
+    sql: `
+      SELECT * FROM (
+        SELECT i.* FROM tier_items i INDEXED BY tier_items_override_rows
+        WHERE i.decided_by = 'override'
+        UNION
+        -- CROSS JOIN keeps the saved undos outer: each is a primary-key lookup.
+        SELECT i.* FROM json_each(?) j
+        CROSS JOIN tier_items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
+          AND i.conversation_key = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
+      ) cleared
+      WHERE cleared.routed = 1 AND cleared.state = 'current'
+        AND cleared.metadata_tier <> 'secrets' AND cleared.content_tier <> 'secrets'
+        AND (? IS NULL OR (cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id) > (?, ?, ?, ?))
+        AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o
+          WHERE o.provider = cleared.provider AND o.account_scope = cleared.account_scope
+            AND o.conversation_key = cleared.conversation_key AND o.provider_item_id = cleared.provider_item_id
+        )
+      ORDER BY cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id
+      LIMIT ?
+    `,
+    params: [
+      JSON.stringify(restoreIdentities),
+      after ? 1 : null,
+      after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null,
+      Math.max(1, Math.min(limit, 1_000)),
+    ],
+    mode: 'all',
+  };
+}
+
+const UNSETTLED_SECRET_SIDE_STORES_SQL = `
+      SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id,
+        EXISTS (
+          SELECT 1 FROM tier_copies c
+          WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+            AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+        ) AS holds_copies
+      FROM tier_items i
+      LEFT JOIN secret_side_store_scrubs s
+        ON s.provider = i.provider AND s.account_scope = i.account_scope
+        AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
+      WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
+        AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
+        AND NOT EXISTS (
+          SELECT 1 FROM secret_side_store_debt d
+          WHERE d.provider = i.provider AND d.account_scope = i.account_scope
+            AND d.conversation_key = i.conversation_key AND d.provider_item_id = i.provider_item_id
+        )
+      -- Unordered pages could keep returning the same skipped items.
+      ORDER BY RANDOM()
+      LIMIT ?
+    `;
+
+interface UnsettledSecretRow {
+  provider: string;
+  account_scope: string;
+  conversation_key: string;
+  provider_item_id: string;
+  holds_copies: number;
+}
+
+function unsettledSecretRows(rows: readonly UnsettledSecretRow[]): Array<TierLedgerIdentity & { holdsCopies: boolean }> {
+  return rows.map((row) => ({
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+    holdsCopies: row.holds_copies === 1,
+  }));
+}
+
+const RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')`;
+const RELABEL_UNREAD_CANDIDATES_SQL = `SELECT rowid FROM tier_items WHERE ${RELABEL_UNREAD_WHERE} LIMIT ?`;
+
+/** The per-copy visibility flags `corpusVisibilityPages` reads (prefix `c.` is the copy). */
+const CORPUS_VISIBILITY_FLAGS_SQL = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
+      c.copy_state <> 'current' OR EXISTS (SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = c.provider AND w.account_scope = c.account_scope
+          AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
+          AND w.kind IN ('secret', 'deletion')) AS hidden,
+      c.copy_state = 'current' AND c.embed_hold = 1 AS held,
+      c.copy_state = 'current' AND c.embed_hold = 1 AND c.trust_domain = 'secure_local'
+        AND c.layers IN ('content', 'both') AND EXISTS (
+          SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+            AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
+            AND t.state = 'pending' AND t.content_read = 1 AND (t.metadata_pending = 1 OR t.content_pending = 1)
+            AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+            AND COALESCE(t.target_metadata_tier, '') <> 'secrets' AND COALESCE(t.target_content_tier, '') <> 'secrets'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o WHERE o.provider = c.provider AND o.account_scope = c.account_scope
+            AND o.conversation_key = c.conversation_key AND o.provider_item_id = c.provider_item_id
+            AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+        ) AS held_for_judgment,
+      c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
+      c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
+        SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
+          AND other.conversation_key = c.conversation_key AND other.provider_item_id = c.provider_item_id
+          AND other.corpus_id <> c.corpus_id AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+      ) AS metadata_unread,
+      EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+        AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
+
+type CorpusVisibilityRow = TierIdentityRow & { hidden: number; held: number; held_for_judgment: number; metadata_layer: number; metadata_unread: number; moving: number };
+
+function corpusVisibilityFromRows(rows: CorpusVisibilityRow[]): TierCorpusVisibility[] {
+  return rows.map(row => ({ ...identityFromRow(row), hidden: !!row.hidden, held: !!row.held, heldForJudgment: !!row.held_for_judgment,
+    metadataLayer: !!row.metadata_layer, metadataLayerContentUnread: !!row.metadata_unread, moving: !!row.moving }));
+}
+
 export type TierLedgerRecordOutcome = 'inserted' | 'updated' | 'unchanged' | 'held_moving';
 
 /** Which layer(s) of an item a store copy is searchable for. */
@@ -1081,14 +1318,13 @@ export class TierLedger {
    * bounded page while moves behind it could land.
    */
   listMoving(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): TierLedgerRecord[] {
-    const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
-    const rows = this.db.query(`
-      SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
-      ${this.movingDirectionClause(options.direction)}
-      ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
-      LIMIT ?
-    `).all(limit);
-    return (rows as TierItemRow[]).map(recordFromRow);
+    const read = listMovingRead(options);
+    return (this.db.query(read.sql).all(...read.params as never[]) as TierItemRow[]).map(recordFromRow);
+  }
+
+  /** `listMoving`'s read, for a read worker (loop-pass.ts). */
+  *listMovingSteps(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): Generator<LedgerRead, TierLedgerRecord[], unknown> {
+    return ((yield listMovingRead(options)) as TierItemRow[]).map(recordFromRow);
   }
 
   /**
@@ -1600,11 +1836,7 @@ export class TierLedger {
    * 10 s freeze on one names-only settle pass).
    */
   listAwaitingTextWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): TierLedgerWindow {
-    return this.window(`routed = 1 AND content_read = 0 AND metadata_pending = 0
-        AND ((state = 'pending' AND content_pending = 1)
-          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, [], options);
+    return this.window(AWAITING_TEXT_WHERE, [], options);
   }
 
   /**
@@ -1615,8 +1847,7 @@ export class TierLedger {
    * Bounded the same way as listAwaitingTextWindow.
    */
   listPersonalFirstWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): TierLedgerWindow {
-    return this.window(`routed = 1 AND content_pending = 1 AND state != 'moving'
-        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, [PERSONAL_FIRST_REASON], options);
+    return this.window(PERSONAL_FIRST_WHERE, [PERSONAL_FIRST_REASON], options);
   }
 
   /**
@@ -1628,34 +1859,17 @@ export class TierLedger {
     params: readonly string[],
     options: { limit?: number; after?: TierLedgerIdentity; examine?: number },
   ): TierLedgerWindow {
-    const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
-    const examine = Math.max(limit, options.examine ?? 20_000);
-    const after = options.after
-      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
-      : undefined;
-    const keyAfter = after ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : '';
-    const rows = this.db.query(`
-      SELECT * FROM (
-        SELECT * FROM tier_items ${keyAfter}
-        ORDER BY provider, account_scope, conversation_key, provider_item_id
-        LIMIT ?
-      )
-      WHERE ${where}
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT ?
-    `).all(...(after ?? []), examine, ...params, limit) as TierItemRow[];
-    const records = rows.map(recordFromRow);
-    const identityOfRow = (row: { provider: string; account_scope: string; conversation_key: string; provider_item_id: string }): TierLedgerIdentity => ({
-      provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
-      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
-    });
-    if (rows.length >= limit) return { records, resumeAfter: identityOfRow(rows[rows.length - 1]!) };
-    const windowEnd = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT 1 OFFSET ?
-    `).get(...(after ?? []), examine - 1) as { provider: string; account_scope: string; conversation_key: string; provider_item_id: string } | null;
-    return windowEnd ? { records, resumeAfter: identityOfRow(windowEnd) } : { records };
+    return this.readSteps(windowSteps(where, params, options));
+  }
+
+  /** `listAwaitingTextWindow`'s reads, for a read worker (loop-pass.ts). */
+  listAwaitingTextWindowSteps(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): Generator<LedgerRead, TierLedgerWindow, unknown> {
+    return windowSteps(AWAITING_TEXT_WHERE, [], options);
+  }
+
+  /** `listPersonalFirstWindow`'s reads, for a read worker (loop-pass.ts). */
+  listPersonalFirstWindowSteps(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): Generator<LedgerRead, TierLedgerWindow, unknown> {
+    return windowSteps(PERSONAL_FIRST_WHERE, [PERSONAL_FIRST_REASON], options);
   }
 
   /** Items waiting on an unanswered sniffer question, oldest first. */
@@ -1733,17 +1947,32 @@ export class TierLedger {
    * generation stay as they are. Returns how many rows changed; 0 means done.
    */
   relabelUnreadFailSafe(limit = 2_000): number {
+    const rowids = (this.db.query(RELABEL_UNREAD_CANDIDATES_SQL).all(Math.max(1, Math.min(limit, 10_000))) as Array<{ rowid: number }>)
+      .map((row) => row.rowid);
+    return this.relabelUnreadFailSafeRows(rowids);
+  }
+
+  /** The rows `relabelUnreadFailSafe` would change, for a read worker (loop-pass.ts). */
+  *relabelUnreadFailSafeCandidateSteps(limit = 2_000): Generator<LedgerRead, number[], unknown> {
+    return ((yield { sql: RELABEL_UNREAD_CANDIDATES_SQL, params: [Math.max(1, Math.min(limit, 10_000))], mode: 'all' }) as Array<{ rowid: number }>)
+      .map((row) => row.rowid);
+  }
+
+  /**
+   * Relabels these rows by rowid, each checked again here: a candidate found
+   * on an older snapshot that no longer qualifies is left alone. Returns how
+   * many changed.
+   */
+  relabelUnreadFailSafeRows(rowids: readonly number[]): number {
+    if (rowids.length === 0) return 0;
     return this.db.query(`
       UPDATE tier_items SET reasons_json = (
         SELECT json_group_array(CASE WHEN r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
           THEN substr(r.value, 1, length(r.value) - length('missing_question')) || 'unread' ELSE r.value END)
         FROM json_each(tier_items.reasons_json) r)
-      WHERE rowid IN (
-        SELECT rowid FROM tier_items
-        WHERE content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
-          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')
-        LIMIT ?)
-    `).run(Math.max(1, Math.min(limit, 10_000))).changes;
+      WHERE rowid IN (SELECT value FROM json_each(?))
+        AND ${RELABEL_UNREAD_WHERE}
+    `).run(JSON.stringify(rowids)).changes;
   }
 
   /** Retire only an unchanged pending row after every relevant store confirmed absence. */
@@ -1863,41 +2092,12 @@ export class TierLedger {
    * settlement has not finished (see `retrySecretSideStoreDebts`).
    */
   unsettledSecretSideStores(limit = 100): Array<TierLedgerIdentity & { holdsCopies: boolean }> {
-    const rows = this.db.query(`
-      SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id,
-        EXISTS (
-          SELECT 1 FROM tier_copies c
-          WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-            AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-        ) AS holds_copies
-      FROM tier_items i
-      LEFT JOIN secret_side_store_scrubs s
-        ON s.provider = i.provider AND s.account_scope = i.account_scope
-        AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
-      WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
-        AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
-        AND NOT EXISTS (
-          SELECT 1 FROM secret_side_store_debt d
-          WHERE d.provider = i.provider AND d.account_scope = i.account_scope
-            AND d.conversation_key = i.conversation_key AND d.provider_item_id = i.provider_item_id
-        )
-      -- Unordered pages could keep returning the same skipped items.
-      ORDER BY RANDOM()
-      LIMIT ?
-    `).all(Math.max(1, Math.min(limit, 1_000))) as Array<{
-      provider: string;
-      account_scope: string;
-      conversation_key: string;
-      provider_item_id: string;
-      holds_copies: number;
-    }>;
-    return rows.map((row) => ({
-      provider: row.provider,
-      accountScope: row.account_scope,
-      providerItemId: row.provider_item_id,
-      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
-      holdsCopies: row.holds_copies === 1,
-    }));
+    return unsettledSecretRows(this.db.query(UNSETTLED_SECRET_SIDE_STORES_SQL).all(Math.max(1, Math.min(limit, 1_000))) as UnsettledSecretRow[]);
+  }
+
+  /** `unsettledSecretSideStores`'s read, for a read worker (loop-pass.ts). */
+  *unsettledSecretSideStoresSteps(limit = 100): Generator<LedgerRead, Array<TierLedgerIdentity & { holdsCopies: boolean }>, unknown> {
+    return unsettledSecretRows((yield { sql: UNSETTLED_SECRET_SIDE_STORES_SQL, params: [Math.max(1, Math.min(limit, 1_000))], mode: 'all' }) as UnsettledSecretRow[]);
   }
 
   /**
@@ -2375,18 +2575,13 @@ export class TierLedger {
    * for background passes that read every routed item (owner-rule sweeps).
    */
   listRouted(options: { after?: TierLedgerIdentity; limit?: number } = {}): TierLedgerRecord[] {
-    const limit = Math.max(1, Math.min(options.limit ?? 500, 50_000));
-    const after = options.after
-      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
-      : null;
-    const rows = this.db.query(`
-      SELECT * FROM tier_items
-      WHERE routed = 1
-        AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT ?
-    `).all(after ? 1 : null, ...(after ?? [null, null, null, null]), limit);
-    return (rows as TierItemRow[]).map(recordFromRow);
+    const read = listRoutedRead(options);
+    return (this.db.query(read.sql).all(...read.params as never[]) as TierItemRow[]).map(recordFromRow);
+  }
+
+  /** `listRouted`'s read, for a read worker (loop-pass.ts). */
+  *listRoutedSteps(options: { after?: TierLedgerIdentity; limit?: number } = {}): Generator<LedgerRead, TierLedgerRecord[], unknown> {
+    return ((yield listRoutedRead(options)) as TierItemRow[]).map(recordFromRow);
   }
 
   /** Bound actual rows examined, even when almost none are routed/eligible. */
@@ -2927,27 +3122,12 @@ export class TierLedger {
    * freezes (14b9be8, 2026-11-05).
    */
   listRoutedOverrides(): Array<{ record: TierLedgerRecord; override: ItemTierOverride }> {
-    const rows = this.db.query(`
-      SELECT i.*, o.override_json AS override_json FROM tier_overrides o
-      CROSS JOIN tier_items i
-        ON i.provider = o.provider AND i.account_scope = o.account_scope
-        AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
-      WHERE i.routed = 1
-      ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
-    `).all() as Array<TierItemRow & { override_json: string }>;
-    const result: Array<{ record: TierLedgerRecord; override: ItemTierOverride }> = [];
-    for (const row of rows) {
-      let parsed: ItemTierOverride;
-      try {
-        parsed = JSON.parse(row.override_json) as ItemTierOverride;
-      } catch {
-        continue;
-      }
-      if (parsed.kind === 'tier' && !TIER_KEYS.includes(parsed.tier)) continue;
-      if (parsed.kind !== 'tier' && parsed.kind !== 'not_secret') continue;
-      result.push({ record: recordFromRow(row), override: parsed });
-    }
-    return result;
+    return routedOverridesFromRows(this.db.query(LIST_ROUTED_OVERRIDES_SQL).all() as Array<TierItemRow & { override_json: string }>);
+  }
+
+  /** `listRoutedOverrides`'s read, for a read worker (loop-pass.ts). */
+  *listRoutedOverridesSteps(): Generator<LedgerRead, Array<{ record: TierLedgerRecord; override: ItemTierOverride }>, unknown> {
+    return routedOverridesFromRows((yield { sql: LIST_ROUTED_OVERRIDES_SQL, params: [], mode: 'all' }) as Array<TierItemRow & { override_json: string }>);
   }
 
   /**
@@ -2997,12 +3177,13 @@ export class TierLedger {
    * state index's non-current ranges), so it is cheap on any ledger.
    */
   clearedOverrideFingerprint(): string {
-    const row = this.db.query(`
-      SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
-        || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
-          FROM tier_ledger_meta WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;')
-        || '|' || (SELECT count(*) FROM tier_items WHERE state > 'current' OR state < 'current') AS f
-    `).get() as { f: string } | null;
+    const row = this.db.query(CLEARED_OVERRIDE_FINGERPRINT_SQL).get() as { f: string } | null;
+    return row?.f ?? '';
+  }
+
+  /** `clearedOverrideFingerprint`'s read, for a read worker (loop-pass.ts). */
+  *clearedOverrideFingerprintSteps(): Generator<LedgerRead, string, unknown> {
+    const row = (yield { sql: CLEARED_OVERRIDE_FINGERPRINT_SQL, params: [], mode: 'get' }) as { f: string } | null;
     return row?.f ?? '';
   }
 
@@ -3013,41 +3194,15 @@ export class TierLedger {
     // never from every routed row: that read held the background's loop for
     // up to 4 s, several times a minute while the judge moved items (Sparta,
     // rc.17, 15 Nov 2026).
-    const restoreKeys = this.db.query(`
-      SELECT key FROM tier_ledger_meta
-      WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;' AND value <> ''
-    `).all() as Array<{ key: string }>;
-    const restoreIdentities = restoreKeys.flatMap(({ key }) => {
-      const parts = key.slice('tier-owner-restore:'.length).split('\0');
-      return parts.length === 4 ? [parts] : [];
-    });
-    const rows = this.db.query(`
-      SELECT * FROM (
-        SELECT i.* FROM tier_items i INDEXED BY tier_items_override_rows
-        WHERE i.decided_by = 'override'
-        UNION
-        -- CROSS JOIN keeps the saved undos outer: each is a primary-key lookup.
-        SELECT i.* FROM json_each(?) j
-        CROSS JOIN tier_items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
-          AND i.conversation_key = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
-      ) cleared
-      WHERE cleared.routed = 1 AND cleared.state = 'current'
-        AND cleared.metadata_tier <> 'secrets' AND cleared.content_tier <> 'secrets'
-        AND (? IS NULL OR (cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id) > (?, ?, ?, ?))
-        AND NOT EXISTS (
-          SELECT 1 FROM tier_overrides o
-          WHERE o.provider = cleared.provider AND o.account_scope = cleared.account_scope
-            AND o.conversation_key = cleared.conversation_key AND o.provider_item_id = cleared.provider_item_id
-        )
-      ORDER BY cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id
-      LIMIT ?
-    `).all(
-      JSON.stringify(restoreIdentities),
-      after ? 1 : null,
-      after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null,
-      Math.max(1, Math.min(limit, 1_000)),
-    ) as TierItemRow[];
-    return rows.map(recordFromRow);
+    const restoreKeys = this.db.query(CLEARED_RESTORE_KEYS_SQL).all() as Array<{ key: string }>;
+    const read = clearedOverrideRowsRead(restoreKeys, limit, after);
+    return (this.db.query(read.sql).all(...read.params as never[]) as TierItemRow[]).map(recordFromRow);
+  }
+
+  /** `listClearedOverrideRows`'s reads, for a read worker (loop-pass.ts). */
+  *listClearedOverrideRowsSteps(limit = 100, after?: Pick<TierLedgerRecord, 'provider' | 'accountScope' | 'conversationKey' | 'providerItemId'>): Generator<LedgerRead, TierLedgerRecord[], unknown> {
+    const restoreKeys = (yield { sql: CLEARED_RESTORE_KEYS_SQL, params: [], mode: 'all' }) as Array<{ key: string }>;
+    return ((yield clearedOverrideRowsRead(restoreKeys, limit, after)) as TierItemRow[]).map(recordFromRow);
   }
 
   /**
@@ -4124,35 +4279,8 @@ export class TierLedger {
 
   /** All copy flags in one indexed walk, or just the changed identities. */
   *corpusVisibilityPages(corpusId: string, identities?: readonly TierLedgerIdentity[]): Generator<TierCorpusVisibility[]> {
-    const flags = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
-      c.copy_state <> 'current' OR EXISTS (SELECT 1 FROM tier_write_intents w
-        WHERE w.provider = c.provider AND w.account_scope = c.account_scope
-          AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
-          AND w.kind IN ('secret', 'deletion')) AS hidden,
-      c.copy_state = 'current' AND c.embed_hold = 1 AS held,
-      c.copy_state = 'current' AND c.embed_hold = 1 AND c.trust_domain = 'secure_local'
-        AND c.layers IN ('content', 'both') AND EXISTS (
-          SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
-            AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
-            AND t.state = 'pending' AND t.content_read = 1 AND (t.metadata_pending = 1 OR t.content_pending = 1)
-            AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
-            AND COALESCE(t.target_metadata_tier, '') <> 'secrets' AND COALESCE(t.target_content_tier, '') <> 'secrets'
-        ) AND NOT EXISTS (
-          SELECT 1 FROM tier_overrides o WHERE o.provider = c.provider AND o.account_scope = c.account_scope
-            AND o.conversation_key = c.conversation_key AND o.provider_item_id = c.provider_item_id
-            AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
-        ) AS held_for_judgment,
-      c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
-      c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
-        SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
-          AND other.conversation_key = c.conversation_key AND other.provider_item_id = c.provider_item_id
-          AND other.corpus_id <> c.corpus_id AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
-      ) AS metadata_unread,
-      EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
-        AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
-    const convert = (rows: Array<TierIdentityRow & { hidden: number; held: number; held_for_judgment: number; metadata_layer: number; metadata_unread: number; moving: number }>) =>
-      rows.map(row => ({ ...identityFromRow(row), hidden: !!row.hidden, held: !!row.held, heldForJudgment: !!row.held_for_judgment,
-        metadataLayer: !!row.metadata_layer, metadataLayerContentUnread: !!row.metadata_unread, moving: !!row.moving }));
+    const flags = CORPUS_VISIBILITY_FLAGS_SQL;
+    const convert = corpusVisibilityFromRows;
     if (identities) {
       for (let offset = 0; offset < identities.length; offset += 200) {
         const batch = identities.slice(offset, offset + 200);
@@ -4175,6 +4303,25 @@ export class TierLedger {
       yield convert(rows);
       after = rows.at(-1)!.row_id;
       if (rows.length < 500) return;
+    }
+  }
+
+  /**
+   * The full walk of `corpusVisibilityPages`, as reads for the read worker,
+   * keeping only the copies some flag marks: a bootstrap applies nothing for
+   * the rest (loop-stall step-back, family 1).
+   */
+  *corpusVisibilityFlaggedSteps(corpusId: string): Generator<LedgerRead, TierCorpusVisibility[], unknown> {
+    const sql = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
+      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
+    const flagged: TierCorpusVisibility[] = [];
+    for (let after = 0; ;) {
+      const rows = (yield { sql, params: [corpusId, after], mode: 'all' }) as Array<CorpusVisibilityRow & { row_id: number }>;
+      for (const row of corpusVisibilityFromRows(rows)) {
+        if (row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread) flagged.push(row);
+      }
+      if (rows.length < 500) return flagged;
+      after = rows.at(-1)!.row_id;
     }
   }
 
@@ -4229,6 +4376,28 @@ export class TierLedger {
       hold = last.embed_hold;
       after = last.row_id;
       yield;
+    }
+  }
+
+  /** corpusCopyIdentitiesSteps as reads for the read worker (loop-stall step-back, family 2). */
+  *corpusCopyIdentityReads(
+    corpusId: string,
+    filter: TierCorpusCopyFilter,
+    pageSize = 5_000,
+  ): Generator<LedgerRead, TierLedgerIdentity[], unknown> {
+    const sql = `
+      SELECT rowid AS row_id, embed_hold, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
+      WHERE corpus_id = ? AND (embed_hold, rowid) > (?, ?) AND ${corpusCopyWhere(filter)}
+      ORDER BY embed_hold, rowid LIMIT ?
+    `;
+    const out: TierLedgerIdentity[] = [];
+    for (let hold = -1, after = 0; ;) {
+      const rows = (yield { sql, params: [corpusId, hold, after, pageSize], mode: 'all' }) as Array<TierIdentityRow & { row_id: number; embed_hold: number }>;
+      for (const row of rows) out.push(identityFromRow(row));
+      if (rows.length < pageSize) return out;
+      const last = rows[rows.length - 1]!;
+      hold = last.embed_hold;
+      after = last.row_id;
     }
   }
 

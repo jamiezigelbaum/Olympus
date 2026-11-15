@@ -47,6 +47,16 @@
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
     },
     {
+      "site": "<anonymous> tier-ledger.ts < ledgerReadOffThread child-visibility.ts",
+      "table": "tier_items",
+      "reason": "in-memory test store only: on a file store this runs on the read worker (family 3)"
+    },
+    {
+      "site": "<anonymous> tier-ledger.ts < ledgerReadOffThread child-visibility.ts",
+      "table": "tier_overrides",
+      "reason": "in-memory test store only: on a file store this runs on the read worker (family 3)"
+    },
+    {
       "site": "addQuestionSlice sniffer-service.ts < countBacklogNow sniffer-service.ts",
       "table": "sniffer_questions",
       "reason": "judge backlog counts on the loop"
@@ -97,14 +107,9 @@
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
     },
     {
-      "site": "clearedOverrideFingerprint tier-ledger.ts < applyOwnerOverrides tier-override-settle.ts",
-      "table": "tier_overrides",
-      "reason": "family 3: settle and the cleared-override walk"
-    },
-    {
       "site": "clearedOverrideFingerprint tier-ledger.ts",
       "table": "tier_overrides",
-      "reason": "family 3: settle and the cleared-override walk"
+      "reason": "a test's direct call to the ledger; the engine finds these on the read worker (family 3)"
     },
     {
       "site": "counts sniffer-store.ts",
@@ -147,6 +152,11 @@
       "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
     },
     {
+      "site": "imageContentOutsidePrivateRowsOffThread local-index.ts < runPassOffThread loop-pass.ts",
+      "table": "items",
+      "reason": "in-memory test store only: on a file store this runs on the read worker (family 3)"
+    },
+    {
       "site": "keepsSecretLocations local-index.ts < syncFromConnectorHeld local-index.ts",
       "table": "items",
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
@@ -162,34 +172,9 @@
       "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
     },
     {
-      "site": "listClearedOverrideRows tier-ledger.ts < applyOwnerOverrides tier-override-settle.ts",
-      "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
-    },
-    {
       "site": "listClearedOverrideRows tier-ledger.ts",
       "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
-    },
-    {
-      "site": "listMoving tier-ledger.ts < runAutoMoves sniffer-service.ts",
-      "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
-    },
-    {
-      "site": "listRouted tier-ledger.ts < sweepImageContentToPrivate tier-image-content-sweep.ts",
-      "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
-    },
-    {
-      "site": "listRouted tier-ledger.ts < sweepSecretsFloor tier-secrets-floor-sweep.ts",
-      "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
-    },
-    {
-      "site": "listRoutedOverrides tier-ledger.ts < applyOwnerOverrides tier-override-settle.ts",
-      "table": "tier_overrides",
-      "reason": "family 3: settle and the cleared-override walk"
+      "reason": "a test's direct call to the ledger; the engine finds these on the read worker (family 3)"
     },
     {
       "site": "migrate local-index.ts < new LocalConnectorStore local-index.ts",
@@ -259,17 +244,12 @@
     {
       "site": "rejudgeCandidatePage tier-ledger.ts",
       "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
-    },
-    {
-      "site": "relabelUnreadFailSafe tier-ledger.ts < recoverMissingQuestions sniffer-service.ts",
-      "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
+      "reason": "a test's direct call to the ledger; the engine finds these on the read worker (family 3)"
     },
     {
       "site": "relabelUnreadFailSafe tier-ledger.ts",
       "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
+      "reason": "a test's direct call to the ledger; the engine finds these on the read worker (family 3)"
     },
     {
       "site": "settleStaleEmbedHolds tier-ledger.ts < new TierLedger tier-ledger.ts",
@@ -337,11 +317,6 @@
       "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
     },
     {
-      "site": "stripImageContentOutsidePrivate local-index.ts < sweepImageContentToPrivate tier-image-content-sweep.ts",
-      "table": "items",
-      "reason": "family 3: settle and the cleared-override walk"
-    },
-    {
       "site": "syncFromConnectorHeld local-index.ts < async syncFromConnector local-index.ts",
       "table": "item_owners",
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
@@ -350,11 +325,6 @@
       "site": "syncFromConnectorHeld local-index.ts < async syncFromConnector local-index.ts",
       "table": "items",
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
-    },
-    {
-      "site": "unsettledSecretSideStores tier-ledger.ts < retrySecretSideStoreDebts secrets-disposition.ts",
-      "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
     },
     {
       "site": "up local-index.ts < <anonymous> sqlite-migrations.ts",
@@ -370,16 +340,6 @@
       "site": "validateConnectorStoreRows local-index.ts < new LocalConnectorStore local-index.ts",
       "table": "connector_store_fts_rows",
       "reason": "boot or migration (step-back: boot work, later)"
-    },
-    {
-      "site": "window tier-ledger.ts < settleNamesOnlyItems tier-names-only-settle.ts",
-      "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
-    },
-    {
-      "site": "window tier-ledger.ts < settlePersonalFirstItems tier-held-settle.ts",
-      "table": "tier_items",
-      "reason": "family 3: settle and the cleared-override walk"
     }
   ]
 }

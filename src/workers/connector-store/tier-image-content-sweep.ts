@@ -20,6 +20,7 @@ import {
   type TierDecision,
 } from '../classification/tier-classifier.ts';
 import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { find, findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 const SWEEP_META_KEY = 'image_content_private_sweep';
@@ -34,15 +35,29 @@ export interface ImageContentSweepReport {
   complete: boolean;
 }
 
+/** Stripped between turns: each item is one store write. */
+const STRIP_BATCH = 50;
+
+/** The sweep on its caller's connection (a direct caller, not the engine's loop). */
 export function sweepImageContentToPrivate(options: { set: TieredStoreSet; limit?: number }): ImageContentSweepReport {
+  return runPassHere(imageContentSweepPass(options));
+}
+
+/** The sweep on the engine's loop: rows are found on the read workers, a turn between the rows it writes. */
+export function sweepImageContentToPrivateOffThread(options: { set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined }): Promise<ImageContentSweepReport> {
+  return runPassOffThread(imageContentSweepPass(options), options.turn ? { turn: options.turn } : {});
+}
+
+function* imageContentSweepPass(options: { set: TieredStoreSet; limit?: number }): LoopPass<ImageContentSweepReport> {
   const report: ImageContentSweepReport = { scanned: 0, raised: 0, stripped: 0, complete: true };
   const { set } = options;
   const ledger = set.ledger;
   const state = readState(ledger.readMeta(SWEEP_META_KEY));
   if (state.done) return report;
   const limit = Math.max(1, options.limit ?? DEFAULT_IMAGE_CONTENT_SWEEP_ROWS);
-  const rows = ledger.listRouted({ ...(state.after ? { after: state.after } : {}), limit });
+  const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...(state.after ? { after: state.after } : {}), limit }));
   for (const record of rows) {
+    yield* turn();
     report.scanned += 1;
     try {
       if (raiseIfImage(set, record)) report.raised += 1;
@@ -58,7 +73,11 @@ export function sweepImageContentToPrivate(options: { set: TieredStoreSet; limit
   for (const domain of ['public_safe', 'internal'] as const) {
     const store = set.store(domain);
     if (!store) continue;
-    report.stripped += store.stripImageContentOutsidePrivate({ keep: (identity) => ledger.isRouted(identity) });
+    const found = yield* find({ here: () => store.imageContentOutsidePrivateRows(), offThread: () => store.imageContentOutsidePrivateRowsOffThread() });
+    for (let at = 0; at < found.length; at += STRIP_BATCH) {
+      yield* turn();
+      report.stripped += store.stripImageContentRows(found.slice(at, at + STRIP_BATCH), { keep: (identity) => ledger.isRouted(identity) });
+    }
   }
   ledger.writeMeta(SWEEP_META_KEY, JSON.stringify({ done: true }));
   return report;

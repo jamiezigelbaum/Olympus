@@ -23,6 +23,7 @@
 
 import type { TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { emptyTierRejudgeReport, rejudgeStoredContent, type TierRejudgeReport } from './tier-rejudge.ts';
+import { runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export const DEFAULT_MEDIA_JUDGMENT_SWEEP_LIMIT = 200;
@@ -34,12 +35,24 @@ export interface MediaJudgmentSweepReport extends TierRejudgeReport {
   waiting: number;
 }
 
-export function applyMediaJudgments(options: {
+export interface ApplyMediaJudgmentsOptions {
   set: TieredStoreSet;
   limit?: number;
   /** Whether queued moves run automatically here (see TierRejudgeOptions.autoMoves). */
   autoMoves?: boolean;
-}): MediaJudgmentSweepReport {
+}
+
+/** The sweep on its caller's connection (a direct caller, not the engine's loop). */
+export function applyMediaJudgments(options: ApplyMediaJudgmentsOptions): MediaJudgmentSweepReport {
+  return runPassHere(mediaJudgmentsPass(options));
+}
+
+/** The sweep on the engine's loop: a turn between the items it re-judges. Its page is read by key. */
+export function applyMediaJudgmentsOffThread(options: ApplyMediaJudgmentsOptions & { turn?: () => Promise<void> | undefined }): Promise<MediaJudgmentSweepReport> {
+  return runPassOffThread(mediaJudgmentsPass(options), options.turn ? { turn: options.turn } : {});
+}
+
+function* mediaJudgmentsPass(options: ApplyMediaJudgmentsOptions): LoopPass<MediaJudgmentSweepReport> {
   const report: MediaJudgmentSweepReport = { ...emptyTierRejudgeReport(), applied: 0, waiting: 0 };
   const { set } = options;
   const ledger = set.ledger;
@@ -52,6 +65,7 @@ export function applyMediaJudgments(options: {
     for (const entry of page) {
       let ready = true;
       for (const identity of entry.items) {
+        yield* turn();
         report.seen += 1;
         const record = ledger.getCurrent(identity as TierLedgerIdentity);
         // Legacy (never routed), or gone: nothing in the ledger to re-decide.

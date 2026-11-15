@@ -1,4 +1,5 @@
 import type { SovereigntyTrustDomainPolicy } from '../../core/sovereignty.ts';
+import { offThreadReadsSupported, readOnPool } from '../connector-store/off-thread-reads.ts';
 import { buildSourceIndexCorpusRegistry, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import { embeddingModelEstimate, estimatedEmbeddingCostUsd } from '../../core/embedding-cost-estimates.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
@@ -745,7 +746,7 @@ export function createSourceIndexStatusHandler(
             readiness?.counts,
             readiness?.contentExtractionThroughput,
             availability?.modelId,
-            secretLocationCount(store),
+            secretLocationCount(store, (read, offThread) => reusedRead(snapshot.countsMaxAgeMs ?? 0, ['secrets', store.corpusId], read, offThread)),
           )
           : configuredCorpusStatus(corpus);
         if (status.configured && readiness?.counts[UNSUPPORTED_KIND_COUNT_KEY] !== undefined) {
@@ -960,19 +961,34 @@ function defaultCorpusDefinitions(): SourceIndexCorpusDefinition[] {
  * secret-locations index beside a Private store, read-only, never created.
  * Location only, and only the count leaves here.
  */
-function secretLocationCount(store: LocalConnectorStore): number | undefined {
+function secretLocationCount(
+  store: LocalConnectorStore,
+  reused: (read: () => number | undefined, offThread?: { read: () => Promise<number | undefined>; empty: number | undefined }) => number | undefined,
+): number | undefined {
   if (store.trustDomain !== 'secure_local' || store.dbPath === ':memory:') return undefined;
   const path = secretLocationsPathForStore(store.dbPath);
   if (!existsSync(path)) return undefined;
-  let index: SecretLocationsIndex | undefined;
-  try {
-    index = new SecretLocationsIndex({ dbPath: path, readOnly: true });
-    return index.count();
-  } catch {
-    return undefined;
-  } finally {
-    index?.close();
-  }
+  const read = (): number | undefined => {
+    let index: SecretLocationsIndex | undefined;
+    try {
+      index = new SecretLocationsIndex({ dbPath: path, readOnly: true });
+      return index.count();
+    } catch {
+      return undefined;
+    } finally {
+      index?.close();
+    }
+  };
+  // The count scans the index: on the loop it runs on the read worker
+  // (loop-stall step-back, family 4), and a snapshot caller gets the last one.
+  if (!offThreadReadsSupported(path)) return reused(read);
+  return reused(read, {
+    read: async () => {
+      const row = await readOnPool(path, { sql: 'SELECT COUNT(*) AS n FROM secret_locations', params: [], mode: 'get' }) as { n: number } | null;
+      return row?.n;
+    },
+    empty: undefined,
+  });
 }
 
 function connectorStoreStatus(

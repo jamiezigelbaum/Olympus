@@ -26,6 +26,7 @@ import { detectSecretFindingKinds, secretScanReusable } from '../classification/
 import { scanSecretsAhead } from '../classification/secret-scan-off-thread.ts';
 import { UNDECIDED_TIER_SNIFFER, type TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { ledgerReadOffThread } from './child-visibility.ts';
 import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -104,7 +105,8 @@ export async function sweepSecretsFloor(options: {
     return report;
   }
   const limit = Math.max(1, options.limit ?? DEFAULT_SECRETS_FLOOR_SWEEP_ROWS);
-  const rows = ledger.listRouted({ ...(progress?.after ? { after: progress.after } : {}), limit });
+  // Found on the ledger's read worker: the loop only applies the floor to each row.
+  const rows = await ledgerReadOffThread(ledger, ledger.listRoutedSteps({ ...(progress?.after ? { after: progress.after } : {}), limit }));
   for (const record of rows) await attempt(record);
   if (rows.length < limit) {
     if (held.length === 0 && !overflow) writeState(ledger, { done: SECRETS_FLOOR_VERSION });

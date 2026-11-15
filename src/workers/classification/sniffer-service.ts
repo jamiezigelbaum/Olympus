@@ -51,13 +51,14 @@ import {
   settleLegacySecrets,
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
-import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
-import { settlePersonalFirstItems } from '../connector-store/tier-held-settle.ts';
-import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
-import { applyOwnerOverrides } from '../connector-store/tier-override-settle.ts';
-import { retireSecretRedactions, retrySecretSideStoreDebts } from '../connector-store/secrets-disposition.ts';
-import { sweepImageContentToPrivate } from '../connector-store/tier-image-content-sweep.ts';
-import { applyMediaJudgments } from '../connector-store/tier-media-judgment-sweep.ts';
+import { settleNamesOnlyItemsOffThread } from '../connector-store/tier-names-only-settle.ts';
+import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-settle.ts';
+import { sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
+import { applyOwnerOverridesOffThread } from '../connector-store/tier-override-settle.ts';
+import { retireSecretRedactions, retrySecretSideStoreDebtsOffThread } from '../connector-store/secrets-disposition.ts';
+import { ledgerReadOffThread } from '../connector-store/child-visibility.ts';
+import { sweepImageContentToPrivateOffThread } from '../connector-store/tier-image-content-sweep.ts';
+import { applyMediaJudgmentsOffThread } from '../connector-store/tier-media-judgment-sweep.ts';
 import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
@@ -1518,7 +1519,7 @@ export class TierSnifferService {
     }
     // A move that just landed may have carried an item whose owner override
     // came while it was queued: apply the override now, not a tick later.
-    if (autoMoves && autoMoves.moved > 0) this.applyOwnerOverrides();
+    if (autoMoves && autoMoves.moved > 0) await this.applyOwnerOverrides();
     return { state: 'ran', report, ...(rejudged.seen > 0 || rejudged.builtinPromptSkipped > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
   }
 
@@ -1553,8 +1554,11 @@ export class TierSnifferService {
         if (stores.length === 0 || stores.some(store => !store.exportItemCopy)) continue;
         // Once per ledger, a page per pass: older unread settlements get the
         // `unread` label they would get now (#847).
-        if (ledger.readMeta(TIER_LEDGER_UNREAD_RELABEL_DONE) !== '1' && ledger.relabelUnreadFailSafe() === 0) {
-          ledger.writeMeta(TIER_LEDGER_UNREAD_RELABEL_DONE, '1');
+        // The page is found on the ledger's read worker; the loop relabels it by rowid.
+        if (ledger.readMeta(TIER_LEDGER_UNREAD_RELABEL_DONE) !== '1') {
+          const relabel = await ledgerReadOffThread(ledger, ledger.relabelUnreadFailSafeCandidateSteps());
+          if (relabel.length === 0) ledger.writeMeta(TIER_LEDGER_UNREAD_RELABEL_DONE, '1');
+          else ledger.relabelUnreadFailSafeRows(relabel);
         }
         const saved = ledger.readMeta(cursorKey);
         const after = saved ? JSON.parse(saved) as TierLedgerIdentity : undefined;
@@ -1741,16 +1745,17 @@ export class TierSnifferService {
    * (tier-names-only-settle.ts). Never throws.
    */
   private async settleStoredItems(): Promise<void> {
-    this.applyOwnerOverrides();
+    await this.applyOwnerOverrides();
     for (const ledgerPath of this.ledgerPaths()) {
       await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
+      const turn = () => this.ingestionTurn();
       void set.repairLowerContent({ ...(this.options.autoMoves ? {
         embeddingLedger: { path: this.options.autoMoves.embeddingLedgerPath, approvedBy: 'system-automatic' as const, why: AUTO_MOVE_WHY },
       } : {}) });
       try {
-        const report = sweepOwnerRuleRaises({ set });
+        const report = await sweepOwnerRuleRaisesOffThread({ set, turn });
         if (report.raised > 0 || report.secrets > 0) {
           this.options.log?.(
             `Olympus tier rules: ${report.raised} stored item(s) raised by a new owner rule (hidden first)`
@@ -1761,7 +1766,7 @@ export class TierSnifferService {
         // A set that cannot be read keeps its placements this tick.
       }
       try {
-        const images = sweepImageContentToPrivate({ set });
+        const images = await sweepImageContentToPrivateOffThread({ set, turn });
         if (images.raised > 0 || images.stripped > 0) {
           this.options.log?.(
             `Olympus photos: ${images.raised} stored photo(s) moved to Private (hidden first), ${images.stripped} photo text(s) removed from a non-Private store.`,
@@ -1773,7 +1778,7 @@ export class TierSnifferService {
       try {
         // The photo judge's verdicts: an ordinary photo leaves the Private
         // store (a queued move), a sensitive one stays.
-        const judged = applyMediaJudgments({ set, autoMoves: this.autoMovesFor(set) });
+        const judged = await applyMediaJudgmentsOffThread({ set, autoMoves: this.autoMovesFor(set), turn });
         if (judged.movesQueued > 0) this.forgetLowerMoves();
         if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
           this.options.log?.(
@@ -1785,7 +1790,7 @@ export class TierSnifferService {
         // A set that cannot be read keeps its placements this tick.
       }
       try {
-        const settled = settleNamesOnlyItems({ set });
+        const settled = await settleNamesOnlyItemsOffThread({ set, turn });
         if (settled.settled > 0) {
           this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
         }
@@ -1793,7 +1798,7 @@ export class TierSnifferService {
         // Left pending this tick.
       }
       try {
-        const held = settlePersonalFirstItems({ set });
+        const held = await settlePersonalFirstItemsOffThread({ set, turn });
         if (held.settled > 0) {
           this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
         }
@@ -1808,8 +1813,9 @@ export class TierSnifferService {
    * directions (tier-override-settle.ts): `olympus tier set` on an unchanged
    * file takes effect within a tick, not at the file's next change. Never throws.
    */
-  private applyOwnerOverrides(): void {
+  private async applyOwnerOverrides(): Promise<void> {
     for (const ledgerPath of this.ledgerPaths()) {
+      await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) {
         // A store's own ledger (no set to apply overrides through): its
@@ -1817,7 +1823,7 @@ export class TierSnifferService {
         // and items that left Secrets get their job names back.
         try {
           const ledger = this.ledgerAt(ledgerPath);
-          retrySecretSideStoreDebts(ledger);
+          await retrySecretSideStoreDebtsOffThread(ledger, { turn: () => this.ingestionTurn() });
           retireSecretRedactions(ledger);
         } catch {
           // Retried next tick.
@@ -1825,7 +1831,7 @@ export class TierSnifferService {
         continue;
       }
       try {
-        const report = applyOwnerOverrides({ set });
+        const report = await applyOwnerOverridesOffThread({ set, turn: () => this.ingestionTurn() });
         if (report.raised > 0 || report.lowered > 0 || report.secrets > 0 || report.updated > 0) {
           this.options.log?.(
             `Olympus tier overrides: ${report.raised + report.lowered + report.secrets + report.updated} stored item(s) set by the owner applied `
@@ -1934,8 +1940,10 @@ export class TierSnifferService {
       // reclaimed would block this thread on its busy timeout. Moves stay
       // queued for the next pass.
       if (set.openStores().some(store => store.reclaiming)) continue;
-      const queued = set.ledger.listMoving({ limit: budget, direction })
+      // Found on the ledger's read worker; each move re-checks its generation as it lands.
+      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction })))
         .filter(isAutoMoveCandidate);
+      if (set.openStores().some(store => store.reclaiming)) continue;
       if (!setEmbedsWithBuiltInOnly(set)) { report.notEligible += queued.length; continue; }
       const failure = (record: TierLedgerRecord, error: unknown) => {
         const identity = recordIdentity(record);

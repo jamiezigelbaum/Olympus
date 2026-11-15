@@ -33,6 +33,7 @@
 // cancels any clearing still owed, and `retireSecretRedactions` removes the
 // item's redaction markers from every job ledger and AI apps list.
 
+import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import { existsSync } from 'node:fs';
 import { appReleaseLogDbPaths, forgetSecretAppReleaseItem, retireSecretAppReleaseItem } from '../../core/app-release-log.ts';
 import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
@@ -257,6 +258,16 @@ export function forgetSecretInSideStores(options: {
 
 /** Retry the side-store clearing of Secrets that could not be cleared before. Returns how many are now clear. */
 export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): number {
+  return runPassHere(retrySecretSideStoreDebtsPass(ledger, limit));
+}
+
+/** `retrySecretSideStoreDebts` on the engine's loop: the unsettled Secrets are found on the ledger's read worker. */
+export function retrySecretSideStoreDebtsOffThread(ledger: TierLedger, options: { limit?: number; turn?: () => Promise<void> | undefined } = {}): Promise<number> {
+  return runPassOffThread(retrySecretSideStoreDebtsPass(ledger, options.limit), options.turn ? { turn: options.turn } : {});
+}
+
+/** `retrySecretSideStoreDebts` as a loop pass: the unsettled Secrets are found on the ledger's read worker. */
+export function* retrySecretSideStoreDebtsPass(ledger: TierLedger, limit = 100): LoopPass<number> {
   try {
     ledger.noteJobLedgerPaths(extractionJobsDbPaths());
   } catch {
@@ -271,11 +282,12 @@ export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): numb
   // Secrets whose clearing never finished and was never written down.
   let unsettled: Array<TierLedgerIdentity & { holdsCopies: boolean }> = [];
   try {
-    unsettled = ledger.unsettledSecretSideStores(limit);
+    unsettled = yield* findInLedger(ledger, () => ledger.unsettledSecretSideStoresSteps(limit));
   } catch {
     // Read again next tick.
   }
   for (const { holdsCopies, ...identity } of unsettled) {
+    yield* turn();
     // A settlement the sniffer retries from its queued question (a refused
     // credential: sniffer-resolver.ts `stillOpen`) needs that question: it
     // clears the side stores itself. Any other question is cleared here.

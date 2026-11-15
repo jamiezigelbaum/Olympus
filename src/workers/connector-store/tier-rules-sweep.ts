@@ -44,6 +44,7 @@ import type { SourceClassificationSignals } from '../../core/contracts.ts';
 import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { leastPrivateDomain } from './tier-override-settle.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
+import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 /** Routed ledger rows read per call. */
@@ -86,7 +87,17 @@ interface SweepState {
   } | undefined;
 }
 
+/** The sweep on its caller's connection (a direct caller, not the engine's loop). */
 export function sweepOwnerRuleRaises(options: { set: TieredStoreSet; limit?: number }): TierRulesSweepReport {
+  return runPassHere(ownerRuleRaisesPass(options));
+}
+
+/** The sweep on the engine's loop: its page is read on the ledger's read worker, a turn between rows. */
+export function sweepOwnerRuleRaisesOffThread(options: { set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined }): Promise<TierRulesSweepReport> {
+  return runPassOffThread(ownerRuleRaisesPass(options), options.turn ? { turn: options.turn } : {});
+}
+
+function* ownerRuleRaisesPass(options: { set: TieredStoreSet; limit?: number }): LoopPass<TierRulesSweepReport> {
   const report: TierRulesSweepReport = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
   const classification = set.classification();
@@ -131,6 +142,7 @@ export function sweepOwnerRuleRaises(options: { set: TieredStoreSet; limit?: num
     // The pass is over; only what it held back is tried again.
     const retrying = held.splice(0);
     for (const identity of retrying) {
+      yield* turn();
       const record = ledger.getCurrent(identity);
       if (record?.routed) attempt(record);
     }
@@ -144,8 +156,11 @@ export function sweepOwnerRuleRaises(options: { set: TieredStoreSet; limit?: num
   }
   const resume = progress?.after;
   const limit = Math.max(1, options.limit ?? DEFAULT_RULES_SWEEP_ROWS);
-  const rows = ledger.listRouted({ ...(resume ? { after: resume } : {}), limit });
-  for (const record of rows) attempt(record);
+  const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...(resume ? { after: resume } : {}), limit }));
+  for (const record of rows) {
+    yield* turn();
+    attempt(record);
+  }
   if (rows.length < limit) {
     if (held.length === 0 && !overflow) {
       writeState(ledger, { done: [...done, ...pendingKeys] });

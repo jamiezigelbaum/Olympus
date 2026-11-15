@@ -797,10 +797,10 @@ describe('5. what an earlier version indexed inside an own folder', () => {
 
   test('settles nothing else first: a backlog of owner overrides is no part of the start-up wait', async () => {
     const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody the session token'], [budget, 'zzbudgetbody']]);
-    // The tier-wide settlement reads every routed override of the set.
+    // The tier-wide settlement reads every routed override of the set (on the ledger's read worker).
     let reads = 0;
-    const listRoutedOverrides = lane.set.ledger.listRoutedOverrides.bind(lane.set.ledger);
-    lane.set.ledger.listRoutedOverrides = () => { reads += 1; return listRoutedOverrides(); };
+    const listRoutedOverridesSteps = lane.set.ledger.listRoutedOverridesSteps.bind(lane.set.ledger);
+    lane.set.ledger.listRoutedOverridesSteps = () => { reads += 1; return listRoutedOverridesSteps(); };
 
     expect(await createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext() }).run()).toEqual({ removed: 1, complete: true });
     expect(present(secure, secret)).toBe(false);

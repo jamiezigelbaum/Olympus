@@ -133,6 +133,7 @@ import {
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
+  ledgerReadOffThread,
   type VisibilityRead,
   parentIdentityField,
   parentKey,
@@ -142,6 +143,7 @@ import {
   type ParentRef,
   type ParentStandingRow,
 } from './child-visibility.ts';
+import type { LoopFinder } from './loop-pass.ts';
 import {
   createSourceExclusionMatcherFromPrefixes,
   sourceExclusionOutcomeIsUnevaluable,
@@ -1105,6 +1107,39 @@ const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 const HIDDEN_CHILD_PARENT_SLICE = 500;
 
 // The same steps with a turn before each one, so requests answer in between.
+/** A step of a status build: a turn, or a finder for the read worker (families 1 and 2). */
+type HiddenStep = void | { find: LoopFinder<unknown> };
+type IdentityRow = { idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null };
+type VisibilityUpdate = { identity: TierLedgerIdentity; pks: number[]; flags: TierCorpusVisibility | undefined };
+
+function visibilityFlagged(row: TierCorpusVisibility): boolean {
+  return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
+}
+
+function runHiddenStepsHere<T>(steps: Generator<HiddenStep, T, unknown>): T {
+  let step = steps.next();
+  while (!step.done) step = steps.next(step.value ? step.value.find.here() : undefined);
+  return step.value;
+}
+
+/** runStepsInTurns for a build with finders: each finder runs on the read worker. */
+async function runHiddenStepsInTurns<T>(steps: Generator<HiddenStep, T, unknown>): Promise<T> {
+  await ingestionTurn();
+  let step = steps.next();
+  while (!step.done) {
+    if (step.value) {
+      let found: unknown;
+      try { found = await step.value.find.offThread(); }
+      catch (error) { step = steps.throw(error); continue; }
+      step = steps.next(found);
+      continue;
+    }
+    await ingestionTurn();
+    step = steps.next();
+  }
+  return step.value;
+}
+
 async function runStepsInTurns<T>(steps: Generator<void, T>): Promise<T> {
   await ingestionTurn();
   let step = steps.next();
@@ -3592,6 +3627,15 @@ const RECLAIM_CONVERSION_BYTES_PER_MS = 15_000;
 /** File releases include filesystem work: admit one picture per prune step. */
 const SUPERSEDED_PRUNE_MEDIA_ROWS = 1;
 
+/** A still image `stripImageContentOutsidePrivate` would strip. */
+export interface ImageContentOutsidePrivateRow {
+  item_pk: number;
+  provider: string;
+  account_scope: string;
+  provider_item_id: string;
+  provider_conversation_id: string | null;
+}
+
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
@@ -4510,7 +4554,7 @@ export class LocalConnectorStore {
    * caught by the embedding batch recheck right before dispatch.
    */
   private async tierHiddenItemPksInTurns(): Promise<TierLedgerHiddenItemPks> {
-    const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
+    const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
     // Keep the counts' start-of-build semantics during continuous intake.
     // Search and embedding recheck served rows; requiring the whole lane to
     // stay unchanged across this full scan would prevent its memo ever filling.
@@ -4546,7 +4590,7 @@ export class LocalConnectorStore {
   }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
-    return runSteps(this.tierLedgerHiddenSteps());
+    return runHiddenStepsHere(this.tierLedgerHiddenSteps());
   }
 
   /**
@@ -4649,7 +4693,54 @@ export class LocalConnectorStore {
    * for a returned row; every row a read returns is still checked against the
    * current ledger (tierVisibleRows, embeddingBatchRecheck).
    */
-  private *tierLedgerHiddenSteps(): Generator<void, TierLedgerHiddenItemPks> {
+  /**
+   * The bootstrap's finder: the corpus's flagged copies from the ledger, and
+   * this store's item pks for them. Here, on this connection (a direct
+   * caller); off the thread, on the read worker over the ledger file and
+   * this store's file. Copies no flag marks are left out: a bootstrap
+   * applies nothing for them.
+   */
+  private visibilityBootstrapFinder(ledger: TierLedger): LoopFinder<VisibilityUpdate[]> {
+    const conversationOf = (identity: TierLedgerIdentity) => normalizeConversationId(identity.providerConversationId);
+    const join = (flagged: readonly TierCorpusVisibility[], rows: ReadonlyArray<{ idx: number; item_pk: number }>): VisibilityUpdate[] => {
+      const pks = new Map<number, number[]>();
+      for (const row of rows) {
+        const list = pks.get(row.idx);
+        if (list) list.push(row.item_pk); else pks.set(row.idx, [row.item_pk]);
+      }
+      return flagged.map((flags, idx) => ({ identity: flags, pks: pks.get(idx) ?? [], flags }));
+    };
+    return {
+      here: () => {
+        const flagged: TierCorpusVisibility[] = [];
+        for (const page of ledger.corpusVisibilityPages(this.corpusId)) {
+          for (const row of page) if (visibilityFlagged(row)) flagged.push(row);
+        }
+        return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
+      },
+      offThread: async () => {
+        const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId));
+        if (flagged.length === 0 || !offThreadReadsSupported(this.dbPath)) {
+          return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
+        }
+        const rows = await withOffThreadSnapshot(this.dbPath, async (read) => {
+          const out: Array<{ idx: number; item_pk: number }> = [];
+          for (let offset = 0; offset < flagged.length; offset += IDENTITY_LOOKUP_SLICE) {
+            const slice = flagged.slice(offset, offset + IDENTITY_LOOKUP_SLICE);
+            const keys = JSON.stringify(slice.map((identity) =>
+              [identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]));
+            for (const row of await read({ sql: identityRowsSql(''), params: [keys], mode: 'all' }) as Array<{ idx: number; item_pk: number }>) {
+              out.push({ idx: row.idx + offset, item_pk: row.item_pk });
+            }
+          }
+          return out;
+        });
+        return join(flagged, rows);
+      },
+    };
+  }
+
+  private *tierLedgerHiddenSteps(): Generator<HiddenStep, TierLedgerHiddenItemPks, unknown> {
     const ledger = this.visibilityLedger(); // binding verification must precede every cache use
     this.registerVisibilityWriter(ledger);
     if (!ledger) {
@@ -4685,7 +4776,6 @@ export class LocalConnectorStore {
     // Prepare deltas off to the side, so a synchronous reader while this walk
     // yields cannot see a half-applied removal or a half-built held set.
     const updates: Array<{ identity: TierLedgerIdentity; pks: number[]; flags: TierCorpusVisibility | undefined }> = [];
-    const pages = ledger.corpusVisibilityPages(this.corpusId, changed);
     const prepare = function* (store: LocalConnectorStore, identities: readonly TierLedgerIdentity[], flags: TierCorpusVisibility[]) {
       const rows = yield* store.itemRowsForIdentitiesSteps(identities, identity => normalizeConversationId(identity.providerConversationId));
       const pks = new Map<number, number[]>();
@@ -4698,15 +4788,18 @@ export class LocalConnectorStore {
     };
     if (changed) {
       const flags: TierCorpusVisibility[] = [];
-      for (const page of pages) { flags.push(...page); yield; }
+      for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) { flags.push(...page); yield; }
       updates.push(...(yield* prepare(this, changed, flags)));
     } else {
-      for (const page of pages) {
-        // Keep bootstrap memory bounded beyond the resulting cache itself.
-        const batch = yield* prepare(this, page, page);
-        this.applyVisibilityUpdates(memo, batch);
-        yield;
+      // The bootstrap walks the whole corpus: a finder (loop-stall step-back,
+      // family 1). Run in turns it is found on the read worker, and the loop
+      // only applies the flagged copies it hands back, a slice per turn.
+      const found = (yield { find: this.visibilityBootstrapFinder(ledger) }) as VisibilityUpdate[];
+      for (let start = 0; start < found.length; start += IDENTITY_LOOKUP_SLICE) {
+        if (start > 0) yield;
+        this.applyVisibilityUpdates(memo, found.slice(start, start + IDENTITY_LOOKUP_SLICE));
       }
+      yield;
     }
     // Another reader may have replaced or advanced the memo during the walk.
     // Never overwrite its newer state with this older delta: rebuild against
@@ -5085,7 +5178,7 @@ export class LocalConnectorStore {
     let refreshing: Promise<void> | undefined;
     refreshing = (async () => {
       try {
-        await runStepsInTurns(this.tierLedgerHiddenSteps());
+        await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
         await this.publishVisibility();
       } catch {
         // The next movement or the backstop asks again.
@@ -7003,8 +7096,31 @@ export class LocalConnectorStore {
   stripImageContentOutsidePrivate(options: {
     keep?: (identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>) => boolean;
   } = {}): number {
-    if (this.trustDomain === 'secure_local') return 0;
-    const rows = this.db.query(`
+    const read = this.imageContentOutsidePrivateRead();
+    if (!read) return 0;
+    return this.stripImageContentRows(this.db.query(read.sql).all() as ImageContentOutsidePrivateRow[], options);
+  }
+
+  /**
+   * The still images `stripImageContentOutsidePrivate` would strip, read on
+   * the store's read worker (on this thread only for an in-memory store).
+   */
+  async imageContentOutsidePrivateRowsOffThread(): Promise<ImageContentOutsidePrivateRow[]> {
+    const read = this.imageContentOutsidePrivateRead();
+    if (!read) return [];
+    if (!offThreadReadsSupported(this.dbPath)) return this.db.query(read.sql).all() as ImageContentOutsidePrivateRow[];
+    return await withOffThreadSnapshot(this.dbPath, async (run) => run(read)) as ImageContentOutsidePrivateRow[];
+  }
+
+  /** The same rows on this thread (a direct caller, not the engine's loop). */
+  imageContentOutsidePrivateRows(): ImageContentOutsidePrivateRow[] {
+    const read = this.imageContentOutsidePrivateRead();
+    return read ? this.db.query(read.sql).all() as ImageContentOutsidePrivateRow[] : [];
+  }
+
+  private imageContentOutsidePrivateRead(): StoreRead | undefined {
+    if (this.trustDomain === 'secure_local') return undefined;
+    return { sql: `
       SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
       FROM items i
       WHERE i.tombstoned = 0
@@ -7015,9 +7131,22 @@ export class LocalConnectorStore {
           SELECT 1 FROM chunks c JOIN media_judgments j ON j.media_sha256 = c.media_sha256
           WHERE c.item_pk = i.item_pk AND j.verdict = 'ordinary'
         )` : ''}
-    `).all() as Array<{
-      item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
-    }>;
+    `, params: [], mode: 'all' };
+  }
+
+  /**
+   * The write half of `stripImageContentOutsidePrivate`, for rows found
+   * elsewhere: each item is checked again here (still an image with chunks
+   * outside Private) before its picture content goes. Returns the items stripped.
+   */
+  stripImageContentRows(found: readonly ImageContentOutsidePrivateRow[], options: {
+    keep?: (identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>) => boolean;
+  } = {}): number {
+    const read = this.imageContentOutsidePrivateRead();
+    if (!read || found.length === 0) return 0;
+    // By key: of the rows found, those that still qualify now.
+    const rows = this.db.query(`${read.sql} AND i.item_pk IN (SELECT value FROM json_each(?))`)
+      .all(JSON.stringify(found.map((row) => row.item_pk))) as ImageContentOutsidePrivateRow[];
     const ledger = this.tierLedger();
     let stripped = 0;
     try {
@@ -15528,7 +15657,7 @@ export class LocalConnectorStore {
     await this.refreshTierHiddenCountsInTurns();
     const key = JSON.stringify(scope ?? null);
     try {
-      const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+      const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
       const memos = this.settledUnreadableCountMemo ??= new Map();
       if (memos.size > 32) memos.clear();
       memos.set(key, { at: Date.now(), ...counts });
@@ -15548,7 +15677,7 @@ export class LocalConnectorStore {
       if (Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope);
       return memo;
     }
-    const counts = this.unreadHoldCounts(runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+    const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32) memos.clear();
     memos.set(key, { at: Date.now(), ...counts });
     return counts;
@@ -15562,7 +15691,7 @@ export class LocalConnectorStore {
     running.add(key);
     void (async () => {
       try {
-        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+        const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
         const memos = this.settledUnreadableCountMemo ??= new Map();
         if (memos.size > 32) memos.clear();
         memos.set(key, { at: Date.now(), ...counts });
@@ -15614,19 +15743,18 @@ export class LocalConnectorStore {
   private *settledUnreadableRowsSteps(
     scope: ConnectorStoreStatusScope | undefined,
     options: { withoutSecretsOverrides?: boolean; includeUnsettled?: boolean } = {},
-  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { item_pk: number; local_item_id: string; title: string | null; source_version: string | null }; disposition: UnreadHoldDisposition }>> {
+  ): Generator<HiddenStep, Array<{ identity: TierLedgerIdentity; row: { item_pk: number; local_item_id: string; title: string | null; source_version: string | null }; disposition: UnreadHoldDisposition }>, unknown> {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
-    // A page of copies at a time: one read of every metadata-only copy was a
-    // tenth of Sparta's sampled freezes (34b0edb, 2026-11-05).
-    const identities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, options.withoutSecretsOverrides
+    const filter = options.withoutSecretsOverrides
       ? 'metadata_layer_settled_unreadable_not_secret'
-      : 'metadata_layer_settled_unreadable');
+      : 'metadata_layer_settled_unreadable';
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
     const outcome = this.extractionOutcome;
-    const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? '', {
+    const conversationOf = (identity: TierLedgerIdentity) => identity.providerConversationId ?? '';
+    const extra = {
       // A child whose source said it has no bytes (media an export left out, a
       // chat file the capture did not keep) was never a file Olympus failed to
       // read: the archive's Not imported list says so, once, for all of them.
@@ -15635,7 +15763,21 @@ export class LocalConnectorStore {
       // (A read-only store from before schema v15 has no such column, and no such children.)
       sql: `${this.childItemColumnsPresent ? 'AND COALESCE(i.bytes_available, 1) <> 0' : ''} ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],
-    });
+    };
+    // The ledger walk and the store lookups are finders (loop-stall
+    // step-back, family 2): in turns they run on the read worker, and the
+    // loop keeps only the per-item outcome probe, which reads by key.
+    const finder: LoopFinder<{ identities: TierLedgerIdentity[]; rows: IdentityRow[] }> = {
+      here: () => {
+        const identities = runSteps(ledger.corpusCopyIdentitiesSteps(this.corpusId, filter));
+        return { identities, rows: runSteps(this.itemRowsForIdentitiesSteps(identities, conversationOf, extra)) };
+      },
+      offThread: async () => {
+        const identities = await ledgerReadOffThread(ledger, ledger.corpusCopyIdentityReads(this.corpusId, filter));
+        return { identities, rows: await this.itemRowsForIdentitiesOffThread(identities, conversationOf, extra) };
+      },
+    };
+    const { identities, rows } = (yield { find: finder }) as { identities: TierLedgerIdentity[]; rows: IdentityRow[] };
     const matched: Array<{ identity: TierLedgerIdentity; row: typeof rows[number]; disposition: UnreadHoldDisposition }> = [];
     for (let index = 0; index < rows.length; index += 1) {
       // Outcome lookups are indexed, but a large hold population still needs
@@ -15688,9 +15830,32 @@ export class LocalConnectorStore {
     return this.db.query(identityRowsSql(extra.sql)).all(keys, ...extra.params) as Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }>;
   }
 
+  /** itemRowsForIdentitiesSteps on the read worker, over one snapshot (here for an in-memory store). */
+  private async itemRowsForIdentitiesOffThread<T extends { provider: string; accountScope: string; providerItemId: string }>(
+    identities: readonly T[],
+    conversationOf: (identity: T) => string,
+    extra: { sql: string; params: readonly string[] } = { sql: '', params: [] },
+  ): Promise<IdentityRow[]> {
+    if (identities.length === 0) return [];
+    if (!offThreadReadsSupported(this.dbPath)) return runSteps(this.itemRowsForIdentitiesSteps(identities, conversationOf, extra));
+    const sql = identityRowsSql(extra.sql);
+    return withOffThreadSnapshot(this.dbPath, async (read) => {
+      const out: IdentityRow[] = [];
+      for (let offset = 0; offset < identities.length; offset += IDENTITY_LOOKUP_SLICE) {
+        const keys = JSON.stringify(identities.slice(offset, offset + IDENTITY_LOOKUP_SLICE).map((identity) =>
+          [identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]));
+        for (const row of await read({ sql, params: [keys, ...extra.params], mode: 'all' }) as IdentityRow[]) {
+          row.idx += offset;
+          out.push(row);
+        }
+      }
+      return out;
+    });
+  }
+
   /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
   settledUnreadableItems(scope?: ConnectorStoreStatusScope): ExtractionUnreadableItem[] {
-    return runSteps(this.settledUnreadableItemsSteps(scope));
+    return runHiddenStepsHere(this.settledUnreadableItemsSteps(scope));
   }
 
   /**
@@ -15699,10 +15864,10 @@ export class LocalConnectorStore {
    * Sparta's sampled freezes (2026-11-05, fe2aef4).
    */
   settledUnreadableItemsInTurns(scope?: ConnectorStoreStatusScope): Promise<ExtractionUnreadableItem[]> {
-    return runStepsInTurns(this.settledUnreadableItemsSteps(scope));
+    return runHiddenStepsInTurns(this.settledUnreadableItemsSteps(scope));
   }
 
-  private *settledUnreadableItemsSteps(scope?: ConnectorStoreStatusScope): Generator<void, ExtractionUnreadableItem[]> {
+  private *settledUnreadableItemsSteps(scope?: ConnectorStoreStatusScope): Generator<HiddenStep, ExtractionUnreadableItem[], unknown> {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];

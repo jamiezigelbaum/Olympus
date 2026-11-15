@@ -69,8 +69,11 @@ describe('Dropbox canonical last-completed-run marker', () => {
       expect(store.lastCompletedSyncRun(connectorId)?.cursor).toBe('cursor-1');
 
       failContinuation = true;
-      await expect(handler.pull({ approved_scope_key: ACTIVE_SCOPE }))
-        .rejects.toThrow('synthetic provider outage');
+      // Not `expect(...).rejects`: Bun's matcher waits in a nested loop that
+      // can miss the read worker's reply the sync's settle step awaits.
+      const failed = await handler.pull({ approved_scope_key: ACTIVE_SCOPE }).then(() => undefined, (error: unknown) => error);
+      expect(failed).toBeInstanceOf(Error);
+      expect((failed as Error).message).toContain('synthetic provider outage');
       expect(store.status().lastSyncRun?.status).toBe('failed');
       expect(store.lastCompletedSyncRun(connectorId)?.cursor).toBe('cursor-1');
 

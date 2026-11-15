@@ -19,6 +19,7 @@
 
 import { PERSONAL_FIRST_REASON, type TierDecision } from '../classification/tier-classifier.ts';
 import { parseTierLedgerIdentity, tierLedgerIdentityOfRecord, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export const DEFAULT_HELD_SETTLE_ROWS = 500;
@@ -33,14 +34,25 @@ export interface TierHeldSettleReport {
   movesQueued: number;
 }
 
+/** The settle on its caller's connection (a direct caller, not the engine's loop). */
 export function settlePersonalFirstItems(options: { set: TieredStoreSet; limit?: number }): TierHeldSettleReport {
+  return runPassHere(personalFirstSettlePass(options));
+}
+
+/** The settle on the engine's loop: its window is read on the ledger's read worker, a turn between rows. */
+export function settlePersonalFirstItemsOffThread(options: { set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined }): Promise<TierHeldSettleReport> {
+  return runPassOffThread(personalFirstSettlePass(options), options.turn ? { turn: options.turn } : {});
+}
+
+function* personalFirstSettlePass(options: { set: TieredStoreSet; limit?: number }): LoopPass<TierHeldSettleReport> {
   const report: TierHeldSettleReport = { checked: 0, settled: 0, movesQueued: 0 };
   const { set } = options;
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_HELD_SETTLE_ROWS);
   const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
-  const { records, resumeAfter } = ledger.listPersonalFirstWindow({ limit, ...(after ? { after } : {}) });
+  const { records, resumeAfter } = yield* findInLedger(ledger, () => ledger.listPersonalFirstWindowSteps({ limit, ...(after ? { after } : {}) }));
   for (const record of records) {
+    yield* turn();
     report.checked += 1;
     try {
       const outcome = settleOne(set, record);
