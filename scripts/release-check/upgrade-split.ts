@@ -139,7 +139,8 @@ export function leftoverFileNames(root: string): string[] {
       const path = join(dir, entry.name);
       if (entry.isDirectory() && dir === root && entry.name === 'models') continue;
       if (entry.isDirectory()) walk(path);
-      else if (/\.pre-schema-.*\.bak$|\.partial|-journal$/.test(entry.name)) names.push(relative(root, path));
+      // A store a failed update made is set aside on purpose until the next committed upgrade (boot-progress.ts).
+      else if (!entry.name.includes('.pre-schema-failed.bak') && /\.pre-schema-.*\.bak$|\.partial|-journal$/.test(entry.name)) names.push(relative(root, path));
     }
   };
   walk(root);
