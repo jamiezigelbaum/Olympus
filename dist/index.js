@@ -13527,6 +13527,7 @@ var init_source_failure = __esm(() => {
     "search_model_unavailable",
     "reader_unavailable",
     "busy_here",
+    "incomplete",
     "setup",
     "not_started",
     "unknown"
@@ -13709,6 +13710,7 @@ var init_vocabulary = __esm(() => {
     search_model_unavailable: "The search model wasn't running.",
     reader_unavailable: "The file reader wasn't running.",
     busy_here: "Olympus was busy with other work.",
+    incomplete: "Olympus couldn't finish reading {source} this time.",
     setup: "{source}'s setup isn't finished.",
     not_started: "The check didn't start.",
     unknown: "Olympus hit an error it doesn't recognise."

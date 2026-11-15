@@ -66862,6 +66862,9 @@ function isSourceFailureKind(value) {
   return typeof value === "string" && KIND_SET.has(value);
 }
 function sourceFailureKind(errorKind, degradedReason) {
+  if (typeof degradedReason === "string" && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(degradedReason)) {
+    return EXACT[degradedReason] ?? "daily_limit";
+  }
   for (const value of [errorKind, degradedReason]) {
     if (typeof value !== "string" || !value)
       continue;
@@ -66932,6 +66935,7 @@ var init_source_failure = __esm(() => {
     "search_model_unavailable",
     "reader_unavailable",
     "busy_here",
+    "incomplete",
     "setup",
     "not_started",
     "unknown"
@@ -66951,6 +66955,7 @@ var init_source_failure = __esm(() => {
     "evernote.rate_limit": SOURCE_RATE_LIMITED,
     "readwise.rate_limit": SOURCE_RATE_LIMITED,
     temporary: "provider_busy",
+    reconcile_incomplete: "incomplete",
     api_request_guard: "provider_refused",
     embedding_backend_unavailable: "search_model_unavailable",
     embedding_provider_unavailable: "search_model_unavailable",
@@ -67895,6 +67900,7 @@ var init_vocabulary = __esm(() => {
     search_model_unavailable: "The search model wasn't running.",
     reader_unavailable: "The file reader wasn't running.",
     busy_here: "Olympus was busy with other work.",
+    incomplete: "Olympus couldn't finish reading {source} this time.",
     setup: "{source}'s setup isn't finished.",
     not_started: "The check didn't start.",
     unknown: "Olympus hit an error it doesn't recognise."

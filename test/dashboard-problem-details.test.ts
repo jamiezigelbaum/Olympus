@@ -50,6 +50,11 @@ describe('a failure is one closed word', () => {
     expect(sourceFailureKind(undefined, 'daily_cost_guard')).toBe('daily_limit');
     expect(sourceFailureKind(undefined, 'provider_rate_limit')).toBe('rate_limited');
     expect(sourceFailureKind('task_failed')).toBe('unknown');
+    // X's reconcile that could not finish is a known kind, not an unrecognised error.
+    expect(sourceFailureKind('reconcile_incomplete', 'x_reconcile_window_boundary_drift')).toBe('incomplete');
+    // A cost guard trip carried in as api_request_guard is Olympus's daily limit, not X refusing.
+    expect(sourceFailureKind('api_request_guard', 'daily_cost_guard')).toBe('daily_limit');
+    expect(sourceFailureKind('api_request_guard')).toBe('provider_refused');
     expect(sourceFailureKind(PROVIDER_WORDS)).toBe('unknown');
     expect(sourceFailureKind(undefined)).toBe('unknown');
   });
