@@ -620,7 +620,10 @@ describe('connector-store status readiness', () => {
     try {
       await handler.status({ corpus_id: CORPUS_ID }, { countsMaxAgeMs: 300_000 });
       await handler.status({ corpus_id: CORPUS_ID });
-      expect(seen).toEqual([300_000, undefined]);
+      // A snapshot may build a corpus twice (once more after its first off-thread counts land): every ask carries its age.
+      expect(seen.length).toBeGreaterThanOrEqual(2);
+      expect(seen.slice(0, -1).every((age) => age === 300_000)).toBe(true);
+      expect(seen.at(-1)).toBeUndefined();
     } finally {
       store.close();
     }

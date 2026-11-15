@@ -42283,6 +42283,12 @@ function connectorStoreEmbeddingInputSha256(rows) {
 `);
   return digest.digest("hex");
 }
+function authorCoverageRows(rows) {
+  return rows.map((row) => ({ provider: row.provider, items: row.items, itemsWithoutAuthor: row.without_author ?? 0 }));
+}
+function pdfBacklogFromRow(row) {
+  return { pendingPdfs: row.pending ?? 0, extractedPdfs: row.extracted ?? 0, extractedChars: row.chars };
+}
 function statusScopeContentFilter(scope) {
   if (!scope)
     return { filter: "", params: [] };
@@ -43965,7 +43971,17 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   } finally {
     closeSqliteStore(db);
   }
-};`, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+};`, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
+  SELECT
+    SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
+    SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
+    COALESCE(SUM(chars), 0) AS chars
+  FROM (
+    SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
+    FROM items i
+    WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
+  )
+`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_source_size_limits();
   init_vector_digest();
@@ -47013,7 +47029,17 @@ ${parentKey(ref)}`, { ref, origin });
       }));
     }
     authorCoverage() {
-      return this.db.query(`
+      const read = this.authorCoverageRead();
+      return authorCoverageRows(this.db.query(read.sql).all(...read.params));
+    }
+    async authorCoverageOffThread() {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.authorCoverage();
+      const read = this.authorCoverageRead();
+      return authorCoverageRows(await withOffThreadSnapshot(this.dbPath, async (run) => run(read)));
+    }
+    authorCoverageRead() {
+      return { mode: "all", params: [], sql: `
       SELECT provider, COUNT(*) AS items,
         SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
           THEN 1 ELSE 0 END) AS without_author
@@ -47021,11 +47047,7 @@ ${parentKey(ref)}`, { ref, origin });
       WHERE tombstoned = 0 AND parent_local_item_id IS NULL
       GROUP BY provider
       ORDER BY provider
-    `).all().map((row) => ({
-        provider: row.provider,
-        items: row.items,
-        itemsWithoutAuthor: row.without_author ?? 0
-      }));
+    ` };
     }
     senderAggregation(options) {
       if (this.family !== "chat") {
@@ -50182,12 +50204,23 @@ ${parentKey(ref)}`, { ref, origin });
       return rows.map((row) => row.local_item_id);
     }
     embeddingBacklogEstimate(modelId, embedder, scope, options = {}) {
-      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
+      const read = this.embeddingBacklogRead(modelId, embedder, scope, options, true);
+      const row = this.db.query(read.sql).get(...read.params);
+      return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    }
+    async embeddingBacklogEstimateOffThread(modelId, embedder, scope, options = {}) {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
+      const read = this.embeddingBacklogRead(modelId, embedder, scope, options, false);
+      const row = await withOffThreadSnapshot(this.dbPath, async (run) => run(read));
+      return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    }
+    embeddingBacklogRead(modelId, embedder, scope, options, connectionLocal) {
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
       const scoped = statusScopeContentFilter(scope);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
-      const params = [...tierExclusion.params, ...privateTier.params, ...scoped.params];
-      const row = this.db.query(`
+      return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
@@ -50195,30 +50228,19 @@ ${parentKey(ref)}`, { ref, origin });
       WHERE i.tombstoned = 0
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
-    `).get(modelId, ...params);
-      return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    ` };
     }
     pdfExtractionBacklog() {
-      const row = this.db.query(`
-      SELECT
-        SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
-        SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
-        COALESCE(SUM(chars), 0) AS chars
-      FROM (
-        SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
-        FROM items i
-        WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
-      )
-    `).get();
-      return {
-        pendingPdfs: row.pending ?? 0,
-        extractedPdfs: row.extracted ?? 0,
-        extractedChars: row.chars
-      };
+      return pdfBacklogFromRow(this.db.query(PDF_EXTRACTION_BACKLOG_SQL).get());
     }
-    embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false) {
+    async pdfExtractionBacklogOffThread() {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.pdfExtractionBacklog();
+      return pdfBacklogFromRow(await withOffThreadSnapshot(this.dbPath, async (run) => run({ sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: "get" })));
+    }
+    embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false, connectionLocal = true) {
       const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
-      if (this.visibilityJournal && this.visibilitySqlMemo) {
+      if (connectionLocal && this.visibilityJournal && this.visibilitySqlMemo) {
         const children = tierExcluded.hidden === this.visibilitySqlMemo.value.hidden ? [] : tierExcluded.hidden;
         return {
           filter: `AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v
@@ -114903,9 +114925,9 @@ var init_source_ingestion_ledger = __esm(() => {
 
 // src/workers/source-index/status.ts
 import { existsSync as existsSync71, readFileSync as readFileSync58, statSync as statSync35 } from "node:fs";
-function authorCoverageStatus(store) {
+function authorCoverageStatus(store, reused = (read) => read()) {
   try {
-    const rows = store.authorCoverage();
+    const rows = reused(() => store.authorCoverage());
     return {
       items: rows.reduce((total, row) => total + row.items, 0),
       items_without_author: rows.reduce((total, row) => total + row.itemsWithoutAuthor, 0),
@@ -114971,7 +114993,8 @@ function createSourceIndexStatusHandler(options = {}) {
     return refresh;
   };
   const storeReadCache = new Map;
-  const reusedStoreRead = (countsMaxAgeMs, key, read) => {
+  const storeReadRefreshing = new Map;
+  const reusedStoreRead = (countsMaxAgeMs, key, read, offThread, pending) => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
     if (reuseMs <= 0)
       return read();
@@ -114979,6 +115002,26 @@ function createSourceIndexStatusHandler(options = {}) {
     const cached = storeReadCache.get(cacheKey);
     if (cached && nowMs() - cached.recordedAtMs <= reuseMs)
       return cached.value;
+    if (offThread && pending) {
+      let running = storeReadRefreshing.get(cacheKey);
+      if (!running) {
+        const remember = (value) => {
+          if (storeReadCache.size > 256)
+            storeReadCache.clear();
+          storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
+        };
+        running = offThread.read().then(remember, () => {
+          try {
+            remember(read());
+          } catch {}
+        }).finally(() => storeReadRefreshing.delete(cacheKey));
+        storeReadRefreshing.set(cacheKey, running);
+      }
+      if (cached)
+        return cached.value;
+      pending.push(running);
+      return offThread.empty;
+    }
     const value = read();
     if (storeReadCache.size > 256)
       storeReadCache.clear();
@@ -115048,7 +115091,10 @@ function createSourceIndexStatusHandler(options = {}) {
     const requestedCorpusId = request.corpus_id ? canonicalSourceCorpusId(request.corpus_id) : undefined;
     const storesByCorpusId = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
     const corpora = currentRegistry().list().filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
+    const pending = [];
+    const reusedRead = (countsMaxAgeMs, key, read, offThread) => reusedStoreRead(countsMaxAgeMs, key, read, offThread, pending);
     const statusFor = (declaredCorpus) => {
+      const pendingBefore = pending.length;
       const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
       const embeddingDisabled = policy !== undefined && (!policy.embeddingProfile || policy.activationMode === "metadata_only" || policy.activationMode === "lexical_only");
       const corpus = embeddingDisabled ? { ...declaredCorpus, embeddingPolicy: "disabled", activationMode: policy?.activationMode === "metadata_only" ? "metadata_only" : "lexical_only" } : declaredCorpus;
@@ -115088,14 +115134,14 @@ function createSourceIndexStatusHandler(options = {}) {
           status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;
       }
       if (status.configured && store && PEOPLE_AUTHORED_FAMILIES.has(corpus.family)) {
-        const coverage = authorCoverageStatus(store);
+        const coverage = authorCoverageStatus(store, (read) => reusedRead(snapshot.countsMaxAgeMs ?? 0, ["authors", store.corpusId], read, typeof store.authorCoverageOffThread === "function" ? { read: () => store.authorCoverageOffThread(), empty: [] } : undefined));
         if (coverage)
           status.author_coverage = coverage;
       }
       const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
-      const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0, reusedStoreRead) : enforced;
-      const resolved = store && corpus.family === "file" ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true ? availability?.modelId : undefined, (read) => reusedStoreRead(snapshot.countsMaxAgeMs ?? 0, ["pdf", store.corpusId], read)) : withBacklog;
-      if (maxAgeMs > 0)
+      const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0, reusedRead) : enforced;
+      const resolved = store && corpus.family === "file" ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true ? availability?.modelId : undefined, (read) => reusedRead(snapshot.countsMaxAgeMs ?? 0, ["pdf", store.corpusId], read, typeof store.pdfExtractionBacklogOffThread === "function" ? { read: () => store.pdfExtractionBacklogOffThread(), empty: { pendingPdfs: 0, extractedPdfs: 0, extractedChars: 0 } } : undefined)) : withBacklog;
+      if (maxAgeMs > 0 && pending.length === pendingBefore)
         cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
       return resolved;
     };
@@ -115112,7 +115158,13 @@ function createSourceIndexStatusHandler(options = {}) {
             await refreshStoreStatusOffThread(store, statusScope, countsMaxAgeMs);
         }
       }
-      statuses.push(statusFor(declaredCorpus));
+      let shown = statusFor(declaredCorpus);
+      if (pending.length > 0) {
+        await Promise.allSettled(pending.splice(0));
+        shown = statusFor(declaredCorpus);
+        pending.splice(0);
+      }
+      statuses.push(shown);
     }
     const tierClassification = options.tierClassification?.();
     let tierMigration;
@@ -115372,7 +115424,7 @@ function withEmbeddingBacklogEstimate(status, store, modelId, availability, scop
   if (!parity?.required)
     return status;
   const embedder = availability.backend !== undefined && availability.provider !== undefined ? { modelId, provider: availability.provider, backend: availability.backend } : undefined;
-  const backlog = reused(countsMaxAgeMs, ["embedding-backlog", store.corpusId, modelId, embedder ?? null, scope ?? null], () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }));
+  const backlog = reused(countsMaxAgeMs, ["embedding-backlog", store.corpusId, modelId, embedder ?? null, scope ?? null], () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }), typeof store.embeddingBacklogEstimateOffThread === "function" ? { read: () => store.embeddingBacklogEstimateOffThread(modelId, embedder, scope, { countsMaxAgeMs }), empty: { missingChunks: 0, estimatedTokens: 0 } } : undefined);
   const withheld = embedder ? reused(countsMaxAgeMs, ["private-withheld", store.corpusId, embedder, scope ?? null], () => store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs })) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {

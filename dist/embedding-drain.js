@@ -24882,7 +24882,17 @@ ${parentKey(ref)}`, { ref, origin });
     }));
   }
   authorCoverage() {
-    return this.db.query(`
+    const read = this.authorCoverageRead();
+    return authorCoverageRows(this.db.query(read.sql).all(...read.params));
+  }
+  async authorCoverageOffThread() {
+    if (!offThreadReadsSupported(this.dbPath))
+      return this.authorCoverage();
+    const read = this.authorCoverageRead();
+    return authorCoverageRows(await withOffThreadSnapshot(this.dbPath, async (run) => run(read)));
+  }
+  authorCoverageRead() {
+    return { mode: "all", params: [], sql: `
       SELECT provider, COUNT(*) AS items,
         SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
           THEN 1 ELSE 0 END) AS without_author
@@ -24890,11 +24900,7 @@ ${parentKey(ref)}`, { ref, origin });
       WHERE tombstoned = 0 AND parent_local_item_id IS NULL
       GROUP BY provider
       ORDER BY provider
-    `).all().map((row) => ({
-      provider: row.provider,
-      items: row.items,
-      itemsWithoutAuthor: row.without_author ?? 0
-    }));
+    ` };
   }
   senderAggregation(options) {
     if (this.family !== "chat") {
@@ -28051,12 +28057,23 @@ ${parentKey(ref)}`, { ref, origin });
     return rows.map((row) => row.local_item_id);
   }
   embeddingBacklogEstimate(modelId, embedder, scope, options = {}) {
-    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
+    const read = this.embeddingBacklogRead(modelId, embedder, scope, options, true);
+    const row = this.db.query(read.sql).get(...read.params);
+    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+  }
+  async embeddingBacklogEstimateOffThread(modelId, embedder, scope, options = {}) {
+    if (!offThreadReadsSupported(this.dbPath))
+      return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
+    const read = this.embeddingBacklogRead(modelId, embedder, scope, options, false);
+    const row = await withOffThreadSnapshot(this.dbPath, async (run) => run(read));
+    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+  }
+  embeddingBacklogRead(modelId, embedder, scope, options, connectionLocal) {
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
     const scoped = statusScopeContentFilter(scope);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
-    const params = [...tierExclusion.params, ...privateTier.params, ...scoped.params];
-    const row = this.db.query(`
+    return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
@@ -28064,30 +28081,19 @@ ${parentKey(ref)}`, { ref, origin });
       WHERE i.tombstoned = 0
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
-    `).get(modelId, ...params);
-    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    ` };
   }
   pdfExtractionBacklog() {
-    const row = this.db.query(`
-      SELECT
-        SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
-        SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
-        COALESCE(SUM(chars), 0) AS chars
-      FROM (
-        SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
-        FROM items i
-        WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
-      )
-    `).get();
-    return {
-      pendingPdfs: row.pending ?? 0,
-      extractedPdfs: row.extracted ?? 0,
-      extractedChars: row.chars
-    };
+    return pdfBacklogFromRow(this.db.query(PDF_EXTRACTION_BACKLOG_SQL).get());
   }
-  embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false) {
+  async pdfExtractionBacklogOffThread() {
+    if (!offThreadReadsSupported(this.dbPath))
+      return this.pdfExtractionBacklog();
+    return pdfBacklogFromRow(await withOffThreadSnapshot(this.dbPath, async (run) => run({ sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: "get" })));
+  }
+  embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false, connectionLocal = true) {
     const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
-    if (this.visibilityJournal && this.visibilitySqlMemo) {
+    if (connectionLocal && this.visibilityJournal && this.visibilitySqlMemo) {
       const children = tierExcluded.hidden === this.visibilitySqlMemo.value.hidden ? [] : tierExcluded.hidden;
       return {
         filter: `AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v
@@ -30515,6 +30521,23 @@ function connectorStoreEmbeddingInputSha256(rows) {
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
   return digest.digest("hex");
+}
+function authorCoverageRows(rows) {
+  return rows.map((row) => ({ provider: row.provider, items: row.items, itemsWithoutAuthor: row.without_author ?? 0 }));
+}
+var PDF_EXTRACTION_BACKLOG_SQL = `
+  SELECT
+    SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
+    SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
+    COALESCE(SUM(chars), 0) AS chars
+  FROM (
+    SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
+    FROM items i
+    WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
+  )
+`;
+function pdfBacklogFromRow(row) {
+  return { pendingPdfs: row.pending ?? 0, extractedPdfs: row.extracted ?? 0, extractedChars: row.chars };
 }
 function statusScopeContentFilter(scope) {
   if (!scope)
