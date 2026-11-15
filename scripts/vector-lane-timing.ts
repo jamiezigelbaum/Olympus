@@ -7,7 +7,7 @@
  * vectorSearchLane on it the way a question does, so a fix can be judged before it reaches a live machine.
  *
  *   bun scripts/vector-lane-timing.ts build   --dir <folder> [--chunks 200000] [--dimension 768]
- *   bun scripts/vector-lane-timing.ts measure --dir <folder> --scenario held|scope|both|none [--trials 5]
+ *   bun scripts/vector-lane-timing.ts measure --dir <folder> --scenario held|scope|both|none [--trials 5] [--contend keyword,writer]
  *
  * build writes <folder>/store.sqlite once (one chunk per item) and is skipped when a store of the same shape is
  * there. Item i's vector leans away from the query as i grows, so low i ranks highest, and each share is periodic in
@@ -18,6 +18,11 @@
  *   - both: the two together, so 1% of the store is servable.
  * measure prints one JSON line: per trial the lane's time, rows and skippedReason (vector_scan_deadline_exceeded is a
  * deadline cut). The caller runs measure under a memory cap below the store's size, so pages come from disk.
+ * --contend adds load while the lane runs (lane 2's suspect, 15 Nov: the live keyword lane took 18.8 s on the same store,
+ * and the store has one read-pool thread whose wait counts against the vector deadline):
+ *   - keyword: keyword searches on the same store, back to back, sharing its read pool;
+ *   - writer: another process committing a judged-items-sized write (50 items and their chunks) every 300 ms, as the
+ *     background's judge does beside a question.
  * Synthetic data only: nothing here reads a real store.
  */
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -137,7 +142,32 @@ async function build(dir: string, count: number, dimension: number): Promise<voi
   } finally { store.close(); }
 }
 
-async function measure(dir: string, scenario: string, trials: number): Promise<void> {
+/** The writer process: a judged batch's worth of rows rewritten every interval until it is stopped. */
+async function write(dir: string, intervalMs: number): Promise<void> {
+  const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { count: number };
+  const store = open(join(dir, 'store.sqlite'));
+  const db = (store as unknown as { db: { exec(sql: string): void; query(sql: string): { run(...params: unknown[]): unknown } } }).db;
+  const items = db.query('UPDATE items SET indexed_at = ? WHERE item_pk BETWEEN ? AND ?');
+  const chunks = db.query('UPDATE chunks SET indexed_at = ? WHERE item_pk BETWEEN ? AND ?');
+  let commits = 0;
+  let stop = false;
+  process.on('SIGTERM', () => { stop = true; });
+  const next = random(4242);
+  while (!stop) {
+    const from = 1 + Math.floor(next() * Math.max(1, shape.count - 50));
+    const at = new Date().toISOString();
+    db.exec('BEGIN IMMEDIATE');
+    items.run(at, from, from + 49);
+    chunks.run(at, from, from + 49);
+    db.exec('COMMIT');
+    commits += 1;
+    await Bun.sleep(intervalMs);
+  }
+  store.close();
+  console.log(JSON.stringify({ phase: 'write', commits }));
+}
+
+async function measure(dir: string, scenario: string, trials: number, contend: ReadonlySet<string>): Promise<void> {
   const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { count: number; dimension: number };
   const store = open(join(dir, 'store.sqlite'));
   try {
@@ -157,6 +187,22 @@ async function measure(dir: string, scenario: string, trials: number): Promise<v
     const filters: ConnectorStoreSearchFilters | undefined = scenario === 'scope' || scenario === 'both' ? { locatorPathScope: '/allowed' } : undefined;
     const embedder = provider(shape.count, shape.dimension);
     const results: Array<{ ms: number; rows: number; skippedReason?: string; servable: boolean }> = [];
+    const writer = contend.has('writer')
+      ? Bun.spawn(['bun', import.meta.path, 'write', '--dir', dir, '--interval', '300'], { stdout: 'pipe', stderr: 'inherit' })
+      : undefined;
+    if (writer) await Bun.sleep(1_000);
+    const keyword: number[] = [];
+    let keywordBusy = 0;
+    let measuring = true;
+    const keywordLoop = contend.has('keyword') ? (async () => {
+      for (let k = 0; measuring; k++) {
+        const started = performance.now();
+        try { await store.searchItemsDetailedOffThread(`${WORDS[k % WORDS.length]} ${WORDS[(k * 7 + 3) % WORDS.length]} coverage`, 20, undefined, filters, {}, { deadlineAtMs: Date.now() + LANE_DEADLINE_MS }); }
+        catch { keywordBusy += 1; }
+        keyword.push(Math.round(performance.now() - started));
+      }
+    })() : undefined;
+    if (keywordLoop) await Bun.sleep(500);
     for (let t = 0; t < trials; t++) {
       // A different question each trial (same direction, different words), so no memo answers it.
       const started = performance.now();
@@ -169,18 +215,33 @@ async function measure(dir: string, scenario: string, trials: number): Promise<v
       });
       results.push({ ms, rows: result.rows.length, ...(result.skippedReason ? { skippedReason: result.skippedReason } : {}), servable });
     }
+    measuring = false;
+    await keywordLoop;
+    let commits: number | undefined;
+    if (writer) {
+      writer.kill('SIGTERM');
+      const out = await new Response(writer.stdout).text();
+      await writer.exited;
+      commits = (JSON.parse(out.trim().split('\n').at(-1) || '{}') as { commits?: number }).commits;
+    }
+    const sorted = [...keyword].sort((a, b) => a - b);
+    const load = {
+      ...(keywordLoop ? { keyword: { calls: keyword.length, busy: keywordBusy, p50Ms: sorted[Math.floor(sorted.length / 2)] ?? null, maxMs: sorted.at(-1) ?? null } } : {}),
+      ...(writer ? { writer: { commits: commits ?? null, intervalMs: 300 } } : {}),
+    };
     const pass = results.every((r) => r.ms < PASS_MS && !r.skippedReason && r.rows > 0 && r.servable);
-    console.log(JSON.stringify({ phase: 'measure', scenario, chunks: shape.count, dimension: shape.dimension, bytes: statSync(join(dir, 'store.sqlite')).size, digest: process.env.OLYMPUS_VECTOR_DIGEST ?? 'default', pass, trials: results }));
+    console.log(JSON.stringify({ phase: 'measure', scenario, contend: [...contend].join(',') || 'none', ...load, chunks: shape.count, dimension: shape.dimension, bytes: statSync(join(dir, 'store.sqlite')).size, digest: process.env.OLYMPUS_VECTOR_DIGEST ?? 'default', pass, trials: results }));
   } finally { store.close(); }
 }
 
 const [command, ...rest] = process.argv.slice(2);
 const values = args(rest);
 const dir = values.get('dir');
-if (!dir || (command !== 'build' && command !== 'measure')) {
-  console.error('Usage: bun scripts/vector-lane-timing.ts build|measure --dir <folder> [--chunks N] [--dimension D] [--scenario held|scope|both|none] [--trials N]');
+if (!dir || (command !== 'build' && command !== 'measure' && command !== 'write')) {
+  console.error('Usage: bun scripts/vector-lane-timing.ts build|measure --dir <folder> [--chunks N] [--dimension D] [--scenario held|scope|both|none] [--trials N] [--contend keyword,writer]');
   process.exit(2);
 }
 if (command === 'build') await build(dir, Number(values.get('chunks') ?? 200_000), Number(values.get('dimension') ?? 768));
-else await measure(dir, values.get('scenario') ?? 'both', Number(values.get('trials') ?? 5));
+else if (command === 'write') await write(dir, Number(values.get('interval') ?? 300));
+else await measure(dir, values.get('scenario') ?? 'both', Number(values.get('trials') ?? 5), new Set((values.get('contend') ?? '').split(',').filter(Boolean)));
 process.exit(0);

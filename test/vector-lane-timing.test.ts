@@ -29,13 +29,16 @@ test.skipIf(!enabled)('vector lane on a 200k-chunk store with Dropbox\'s held an
   const capMb = Math.max(512, Math.floor(bytes / 1024 / 1024 / 2));
   const lines: string[] = [];
   let failed = 0;
-  for (const scenario of ['none', 'held', 'scope', 'both']) {
+  // The four shapes alone, then Dropbox's shape (both) with the load lane 2 suspects: keyword searches sharing the
+  // store's one read-pool thread, a writer committing judged batches, and the two together.
+  const runs: Array<[string, string]> = [['none', ''], ['held', ''], ['scope', ''], ['both', ''], ['both', 'keyword'], ['both', 'writer'], ['both', 'keyword,writer']];
+  for (const [scenario, contend] of runs) {
     // Drop the file's cached pages first: the build (or the last scenario) left them in memory.
     for (const suffix of ['', '-wal']) spawnSync('dd', [`if=${join(dir, `store.sqlite${suffix}`)}`, 'iflag=nocache', 'count=0', 'status=none']);
     const out = run(['systemd-run', '--user', '--scope', '--quiet', '-p', `MemoryMax=${capMb}M`, '-p', 'MemorySwapMax=0', '--',
-      'bun', script, 'measure', '--dir', dir, '--scenario', scenario, '--trials', '5'], `measure ${scenario}`);
+      'bun', script, 'measure', '--dir', dir, '--scenario', scenario, '--trials', '5', ...(contend ? ['--contend', contend] : [])], `measure ${scenario} ${contend}`);
     const line = out.trim().split('\n').filter((l) => l.startsWith('{"phase":"measure"')).at(-1);
-    if (!line) throw new Error(`measure ${scenario} printed no result: ${out.slice(-2000)}`);
+    if (!line) throw new Error(`measure ${scenario} ${contend} printed no result: ${out.slice(-2000)}`);
     const parsed = JSON.parse(line) as { pass: boolean };
     if (!parsed.pass) failed += 1;
     lines.push(line);
