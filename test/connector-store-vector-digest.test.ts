@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -153,7 +153,7 @@ test('backfill resumes across reopen, bounds physical rows, and invalidates disp
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('SQL eligibility excludes account, filter, tombstone and stale-hash rows before full vectors reach scoring; expands past rejected top K', async () => {
+test('SQL eligibility excludes account, filter, tombstone and stale-hash rows before full vectors reach scoring; filtered rows never take a ranking slot', async () => {
   const db = numericStore();
   try {
     db.transaction(() => { for (let i = 1; i <= 1300; i++) insert(db, i, i <= 1200 ? [1, 0, 0] : [0.9, 0.1, 0]); })();
@@ -173,7 +173,9 @@ test('SQL eligibility excludes account, filter, tombstone and stale-hash rows be
       }
     }), [1, 0, 0], options, undefined, 20);
     expect(rank(result)).toEqual(exact(db, [1, 0, 0], options));
-    expect(exactReads).toBeGreaterThanOrEqual(3);
+    // The scope filters apply in the digest pass too, so rejected rows never
+    // take a ranking slot: one re-score batch reaches the eligible tail.
+    expect(exactReads).toBe(1);
     expect(fullRows).toBe(100);
     // Sequential rowid range scan; no temp sort or secondary index.
     const page = connectorStoreVectorDigestPageQuery(options, 0);
@@ -633,4 +635,94 @@ test('the candidate cap never cuts a pass short of the limit: rejected top candi
     if ('skippedReason' in result) throw new Error(result.skippedReason);
     expect(result.exhausted).toBe(true);
   } finally { db.close(); }
+});
+
+// ASK SPEED (olympus-ops#151, 14 Nov): on Jamie's box the Dropbox vector
+// lane ran out its 54 s deadline on every Ask. The scan ranked items the
+// store would not serve, the ledger check then dropped them, and the scan
+// re-ran 8x wider until enough survived, reading the whole store. These
+// count the scan's reads, so a fast machine cannot hide the extra passes.
+describe('the vector lane ranks only what it can serve, in one pass', () => {
+  const count = 2_000;
+  // Item i's vector leans away from the query as i grows: the first items rank highest.
+  const graded: SourceEmbeddingProvider = { ...provider, async embed(inputs) {
+    return inputs.map((input) => {
+      const n = Number(/(\d+)\s*$/.exec(input.text)?.[1] ?? 0);
+      const lean = n / count;
+      return [1 - lean * 0.5, lean, 0];
+    });
+  } };
+  async function seeded(): Promise<{ store: LocalConnectorStore; dir: string; pks: number[] }> {
+    const dir = mkdtempSync(join(tmpdir(), 'vector-digest-workcount-'));
+    const store = open(join(dir, 'store.sqlite'));
+    await store.syncFromConnector(connector(count), { fetchContent: true });
+    await store.embedChunks({ provider: graded });
+    await store.ensureVectorDigestReady(modelId, 4_096);
+    const pks = (database(store).query('SELECT item_pk FROM items ORDER BY CAST(provider_item_id AS INTEGER)').all() as Array<{ item_pk: number }>).map((row) => row.item_pk);
+    return { store, dir, pks };
+  }
+  function counted() {
+    const reads = { digestPages: 0, rescoreStatements: 0 };
+    setReadPoolObserverForTests((_, query) => {
+      if (query.sql.includes('FROM chunk_vector_digest d')) reads.digestPages += 1;
+      if (query.sql.includes('FROM chunk_embeddings emb') && query.sql.includes('emb.chunk_pk IN')) reads.rescoreStatements += 1;
+    }, { snapshots: true });
+    return reads;
+  }
+
+  test('90% of the best-ranked items held for judging: one digest read, one re-score batch, a full visible result', async () => {
+    const { store, dir, pks } = await seeded();
+    try {
+      // The store's own visibility set and the live ledger agree: the top 90% are held.
+      const held = new Set(pks.slice(0, count * 0.9));
+      const lane = store as unknown as {
+        tierHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
+        visibleVectorItemPks(pks: readonly number[]): Set<number>;
+      };
+      const value = { hidden: [], held: [...held], heldForJudgment: [...held], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+      lane.tierHiddenItemPks = () => value;
+      lane.visibleVectorItemPks = (candidates) => new Set(candidates.filter((pk) => !held.has(pk)));
+      const reads = counted();
+      try {
+        const result = await store.vectorSearchLane('harbor note', graded, 20);
+        expect(result.skippedReason).toBeUndefined();
+        expect(result.rows).toHaveLength(20);
+        expect(reads.digestPages).toBe(1);
+        expect(reads.rescoreStatements).toBeLessThanOrEqual(2);
+      } finally { setReadPoolObserverForTests(); }
+    } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('90% of the best-ranked items outside the search scope: one digest read, one re-score batch', async () => {
+    const { store, dir, pks } = await seeded();
+    try {
+      database(store).query(`UPDATE items SET provider = 'out_of_scope' WHERE item_pk IN (SELECT value FROM json_each(?))`)
+        .run(JSON.stringify(pks.slice(0, count * 0.9)));
+      const reads = counted();
+      try {
+        const result = await store.vectorSearchLane('harbor note', graded, 20, undefined, { provider: 'fixture' });
+        expect(result.rows).toHaveLength(20);
+        expect(reads.digestPages).toBe(1);
+        expect(reads.rescoreStatements).toBeLessThanOrEqual(2);
+      } finally { setReadPoolObserverForTests(); }
+    } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('a scan cut after ranking began keeps the winners it found, and names the cut', async () => {
+    const db = numericStore();
+    try {
+      db.transaction(() => { for (let i = 1; i <= 3_000; i++) insert(db, i, [1, i / 3_000, 0]); })();
+      finish(db);
+      const deadlineAtMs = Date.now() + 3_000;
+      let rescored = 0;
+      const result = await scanDigestPages(reader(db, (query) => {
+        if (!query.sql.includes('emb.chunk_pk IN')) return;
+        // The first re-score page is folded, then the clock runs out on the next.
+        if (++rescored === 2) { const until = deadlineAtMs + 1; while (Date.now() < until) { /* past the deadline */ } }
+      }), [1, 0, 0], { modelId }, deadlineAtMs, 20);
+      if ('skippedReason' in result) throw new Error(`cut dropped its winners: ${result.skippedReason}`);
+      expect(result.cutReason).toBe('vector_scan_deadline_exceeded');
+      expect(result.bestByItem.size).toBeGreaterThan(0);
+    } finally { db.close(); }
+  }, 120_000);
 });

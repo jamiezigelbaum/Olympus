@@ -2247,6 +2247,13 @@ interface ConnectorStoreCurrentEmbeddingRowsOptions {
   chunkPks?: readonly number[];
   /** Set only after checking sqlite_master on the scan's read snapshot. */
   onDemandReadsTablePresent?: boolean;
+  /**
+   * Items the store already knows it will not serve (hidden, held for
+   * judging, metadata only): the vector scan skips them before ranking, so
+   * its top K are servable by construction. A pre-filter only: every winner
+   * is still checked against the live ledger after ranking.
+   */
+  excludedItemPks?: ReadonlySet<number>;
 }
 
 const CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
@@ -2341,6 +2348,8 @@ type VectorScan =
     dimensionMismatches: number;
     /** False when the digest pass stopped with candidates left unread. */
     exhausted?: boolean;
+    /** The scan ran out of time after ranking began: these are the winners found so far. */
+    cutReason?: string;
   }
   | { skippedReason: string };
 
@@ -2399,8 +2408,13 @@ async function scanVectorPages(
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
   let pagesScanned = 0;
+  const excluded = pageOptions.excludedItemPks;
+  // Out of time: the winners scored so far are kept, with the cut named.
+  const cutExact = (): VectorScan => (bestByItem.size > 0
+    ? { bestByItem, dimensionMismatches, exhausted: false, cutReason: 'vector_scan_deadline_exceeded' }
+    : { skippedReason: 'vector_scan_deadline_exceeded' });
   while (true) {
-    if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) return { skippedReason: 'vector_scan_deadline_exceeded' };
+    if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) return cutExact();
     const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(pageOptions, afterChunkPk, pageSize);
     const page = await read({ mode: 'all', sql, params }) as Array<{
       item_pk: number;
@@ -2413,9 +2427,8 @@ async function scanVectorPages(
     // chunk-level measurement, so the chunk that produced the item's best
     // score is the only defensible semantic citation target.
     for (const [index, row] of page.entries()) {
-      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-        return { skippedReason: 'vector_scan_deadline_exceeded' };
-      }
+      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) return cutExact();
+      if (excluded?.has(row.item_pk)) continue;
       dimensionMismatches += foldVectorScore(bestByItem, row, queryVector).mismatch;
     }
     afterChunkPk = page.at(-1)!.chunk_pk;
@@ -2471,8 +2484,10 @@ export async function scanDigestPages(
     if (expired()) return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
     const packed = await read({ mode: 'get', ...page }) as VectorDigestPackedPage;
-    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index) => {
+    const excluded = options.excludedItemPks;
+    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index, itemPk) => {
       if ((index & 31) === 0 && expired()) return false;
+      if (excluded && itemPk !== undefined && excluded.has(itemPk)) return true;
       heap.append(chunkPk, scoreVectorDigest(query, digest));
       return true;
     });
@@ -2490,6 +2505,11 @@ export async function scanDigestPages(
   }
   const bestByItem: Extract<VectorScan, { bestByItem: unknown }>['bestByItem'] = new Map();
   let dimensionMismatches = 0;
+  // Out of time once ranking has begun: the winners found so far are kept,
+  // with the cut named so coverage still says the search was partial.
+  const cutWith = (): VectorScan => (bestByItem.size > 0
+    ? { bestByItem, dimensionMismatches, exhausted: false, cutReason: cut.skippedReason }
+    : cut);
   const batchSize = Math.max(400, 20 * limit);
   // The stop is by score, not by count: re-scoring continues while the next
   // candidate's digest score, raised by the digest's largest underestimate
@@ -2508,7 +2528,7 @@ export async function scanDigestPages(
     // score-driven reading past that point.
     if (qualifiedItems >= limit && (candidates >= VECTOR_DIGEST_MAX_CANDIDATES
       || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) break;
-    if (expired()) return cut;
+    if (expired()) return cutWith();
     if (batches++ > 0) await yieldConnectorStoreVectorScan();
     const digestScores = new Map<number, number>();
     while (heap.length > 0 && digestScores.size < batchSize) {
@@ -2520,11 +2540,11 @@ export async function scanDigestPages(
     let after = 0;
     let rePages = 0;
     while (true) {
-      if (expired()) return cut;
+      if (expired()) return cutWith();
       const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks }, after);
       const rows = await read({ mode: 'all', ...page }) as VectorScoreRow[];
       for (const [index, row] of rows.entries()) {
-        if ((index & 31) === 0 && expired()) return cut;
+        if ((index & 31) === 0 && expired()) return cutWith();
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
@@ -2536,7 +2556,7 @@ export async function scanDigestPages(
       if (rePages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
     }
   }
-  return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
+  return { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
 
 const VECTOR_DIGEST_PAGE_ROWS = 4096;
@@ -2563,14 +2583,16 @@ function kthBestCosine(bestByItem: VectorWinners, k: number): number {
  * blobs were the shape under the Bun memory fault on large stores
  * (olympus-ops#151).
  */
-export type VectorDigestPackedPage = { n: number; last_pk: number; pks: string; lengths: string; packed: Uint8Array };
+export type VectorDigestPackedPage = { n: number; last_pk: number; pks: string; items?: string; lengths: string; packed: Uint8Array };
 
 /** Visits each digest as a view into the page's blob; false from `visit` stops early. */
 export function forEachPackedVectorDigest(
-  page: VectorDigestPackedPage, visit: (chunkPk: number, digest: Uint8Array, index: number) => boolean,
+  page: VectorDigestPackedPage, visit: (chunkPk: number, digest: Uint8Array, index: number, itemPk: number | undefined) => boolean,
 ): boolean {
   if (page.n === 0) return true;
   const pks = JSON.parse(page.pks) as number[];
+  const items = page.items === undefined ? undefined : JSON.parse(page.items) as number[];
+  if (items && items.length !== page.n) throw new Error('vector digest page does not unpack: item and key counts disagree');
   const lengths = JSON.parse(page.lengths) as number[];
   const total = lengths.reduce((sum, length) => sum + length, 0);
   if (pks.length !== page.n || lengths.length !== page.n || total !== page.packed.byteLength) {
@@ -2579,7 +2601,7 @@ export function forEachPackedVectorDigest(
   let offset = 0;
   for (let index = 0; index < page.n; index++) {
     const length = lengths[index]!;
-    if (!visit(pks[index]!, page.packed.subarray(offset, offset + length), index)) return false;
+    if (!visit(pks[index]!, page.packed.subarray(offset, offset + length), index, items?.[index])) return false;
     offset += length;
   }
   return true;
@@ -2587,19 +2609,30 @@ export function forEachPackedVectorDigest(
 
 /** INTEGER PRIMARY KEY is the rowid: no secondary index, joins, or blob sort. */
 export function connectorStoreVectorDigestPageQuery(
-  options: { modelId: string; accountScope?: string }, afterChunkPk: number, limit = VECTOR_DIGEST_PAGE_ROWS,
+  options: Pick<ConnectorStoreCurrentEmbeddingRowsOptions, 'modelId' | 'accountScope' | 'filters' | 'onDemandReadsTablePresent'>, afterChunkPk: number, limit = VECTOR_DIGEST_PAGE_ROWS,
 ): { sql: string; params: Array<string | number> } {
   const account = normalizeOptionalAccountScope(options.accountScope);
+  // Scope filters (source scope, revision, names-only folders) apply inside
+  // the pass, so an out-of-scope chunk never takes a ranking slot.
+  const selectedFilters = connectorStoreFilterSql(options.filters);
+  const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
+  const filtered = Boolean(selectedFilters.sql.trim() || metadataOnly.sql);
   return {
     sql: `SELECT count(*) AS n, max(chunk_pk) AS last_pk, json_group_array(chunk_pk) AS pks,
+        json_group_array(item_pk) AS items,
         json_group_array(length(digest)) AS lengths, CAST(coalesce(group_concat(digest, ''), x'') AS BLOB) AS packed
-      FROM (SELECT chunk_pk, digest FROM chunk_vector_digest
-        WHERE chunk_pk > ? AND model_id = ? ${account ? 'AND account_scope = ?' : ''}
-        ORDER BY chunk_pk LIMIT ?)`,
-    params: [afterChunkPk, options.modelId, ...(account ? [account] : []), limit],
+      FROM (SELECT d.chunk_pk, d.item_pk, d.digest FROM chunk_vector_digest d
+        ${filtered ? 'JOIN items i ON i.item_pk = d.item_pk' : ''}
+        WHERE d.chunk_pk > ? AND d.model_id = ? ${account ? 'AND d.account_scope = ?' : ''}
+        ${filtered ? `AND i.tombstoned = 0 ${selectedFilters.sql} ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ''}` : ''}
+        ORDER BY d.chunk_pk LIMIT ?)`,
+    params: [afterChunkPk, options.modelId, ...(account ? [account] : []),
+      ...(filtered ? [...selectedFilters.params, ...metadataOnly.params] : []), limit],
   };
 }
 
+/** Past the deadline, the pool backstop waits this long for the scan's own cut, which keeps its winners. */
+const VECTOR_SCAN_BACKSTOP_GRACE_MS = 250;
 /**
  * The scan on the store's read-pool thread, inside one pool snapshot. Waiting
  * for that thread counts against the lane's deadline: a scan that cannot
@@ -2617,14 +2650,19 @@ async function scanVectorPagesOnPool(
 ): Promise<VectorScan> {
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
     read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit,
-  )).catch((error: unknown): VectorScan => {
+  // Its own worker of the store: the scan never queues behind keyword reads.
+  ), { lane: 'scan' }).catch((error: unknown): VectorScan => {
     if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
     throw error;
   });
   if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs)) return scan;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<VectorScan>((resolve) => {
-    timer = setTimeout(() => resolve({ skippedReason: 'vector_scan_deadline_exceeded' }), Math.max(0, deadlineAtMs - Date.now()));
+    // A backstop for a scan stuck in one statement or waiting for the thread.
+    // It fires just after the deadline the scan checks itself, so a scan that
+    // stops on time returns the winners it found rather than losing the race.
+    timer = setTimeout(() => resolve({ skippedReason: 'vector_scan_deadline_exceeded' }),
+      Math.max(0, deadlineAtMs - Date.now()) + VECTOR_SCAN_BACKSTOP_GRACE_MS);
   });
   try {
     return await Promise.race([scan, deadline]);
@@ -13907,50 +13945,35 @@ export class LocalConnectorStore {
       ...(selectedAccount ? { accountScope: selectedAccount } : {}),
       ...(filters ? { filters } : {}),
     };
-    // The digest pass reads only enough candidates for `wanted` SQL-eligible
-    // items. When ledger visibility below then leaves too few (staged-away
-    // copies, held items), the scan runs again wider, up to the whole store.
-    let wanted = limit;
-    let rankedItems: Array<[number, { bestCosine: number; bestChunkPk: number; localItemId: string }]> = [];
-    let dimensionMismatches = 0;
-    for (;;) {
-      // A file store's pages are read on its read-pool thread inside one
-      // snapshot (#1305): run on the request thread they held it for tens of
-      // seconds on a large store, and every other lane and request waited.
-      const scanned = offThreadReadsSupported(this.dbPath)
-        ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, wanted)
-        : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, wanted);
-      if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
-      const { bestByItem } = scanned;
-      dimensionMismatches = scanned.dimensionMismatches;
-
-      // Ties break on item_pk, explicitly.
-      //
-      // This sort is stable, so the previous code inherited its tie order from
-      // Map insertion order, which came from the scan's ORDER BY item_pk. The
-      // scan no longer sorts (see connectorStoreCurrentEmbeddingRowsIterator), so
-      // that implicit order is gone — and exactly-equal cosines are not rare in a
-      // real corpus, where duplicated and forwarded content is normal. Naming the
-      // tiebreak here keeps the ranking identical to the ordered scan's and, more
-      // importantly, makes it independent of whatever plan SQLite chooses.
-      // Validate in rank order after the scan's last yield. Only candidates
-      // needed to fill the result limit touch the live tier ledger; hidden
-      // winners are skipped so they cannot crowd out an eligible match.
-      const candidates = Array.from(bestByItem.entries())
-        .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
-        .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-      rankedItems = [];
-      let candidateOffset = 0;
-      while (rankedItems.length < limit && candidateOffset < candidates.length) {
-        const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
-        const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
-        for (const candidate of batch) if (visible.has(candidate[0])) rankedItems.push(candidate);
-        candidateOffset += batch.length;
-      }
-      if (rankedItems.length >= limit || scanned.exhausted !== false) break;
-      // Out of time: answer with the visible winners already found.
-      if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) break;
-      wanted *= 8;
+    const excludedItemPks = this.vectorScanExcludedItemPks();
+    if (excludedItemPks) pageOptions.excludedItemPks = excludedItemPks;
+    // One pass. Items the store will not serve are skipped inside the scan,
+    // so its top K are servable by construction; the live ledger check below
+    // stays the authority for each winner. (A post-ranking filter that
+    // re-ran the scan 8x wider until enough survived read the whole store on
+    // a heavily held one and ran out its deadline on every Ask: olympus-ops#151.)
+    // A file store's pages are read on its read-pool thread inside one
+    // snapshot (#1305): run on the request thread they held it for tens of
+    // seconds on a large store, and every other lane and request waited.
+    const scanned = offThreadReadsSupported(this.dbPath)
+      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit)
+      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
+    if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
+    const { bestByItem, dimensionMismatches } = scanned;
+    // Ties break on item_pk, explicitly: exactly-equal cosines are common in
+    // a real corpus (duplicated and forwarded content), and the ranking must
+    // not depend on whatever plan SQLite chooses. Validate in rank order:
+    // only candidates needed to fill the limit touch the live tier ledger.
+    const candidates = Array.from(bestByItem.entries())
+      .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
+      .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+    const rankedItems: Array<[number, { bestCosine: number; bestChunkPk: number; localItemId: string }]> = [];
+    let candidateOffset = 0;
+    while (rankedItems.length < limit && candidateOffset < candidates.length) {
+      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+      for (const candidate of batch) if (visible.has(candidate[0])) rankedItems.push(candidate);
+      candidateOffset += batch.length;
     }
     const searchRows = this.searchRowsByItemPks(
       rankedItems.map(([itemPk]) => itemPk),
@@ -13971,10 +13994,30 @@ export class LocalConnectorStore {
     });
     return {
       rows: laneRows,
-      ...(laneRows.length === 0 && dimensionMismatches > 0
-        ? { skippedReason: 'embedding_stored_dimension_mismatch' }
-        : {}),
+      ...(scanned.cutReason !== undefined
+        ? { skippedReason: scanned.cutReason }
+        : laneRows.length === 0 && dimensionMismatches > 0
+          ? { skippedReason: 'embedding_stored_dimension_mismatch' }
+          : {}),
     };
+  }
+
+  /**
+   * The items the vector scan skips before ranking: those the store's own
+   * visibility set already keeps out of content search (hidden, held back
+   * from embedding, metadata only). It is the current set (the feed keeps it
+   * incremental), never an aged one: an item judged a moment ago must rank
+   * at once. Every winner is still checked against the live ledger.
+   * Undefined when nothing is excluded or
+   * the set cannot be read (the scan then ranks everything, as before).
+   */
+  private vectorScanExcludedItemPks(): ReadonlySet<number> | undefined {
+    let value: TierLedgerHiddenItemPks;
+    try { value = this.tierHiddenItemPks(); } catch { return undefined; }
+    // Built per scan: the set's lists change in place as verdicts land, so
+    // no copy of them can be keyed on the object.
+    const set = new Set<number>([...value.hidden, ...value.held, ...value.metadataLayer]);
+    return set.size > 0 ? set : undefined;
   }
 
   /**
