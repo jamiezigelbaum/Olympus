@@ -42,6 +42,8 @@ export interface EngineStatusSnapshot {
   rss_restarts?: { count: number; last?: { at: string; rss_mb: number } };
   /** How late the background's loop turned (control-path-headroom.ts): the last beat, the worst since start, beats over 250 ms. */
   loop_lag?: { last_ms: number; max_ms: number; over_budget: number };
+  /** Statements that held the background's loop past the slow-log threshold (main-thread-sql-trace.ts). */
+  loop_slow_sql?: import('../connector-store/main-thread-sql-trace.ts').SlowMainThreadSqlHealth;
   /** The background's paced status recount (status-recount.ts). */
   status_recount?: { runs: number; failures: number; last_ms?: number; age_ms?: number; counting: boolean };
 }

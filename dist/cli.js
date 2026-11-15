@@ -46858,19 +46858,29 @@ function installMainThreadSqlTrace() {
   installed = true;
   const exec = Database4.prototype.exec;
   Database4.prototype.exec = function(...args) {
-    if (!sliceTiming)
+    if (!sliceTiming && !slowLog)
       return exec.apply(this, args);
     const started = performance.now();
     try {
       return exec.apply(this, args);
     } finally {
-      sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, performance.now() - started);
+      const ms = performance.now() - started;
+      if (sliceTiming)
+        sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
+      if (slowLog && ms >= slowLog.thresholdMs)
+        noteSlowStatement(ms, typeof args[0] === "string" ? args[0] : undefined);
     }
   };
   for (const name of ["query", "prepare"]) {
     const original = Database4.prototype[name];
     Database4.prototype[name] = function(...args) {
-      return timeStatement(original.apply(this, args));
+      const statement = timeStatement(original.apply(this, args));
+      if (statement && typeof args[0] === "string") {
+        const held = statement;
+        held[SQL] = args[0];
+        held[DB] = this;
+      }
+      return statement;
     };
   }
 }
@@ -46883,8 +46893,10 @@ function timeStatement(statement) {
     if (typeof call !== "function")
       continue;
     held[method] = function(...args) {
+      if (planRecorder && !planRecorder.explaining)
+        recordPlan(held);
       const answer = sourceAnswerTraceActive();
-      if (!answer && !sliceTiming)
+      if (!answer && !sliceTiming && !slowLog)
         return call.apply(this, args);
       const started = performance.now();
       try {
@@ -46895,11 +46907,110 @@ function timeStatement(statement) {
           sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
         if (answer)
           recordSourceAnswerMainThreadSql(ms, callSite);
+        if (slowLog && ms >= slowLog.thresholdMs)
+          noteSlowStatement(ms, typeof held[SQL] === "string" ? held[SQL] : undefined);
       }
     };
   }
   held[TIMED] = true;
   return statement;
+}
+function recordPlan(held) {
+  const recorder = planRecorder;
+  const sql = held[SQL];
+  const db = held[DB];
+  if (typeof sql !== "string" || !db)
+    return;
+  let scans = recorder.plans.get(sql);
+  if (!scans) {
+    scans = [];
+    recorder.explaining = true;
+    try {
+      const explain = db.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+      let rows;
+      try {
+        rows = explain.all();
+      } finally {
+        explain.finalize();
+      }
+      const aliases = tableAliases(sql);
+      for (const { detail } of rows) {
+        const scan = /^SCAN (\S+)/.exec(detail);
+        const temp = /^USE TEMP B-TREE/.test(detail);
+        if (!scan && !temp)
+          continue;
+        const name = scan ? aliases.get(scan[1]) ?? scan[1] : undefined;
+        if (name && recorder.large.has(name))
+          scans.push({ table: name, plan: detail });
+      }
+    } catch {} finally {
+      recorder.explaining = false;
+    }
+    recorder.plans.set(sql, scans);
+  }
+  if (scans.length === 0)
+    return;
+  const site = sourceSite();
+  if (site === "")
+    return;
+  for (const scan of scans) {
+    const key = `${site}|${scan.table}`;
+    if (!recorder.finders.has(key))
+      recorder.finders.set(key, { ...scan, site, sql: sql.replace(/\s+/g, " ").trim().slice(0, 160) });
+  }
+}
+function tableAliases(sql) {
+  const aliases = new Map;
+  const keywords = new Set(["WHERE", "ON", "JOIN", "LEFT", "INNER", "CROSS", "GROUP", "ORDER", "LIMIT", "INDEXED", "NOT", "USING", "UNION", "SET", "AND"]);
+  for (const match of sql.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:\w+\.)?(\w+)(?:\s+(?:AS\s+)?(\w+))?/gi)) {
+    const table = match[1];
+    aliases.set(table, table);
+    const alias = match[2];
+    if (alias && !keywords.has(alias.toUpperCase()))
+      aliases.set(alias, table);
+  }
+  return aliases;
+}
+function sourceSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).slice(1).map((line) => line.trim().replace(/^at /, ""));
+  const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace"));
+  return mine.slice(0, 2).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
+}
+function startSlowMainThreadSqlLog(thresholdMs, log = (line) => console.warn(line)) {
+  installMainThreadSqlTrace();
+  if (!isMainThread3)
+    return;
+  slowLog = { thresholdMs, count: 0, maxMs: 0, recent: [], log };
+}
+function slowMainThreadSqlHealth() {
+  if (!slowLog)
+    return;
+  return { threshold_ms: slowLog.thresholdMs, count: slowLog.count, max_ms: Math.round(slowLog.maxMs), recent: slowLog.recent.slice() };
+}
+function noteSlowStatement(ms, sql) {
+  const log = slowLog;
+  log.count += 1;
+  log.maxMs = Math.max(log.maxMs, ms);
+  const site = slowSite();
+  const sqlId = sql === undefined ? "exec" : shortHash(sql.replace(/\s+/g, " ").trim());
+  log.recent.push({ at: new Date().toISOString(), ms: Math.round(ms), site, sql_id: sqlId });
+  if (log.recent.length > SLOW_RECENT)
+    log.recent.shift();
+  log.log(`[olympus] slow loop sql: ${Math.round(ms)} ms at ${site} (sql ${sqlId})`);
+}
+function slowSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).slice(1).map((line) => line.trim().replace(/^at /, "")).filter((frame) => frame.length > 0 && !frame.includes("main-thread-sql-trace"));
+  return frames.slice(0, SITE_FRAMES).map(shortFrame).join(" < ");
+}
+function shortHash(text) {
+  let hash = 2166136261;
+  for (let index = 0;index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
 }
 function callSite() {
   const frames = (new Error().stack ?? "").split(`
@@ -46915,7 +47026,7 @@ function shortFrame(frame) {
   const [file, line] = where.split(":");
   return `${name} ${file}${line ? `:${line}` : ""}`;
 }
-var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, sliceTiming;
+var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, sliceTiming, SQL = "__olympusMainThreadSql", DB = "__olympusMainThreadSqlDb", planRecorder, LOOP_SLOW_SQL_MS = 100, slowLog, SLOW_RECENT = 10;
 var init_main_thread_sql_trace = __esm(() => {
   init_answer_latency_trace();
   STATEMENT_METHODS = ["all", "get", "run", "values"];
@@ -204936,18 +205047,18 @@ class VolumeResolver {
   }
   idFor(mount, network, uuids) {
     if (network)
-      return `net-${shortHash(normalizeNetworkSource(mount.source))}`;
+      return `net-${shortHash2(normalizeNetworkSource(mount.source))}`;
     if (this.deps.platform === "darwin") {
       const plist = (this.deps.diskutilPlist ?? defaultDiskutilPlist)(mount.mountPoint);
       const uuid = plist ? plistString(plist, "VolumeUUID") : undefined;
       if (uuid)
         return `mac-${uuid.toLowerCase()}`;
-      return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
+      return `dev-${shortHash2(`${mount.source}\x00${mount.fsType}`)}`;
     }
     const uuid = uuids?.get(mount.source);
     if (uuid)
       return `lin-${uuid.toLowerCase()}`;
-    return `dev-${shortHash(`${mount.source}\x00${mount.fsType}`)}`;
+    return `dev-${shortHash2(`${mount.source}\x00${mount.fsType}`)}`;
   }
 }
 function probeIgnoresCaseIn(dir) {
@@ -204982,7 +205093,7 @@ function labelFor2(mountPoint) {
     return "Macintosh HD";
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
-function shortHash(value) {
+function shortHash2(value) {
   return createHash101("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
@@ -264587,6 +264698,7 @@ async function mainRecordingFrontFailure() {
 async function main() {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  startSlowMainThreadSqlLog(LOOP_SLOW_SQL_MS);
   if (engineRole !== "front") {
     startEngineHeartbeat(process.env, engineRole);
     setEngineStep("starting");
@@ -268829,6 +268941,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         ...statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {},
         loop_lag: loopLag,
         ...backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {},
+        ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth()),
+        ...backgroundSnapshot?.loop_slow_sql ? { background_loop_slow_sql: backgroundSnapshot.loop_slow_sql } : {},
         ...engineFront ? { engine_background: await engineFront.backgroundReady() ? "ready" : "unreachable" } : {}
       }, { status: response.status, headers: response.headers });
     }
@@ -269227,7 +269341,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
-        ...statusRecount ? { status_recount: statusRecount.health() } : {}
+        ...statusRecount ? { status_recount: statusRecount.health() } : {},
+        ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth())
       })
     });
     restartForDelete = (request) => {
@@ -269464,6 +269579,7 @@ var init_server5 = __esm(async () => {
   init_answer_latency_log();
   init_status();
   init_store_totals();
+  init_main_thread_sql_trace();
   init_http();
   init_analyst();
   init_transcription_model();

@@ -104,6 +104,7 @@ import {
 } from '../source-index/status.ts';
 import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
 import { storeTotalsReconcileDue } from '../connector-store/store-totals.ts';
+import { LOOP_SLOW_SQL_MS, slowMainThreadSqlHealth, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
 import {
   dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
@@ -634,6 +635,10 @@ export async function main(): Promise<void> {
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  // Every statement that holds this process's loop past LOOP_SLOW_SQL_MS is
+  // named in the log and counted in health, from before the first store opens
+  // (loop-stall step-back, 15 Nov 2026): the next stall names itself.
+  startSlowMainThreadSqlLog(LOOP_SLOW_SQL_MS);
   // The waits on this boot read its progress, not a fixed ceiling (#1494). The
   // front does not own the data root's boot work and never writes that file;
   // it reports its own start, each store it opens a step (#1563).
@@ -6232,6 +6237,9 @@ export async function main(): Promise<void> {
         ...(statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {}),
         loop_lag: loopLag,
         ...(backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {}),
+        // Statements that held this process's loop past the slow-log threshold, named by call site.
+        ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
+        ...(backgroundSnapshot?.loop_slow_sql ? { background_loop_slow_sql: backgroundSnapshot.loop_slow_sql } : {}),
         // The front answers while its background restarts or crash-loops: an
         // upgrade or rollback reads this before it calls the engine healthy
         // (#1563 review).
@@ -6652,6 +6660,7 @@ export async function main(): Promise<void> {
         rss_restarts: rssRestart.restarts(),
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
         ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
+        ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
       }),
     });
     // A delete the front forwarded: stop answering ready (so no new front

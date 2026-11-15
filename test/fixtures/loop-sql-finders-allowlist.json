@@ -1,0 +1,385 @@
+{
+  "note": "Finders still on a loop thread (test/loop-sql-finders-guard.test.ts). Shrink only: move one to the read worker, then rewrite.",
+  "entries": [
+    {
+      "site": "<anonymous> local-index.ts < importItemCopy local-index.ts",
+      "table": "item_owners",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "<anonymous> local-index.ts < importItemCopy local-index.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "<anonymous> local-index.ts < purgeAccountScope local-index.ts",
+      "table": "item_owners",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "<anonymous> local-index.ts < purgeAccountScope local-index.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "<anonymous> local-index.ts < purgeAccountScope local-index.ts",
+      "table": "sync_runs",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "<anonymous> local-index.ts < restoreItemRepresentations local-index.ts",
+      "table": "item_owners",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "<anonymous> local-index.ts < restoreItemRepresentations local-index.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "<anonymous> local-index.ts < tombstoneCopy local-index.ts",
+      "table": "item_owners",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "<anonymous> local-index.ts < tombstoneCopy local-index.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "addQuestionSlice sniffer-service.ts < countBacklogNow sniffer-service.ts",
+      "table": "sniffer_questions",
+      "reason": "judge backlog counts on the loop"
+    },
+    {
+      "site": "authorCoverage local-index.ts",
+      "table": "items",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "bindEmbeddingWriteAuthority local-index.ts < embedChunksUnderLease local-index.ts",
+      "table": "item_owners",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "bindEmbeddingWriteAuthority local-index.ts < embedChunksUnderLease local-index.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "bindTierSet local-index.ts < accept tiered-store-sink.ts",
+      "table": "item_owners",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "bindTierSet local-index.ts < accept tiered-store-sink.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "bindTierSet local-index.ts < copyWithLockedSources tier-move.ts",
+      "table": "item_owners",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "bindTierSet local-index.ts < copyWithLockedSources tier-move.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "bindTierSet local-index.ts < planFor tiered-store-set.ts",
+      "table": "item_owners",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "bindTierSet local-index.ts < planFor tiered-store-set.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "clearedOverrideFingerprint tier-ledger.ts < applyOwnerOverrides tier-override-settle.ts",
+      "table": "tier_overrides",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "clearedOverrideFingerprint tier-ledger.ts",
+      "table": "tier_overrides",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "counts sniffer-store.ts",
+      "table": "sniffer_questions",
+      "reason": "judge backlog counts on the loop"
+    },
+    {
+      "site": "counts sniffer-store.ts",
+      "table": "sniffer_verdicts",
+      "reason": "judge backlog counts on the loop"
+    },
+    {
+      "site": "counts tier-ledger.ts",
+      "table": "tier_items",
+      "reason": "judge backlog counts on the loop"
+    },
+    {
+      "site": "embedChunksUnderLease local-index.ts < async withFileLease file-lease.ts",
+      "table": "chunks",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "embedChunksUnderLease local-index.ts",
+      "table": "chunks",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "embeddingBacklogEstimate local-index.ts < embeddingBacklogEstimateOffThread local-index.ts",
+      "table": "chunks",
+      "reason": "in-memory test store only: on a file store this runs on the read worker"
+    },
+    {
+      "site": "embeddingBacklogEstimate local-index.ts < withEmbeddingBacklogEstimate status.ts",
+      "table": "chunks",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "embeddingBacklogEstimate local-index.ts",
+      "table": "chunks",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "keepsSecretLocations local-index.ts < syncFromConnectorHeld local-index.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "lastCompletedSyncRun local-index.ts < pull provider-store-sync.ts",
+      "table": "sync_runs",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "lastSyncRun local-index.ts < statusSteps local-index.ts",
+      "table": "sync_runs",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "listClearedOverrideRows tier-ledger.ts < applyOwnerOverrides tier-override-settle.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "listClearedOverrideRows tier-ledger.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "listMoving tier-ledger.ts < runAutoMoves sniffer-service.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "listRouted tier-ledger.ts < sweepImageContentToPrivate tier-image-content-sweep.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "listRouted tier-ledger.ts < sweepSecretsFloor tier-secrets-floor-sweep.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "listRoutedOverrides tier-ledger.ts < applyOwnerOverrides tier-override-settle.ts",
+      "table": "tier_overrides",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "migrate local-index.ts < new LocalConnectorStore local-index.ts",
+      "table": "chunks",
+      "reason": "boot or migration (step-back: boot work, later)"
+    },
+    {
+      "site": "missingEmbeddingItemIds local-index.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "new LocalConnectorStore local-index.ts < openConnectorStore source-storage.ts",
+      "table": "chunk_embeddings",
+      "reason": "boot or migration (step-back: boot work, later)"
+    },
+    {
+      "site": "new LocalConnectorStore local-index.ts < store tiered-store-set.ts",
+      "table": "chunk_embeddings",
+      "reason": "boot or migration (step-back: boot work, later)"
+    },
+    {
+      "site": "new LocalConnectorStore local-index.ts",
+      "table": "chunk_embeddings",
+      "reason": "boot or migration (step-back: boot work, later)"
+    },
+    {
+      "site": "pdfExtractionBacklog local-index.ts < pdfExtractionBacklogOffThread local-index.ts",
+      "table": "items",
+      "reason": "in-memory test store only: on a file store this runs on the read worker"
+    },
+    {
+      "site": "pdfExtractionBacklog local-index.ts < withPdfExtractionBacklog status.ts",
+      "table": "items",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "pdfExtractionBacklog local-index.ts",
+      "table": "items",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "read sniffer-store.ts < listQuestions sniffer-store.ts",
+      "table": "sniffer_questions",
+      "reason": "judge backlog counts on the loop"
+    },
+    {
+      "site": "reconcileTotals local-index.ts",
+      "table": "chunk_embeddings",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "reconcileTotals local-index.ts",
+      "table": "chunks",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "reconcileTotals local-index.ts",
+      "table": "items",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "reconcileTotals local-index.ts",
+      "table": "sync_runs",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "rejudgeCandidatePage tier-ledger.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "relabelUnreadFailSafe tier-ledger.ts < recoverMissingQuestions sniffer-service.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "relabelUnreadFailSafe tier-ledger.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "settleStaleEmbedHolds tier-ledger.ts < new TierLedger tier-ledger.ts",
+      "table": "tier_copies",
+      "reason": "boot or migration (step-back: boot work, later)"
+    },
+    {
+      "site": "status local-index.ts < statusFor status.ts",
+      "table": "chunk_embeddings",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "status local-index.ts < statusFor status.ts",
+      "table": "chunks",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "status local-index.ts < statusFor status.ts",
+      "table": "items",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "status local-index.ts < statusFor status.ts",
+      "table": "sync_runs",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "status local-index.ts < statusOffThread local-index.ts",
+      "table": "chunk_embeddings",
+      "reason": "in-memory test store only: on a file store this runs on the read worker"
+    },
+    {
+      "site": "status local-index.ts < statusOffThread local-index.ts",
+      "table": "chunks",
+      "reason": "in-memory test store only: on a file store this runs on the read worker"
+    },
+    {
+      "site": "status local-index.ts < statusOffThread local-index.ts",
+      "table": "items",
+      "reason": "in-memory test store only: on a file store this runs on the read worker"
+    },
+    {
+      "site": "status local-index.ts < statusOffThread local-index.ts",
+      "table": "sync_runs",
+      "reason": "in-memory test store only: on a file store this runs on the read worker"
+    },
+    {
+      "site": "status local-index.ts",
+      "table": "chunk_embeddings",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "status local-index.ts",
+      "table": "chunks",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "status local-index.ts",
+      "table": "items",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "status local-index.ts",
+      "table": "sync_runs",
+      "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "stripImageContentOutsidePrivate local-index.ts < sweepImageContentToPrivate tier-image-content-sweep.ts",
+      "table": "items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "syncFromConnectorHeld local-index.ts < async syncFromConnector local-index.ts",
+      "table": "item_owners",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "syncFromConnectorHeld local-index.ts < async syncFromConnector local-index.ts",
+      "table": "items",
+      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "unsettledSecretSideStores tier-ledger.ts < retrySecretSideStoreDebts secrets-disposition.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "up local-index.ts < <anonymous> sqlite-migrations.ts",
+      "table": "items",
+      "reason": "boot or migration (step-back: boot work, later)"
+    },
+    {
+      "site": "up tier-ledger.ts < <anonymous> sqlite-migrations.ts",
+      "table": "tier_copies",
+      "reason": "boot or migration (step-back: boot work, later)"
+    },
+    {
+      "site": "validateConnectorStoreRows local-index.ts < new LocalConnectorStore local-index.ts",
+      "table": "connector_store_fts_rows",
+      "reason": "boot or migration (step-back: boot work, later)"
+    },
+    {
+      "site": "window tier-ledger.ts < settleNamesOnlyItems tier-names-only-settle.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    },
+    {
+      "site": "window tier-ledger.ts < settlePersonalFirstItems tier-held-settle.ts",
+      "table": "tier_items",
+      "reason": "family 3: settle and the cleared-override walk"
+    }
+  ]
+}
