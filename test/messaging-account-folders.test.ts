@@ -13,9 +13,11 @@ import { holdDataOwnerLock, type HeldDataOwnerLock } from '../src/core/data-owne
 import {
   MessagingCaptureSupervisor,
   defaultMessagingCaptureGrantPath,
+  messagingCaptureStartFailure,
   saveMessagingCaptureGrant,
   type CaptureChild,
 } from '../src/core/messaging-capture.ts';
+import { whatsappBridgeFileName } from '../src/core/whatsapp-bridge-name.ts';
 import { openConnectorStore, __sourceStorageTestHooks, enableSourceRegistryAdoption } from '../src/core/source-storage.ts';
 import {
   TELEGRAM_API_HASH_SECRET_KEY,
@@ -343,6 +345,36 @@ describe('a fresh install pairs and captures only inside the account folder', ()
     put(join(state, 'qr.png'));
     expect(dataFiles(f.env).filter((path) => !inside(path, folder))).toEqual([]);
     expect(existsSync(join(f.home, '.local', 'share', 'olympus', 'whatsapp-live'))).toBe(false);
+  });
+
+  test('WhatsApp capture after an upgrade finds no bridge: it names the missing helper, and builds one when it can', async () => {
+    // Sparta 2026-11-15: an upgrade changed the bridge fingerprint and shipped none; capture spawned a missing
+    // file for days and the card offered a re-pair. Capture now goes through the same resolver as pairing.
+    const f = fresh();
+    const paired = await pairWhatsApp(f, (path) => writeFileSync(join(path!, 'session.db'), 'device'));
+    const env = { ...f.env, XDG_CACHE_HOME: join(f.dir, 'fresh-cache') };
+    let spawned: string | undefined;
+    const noTools = new MessagingCaptureSupervisor({
+      source: 'whatsapp', registryPath: paired.registryPath, grantPath: paired.grantPath, baseEnv: env,
+      packageRoot: paired.pkg, which: () => null,
+      spawn: (input) => { spawned = input.executable; return fakeChild(); },
+    });
+    const failure = await noTools.reconcile().then(() => undefined, (error: unknown) => error);
+    expect(messagingCaptureStartFailure(failure)).toBe('helper_missing');
+    expect(spawned).toBeUndefined();
+
+    const building = new MessagingCaptureSupervisor({
+      source: 'whatsapp', registryPath: paired.registryPath, grantPath: paired.grantPath, baseEnv: env,
+      packageRoot: paired.pkg, which: (command) => `/fixture/bin/${command}`,
+      buildWhatsAppBridge: async (input) => {
+        writeFileSync(input.outputPath, '#!/bin/sh\n');
+        chmodSync(input.outputPath, 0o700);
+        return true;
+      },
+      spawn: (input) => { spawned = input.executable; return fakeChild(); },
+    });
+    expect(await building.reconcile()).toEqual({ source: 'whatsapp', state: 'running' });
+    expect(spawned).toBe(join(env.XDG_CACHE_HOME, 'olympus', 'bin', whatsappBridgeFileName(join(paired.pkg, 'tools', 'whatsapp-bridge'))));
   });
 
   test('a real child process is handed the same paths and makes its files there', async () => {

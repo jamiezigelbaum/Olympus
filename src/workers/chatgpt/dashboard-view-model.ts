@@ -59,6 +59,7 @@ import {
   DASHBOARD_ARCHIVE_COPY,
   DASHBOARD_CAPTURE_BLOCKED_LABEL,
   DASHBOARD_CAPTURE_COPY,
+  dashboardCaptureHelperNeverStarted,
   DASHBOARD_CAPTURE_STALE_LABEL,
   dashboardAttentionLine,
   dashboardAttentionParts,
@@ -563,12 +564,12 @@ function sourceEntry(
       : scopePending(card) || missingScope(card)
         ? scopeFix(definition, card)
         : reconnect ?? (late && captureOnly
-          ? captureFix(definition)
+          ? captureFix(definition, card)
           : late && mediaStorageOnly(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) })
             ? checkAgainFix()
           // Beside another problem the other problem's fix leads when it has
           // one; a chat source has no Sync now, so Check capture is then the row's fix.
-          : late ? sync ?? (capture ? captureFix(definition) : undefined)
+          : late ? sync ?? (capture ? captureFix(definition, card) : undefined)
             : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu: DashboardFix[] = [];
   // Sync now sits first in the ⋯ menu of every connected source that can
@@ -577,7 +578,7 @@ function sourceEntry(
   if (sync) menu.push(sync);
   // Check capture, for a live feed in trouble beside some other problem; the
   // panel drops it from the menu when it is the row's own fix.
-  if (capture && !connecting && status !== 'Off') menu.push(captureFix(definition));
+  if (capture && !connecting && status !== 'Off') menu.push(captureFix(definition, card));
   // Another archive is imported the way the first was: from the dashboard on
   // the computer it is on. Never over a record that cannot be read, which an
   // import would write over.
@@ -711,10 +712,10 @@ function attentionItem(
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
       ? reconnectFix(definition, card)
       : captureOnly
-        ? captureFix(definition)
+        ? captureFix(definition, card)
         : mediaOnly
           ? checkAgainFix()
-          : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
+          : sync ?? (captureProblem(card) ? captureFix(definition, card) : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 
@@ -772,7 +773,10 @@ function mediaStorageOnly(card: DashboardSourceCard, options: Parameters<typeof 
   return card.media_storage !== undefined && !captureProblem(card) && dashboardAttentionParts(card, options).reason === '';
 }
 
-function captureFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
+function captureFix(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard): DashboardFix {
+  // A helper that never started is not a link problem: Check capture would open the re-pair for nothing. The card's
+  // line names the step (reinstall or restart); the control checks again after it.
+  if (dashboardCaptureHelperNeverStarted(card)) return checkAgainFix();
   return helpLinkFix(DASHBOARD_CAPTURE_COPY.fixLabel, openOnComputer(definition, 'reconnect'));
 }
 
@@ -1622,6 +1626,8 @@ const CAPTURE_SUPERVISOR_REASONS: ReadonlySet<string> = new Set([
   'session_missing',
   'secret_missing',
   'start_failed',
+  'helper_missing',
+  'helper_build_failed',
   'helper_exited',
   'restarting',
   'helper_running',

@@ -13,7 +13,7 @@ import {
 import { privateAnswerMode } from '../../core/first-run-privacy.ts';
 import { parseSettingsProposalInput, parseProposalFrom, SettingsProposalError } from '../../core/settings-proposal.ts';
 import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
-import { createDashboardMessagingService } from './dashboard/dashboard-messaging-service.ts';
+import { createDashboardMessagingService, dashboardMessagingFailure } from './dashboard/dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { type AgentAnswerReceipt, recordAgentAnswerReceipt, agentAnswerReceipt } from '../../core/app-release-agent.ts';
 import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy-backlog-coverage.ts';
@@ -1896,7 +1896,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           if (!sourceDashboard?.judgeSetup) throw new EmailSourceWorkerError(501, 'not_available', 'Judge setup is unavailable.');
           try { return json(await sourceDashboard.judgeSetup.save(input.choice as JudgeChoice, input.cap_dollars)); }
-          catch (error) { return json({ ok: false, error: { code: 'judge_setup_failed', message: error instanceof Error ? error.message : 'The judge choice could not be saved.' } }, 409); }
+          catch (error) { console.warn('[olympus] dashboard save failed: judge_setup_failed'); return json({ ok: false, error: { code: 'judge_setup_failed', message: error instanceof Error ? error.message : 'The judge choice could not be saved.' } }, 409); }
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/engine/go-easy') {
@@ -1907,7 +1907,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (typeof input.on !== 'boolean') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose whether to go easy on this computer.');
           if (!sourceDashboard?.goEasy) throw new EmailSourceWorkerError(501, 'not_available', 'This setting is unavailable.');
           try { return json(sourceDashboard.goEasy.save(input.on)); }
-          catch { return json({ ok: false, error: { code: 'go_easy_failed', message: 'The setting could not be saved. Try again.' } }, 409); }
+          catch { console.warn('[olympus] dashboard go-easy save failed: go_easy_failed'); return json({ ok: false, error: { code: 'go_easy_failed', message: 'The setting could not be saved. Try again.' } }, 409); }
         }
 
         if (request.method === 'POST' && (url.pathname === DASHBOARD_SELF_UPDATE_PATHS.start || url.pathname === DASHBOARD_SELF_UPDATE_PATHS.status)) {
@@ -1932,7 +1932,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             return json({ ok: false, error: { code: 'not_available', message: 'This setting is available in the standalone Olympus app on a Mac.' } }, 409);
           }
           try { return json(sourceDashboard.saveComputerUseChoice(input.choice as 'everyday' | 'server')); }
-          catch (error) { return json({ ok: false, error: { code: 'server_mode_failed', message: error instanceof Error ? error.message : 'Olympus could not change this setting. Try again in Keys.' } }, 409); }
+          catch (error) { console.warn('[olympus] dashboard save failed: server_mode_failed'); return json({ ok: false, error: { code: 'server_mode_failed', message: error instanceof Error ? error.message : 'Olympus could not change this setting. Try again in Keys.' } }, 409); }
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/models/first-run-privacy') {
@@ -1996,8 +1996,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           try {
             const record = await parseDashboardMessagingBody(request);
             return new Response(JSON.stringify(await dashboardMessaging.handle(operation, record)), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
-          } catch {
-            return new Response(JSON.stringify({ ok: false, error: { code: 'messaging_request_failed', message: 'Could not complete this pairing step. Try again from this computer.' } }), { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+          } catch (error) {
+            // Logged and named, never swallowed: a missing bridge read as "Could not complete this step" with nothing in
+            // the log (Sparta, 15 Nov). Only the fixed code leaves; the message can name paths.
+            const failure = dashboardMessagingFailure(error);
+            console.warn(`[messaging] dashboard ${operation} failed: ${failure.code}`);
+            return new Response(JSON.stringify({ ok: false, error: failure }), { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
           }
         }
 
@@ -3814,6 +3818,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (request.method === 'GET' && failedUrl.pathname === '/dashboard' && dashboardHtmlRoutePage(failedUrl) === 'help') {
           console.warn('[olympus] support_source_status_unavailable');
           return renderHelp(request, failedUrl);
+        }
+        // A dashboard step that failed says so in the log by its fixed code (never its message, which can name paths),
+        // so a card's "could not complete" always has a line behind it (Sparta, 15 Nov).
+        if (failedUrl.pathname.startsWith('/dashboard')) {
+          const code = error instanceof EmailSourceWorkerError || error instanceof ConnectedHandleGrantMutationError ? error.code : isCredentialRefreshBusyError(error) ? 'credential_refresh_busy' : 'unexpected';
+          console.warn(`[olympus] dashboard ${failedUrl.pathname} failed: ${code}`);
         }
         if (error instanceof EmailSourceWorkerError) {
           return json(

@@ -53,6 +53,7 @@ import {
   DASHBOARD_CAPTURE_STALE_LABEL,
   DASHBOARD_MANY_UNREADABLE_LABEL,
   DASHBOARD_MEDIA_STORAGE_COPY,
+  dashboardCaptureHelperNextAction,
   dashboardCaptureProblem,
   dashboardNoneReadSentence,
 } from './dashboard/vocabulary.ts';
@@ -856,6 +857,10 @@ export type DashboardCaptureSupervisorReason =
   | 'secret_missing'
   /** The helper process could not be started at all (no Python, the executable is gone). */
   | 'start_failed'
+  /** This version's helper program is not installed, and this computer cannot build it (no Go or C compiler). */
+  | 'helper_missing'
+  /** This version's helper program could not be built. */
+  | 'helper_build_failed'
   /** The helper keeps exiting on its own shortly after it starts. */
   | 'helper_exited'
   /** The helper exited and has not been started again yet. Not a fault by itself. */
@@ -3196,7 +3201,7 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       stage: 'source_health',
       condition: 'degraded',
       next_action: captureProblem.cause === 'helper'
-        ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
+        ? dashboardCaptureHelperNextAction(card, card.label)
         : captureProblem.cause === 'disk'
           ? DASHBOARD_CAPTURE_COPY.nextAction.disk(card.label)
           : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
@@ -3247,7 +3252,7 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
         // A live-feed problem beside this one keeps its own step, which Sync now does not do.
         + (captureProblem
           ? ` ${captureProblem.cause === 'helper'
-            ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
+            ? dashboardCaptureHelperNextAction(card, card.label)
             : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label)}`
           : ''),
       dependencies,

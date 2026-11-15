@@ -664,6 +664,8 @@ export const DASHBOARD_CAPTURE_COPY = {
     session_missing: 'capture cannot start: its linked session is missing',
     secret_missing: 'capture cannot start: its saved sign-in key is missing',
     start_failed: 'capture cannot start: its helper would not start',
+    helper_missing: 'capture cannot start: this version\'s helper is not installed on this computer',
+    helper_build_failed: 'capture cannot start: this version\'s helper could not be built on this computer',
     helper_exited: 'capture keeps stopping: its helper exits soon after it starts',
     grant_missing: 'capture stopped: its approval is missing',
     handle_unavailable: 'capture stopped: its sign-in is no longer available',
@@ -681,6 +683,9 @@ export const DASHBOARD_CAPTURE_COPY = {
   nextAction: {
     stale: (label: string) => `Open ${label} on this computer to check the link and capture. Syncing again will not bring in messages that were never captured.`,
     blocked: (label: string) => `Open ${label} on this computer and link it again so live capture can start.`,
+    /** The helper itself would not start: linking again does not help, and nothing linked is lost. */
+    helperMissing: (label: string) => `Reinstall Olympus on this computer to put back ${label}'s helper; capture starts on its own after, and what you linked is kept.`,
+    helperStart: (label: string) => `Restart Olympus on this computer; ${label} stays linked. If capture still cannot start, email support.`,
     awaiting: (label: string) => `Keep ${label} linked. The first live message since linking will end this wait; if none arrives within the day, this row says so.`,
     disk: (label: string) => `Free some space on this computer. Every ${label} message is kept meanwhile, and the waiting pictures, videos and voice notes download on their own once there is room.`,
   },
@@ -728,6 +733,23 @@ export function dashboardCaptureProblem(source: DashboardSourceCard): DashboardC
   if (source.freshness.capture?.state === 'stale') return { cause: 'stale' };
   if (source.freshness.capture?.media_waiting_for_disk === true) return { cause: 'disk' };
   return undefined;
+}
+
+/**
+ * Whether the live feed's helper never started (not installed, not built, would not run): linking again cannot fix it,
+ * so the card names the step that does and offers no re-pair.
+ */
+export function dashboardCaptureHelperNeverStarted(source: DashboardSourceCard): boolean {
+  const problem = dashboardCaptureProblem(source);
+  return problem?.cause === 'helper' && (problem.reason === 'start_failed' || problem.reason === 'helper_missing' || problem.reason === 'helper_build_failed');
+}
+
+/** The next step for a live feed whose helper is in trouble: put the helper back, restart, or link again. */
+export function dashboardCaptureHelperNextAction(source: DashboardSourceCard, label: string): string {
+  const reason = dashboardCaptureProblem(source)?.reason;
+  return reason === 'helper_missing' || reason === 'helper_build_failed' ? DASHBOARD_CAPTURE_COPY.nextAction.helperMissing(label)
+    : reason === 'start_failed' ? DASHBOARD_CAPTURE_COPY.nextAction.helperStart(label)
+      : DASHBOARD_CAPTURE_COPY.nextAction.blocked(label);
 }
 
 /** True when the card's readiness label is one of the two that only name the live feed. */

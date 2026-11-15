@@ -48,9 +48,10 @@ import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/mo
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import {
+  type MessagingCaptureStartFailure,
   type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
-import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
+import { readyWhatsAppBridge } from '../../core/messaging-pairing.ts';
 import { unlinkHelper } from './dashboard/dashboard-messaging-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
@@ -867,13 +868,13 @@ export async function main(): Promise<void> {
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
-  const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+  const captureFailures: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStartFailure>> = {};
   // What each supervisor last reported, for the dashboard. Absent for a source
   // whose capture the native service owns: this worker runs nothing there.
   const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
-    onResumeFailure: (source) => { captureFailures[source] = true; },
+    onResumeFailure: (source, kind) => { captureFailures[source] = kind; },
     onResumeSuccess: (source, status) => { delete captureFailures[source]; captureStatuses[source] = status; },
     registryPath: connectedHandleRegistryPath!,
     packageRoot,
@@ -906,8 +907,8 @@ export async function main(): Promise<void> {
   const stopMessagingCapture = engineFront
     ? frontCaptureStop(engineFront.client)
     : async (source: 'telegram' | 'whatsapp') => { await captureOwnership.stopForUnpair(source); };
-  const unlinkWhatsAppDevice = (stateDir: string) => unlinkHelper(
-    whatsappBridgePathForPackage(packageRoot, { env: process.env }),
+  const unlinkWhatsAppDevice = async (stateDir: string) => unlinkHelper(
+    await readyWhatsAppBridge({ env: process.env }, packageRoot),
     { ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: stateDir },
   );
 

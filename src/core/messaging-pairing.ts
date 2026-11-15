@@ -455,6 +455,19 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
       onInstall: (venvDir) => process.stderr.write(`Installing ${TELEGRAM_TELETHON_REQUIREMENT} for Telegram into ${venvDir} (once; about a minute)...\n`),
     });
   }
+  return readyWhatsAppBridge(options, packageRoot);
+}
+
+/** What readyWhatsAppBridge needs: where it looks and builds, and the seams the tests use. */
+export type WhatsAppBridgeOptions = Pick<PairMessagingSourceOptions, 'whatsappBridgePath' | 'homeDir' | 'env' | 'which' | 'buildWhatsAppBridge'>;
+
+/**
+ * The WhatsApp bridge this package runs, made ready: the release's prebuilt one when the installer placed it, else the
+ * per-user build for this package's bridge source, built now when it is not there yet (an upgrade whose bridge source
+ * changed leaves only the old build behind). Pairing and live capture both start the bridge through this, so neither
+ * runs an old build or none. Throws with code bridge_build_tools_missing or bridge_build_failed when it cannot.
+ */
+export async function readyWhatsAppBridge(options: WhatsAppBridgeOptions, packageRoot: string): Promise<string> {
   if (options.whatsappBridgePath) {
     if (!existsSync(options.whatsappBridgePath)) throw new Error('The configured WhatsApp pairing bridge does not exist.');
     return options.whatsappBridgePath;
