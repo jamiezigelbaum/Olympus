@@ -222825,6 +222825,74 @@ var init_front_history = __esm(() => {
   init_source_dashboard();
 });
 
+// src/workers/engine/stand-back.ts
+function ownerAskReason(local, frontBusy) {
+  if (local.busy)
+    return "question in this process";
+  return frontBusy() ? "question in the front" : undefined;
+}
+function createStandBack(options) {
+  const now = options.now ?? Date.now;
+  const log = options.log ?? ((line) => console.log(line));
+  const maxMs = options.maxMs ?? STAND_BACK_MAX_MS;
+  const shareMs = options.shareMs ?? STAND_BACK_SHARE_MS;
+  const states = new Map;
+  const seconds = (ms) => Math.round(ms / 1000);
+  return {
+    holds(work) {
+      const at = now();
+      let reason;
+      try {
+        reason = options.reason();
+      } catch {
+        reason = undefined;
+      }
+      let state = states.get(work);
+      if (!reason) {
+        if (state?.since !== undefined) {
+          state.counts.held_ms += at - state.since;
+          log(`Olympus engine: ${work} resumes after standing back ${seconds(at - state.since)} s (${state.reason}).`);
+          state.since = undefined;
+        }
+        if (state)
+          state.shareUntil = undefined;
+        return false;
+      }
+      if (!state)
+        states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
+      if (state.shareUntil !== undefined && at < state.shareUntil)
+        return false;
+      state.shareUntil = undefined;
+      if (state.since === undefined) {
+        state.since = at;
+        state.reason = reason;
+        state.counts.holds += 1;
+        log(`Olympus engine: ${work} stands back for the owner's Ask (${reason}).`);
+        return true;
+      }
+      if (at - state.since >= maxMs) {
+        state.counts.held_ms += at - state.since;
+        state.counts.bound_reached += 1;
+        log(`Olympus engine: ${work} stood back ${seconds(at - state.since)} s (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
+        state.since = undefined;
+        state.shareUntil = at + shareMs;
+        return false;
+      }
+      return true;
+    },
+    counts() {
+      const at = now();
+      return Object.fromEntries([...states].map(([work, state]) => [work, {
+        ...state.counts,
+        held_ms: state.counts.held_ms + (state.since !== undefined ? at - state.since : 0),
+        holding: state.since !== undefined,
+        ...state.since !== undefined && state.reason ? { reason: state.reason } : {}
+      }]));
+    }
+  };
+}
+var STAND_BACK_MAX_MS = 60000, STAND_BACK_SHARE_MS = 15000;
+
 // src/core/remote-access-config.ts
 var REMOTE_ACCESS_CONFIG_ROUTE = "/plugins/olympus/remote-access";
 var init_remote_access_config = __esm(() => {
@@ -248493,22 +248561,9 @@ async function main() {
   const ownerQuestions = createOwnerQuestionActivity(engineFront?.ownerBusy);
   const remoteOwnerMarks = new OwnerBusyMarks;
   const remoteOwnerBusy = (resource) => remoteOwnerMarks.busy(resource);
-  let readPriorityProbe;
-  const ownerAskRunning = () => {
-    if (ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
-      return true;
-    const now = Date.now();
-    if (!readPriorityProbe || now - readPriorityProbe.at >= 250) {
-      let busy = false;
-      try {
-        busy = storeReadHasPriority();
-      } catch {
-        busy = false;
-      }
-      readPriorityProbe = { at: now, busy };
-    }
-    return readPriorityProbe.busy;
-  };
+  const standBack = createStandBack({
+    reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
+  });
   const answerActivity = createAnswerActivity(() => {
     return;
   }, {
@@ -251035,7 +251090,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         if (embedsOnThisComputer(target.provider))
           localPacer.noteLocalWork();
       },
-      holdForAsk: ownerAskRunning
+      holdForAsk: () => standBack.holds("embed")
     });
     const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
@@ -251053,7 +251108,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const sourceScheduler = engineFront ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront.status(), sourcesChanged: () => refreshFrontMounts() }) : olympusConfig.worker.scheduler.enabled ? createSourceSchedulerFromConfig({
     config: olympusConfig,
     sources: schedulerSources,
-    holdForAsk: ownerAskRunning,
+    holdForAsk: () => standBack.holds("import"),
     ...!(sourceIndexStatus && sourceIngestionLedger) ? {
       afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
       afterTick: () => refreshPeople()
@@ -252562,7 +252617,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const path = new URL(request.url).pathname;
     const rerankOutcomes = builtInRerankerMayRun(process.env) ? rerankOutcomeCounts() : undefined;
     const localPromptBudgets = localAnalystWindowReports();
-    if ((path === "/v1/health" || path === "/health") && response?.ok && (tierLedgerProblems.size || engineFront || rerankOutcomes || localPromptBudgets.length)) {
+    const standBackCounts = standBack.counts();
+    const standBackSeen = Object.keys(standBackCounts).length > 0;
+    if ((path === "/v1/health" || path === "/health") && response?.ok && (tierLedgerProblems.size || engineFront || rerankOutcomes || localPromptBudgets.length || standBackSeen)) {
       return Response.json({
         ...await response.json(),
         ...rerankOutcomes ? {
@@ -252576,6 +252633,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           ...report.windowTokens !== undefined ? { window_tokens: report.windowTokens } : {}
         })) } : {},
         ...tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {},
+        ...standBackSeen ? { stand_back: standBackCounts } : {},
         ...engineFront ? { engine_background: await engineFront.backgroundReady() ? "ready" : "unreachable" } : {}
       }, { status: response.status, headers: response.headers });
     }
@@ -252777,8 +252835,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : snifferLane.kind === "venice" ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {},
     ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "venice" && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, "tier_sniffer") || remoteOwnerBusy(snifferResource)),
-    ownerInFlight: () => ownerAskRunning() || snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
-    shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || ownerAskRunning(),
+    ownerInFlight: () => standBack.holds("judge") || snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
+    shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || standBack.holds("judge"),
     pacing: localPacer,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line),
@@ -252905,7 +252963,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         owner_busy: (change) => {
           if (!remoteOwnerMarks.apply(change))
             return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          if (change.resource === snifferResource || change.resource === OWNER_QUESTION_RESOURCE)
+          if (change.resource === snifferResource || change.resource === OWNER_QUESTION_RESOURCE && standBack.holds("judge"))
             tierSniffer?.preempt();
           return { busy: true };
         },

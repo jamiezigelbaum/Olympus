@@ -487,7 +487,8 @@ import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
-import { storeReadHasPriority, withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
+import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
+import { createStandBack, ownerAskReason } from './stand-back.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
@@ -822,23 +823,18 @@ export async function main(): Promise<void> {
   // Busy marks from the split's front lapse after ten minutes without renewal.
   const remoteOwnerMarks = new OwnerBusyMarks();
   const remoteOwnerBusy = (resource: string): boolean => remoteOwnerMarks.busy(resource);
-  // The owner's Ask, wherever it runs: this process, the split's front (its
-  // owner_busy mark), or any Ask holding the shared read-priority lease.
-  // Background work starts no new task, embedding batch or judge call while
-  // it is true (ops#151, 14 Nov 2026: Sparta's Asks took 80 s beside the
-  // background's embedder). Forwarded commands are never held: the front may
-  // be waiting on one during the Ask.
-  let readPriorityProbe: { at: number; busy: boolean } | undefined;
-  const ownerAskRunning = (): boolean => {
-    if (ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE)) return true;
-    const now = Date.now();
-    if (!readPriorityProbe || now - readPriorityProbe.at >= 250) {
-      let busy = false;
-      try { busy = storeReadHasPriority(); } catch { busy = false; }
-      readPriorityProbe = { at: now, busy };
-    }
-    return readPriorityProbe.busy;
-  };
+  // The owner's Ask, wherever it runs: this process, or the split's front
+  // (its owner_busy mark). Background work stands back from it, bounded and
+  // logged, by one rule (stand-back.ts; ops#151, 14 Nov 2026: Sparta's Asks
+  // took 80 s beside the background's embedder). Forwarded commands are
+  // never held: the front may be waiting on one during the Ask. The shared
+  // read-priority lease is not this signal: background answers and the
+  // private-match probe hold it too (the probe past its own timeout), and
+  // counting them held imports for most of an hour (lane 6 archive-scale
+  // leg, 15 Nov).
+  const standBack = createStandBack({
+    reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
+  });
   // UI answer leases coordinate owner/background jobs. Actual local model
   // dispatches have separate leases; cloud searches never preempt sorting.
   const answerActivity = createAnswerActivity(() => undefined, {
@@ -4316,7 +4312,7 @@ export async function main(): Promise<void> {
     }, {
       trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
       onProgress: (target) => { if (embedsOnThisComputer(target.provider)) localPacer.noteLocalWork(); },
-      holdForAsk: ownerAskRunning,
+      holdForAsk: () => standBack.holds('embed'),
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
@@ -4343,7 +4339,7 @@ export async function main(): Promise<void> {
     ? createSourceSchedulerFromConfig({
       config: olympusConfig,
       sources: schedulerSources,
-      holdForAsk: ownerAskRunning,
+      holdForAsk: () => standBack.holds('import'),
       ...(!(sourceIndexStatus && sourceIngestionLedger)
         ? {
             afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
@@ -6172,7 +6168,9 @@ export async function main(): Promise<void> {
     // the fused cut, and health counts it rather than let it vanish (#1583).
     const rerankOutcomes = builtInRerankerMayRun(process.env) ? rerankOutcomeCounts() : undefined;
     const localPromptBudgets = localAnalystWindowReports();
-    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront || rerankOutcomes || localPromptBudgets.length)) {
+    const standBackCounts = standBack.counts();
+    const standBackSeen = Object.keys(standBackCounts).length > 0;
+    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront || rerankOutcomes || localPromptBudgets.length || standBackSeen)) {
       return Response.json({
         ...await response.json() as object,
         ...(rerankOutcomes ? {
@@ -6188,6 +6186,8 @@ export async function main(): Promise<void> {
           ...(report.windowTokens !== undefined ? { window_tokens: report.windowTokens } : {}),
         })) } : {}),
         ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
+        // Background work that stood back for the owner's Ask: never silent.
+        ...(standBackSeen ? { stand_back: standBackCounts } : {}),
         // The front answers while its background restarts or crash-loops: an
         // upgrade or rollback reads this before it calls the engine healthy
         // (#1563 review).
@@ -6390,9 +6390,9 @@ export async function main(): Promise<void> {
         ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'venice' && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
-        ownerInFlight: () => ownerAskRunning() || (snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource))),
+        ownerInFlight: () => standBack.holds('judge') || (snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource))),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
-        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || ownerAskRunning(),
+        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || standBack.holds('judge'),
         // The service applies it to the built-in judge only, never Venice or a remote judge.
         pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
@@ -6535,7 +6535,9 @@ export async function main(): Promise<void> {
         // A stale change (older than the last applied for that resource) changes nothing.
         owner_busy: (change) => {
           if (!remoteOwnerMarks.apply(change)) return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          if (change.resource === snifferResource || change.resource === OWNER_QUESTION_RESOURCE) tierSniffer?.preempt();
+          // An owner question preempts the judge only while it stands back:
+          // within its guaranteed share the call it is making finishes.
+          if (change.resource === snifferResource || (change.resource === OWNER_QUESTION_RESOURCE && standBack.holds('judge'))) tierSniffer?.preempt();
           return { busy: true };
         },
         owner_idle: (change) => {
