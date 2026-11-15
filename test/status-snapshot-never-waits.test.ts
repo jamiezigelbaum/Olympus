@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { defineDropboxFilesCorpus } from '../src/workers/dropbox-files/index.ts';
 import { flushMicrotasks } from './helpers/test-clock.ts';
@@ -35,8 +36,8 @@ describe('status snapshot for the dashboard', () => {
       // From here the store's recount is stuck (a busy disk, a held lock, a blocked engine).
       store.prepareStatusCounts = () => { reads += 1; return new Promise<void>(() => {}); };
       // And busy: written to since its last count, so it is counted again.
-      let writes = 0;
-      store.changeMarker = () => `written:${writes++}`;
+      let writes = 1_000_000_000;
+      store.writeSequence = () => writes++;
       now += STORE_STATUS_REUSE_MS + 1;
       for (let poll = 0; poll < 5; poll += 1) {
         now += 2_000;
@@ -114,6 +115,35 @@ describe('status snapshot for the dashboard', () => {
   });
 });
 
+describe('live totals beside kept counts', () => {
+  test("the front's dashboard shows a write in the totals at once, while the counts keep their age", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'status-totals-'));
+    const snapshotPath = join(dir, 'source-status-snapshot.json');
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let now = 1_000_000;
+    try {
+      await store.reconcileTotals();
+      await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
+      const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'writer' });
+      await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
+      const before = (await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)).corpora[0] as { counts: Record<string, number>; totals?: { items: number; sync_runs: number } };
+      expect(before.totals).toMatchObject({ items: 1, sync_runs: 1 });
+      await store.syncFromConnector(connector([file('a.txt', 'alpha'), file('b.txt', 'beta')]), { fetchContent: true });
+      now += 2_000;
+      const after = await within(front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT));
+      expect(after).not.toBe('waited');
+      const shown = after as Awaited<ReturnType<typeof front.status>>;
+      expect((shown.corpora[0] as typeof before).totals).toMatchObject({ items: 2, sync_runs: 2 });
+      expect((shown.corpora[0] as typeof before).counts.indexed_items).toBe(before.counts.indexed_items);
+      expect(shown.snapshot_age_ms).toBe(2_000);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the background's paced status recount", () => {
   test('rests several times as long as each recount took, stands back for the owner, and reports it', async () => {
     const clock = createTestClock();
@@ -179,3 +209,23 @@ describe("the background's paced status recount", () => {
     } finally { recount.stop(); }
   });
 });
+
+function file(name: string, text: string): RawItem {
+  return {
+    identity: { family: 'file', provider: 'dropbox', accountScope: 'dropbox.personal', providerItemId: name, localItemId: `dropbox.personal:${name}`, sourceVersion: 'rev-1' },
+    mimeType: 'text/plain', content: { kind: 'text', text }, metadata: { title: name }, fetchedAt: '2026-08-31T12:00:00.000Z',
+  };
+}
+
+function connector(items: RawItem[]): SourceConnector {
+  return {
+    id: 'dropbox-test', family: 'file', async authenticate() {},
+    listItems() { return (async function* () { yield { items, done: true }; })(); },
+    async fetchItem(localItemId: string) {
+      const found = items.find((candidate) => candidate.identity.localItemId === localItemId);
+      if (!found) throw new Error(`missing item ${localItemId}`);
+      return found;
+    },
+    classificationSignals() { return {}; },
+  };
+}

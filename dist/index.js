@@ -15712,6 +15712,25 @@ var init_source_size_limits = __esm(() => {
   registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
 });
 
+// src/workers/connector-store/store-totals.ts
+var STORE_TOTALS_TRIGGERS, STORE_TOTALS_RECONCILE_EVERY_MS;
+var init_store_totals = __esm(() => {
+  STORE_TOTALS_TRIGGERS = [
+    "connector_store_totals_item_insert",
+    "connector_store_totals_item_delete",
+    "connector_store_totals_item_tombstone",
+    "connector_store_totals_chunk_insert",
+    "connector_store_totals_chunk_delete",
+    "connector_store_totals_vector_insert",
+    "connector_store_totals_vector_delete",
+    "connector_store_totals_vector_model",
+    "connector_store_totals_sync_insert",
+    "connector_store_totals_sync_delete",
+    ...["items", "chunks", "chunk_embeddings", "sync_runs"].flatMap((table) => ["insert", "update", "delete"].map((op) => `connector_store_totals_writes_${table}_${op}`))
+  ];
+  STORE_TOTALS_RECONCILE_EVERY_MS = 60 * 60000;
+});
+
 // src/workers/source-index/embedding-identity.ts
 function embeddingProviderFamily(providerKind) {
   return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
@@ -16337,6 +16356,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_source_size_limits();
+  init_store_totals();
   init_vector_digest();
   init_boot_progress();
   init_engine_heartbeat();

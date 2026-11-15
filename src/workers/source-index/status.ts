@@ -244,8 +244,25 @@ function authorCoverageStatus(
   }
 }
 
+/**
+ * The store's plain totals as its writes left them (store-totals.ts), read at
+ * every status, so never old even when `counts` come from a kept snapshot.
+ * Whole store: no scope or tier adjustment (those are `counts`).
+ */
+export interface SourceIndexStoreTotals {
+  items: number;
+  tombstoned_items: number;
+  chunks: number;
+  sync_runs: number;
+  vectors_by_model: Record<string, number>;
+  /** When an exact count last confirmed them. */
+  reconciled_at: string;
+}
+
 export interface SourceIndexConnectorStoreStatus extends SourceIndexCorpusStatusBase {
   configured: true;
+  /** Live plain totals; absent until the background's first reconcile of this store. */
+  totals?: SourceIndexStoreTotals;
   /** Opaque approval revision binding these counts to one file-source scope. */
   scope_revision?: string;
   counts: {
@@ -454,8 +471,11 @@ export function createSourceIndexStatusHandler(
   // store took the background's paced recount 7 minutes.
   const unchangedMarker = (store: LocalConnectorStore): string | undefined => {
     try {
-      const change = store.changeMarker?.();
-      return change === undefined ? undefined : `${visibilityMarker(store) ?? ''}|${change}`;
+      // The store's write sequence, not its connection's change count: a
+      // status pass writes visibility bookkeeping itself, which would read as
+      // a change every time. A store without one is always counted.
+      const writes = store.writeSequence?.();
+      return writes === undefined ? undefined : `${visibilityMarker(store) ?? ''}|${writes}`;
     } catch {
       return undefined;
     }
@@ -596,6 +616,24 @@ export function createSourceIndexStatusHandler(
     } catch { /* the in-memory snapshot still serves; the next refresh writes again */ }
   };
   const snapshotRefreshes = new Map<string, Promise<SourceIndexStatusResult>>();
+  // The totals are read at every status, on every role: a small read of what
+  // the store's writes left, so they are current however old the counts are.
+  const totalsStores = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
+  const withLiveTotals = (result: SourceIndexStatusResult): SourceIndexStatusResult => {
+    if (totalsStores.size === 0) return result;
+    let changed = false;
+    const corpora = result.corpora.map((corpus) => {
+      if (corpus.configured !== true) return corpus;
+      const totals = totalsStores.get(corpus.corpus_id)?.totals?.();
+      if (!totals) return corpus;
+      changed = true;
+      return { ...corpus, totals: {
+        items: totals.items, tombstoned_items: totals.tombstonedItems, chunks: totals.chunks, sync_runs: totals.syncRuns,
+        vectors_by_model: totals.vectorsByModel, reconciled_at: totals.reconciledAt,
+      } };
+    });
+    return changed ? { ...result, corpora } : result;
+  };
   // Keyed by each store's scope too: a status counted under folders the owner
   // has since taken out is never served (they leave the counts at once).
   // include_items left out is false: `olympus status` with no options is the plain request the background counts.
@@ -828,9 +866,9 @@ export function createSourceIndexStatusHandler(
       const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
       // A live read (no allowance), or one that asks for a conversation's
       // senders, is read now as before.
-      if (countsMaxAgeMs <= 0 || request.include_sender_aggregation) return computeStatus(request, snapshot);
+      if (countsMaxAgeMs <= 0 || request.include_sender_aggregation) return withLiveTotals(await computeStatus(request, snapshot));
       assertSupportedStatusRequest(request);
-      return snapshotStatus(() => computeStatus(request, snapshot), request, countsMaxAgeMs);
+      return withLiveTotals(await snapshotStatus(() => computeStatus(request, snapshot), request, countsMaxAgeMs));
     },
     async settled() {
       while (snapshotRefreshes.size > 0) await Promise.allSettled([...snapshotRefreshes.values()]);

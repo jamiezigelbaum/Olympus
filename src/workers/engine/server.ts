@@ -103,6 +103,7 @@ import {
   PLAIN_STATUS_REQUEST,
 } from '../source-index/status.ts';
 import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
+import { storeTotalsReconcileDue } from '../connector-store/store-totals.ts';
 import {
   dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
@@ -6672,6 +6673,18 @@ export async function main(): Promise<void> {
       ? startPacedStatusRecount({
           holds: () => standBack.holds('status'),
           recount: async () => {
+            // The kept totals first (one count on the read thread per store, an hour apart), so a fresh
+            // install shows live totals before its first recount ends.
+            for (const store of connectorStores) {
+              if (standBack.holds('status')) break;
+              if (!storeTotalsReconcileDue(store.totals(), Date.now())) continue;
+              try {
+                const drift = await store.reconcileTotals();
+                if (drift) console.warn(`[olympus] store totals: ${store.corpusId} was off by ${drift}; put right from an exact count.`);
+              } catch (error) {
+                console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+              }
+            }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
               await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
             }

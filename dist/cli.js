@@ -44963,6 +44963,162 @@ var init_source_size_limits = __esm(() => {
   registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
 });
 
+// src/workers/connector-store/store-totals.ts
+function createStoreTotals(db, nonSyncConnectorsSql) {
+  const real = (row) => `${row}.connector_id NOT IN ${nonSyncConnectorsSql}`;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS store_totals (
+      name TEXT PRIMARY KEY,
+      n INTEGER NOT NULL
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS store_totals_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      reconciled_at TEXT NOT NULL,
+      drift INTEGER NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_item_insert AFTER INSERT ON items BEGIN
+      ${bump("CASE WHEN NEW.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_item_delete AFTER DELETE ON items BEGIN
+      ${bump("CASE WHEN OLD.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "-1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_item_tombstone AFTER UPDATE OF tombstoned ON items
+      WHEN (OLD.tombstoned = 0) <> (NEW.tombstoned = 0) BEGIN
+      ${bump("CASE WHEN OLD.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "-1")}
+      ${bump("CASE WHEN NEW.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_chunk_insert AFTER INSERT ON chunks BEGIN
+      ${bump("'chunks'", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_chunk_delete AFTER DELETE ON chunks BEGIN
+      ${bump("'chunks'", "-1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_vector_insert AFTER INSERT ON chunk_embeddings BEGIN
+      ${bump("'vectors:' || NEW.model_id", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_vector_delete AFTER DELETE ON chunk_embeddings BEGIN
+      ${bump("'vectors:' || OLD.model_id", "-1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_vector_model AFTER UPDATE OF model_id ON chunk_embeddings
+      WHEN OLD.model_id <> NEW.model_id BEGIN
+      ${bump("'vectors:' || OLD.model_id", "-1")}
+      ${bump("'vectors:' || NEW.model_id", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_sync_insert AFTER INSERT ON sync_runs WHEN ${real("NEW")} BEGIN
+      ${bump("'sync_runs'", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_sync_delete AFTER DELETE ON sync_runs WHEN ${real("OLD")} BEGIN
+      ${bump("'sync_runs'", "-1")}
+    END;
+  `);
+  for (const table of ["items", "chunks", "chunk_embeddings", "sync_runs"]) {
+    for (const op of ["insert", "update", "delete"]) {
+      db.exec(`CREATE TRIGGER IF NOT EXISTS connector_store_totals_writes_${table}_${op} AFTER ${op.toUpperCase()} ON ${table} BEGIN
+        ${bump(`'${STORE_TOTALS_WRITES}'`, "1")}
+      END;`);
+    }
+  }
+}
+function storeTotalsInstalled(db) {
+  const row = db.query(`SELECT COUNT(*) AS n FROM sqlite_master
+    WHERE (type = 'table' AND name IN ('store_totals', 'store_totals_state'))
+      OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`).get(JSON.stringify(STORE_TOTALS_TRIGGERS));
+  return row.n === 2 + STORE_TOTALS_TRIGGERS.length;
+}
+function readStoreTotals(db) {
+  const state = db.query("SELECT reconciled_at FROM store_totals_state WHERE id = 1").get();
+  if (!state)
+    return;
+  const rows = db.query("SELECT name, n FROM store_totals").all();
+  return totalsFromRows(rows, state.reconciled_at);
+}
+function totalsFromRows(rows, reconciledAt) {
+  const totals = { items: 0, tombstonedItems: 0, chunks: 0, syncRuns: 0, vectorsByModel: {}, reconciledAt };
+  for (const { name, n } of rows) {
+    const value = Number(n);
+    if (name === "items")
+      totals.items = value;
+    else if (name === "tombstoned_items")
+      totals.tombstonedItems = value;
+    else if (name === "chunks")
+      totals.chunks = value;
+    else if (name === "sync_runs")
+      totals.syncRuns = value;
+    else if (name.startsWith("vectors:") && value !== 0)
+      totals.vectorsByModel[name.slice("vectors:".length)] = value;
+  }
+  return totals;
+}
+function storeTotalsCountSql(nonSyncConnectorsSql) {
+  return `SELECT
+    (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items,
+    (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items,
+    (SELECT COUNT(*) FROM chunks) AS chunks,
+    (SELECT COUNT(*) FROM sync_runs WHERE connector_id NOT IN ${nonSyncConnectorsSql}) AS sync_runs,
+    (SELECT json_group_object(model_id, n) FROM (SELECT model_id, COUNT(*) AS n FROM chunk_embeddings GROUP BY model_id)) AS vectors_json,
+    (SELECT json_group_object(name, n) FROM store_totals) AS kept_json`;
+}
+function applyStoreTotalsCount(db, count, nowIso) {
+  const counted = new Map([
+    ["items", Number(count.items)],
+    ["tombstoned_items", Number(count.tombstoned_items)],
+    ["chunks", Number(count.chunks)],
+    ["sync_runs", Number(count.sync_runs)]
+  ]);
+  for (const [model, n] of Object.entries(JSON.parse(count.vectors_json ?? "{}")))
+    counted.set(`vectors:${model}`, Number(n));
+  const keptThen = new Map(Object.entries(JSON.parse(count.kept_json ?? "{}")).map(([k, v]) => [k, Number(v)]));
+  let drift = 0;
+  db.transaction(() => {
+    const keptNow = new Map(db.query("SELECT name, n FROM store_totals").all().map((row) => [row.name, Number(row.n)]));
+    const names = new Set([...counted.keys(), ...keptThen.keys(), ...keptNow.keys()]);
+    const write = db.query("INSERT INTO store_totals (name, n) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET n = excluded.n");
+    const remove = db.query("DELETE FROM store_totals WHERE name = ?");
+    names.delete(STORE_TOTALS_WRITES);
+    for (const name of names) {
+      const since = (keptNow.get(name) ?? 0) - (keptThen.get(name) ?? 0);
+      const exact = (counted.get(name) ?? 0) + since;
+      drift += Math.abs((keptNow.get(name) ?? 0) - exact);
+      if (exact === 0 && name.startsWith("vectors:"))
+        remove.run(name);
+      else
+        write.run(name, exact);
+    }
+    db.query(`INSERT INTO store_totals_state (id, reconciled_at, drift) VALUES (1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, drift);
+  })();
+  return drift;
+}
+function storeTotalsReconcileDue(totals, nowMs) {
+  if (!totals)
+    return true;
+  const at = Date.parse(totals.reconciledAt);
+  return !Number.isFinite(at) || nowMs - at >= STORE_TOTALS_RECONCILE_EVERY_MS;
+}
+function readStoreWriteSequence(db) {
+  const row = db.query("SELECT n FROM store_totals WHERE name = ?").get(STORE_TOTALS_WRITES);
+  return row ? Number(row.n) : undefined;
+}
+var STORE_TOTALS_TRIGGERS, STORE_TOTALS_WRITES = "writes", bump = (name, by) => `
+  INSERT INTO store_totals (name, n) VALUES (${name}, ${by})
+    ON CONFLICT(name) DO UPDATE SET n = n + excluded.n;`, STORE_TOTALS_RECONCILE_EVERY_MS;
+var init_store_totals = __esm(() => {
+  STORE_TOTALS_TRIGGERS = [
+    "connector_store_totals_item_insert",
+    "connector_store_totals_item_delete",
+    "connector_store_totals_item_tombstone",
+    "connector_store_totals_chunk_insert",
+    "connector_store_totals_chunk_delete",
+    "connector_store_totals_vector_insert",
+    "connector_store_totals_vector_delete",
+    "connector_store_totals_vector_model",
+    "connector_store_totals_sync_insert",
+    "connector_store_totals_sync_delete",
+    ...["items", "chunks", "chunk_embeddings", "sync_runs"].flatMap((table) => ["insert", "update", "delete"].map((op) => `connector_store_totals_writes_${table}_${op}`))
+  ];
+  STORE_TOTALS_RECONCILE_EVERY_MS = 60 * 60000;
+});
+
 // src/core/local-model-policy.ts
 function isCloudForwardingModelId(modelId) {
   const trimmed = modelId.trim().toLowerCase();
@@ -60261,6 +60417,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 `, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_source_size_limits();
+  init_store_totals();
   init_vector_digest();
   init_boot_progress();
   init_engine_heartbeat();
@@ -60499,6 +60656,7 @@ var init_local_index = __esm(() => {
           createConnectorStoreMediaJudgments(this.db);
           createConnectorStoreItemTextVersions(this.db);
           createConnectorStoreVisibilityTables(this.db);
+          createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
           createConnectorStorePeopleIndex(this.db);
           this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
           local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
@@ -68330,6 +68488,29 @@ ${parentKey(ref)}`, { ref, origin });
         });
       }
       return out;
+    }
+    totals() {
+      try {
+        return readStoreTotals(this.db);
+      } catch {
+        return;
+      }
+    }
+    writeSequence() {
+      try {
+        return readStoreWriteSequence(this.db);
+      } catch {
+        return;
+      }
+    }
+    async reconcileTotals() {
+      if (this.readOnly)
+        return;
+      if (!storeTotalsInstalled(this.db))
+        createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
+      const sql = storeTotalsCountSql(NON_SYNC_RUN_CONNECTORS_SQL);
+      const count = offThreadReadsSupported(this.dbPath) ? await withOffThreadSnapshot(this.dbPath, async (read) => await read({ sql, params: [], mode: "get" })) : this.db.query(sql).get();
+      return applyStoreTotalsCount(this.db, count, new Date().toISOString());
     }
     status(scope, options = {}) {
       const steps = this.statusSteps(scope, options);
@@ -129999,8 +130180,8 @@ function createSourceIndexStatusHandler(options = {}) {
   const storeStatusCache = new Map;
   const unchangedMarker = (store) => {
     try {
-      const change = store.changeMarker?.();
-      return change === undefined ? undefined : `${visibilityMarker(store) ?? ""}|${change}`;
+      const writes = store.writeSequence?.();
+      return writes === undefined ? undefined : `${visibilityMarker(store) ?? ""}|${writes}`;
     } catch {
       return;
     }
@@ -130123,6 +130304,29 @@ function createSourceIndexStatusHandler(options = {}) {
     } catch {}
   };
   const snapshotRefreshes = new Map;
+  const totalsStores = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
+  const withLiveTotals = (result) => {
+    if (totalsStores.size === 0)
+      return result;
+    let changed = false;
+    const corpora = result.corpora.map((corpus) => {
+      if (corpus.configured !== true)
+        return corpus;
+      const totals = totalsStores.get(corpus.corpus_id)?.totals?.();
+      if (!totals)
+        return corpus;
+      changed = true;
+      return { ...corpus, totals: {
+        items: totals.items,
+        tombstoned_items: totals.tombstonedItems,
+        chunks: totals.chunks,
+        sync_runs: totals.syncRuns,
+        vectors_by_model: totals.vectorsByModel,
+        reconciled_at: totals.reconciledAt
+      } };
+    });
+    return changed ? { ...result, corpora } : result;
+  };
   const snapshotKey = (request, countsMaxAgeMs) => JSON.stringify([
     { include_items: false, ...request },
     countsMaxAgeMs,
@@ -130296,9 +130500,9 @@ function createSourceIndexStatusHandler(options = {}) {
     async status(request = {}, snapshot = {}) {
       const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
       if (countsMaxAgeMs <= 0 || request.include_sender_aggregation)
-        return computeStatus(request, snapshot);
+        return withLiveTotals(await computeStatus(request, snapshot));
       assertSupportedStatusRequest(request);
-      return snapshotStatus(() => computeStatus(request, snapshot), request, countsMaxAgeMs);
+      return withLiveTotals(await snapshotStatus(() => computeStatus(request, snapshot), request, countsMaxAgeMs));
     },
     async settled() {
       while (snapshotRefreshes.size > 0)
@@ -269042,6 +269246,19 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     statusRecount = refreshSnapshot ? startPacedStatusRecount({
       holds: () => standBack.holds("status"),
       recount: async () => {
+        for (const store of connectorStores) {
+          if (standBack.holds("status"))
+            break;
+          if (!storeTotalsReconcileDue(store.totals(), Date.now()))
+            continue;
+          try {
+            const drift = await store.reconcileTotals();
+            if (drift)
+              console.warn(`[olympus] store totals: ${store.corpusId} was off by ${drift}; put right from an exact count.`);
+          } catch (error) {
+            console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+          }
+        }
         for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
           await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
         }
@@ -269246,6 +269463,7 @@ var init_server5 = __esm(async () => {
   init_analyst_answer();
   init_answer_latency_log();
   init_status();
+  init_store_totals();
   init_http();
   init_analyst();
   init_transcription_model();

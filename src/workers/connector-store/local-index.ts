@@ -1,4 +1,8 @@
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
+import {
+  applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreWriteSequence, storeTotalsCountSql, storeTotalsInstalled,
+  type StoreTotals, type StoreTotalsCount,
+} from './store-totals.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { reportFrontStoreOpened } from '../../core/boot-progress.ts';
@@ -3755,6 +3759,7 @@ export class LocalConnectorStore {
         createConnectorStoreMediaJudgments(this.db);
         createConnectorStoreItemTextVersions(this.db);
         createConnectorStoreVisibilityTables(this.db);
+        createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
         createConnectorStorePeopleIndex(this.db);
         this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
           local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
@@ -15723,6 +15728,39 @@ export class LocalConnectorStore {
    * settled-unreadable count behind these counts may be reused up to this old
    * (see STATUS_COUNTS_MAX_AGE_MS). Left out, every count is current.
    */
+  /**
+   * The store's plain totals as its writes left them (store-totals.ts): one
+   * small read, never a count. Undefined until the first reconcile, and on a
+   * store no build with the totals has written.
+   */
+  totals(): StoreTotals | undefined {
+    try { return readStoreTotals(this.db); } catch { return undefined; }
+  }
+
+  /**
+   * A sequence every write to items, chunks, vectors or run rows moves
+   * (store-totals.ts), undefined where the store has none yet: "nothing was
+   * written since" without the connection's own bookkeeping writes.
+   */
+  writeSequence(): number | undefined {
+    try { return readStoreWriteSequence(this.db); } catch { return undefined; }
+  }
+
+  /**
+   * Check the kept totals against an exact count, read on the read thread
+   * where the store allows it, and put right any drift. Returns the drift, or
+   * undefined for a read-only open.
+   */
+  async reconcileTotals(): Promise<number | undefined> {
+    if (this.readOnly) return undefined;
+    if (!storeTotalsInstalled(this.db)) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
+    const sql = storeTotalsCountSql(NON_SYNC_RUN_CONNECTORS_SQL);
+    const count = (offThreadReadsSupported(this.dbPath)
+      ? await withOffThreadSnapshot(this.dbPath, async (read) => await read({ sql, params: [], mode: 'get' }))
+      : this.db.query(sql).get()) as StoreTotalsCount;
+    return applyStoreTotalsCount(this.db, count, new Date().toISOString());
+  }
+
   status(scope?: ConnectorStoreStatusScope, options: { countsMaxAgeMs?: number } = {}): ConnectorStoreStatus {
     const steps = this.statusSteps(scope, options);
     let step = steps.next();

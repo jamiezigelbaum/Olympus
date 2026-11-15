@@ -95,7 +95,9 @@ describe('connector-store status readiness', () => {
       const shown = async () => {
         await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
         await handler.settled!();
-        return (await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 })).corpora[0] as { counts: Record<string, number> };
+        const result = await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+        await handler.settled!();
+        return result.corpora[0] as { counts: Record<string, number> };
       };
       expect((await shown()).counts.indexed_items).toBe(1);
       expect(reads).toBe(1);
@@ -168,6 +170,8 @@ describe('connector-store status readiness', () => {
       expect(first.embedding_parity?.backlog_estimate?.missing_chunks).toBe(1);
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
       expect([backlogReads, pdfReads]).toEqual([1, 1]);
+      // The refresh that poll started behind it finishes inside the window.
+      await handler.settled!();
       now += STORE_STATUS_REUSE_MS + 1;
       writtenSinceEveryRead(store);
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
@@ -764,6 +768,8 @@ describe('status build shares the worker thread', () => {
 
 /** The store reads as written to since every count, as a busy store would (status.ts unchangedMarker). */
 function writtenSinceEveryRead(store: LocalConnectorStore): void {
-  let writes = 0;
+  // Far past any real sequence, so no count can match one it recorded.
+  let writes = 1_000_000_000;
+  store.writeSequence = () => writes++;
   store.changeMarker = () => `written:${writes++}`;
 }
