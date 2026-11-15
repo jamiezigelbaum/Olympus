@@ -173213,6 +173213,13 @@ function dashboardNeedsSetupSheet(source, action, options = {}) {
   });
   return { sheetId, sheet };
 }
+function dashboardOAuthUsesSavedApp(action) {
+  return action.kind === "oauth" && action.publisher_client !== true && action.known_client_id !== undefined && !isGoogleOAuthSource2(action.source) && (action.source !== "x" || action.client_secret_on_file === true);
+}
+function dashboardOAuthOneClickReconnect(source) {
+  const action = source.connection.action;
+  return action.kind === "oauth" && (action.publisher_client === true || dashboardOAuthUsesSavedApp(action)) && action.pending_attempt !== true && source.connection.provider_refusal === undefined;
+}
 function dashboardOAuthConnectSheet(source, action, options = {}) {
   const instructions = action.instructions;
   if (instructions === undefined)
@@ -173223,6 +173230,8 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
   const fields = byo.fields.map((field) => field.name === "client_id" || !secretOnFile ? field : { ...field, required: false });
   const savedSecrets = secretOnFile ? byo.fields.filter((field) => field.secret).map((field) => field.name) : [];
   const notice = options.notice;
+  const savedApp = dashboardOAuthUsesSavedApp(action);
+  const lead = savedApp ? undefined : options.lead;
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${dashboardActionLabel(action.label)} ${source.label}`,
@@ -173232,12 +173241,17 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     fields,
     ...byo.setup_provider ? { steps: byo.diy_steps, provider: byo.setup_provider, setupHeading: byo.setup_heading, credentialFile: byo.credential_file } : {},
     ...byo.setup_shortcut ? { shortcut: byo.setup_shortcut } : {},
-    ...options.lead ? { lead: options.lead } : {},
+    ...lead ? { lead } : {},
     submitLabel: dashboardActionLabel(action.label),
-    ...action.publisher_client && !options.lead ? {
+    ...action.publisher_client && !lead ? {
       publisher: {
         intro: instructions.plain_intro,
         byoSummary: instructions.diy_summary
+      }
+    } : savedApp ? {
+      publisher: {
+        intro: `Your ${source.label} app settings are saved, so this only signs you in again.`,
+        byoSummary: "Change app settings"
       }
     } : {},
     ...savedSecrets.length > 0 ? { savedSecrets } : {},
@@ -187507,7 +187521,8 @@ function connectedSourceRow(source, messagingLocalSession, off, kept = false, ba
   if (kept)
     items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
   const fixLabel = kept ? "Reconnect" : source.connection.state === "reauth_required" ? "Sign in" : needsSetupAgain(source) && ("label" in source.connection.action) ? dashboardActionLabel(source.connection.action.label) : "";
-  const needs = fixLabel ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${escapeHtml2(fixLabel)}</button>` : "";
+  const action = source.connection.action;
+  const needs = !fixLabel ? "" : action.kind === "oauth" && dashboardOAuthOneClickReconnect(source) ? `<form class="rowform" data-connect-kind="oauth" data-one-click-reconnect><input type="hidden" name="source" value="${escapeHtml2(action.source)}">` + `<button class="btn${kept ? "" : " primary"}" type="submit"${off}>${escapeHtml2(fixLabel)}</button>` + '<span class="actmsg" data-action-message role="status"></span><span class="authfallback" data-authorization-fallback></span></form>' : `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${escapeHtml2(fixLabel)}</button>`;
   const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString("en-US")} items` : sourceFacts(source);
   const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml2(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml2(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
   return { row, dialogs: dialogs.join("") };
@@ -187651,11 +187666,12 @@ ${sheet}`;
   if (action.kind === "oauth") {
     const connect = dashboardOAuthConnectSheet(source, action, { ...refusalNotice(source), ...providerNote(view, action) });
     if (connect) {
+      const lead = dashboardOAuthUsesSavedApp(action) ? undefined : providerNote(view, action).lead;
       const row = setupRow({
         ...id,
         label: source.label,
-        blurb: providerNote(view, action).lead?.title ?? setupBlurb(source),
-        action: { label: providerNote(view, action).lead?.button ?? action.label, kind: "none", sheet: connect.sheetId, ...gate }
+        blurb: lead?.title ?? setupBlurb(source),
+        action: { label: lead?.button ?? action.label, kind: "none", sheet: connect.sheetId, ...gate }
       });
       return `${row}
 ${connect.sheet}`;
@@ -187847,6 +187863,8 @@ var CONNECTOR_DIALOG_ID = "build-connector", CONNECTOR_DIALOG_HEADING = "Build a
 .srcrow { display: flex; align-items: center; gap: 14px; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
 .srcmain { flex: 1; min-width: 0; }
 .srcact { display: flex; align-items: center; gap: 10px; }
+.srcact .rowform { flex-direction: row-reverse; align-items: center; gap: 8px; margin: 0; }
+.srcact .rowform .actmsg:empty, .srcact .rowform .authfallback:empty { display: none; }
 .srcact .rowmenu { position: relative; }
 .srcact .rowmenu .menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; min-width: 220px; display: grid; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel, var(--bg)); box-shadow: 0 8px 24px rgba(0,0,0,.35); }
 .menuitem { font: inherit; text-align: left; background: none; border: 0; color: var(--t1); padding: 9px 12px; border-radius: 6px; cursor: pointer; width: 100%; }
@@ -198781,7 +198799,8 @@ function createEmailSourceWorker(options = {}) {
             assertDashboardAccountCardinality(registry, source);
             const clientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
             let uploadedClient;
-            const ownDesktop = dashboardGoogleOAuthSource(source) && record.google_desktop === true;
+            const reconnectSavedDesktop = dashboardGoogleOAuthSource(source) && record.google_desktop === undefined && record.client_id === undefined && record.google_client_json === undefined && await readGoogleOwnAppRegistration(secretStore) !== undefined;
+            const ownDesktop = dashboardGoogleOAuthSource(source) && (record.google_desktop === true || reconnectSavedDesktop);
             if (ownDesktop && typeof record.google_client_json === "string") {
               try {
                 uploadedClient = parseGoogleDesktopClient(record.google_client_json);
