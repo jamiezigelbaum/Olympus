@@ -204030,6 +204030,7 @@ class SourceScheduler {
           }));
         }
       }
+      const startedCheckpoint = state.checkpoint;
       const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance, stopsAtStart);
       const completedAt = this.now().toISOString();
       const zeroChangeRuns = nextZeroChangeRuns(state.lastResult?.counts, result.counts);
@@ -204039,7 +204040,8 @@ class SourceScheduler {
       const configuredIntervalMs = taskIntervalMs(state.source, state.task);
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
       const continueAt = Date.parse(completedAt) + this.continueAfterMs;
-      const continuing = result.continueSoon === true && !retryAt;
+      const cursorLeftOpen = runningTask.kind === "sync" && typeof result.checkpoint === "string" && result.checkpoint !== startedCheckpoint && result.counts?.traversal_complete !== 1;
+      const continuing = (result.continueSoon === true || cursorLeftOpen) && !retryAt;
       const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
       const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
       const scheduledRunAt = retryAt?.at ? Date.parse(retryAt.at) : Math.min(continuing ? Math.min(continueAt, cadenceRunAt) : cadenceRunAt, wakeAt ?? Number.POSITIVE_INFINITY);

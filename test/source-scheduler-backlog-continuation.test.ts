@@ -79,6 +79,34 @@ describe('backlog continuation', () => {
     expect(Date.parse(nextRunAt(status, 'extract')!)).toBe(T0 + 5_000 + INTERVAL);
   });
 
+  test('a sync cut at its item cap with its cursor left open continues within seconds: 5 caps of items take 5 back-to-back passes', async () => {
+    const clock = { now: T0 };
+    const CAP = 1_000;
+    const total = 5 * CAP;
+    let read = 0;
+    let passes = 0;
+    // Says nothing of its own about continuing: only its cursor and its traversal count tell the scheduler there is more.
+    const sched = scheduler([source([
+      task('pull', 'sync', async () => {
+        passes += 1;
+        read = Math.min(total, read + CAP);
+        const done = read === total;
+        return { status: 'progress', counts: { items_seen: CAP, items_changed: CAP, traversal_complete: done ? 1 : 0 }, checkpoint: done ? 'watermark' : `page-${read}` };
+      }),
+    ])], clock);
+    let next = T0;
+    for (let tick = 0; tick < 20 && read < total; tick += 1) {
+      clock.now = next;
+      const status = await sched.runDueTasks(new Date(clock.now));
+      next = Date.parse(nextRunAt(status, 'pull')!);
+      if (read < total) expect(next - clock.now).toBe(5_000);
+    }
+    expect(passes).toBe(5);
+    expect(clock.now - T0).toBe(4 * 5_000);
+    // The walk is done: the next pass waits for the cadence.
+    expect(next).toBe(clock.now + INTERVAL);
+  });
+
   test('an upstream pass that made progress wakes the same source\'s extraction and embedding', async () => {
     const clock = { now: T0 };
     const runs: string[] = [];
