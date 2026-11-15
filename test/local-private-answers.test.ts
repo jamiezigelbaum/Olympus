@@ -323,6 +323,8 @@ async function localFixture(options: {
   keywordOnly?: boolean;
   meaningEmbeddings?: boolean;
   realEmbeddings?: boolean;
+  /** Both stores hold the built-in model's vectors and are searched with it. */
+  oneModel?: boolean;
   /** The secret-locations index's matches for a query (location only). */
   secrets?: (query: string) => ReturnType<NonNullable<Parameters<typeof createSourceAnswerLanes>[0]['secretLocations']>>;
 } = {}) {
@@ -341,7 +343,7 @@ async function localFixture(options: {
   const builtIn = await builtInEmbedding(options.embedding ?? 'loaded', options.meaningEmbeddings, options.realEmbeddings);
   if (!options.keywordOnly) {
     await fixture.stores.secure_local!.embedChunks({ provider: builtIn.vectors });
-    await fixture.stores.internal!.embedChunks({ provider: fixture.cloud });
+    await fixture.stores.internal!.embedChunks({ provider: options.oneModel ? builtIn.vectors : fixture.cloud });
   }
   const lanes = createSourceAnswerLanes({
     stores: () => fixture.set.openStores(),
@@ -351,7 +353,7 @@ async function localFixture(options: {
       defineSourceIndexCorpus({ corpusId: CLOUD_ONLY_CORPUS, family: 'email', trustDomain: 'internal', storageProfileInput: { cloudQueryApproved: true } }),
       defineConnectorCorpus({ corpusId: NO_ADAPTER_CORPUS, family: 'file', trustDomain: 'secure_local' }),
     ]),
-    embeddingProvider: (store) => options.keywordOnly ? undefined : (store.trustDomain === 'secure_local' ? builtIn.provider : fixture.cloud),
+    embeddingProvider: (store) => options.keywordOnly ? undefined : (store.trustDomain === 'secure_local' || options.oneModel ? builtIn.provider : fixture.cloud),
     localEmbedding: loadedBuiltInEmbedding,
     readScope: () => ({ allowed: true, contentAllowed: true }),
     answerScope: () => ({ kind: 'search' }),
@@ -708,6 +710,19 @@ describe('answers on this computer, with every outbound request denied', () => {
     expect(outcome.body.left_out).toEqual(['Cloud mail']);
     // A citation names its source and never carries a path.
     expect(JSON.stringify(outcome.body.citations)).not.toContain('/Files/');
+  });
+
+  test('stores searched with one model embed the question once between them', async () => {
+    // A memo per store embedded the one question once per store, one forward
+    // pass at a time: 2.0 to 3.8 s of a live Ask before any lane ran (rc.17).
+    const local = await localFixture({ oneModel: true });
+    const question = 'When does the orchard flat lease end?';
+    const lanes = local.lanes({ question, retrieval_mode: 'hybrid' });
+    const searched = Object.values(lanes.adapters).filter((adapter) => adapter?.prepareSemantic);
+    expect(searched.length).toBeGreaterThanOrEqual(2);
+    const before = local.builtIn.embedded.length;
+    await Promise.all(searched.map((adapter) => adapter!.prepareSemantic!(question, 5_000)));
+    expect(local.builtIn.embedded.slice(before).filter((text) => text.includes(question))).toHaveLength(1);
   });
 
   test('Answer on a waiting question: the same local path, with the question\'s own selectors', async () => {
