@@ -21928,7 +21928,8 @@ var EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000;
 var MISSING_EMBEDDING_CHUNK_WINDOW = 20000;
 var SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 var HIDDEN_CHILD_PARENT_SLICE = 500;
-var VISIBILITY_HOLD_TURNS = 50;
+var VISIBILITY_HOLD_WAITS = 100;
+var VISIBILITY_HOLD_WAIT_MS = 10;
 function visibilityFlagged(row) {
   return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
 }
@@ -23215,10 +23216,12 @@ class LocalConnectorStore {
         return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
       },
       offThread: async () => {
-        for (let turns = 0;ledger.writesHeld() || this.db.inTransaction; turns += 1) {
-          if (turns >= VISIBILITY_HOLD_TURNS)
+        for (let waits = 0;ledger.writesHeld() || this.db.inTransaction; waits += 1) {
+          if (waits >= VISIBILITY_HOLD_WAITS)
             return this.visibilityBootstrapFinder(ledger).here();
-          await ingestionTurn();
+          await new Promise((resolve) => {
+            setTimeout(resolve, VISIBILITY_HOLD_WAIT_MS);
+          });
         }
         const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId));
         if (flagged.length === 0 || !offThreadReadsSupported(this.dbPath)) {

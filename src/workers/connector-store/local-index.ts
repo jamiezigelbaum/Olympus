@@ -1112,8 +1112,13 @@ type HiddenStep = void | { find: LoopFinder<unknown> };
 type IdentityRow = { idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null };
 type VisibilityUpdate = { identity: TierLedgerIdentity; pks: number[]; flags: TierCorpusVisibility | undefined };
 
-/** Turns the bootstrap finder waits for a write hold on the loop's connections to end before it walks here instead. */
-const VISIBILITY_HOLD_TURNS = 50;
+/**
+ * How long the bootstrap finder waits for a write hold on the loop's
+ * connections to end (a hold is kept short: every other writer waits on it)
+ * before it walks on those connections instead: 100 waits of 10 ms.
+ */
+const VISIBILITY_HOLD_WAITS = 100;
+const VISIBILITY_HOLD_WAIT_MS = 10;
 
 function visibilityFlagged(row: TierCorpusVisibility): boolean {
   return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
@@ -4726,11 +4731,11 @@ export class LocalConnectorStore {
         // transaction (a ledger hold across an await) they can cover writes
         // the worker's snapshot can't see yet, and the set would install past
         // a hide it never applied. Wait for the hold to end, a turn at a time;
-        // a hold that outlasts that is walked here, on the connections that
+        // a hold that outlasts the wait is walked here, on the connections that
         // read the cursors.
-        for (let turns = 0; ledger.writesHeld() || this.db.inTransaction; turns += 1) {
-          if (turns >= VISIBILITY_HOLD_TURNS) return this.visibilityBootstrapFinder(ledger).here();
-          await ingestionTurn();
+        for (let waits = 0; ledger.writesHeld() || this.db.inTransaction; waits += 1) {
+          if (waits >= VISIBILITY_HOLD_WAITS) return this.visibilityBootstrapFinder(ledger).here();
+          await new Promise<void>((resolve) => { setTimeout(resolve, VISIBILITY_HOLD_WAIT_MS); });
         }
         const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId));
         if (flagged.length === 0 || !offThreadReadsSupported(this.dbPath)) {
