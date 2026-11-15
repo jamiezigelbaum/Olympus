@@ -385,7 +385,8 @@ describe('the packaged build can load and use the native watcher', () => {
     expect(text.includes('const specifier = "@parcel/watcher"')).toBe(true);
     expect(text.includes('await import(specifier)')).toBe(true);
     expect(text.includes('OLYMPUS_NATIVE_MODULES_DIR')).toBe(true);
-    expect(/\.node["')]/.test(text)).toBe(false);
+    // `process.versions.node` (a runtime check in a bundled SDK) is not an addon path.
+    expect(/(?<!versions)\.node["')]/.test(text)).toBe(false);
   });
 
   test('a bundle made the way dist is made finds the watcher in the packaged native-modules folder and gets a real change event', () => {

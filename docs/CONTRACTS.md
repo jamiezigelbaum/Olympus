@@ -267,7 +267,7 @@ cloud analyst, including Venice.
 
 ### Tinfoil S4 policy (normative)
 
-Owner decision, Jamie, 2026-11-15, “Add Tinfoil to Olympus 1.5?”:
+Owner decision, 2026-11-15, “Add Tinfoil to Olympus 1.5?”:
 “Answers + judge option”. Tinfoil is an additional `encrypted_cloud`
 provider for S4 packs **only when the owner explicitly chooses it** in the
 answer policy or privacy judge choice. It is never selected by a default,

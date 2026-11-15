@@ -358,7 +358,7 @@ describe('operations', () => {
         conversation_id: { type: 'string' },
         selected_items: { type: 'array' },
         retrieval_mode: { enum: ['keyword', 'hybrid'] },
-        analyst_provider: { enum: ['default', 'local', 'venice', 'cloud'] },
+        analyst_provider: { enum: ['default', 'local', 'venice', 'tinfoil', 'cloud'] },
         analyst_model: { type: 'string' },
         include_secure_local_content: { type: 'boolean' },
         timeoutMs: {

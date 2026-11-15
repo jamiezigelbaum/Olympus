@@ -106,7 +106,9 @@ test.each([
   f.click('[data-first-run-sheet] [data-setup-next]');
   const form = visiblePanel(f.root)?.querySelector<HTMLFormElement>('[data-first-run-judge]')!;
   expect(form.querySelector<HTMLInputElement>('input[name="choice"]:checked')?.value).toBe(selected);
-  expect(form.querySelectorAll('input[name="choice"]')).toHaveLength(2);
+  expect(form.querySelectorAll('input[name="choice"]')).toHaveLength(3);
+  // Tinfoil is offered but never preselected.
+  expect(form.querySelector<HTMLInputElement>('input[name="choice"][value="tinfoil"]')?.checked).toBe(false);
   expect(form.textContent?.includes('Recommended')).toBe(selected === 'venice');
   expect(form.textContent).toContain('1,000 items');
   expect(form.textContent).toContain('About 5 minutes');
