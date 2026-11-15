@@ -2781,6 +2781,7 @@ var init_olympus_layout = __esm(() => {
     "tier-migration": "tier-migration",
     "engine-run": "engine-run",
     "engine-status": "engine-background-status.json",
+    "source-status-snapshot": "source-status-snapshot.json",
     "backup-staging": "backup-staging",
     "people-index": "people-index.sqlite",
     "boot-progress": "boot-progress.json",
@@ -19519,6 +19520,7 @@ var init_status = __esm(() => {
   init_telegram_messages();
   init_operation_error();
   init_people_index();
+  init_atomic_file();
   init_control_path_headroom();
   init_secret_locations();
   STORE_STATUS_REUSE_MS = 5 * 60000;

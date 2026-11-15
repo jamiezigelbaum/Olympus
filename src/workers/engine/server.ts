@@ -222,7 +222,7 @@ import {
 } from '../archive-import/dashboard.ts';
 import { archiveLaneLegs } from '../archive-import/lane.ts';
 import { withArchiveImportCorpora } from '../archive-import/store.ts';
-import { accountStoreNames } from '../../core/olympus-layout.ts';
+import { accountStoreNames, sharedDataPath } from '../../core/olympus-layout.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
 import { createArchiveExtractionRuntime } from '../archive-import/extraction-runtime.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
@@ -3675,6 +3675,8 @@ export async function main(): Promise<void> {
   const unreadableFiles = engineFront ? frontUnreadableFiles(localUnreadableFiles, () => engineFront!.status()) : localUnreadableFiles;
   const sourceIndexStatus = sourceIndexReadEnabled
     ? createSourceIndexStatusHandler({
+      // The engine that serves the dashboard keeps its last status on disk; the split's background serves none.
+      ...(engineRole !== 'background' ? { snapshotPath: sharedDataPath('source-status-snapshot') } : {}),
       // Read per request: a per-tier store its tier set creates while the
       // runtime is up is reported from that moment, with no restart.
       corpusDefinitions: () => {

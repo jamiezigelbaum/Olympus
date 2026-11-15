@@ -70,7 +70,9 @@ describe('connector-store status readiness', () => {
       // The reused sets are built in turns before the one count, not again while it is fresh.
       expect(prepared).toBe(1);
       now += STORE_STATUS_REUSE_MS + 1;
+      // The dashboard gets the last status at once; the recount runs behind it.
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      await handler.settled!();
       expect(reads).toBe(2);
       expect(prepared).toBe(2);
       await handler.status({ include_items: false });
@@ -89,7 +91,14 @@ describe('connector-store status readiness', () => {
     try {
       await store.syncFromConnector(connector([file('first.txt', 'synthetic text')]), { fetchContent: true });
       const handler = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now });
-      const indexed = async () => ((await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 })).corpora[0] as { counts: Record<string, number> }).counts.indexed_items;
+      // What the dashboard shows once the refresh its poll started behind it has finished.
+      const indexed = async () => {
+        await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+        await handler.settled!();
+        const shown = await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+        await handler.settled!();
+        return (shown.corpora[0] as { counts: Record<string, number> }).counts.indexed_items;
+      };
       expect(await indexed()).toBe(1);
       now += STORE_STATUS_CHANGED_REUSE_MS + 1;
       expect(await indexed()).toBe(1);
@@ -129,6 +138,7 @@ describe('connector-store status readiness', () => {
       expect([backlogReads, pdfReads]).toEqual([1, 1]);
       now += STORE_STATUS_REUSE_MS + 1;
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      await handler.settled!();
       expect([backlogReads, pdfReads]).toEqual([2, 2]);
       await handler.status({ include_items: false });
       await handler.status({ include_items: false });

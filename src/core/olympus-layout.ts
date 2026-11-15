@@ -83,6 +83,8 @@ export const SHARED_DATA_FILES = {
   // socket folder off Linux, and the status snapshot it publishes.
   'engine-run': 'engine-run',
   'engine-status': 'engine-background-status.json',
+  // The last source status each dashboard read was given (source-index/status.ts): counts only, so a restart answers at once.
+  'source-status-snapshot': 'source-status-snapshot.json',
   // Private, short-lived: an export being packed into a backup, or a backup
   // being opened for a restore (data-backup.ts). Removed when each finishes.
   'backup-staging': 'backup-staging',

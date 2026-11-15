@@ -647,6 +647,7 @@ var SHARED_DATA_FILES = {
   "tier-migration": "tier-migration",
   "engine-run": "engine-run",
   "engine-status": "engine-background-status.json",
+  "source-status-snapshot": "source-status-snapshot.json",
   "backup-staging": "backup-staging",
   "people-index": "people-index.sqlite",
   "boot-progress": "boot-progress.json",
