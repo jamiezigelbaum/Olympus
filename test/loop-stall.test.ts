@@ -11,17 +11,23 @@ import { waitFor } from './helpers/test-clock.ts';
 const enabled = process.env.CJ_JOB === 'test-focus';
 const script = join(import.meta.dir, '../scripts/loop-stall-test.ts');
 const dir = join(userInfo().homedir, 'olympus-prof/loop-stall');
-function invoke(args: string[], timeout = 10 * 60_000) {
-  const result = spawnSync(args[0]!, args.slice(1), { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout });
+// SQLite's temporary files (index builds and sorts on a store of several GB) go to TMPDIR, which a cloud job points at
+// /dev/shm: there they are shared memory inside the job's 6G cap, and the cgroup OOM killer stopped the first build at
+// 6.0 GB of shmem (cloud-job 43775223716, 15 Nov 2026). The gate's processes keep them on disk, beside the fixture.
+const diskTmp = join(dir, 'tmp');
+function invoke(args: string[], timeout = 10 * 60_000, env: NodeJS.ProcessEnv = process.env) {
+  const result = spawnSync(args[0]!, args.slice(1), { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout, env });
   console.log(result.stdout);
   if (result.stderr) console.error(result.stderr);
   if (result.error) throw result.error;
   return result.status;
 }
 test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-thread SQLite budgets', () => {
-  expect(invoke(['bun', script, 'build', '--dir', dir], 60 * 60_000)).toBe(0);
+  mkdirSync(diskTmp, { recursive: true });
+  const onDisk = { ...process.env, TMPDIR: diskTmp, SQLITE_TMPDIR: diskTmp };
+  expect(invoke(['bun', script, 'build', '--dir', dir], 60 * 60_000, onDisk)).toBe(0);
   // More RAM must not hide repeated scans through SQLite's small connection caches.
-  expect(invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G'])).toBe(0);
+  expect(invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G'], 10 * 60_000, onDisk)).toBe(0);
 }, 70 * 60_000);
 
 test('memory cap accepts the default and warm-cache sizes and rejects invalid caps', () => {
