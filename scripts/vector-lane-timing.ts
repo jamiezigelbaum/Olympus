@@ -10,8 +10,10 @@
  *   bun scripts/vector-lane-timing.ts measure --dir <folder> --scenario held|scope|both|none [--trials 5] [--contend keyword,writer]
  *
  * build writes <folder>/store.sqlite once (one chunk per item) and is skipped when a store of the same shape is
- * there. Item i's vector leans away from the query as i grows, so low i ranks highest, and each share is periodic in
- * i, so it holds for the best-ranked items as much as for the whole store:
+ * there (version 2 since 15 Nov: shuffled layout). Item i's vector leans away from the shared direction as i grows, so low
+ * i ranks highest; each question lies near one of the best-ranked 2,000 plus noise. Items are written in a seeded shuffle,
+ * and each trial starts with the store out of the page cache. Each share is periodic in i, so it holds for the
+ * best-ranked items as much as for the whole store:
  *   - held for judging: every item with i % 10 != 0 (90%), through the store's own visibility seams;
  *   - out of scope: every item with i % 100 >= 10 (90%), filed under /other instead of /allowed, and asked with a
  *     locatorPathScope of /allowed;
@@ -25,7 +27,8 @@
  *     background's judge does beside a question.
  * Synthetic data only: nothing here reads a real store.
  */
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
@@ -50,10 +53,20 @@ function random(seed: number): () => number {
   return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; };
 }
 
-function queryVector(dimension: number): number[] {
-  const v = new Array<number>(dimension).fill(0);
-  v[0] = 1;
-  return v;
+/**
+ * A question's vector, shaped like a real one: near a stored item's vector (one of the best-ranked 2,000, picked by the
+ * seed) plus noise, rather than a basis vector every item leans toward.
+ */
+function queryVector(seed: number, count: number, dimension: number): number[] {
+  // Spread the seed first: xorshift's first draws from neighbouring seeds are close.
+  const next = random(Math.imul(seed + 1, 2654435761) >>> 0);
+  next();
+  const near = itemVector(Math.floor(next() * Math.min(count, 2_000)), count, dimension);
+  // Noise of about 0.2 in all, whatever the dimension.
+  const scale = 0.7 / Math.sqrt(dimension);
+  const v = near.map((x) => x + (next() - 0.5) * scale);
+  const norm = Math.hypot(...v);
+  return v.map((x) => x / norm);
 }
 
 /** Item i's vector: the query's direction, weaker as i grows, plus seeded noise. */
@@ -74,7 +87,8 @@ function provider(count: number, dimension: number): SourceEmbeddingProvider {
     async embed(inputs) {
       return inputs.map((input) => {
         const n = /#(\d+)\s*$/.exec(input.text)?.[1];
-        return n === undefined ? queryVector(dimension) : itemVector(Number(n), count, dimension);
+        const seed = Number(/seed (\d+)/.exec(input.text)?.[1] ?? 0);
+        return n === undefined ? queryVector(seed, count, dimension) : itemVector(Number(n), count, dimension);
       });
     },
   };
@@ -96,11 +110,16 @@ function connector(count: number): SourceConnector {
   };
   return {
     id: 'fixture', family: 'file', async authenticate() {},
+    // Items arrive in a seeded shuffle, so chunk_pk order is unrelated to rank and a re-score reads scattered pages,
+    // as on a live store filled over years.
     async *listItems() {
+      const order = Array.from({ length: count }, (_, k) => k);
+      const next = random(99991);
+      for (let k = count - 1; k > 0; k--) { const j = Math.floor(next() * (k + 1)); [order[k], order[j]] = [order[j]!, order[k]!]; }
       const page = 2_000;
       for (let start = 0; start < count; start += page) {
         const end = Math.min(count, start + page);
-        yield { items: Array.from({ length: end - start }, (_, k) => item(start + k)), done: end === count };
+        yield { items: order.slice(start, end).map(item), done: end === count };
       }
     },
     async fetchItem(id) { return item(Number(id.split(':')[1])); },
@@ -119,11 +138,13 @@ async function build(dir: string, count: number, dimension: number): Promise<voi
   mkdirSync(dir, { recursive: true });
   const dbPath = join(dir, 'store.sqlite');
   const shapePath = join(dir, 'shape.json');
-  const shape = JSON.stringify({ count, dimension, version: 1 });
+  const shape = JSON.stringify({ count, dimension, version: 2 });
   if (existsSync(dbPath) && existsSync(shapePath) && readFileSync(shapePath, 'utf8') === shape) {
     console.log(JSON.stringify({ phase: 'build', reused: true, bytes: statSync(dbPath).size }));
     return;
   }
+  // Another shape (version 1 wrote items in rank order): start over, so no row of it survives.
+  for (const name of readdirSync(dir)) if (name.startsWith('store.sqlite') || name === 'shape.json' || name === 'home') rmSync(join(dir, name), { recursive: true, force: true });
   const started = Date.now();
   const store = open(dbPath);
   try {
@@ -207,9 +228,11 @@ async function measure(dir: string, scenario: string, trials: number, contend: R
     })() : undefined;
     if (keywordLoop) await Bun.sleep(500);
     for (let t = 0; t < trials; t++) {
-      // A different question each trial (same direction, different words), so no memo answers it.
+      // Every trial starts cold: the store's pages leave the page cache (posix_fadvise DONTNEED through dd, no root).
+      for (const suffix of ['', '-wal', '-shm']) spawnSync('dd', [`if=${join(dir, `store.sqlite${suffix}`)}`, 'iflag=nocache', 'count=0', 'status=none']);
+      // A different question each trial, near a different stored item, so no memo answers it.
       const started = performance.now();
-      const result = await store.vectorSearchLane(`coverage question ${t} ${Date.now()}`, embedder, 20, undefined, filters, Date.now() + LANE_DEADLINE_MS);
+      const result = await store.vectorSearchLane(`coverage question seed ${t + 1} ${Date.now()}`, embedder, 20, undefined, filters, Date.now() + LANE_DEADLINE_MS);
       const ms = Math.round(performance.now() - started);
       // Every row must be one the store may serve: in scope, and not held.
       const servable = result.rows.every((row) => {
