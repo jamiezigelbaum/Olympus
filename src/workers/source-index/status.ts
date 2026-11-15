@@ -415,6 +415,10 @@ export const STORE_STATUS_REUSE_MS = 5 * 60_000;
  * dashboard polling every few seconds sees each change one poll later.
  */
 export const STATUS_SNAPSHOT_REFRESH_MS = 0;
+/** How long a store nothing has written to keeps its last counts (status.ts unchangedMarker). */
+export const STORE_UNCHANGED_REUSE_MS = 60 * 60_000;
+/** A corpus whose recount takes this long is named in the log, with its phases. */
+const STATUS_RECOUNT_CORPUS_LOG_MS = 2_000;
 /**
  * How long counts are reused once the store's visibility has moved since they
  * were read (an item added, held, judged or released). Five minutes of such
@@ -442,7 +446,20 @@ export function createSourceIndexStatusHandler(
   // the scheduler's status publish) for up to STORE_STATUS_REUSE_MS: each read is a
   // synchronous pass over the whole store, and the two callers' separate
   // reads were most of the worker's freezes (Sparta CPU samples, 2026-11-05).
-  const storeStatusCache = new Map<string, { recordedAtMs: number; marker: string | undefined; status: ConnectorStoreStatus }>();
+  const storeStatusCache = new Map<string, { recordedAtMs: number; marker: string | undefined; unchanged?: string | undefined; status: ConnectorStoreStatus }>();
+  // A store nothing has written to (and whose copies' visibility has not
+  // moved) since its last count is not counted again, up to
+  // STORE_UNCHANGED_REUSE_MS, for what its counts read from outside it (the
+  // extraction queue's verdicts). Sparta rc.18, 15 Nov 2026: recounting every
+  // store took the background's paced recount 7 minutes.
+  const unchangedMarker = (store: LocalConnectorStore): string | undefined => {
+    try {
+      const change = store.changeMarker?.();
+      return change === undefined ? undefined : `${visibilityMarker(store) ?? ''}|${change}`;
+    } catch {
+      return undefined;
+    }
+  };
   const nowMs = options.nowMs ?? Date.now;
   const storeStatusKey = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined) => JSON.stringify([store.corpusId, statusScope ?? null]);
   // Test doubles and older stores may lack the marker: they keep the plain window.
@@ -458,6 +475,7 @@ export function createSourceIndexStatusHandler(
     const cached = reuseMs > 0 ? storeStatusCache.get(storeStatusKey(store, statusScope)) : undefined;
     if (!cached) return false;
     const age = nowMs() - cached.recordedAtMs;
+    if (cached.unchanged !== undefined && age <= STORE_UNCHANGED_REUSE_MS && cached.unchanged === unchangedMarker(store)) return true;
     if (age > reuseMs) return false;
     return age <= Math.min(reuseMs, STORE_STATUS_CHANGED_REUSE_MS) || cached.marker === visibilityMarker(store);
   };
@@ -468,8 +486,9 @@ export function createSourceIndexStatusHandler(
     const cached = storeStatusCache.get(key);
     if (cached && storeStatusFresh(store, statusScope, countsMaxAgeMs)) return cached.status;
     const marker = visibilityMarker(store);
+    const unchanged = unchangedMarker(store);
     const status = store.status(statusScope, { countsMaxAgeMs });
-    storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, status });
+    storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, unchanged, status });
     return status;
   };
   // One off-thread refresh per store and scope at a time: a dashboard poll and
@@ -486,8 +505,9 @@ export function createSourceIndexStatusHandler(
     const refresh = (async () => {
       try {
         const marker = visibilityMarker(store);
+        const unchanged = unchangedMarker(store);
         const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
-        storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, status });
+        storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, unchanged, status });
       } catch {
         // Read on this thread by statusFor, as before.
       } finally {
@@ -501,7 +521,7 @@ export function createSourceIndexStatusHandler(
   // chunks withheld, unread PDFs) are whole-store passes too, and were read on
   // every dashboard status outside that reuse: 15-20% of Sparta's sampled
   // freezes on 14b9be8 (2026-11-05). Reused for the same window.
-  const storeReadCache = new Map<string, { recordedAtMs: number; value: unknown }>();
+  const storeReadCache = new Map<string, { recordedAtMs: number; value: unknown; unchanged?: string | undefined }>();
   // A read that has an off-thread form is never run on this thread for a
   // snapshot caller: the older value serves while the read thread recounts,
   // and a first one is waited for by the status count (`pending`), which
@@ -514,18 +534,22 @@ export function createSourceIndexStatusHandler(
     read: () => T,
     offThread?: { read: () => Promise<T>; empty: T },
     pending?: Promise<void>[],
+    store?: LocalConnectorStore,
   ): T => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
     if (reuseMs <= 0) return read();
     const cacheKey = JSON.stringify(key);
     const cached = storeReadCache.get(cacheKey);
+    const unchanged = store ? unchangedMarker(store) : undefined;
     if (cached && nowMs() - cached.recordedAtMs <= reuseMs) return cached.value as T;
+    // As the counts: a store nothing has written to is not read again.
+    if (cached && unchanged !== undefined && cached.unchanged === unchanged && nowMs() - cached.recordedAtMs <= STORE_UNCHANGED_REUSE_MS) return cached.value as T;
     if (offThread && pending) {
       let running = storeReadRefreshing.get(cacheKey);
       if (!running) {
         const remember = (value: T) => {
           if (storeReadCache.size > 256) storeReadCache.clear();
-          storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
+          storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value, unchanged });
         };
         // A read thread that cannot take it (a closed or busy pool) counts here once, as before.
         running = offThread.read().then(remember, () => { try { remember(read()); } catch { /* the next status tries again */ } })
@@ -538,7 +562,7 @@ export function createSourceIndexStatusHandler(
     }
     const value = read();
     if (storeReadCache.size > 256) storeReadCache.clear();
-    storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
+    storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value, unchanged });
     return value;
   };
 
@@ -574,8 +598,9 @@ export function createSourceIndexStatusHandler(
   const snapshotRefreshes = new Map<string, Promise<SourceIndexStatusResult>>();
   // Keyed by each store's scope too: a status counted under folders the owner
   // has since taken out is never served (they leave the counts at once).
+  // include_items left out is false: `olympus status` with no options is the plain request the background counts.
   const snapshotKey = (request: SourceIndexStatusRequest, countsMaxAgeMs: number): string => JSON.stringify([
-    request, countsMaxAgeMs,
+    { include_items: false, ...request }, countsMaxAgeMs,
     (options.connectorStores ?? []).map((store) => [store.corpusId, options.connectorStoreStatusScope?.(store) ?? null]),
   ]);
   const refreshKept = (key: string, compute: () => Promise<SourceIndexStatusResult>): Promise<SourceIndexStatusResult> => {
@@ -620,8 +645,9 @@ export function createSourceIndexStatusHandler(
         .filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
       // Off-thread reads a corpus started and has no value for yet (reusedStoreRead).
       const pending: Promise<void>[] = [];
+      // Every reused read's key names its corpus second, so the store it reads is known.
       const reusedRead = <T>(countsMaxAgeMs: number, key: unknown[], read: () => T, offThread?: { read: () => Promise<T>; empty: T }): T =>
-        reusedStoreRead(countsMaxAgeMs, key, read, offThread, pending);
+        reusedStoreRead(countsMaxAgeMs, key, read, offThread, pending, typeof key[1] === 'string' ? storesByCorpusId.get(key[1]) : undefined);
       const statusFor = (declaredCorpus: (typeof corpora)[number]): SourceIndexStatusCorpus => {
         const pendingBefore = pending.length;
         const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
@@ -713,6 +739,8 @@ export function createSourceIndexStatusHandler(
       // time). A turn between corpora lets requests answer in between.
       const statuses: SourceIndexStatusCorpus[] = [];
       for (const declaredCorpus of corpora) {
+        const corpusStartedMs = nowMs();
+        const phaseMs = { prepare: 0, counts: 0, estimates: 0 };
         await ingestionTurn();
         // A snapshot builds the store's reused sets in turns first, so its
         // count below does not build them in one go.
@@ -721,13 +749,18 @@ export function createSourceIndexStatusHandler(
         if (store && countsMaxAgeMs > 0) {
           const statusScope = options.connectorStoreStatusScope?.(store);
           if (!storeStatusFresh(store, statusScope, countsMaxAgeMs)) {
+            let at = nowMs();
             await store.prepareStatusCounts?.(statusScope);
+            phaseMs.prepare = nowMs() - at;
+            at = nowMs();
             // The counts themselves are read on the second thread where the
             // store allows it (#870), and statusFor below finds them fresh.
             // Test doubles and older stores may lack it.
             if (typeof store.statusOffThread === 'function') await refreshStoreStatusOffThread(store, statusScope, countsMaxAgeMs);
+            phaseMs.counts = nowMs() - at;
           }
         }
+        let at = nowMs();
         let shown = statusFor(declaredCorpus);
         if (pending.length > 0) {
           // A first off-thread count for this corpus: wait for it on the read thread, then build the corpus with it.
@@ -735,7 +768,13 @@ export function createSourceIndexStatusHandler(
           shown = statusFor(declaredCorpus);
           pending.splice(0);
         }
+        phaseMs.estimates = nowMs() - at;
         statuses.push(shown);
+        // The background's paced recount names each slow corpus, so a long recount says what it was made of.
+        at = nowMs() - corpusStartedMs;
+        if (options.snapshotRole === 'writer' && at >= STATUS_RECOUNT_CORPUS_LOG_MS) {
+          console.warn(`[olympus] status recount: ${declaredCorpus.corpusId} took ${at} ms (prepare ${phaseMs.prepare}, counts ${phaseMs.counts}, estimates ${phaseMs.estimates})`);
+        }
       }
       const tierClassification = options.tierClassification?.();
       let tierMigration: SourceIndexTierMigrationStatus | undefined;

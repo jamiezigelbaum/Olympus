@@ -115012,6 +115012,14 @@ function createSourceIndexStatusHandler(options = {}) {
   const currentRegistry = () => staticRegistry ?? buildSourceIndexCorpusRegistry(options.corpusDefinitions());
   const cache = new Map;
   const storeStatusCache = new Map;
+  const unchangedMarker = (store) => {
+    try {
+      const change = store.changeMarker?.();
+      return change === undefined ? undefined : `${visibilityMarker(store) ?? ""}|${change}`;
+    } catch {
+      return;
+    }
+  };
   const nowMs = options.nowMs ?? Date.now;
   const storeStatusKey = (store, statusScope) => JSON.stringify([store.corpusId, statusScope ?? null]);
   const visibilityMarker = (store) => {
@@ -115027,6 +115035,8 @@ function createSourceIndexStatusHandler(options = {}) {
     if (!cached)
       return false;
     const age = nowMs() - cached.recordedAtMs;
+    if (cached.unchanged !== undefined && age <= STORE_UNCHANGED_REUSE_MS && cached.unchanged === unchangedMarker(store))
+      return true;
     if (age > reuseMs)
       return false;
     return age <= Math.min(reuseMs, STORE_STATUS_CHANGED_REUSE_MS) || cached.marker === visibilityMarker(store);
@@ -115040,8 +115050,9 @@ function createSourceIndexStatusHandler(options = {}) {
     if (cached && storeStatusFresh(store, statusScope, countsMaxAgeMs))
       return cached.status;
     const marker = visibilityMarker(store);
+    const unchanged = unchangedMarker(store);
     const status = store.status(statusScope, { countsMaxAgeMs });
-    storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, status });
+    storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, unchanged, status });
     return status;
   };
   const storeStatusRefreshing = new Map;
@@ -115053,8 +115064,9 @@ function createSourceIndexStatusHandler(options = {}) {
     const refresh = (async () => {
       try {
         const marker = visibilityMarker(store);
+        const unchanged = unchangedMarker(store);
         const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
-        storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, status });
+        storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, unchanged, status });
       } catch {} finally {
         storeStatusRefreshing.delete(key);
       }
@@ -115064,13 +115076,16 @@ function createSourceIndexStatusHandler(options = {}) {
   };
   const storeReadCache = new Map;
   const storeReadRefreshing = new Map;
-  const reusedStoreRead = (countsMaxAgeMs, key, read, offThread, pending) => {
+  const reusedStoreRead = (countsMaxAgeMs, key, read, offThread, pending, store) => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
     if (reuseMs <= 0)
       return read();
     const cacheKey = JSON.stringify(key);
     const cached = storeReadCache.get(cacheKey);
+    const unchanged = store ? unchangedMarker(store) : undefined;
     if (cached && nowMs() - cached.recordedAtMs <= reuseMs)
+      return cached.value;
+    if (cached && unchanged !== undefined && cached.unchanged === unchanged && nowMs() - cached.recordedAtMs <= STORE_UNCHANGED_REUSE_MS)
       return cached.value;
     if (offThread && pending) {
       let running = storeReadRefreshing.get(cacheKey);
@@ -115078,7 +115093,7 @@ function createSourceIndexStatusHandler(options = {}) {
         const remember = (value) => {
           if (storeReadCache.size > 256)
             storeReadCache.clear();
-          storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
+          storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value, unchanged });
         };
         running = offThread.read().then(remember, () => {
           try {
@@ -115095,7 +115110,7 @@ function createSourceIndexStatusHandler(options = {}) {
     const value = read();
     if (storeReadCache.size > 256)
       storeReadCache.clear();
-    storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
+    storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value, unchanged });
     return value;
   };
   const role = options.snapshotRole;
@@ -115124,7 +115139,7 @@ function createSourceIndexStatusHandler(options = {}) {
   };
   const snapshotRefreshes = new Map;
   const snapshotKey = (request, countsMaxAgeMs) => JSON.stringify([
-    request,
+    { include_items: false, ...request },
     countsMaxAgeMs,
     (options.connectorStores ?? []).map((store) => [store.corpusId, options.connectorStoreStatusScope?.(store) ?? null])
   ]);
@@ -115162,7 +115177,7 @@ function createSourceIndexStatusHandler(options = {}) {
     const storesByCorpusId = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
     const corpora = currentRegistry().list().filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
     const pending = [];
-    const reusedRead = (countsMaxAgeMs, key, read, offThread) => reusedStoreRead(countsMaxAgeMs, key, read, offThread, pending);
+    const reusedRead = (countsMaxAgeMs, key, read, offThread) => reusedStoreRead(countsMaxAgeMs, key, read, offThread, pending, typeof key[1] === "string" ? storesByCorpusId.get(key[1]) : undefined);
     const statusFor = (declaredCorpus) => {
       const pendingBefore = pending.length;
       const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
@@ -115217,24 +115232,36 @@ function createSourceIndexStatusHandler(options = {}) {
     };
     const statuses = [];
     for (const declaredCorpus of corpora) {
+      const corpusStartedMs = nowMs();
+      const phaseMs = { prepare: 0, counts: 0, estimates: 0 };
       await ingestionTurn();
       const store = storesByCorpusId.get(declaredCorpus.corpusId);
       const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
       if (store && countsMaxAgeMs > 0) {
         const statusScope = options.connectorStoreStatusScope?.(store);
         if (!storeStatusFresh(store, statusScope, countsMaxAgeMs)) {
+          let at = nowMs();
           await store.prepareStatusCounts?.(statusScope);
+          phaseMs.prepare = nowMs() - at;
+          at = nowMs();
           if (typeof store.statusOffThread === "function")
             await refreshStoreStatusOffThread(store, statusScope, countsMaxAgeMs);
+          phaseMs.counts = nowMs() - at;
         }
       }
+      let at = nowMs();
       let shown = statusFor(declaredCorpus);
       if (pending.length > 0) {
         await Promise.allSettled(pending.splice(0));
         shown = statusFor(declaredCorpus);
         pending.splice(0);
       }
+      phaseMs.estimates = nowMs() - at;
       statuses.push(shown);
+      at = nowMs() - corpusStartedMs;
+      if (options.snapshotRole === "writer" && at >= STATUS_RECOUNT_CORPUS_LOG_MS) {
+        console.warn(`[olympus] status recount: ${declaredCorpus.corpusId} took ${at} ms (prepare ${phaseMs.prepare}, counts ${phaseMs.counts}, estimates ${phaseMs.estimates})`);
+      }
     }
     const tierClassification = options.tierClassification?.();
     let tierMigration;
@@ -115561,7 +115588,7 @@ function providerFromCorpusId(corpusId) {
   }
   return parts[0] || "unknown";
 }
-var ITEMS_EMBEDDED_COUNT_KEY = "items_embedded", DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, STATUS_SNAPSHOT_REFRESH_MS = 0, STORE_STATUS_CHANGED_REUSE_MS = 30000, STATUS_SNAPSHOT_SCHEMA = "olympus.source-status-snapshot.v1", FALLBACK_PDF_EXTRACTED_CHARS = 50000;
+var ITEMS_EMBEDDED_COUNT_KEY = "items_embedded", DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, STATUS_SNAPSHOT_REFRESH_MS = 0, STORE_UNCHANGED_REUSE_MS, STATUS_RECOUNT_CORPUS_LOG_MS = 2000, STORE_STATUS_CHANGED_REUSE_MS = 30000, STATUS_SNAPSHOT_SCHEMA = "olympus.source-status-snapshot.v1", FALLBACK_PDF_EXTRACTED_CHARS = 50000;
 var init_status = __esm(() => {
   init_corpus();
   init_embedding_cost_estimates();
@@ -115585,6 +115612,7 @@ var init_status = __esm(() => {
     readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS
   });
   STORE_STATUS_REUSE_MS = 5 * 60000;
+  STORE_UNCHANGED_REUSE_MS = 60 * 60000;
 });
 
 // src/core/public-source-capabilities.ts

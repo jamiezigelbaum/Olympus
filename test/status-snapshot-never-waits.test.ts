@@ -34,6 +34,9 @@ describe('status snapshot for the dashboard', () => {
       expect(first.snapshot_age_ms).toBeUndefined();
       // From here the store's recount is stuck (a busy disk, a held lock, a blocked engine).
       store.prepareStatusCounts = () => { reads += 1; return new Promise<void>(() => {}); };
+      // And busy: written to since its last count, so it is counted again.
+      let writes = 0;
+      store.changeMarker = () => `written:${writes++}`;
       now += STORE_STATUS_REUSE_MS + 1;
       for (let poll = 0; poll < 5; poll += 1) {
         now += 2_000;
