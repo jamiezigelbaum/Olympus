@@ -1867,6 +1867,7 @@ var init_olympus_layout = __esm(() => {
   SHARED_DATA_FILES = {
     registry: "registry.json",
     "data-owner-lock": "data-owner.lock",
+    "engine-process-lock": "engine-process.lock",
     "remote-connections": "remote-connections.sqlite",
     "source-dashboard": "source-dashboard.sqlite",
     "source-scheduler": "source-scheduler.sqlite",
@@ -14410,7 +14411,7 @@ function dataOwnerLockPath(env = process.env) {
   return sharedDataPath("data-owner-lock", env);
 }
 function isDataOwnerLockName(name) {
-  return name === SHARED_DATA_FILES["data-owner-lock"];
+  return name === SHARED_DATA_FILES["data-owner-lock"] || name === SHARED_DATA_FILES["engine-process-lock"];
 }
 function holdDataOwnerLock(env = process.env, options = {}) {
   const lockPath = dataOwnerLockPath(env);
@@ -14438,13 +14439,13 @@ function holdDataOwnerLock(env = process.env, options = {}) {
     sleepSync2(25);
   }
 }
-function tryFlock(lockPath) {
+function tryFlock(lockPath, mode = LOCK_EX) {
   const fd = openSync8(lockPath, constants4.O_RDWR | constants4.O_CREAT | O_CLOEXEC, 384);
   let failure;
   try {
     const kernel = flockLibrary();
     do {
-      if (kernel.flock(fd, LOCK_EX | LOCK_NB) === 0)
+      if (kernel.flock(fd, mode | LOCK_NB) === 0)
         return fd;
       failure = kernel.errno();
     } while (failure === osConstants.errno.EINTR);
@@ -14523,9 +14524,11 @@ function withDataOwnerLock(env, run, options = {}) {
   return result;
 }
 function takeWorkerDataOwnerLock(env = process.env, options = {}) {
-  if (options.engineRole === "front")
-    return;
   try {
+    if (options.engineRole !== undefined)
+      holdEngineProcessShare(env, options.waitMs ?? WORKER_OWNER_LOCK_WAIT_MS);
+    if (options.engineRole === "front")
+      return;
     return holdDataOwnerLock(env, { waitMs: options.waitMs ?? WORKER_OWNER_LOCK_WAIT_MS });
   } catch (error) {
     if (!(error instanceof DataOwnerBusyError))
@@ -14537,7 +14540,45 @@ function takeWorkerDataOwnerLock(env = process.env, options = {}) {
 function isPromiseLike(value) {
   return typeof value === "object" && value !== null && typeof value.then === "function";
 }
-var runtimeRequire2, LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8, O_CLOEXEC, STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", WORKER_OWNER_LOCK_WAIT_MS = 1e4, WORKER_DATA_OWNER_BUSY_EXIT_CODE = 73, DataOwnerBusyError, library;
+function holdEngineProcessLock(env, mode, waitMs) {
+  const lockPath = sharedDataPath("engine-process-lock", env);
+  const deadline = Date.now() + Math.max(0, waitMs);
+  if (!existsSync13(dirname22(lockPath)))
+    mkdirSync9(dirname22(lockPath), { recursive: true, mode: 448 });
+  while (true) {
+    const fd = tryFlock(lockPath, mode);
+    if (fd !== undefined) {
+      let held = true;
+      return {
+        root: olympusDataRoot(env),
+        lockPath,
+        release() {
+          if (!held)
+            return;
+          held = false;
+          flockLibrary().flock(fd, LOCK_UN);
+          closeSync8(fd);
+        }
+      };
+    }
+    if (Date.now() >= deadline)
+      throw new DataOwnerBusyError(olympusDataRoot(env));
+    sleepSync2(25);
+  }
+}
+function holdEngineProcessShare(env = process.env, waitMs = WORKER_OWNER_LOCK_WAIT_MS) {
+  engineProcessLock ??= holdEngineProcessLock(env, LOCK_SH, waitMs);
+}
+function withNoEngineProcess(env, run, waitMs) {
+  const started = Date.now();
+  const processes = holdEngineProcessLock(env, LOCK_EX, waitMs);
+  try {
+    return withDataOwnerLock(env, run, { waitMs: Math.max(0, waitMs - (Date.now() - started)) });
+  } finally {
+    processes.release();
+  }
+}
+var runtimeRequire2, LOCK_SH = 1, LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8, O_CLOEXEC, STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", WORKER_OWNER_LOCK_WAIT_MS = 1e4, WORKER_DATA_OWNER_BUSY_EXIT_CODE = 73, DataOwnerBusyError, library, engineProcessLock;
 var init_data_owner_lock = __esm(() => {
   init_olympus_layout();
   runtimeRequire2 = createRequire4(import.meta.url);
@@ -123922,7 +123963,7 @@ var init_first_run_privacy = __esm(() => {
 // src/core/engine-store-copies.ts
 function withStoppedEngine(env, what, step, waitMs) {
   try {
-    return withDataOwnerLock(env, step, { waitMs });
+    return withNoEngineProcess(env, step, waitMs);
   } catch (error) {
     if (!(error instanceof DataOwnerBusyError))
       throw error;
@@ -129904,10 +129945,13 @@ function copyMacStoresBeforeReplacing(options) {
   mustSucceed(exec("launchctl", ["bootout", target]), "stop the previous engine to copy its stores");
   for (let waited = 0;waited < 1e4 && launchctlLoaded(exec, target); waited += 250)
     sleepSync4(250);
-  const env = { HOME: homeDir, OLYMPUS_ENGINE_HOST: "1" };
+  const env = definedValues(environmentWithWorkerSetupEnv({ env: { HOME: homeDir, OLYMPUS_ENGINE_HOST: "1" }, workerEnvPath: paths.workerEnvPath }));
   copyEngineStores(env, { bunBin: program.runtimePath, log: (line) => process.stderr.write(`${line}
 `) });
   return { env, exec, target };
+}
+function definedValues(env) {
+  return Object.fromEntries(Object.entries(env).filter((entry) => typeof entry[1] === "string"));
 }
 function putMacStoresBack(copied) {
   const result = copied.exec("launchctl", ["bootout", copied.target]);

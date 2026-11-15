@@ -2878,6 +2878,7 @@ var init_olympus_layout = __esm(() => {
   SHARED_DATA_FILES = {
     registry: "registry.json",
     "data-owner-lock": "data-owner.lock",
+    "engine-process-lock": "engine-process.lock",
     "remote-connections": "remote-connections.sqlite",
     "source-dashboard": "source-dashboard.sqlite",
     "source-scheduler": "source-scheduler.sqlite",

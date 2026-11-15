@@ -627,6 +627,7 @@ function olympusDataPath(env, ...segments) {
 var SHARED_DATA_FILES = {
   registry: "registry.json",
   "data-owner-lock": "data-owner.lock",
+  "engine-process-lock": "engine-process.lock",
   "remote-connections": "remote-connections.sqlite",
   "source-dashboard": "source-dashboard.sqlite",
   "source-scheduler": "source-scheduler.sqlite",
@@ -6144,13 +6145,13 @@ function holdDataOwnerLock(env = process.env, options = {}) {
     sleepSync2(25);
   }
 }
-function tryFlock(lockPath) {
+function tryFlock(lockPath, mode = LOCK_EX) {
   const fd = openSync6(lockPath, constants3.O_RDWR | constants3.O_CREAT | O_CLOEXEC, 384);
   let failure;
   try {
     const kernel = flockLibrary();
     do {
-      if (kernel.flock(fd, LOCK_EX | LOCK_NB) === 0)
+      if (kernel.flock(fd, mode | LOCK_NB) === 0)
         return fd;
       failure = kernel.errno();
     } while (failure === osConstants.errno.EINTR);
