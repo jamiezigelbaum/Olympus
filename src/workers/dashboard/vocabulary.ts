@@ -2830,6 +2830,8 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   disk: 'Disk',
   /** Beside a folder that is an Obsidian vault. */
   obsidianVault: 'Obsidian vault',
+  /** Beside a folder that is a Reflect Open graph. */
+  reflectGraph: 'Reflect graph',
   foldersIntro: 'Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.',
   mailTitle: 'Choose mail',
   mailIntro: 'Choose which {source} mail Olympus may read. Nothing starts until you save.',

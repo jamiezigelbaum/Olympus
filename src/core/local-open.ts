@@ -6,7 +6,7 @@
  */
 import { lstatSync, realpathSync } from 'node:fs';
 import { extname, sep } from 'node:path';
-import { obsidianAppInstalled, obsidianOpenUrl, obsidianVaultOf } from './notes-app-folders.ts';
+import { notesAppFolderOf, obsidianAppInstalled, obsidianOpenUrl, reflectAppInstalled, reflectOpenUrl } from './notes-app-folders.ts';
 
 /**
  * File types macOS `open` hands to a viewer or editor: documents, images,
@@ -31,12 +31,13 @@ export const OPENABLE_EXTENSIONS: ReadonlySet<string> = new Set([
  * regular file, not a symlink, with no symlink on the way (its real path is
  * itself), inside an approved folder on this computer. A document opens; any
  * other type is revealed in Finder (`-R`). A Markdown note inside an Obsidian
- * vault opens in Obsidian when the app is installed. Undefined: refuse.
+ * vault opens in Obsidian, and one in a Reflect Open graph in Reflect, when
+ * the app is installed. Undefined: refuse.
  */
 export function localOpenArguments(
   path: string,
   roots: readonly string[],
-  options: { obsidianInstalled?: () => boolean } = {},
+  options: { obsidianInstalled?: () => boolean; reflectInstalled?: () => boolean } = {},
 ): string[] | undefined {
   if (!path.startsWith('/') || path.includes('\0')) return undefined;
   try {
@@ -49,9 +50,8 @@ export function localOpenArguments(
   const root = roots.find((candidate) => path.startsWith(candidate.endsWith(sep) ? candidate : `${candidate}${sep}`));
   if (!root) return undefined;
   const extension = extname(path).slice(1).toLowerCase();
-  if ((extension === 'md' || extension === 'markdown') && obsidianVaultOf(path, root)
-    && (options.obsidianInstalled ?? obsidianAppInstalled)()) {
-    return [obsidianOpenUrl(path)];
-  }
+  const notes = extension === 'md' || extension === 'markdown' ? notesAppFolderOf(path, root) : undefined;
+  if (notes?.app === 'obsidian' && (options.obsidianInstalled ?? obsidianAppInstalled)()) return [obsidianOpenUrl(path)];
+  if (notes?.app === 'reflect' && (options.reflectInstalled ?? reflectAppInstalled)()) return [reflectOpenUrl(notes.folder, path)];
   return OPENABLE_EXTENSIONS.has(extension) ? [path] : ['-R', path];
 }

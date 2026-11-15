@@ -1901,6 +1901,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }
     if (node && node.is_disk === true) add(main, el('span', 'ftag', Q.disk));
     if (node && node.notes_app === 'obsidian') add(main, el('span', 'ftag', Q.obsidianVault));
+    if (node && node.notes_app === 'reflect') add(main, el('span', 'ftag', Q.reflectGraph));
     add(target, main);
     if (node) {
       const [bytes, files] = nodeMeta(node);

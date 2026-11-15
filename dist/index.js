@@ -1027,9 +1027,9 @@ function optionalString(value) {
 }
 
 // src/core/notes-app-folders.ts
-import { existsSync as existsSync3, lstatSync as lstatSync4, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync3, lstatSync as lstatSync4, readdirSync as readdirSync2, readFileSync as readFileSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname6, join as join6, sep as sep3 } from "node:path";
+import { dirname as dirname6, join as join6, relative as relative3, sep as sep3 } from "node:path";
 function realFolder(path) {
   try {
     const stat = lstatSync4(path);
@@ -1091,12 +1091,56 @@ function obsidianVaultFolders(lookup = {}) {
   }
   return found;
 }
-var OBSIDIAN_SETTINGS_FOLDER = ".obsidian", NOTES_APPS, NOTES_APP_SETTINGS_FOLDERS;
+function reflectGraphFolders(lookup = {}) {
+  const home = lookup.home ?? homedir3();
+  if ((lookup.platform ?? process.platform) !== "darwin")
+    return [];
+  const readText = lookup.readText ?? readTextFile;
+  const isFolder = lookup.isFolder ?? realFolder;
+  const listFolder = lookup.listFolder ?? listChildren;
+  const candidates = [];
+  const recent = readText(join6(home, "Library/Application Support/reflect-open/recent-graphs.json"));
+  if (recent) {
+    try {
+      const parsed = JSON.parse(recent);
+      const entries = Array.isArray(parsed) ? parsed : parsed?.graphs;
+      if (Array.isArray(entries)) {
+        for (const entry of entries) {
+          const root = entry?.root;
+          if (typeof root === "string" && root.startsWith("/") && !root.includes("\x00"))
+            candidates.push(root);
+        }
+      }
+    } catch {}
+  }
+  const icloud = join6(home, "Library/Mobile Documents/iCloud~app~reflect/Documents");
+  for (const name of listFolder(icloud))
+    if (!name.startsWith("."))
+      candidates.push(join6(icloud, name));
+  const found = [];
+  for (const candidate of candidates) {
+    const folder = candidate.length > 1 && candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
+    if (found.includes(folder))
+      continue;
+    if (isFolder(folder) && isFolder(join6(folder, REFLECT_SETTINGS_FOLDER)))
+      found.push(folder);
+  }
+  return found;
+}
+function listChildren(path) {
+  try {
+    return readdirSync2(path);
+  } catch {
+    return [];
+  }
+}
+var OBSIDIAN_SETTINGS_FOLDER = ".obsidian", REFLECT_SETTINGS_FOLDER = ".reflect", NOTES_APPS, NOTES_APP_SETTINGS_FOLDERS;
 var init_notes_app_folders = __esm(() => {
   NOTES_APPS = Object.freeze([
-    { id: "obsidian", settingsFolder: OBSIDIAN_SETTINGS_FOLDER, knownFolders: (lookup) => obsidianVaultFolders(lookup) }
+    { id: "obsidian", settingsFolder: OBSIDIAN_SETTINGS_FOLDER, knownFolders: (lookup) => obsidianVaultFolders(lookup) },
+    { id: "reflect", settingsFolder: REFLECT_SETTINGS_FOLDER, knownFolders: (lookup) => reflectGraphFolders(lookup) }
   ]);
-  NOTES_APP_SETTINGS_FOLDERS = Object.freeze([".obsidian", ".reflect"]);
+  NOTES_APP_SETTINGS_FOLDERS = Object.freeze([OBSIDIAN_SETTINGS_FOLDER, REFLECT_SETTINGS_FOLDER]);
 });
 
 // src/core/worker-auth.ts
@@ -2596,7 +2640,7 @@ var init_http_timeout = __esm(() => {
 
 // src/core/olympus-layout.ts
 import { homedir as homedir6 } from "node:os";
-import { basename, dirname as dirname9, isAbsolute as isAbsolute6, join as join11, relative as relative3, resolve as resolve3, sep as sep4 } from "node:path";
+import { basename, dirname as dirname9, isAbsolute as isAbsolute6, join as join11, relative as relative4, resolve as resolve3, sep as sep4 } from "node:path";
 function layoutHome(env = process.env) {
   return env.HOME?.trim() || homedir6();
 }
@@ -6522,14 +6566,14 @@ self.onmessage = ({ data }) => {
 });
 
 // src/core/upgrade-store-copies.ts
-import { chmodSync as chmodSync3, closeSync as closeSync4, fsyncSync as fsyncSync2, lstatSync as lstatSync8, openSync as openSync4, readdirSync as readdirSync2, readFileSync as readFileSync15, readlinkSync, renameSync as renameSync4, rmSync as rmSync5, statfsSync, statSync as statSync6, utimesSync } from "node:fs";
-import { dirname as dirname15, join as join19, relative as relative4 } from "node:path";
+import { chmodSync as chmodSync3, closeSync as closeSync4, fsyncSync as fsyncSync2, lstatSync as lstatSync8, openSync as openSync4, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync, renameSync as renameSync4, rmSync as rmSync5, statfsSync, statSync as statSync6, utimesSync } from "node:fs";
+import { dirname as dirname15, join as join19, relative as relative5 } from "node:path";
 function olympusStoreFiles(env) {
   const files = [];
   const walk = (directory, top) => {
     let names;
     try {
-      names = readdirSync2(directory);
+      names = readdirSync3(directory);
     } catch {
       return;
     }
@@ -9807,7 +9851,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/core/worker-service.ts
-import { basename as basename4, dirname as dirname25, isAbsolute as isAbsolute17, join as join33, relative as relative5, sep as sep5 } from "node:path";
+import { basename as basename4, dirname as dirname25, isAbsolute as isAbsolute17, join as join33, relative as relative6, sep as sep5 } from "node:path";
 function workerServicePaths(platform, homeDir, env = {}) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform === "darwin") {
@@ -9904,7 +9948,7 @@ import {
   lstatSync as lstatSync13,
   mkdirSync as mkdirSync14,
   readFileSync as readFileSync30,
-  readdirSync as readdirSync3,
+  readdirSync as readdirSync4,
   realpathSync as realpathSync4,
   renameSync as renameSync5,
   rmSync as rmSync8,
@@ -10729,7 +10773,7 @@ var init_zkapi_confine_fetch = __esm(() => {
 
 // src/core/zkapi-confine-selftest.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { chmodSync as chmodSync7, readFileSync as readFileSync31, readlinkSync as readlinkSync2, readdirSync as readdirSync4, rmSync as rmSync9, writeFileSync as writeFileSync6 } from "node:fs";
+import { chmodSync as chmodSync7, readFileSync as readFileSync31, readlinkSync as readlinkSync2, readdirSync as readdirSync5, rmSync as rmSync9, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer, createConnection as createConnection2 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
@@ -10827,7 +10871,7 @@ function connected(options) {
 function processGone(pgid) {
   if (process.platform === "linux") {
     try {
-      for (const name of readdirSync4("/proc")) {
+      for (const name of readdirSync5("/proc")) {
         if (!/^\d+$/.test(name))
           continue;
         try {
@@ -11536,7 +11580,7 @@ import { execFile as execFile2 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash2 } from "node:crypto";
-import { lstatSync as lstatSync14, readFileSync as readFileSync32, readlinkSync as readlinkSync3, readdirSync as readdirSync5, realpathSync as realpathSync5 } from "node:fs";
+import { lstatSync as lstatSync14, readFileSync as readFileSync32, readlinkSync as readlinkSync3, readdirSync as readdirSync6, realpathSync as realpathSync5 } from "node:fs";
 import { dirname as dirname27, join as join36 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -11876,7 +11920,7 @@ var init_zkapi_confinement_linux = __esm(() => {
   init_managed_tools();
   init_zkapi_confine_fetch();
   init_zkapi_confine_selftest();
-  realProc = { read: (p) => readFileSync32(p, "utf8"), link: readlinkSync3, list: (p) => readdirSync5(p) };
+  realProc = { read: (p) => readFileSync32(p, "utf8"), link: readlinkSync3, list: (p) => readdirSync6(p) };
   execFileAsync = promisify(execFile2);
   hostChecks = new Map;
   injectedChecks = new WeakMap;
@@ -11885,7 +11929,7 @@ var init_zkapi_confinement_linux = __esm(() => {
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash3, randomUUID as randomUUID9 } from "node:crypto";
-import { accessSync as accessSync8, chmodSync as chmodSync8, closeSync as closeSync6, constants as constants5, existsSync as existsSync13, mkdirSync as mkdirSync15, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, readFileSync as readFileSync33, readlinkSync as readlinkSync4, realpathSync as realpathSync6, rmSync as rmSync10, statSync as statSync16, writeFileSync as writeFileSync7 } from "node:fs";
+import { accessSync as accessSync8, chmodSync as chmodSync8, closeSync as closeSync6, constants as constants5, existsSync as existsSync13, mkdirSync as mkdirSync15, mkdtempSync as mkdtempSync2, readdirSync as readdirSync7, readFileSync as readFileSync33, readlinkSync as readlinkSync4, realpathSync as realpathSync6, rmSync as rmSync10, statSync as statSync16, writeFileSync as writeFileSync7 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
 import { homedir as homedir14, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter5, dirname as dirname28, isAbsolute as isAbsolute19, join as join37, resolve as resolvePath } from "node:path";
@@ -14349,6 +14393,7 @@ var init_vocabulary = __esm(() => {
     openPrivacySettings: "Open privacy settings",
     disk: "Disk",
     obsidianVault: "Obsidian vault",
+    reflectGraph: "Reflect graph",
     foldersIntro: "Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.",
     mailTitle: "Choose mail",
     mailIntro: "Choose which {source} mail Olympus may read. Nothing starts until you save.",
@@ -25999,9 +26044,9 @@ init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { chmodSync as chmodSync9, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync15, fstatSync as fstatSync2, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync16, linkSync as linkSync2, mkdirSync as mkdirSync16, openSync as openSync6, readFileSync as readFileSync35, readlinkSync as readlinkSync5, readdirSync as readdirSync8, realpathSync as realpathSync7, renameSync as renameSync7, rmSync as rmSync12, rmdirSync, statSync as statSync18, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
+import { chmodSync as chmodSync9, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync15, fstatSync as fstatSync2, fsyncSync as fsyncSync3, ftruncateSync, lstatSync as lstatSync16, linkSync as linkSync2, mkdirSync as mkdirSync16, openSync as openSync6, readFileSync as readFileSync35, readlinkSync as readlinkSync5, readdirSync as readdirSync9, realpathSync as realpathSync7, renameSync as renameSync7, rmSync as rmSync12, rmdirSync, statSync as statSync18, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
-import { basename as basename6, dirname as dirname30, join as join39, relative as relative6, resolve as resolve9, sep as sep7 } from "node:path";
+import { basename as basename6, dirname as dirname30, join as join39, relative as relative7, resolve as resolve9, sep as sep7 } from "node:path";
 init_linux_engine_layout();
 init_atomic_file();
 init_linux_engine_layout();
@@ -26059,7 +26104,7 @@ function runningOlympusVersion() {
 // src/core/engine-service.ts
 import { spawn as spawn3, spawnSync as spawnSync6 } from "node:child_process";
 init_atomic_file();
-import { existsSync as existsSync14, lstatSync as lstatSync15, readdirSync as readdirSync7, readFileSync as readFileSync34, renameSync as renameSync6, rmSync as rmSync11, statSync as statSync17 } from "node:fs";
+import { existsSync as existsSync14, lstatSync as lstatSync15, readdirSync as readdirSync8, readFileSync as readFileSync34, renameSync as renameSync6, rmSync as rmSync11, statSync as statSync17 } from "node:fs";
 import { homedir as homedir15, platform as osPlatform } from "node:os";
 import { basename as basename5, dirname as dirname29, isAbsolute as isAbsolute20, join as join38, resolve as resolvePath2 } from "node:path";
 

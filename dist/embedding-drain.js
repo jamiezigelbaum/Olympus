@@ -35509,14 +35509,16 @@ var PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 var reporter = createLimitStopReporter();
 
 // src/core/notes-app-folders.ts
-import { existsSync as existsSync23, lstatSync as lstatSync12, readFileSync as readFileSync20 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync12, readdirSync as readdirSync6, readFileSync as readFileSync20 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
-import { dirname as dirname25, join as join26, sep as sep7 } from "node:path";
+import { dirname as dirname25, join as join26, relative as relative6, sep as sep7 } from "node:path";
 var OBSIDIAN_SETTINGS_FOLDER = ".obsidian";
+var REFLECT_SETTINGS_FOLDER = ".reflect";
 var NOTES_APPS = Object.freeze([
-  { id: "obsidian", settingsFolder: OBSIDIAN_SETTINGS_FOLDER, knownFolders: (lookup) => obsidianVaultFolders(lookup) }
+  { id: "obsidian", settingsFolder: OBSIDIAN_SETTINGS_FOLDER, knownFolders: (lookup) => obsidianVaultFolders(lookup) },
+  { id: "reflect", settingsFolder: REFLECT_SETTINGS_FOLDER, knownFolders: (lookup) => reflectGraphFolders(lookup) }
 ]);
-var NOTES_APP_SETTINGS_FOLDERS = Object.freeze([".obsidian", ".reflect"]);
+var NOTES_APP_SETTINGS_FOLDERS = Object.freeze([OBSIDIAN_SETTINGS_FOLDER, REFLECT_SETTINGS_FOLDER]);
 function realFolder(path) {
   try {
     const stat = lstatSync12(path);
@@ -35577,6 +35579,49 @@ function obsidianVaultFolders(lookup = {}) {
     }
   }
   return found;
+}
+function reflectGraphFolders(lookup = {}) {
+  const home = lookup.home ?? homedir11();
+  if ((lookup.platform ?? process.platform) !== "darwin")
+    return [];
+  const readText = lookup.readText ?? readTextFile;
+  const isFolder = lookup.isFolder ?? realFolder;
+  const listFolder = lookup.listFolder ?? listChildren;
+  const candidates = [];
+  const recent = readText(join26(home, "Library/Application Support/reflect-open/recent-graphs.json"));
+  if (recent) {
+    try {
+      const parsed = JSON.parse(recent);
+      const entries = Array.isArray(parsed) ? parsed : parsed?.graphs;
+      if (Array.isArray(entries)) {
+        for (const entry of entries) {
+          const root = entry?.root;
+          if (typeof root === "string" && root.startsWith("/") && !root.includes("\x00"))
+            candidates.push(root);
+        }
+      }
+    } catch {}
+  }
+  const icloud = join26(home, "Library/Mobile Documents/iCloud~app~reflect/Documents");
+  for (const name of listFolder(icloud))
+    if (!name.startsWith("."))
+      candidates.push(join26(icloud, name));
+  const found = [];
+  for (const candidate of candidates) {
+    const folder = candidate.length > 1 && candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
+    if (found.includes(folder))
+      continue;
+    if (isFolder(folder) && isFolder(join26(folder, REFLECT_SETTINGS_FOLDER)))
+      found.push(folder);
+  }
+  return found;
+}
+function listChildren(path) {
+  try {
+    return readdirSync6(path);
+  } catch {
+    return [];
+  }
 }
 
 // src/workers/local-files/paths.ts

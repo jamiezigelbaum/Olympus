@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { localOpenArguments } from '../src/core/local-open.ts';
-import { knownNotesAppFolders, obsidianConfigFiles, obsidianVaultFolders, obsidianVaultOf } from '../src/core/notes-app-folders.ts';
+import {
+  knownNotesAppFolders, notesAppFolderOf, obsidianConfigFiles, obsidianVaultFolders, obsidianVaultOf, reflectGraphFolders, reflectOpenUrl,
+} from '../src/core/notes-app-folders.ts';
 import { defaultExclusionForFolder, type DefaultExclusionContext } from '../src/workers/local-files/paths.ts';
 import { createLocalFilesFolderScopeBrowser } from '../src/workers/local-files/scope-browser.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
@@ -115,5 +117,59 @@ describe('the folder picker offers vaults', () => {
     expect(page.nodes.filter((node) => node.key === inHome)).toHaveLength(1);
     const inside = await browser.browse({ parentKey: inHome });
     expect(inside.nodes.find((node) => node.name === '.obsidian')?.default_exclusion_reason).toBe('App settings');
+  });
+});
+
+function graph(path: string): string {
+  mkdirSync(join(path, '.reflect', 'sync-base', 'daily'), { recursive: true });
+  mkdirSync(join(path, 'daily'), { recursive: true });
+  mkdirSync(join(path, 'notes'), { recursive: true });
+  writeFileSync(join(path, 'daily', '2026-11-15.md'), '- a day');
+  writeFileSync(join(path, 'notes', 'Plans.md'), '# Plans');
+  return path;
+}
+
+describe('Reflect Open graphs', () => {
+  test('graphs in its iCloud folder and its recent list are found on a Mac, each once, only with .reflect', () => {
+    const home = tempHome();
+    const icloud = join(home, 'Library/Mobile Documents/iCloud~app~reflect/Documents');
+    const inCloud = graph(join(icloud, 'Olympus'));
+    mkdirSync(join(icloud, 'Not a graph'), { recursive: true });
+    const elsewhere = graph(join(home, 'Graphs/Work'));
+    const support = join(home, 'Library/Application Support/reflect-open');
+    mkdirSync(support, { recursive: true });
+    writeFileSync(join(support, 'recent-graphs.json'), JSON.stringify([
+      { name: 'Work', openedMs: 2, root: elsewhere },
+      { name: 'Olympus', openedMs: 1, root: `${inCloud}/` },
+      { name: 'Gone', openedMs: 0, root: join(home, 'Gone') },
+    ]));
+    expect(reflectGraphFolders({ home, platform: 'darwin' })).toEqual([elsewhere, inCloud]);
+    expect(reflectGraphFolders({ home, platform: 'linux' })).toEqual([]);
+    expect(knownNotesAppFolders({ home, platform: 'darwin' }).filter((entry) => entry.app === 'reflect').map((entry) => entry.path))
+      .toEqual([elsewhere, inCloud]);
+  });
+
+  test('a broken recent list still finds the iCloud graphs', () => {
+    const home = tempHome();
+    const inCloud = graph(join(home, 'Library/Mobile Documents/iCloud~app~reflect/Documents/Notes'));
+    const support = join(home, 'Library/Application Support/reflect-open');
+    mkdirSync(support, { recursive: true });
+    writeFileSync(join(support, 'recent-graphs.json'), '{nope');
+    expect(reflectGraphFolders({ home, platform: 'darwin' })).toEqual([inCloud]);
+  });
+
+  test('a cited note opens in Reflect Open: a daily note by its date, any other by its path', () => {
+    const home = tempHome();
+    const notes = graph(join(home, 'Olympus'));
+    const daily = join(notes, 'daily', '2026-11-15.md');
+    const plans = join(notes, 'notes', 'Plans.md');
+    expect(notesAppFolderOf(plans, home)).toEqual({ folder: notes, app: 'reflect' });
+    expect(obsidianVaultOf(plans, home)).toBeUndefined();
+    expect(reflectOpenUrl(notes, daily)).toBe('reflect://daily/2026-11-15');
+    expect(reflectOpenUrl(notes, plans)).toBe('reflect://note/notes%2FPlans.md');
+    const installed = { reflectInstalled: () => true, obsidianInstalled: () => true };
+    expect(localOpenArguments(daily, [home], installed)).toEqual(['reflect://daily/2026-11-15']);
+    expect(localOpenArguments(plans, [home], installed)).toEqual(['reflect://note/notes%2FPlans.md']);
+    expect(localOpenArguments(plans, [home], { reflectInstalled: () => false })).toEqual([plans]);
   });
 });

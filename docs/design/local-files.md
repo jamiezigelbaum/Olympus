@@ -135,9 +135,9 @@ The user can turn any of these back on in the picker:
   (`~/Library/CloudStorage`). These are already indexed through their own
   sources, so this avoids duplicates.
 
-### Notes apps (Obsidian)
+### Notes apps (Obsidian, Reflect Open)
 
-An Obsidian vault is a folder of Markdown notes, so it is read as files on this
+An Obsidian vault and a Reflect Open graph are folders of Markdown notes, so it is read as files on this
 computer: no separate source, sign-in or per-source pipeline. Live updates,
 deletions, a missing vault never removing anything, and per-note judging are
 the local files rules above. What notes apps add lives in
@@ -150,6 +150,22 @@ the local files rules above. What notes apps add lives in
 - A cited Markdown note inside a vault (looked for no higher than the chosen
   folder) opens in Obsidian through `obsidian://open?path=` on a Mac with the
   app installed; otherwise it opens as any other file.
+- Reflect Open graphs (a folder holding `.reflect`, with `daily/` and `notes/`)
+  are tagged "Reflect graph"; on a Mac the picker offers the graphs in the
+  app's `recent-graphs.json` and in its iCloud folder
+  (`~/Library/Mobile Documents/iCloud~app~reflect/Documents`). A cited note
+  opens in Reflect Open (bundle `app.reflect.desktop`, not the older Reflect
+  app) as `reflect://daily/<date>` or `reflect://note/<path in the graph>`.
+  The older Reflect app keeps notes end-to-end encrypted behind an
+  append-only API, so it has no live reader; its export is an archive import.
+- A note whose own front matter says `private: true` (both apps use it) is
+  Private by content rule, from any source (`frontMatterMarksPrivate` in the
+  tier classifier); only Secrets ranks higher.
+- A walk that would remove every indexed file under a chosen folder, or more
+  than 20% of them (and more than 5), holds the deletions until a walk a
+  minute later agrees (`deletion-guard.ts`, warning
+  `local_files_deletions_held`), so an unmounted disk or a half-copied mirror
+  never empties the index.
 
 ### Never indexed: Olympus's own folders
 

@@ -996,7 +996,7 @@ export interface ScopeFolderNode {
   /** A mounted disk rather than a folder: listed after the folders, tagged Disk. */
   is_disk?: true;
   /** The folder is an Obsidian vault. */
-  notes_app?: 'obsidian';
+  notes_app?: 'obsidian' | 'reflect';
 }
 
 /** Where the computer's own privacy rules stand for a folder, in the words the picker shows. */
