@@ -2477,6 +2477,8 @@ export async function scanDigestPages(
   options: ConnectorStoreCurrentEmbeddingRowsOptions,
   deadlineAtMs: number | undefined,
   limit: number,
+  /** A lower re-score cap, for the offline recall comparison only (eval/vector-rescore-cap.ts). */
+  maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES,
 ): Promise<VectorScan> {
   const heap = new VectorDigestHeap();
   const query = encodeVectorDigest(queryVector);
@@ -2530,7 +2532,7 @@ export async function scanDigestPages(
     // Until `limit` items qualify the pass reads on as before (a narrow filter
     // drains the heap rather than restarting wider); the cap bounds only the
     // score-driven reading past that point.
-    if (qualifiedItems >= limit && (candidates >= VECTOR_DIGEST_MAX_CANDIDATES
+    if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES)
       || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) break;
     if (expired()) return cutWith();
     if (batches++ > 0) await yieldConnectorStoreVectorScan();

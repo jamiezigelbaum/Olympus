@@ -40518,7 +40518,7 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
     return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
   return rows;
 }
-async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES) {
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
@@ -40564,7 +40564,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
   let qualifiedItems = 0;
   let batches = 0;
   while (heap.length > 0) {
-    if (qualifiedItems >= limit && (candidates >= VECTOR_DIGEST_MAX_CANDIDATES || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
+    if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES) || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
       break;
     if (expired())
       return cutWith();
