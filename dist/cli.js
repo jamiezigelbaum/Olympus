@@ -89439,7 +89439,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
         stateStore,
         account,
         failureClass: "window_boundary_drift",
-        message: "X bookmarks provider-window boundary proof drifted from its staged traversal.",
+        message: `X bookmarks provider-window boundary proof drifted from its staged traversal (${error.mismatchKind}).`,
         config,
         now: clock(),
         warnings: [...openedWarnings, "x_reconcile_window_boundary_inconsistent_no_authority"]

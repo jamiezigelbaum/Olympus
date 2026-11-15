@@ -867,7 +867,8 @@ async function acquireReconciliation(
         stateStore,
         account,
         failureClass: 'window_boundary_drift',
-        message: 'X bookmarks provider-window boundary proof drifted from its staged traversal.',
+        // The kind names which proof step refused, so the log's hash tells them apart.
+        message: `X bookmarks provider-window boundary proof drifted from its staged traversal (${error.mismatchKind}).`,
         config,
         now: clock(),
         warnings: [...openedWarnings, 'x_reconcile_window_boundary_inconsistent_no_authority'],
