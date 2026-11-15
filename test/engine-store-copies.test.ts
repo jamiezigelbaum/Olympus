@@ -39,6 +39,27 @@ describe('the store copies an engine install takes', () => {
     expect(workerUpgradeInFlight(env)).toBe(false);
   }, 30_000);
 
+  test('a failed new version: the stores and ledgers it made go too, so the earlier version finds only its own (run 43751182260)', () => {
+    const { env, body, update } = setup();
+    const root = olympusDataRoot(env);
+    writeFileSync(join(root, 'classification-ledger.jsonl'), '{}\n');
+    copyEngineStores(env, { bunBin: process.execPath });
+    update();
+    const made = join(root, 'sources', 'archive.imports', '1', 'stores', 'email.secure_local.sqlite');
+    mkdirSync(join(made, '..'), { recursive: true });
+    new Database(made, { create: true }).close();
+    writeFileSync(`${made}-wal`, '');
+    writeFileSync(join(root, 'embedding-ledger.jsonl'), '{}\n');
+    expect(restoreEngineStores(env)).toEqual([
+      'ledger.sqlite',
+      'embedding-ledger.jsonl (made by the update, removed)',
+      'sources/archive.imports/1/stores/email.secure_local.sqlite (made by the update, removed)',
+    ]);
+    expect(body()).toBe('old');
+    expect(existsSync(made) || existsSync(`${made}-wal`) || existsSync(join(root, 'embedding-ledger.jsonl'))).toBe(false);
+    expect(existsSync(join(root, 'classification-ledger.jsonl'))).toBe(true);
+  }, 30_000);
+
   test('a healthy new version: its changes stay, and the copies and the mark go', () => {
     const { env, store, body, update } = setup();
     copyEngineStores(env, { bunBin: process.execPath });
