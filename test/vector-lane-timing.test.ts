@@ -31,7 +31,9 @@ test.skipIf(!enabled)('vector lane on a 200k-chunk store with Dropbox\'s held an
   let failed = 0;
   // The four shapes alone, then Dropbox's shape (both) with the load lane 2 suspects: keyword searches sharing the
   // store's one read-pool thread, a writer committing judged batches, and the two together.
-  const runs: Array<[string, string]> = [['none', ''], ['held', ''], ['scope', ''], ['both', ''], ['both', 'keyword'], ['both', 'writer'], ['both', 'keyword,writer']];
+  const runs: Array<[string, string]> = [['none', ''], ['held', ''], ['scope', ''], ['both', ''], ['both', 'keyword'], ['both', 'writer'], ['both', 'keyword,writer'],
+    // The owner's folder scope (lane 2, 15 Nov): the shape that cut the live lane at 54 s.
+    ['folders', ''], ['folders-held', ''], ['folders-held', 'keyword,writer']];
   for (const [scenario, contend] of runs) {
     // Drop the file's cached pages first: the build (or the last scenario) left them in memory.
     for (const suffix of ['', '-wal']) spawnSync('dd', [`if=${join(dir, `store.sqlite${suffix}`)}`, 'iflag=nocache', 'count=0', 'status=none']);
