@@ -257,6 +257,9 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
     // The paged form (#858) reads the hidden copies too.
     ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
+    // A rebuild in turns reads them on the read worker (loop-stall step-back, family 2).
+    const realReads = ledger.corpusCopyIdentityReads.bind(ledger);
+    ledger.corpusCopyIdentityReads = ((...args: Parameters<typeof realReads>) => { reads += 1; return realReads(...args); }) as typeof realReads;
     try {
       const readsFor = (): number => {
         const before = reads;
@@ -275,6 +278,7 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     } finally {
       ledger.corpusCopyIdentities = real;
       ledger.corpusCopyIdentitiesSteps = realSteps;
+      ledger.corpusCopyIdentityReads = realReads;
       tiered.close();
     }
   });

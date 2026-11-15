@@ -12158,6 +12158,219 @@ function* routedWithoutCopiesSteps(list) {
   }
   return result;
 }
+var AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`;
+var PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1 AND state != 'moving'
+        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
+function* windowSteps(where, params, options) {
+  const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
+  const examine = Math.max(limit, options.examine ?? 20000);
+  const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : undefined;
+  const keyAfter = after ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "";
+  const rows = yield {
+    sql: `
+      SELECT * FROM (
+        SELECT * FROM tier_items ${keyAfter}
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+        LIMIT ?
+      )
+      WHERE ${where}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?
+    `,
+    params: [...after ?? [], examine, ...params, limit],
+    mode: "all"
+  };
+  const records = rows.map(recordFromRow);
+  if (rows.length >= limit)
+    return { records, resumeAfter: identityOfRow(rows[rows.length - 1]) };
+  const windowEnd = yield {
+    sql: `
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT 1 OFFSET ?
+    `,
+    params: [...after ?? [], examine - 1],
+    mode: "get"
+  };
+  return windowEnd ? { records, resumeAfter: identityOfRow(windowEnd) } : { records };
+}
+function listMovingRead(options) {
+  const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
+  return {
+    sql: `
+      SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
+      ${tierMovingDirectionClause(options.direction)}
+      ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
+      LIMIT ?
+    `,
+    params: [limit],
+    mode: "all"
+  };
+}
+function listRoutedRead(options) {
+  const limit = Math.max(1, Math.min(options.limit ?? 500, 50000));
+  const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
+  return {
+    sql: `
+      SELECT * FROM tier_items
+      WHERE routed = 1
+        AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?
+    `,
+    params: [after ? 1 : null, ...after ?? [null, null, null, null], limit],
+    mode: "all"
+  };
+}
+var LIST_ROUTED_OVERRIDES_SQL = `
+      SELECT i.*, o.override_json AS override_json FROM tier_overrides o
+      CROSS JOIN tier_items i
+        ON i.provider = o.provider AND i.account_scope = o.account_scope
+        AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
+      WHERE i.routed = 1
+      ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
+    `;
+function routedOverridesFromRows(rows) {
+  const result = [];
+  for (const row of rows) {
+    let parsed;
+    try {
+      parsed = JSON.parse(row.override_json);
+    } catch {
+      continue;
+    }
+    if (parsed.kind === "tier" && !TIER_KEYS.includes(parsed.tier))
+      continue;
+    if (parsed.kind !== "tier" && parsed.kind !== "not_secret")
+      continue;
+    result.push({ record: recordFromRow(row), override: parsed });
+  }
+  return result;
+}
+var CLEARED_OVERRIDE_FINGERPRINT_SQL = `
+      SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
+        || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
+          FROM tier_ledger_meta WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;')
+        || '|' || (SELECT count(*) FROM tier_items WHERE state > 'current' OR state < 'current') AS f
+    `;
+var CLEARED_RESTORE_KEYS_SQL = `
+      SELECT key FROM tier_ledger_meta
+      WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;' AND value <> ''
+    `;
+function clearedOverrideRowsRead(restoreKeys, limit, after) {
+  const restoreIdentities = restoreKeys.flatMap(({ key }) => {
+    const parts = key.slice("tier-owner-restore:".length).split("\x00");
+    return parts.length === 4 ? [parts] : [];
+  });
+  return {
+    sql: `
+      SELECT * FROM (
+        SELECT i.* FROM tier_items i INDEXED BY tier_items_override_rows
+        WHERE i.decided_by = 'override'
+        UNION
+        -- CROSS JOIN keeps the saved undos outer: each is a primary-key lookup.
+        SELECT i.* FROM json_each(?) j
+        CROSS JOIN tier_items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
+          AND i.conversation_key = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
+      ) cleared
+      WHERE cleared.routed = 1 AND cleared.state = 'current'
+        AND cleared.metadata_tier <> 'secrets' AND cleared.content_tier <> 'secrets'
+        AND (? IS NULL OR (cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id) > (?, ?, ?, ?))
+        AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o
+          WHERE o.provider = cleared.provider AND o.account_scope = cleared.account_scope
+            AND o.conversation_key = cleared.conversation_key AND o.provider_item_id = cleared.provider_item_id
+        )
+      ORDER BY cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id
+      LIMIT ?
+    `,
+    params: [
+      JSON.stringify(restoreIdentities),
+      after ? 1 : null,
+      after?.provider ?? null,
+      after?.accountScope ?? null,
+      after?.conversationKey ?? null,
+      after?.providerItemId ?? null,
+      Math.max(1, Math.min(limit, 1000))
+    ],
+    mode: "all"
+  };
+}
+var UNSETTLED_SECRET_SIDE_STORES_SQL = `
+      SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id,
+        EXISTS (
+          SELECT 1 FROM tier_copies c
+          WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+            AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+        ) AS holds_copies
+      FROM tier_items i
+      LEFT JOIN secret_side_store_scrubs s
+        ON s.provider = i.provider AND s.account_scope = i.account_scope
+        AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
+      WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
+        AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
+        AND NOT EXISTS (
+          SELECT 1 FROM secret_side_store_debt d
+          WHERE d.provider = i.provider AND d.account_scope = i.account_scope
+            AND d.conversation_key = i.conversation_key AND d.provider_item_id = i.provider_item_id
+        )
+      -- Unordered pages could keep returning the same skipped items.
+      ORDER BY RANDOM()
+      LIMIT ?
+    `;
+function unsettledSecretRows(rows) {
+  return rows.map((row) => ({
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
+    holdsCopies: row.holds_copies === 1
+  }));
+}
+var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')`;
+var RELABEL_UNREAD_CANDIDATES_SQL = `SELECT rowid FROM tier_items WHERE ${RELABEL_UNREAD_WHERE} LIMIT ?`;
+var CORPUS_VISIBILITY_FLAGS_SQL = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
+      c.copy_state <> 'current' OR EXISTS (SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = c.provider AND w.account_scope = c.account_scope
+          AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
+          AND w.kind IN ('secret', 'deletion')) AS hidden,
+      c.copy_state = 'current' AND c.embed_hold = 1 AS held,
+      c.copy_state = 'current' AND c.embed_hold = 1 AND c.trust_domain = 'secure_local'
+        AND c.layers IN ('content', 'both') AND EXISTS (
+          SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+            AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
+            AND t.state = 'pending' AND t.content_read = 1 AND (t.metadata_pending = 1 OR t.content_pending = 1)
+            AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+            AND COALESCE(t.target_metadata_tier, '') <> 'secrets' AND COALESCE(t.target_content_tier, '') <> 'secrets'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o WHERE o.provider = c.provider AND o.account_scope = c.account_scope
+            AND o.conversation_key = c.conversation_key AND o.provider_item_id = c.provider_item_id
+            AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+        ) AS held_for_judgment,
+      c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
+      c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
+        SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
+          AND other.conversation_key = c.conversation_key AND other.provider_item_id = c.provider_item_id
+          AND other.corpus_id <> c.corpus_id AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+      ) AS metadata_unread,
+      EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+        AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
+function corpusVisibilityFromRows(rows) {
+  return rows.map((row) => ({
+    ...identityFromRow(row),
+    hidden: !!row.hidden,
+    held: !!row.held,
+    heldForJudgment: !!row.held_for_judgment,
+    metadataLayer: !!row.metadata_layer,
+    metadataLayerContentUnread: !!row.metadata_unread,
+    moving: !!row.moving
+  }));
+}
 function overrideRestoreKey(identity) {
   return `tier-owner-restore:${tierLedgerIdentityKey(identity)}`;
 }
@@ -12581,14 +12794,11 @@ class TierLedger {
     return tierMovingDirectionClause(direction);
   }
   listMoving(options = {}) {
-    const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
-    const rows = this.db.query(`
-      SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
-      ${this.movingDirectionClause(options.direction)}
-      ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
-      LIMIT ?
-    `).all(limit);
-    return rows.map(recordFromRow);
+    const read = listMovingRead(options);
+    return this.db.query(read.sql).all(...read.params).map(recordFromRow);
+  }
+  *listMovingSteps(options = {}) {
+    return (yield listMovingRead(options)).map(recordFromRow);
   }
   recordMoveFailure(identity, options) {
     this.db.query(`
@@ -12915,46 +13125,19 @@ class TierLedger {
     return rows.map(recordFromRow);
   }
   listAwaitingTextWindow(options = {}) {
-    return this.window(`routed = 1 AND content_read = 0 AND metadata_pending = 0
-        AND ((state = 'pending' AND content_pending = 1)
-          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, [], options);
+    return this.window(AWAITING_TEXT_WHERE, [], options);
   }
   listPersonalFirstWindow(options = {}) {
-    return this.window(`routed = 1 AND content_pending = 1 AND state != 'moving'
-        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, [PERSONAL_FIRST_REASON], options);
+    return this.window(PERSONAL_FIRST_WHERE, [PERSONAL_FIRST_REASON], options);
   }
   window(where, params, options) {
-    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
-    const examine = Math.max(limit, options.examine ?? 20000);
-    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : undefined;
-    const keyAfter = after ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "";
-    const rows = this.db.query(`
-      SELECT * FROM (
-        SELECT * FROM tier_items ${keyAfter}
-        ORDER BY provider, account_scope, conversation_key, provider_item_id
-        LIMIT ?
-      )
-      WHERE ${where}
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT ?
-    `).all(...after ?? [], examine, ...params, limit);
-    const records = rows.map(recordFromRow);
-    const identityOfRow = (row) => ({
-      provider: row.provider,
-      accountScope: row.account_scope,
-      providerItemId: row.provider_item_id,
-      ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
-    });
-    if (rows.length >= limit)
-      return { records, resumeAfter: identityOfRow(rows[rows.length - 1]) };
-    const windowEnd = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT 1 OFFSET ?
-    `).get(...after ?? [], examine - 1);
-    return windowEnd ? { records, resumeAfter: identityOfRow(windowEnd) } : { records };
+    return this.readSteps(windowSteps(where, params, options));
+  }
+  listAwaitingTextWindowSteps(options = {}) {
+    return windowSteps(AWAITING_TEXT_WHERE, [], options);
+  }
+  listPersonalFirstWindowSteps(options = {}) {
+    return windowSteps(PERSONAL_FIRST_WHERE, [PERSONAL_FIRST_REASON], options);
   }
   listPending(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
@@ -13015,17 +13198,23 @@ class TierLedger {
     })();
   }
   relabelUnreadFailSafe(limit = 2000) {
+    const rowids = this.db.query(RELABEL_UNREAD_CANDIDATES_SQL).all(Math.max(1, Math.min(limit, 1e4))).map((row) => row.rowid);
+    return this.relabelUnreadFailSafeRows(rowids);
+  }
+  *relabelUnreadFailSafeCandidateSteps(limit = 2000) {
+    return (yield { sql: RELABEL_UNREAD_CANDIDATES_SQL, params: [Math.max(1, Math.min(limit, 1e4))], mode: "all" }).map((row) => row.rowid);
+  }
+  relabelUnreadFailSafeRows(rowids) {
+    if (rowids.length === 0)
+      return 0;
     return this.db.query(`
       UPDATE tier_items SET reasons_json = (
         SELECT json_group_array(CASE WHEN r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
           THEN substr(r.value, 1, length(r.value) - length('missing_question')) || 'unread' ELSE r.value END)
         FROM json_each(tier_items.reasons_json) r)
-      WHERE rowid IN (
-        SELECT rowid FROM tier_items
-        WHERE content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
-          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')
-        LIMIT ?)
-    `).run(Math.max(1, Math.min(limit, 1e4))).changes;
+      WHERE rowid IN (SELECT value FROM json_each(?))
+        AND ${RELABEL_UNREAD_WHERE}
+    `).run(JSON.stringify(rowids)).changes;
   }
   retireAbsentPending(record) {
     const identity = {
@@ -13104,35 +13293,10 @@ class TierLedger {
     }))();
   }
   unsettledSecretSideStores(limit = 100) {
-    const rows = this.db.query(`
-      SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id,
-        EXISTS (
-          SELECT 1 FROM tier_copies c
-          WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-            AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-        ) AS holds_copies
-      FROM tier_items i
-      LEFT JOIN secret_side_store_scrubs s
-        ON s.provider = i.provider AND s.account_scope = i.account_scope
-        AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
-      WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
-        AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
-        AND NOT EXISTS (
-          SELECT 1 FROM secret_side_store_debt d
-          WHERE d.provider = i.provider AND d.account_scope = i.account_scope
-            AND d.conversation_key = i.conversation_key AND d.provider_item_id = i.provider_item_id
-        )
-      -- Unordered pages could keep returning the same skipped items.
-      ORDER BY RANDOM()
-      LIMIT ?
-    `).all(Math.max(1, Math.min(limit, 1000)));
-    return rows.map((row) => ({
-      provider: row.provider,
-      accountScope: row.account_scope,
-      providerItemId: row.provider_item_id,
-      ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
-      holdsCopies: row.holds_copies === 1
-    }));
+    return unsettledSecretRows(this.db.query(UNSETTLED_SECRET_SIDE_STORES_SQL).all(Math.max(1, Math.min(limit, 1000))));
+  }
+  *unsettledSecretSideStoresSteps(limit = 100) {
+    return unsettledSecretRows(yield { sql: UNSETTLED_SECRET_SIDE_STORES_SQL, params: [Math.max(1, Math.min(limit, 1000))], mode: "all" });
   }
   markSecretSideStoresCleared(identity, mark) {
     this.db.query(`
@@ -13462,16 +13626,11 @@ class TierLedger {
     return result;
   }
   listRouted(options = {}) {
-    const limit = Math.max(1, Math.min(options.limit ?? 500, 50000));
-    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
-    const rows = this.db.query(`
-      SELECT * FROM tier_items
-      WHERE routed = 1
-        AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT ?
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], limit);
-    return rows.map(recordFromRow);
+    const read = listRoutedRead(options);
+    return this.db.query(read.sql).all(...read.params).map(recordFromRow);
+  }
+  *listRoutedSteps(options = {}) {
+    return (yield listRoutedRead(options)).map(recordFromRow);
   }
   listItemWindow(options) {
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
@@ -13802,29 +13961,10 @@ class TierLedger {
     return result;
   }
   listRoutedOverrides() {
-    const rows = this.db.query(`
-      SELECT i.*, o.override_json AS override_json FROM tier_overrides o
-      CROSS JOIN tier_items i
-        ON i.provider = o.provider AND i.account_scope = o.account_scope
-        AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
-      WHERE i.routed = 1
-      ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
-    `).all();
-    const result = [];
-    for (const row of rows) {
-      let parsed;
-      try {
-        parsed = JSON.parse(row.override_json);
-      } catch {
-        continue;
-      }
-      if (parsed.kind === "tier" && !TIER_KEYS.includes(parsed.tier))
-        continue;
-      if (parsed.kind !== "tier" && parsed.kind !== "not_secret")
-        continue;
-      result.push({ record: recordFromRow(row), override: parsed });
-    }
-    return result;
+    return routedOverridesFromRows(this.db.query(LIST_ROUTED_OVERRIDES_SQL).all());
+  }
+  *listRoutedOverridesSteps() {
+    return routedOverridesFromRows(yield { sql: LIST_ROUTED_OVERRIDES_SQL, params: [], mode: "all" });
   }
   recentDecisions(limit = 25, contentTier, before, beforeItem) {
     const capped = Math.max(1, Math.min(limit, 200));
@@ -13845,45 +13985,21 @@ class TierLedger {
     return rows.map(recordFromRow);
   }
   clearedOverrideFingerprint() {
-    const row = this.db.query(`
-      SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
-        || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
-          FROM tier_ledger_meta WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;')
-        || '|' || (SELECT count(*) FROM tier_items WHERE state > 'current' OR state < 'current') AS f
-    `).get();
+    const row = this.db.query(CLEARED_OVERRIDE_FINGERPRINT_SQL).get();
+    return row?.f ?? "";
+  }
+  *clearedOverrideFingerprintSteps() {
+    const row = yield { sql: CLEARED_OVERRIDE_FINGERPRINT_SQL, params: [], mode: "get" };
     return row?.f ?? "";
   }
   listClearedOverrideRows(limit = 100, after) {
-    const restoreKeys = this.db.query(`
-      SELECT key FROM tier_ledger_meta
-      WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;' AND value <> ''
-    `).all();
-    const restoreIdentities = restoreKeys.flatMap(({ key }) => {
-      const parts = key.slice("tier-owner-restore:".length).split("\x00");
-      return parts.length === 4 ? [parts] : [];
-    });
-    const rows = this.db.query(`
-      SELECT * FROM (
-        SELECT i.* FROM tier_items i INDEXED BY tier_items_override_rows
-        WHERE i.decided_by = 'override'
-        UNION
-        -- CROSS JOIN keeps the saved undos outer: each is a primary-key lookup.
-        SELECT i.* FROM json_each(?) j
-        CROSS JOIN tier_items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
-          AND i.conversation_key = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
-      ) cleared
-      WHERE cleared.routed = 1 AND cleared.state = 'current'
-        AND cleared.metadata_tier <> 'secrets' AND cleared.content_tier <> 'secrets'
-        AND (? IS NULL OR (cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id) > (?, ?, ?, ?))
-        AND NOT EXISTS (
-          SELECT 1 FROM tier_overrides o
-          WHERE o.provider = cleared.provider AND o.account_scope = cleared.account_scope
-            AND o.conversation_key = cleared.conversation_key AND o.provider_item_id = cleared.provider_item_id
-        )
-      ORDER BY cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id
-      LIMIT ?
-    `).all(JSON.stringify(restoreIdentities), after ? 1 : null, after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null, Math.max(1, Math.min(limit, 1000)));
-    return rows.map(recordFromRow);
+    const restoreKeys = this.db.query(CLEARED_RESTORE_KEYS_SQL).all();
+    const read = clearedOverrideRowsRead(restoreKeys, limit, after);
+    return this.db.query(read.sql).all(...read.params).map(recordFromRow);
+  }
+  *listClearedOverrideRowsSteps(limit = 100, after) {
+    const restoreKeys = yield { sql: CLEARED_RESTORE_KEYS_SQL, params: [], mode: "all" };
+    return (yield clearedOverrideRowsRead(restoreKeys, limit, after)).map(recordFromRow);
   }
   settledDecisionBeforeOverride(identity) {
     const requested = this.overrideRestoreRequest(identity);
@@ -14566,41 +14682,8 @@ class TierLedger {
     })();
   }
   *corpusVisibilityPages(corpusId, identities) {
-    const flags = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
-      c.copy_state <> 'current' OR EXISTS (SELECT 1 FROM tier_write_intents w
-        WHERE w.provider = c.provider AND w.account_scope = c.account_scope
-          AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
-          AND w.kind IN ('secret', 'deletion')) AS hidden,
-      c.copy_state = 'current' AND c.embed_hold = 1 AS held,
-      c.copy_state = 'current' AND c.embed_hold = 1 AND c.trust_domain = 'secure_local'
-        AND c.layers IN ('content', 'both') AND EXISTS (
-          SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
-            AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
-            AND t.state = 'pending' AND t.content_read = 1 AND (t.metadata_pending = 1 OR t.content_pending = 1)
-            AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
-            AND COALESCE(t.target_metadata_tier, '') <> 'secrets' AND COALESCE(t.target_content_tier, '') <> 'secrets'
-        ) AND NOT EXISTS (
-          SELECT 1 FROM tier_overrides o WHERE o.provider = c.provider AND o.account_scope = c.account_scope
-            AND o.conversation_key = c.conversation_key AND o.provider_item_id = c.provider_item_id
-            AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
-        ) AS held_for_judgment,
-      c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
-      c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
-        SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
-          AND other.conversation_key = c.conversation_key AND other.provider_item_id = c.provider_item_id
-          AND other.corpus_id <> c.corpus_id AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
-      ) AS metadata_unread,
-      EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
-        AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
-    const convert = (rows) => rows.map((row) => ({
-      ...identityFromRow(row),
-      hidden: !!row.hidden,
-      held: !!row.held,
-      heldForJudgment: !!row.held_for_judgment,
-      metadataLayer: !!row.metadata_layer,
-      metadataLayerContentUnread: !!row.metadata_unread,
-      moving: !!row.moving
-    }));
+    const flags = CORPUS_VISIBILITY_FLAGS_SQL;
+    const convert = corpusVisibilityFromRows;
     if (identities) {
       for (let offset = 0;offset < identities.length; offset += 200) {
         const batch = identities.slice(offset, offset + 200);
@@ -14622,6 +14705,21 @@ class TierLedger {
       after = rows.at(-1).row_id;
       if (rows.length < 500)
         return;
+    }
+  }
+  *corpusVisibilityFlaggedSteps(corpusId) {
+    const sql = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
+      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
+    const flagged = [];
+    for (let after = 0;; ) {
+      const rows = yield { sql, params: [corpusId, after], mode: "all" };
+      for (const row of corpusVisibilityFromRows(rows)) {
+        if (row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread)
+          flagged.push(row);
+      }
+      if (rows.length < 500)
+        return flagged;
+      after = rows.at(-1).row_id;
     }
   }
   corpusCopyIdentities(corpusId, filter) {
@@ -14649,6 +14747,24 @@ class TierLedger {
       hold = last.embed_hold;
       after = last.row_id;
       yield;
+    }
+  }
+  *corpusCopyIdentityReads(corpusId, filter, pageSize = 5000) {
+    const sql = `
+      SELECT rowid AS row_id, embed_hold, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
+      WHERE corpus_id = ? AND (embed_hold, rowid) > (?, ?) AND ${corpusCopyWhere(filter)}
+      ORDER BY embed_hold, rowid LIMIT ?
+    `;
+    const out = [];
+    for (let hold = -1, after = 0;; ) {
+      const rows = yield { sql, params: [corpusId, hold, after, pageSize], mode: "all" };
+      for (const row of rows)
+        out.push(identityFromRow(row));
+      if (rows.length < pageSize)
+        return out;
+      const last = rows[rows.length - 1];
+      hold = last.embed_hold;
+      after = last.row_id;
     }
   }
   heldItemCount(corpusIds) {
@@ -20222,6 +20338,325 @@ function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
   };
 }
 
+// src/workers/connector-store/child-visibility.ts
+function* visibilityRead(here, offThread) {
+  return yield { here, offThread };
+}
+function visibilityHere(steps) {
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = next.value.here();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  return next.value;
+}
+
+class VisibilityChangedError extends Error {
+  constructor() {
+    super("Visibility changed during read");
+    this.name = "VisibilityChangedError";
+  }
+}
+async function visibilityOffThread(steps, lane, options = {}) {
+  const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
+  let changed = false;
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = await next.value.offThread();
+    } catch (error) {
+      if (error instanceof VisibilityChangedError)
+        changed = true;
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  if (changed && options.voidOnChange !== false || unchanged && !unchanged())
+    throw new VisibilityChangedError;
+  return next.value;
+}
+var VISIBILITY_CHANGE_RETRIES = 3;
+async function judgedAwaited(attempt, here) {
+  for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof VisibilityChangedError))
+        throw error;
+    }
+  }
+  return here();
+}
+function visibilityAwaited(make, lane) {
+  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
+}
+var askReads = new WeakMap;
+function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? read(missing) : new Map;
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key of asked.keys()) {
+    const row = memo ? memo.rows.get(key) : fresh.get(key);
+    if (row !== undefined)
+      out.set(key, row);
+  }
+  return out;
+}
+function askReadMemo(owner, kind, marker) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  let owners = askReads.get(trace);
+  if (!owners)
+    askReads.set(trace, owners = new Map);
+  let kinds = owners.get(owner);
+  if (!kinds)
+    owners.set(owner, kinds = new Map);
+  let memo = kinds.get(kind);
+  if (memo?.marker !== marker)
+    kinds.set(kind, memo = { marker, rows: new Map });
+  return memo;
+}
+async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? await read(missing) : new Map;
+  if (marker() !== before)
+    throw new VisibilityChangedError;
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key of asked.keys()) {
+    const row = memo ? memo.rows.get(key) : fresh.get(key);
+    if (row !== undefined)
+      out.set(key, row);
+  }
+  return out;
+}
+function itemStatesOffThread(ledger, identities) {
+  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing)));
+}
+function* itemSecretSteps(ledger, identity) {
+  const key = tierLedgerIdentityKey(identity);
+  const rows = yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, (missing) => new Map(missing.map((item) => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))), () => memoVisibilityItems(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, async (missing) => {
+    const rows = new Map;
+    for (const item of missing)
+      rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item)));
+    return rows;
+  }));
+  return rows.get(key) === true;
+}
+function visibilityRows(identities, read) {
+  return new Map(identities.map((identity) => {
+    const key = tierLedgerIdentityKey(identity);
+    return [key, { copies: read.copies.get(key), routed: read.routedWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
+  }));
+}
+function visibilityFromRows(rows) {
+  const result = { copies: new Map, routedWithoutCopies: new Set, personalFirstWaiting: new Set };
+  for (const [key, row] of rows) {
+    if (row.copies)
+      result.copies.set(key, row.copies);
+    if (row.routed)
+      result.routedWithoutCopies.add(key);
+    if (row.waiting)
+      result.personalFirstWaiting.add(key);
+  }
+  return result;
+}
+function ledgerVisibilityHere(ledger, identities, options = {}) {
+  return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
+}
+async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
+  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options))));
+  return visibilityFromRows(rows);
+}
+var releasing = new WeakSet;
+async function ledgerReadOffThread(ledger, steps) {
+  if (!offThreadReadsSupported(ledger.dbPath))
+    return ledger.readSteps(steps);
+  if (!releasing.has(ledger)) {
+    releasing.add(ledger);
+    ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+  }
+  return withOffThreadSnapshot(ledger.dbPath, async (read) => {
+    let next = steps.next();
+    while (!next.done)
+      next = steps.next(await read(next.value));
+    return next.value;
+  });
+}
+function parentIdentityOf(child) {
+  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
+  if (cut <= 0)
+    return;
+  return {
+    provider: child.provider,
+    accountScope: child.accountScope,
+    providerItemId: child.providerItemId.slice(0, cut),
+    ...child.providerConversationId ? { providerConversationId: child.providerConversationId } : {}
+  };
+}
+function parentIdentityField(child) {
+  const identity = parentIdentityOf(child);
+  return identity ? { identity } : {};
+}
+function childVisibilityUnchanged(lane) {
+  const stores = lane.stores();
+  const ledger = lane.ledger();
+  const ledgerMarker = ledger?.changeMarker();
+  const markers = stores.map((store) => store.childVisibilityMarker?.());
+  return () => {
+    const current = lane.stores();
+    return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current.length === stores.length && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
+  };
+}
+var CHILD_PARENT_CHAIN_LIMIT = 8;
+function parentKey(parent) {
+  return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
+}
+var HIDDEN = { visible: false, gone: false };
+function* parentVerdictsSteps(lane, parents) {
+  const unique = new Map;
+  for (const parent of parents)
+    unique.set(parentKey(parent), parent);
+  try {
+    return yield* judge(lane, [...unique.values()], 0);
+  } catch {
+    return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
+  }
+}
+function* judge(lane, parents, depth) {
+  const verdicts = new Map;
+  if (parents.length === 0)
+    return verdicts;
+  if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
+    for (const parent of parents)
+      verdicts.set(parentKey(parent), HIDDEN);
+    return verdicts;
+  }
+  const rows = new Map;
+  for (const store of lane.stores()) {
+    for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
+      const key = parentKey(row);
+      const list = rows.get(key) ?? [];
+      list.push({ ...row, corpusId: store.corpusId });
+      rows.set(key, list);
+    }
+  }
+  const ledger = lane.ledger();
+  const identities = new Map;
+  for (const list of rows.values()) {
+    for (const row of list)
+      identities.set(tierLedgerIdentityKey(row.identity), row.identity);
+  }
+  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
+  const climbing = new Map;
+  for (const parent of parents) {
+    const key = parentKey(parent);
+    const list = rows.get(key) ?? [];
+    const identity = list[0]?.identity;
+    const active = list.filter((row) => row.active);
+    const locations = list.filter((row) => row.secret);
+    if (locations.length > 0) {
+      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key, { visible: true, gone: false });
+      continue;
+    }
+    if (!identity) {
+      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
+        verdicts.set(key, HIDDEN);
+      } else {
+        verdicts.set(key, { visible: false, gone: true });
+      }
+      continue;
+    }
+    let visible;
+    if (!ledger) {
+      visible = active.length > 0;
+    } else {
+      const state = states?.get(tierLedgerIdentityKey(identity));
+      const copies = state?.copies ?? [];
+      visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
+      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity)))
+        visible = true;
+    }
+    if (visible) {
+      const above = active.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key, { visible: true, gone: false });
+    } else {
+      verdicts.set(key, { visible: false, gone: active.length === 0 });
+    }
+  }
+  if (climbing.size > 0) {
+    const above = yield* judge(lane, [...climbing.values()], depth + 1);
+    for (const [key, grandparent] of climbing) {
+      if (above.get(parentKey(grandparent))?.visible !== true)
+        verdicts.set(key, HIDDEN);
+    }
+  }
+  return verdicts;
+}
+function* childrenWithHiddenParentsSteps(lane, children) {
+  const hidden = new Set;
+  if (children.length === 0)
+    return hidden;
+  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
+  for (const child of children) {
+    if (verdicts.get(parentKey(child.parent))?.visible !== true)
+      hidden.add(child.key);
+  }
+  return hidden;
+}
+function* childLinksSteps(lane, probes) {
+  const found = new Map;
+  let remaining = probes;
+  for (const store of lane.stores()) {
+    if (remaining.length === 0)
+      break;
+    const asked = remaining;
+    for (const [key, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked))))
+      found.set(key, parent);
+    remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
+  }
+  return [...found].map(([key, parent]) => ({ key, parent }));
+}
+function hiddenChildKeys(lane, probes) {
+  return visibilityHere(hiddenChildKeysSteps(lane, probes));
+}
+function* hiddenChildKeysSteps(lane, probes) {
+  if (probes.length === 0)
+    return new Set;
+  let links;
+  try {
+    links = yield* childLinksSteps(lane, probes);
+  } catch {
+    return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
+  }
+  return yield* childrenWithHiddenParentsSteps(lane, links);
+}
+
 // src/workers/connector-store/secrets-disposition.ts
 import { existsSync as existsSync20 } from "node:fs";
 
@@ -20718,325 +21153,6 @@ function retireSecretRedactions(ledger, options = {}) {
     } catch {}
   }
   return retired;
-}
-
-// src/workers/connector-store/child-visibility.ts
-function* visibilityRead(here, offThread) {
-  return yield { here, offThread };
-}
-function visibilityHere(steps) {
-  let next = steps.next();
-  while (!next.done) {
-    let result;
-    try {
-      result = next.value.here();
-    } catch (error) {
-      next = steps.throw(error);
-      continue;
-    }
-    next = steps.next(result);
-  }
-  return next.value;
-}
-
-class VisibilityChangedError extends Error {
-  constructor() {
-    super("Visibility changed during read");
-    this.name = "VisibilityChangedError";
-  }
-}
-async function visibilityOffThread(steps, lane, options = {}) {
-  const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
-  let changed = false;
-  let next = steps.next();
-  while (!next.done) {
-    let result;
-    try {
-      result = await next.value.offThread();
-    } catch (error) {
-      if (error instanceof VisibilityChangedError)
-        changed = true;
-      next = steps.throw(error);
-      continue;
-    }
-    next = steps.next(result);
-  }
-  if (changed && options.voidOnChange !== false || unchanged && !unchanged())
-    throw new VisibilityChangedError;
-  return next.value;
-}
-var VISIBILITY_CHANGE_RETRIES = 3;
-async function judgedAwaited(attempt, here) {
-  for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
-    try {
-      return await attempt();
-    } catch (error) {
-      if (!(error instanceof VisibilityChangedError))
-        throw error;
-    }
-  }
-  return here();
-}
-function visibilityAwaited(make, lane) {
-  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
-}
-var askReads = new WeakMap;
-function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
-  const asked = new Map(items.map((item) => [keyOf(item), item]));
-  const before = marker();
-  const memo = askReadMemo(owner, kind, before);
-  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
-  const fresh = missing.length > 0 ? read(missing) : new Map;
-  if (memo)
-    for (const item of missing)
-      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
-  const out = new Map;
-  for (const key of asked.keys()) {
-    const row = memo ? memo.rows.get(key) : fresh.get(key);
-    if (row !== undefined)
-      out.set(key, row);
-  }
-  return out;
-}
-function askReadMemo(owner, kind, marker) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  let owners = askReads.get(trace);
-  if (!owners)
-    askReads.set(trace, owners = new Map);
-  let kinds = owners.get(owner);
-  if (!kinds)
-    owners.set(owner, kinds = new Map);
-  let memo = kinds.get(kind);
-  if (memo?.marker !== marker)
-    kinds.set(kind, memo = { marker, rows: new Map });
-  return memo;
-}
-async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
-  const asked = new Map(items.map((item) => [keyOf(item), item]));
-  const before = marker();
-  const memo = askReadMemo(owner, kind, before);
-  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
-  const fresh = missing.length > 0 ? await read(missing) : new Map;
-  if (marker() !== before)
-    throw new VisibilityChangedError;
-  if (memo)
-    for (const item of missing)
-      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
-  const out = new Map;
-  for (const key of asked.keys()) {
-    const row = memo ? memo.rows.get(key) : fresh.get(key);
-    if (row !== undefined)
-      out.set(key, row);
-  }
-  return out;
-}
-function itemStatesOffThread(ledger, identities) {
-  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing)));
-}
-function* itemSecretSteps(ledger, identity) {
-  const key = tierLedgerIdentityKey(identity);
-  const rows = yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, (missing) => new Map(missing.map((item) => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))), () => memoVisibilityItems(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, async (missing) => {
-    const rows = new Map;
-    for (const item of missing)
-      rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item)));
-    return rows;
-  }));
-  return rows.get(key) === true;
-}
-function visibilityRows(identities, read) {
-  return new Map(identities.map((identity) => {
-    const key = tierLedgerIdentityKey(identity);
-    return [key, { copies: read.copies.get(key), routed: read.routedWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
-  }));
-}
-function visibilityFromRows(rows) {
-  const result = { copies: new Map, routedWithoutCopies: new Set, personalFirstWaiting: new Set };
-  for (const [key, row] of rows) {
-    if (row.copies)
-      result.copies.set(key, row.copies);
-    if (row.routed)
-      result.routedWithoutCopies.add(key);
-    if (row.waiting)
-      result.personalFirstWaiting.add(key);
-  }
-  return result;
-}
-function ledgerVisibilityHere(ledger, identities, options = {}) {
-  return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
-}
-async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
-  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options))));
-  return visibilityFromRows(rows);
-}
-var releasing = new WeakSet;
-async function ledgerReadOffThread(ledger, steps) {
-  if (!offThreadReadsSupported(ledger.dbPath))
-    return ledger.readSteps(steps);
-  if (!releasing.has(ledger)) {
-    releasing.add(ledger);
-    ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
-  }
-  return withOffThreadSnapshot(ledger.dbPath, async (read) => {
-    let next = steps.next();
-    while (!next.done)
-      next = steps.next(await read(next.value));
-    return next.value;
-  });
-}
-function parentIdentityOf(child) {
-  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
-  if (cut <= 0)
-    return;
-  return {
-    provider: child.provider,
-    accountScope: child.accountScope,
-    providerItemId: child.providerItemId.slice(0, cut),
-    ...child.providerConversationId ? { providerConversationId: child.providerConversationId } : {}
-  };
-}
-function parentIdentityField(child) {
-  const identity = parentIdentityOf(child);
-  return identity ? { identity } : {};
-}
-function childVisibilityUnchanged(lane) {
-  const stores = lane.stores();
-  const ledger = lane.ledger();
-  const ledgerMarker = ledger?.changeMarker();
-  const markers = stores.map((store) => store.childVisibilityMarker?.());
-  return () => {
-    const current = lane.stores();
-    return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current.length === stores.length && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
-  };
-}
-var CHILD_PARENT_CHAIN_LIMIT = 8;
-function parentKey(parent) {
-  return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
-}
-var HIDDEN = { visible: false, gone: false };
-function* parentVerdictsSteps(lane, parents) {
-  const unique = new Map;
-  for (const parent of parents)
-    unique.set(parentKey(parent), parent);
-  try {
-    return yield* judge(lane, [...unique.values()], 0);
-  } catch {
-    return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
-  }
-}
-function* judge(lane, parents, depth) {
-  const verdicts = new Map;
-  if (parents.length === 0)
-    return verdicts;
-  if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
-    for (const parent of parents)
-      verdicts.set(parentKey(parent), HIDDEN);
-    return verdicts;
-  }
-  const rows = new Map;
-  for (const store of lane.stores()) {
-    for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
-      const key = parentKey(row);
-      const list = rows.get(key) ?? [];
-      list.push({ ...row, corpusId: store.corpusId });
-      rows.set(key, list);
-    }
-  }
-  const ledger = lane.ledger();
-  const identities = new Map;
-  for (const list of rows.values()) {
-    for (const row of list)
-      identities.set(tierLedgerIdentityKey(row.identity), row.identity);
-  }
-  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
-  const climbing = new Map;
-  for (const parent of parents) {
-    const key = parentKey(parent);
-    const list = rows.get(key) ?? [];
-    const identity = list[0]?.identity;
-    const active = list.filter((row) => row.active);
-    const locations = list.filter((row) => row.secret);
-    if (locations.length > 0) {
-      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
-      if (above)
-        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
-      verdicts.set(key, { visible: true, gone: false });
-      continue;
-    }
-    if (!identity) {
-      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
-        verdicts.set(key, HIDDEN);
-      } else {
-        verdicts.set(key, { visible: false, gone: true });
-      }
-      continue;
-    }
-    let visible;
-    if (!ledger) {
-      visible = active.length > 0;
-    } else {
-      const state = states?.get(tierLedgerIdentityKey(identity));
-      const copies = state?.copies ?? [];
-      visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity)))
-        visible = true;
-    }
-    if (visible) {
-      const above = active.find((row) => row.grandparentLocalItemId !== undefined);
-      if (above)
-        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
-      verdicts.set(key, { visible: true, gone: false });
-    } else {
-      verdicts.set(key, { visible: false, gone: active.length === 0 });
-    }
-  }
-  if (climbing.size > 0) {
-    const above = yield* judge(lane, [...climbing.values()], depth + 1);
-    for (const [key, grandparent] of climbing) {
-      if (above.get(parentKey(grandparent))?.visible !== true)
-        verdicts.set(key, HIDDEN);
-    }
-  }
-  return verdicts;
-}
-function* childrenWithHiddenParentsSteps(lane, children) {
-  const hidden = new Set;
-  if (children.length === 0)
-    return hidden;
-  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
-  for (const child of children) {
-    if (verdicts.get(parentKey(child.parent))?.visible !== true)
-      hidden.add(child.key);
-  }
-  return hidden;
-}
-function* childLinksSteps(lane, probes) {
-  const found = new Map;
-  let remaining = probes;
-  for (const store of lane.stores()) {
-    if (remaining.length === 0)
-      break;
-    const asked = remaining;
-    for (const [key, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked))))
-      found.set(key, parent);
-    remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
-  }
-  return [...found].map(([key, parent]) => ({ key, parent }));
-}
-function hiddenChildKeys(lane, probes) {
-  return visibilityHere(hiddenChildKeysSteps(lane, probes));
-}
-function* hiddenChildKeysSteps(lane, probes) {
-  if (probes.length === 0)
-    return new Set;
-  let links;
-  try {
-    links = yield* childLinksSteps(lane, probes);
-  } catch {
-    return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
-  }
-  return yield* childrenWithHiddenParentsSteps(lane, links);
 }
 
 // src/core/source-index/reactions.ts
@@ -21803,6 +21919,35 @@ var EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000;
 var MISSING_EMBEDDING_CHUNK_WINDOW = 20000;
 var SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 var HIDDEN_CHILD_PARENT_SLICE = 500;
+function visibilityFlagged(row) {
+  return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
+}
+function runHiddenStepsHere(steps) {
+  let step = steps.next();
+  while (!step.done)
+    step = steps.next(step.value ? step.value.find.here() : undefined);
+  return step.value;
+}
+async function runHiddenStepsInTurns(steps) {
+  await ingestionTurn();
+  let step = steps.next();
+  while (!step.done) {
+    if (step.value) {
+      let found;
+      try {
+        found = await step.value.find.offThread();
+      } catch (error) {
+        step = steps.throw(error);
+        continue;
+      }
+      step = steps.next(found);
+      continue;
+    }
+    await ingestionTurn();
+    step = steps.next();
+  }
+  return step.value;
+}
 async function runStepsInTurns(steps) {
   await ingestionTurn();
   let step = steps.next();
@@ -22969,7 +23114,7 @@ class LocalConnectorStore {
     return this.tierHiddenCountsRefresh;
   }
   async tierHiddenItemPksInTurns() {
-    const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
+    const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
     return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
   }
   async hiddenChildItemPksInTurns() {
@@ -22988,7 +23133,7 @@ class LocalConnectorStore {
     return next.value;
   }
   tierLedgerHiddenItemPks() {
-    return runSteps(this.tierLedgerHiddenSteps());
+    return runHiddenStepsHere(this.tierLedgerHiddenSteps());
   }
   async keepVisibilityCurrentInTurns() {
     await this.tierHiddenItemPksInTurns();
@@ -23036,6 +23181,49 @@ class LocalConnectorStore {
       })) };
     })();
   }
+  visibilityBootstrapFinder(ledger) {
+    const conversationOf = (identity) => normalizeConversationId(identity.providerConversationId);
+    const join = (flagged, rows) => {
+      const pks = new Map;
+      for (const row of rows) {
+        const list = pks.get(row.idx);
+        if (list)
+          list.push(row.item_pk);
+        else
+          pks.set(row.idx, [row.item_pk]);
+      }
+      return flagged.map((flags, idx) => ({ identity: flags, pks: pks.get(idx) ?? [], flags }));
+    };
+    return {
+      here: () => {
+        const flagged = [];
+        for (const page of ledger.corpusVisibilityPages(this.corpusId)) {
+          for (const row of page)
+            if (visibilityFlagged(row))
+              flagged.push(row);
+        }
+        return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
+      },
+      offThread: async () => {
+        const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId));
+        if (flagged.length === 0 || !offThreadReadsSupported(this.dbPath)) {
+          return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
+        }
+        const rows = await withOffThreadSnapshot(this.dbPath, async (read) => {
+          const out = [];
+          for (let offset = 0;offset < flagged.length; offset += IDENTITY_LOOKUP_SLICE) {
+            const slice = flagged.slice(offset, offset + IDENTITY_LOOKUP_SLICE);
+            const keys = JSON.stringify(slice.map((identity) => [identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]));
+            for (const row of await read({ sql: identityRowsSql(""), params: [keys], mode: "all" })) {
+              out.push({ idx: row.idx + offset, item_pk: row.item_pk });
+            }
+          }
+          return out;
+        });
+        return join(flagged, rows);
+      }
+    };
+  }
   *tierLedgerHiddenSteps() {
     const ledger = this.visibilityLedger();
     this.registerVisibilityWriter(ledger);
@@ -23067,7 +23255,6 @@ class LocalConnectorStore {
       memo.value[flag] = memo.lists[flag].values;
     const changed = incremental ? [...new Map([...ledgerChanges.identities, ...storeChanges.identities].map((identity) => [tierLedgerIdentityKey(identity), identity])).values()] : undefined;
     const updates = [];
-    const pages = ledger.corpusVisibilityPages(this.corpusId, changed);
     const prepare = function* (store, identities, flags) {
       const rows = yield* store.itemRowsForIdentitiesSteps(identities, (identity) => normalizeConversationId(identity.providerConversationId));
       const pks = new Map;
@@ -23083,17 +23270,19 @@ class LocalConnectorStore {
     };
     if (changed) {
       const flags = [];
-      for (const page of pages) {
+      for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) {
         flags.push(...page);
         yield;
       }
       updates.push(...yield* prepare(this, changed, flags));
     } else {
-      for (const page of pages) {
-        const batch = yield* prepare(this, page, page);
-        this.applyVisibilityUpdates(memo, batch);
-        yield;
+      const found = yield { find: this.visibilityBootstrapFinder(ledger) };
+      for (let start = 0;start < found.length; start += IDENTITY_LOOKUP_SLICE) {
+        if (start > 0)
+          yield;
+        this.applyVisibilityUpdates(memo, found.slice(start, start + IDENTITY_LOOKUP_SLICE));
       }
+      yield;
     }
     if (this.tierLedgerHiddenMemo !== prior || incremental && (memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor)) {
       return yield* this.tierLedgerHiddenSteps();
@@ -23430,7 +23619,7 @@ class LocalConnectorStore {
     let refreshing;
     refreshing = (async () => {
       try {
-        await runStepsInTurns(this.tierLedgerHiddenSteps());
+        await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
         await this.publishVisibility();
       } catch {} finally {
         if (this.visibilityRefreshing === refreshing)
@@ -24820,9 +25009,27 @@ ${parentKey(ref)}`, { ref, origin });
     return migrationFingerprint(row.content_hash, hashes);
   }
   stripImageContentOutsidePrivate(options = {}) {
-    if (this.trustDomain === "secure_local")
+    const read = this.imageContentOutsidePrivateRead();
+    if (!read)
       return 0;
-    const rows = this.db.query(`
+    return this.stripImageContentRows(this.db.query(read.sql).all(), options);
+  }
+  async imageContentOutsidePrivateRowsOffThread() {
+    const read = this.imageContentOutsidePrivateRead();
+    if (!read)
+      return [];
+    if (!offThreadReadsSupported(this.dbPath))
+      return this.db.query(read.sql).all();
+    return await withOffThreadSnapshot(this.dbPath, async (run) => run(read));
+  }
+  imageContentOutsidePrivateRows() {
+    const read = this.imageContentOutsidePrivateRead();
+    return read ? this.db.query(read.sql).all() : [];
+  }
+  imageContentOutsidePrivateRead() {
+    if (this.trustDomain === "secure_local")
+      return;
+    return { sql: `
       SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
       FROM items i
       WHERE i.tombstoned = 0
@@ -24833,7 +25040,13 @@ ${parentKey(ref)}`, { ref, origin });
           SELECT 1 FROM chunks c JOIN media_judgments j ON j.media_sha256 = c.media_sha256
           WHERE c.item_pk = i.item_pk AND j.verdict = 'ordinary'
         )` : ""}
-    `).all();
+    `, params: [], mode: "all" };
+  }
+  stripImageContentRows(found, options = {}) {
+    const read = this.imageContentOutsidePrivateRead();
+    if (!read || found.length === 0)
+      return 0;
+    const rows = this.db.query(`${read.sql} AND i.item_pk IN (SELECT value FROM json_each(?))`).all(JSON.stringify(found.map((row) => row.item_pk)));
     const ledger = this.tierLedger();
     let stripped = 0;
     try {
@@ -30090,7 +30303,7 @@ ${parentKey(ref)}`, { ref, origin });
     await this.refreshTierHiddenCountsInTurns();
     const key = JSON.stringify(scope ?? null);
     try {
-      const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+      const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
       const memos = this.settledUnreadableCountMemo ??= new Map;
       if (memos.size > 32)
         memos.clear();
@@ -30106,7 +30319,7 @@ ${parentKey(ref)}`, { ref, origin });
         this.refreshSettledUnreadableCountInTurns(key, scope);
       return memo;
     }
-    const counts = this.unreadHoldCounts(runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+    const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32)
       memos.clear();
     memos.set(key, { at: Date.now(), ...counts });
@@ -30120,7 +30333,7 @@ ${parentKey(ref)}`, { ref, origin });
     running.add(key);
     (async () => {
       try {
-        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+        const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
         const memos = this.settledUnreadableCountMemo ??= new Map;
         if (memos.size > 32)
           memos.clear();
@@ -30161,14 +30374,26 @@ ${parentKey(ref)}`, { ref, origin });
     const ledger = this.visibilityLedger();
     if (!ledger)
       return [];
-    const identities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
+    const filter = options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable";
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
     const outcome = this.extractionOutcome;
-    const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? "", {
+    const conversationOf = (identity) => identity.providerConversationId ?? "";
+    const extra = {
       sql: `${this.childItemColumnsPresent ? "AND COALESCE(i.bytes_available, 1) <> 0" : ""} ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
       params: [...account ? [account] : [], ...filters.params]
-    });
+    };
+    const finder = {
+      here: () => {
+        const identities = runSteps(ledger.corpusCopyIdentitiesSteps(this.corpusId, filter));
+        return { identities, rows: runSteps(this.itemRowsForIdentitiesSteps(identities, conversationOf, extra)) };
+      },
+      offThread: async () => {
+        const identities = await ledgerReadOffThread(ledger, ledger.corpusCopyIdentityReads(this.corpusId, filter));
+        return { identities, rows: await this.itemRowsForIdentitiesOffThread(identities, conversationOf, extra) };
+      }
+    };
+    const { identities, rows } = yield { find: finder };
     const matched = [];
     for (let index = 0;index < rows.length; index += 1) {
       if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0)
@@ -30199,11 +30424,29 @@ ${parentKey(ref)}`, { ref, origin });
     const keys = JSON.stringify(identities.map((identity) => [identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]));
     return this.db.query(identityRowsSql(extra.sql)).all(keys, ...extra.params);
   }
+  async itemRowsForIdentitiesOffThread(identities, conversationOf, extra = { sql: "", params: [] }) {
+    if (identities.length === 0)
+      return [];
+    if (!offThreadReadsSupported(this.dbPath))
+      return runSteps(this.itemRowsForIdentitiesSteps(identities, conversationOf, extra));
+    const sql = identityRowsSql(extra.sql);
+    return withOffThreadSnapshot(this.dbPath, async (read) => {
+      const out = [];
+      for (let offset = 0;offset < identities.length; offset += IDENTITY_LOOKUP_SLICE) {
+        const keys = JSON.stringify(identities.slice(offset, offset + IDENTITY_LOOKUP_SLICE).map((identity) => [identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]));
+        for (const row of await read({ sql, params: [keys, ...extra.params], mode: "all" })) {
+          row.idx += offset;
+          out.push(row);
+        }
+      }
+      return out;
+    });
+  }
   settledUnreadableItems(scope) {
-    return runSteps(this.settledUnreadableItemsSteps(scope));
+    return runHiddenStepsHere(this.settledUnreadableItemsSteps(scope));
   }
   settledUnreadableItemsInTurns(scope) {
-    return runStepsInTurns(this.settledUnreadableItemsSteps(scope));
+    return runHiddenStepsInTurns(this.settledUnreadableItemsSteps(scope));
   }
   *settledUnreadableItemsSteps(scope) {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
@@ -34273,6 +34516,7 @@ var MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public
 // src/workers/connector-store/tier-override-settle.ts
 var CLEARED_RECHECK_MS = 10 * 60000;
 var clearedChecks = new WeakMap;
+var running = new WeakMap;
 
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;

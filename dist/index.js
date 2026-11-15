@@ -15369,6 +15369,15 @@ var init_credential_health = __esm(() => {
   CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS = 10 * 60 * 1000;
   CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
 });
+// src/workers/connector-store/off-thread-reads.ts
+var startedStores, storeOpens, queues, releases;
+var init_off_thread_reads = __esm(() => {
+  init_answer_latency_trace();
+  startedStores = new Set;
+  storeOpens = new Map;
+  queues = new Map;
+  releases = new Map;
+});
 
 // src/core/embedding-cost-estimates.ts
 var init_embedding_cost_estimates = () => {};
@@ -15688,13 +15697,16 @@ var init_sniffer_store = __esm(() => {
   init_tier_classifier();
   init_tier_ledger_path();
 });
+
 // src/workers/classification/tier-ledger.ts
-var REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
+var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')`, RELABEL_UNREAD_CANDIDATES_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
+  RELABEL_UNREAD_CANDIDATES_SQL = `SELECT rowid FROM tier_items WHERE ${RELABEL_UNREAD_WHERE} LIMIT ?`;
   REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
   REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
 });
@@ -16196,16 +16208,6 @@ var init_keyword_expansion = __esm(() => {
   lastTranslationMs = new WeakMap;
 });
 
-// src/workers/connector-store/off-thread-reads.ts
-var startedStores, storeOpens, queues, releases;
-var init_off_thread_reads = __esm(() => {
-  init_answer_latency_trace();
-  startedStores = new Set;
-  storeOpens = new Map;
-  queues = new Map;
-  releases = new Map;
-});
-
 // src/core/store-identity.ts
 var init_store_identity = __esm(() => {
   init_archive_formats();
@@ -16239,6 +16241,21 @@ var init_tier_placement = __esm(() => {
   init_engine();
   init_tier_classifier();
   init_tier_ledger();
+});
+
+// src/workers/connector-store/child-visibility.ts
+var askReads, releasing;
+var init_child_visibility = __esm(() => {
+  init_tier_ledger();
+  init_answer_latency_trace();
+  init_off_thread_reads();
+  askReads = new WeakMap;
+  releasing = new WeakSet;
+});
+
+// src/workers/connector-store/loop-pass.ts
+var init_loop_pass = __esm(() => {
+  init_child_visibility();
 });
 
 // connect-relay/shared/tokens.ts
@@ -16320,21 +16337,12 @@ var init_app_release_log = __esm(() => {
 
 // src/workers/connector-store/secrets-disposition.ts
 var init_secrets_disposition = __esm(() => {
+  init_loop_pass();
   init_app_release_log();
   init_sniffer();
   init_sniffer_store();
   init_tier_ledger_path();
   init_job_names();
-});
-
-// src/workers/connector-store/child-visibility.ts
-var askReads, releasing;
-var init_child_visibility = __esm(() => {
-  init_tier_ledger();
-  init_answer_latency_trace();
-  init_off_thread_reads();
-  askReads = new WeakMap;
-  releasing = new WeakSet;
 });
 
 // src/core/source-index/reactions.ts
@@ -16624,12 +16632,14 @@ var init_tier_names_only_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_local_index();
+  init_loop_pass();
 });
 
 // src/workers/connector-store/tier-held-settle.ts
 var init_tier_held_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_loop_pass();
 });
 
 // src/workers/embedding-ledger.ts
@@ -16856,17 +16866,19 @@ var init_tier_rejudge = __esm(() => {
 });
 
 // src/workers/connector-store/tier-override-settle.ts
-var CLEARED_RECHECK_MS, clearedChecks;
+var CLEARED_RECHECK_MS, clearedChecks, running;
 var init_tier_override_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
+  init_loop_pass();
   init_parent_context();
   init_stored_names();
   init_tier_rejudge();
   init_tier_rules_sweep();
   CLEARED_RECHECK_MS = 10 * 60000;
   clearedChecks = new WeakMap;
+  running = new WeakMap;
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
@@ -16875,17 +16887,20 @@ var init_tier_rules_sweep = __esm(() => {
   init_stored_names();
   init_tier_override_settle();
   init_tier_rejudge();
+  init_loop_pass();
 });
 
 // src/workers/connector-store/tier-image-content-sweep.ts
 var init_tier_image_content_sweep = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
+  init_loop_pass();
 });
 
 // src/workers/connector-store/tier-media-judgment-sweep.ts
 var init_tier_media_judgment_sweep = __esm(() => {
   init_tier_rejudge();
+  init_loop_pass();
 });
 
 // src/workers/connector-store/tier-secrets-floor-sweep.ts
@@ -16895,6 +16910,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
   init_secret_scan_off_thread();
   init_tier_classifier();
   init_tier_ledger();
+  init_child_visibility();
   init_stored_names();
   init_tier_rejudge();
 });
@@ -18711,6 +18727,7 @@ var init_extraction_factory = __esm(() => {
 var NETWORK_ERROR_KINDS, POLICY_DECISIONS, TERMINAL_STATUSES;
 var init_job_store = __esm(() => {
   init_source_size_limits();
+  init_off_thread_reads();
   init_sqlite_migrations();
   init_store_write_guard();
   init_job_names();
@@ -19736,6 +19753,7 @@ var init_telegram_messages = __esm(() => {
 // src/workers/source-index/status.ts
 var DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, STORE_UNCHANGED_REUSE_MS;
 var init_status = __esm(() => {
+  init_off_thread_reads();
   init_corpus();
   init_embedding_cost_estimates();
   init_source_corpus_registry();
