@@ -465,6 +465,12 @@ const SOURCES_CSS = `
 .srctile[hidden] { display: none; }
 .srctiles + .pnote { margin-top: 14px; }
 .srcsetup .plainlink { margin: 8px 0 12px; }
+/* The sheet is at most 480px wide, too narrow for a setup row's four columns
+   (the description got 0px and printed one letter per line, 2026-11-15).
+   In the sheet the description always sits on its own line under the name. */
+.srcsheet .setrow { grid-template-columns: 20px minmax(0, 1fr) auto; padding: 12px 0; }
+.srcsheet .setrow .blurb { grid-column: 1 / -1; grid-row: 2; }
+.srcsheet .setrow .btn { justify-self: end; width: max-content; }
 .linkbtn { font: inherit; color: var(--link); background: none; border: 0; padding: 0; text-decoration: underline; cursor: pointer; }
 #build-connector > .pnote { margin: 12px 0 0; }
 #build-connector .promptbox { margin: 12px 0 0; word-break: normal; overflow-wrap: anywhere; }

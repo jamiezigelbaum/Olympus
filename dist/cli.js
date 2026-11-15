@@ -68220,10 +68220,10 @@ var init_vocabulary = __esm(() => {
       back: "Back to Olympus",
       title: "Import another archive",
       intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
-      zone: "Upload folder",
+      zone: "Drop your archive",
       over: "Drop to import",
-      hint: "Drag a folder here, or click to choose one.",
-      zoneLabel: "Upload folder: choose a folder, or drop one here",
+      hint: "Drag a file or folder here, or click to choose a folder.",
+      zoneLabel: "Drop your archive: choose a folder, or drop a file or folder here",
       chooseFile: "or choose a file",
       reading: "Reading the folder…",
       uploading: "Uploading {name}",
@@ -68233,7 +68233,7 @@ var init_vocabulary = __esm(() => {
       cancel: "Cancel",
       starting: "Starting…",
       empty: "There was no file in that. Drop a folder or a file from this computer.",
-      unreadable: "Olympus could not read what you dropped. Try again.",
+      unreadable: 'Your browser would not let Olympus read {name}. If it is in Dropbox or iCloud, make it available offline first, then drop it again or use "or choose a file".',
       failed: "The upload stopped before it finished. Nothing was imported. Try again.",
       several: "{n} items",
       chooseAnother: "Start over",
@@ -68321,6 +68321,7 @@ var init_vocabulary = __esm(() => {
     },
     inSource: {
       listLabel: "Imported archives",
+      starting: "Importing {name}…",
       importingLine: "Reading your export: {percent}% · {items} so far",
       importingNote: "The bar above counts these as they become searchable.",
       importingLineNone: "Reading your export: {percent}%",
@@ -174444,6 +174445,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     computerMeta: null,
     archiveConfirm: {},
     archiveStarting: {},
+    importStarted: {},
     archivePeak: {},
     unreadablePages: {},
     landing: "",
@@ -175300,13 +175302,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const status = String(source.status || "");
     const archives = archivesMeta(id);
     const item = sourceItem(source);
-    const tone = item ? "warn" : config.statusTone[status] || "off";
+    const starting = importStarting(id);
+    const tone = item ? "warn" : starting ? config.statusTone.Working || "run" : config.statusTone[status] || "off";
     const row = el("li", item ? "row source need-row" : "row source");
     const main = el("div", "source-main");
     const dot = el("span", "dot tone-" + tone);
     dot.setAttribute("aria-hidden", "true");
     const head = add(el("p", "source-head"), dot, other ? add(el("span", "source-name source-for", P.otherArchives.line), el("span", "sr", " — " + String(source.label || ""))) : el("span", "source-name", String(source.label || "")));
-    const off = status === "Off" && !item;
+    const off = status === "Off" && !item && !starting;
     if (!off)
       add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
     add(main, head);
@@ -175325,7 +175328,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       meta.push(fill(P.syncCheckingLine, { source: String(source.syncNoun || source.label || "") }));
     } else if (manual) {
       meta.push(capitalise(detail));
-    } else if (progress) {} else if (item)
+    } else if (progress) {} else if (starting) {
+      meta.push(fill(H.copy.archives.inSource.starting, { name: starting.name }));
+    } else if (item)
       meta.push(capitalise(itemReason(item, source)));
     else if (off)
       meta.push(capitalise(detail || P.notConnected));
@@ -175528,7 +175533,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const links = own ? guideLinksOf([own]) : allGuideLinks();
     const guides = linkedGuides(A.pick.guides, links, !!own);
     const words = own ? { ...A.pick, guides, title: fill(A.sourceImport.title, { source: String(own.label) }), intro: String(own.intro), account: A.account } : { ...A.pick, guides, account: A.account };
-    picker.pickArchive(words, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", true, key), own ? String(own.sourceId) : "");
+    picker.pickArchive(words, (picked) => {
+      if (own && picked && picked.status === "started" && picked.name)
+        state.importStarted[String(own.sourceId)] = { name: picked.name, at: Date.now() };
+      closeScreen(picked ? archiveOutcome(picked) : "", true, key);
+    }, own ? String(own.sourceId) : "");
   }
   function allArchiveSourceMetas() {
     const meta = state.computerMeta;
@@ -175676,6 +175685,17 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return null;
     const found = meta.sourceImports.filter((group) => !!group && group.sourceId === id && Array.isArray(group.imports))[0];
     return found && found.imports.filter(validArchive).length > 0 ? found : null;
+  }
+  function importStarting(id) {
+    const started = state.importStarted[id];
+    if (!started)
+      return null;
+    const joined = sourceImportsMeta(id);
+    if (Date.now() - started.at > 120000 || joined && joined.imports.some((entry) => entry && entry.name === started.name)) {
+      delete state.importStarted[id];
+      return null;
+    }
+    return started;
   }
   function sourceImportNeedsPerson(entry) {
     return entry.status === "stopped" && !(entry.stop && entry.stop.code === "stopped_by_owner");
@@ -177051,6 +177071,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return true;
     if (archivesMoving())
       return true;
+    if (Object.keys(state.importStarted).length)
+      return true;
     return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== "failed");
   }
   function deletePending() {
@@ -178067,13 +178089,15 @@ function chatgptPickerProgram(kit) {
       if (!item || item.kind !== "file")
         continue;
       const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
-      if (entry)
+      if (entry && entry.isDirectory) {
         entries.push(entry);
-      else {
-        const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
-        if (file)
-          plain.push({ file, path: file.name });
+        continue;
       }
+      const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
+      if (file)
+        plain.push({ file, path: file.name });
+      else if (entry)
+        entries.push(entry);
     }
     if (!items.length) {
       for (const file of Array.prototype.slice.call(transfer.files || []))
@@ -178090,6 +178114,11 @@ function chatgptPickerProgram(kit) {
       input.value = "";
     } catch {}
     return items;
+  }
+  function unreadableName(skipped) {
+    if (!skipped.length)
+      return "what you dropped";
+    return skipped.length === 1 ? String(skipped[0]).replace(/\/$/, "") : fill(drop.words.several, { n: kit.count(skipped.length) });
   }
   function topName(items) {
     const tops = {};
@@ -178128,7 +178157,7 @@ function chatgptPickerProgram(kit) {
       if (!dropLive(mine, attempt))
         return;
       if (!items.length) {
-        dropFail(skipped.length ? drop.words.unreadable : drop.words.empty);
+        dropFail(skipped.length ? fill(drop.words.unreadable, { name: unreadableName(skipped) }) : drop.words.empty);
         return;
       }
       let total = 0;
@@ -178156,7 +178185,7 @@ function chatgptPickerProgram(kit) {
       });
     }, () => {
       if (dropLive(mine, attempt))
-        dropFail(drop.words.unreadable);
+        dropFail(fill(drop.words.unreadable, { name: unreadableName(skipped) }));
     });
   }
   function pollUpload(mine, attempt) {
@@ -187891,6 +187920,12 @@ var CONNECTOR_DIALOG_ID = "build-connector", CONNECTOR_DIALOG_HEADING = "Build a
 .srctile[hidden] { display: none; }
 .srctiles + .pnote { margin-top: 14px; }
 .srcsetup .plainlink { margin: 8px 0 12px; }
+/* The sheet is at most 480px wide, too narrow for a setup row's four columns
+   (the description got 0px and printed one letter per line, 2026-11-15).
+   In the sheet the description always sits on its own line under the name. */
+.srcsheet .setrow { grid-template-columns: 20px minmax(0, 1fr) auto; padding: 12px 0; }
+.srcsheet .setrow .blurb { grid-column: 1 / -1; grid-row: 2; }
+.srcsheet .setrow .btn { justify-self: end; width: max-content; }
 .linkbtn { font: inherit; color: var(--link); background: none; border: 0; padding: 0; text-decoration: underline; cursor: pointer; }
 #build-connector > .pnote { margin: 12px 0 0; }
 #build-connector .promptbox { margin: 12px 0 0; word-break: normal; overflow-wrap: anywhere; }

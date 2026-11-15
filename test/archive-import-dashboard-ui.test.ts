@@ -104,7 +104,7 @@ function choose(page: Page, key: 'picker:drop:file-input' | 'picker:drop:folder-
   input.dispatchEvent(new page.win.Event('change', { bubbles: true }) as unknown as Event);
 }
 
-type Fake = { name: string; text?: string; children?: Fake[]; unreadable?: true };
+type Fake = { name: string; text?: string; children?: Fake[]; unreadable?: true; /** The drop also holds it as a File (getAsFile), as a real dropped file does. */ asFile?: true };
 /** A dragged file or folder as the browser's entries API shows it. */
 function entryOf(win: Window, node: Fake): any {
   if (!node.children) {
@@ -128,7 +128,7 @@ function dropOnZone(page: Page, dropped: Fake[], phase: 'enter' | 'drop' = 'drop
   const send = (type: string) => {
     const event = new page.win.Event(type, { bubbles: true, cancelable: true });
     Object.defineProperty(event, 'dataTransfer', {
-      value: { dropEffect: '', files: [], items: dropped.map((node) => ({ kind: 'file', webkitGetAsEntry: () => entryOf(page.win, node) })) },
+      value: { dropEffect: '', files: [], items: dropped.map((node) => ({ kind: 'file', webkitGetAsEntry: () => entryOf(page.win, node), ...(node.asFile ? { getAsFile: () => new page.win.File([node.text ?? 'content'], node.name) } : {}) })) },
     });
     zone.dispatchEvent(event as unknown as Event);
     return event;
@@ -403,6 +403,20 @@ describe('Import an archive on the computer', () => {
     expect(page.uploads()[0]!.file.size).toBe('From mail'.length);
   });
 
+  test('one dropped file is read from the drop itself, even when its entry refuses (Roam .json, 2026-11-15)', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    }, { upload: noteUploads });
+    page.button(A.importAction).click();
+    await settle();
+    dropOnZone(page, [{ name: 'Roam export.json', text: '[]', unreadable: true, asFile: true }]);
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 || page.doc.querySelector('[role="alert"]') !== null);
+    expect(page.doc.querySelector('[role="alert"]')).toBeNull();
+    expect(page.uploads().map((entry) => entry.path)).toEqual(['Roam export.json']);
+  });
+
   test('a folder with a file or folder the browser cannot read imports the rest and names what it left out (#783)', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
@@ -427,7 +441,7 @@ describe('Import an archive on the computer', () => {
     await settle();
     dropOnZone(page, [{ name: 'Inbox.mbox', children: [{ name: 'Info.plist', unreadable: true }] }]);
     await until(() => page.doc.querySelector('[role="alert"]') !== null);
-    expect(page.doc.querySelector('[role="alert"]')!.textContent).toBe(A.pick.unreadable);
+    expect(page.doc.querySelector('[role="alert"]')!.textContent).toBe(fill(A.pick.unreadable, { name: 'Inbox.mbox/Info.plist' }));
     expect(page.calls(ARCHIVE_UPLOAD_START_TOOL_NAME)).toEqual([]);
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
   });
@@ -731,6 +745,21 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([
       { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { upload_id: page.uploads()[0]!.upload_id, source_id: 'telegram.messages' } },
     ]);
+  });
+
+  test('the card says Importing the moment its import starts, before the engine lists it (2026-11-15)', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name: 'result.json', source: { id: 'telegram.messages', label: 'Telegram' } } }),
+    }, { upload: noteUploads });
+    (Array.from(sourceRow(page, 'Telegram').querySelectorAll('.source-actions button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
+    await settle();
+    choose(page, 'picker:drop:file-input', [{ path: 'result.json', text: '{}' }]);
+    // The engine's next read does not list the import yet; the card still says it is on its way.
+    await until(() => page.text().includes(fill(A.startedIn, { name: 'result.json', source: 'Telegram' })));
+    await settle();
+    expect(sourceRow(page, 'Telegram').textContent).toContain(fill(A.inSource.starting, { name: 'result.json' }));
   });
 
   test('a Keys link lands on a card\'s Import an archive: its drop zone opens, for that card only (owner, 2026-10-29)', async () => {

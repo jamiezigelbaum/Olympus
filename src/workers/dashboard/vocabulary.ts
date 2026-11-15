@@ -2295,10 +2295,10 @@ export const DASHBOARD_ARCHIVE_COPY = {
     title: 'Import another archive',
     /** Any export: one of a source's own still joins that source (start.ts), so the line says where each goes. */
     intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
-    zone: 'Upload folder',
+    zone: 'Drop your archive',
     over: 'Drop to import',
-    hint: 'Drag a folder here, or click to choose one.',
-    zoneLabel: 'Upload folder: choose a folder, or drop one here',
+    hint: 'Drag a file or folder here, or click to choose a folder.',
+    zoneLabel: 'Drop your archive: choose a folder, or drop a file or folder here',
     chooseFile: 'or choose a file',
     reading: 'Reading the folder…',
     uploading: 'Uploading {name}',
@@ -2308,7 +2308,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
     cancel: 'Cancel',
     starting: 'Starting…',
     empty: 'There was no file in that. Drop a folder or a file from this computer.',
-    unreadable: 'Olympus could not read what you dropped. Try again.',
+    unreadable: 'Your browser would not let Olympus read {name}. If it is in Dropbox or iCloud, make it available offline first, then drop it again or use "or choose a file".',
     failed: 'The upload stopped before it finished. Nothing was imported. Try again.',
     several: '{n} items',
     chooseAnother: 'Start over',
@@ -2432,6 +2432,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
    */
   inSource: {
     listLabel: 'Imported archives',
+    /** On the card the moment an import starts from it, until the engine lists it with its own progress. */
+    starting: 'Importing {name}…',
     importingLine: 'Reading your export: {percent}% · {items} so far',
     /** Under an import's own bar: the source's bar above is the same items, counted as they become searchable. */
     importingNote: 'The bar above counts these as they become searchable.',

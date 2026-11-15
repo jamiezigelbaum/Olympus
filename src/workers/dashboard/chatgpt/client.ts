@@ -188,6 +188,12 @@ export function chatgptDashboardClient(
     archiveConfirm: Record<string, { source: string; reconfirm?: boolean }>;
     /** Requests the person approved here, until a read stops listing them as pending (or the hold runs out). */
     archiveStarting: Record<string, number>;
+    /**
+     * Imports just started from a source's own card, by source id: the file's name and when. The card says
+     * Importing at once, before the engine's next read lists the import (2026-11-15: the Roam card still said
+     * "No archives imported yet" under the Importing notice).
+     */
+    importStarted: Record<string, { name: string; at: number }>;
     /** The highest percent shown for each importing archive on this page: a read never moves its bar back. */
     archivePeak: Record<string, number>;
     /** Computer only: the source an open link asked to land on, until the panel has landed there. */
@@ -226,6 +232,7 @@ export function chatgptDashboardClient(
     // Agent requests whose export did not prove its account: asked in the request's own row, by request id.
     archiveConfirm: {},
     archiveStarting: {},
+    importStarted: {},
     archivePeak: {},
     unreadablePages: {},
     landing: '',
@@ -1192,7 +1199,8 @@ export function chatgptDashboardClient(
     const archives = archivesMeta(id);
     const item = sourceItem(source);
     // A source that needs the owner gets the amber dot, whatever its status word.
-    const tone = item ? 'warn' : (config.statusTone as Any)[status] || 'off';
+    const starting = importStarting(id);
+    const tone = item ? 'warn' : starting ? (config.statusTone as Any).Working || 'run' : (config.statusTone as Any)[status] || 'off';
     const row = el('li', item ? 'row source need-row' : 'row source');
     const main = el('div', 'source-main');
     const dot = el('span', 'dot tone-' + tone);
@@ -1202,7 +1210,7 @@ export function chatgptDashboardClient(
       ? add(el('span', 'source-name source-for', P.otherArchives.line), el('span', 'sr', ' — ' + String(source.label || '')))
       : el('span', 'source-name', String(source.label || '')));
     // The dot and the line under the name carry the state; the word is for screen readers only.
-    const off = status === 'Off' && !item;
+    const off = status === 'Off' && !item && !starting;
     if (!off) add(head, el('span', 'sr', ' — ' + (item ? P.needsYou : status)));
     add(main, head);
     const meta: string[] = [];
@@ -1224,6 +1232,8 @@ export function chatgptDashboardClient(
       meta.push(capitalise(detail));
     } else if (progress) {
       // The bar and its sentence say what is happening; the line keeps only the last sync.
+    } else if (starting) {
+      meta.push(fill(H.copy.archives.inSource.starting, { name: starting.name }));
     } else if (item) meta.push(capitalise(itemReason(item, source)));
     else if (off) meta.push(capitalise(detail || P.notConnected));
     else if (detail) meta.push(capitalise(detail));
@@ -1497,7 +1507,10 @@ export function chatgptDashboardClient(
       ? { ...A.pick, guides, title: fill(A.sourceImport.title, { source: String(own.label) }), intro: String(own.intro), account: A.account }
       : { ...A.pick, guides, account: A.account };
     // Names in the line are the person's own files, shown only on this computer.
-    picker!.pickArchive(words, (picked: ChatGptArchivePicked | null) => closeScreen(picked ? archiveOutcome(picked) : '', true, key), own ? String(own.sourceId) : '');
+    picker!.pickArchive(words, (picked: ChatGptArchivePicked | null) => {
+      if (own && picked && picked.status === 'started' && picked.name) state.importStarted[String(own.sourceId)] = { name: picked.name, at: Date.now() };
+      closeScreen(picked ? archiveOutcome(picked) : '', true, key);
+    }, own ? String(own.sourceId) : '');
   }
 
   /** Every source whose card imports its own exports, from the computer meta (computer only). */
@@ -1680,6 +1693,21 @@ export function chatgptDashboardClient(
     if (!onComputer() || !meta || !Array.isArray(meta.sourceImports)) return null;
     const found = meta.sourceImports.filter((group: Any) => !!group && group.sourceId === id && Array.isArray(group.imports))[0];
     return found && found.imports.filter(validArchive).length > 0 ? found : null;
+  }
+
+  /**
+   * The import just started on this source's card that the engine's reads do not list yet, or null. It
+   * stands in for at most two minutes; once the engine lists any import on the card, its own line wins.
+   */
+  function importStarting(id: string): { name: string; at: number } | null {
+    const started = state.importStarted[id];
+    if (!started) return null;
+    const joined = sourceImportsMeta(id);
+    if (Date.now() - started.at > 120_000 || (joined && joined.imports.some((entry: Any) => entry && entry.name === started.name))) {
+      delete state.importStarted[id];
+      return null;
+    }
+    return started;
   }
 
   /** An import stopped for a reason that is not the person's own Stop needs them. */
@@ -3235,6 +3263,8 @@ export function chatgptDashboardClient(
     })) return true;
     if (data.progress && !data.progress.stalled && !progressFinished(data.progress)) return true;
     if (archivesMoving()) return true;
+    // A start the engine has not listed yet: read again soon so its own progress takes over.
+    if (Object.keys(state.importStarted).length) return true;
     return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== 'failed');
   }
 

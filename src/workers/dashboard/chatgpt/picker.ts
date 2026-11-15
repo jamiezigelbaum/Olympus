@@ -188,7 +188,7 @@ export interface ChatGptArchivePickWords {
   back: string;
   title: string;
   intro: string;
-  /** The drop zone's title ("Upload folder"), what it says while something is dragged over it, and its hint. */
+  /** The drop zone's title ("Drop your archive"), what it says while something is dragged over it, and its hint. */
   zone: string;
   over: string;
   hint: string;
@@ -210,6 +210,7 @@ export interface ChatGptArchivePickWords {
   starting: string;
   /** A drop that held no file, a folder with nothing in it, or one the page could not read. */
   empty: string;
+  /** {name}: what the browser refused to read. */
   unreadable: string;
   /** Any other upload failure the engine gave no sentence for. */
   failed: string;
@@ -750,11 +751,15 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     for (const item of items) {
       if (!item || item.kind !== 'file') continue;
       const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
-      if (entry) entries.push(entry);
-      else {
-        const file = typeof item.getAsFile === 'function' ? item.getAsFile() : null;
-        if (file) plain.push({ file, path: file.name });
+      // Only a folder needs the entry API. A dropped file is taken as the File the drop already
+      // holds: entry.file() can refuse one the drop can still read (a Roam .json, 2026-11-15).
+      if (entry && entry.isDirectory) {
+        entries.push(entry);
+        continue;
       }
+      const file = typeof item.getAsFile === 'function' ? item.getAsFile() : null;
+      if (file) plain.push({ file, path: file.name });
+      else if (entry) entries.push(entry);
     }
     if (!items.length) {
       for (const file of Array.prototype.slice.call(transfer.files || [])) plain.push({ file, path: file.name });
@@ -773,6 +778,12 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       // An input that cannot be reset keeps its selection; a second choice of the same folder is then a no-op.
     }
     return items;
+  }
+
+  /** What the browser refused, for the error: the one name, or a count. */
+  function unreadableName(skipped: string[]): string {
+    if (!skipped.length) return 'what you dropped';
+    return skipped.length === 1 ? String(skipped[0]).replace(/\/$/, '') : fill(drop.words.several, { n: kit.count(skipped.length) });
   }
 
   /** The name to show: the dropped folder's, the one file's, or "N items" for several. */
@@ -810,7 +821,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     collect().then((items) => {
       if (!dropLive(mine, attempt)) return;
       if (!items.length) {
-        dropFail(skipped.length ? drop.words.unreadable : drop.words.empty);
+        dropFail(skipped.length ? fill(drop.words.unreadable, { name: unreadableName(skipped) }) : drop.words.empty);
         return;
       }
       let total = 0;
@@ -834,7 +845,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
         if (dropLive(mine, attempt)) dropFail('');
       });
     }, () => {
-      if (dropLive(mine, attempt)) dropFail(drop.words.unreadable);
+      if (dropLive(mine, attempt)) dropFail(fill(drop.words.unreadable, { name: unreadableName(skipped) }));
     });
   }
 
