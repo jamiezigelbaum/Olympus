@@ -8,6 +8,9 @@
 // and prints the re-score page's EXPLAIN QUERY PLAN with them: a speed
 // number taken without the owner's real scope does not count (15 Nov).
 // --no-live-scope searches the whole store, for comparison only.
+// --lane keyword times the keyword lane's two searches (plain, then content
+// only) instead, and prints the query plan of its three slowest read sites.
+// Plans name tables and indexes only, never a searched value.
 // --writer runs a writer on the copy's store during the trials (a no-op
 // update in its own transaction every 50 ms, from another thread), so a
 // read is timed while the WAL grows, as it does during ingest.
@@ -45,8 +48,9 @@ async function main(): Promise<void> {
   const store = opened.stores.find(candidate => candidate.corpusId === corpus);
   if (!store) throw new Error(`No store ${corpus} in the copy.`);
   const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(loadConfig(), process.env) });
+  const keywordLane = values.get('lane') === 'keyword';
   const provider = embedding.embeddingFor(store.trustDomain);
-  if (!provider) throw new Error('No embedding provider for that store.');
+  if (!provider && !keywordLane) throw new Error('No embedding provider for that store.');
   let accountScope: string | undefined;
   let filters: ConnectorStoreSearchFilters | undefined;
   if (!rest.includes('--no-live-scope')) {
@@ -57,14 +61,16 @@ async function main(): Promise<void> {
     if (!scope.allowed) throw new Error(`The source scope is not approved (${approval.status}).`);
     filters = scope.filters;
     accountScope = values.get('account') ?? 'personal';
+    if (provider) {
     const db = new Database(store.dbPath, { readonly: true, create: false, strict: true });
     try {
       const onDemandReadsTablePresent = Boolean(db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get());
-      const chunkPks = (db.query('SELECT chunk_pk FROM chunk_embeddings WHERE model_id = ? LIMIT 480').all(provider.modelId) as Array<{ chunk_pk: number }>).map(row => row.chunk_pk);
+      const chunkPks = (db.query('SELECT chunk_pk FROM chunk_embeddings WHERE model_id = ? ORDER BY chunk_pk LIMIT 256').all(provider.modelId) as Array<{ chunk_pk: number }>).map(row => row.chunk_pk);
       const page = connectorStoreCurrentEmbeddingPageQuery({ modelId: provider.modelId, accountScope, filters, chunkPks, onDemandReadsTablePresent }, 0);
       const plan = db.query(`EXPLAIN QUERY PLAN ${page.sql}`).all(...page.params) as Array<{ detail: string }>;
-      console.log(JSON.stringify({ liveScope: true, filterKeys: Object.keys(filters).sort(), onDemandReadsTablePresent, plan: plan.map(row => row.detail) }));
+      console.log(JSON.stringify({ liveScope: true, filterKeys: Object.keys(filters).sort(), onDemandReadsTablePresent, rescorePlan: plan.map(row => row.detail) }));
     } finally { db.close(); }
+    }
   }
   const writer = rest.includes('--writer') ? new Worker(URL.createObjectURL(new Blob([`
     const { Database } = require('bun:sqlite');
@@ -76,11 +82,25 @@ async function main(): Promise<void> {
     self.onmessage = () => { postMessage(writes); db.close(); };
   `], { type: 'application/javascript' }))) : undefined;
   let reads: Array<{ site: string; sentAt: number }> = [];
-  setReadPoolObserverForTests((dbPath, read) => { if (dbPath === store.dbPath) reads.push({ site: poolSqlSite(read.sql), sentAt: performance.now() }); }, { snapshots: true });
+  const examples = new Map<string, { sql: string; params: unknown }>();
+  const slowest = new Map<string, number>();
+  setReadPoolObserverForTests((dbPath, read) => {
+    if (dbPath !== store.dbPath) return;
+    const site = poolSqlSite(read.sql);
+    if (!examples.has(site)) examples.set(site, { sql: read.sql, params: read.params });
+    reads.push({ site, sentAt: performance.now() });
+  }, { snapshots: true });
   for (let trial = 1; trial <= trials; trial++) {
     reads = [];
     const started = performance.now();
-    const lane = await store.vectorSearchLane(query, provider, maxResults, accountScope, filters, Date.now() + deadlineMs);
+    const deadlineAtMs = Date.now() + deadlineMs;
+    const lane: { rows: Array<{ sourceItem: { localItemId: string } }>; skippedReason?: string } = keywordLane
+      ? await (async () => {
+        const plain = await store.searchItemsDetailedOffThread(query, 50, accountScope, filters, {}, { deadlineAtMs });
+        const content = await store.searchItemsDetailedOffThread(query, 50, accountScope, filters, { contentOnly: true }, { deadlineAtMs });
+        return { rows: [...plain.rows, ...content.rows] };
+      })()
+      : await store.vectorSearchLane(query, provider!, maxResults, accountScope, filters, deadlineAtMs);
     const ended = performance.now();
     const sites = new Map<string, { reads: number; ms: number; maxMs: number }>();
     reads.forEach((read, at) => {
@@ -88,9 +108,10 @@ async function main(): Promise<void> {
       const entry = sites.get(read.site) ?? { reads: 0, ms: 0, maxMs: 0 };
       entry.reads += 1; entry.ms += ms; entry.maxMs = Math.max(entry.maxMs, ms);
       sites.set(read.site, entry);
+      slowest.set(read.site, Math.max(slowest.get(read.site) ?? 0, ms));
     });
     console.log(JSON.stringify({
-      trial, corpus, liveScope: filters !== undefined, laneMs: Math.round(ended - started), rows: lane.rows.length,
+      trial, corpus, lane: keywordLane ? 'keyword' : 'vector', liveScope: filters !== undefined, laneMs: Math.round(ended - started), rows: lane.rows.length,
       ...(lane.skippedReason ? { skippedReason: lane.skippedReason } : {}),
       itemIds: lane.rows.map(row => row.sourceItem.localItemId),
       sites: [...sites].sort((a, b) => b[1].ms - a[1].ms).slice(0, 6)
@@ -98,6 +119,16 @@ async function main(): Promise<void> {
     }));
   }
   setReadPoolObserverForTests();
+  if (keywordLane) {
+    const db = new Database(store.dbPath, { readonly: true, create: false, strict: true });
+    try {
+      for (const [site, ms] of [...slowest].sort((a, b) => b[1] - a[1]).slice(0, 3)) {
+        const example = examples.get(site)!;
+        const plan = db.query(`EXPLAIN QUERY PLAN ${example.sql}`).all(...(example.params as Array<string | number | null>)) as Array<{ detail: string }>;
+        console.log(JSON.stringify({ site: site.slice(0, 60), maxMs: Math.round(ms), plan: plan.map(row => row.detail) }));
+      }
+    } finally { db.close(); }
+  }
   if (writer) {
     const writes = await new Promise<number>(resolve => { writer.onmessage = event => resolve(event.data as number); writer.postMessage('stop'); });
     writer.terminate();
