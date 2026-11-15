@@ -127,9 +127,29 @@ The user can turn any of these back on in the picker:
 - `~/Library`, caches, `.Trash`
 - `.git`, `node_modules`, build output
 - app bundles
+- notes apps' own settings folders inside a folder of notes: an Obsidian
+  vault's `.obsidian` (plugin settings can hold a plugin's API key, and its
+  layout file is rewritten on every click) and Reflect's `.reflect` (a second
+  copy of every note, its index and AI chats). Obsidian's `.trash` is Trash.
 - The local Dropbox folder, and Google Drive for desktop
   (`~/Library/CloudStorage`). These are already indexed through their own
   sources, so this avoids duplicates.
+
+### Notes apps (Obsidian)
+
+An Obsidian vault is a folder of Markdown notes, so it is read as files on this
+computer: no separate source, sign-in or per-source pipeline. Live updates,
+deletions, a missing vault never removing anything, and per-note judging are
+the local files rules above. What notes apps add lives in
+`core/notes-app-folders.ts` (one `NOTES_APPS` entry per app):
+
+- The picker tags a vault ("Obsidian vault") wherever it lists one, and offers
+  the vaults Obsidian lists in its `obsidian.json` at the top level, so a vault
+  kept in iCloud (deep inside `~/Library`) is one click away. A vault Obsidian
+  remembers but that is no longer on disk is not offered.
+- A cited Markdown note inside a vault (looked for no higher than the chosen
+  folder) opens in Obsidian through `obsidian://open?path=` on a Mac with the
+  app installed; otherwise it opens as any other file.
 
 ### Never indexed: Olympus's own folders
 

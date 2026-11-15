@@ -828,6 +828,7 @@ function folderList(browse: OlympusFolderScopeBrowseResult, secrets: SecretLocat
           ...(fileCount !== undefined ? { file_count: fileCount } : {}),
           ...(node.access ? { access: { ...node.access } } : {}),
           ...(node.is_disk === true ? { is_disk: true as const } : {}),
+          ...(node.notes_app ? { notes_app: node.notes_app } : {}),
         };
       }),
     ...(browse.next_cursor ? { next_cursor: browse.next_cursor } : {}),

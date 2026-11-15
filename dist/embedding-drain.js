@@ -2317,8 +2317,8 @@ function withSqliteFiles(path) {
 
 // scripts/source-embedding-drain.ts
 import { createHash as createHash13 } from "node:crypto";
-import { existsSync as existsSync23, lstatSync as lstatSync12, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname25, isAbsolute as isAbsolute15 } from "node:path";
+import { existsSync as existsSync24, lstatSync as lstatSync13, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname26, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
 import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
@@ -35482,6 +35482,77 @@ var PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 // src/workers/file-extraction/size-limit-stops.ts
 var reporter = createLimitStopReporter();
 
+// src/core/notes-app-folders.ts
+import { existsSync as existsSync23, lstatSync as lstatSync12, readFileSync as readFileSync20 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { dirname as dirname25, join as join26, sep as sep7 } from "node:path";
+var OBSIDIAN_SETTINGS_FOLDER = ".obsidian";
+var NOTES_APPS = Object.freeze([
+  { id: "obsidian", settingsFolder: OBSIDIAN_SETTINGS_FOLDER, knownFolders: (lookup) => obsidianVaultFolders(lookup) }
+]);
+var NOTES_APP_SETTINGS_FOLDERS = Object.freeze([".obsidian", ".reflect"]);
+function realFolder(path) {
+  try {
+    const stat = lstatSync12(path);
+    return stat.isDirectory() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+function readTextFile(path) {
+  try {
+    return readFileSync20(path, "utf8");
+  } catch {
+    return;
+  }
+}
+function obsidianConfigFiles(lookup = {}) {
+  const home = lookup.home ?? homedir11();
+  const platform = lookup.platform ?? process.platform;
+  const env = lookup.env ?? process.env;
+  if (platform === "darwin")
+    return [join26(home, "Library/Application Support/obsidian/obsidian.json")];
+  if (platform === "win32") {
+    return env.APPDATA ? [join26(env.APPDATA, "obsidian", "obsidian.json")] : [];
+  }
+  const config = env.XDG_CONFIG_HOME?.trim() || join26(home, ".config");
+  return [
+    join26(config, "obsidian/obsidian.json"),
+    join26(home, ".var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json"),
+    join26(home, "snap/obsidian/current/.config/obsidian/obsidian.json")
+  ];
+}
+function obsidianVaultFolders(lookup = {}) {
+  const readText = lookup.readText ?? readTextFile;
+  const isFolder = lookup.isFolder ?? realFolder;
+  const found = [];
+  for (const file of obsidianConfigFiles(lookup)) {
+    const text = readText(file);
+    if (!text)
+      continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    const vaults = parsed?.vaults;
+    if (!vaults || typeof vaults !== "object")
+      continue;
+    for (const entry of Object.values(vaults)) {
+      const path = entry?.path;
+      if (typeof path !== "string" || !path.startsWith("/") || path.includes("\x00"))
+        continue;
+      const folder = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+      if (found.includes(folder))
+        continue;
+      if (isFolder(folder) && isFolder(join26(folder, OBSIDIAN_SETTINGS_FOLDER)))
+        found.push(folder);
+    }
+  }
+  return found;
+}
+
 // src/workers/local-files/paths.ts
 var UNSAFE_PATH_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
 var DEFAULT_EXCLUSION_LABELS = Object.freeze({
@@ -35492,6 +35563,7 @@ var DEFAULT_EXCLUSION_LABELS = Object.freeze({
   dependencies: "Installed dependencies",
   build_output: "Build output",
   app_bundle: "Application",
+  app_settings: "App settings",
   olympus_data: "Olympus's own data",
   synced_by_another_source: "Already indexed through its own source"
 });
@@ -35511,6 +35583,7 @@ var BUILD_SEGMENTS = new Set([
   ".build",
   ".tox"
 ]);
+var APP_SETTINGS_SEGMENTS = new Set(NOTES_APP_SETTINGS_FOLDERS);
 var SYNCED_FOLDER_NAMES = new Set(["dropbox", "google drive"]);
 var ownRootIndexes = new WeakMap;
 
@@ -36314,7 +36387,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync23(config.dbPath))
+    if (!config.dbPath || !existsSync24(config.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config), { ...config, dbPath: config.dbPath, readOnly: true }, env);
     try {
@@ -36666,9 +36739,9 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute15(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname25(readinessPath);
+  const directory = dirname26(readinessPath);
   mkdirSync14(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync12(directory);
+  const parent = lstatSync13(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -36697,7 +36770,7 @@ if (__require.main == __require.module) {
     }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync14(dirname25(args.reportPath), { recursive: true });
+      mkdirSync14(dirname26(args.reportPath), { recursive: true });
       writeFileSync6(args.reportPath, `${json}
 `);
     }
@@ -36707,7 +36780,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync14(dirname25(args.reportPath), { recursive: true });
+      mkdirSync14(dirname26(args.reportPath), { recursive: true });
       options.onProgress = (report) => {
         writeFileSync6(args.reportPath, `${JSON.stringify(report, null, 2)}
 `);

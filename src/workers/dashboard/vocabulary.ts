@@ -2826,6 +2826,8 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   openPrivacySettings: 'Open privacy settings',
   /** Beside a mounted disk in the list of folders, so it does not read as a folder. */
   disk: 'Disk',
+  /** Beside a folder that is an Obsidian vault. */
+  obsidianVault: 'Obsidian vault',
   foldersIntro: 'Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.',
   mailTitle: 'Choose mail',
   mailIntro: 'Choose which {source} mail Olympus may read. Nothing starts until you save.',

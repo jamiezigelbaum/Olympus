@@ -53,6 +53,8 @@ describe('folders that are off by default', () => {
     expect(reason('/Users/jo/Sync')).toBe('synced_by_another_source');
     expect(reason('/Users/jo/.cache')).toBe('cache');
     expect(reason('/Users/jo/.olympus')).toBe('olympus_data');
+    expect(reason('/Users/jo/Notes/Vault/.obsidian')).toBe('app_settings');
+    expect(reason('/Users/jo/Notes/Vault/.trash')).toBe('trash');
     expect(reason('/Users/jo/Documents')).toBeUndefined();
   });
 

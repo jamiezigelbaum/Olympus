@@ -84,6 +84,8 @@ export interface OlympusFolderScopeNode {
   access?: OlympusFolderAccess;
   /** A mounted disk, listed beside the home folders: the picker tags it so it does not read as a folder. */
   is_disk?: true;
+  /** A folder an app keeps as one library of notes (an Obsidian vault): the picker tags it. */
+  notes_app?: 'obsidian';
 }
 
 export type OlympusSourceScopeStatus = 'scope_pending' | 'approved';

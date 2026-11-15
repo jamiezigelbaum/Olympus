@@ -1362,6 +1362,7 @@ function copyScopeList(list: ScopeList): ScopeList {
         ...(finite(node.file_count) ? { file_count: whole(node.file_count) } : {}),
         ...(copyAccess(node.access) ? { access: copyAccess(node.access)! } : {}),
         ...(node.is_disk === true ? { is_disk: true as const } : {}),
+        ...(node.notes_app === 'obsidian' ? { notes_app: 'obsidian' as const } : {}),
       })),
       ...(list.next_cursor ? { next_cursor: opaque(list.next_cursor) } : {}),
       ...(copyAccess(list.access) ? { access: copyAccess(list.access)! } : {}),

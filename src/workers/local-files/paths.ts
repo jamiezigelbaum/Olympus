@@ -16,6 +16,7 @@ import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { configuredCaptureLocations } from '../../core/config.ts';
+import { NOTES_APP_SETTINGS_FOLDERS } from '../../core/notes-app-folders.ts';
 import {
   isDedicatedFolder,
   olympusOwnLocations,
@@ -145,6 +146,7 @@ export type DefaultExclusionReason =
   | 'dependencies'
   | 'build_output'
   | 'app_bundle'
+  | 'app_settings'
   | 'olympus_data'
   | 'synced_by_another_source';
 
@@ -157,6 +159,7 @@ export const DEFAULT_EXCLUSION_LABELS: Readonly<Record<DefaultExclusionReason, s
   dependencies: 'Installed dependencies',
   build_output: 'Build output',
   app_bundle: 'Application',
+  app_settings: 'App settings',
   olympus_data: 'Olympus\'s own data',
   synced_by_another_source: 'Already indexed through its own source',
 });
@@ -168,6 +171,8 @@ const DEPENDENCY_SEGMENTS = new Set(['node_modules', '.venv', 'venv', 'bower_com
 const BUILD_SEGMENTS = new Set([
   'dist', 'build', 'target', '.next', '.nuxt', '.svelte-kit', '__pycache__', 'deriveddata', '.build', '.tox',
 ]);
+/** Settings folders notes apps keep beside the notes (core/notes-app-folders.ts). */
+const APP_SETTINGS_SEGMENTS = new Set(NOTES_APP_SETTINGS_FOLDERS);
 const SYNCED_FOLDER_NAMES = new Set(['dropbox', 'google drive']);
 
 export interface DefaultExclusionContext {
@@ -339,6 +344,7 @@ export function defaultExclusionForFolder(
   if (DEPENDENCY_SEGMENTS.has(lower)) return 'dependencies';
   if (CACHE_SEGMENTS.has(lower)) return 'cache';
   if (lower.endsWith('.app')) return 'app_bundle';
+  if (APP_SETTINGS_SEGMENTS.has(lower)) return 'app_settings';
   if (BUILD_SEGMENTS.has(lower)) return 'build_output';
   if (volumeId) return undefined;
   const platform = context.platform ?? process.platform;

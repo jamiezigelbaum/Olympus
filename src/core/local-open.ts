@@ -6,6 +6,7 @@
  */
 import { lstatSync, realpathSync } from 'node:fs';
 import { extname, sep } from 'node:path';
+import { obsidianAppInstalled, obsidianOpenUrl, obsidianVaultOf } from './notes-app-folders.ts';
 
 /**
  * File types macOS `open` hands to a viewer or editor: documents, images,
@@ -29,9 +30,14 @@ export const OPENABLE_EXTENSIONS: ReadonlySet<string> = new Set([
  * opened (not only when its token was minted): the path must still be a
  * regular file, not a symlink, with no symlink on the way (its real path is
  * itself), inside an approved folder on this computer. A document opens; any
- * other type is revealed in Finder (`-R`). Undefined: refuse.
+ * other type is revealed in Finder (`-R`). A Markdown note inside an Obsidian
+ * vault opens in Obsidian when the app is installed. Undefined: refuse.
  */
-export function localOpenArguments(path: string, roots: readonly string[]): string[] | undefined {
+export function localOpenArguments(
+  path: string,
+  roots: readonly string[],
+  options: { obsidianInstalled?: () => boolean } = {},
+): string[] | undefined {
   if (!path.startsWith('/') || path.includes('\0')) return undefined;
   try {
     const link = lstatSync(path);
@@ -40,7 +46,12 @@ export function localOpenArguments(path: string, roots: readonly string[]): stri
   } catch {
     return undefined;
   }
-  if (!roots.some((root) => path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`))) return undefined;
+  const root = roots.find((candidate) => path.startsWith(candidate.endsWith(sep) ? candidate : `${candidate}${sep}`));
+  if (!root) return undefined;
   const extension = extname(path).slice(1).toLowerCase();
+  if ((extension === 'md' || extension === 'markdown') && obsidianVaultOf(path, root)
+    && (options.obsidianInstalled ?? obsidianAppInstalled)()) {
+    return [obsidianOpenUrl(path)];
+  }
   return OPENABLE_EXTENSIONS.has(extension) ? [path] : ['-R', path];
 }
