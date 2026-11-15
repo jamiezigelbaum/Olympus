@@ -49,7 +49,8 @@ if (verb === 'provision') {
   const life = JSON.parse(readFileSync(state + '/life.json', 'utf8'));
   const counts = { seen: life.seen, indexed: life.stored, contentReady: life.stored, embedded: life.stored, secretsLocated: life.secrets, pending: 0, queueWaiting: 0, queueActive: 0, personal: life.personal, privateItems: life.privateItems };
   const mode = process.env.FAKE_INBOX_MODE ?? '';
-  if (sub === 'engine-build') say({ ok: true, build: '1.1.0+abc', version: '1.1.0', remoteMode: 'relay', relay: {} });
+  if (sub === 'helper-files') say({ ok: true, whatsappBridges: ['olympus-whatsapp-bridge-0123456789abcdef'] });
+  else if (sub === 'engine-build') say({ ok: true, build: '1.1.0+abc', version: '1.1.0', remoteMode: 'relay', relay: {} });
   else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000 });
   else if (sub === 'connect-source') say({ ok: true, message: 'Connected' });
   else if (sub === 'settle') say({ ok: true, settled: true, polls: 2, waitedMs: 1000, snapshot: counts });
@@ -135,6 +136,7 @@ beforeEach(() => {
   candidateDir = join(dir, 'candidate');
   mkdirSync(candidateDir);
   writeFileSync(join(candidateDir, 'olympus-1.1.0.tgz'), 'x');
+  writeFileSync(join(candidateDir, 'install-linux.sh'), '#!/bin/sh\nWHATSAPP_BRIDGE_NAME=olympus-whatsapp-bridge-0123456789abcdef\n');
   const countTier = (tier: string): number => FIXTURE_ITEMS.filter((item) => item.tier === tier).length;
   writeFileSync(join(dir, 'life.json'), JSON.stringify({ seen: FIXTURE_ITEMS.length, stored: FIXTURE_ITEMS.length - countTier('secrets'), secrets: countTier('secrets'), personal: countTier('personal'), privateItems: countTier('private') }));
   writeFileSync(join(dir, 'agent.log'), '');
