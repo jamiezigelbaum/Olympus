@@ -49,6 +49,28 @@ describe('Sources page', () => {
     expect(doc.querySelector('dialog#delete-google_drive-docs form[data-source-action="delete_source_data"] input[name="source_id"]')!.getAttribute('value')).toBe('google_drive.docs');
   });
 
+  test('Reconnect with a saved app is one button that signs in again (owner, 2026-11-15)', () => {
+    const saved = view();
+    saved.sources = [
+      { source_id: 'x.bookmarks', label: 'X bookmarks', connection: { state: 'not_connected', action: { kind: 'oauth', source: 'x', label: 'Connect', known_client_id: 'x-client', client_secret_on_file: true } }, coverage: { indexed_items: 37 }, freshness: {} },
+      { source_id: 'dropbox.files', label: 'Dropbox', connection: { state: 'reauth_required', action: { kind: 'oauth', source: 'dropbox', label: 'Reauthenticate', publisher_client: true } }, coverage: { indexed_items: 50 }, freshness: {} },
+      // The provider refused the last attempt: the setup explains why instead.
+      { source_id: 'google_drive.docs', label: 'Google Drive', connection: { state: 'not_connected', provider_refusal: { code: 'redirect_uri_mismatch' }, action: { kind: 'oauth', source: 'google-drive', label: 'Connect', known_client_id: 'g-client' } }, coverage: { indexed_items: 310 }, freshness: {} },
+    ] as unknown as View['sources'];
+    const doc = new Window().document;
+    doc.body.innerHTML = renderDashboardConnectPage(saved, unlockedOptions);
+    for (const [row, source, label] of [['x.bookmarks', 'x', 'Reconnect'], ['dropbox.files', 'dropbox', 'Sign in']] as const) {
+      const form = doc.querySelector(`[data-source-row="${row}"] form[data-connect-kind="oauth"][data-one-click-reconnect]`)!;
+      expect(form.querySelector('input[name="source"]')!.getAttribute('value')).toBe(source);
+      expect(form.querySelector('input[name="client_id"]')).toBeNull();
+      expect(form.querySelector('button[type="submit"]')!.textContent).toBe(label);
+      expect(doc.querySelector(`[data-source-row="${row}"] button[data-source-open]`)).toBeNull();
+    }
+    const drive = doc.querySelector('[data-source-row="google_drive.docs"]')!;
+    expect(drive.querySelector('form[data-one-click-reconnect]')).toBeNull();
+    expect(drive.querySelector('button[data-source-open="google_drive.docs"]')!.textContent).toBe('Reconnect');
+  });
+
   test('a source that needs sign-in says so and its button opens its setup in Add a source', () => {
     const doc = new Window().document;
     doc.body.innerHTML = renderDashboardConnectPage(view(), unlockedOptions);

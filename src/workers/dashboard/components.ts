@@ -796,6 +796,34 @@ export function dashboardNeedsSetupSheet(
  * Returns undefined when the action carries no instructions, which is the
  * shape a caller that only wants the plain one-click control keeps.
  */
+/**
+ * Whether this OAuth source can sign in again with nothing to fill in: its
+ * own app's client id is on file (and, for X, the secret its token exchange
+ * needs), so a reconnect is the provider's consent screen and nothing else.
+ * The start route reads a body with no client id as "use what is stored".
+ * Reconnect used to walk the owner through the whole first-time app setup
+ * again even though every value was already saved (owner, 2026-11-15).
+ */
+export function dashboardOAuthUsesSavedApp(action: DashboardSourceAction): boolean {
+  // Not Google: its known client id can be Olympus's shared pilot app, which
+  // is not the owner's saved app and may be the one that is full.
+  return action.kind === 'oauth' && action.publisher_client !== true && action.known_client_id !== undefined
+    && !isGoogleOAuthSource(action.source)
+    && (action.source !== 'x' || action.client_secret_on_file === true);
+}
+
+/**
+ * Whether the row's own button can start the sign-in in one press: the
+ * source needs nothing typed (Olympus's own app, or the owner's saved one),
+ * no attempt is already waiting, and the provider did not refuse the last
+ * one, which the sheet explains instead.
+ */
+export function dashboardOAuthOneClickReconnect(source: Pick<DashboardSourceCard, 'connection'>): boolean {
+  const action = source.connection.action;
+  return action.kind === 'oauth' && (action.publisher_client === true || dashboardOAuthUsesSavedApp(action))
+    && action.pending_attempt !== true && source.connection.provider_refusal === undefined;
+}
+
 export function dashboardOAuthConnectSheet(
   source: Pick<DashboardSourceCard, 'source_id' | 'label'>,
   action: Extract<DashboardSourceAction, { kind: 'oauth' }>,
@@ -819,6 +847,10 @@ export function dashboardOAuthConnectSheet(
   ));
   const savedSecrets = secretOnFile ? byo.fields.filter((field) => field.secret).map((field) => field.name) : [];
   const notice = options.notice;
+  // A saved app leads with the one sign-in button, like Olympus's own app
+  // does; the walkthrough stays one click away to change the app settings.
+  const savedApp = dashboardOAuthUsesSavedApp(action);
+  const lead = savedApp ? undefined : options.lead;
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${dashboardActionLabel(action.label)} ${source.label}`,
@@ -828,20 +860,27 @@ export function dashboardOAuthConnectSheet(
     fields,
     ...(byo.setup_provider ? { steps: byo.diy_steps, provider: byo.setup_provider, setupHeading: byo.setup_heading, credentialFile: byo.credential_file } : {}),
     ...(byo.setup_shortcut ? { shortcut: byo.setup_shortcut } : {}),
-    ...(options.lead ? { lead: options.lead } : {}),
+    ...(lead ? { lead } : {}),
     submitLabel: dashboardActionLabel(action.label),
     // Publisher mode: Olympus's own registered app does the asking, so the
     // sheet leads with the button and keeps the bring-your-own walkthrough
     // one click away rather than deleting it. The sentence is the action's own
     // plain_intro, so the page and dashboard.json cannot drift apart.
-    ...(action.publisher_client && !options.lead
+    ...(action.publisher_client && !lead
       ? {
         publisher: {
           intro: instructions.plain_intro,
           byoSummary: instructions.diy_summary,
         },
       }
-      : {}),
+      : savedApp
+        ? {
+          publisher: {
+            intro: `Your ${source.label} app settings are saved, so this only signs you in again.`,
+            byoSummary: 'Change app settings',
+          },
+        }
+        : {}),
     ...(savedSecrets.length > 0 ? { savedSecrets } : {}),
     ...(action.known_client_id ? { values: { client_id: action.known_client_id } } : {}),
     ...(action.pending_attempt ? { cancellable: true } : {}),

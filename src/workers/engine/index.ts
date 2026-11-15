@@ -1618,7 +1618,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           assertDashboardAccountCardinality(registry, source);
           const clientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
           let uploadedClient: { clientId: string; clientSecret: string } | undefined;
-          const ownDesktop = dashboardGoogleOAuthSource(source) && record.google_desktop === true;
+          // A one-press reconnect sends only the source. For Google, a saved
+          // own Desktop app is then what it signs in with, on loopback as it
+          // was set up; anything typed still goes the way it always did.
+          const reconnectSavedDesktop = dashboardGoogleOAuthSource(source) && record.google_desktop === undefined
+            && record.client_id === undefined && record.google_client_json === undefined
+            && (await readGoogleOwnAppRegistration(secretStore)) !== undefined;
+          const ownDesktop = dashboardGoogleOAuthSource(source) && (record.google_desktop === true || reconnectSavedDesktop);
           if (ownDesktop && typeof record.google_client_json === 'string') {
             try { uploadedClient = parseGoogleDesktopClient(record.google_client_json); }
             catch (error) { throw new EmailSourceWorkerError(400, 'google_app_file_invalid', (error as Error).message); }

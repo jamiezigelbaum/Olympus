@@ -40,7 +40,7 @@ import { defaultConfig } from '../src/core/config.ts';
 import {
   registerOlympusDashboardGateway,
 } from '../src/core/control-ui-gateway.ts';
-import { dashboardOAuthConnectSheet } from '../src/workers/dashboard/components.ts';
+import { dashboardOAuthConnectSheet, dashboardOAuthUsesSavedApp } from '../src/workers/dashboard/components.ts';
 import {
   DASHBOARD_SAVED_SECRET_FIELD_VALUE,
   PUBLISHER_ADVANCED_BYO_SUMMARY,
@@ -1382,13 +1382,23 @@ describe('publisher-mode sheet', () => {
     expect(disclosure).toContain(registration.setting_label.replace('→', '→'));
   });
 
-  test('bring-your-own mode is exactly what it was', () => {
+  test('a saved own app reconnects with one button, its settings one click away (owner, 2026-11-15)', () => {
     const sheet = sheetFor({ known_client_id: 'stored-dropbox-app-key' });
     expect(sheet).not.toContain('Use my own app instead');
     expect(sheet).not.toContain('through its own registered app');
-    const [lead] = sheet.split('<details') as [string];
-    expect(lead).toContain('keyfield');
-    expect(lead).toContain('value="stored-dropbox-app-key"');
+    const [lead, rest] = sheet.split('<details') as [string, string];
+    expect(lead).toContain('Your Dropbox app settings are saved, so this only signs you in again.');
+    expect(lead).toContain('data-oauth-autostart');
+    expect(lead).not.toContain('keyfield');
+    expect(lead).not.toContain('name="client_id"');
+    expect(rest).toContain('<summary>Change app settings</summary>');
+    expect(rest).toContain('value="stored-dropbox-app-key"');
+  });
+
+  test('an X app without its stored secret still asks for it', () => {
+    expect(dashboardOAuthUsesSavedApp({ kind: 'oauth', source: 'x', label: 'Reauthenticate', known_client_id: 'x-id' })).toBe(false);
+    expect(dashboardOAuthUsesSavedApp({ kind: 'oauth', source: 'x', label: 'Reauthenticate', known_client_id: 'x-id', client_secret_on_file: true })).toBe(true);
+    expect(dashboardOAuthUsesSavedApp({ kind: 'oauth', source: 'dropbox', label: 'Connect' })).toBe(false);
   });
 
   test('every rendered value is escaped', () => {
