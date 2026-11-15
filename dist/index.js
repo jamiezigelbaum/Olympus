@@ -15677,13 +15677,6 @@ var init_sniffer_store = __esm(() => {
   init_tier_classifier();
   init_tier_ledger_path();
 });
-
-// src/workers/connector-store/sqlite-mmap.ts
-function sqliteMmapEnabled(env = process.env) {
-  return process.platform === "linux" && env.OLYMPUS_SQLITE_MMAP !== "off";
-}
-var SQLITE_MMAP_BYTES = 2147418112;
-
 // src/workers/classification/tier-ledger.ts
 var REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
@@ -16193,97 +16186,9 @@ var init_keyword_expansion = __esm(() => {
 });
 
 // src/workers/connector-store/off-thread-reads.ts
-var MMAP_PRAGMA, WORKER_SOURCE, startedStores, storeOpens, queues, releases;
+var startedStores, storeOpens, queues, releases;
 var init_off_thread_reads = __esm(() => {
   init_answer_latency_trace();
-  MMAP_PRAGMA = sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
-  WORKER_SOURCE = `
-import { Database } from 'bun:sqlite';
-import { statSync } from 'node:fs';
-const snapshots = new Map();
-const connections = new Map();
-const open = (path) => {
-  const started = performance.now();
-  const db = new Database(path, { readonly: true });
-  db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
-  ${MMAP_PRAGMA}
-  postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
-  return db;
-};
-// Snapshot connections are kept for the next snapshot instead of closed:
-// Bun 1.3.x corrupts its heap when pool threads open and close SQLite
-// connections concurrently (olympus-ops#151), and a store's searches would
-// otherwise open one connection per snapshot.
-const IDLE_SNAPSHOT_CONNECTIONS = 8;
-const idleSnapshots = new Map();
-const snapshotConnection = (path) => {
-  const stat = statSync(path);
-  const file = stat.dev + ':' + stat.ino;
-  const idle = idleSnapshots.get(path) ?? [];
-  while (idle.length > 0) {
-    const held = idle.pop();
-    if (held.file === file) {
-      // A snapshot may have changed its connection's settings; the next starts from the defaults.
-      held.db.exec('PRAGMA busy_timeout = 10000');
-      return held;
-    }
-    try { held.db.close(); } catch {}
-  }
-  return { db: open(path), file, path };
-};
-const connection = (path) => {
-  const stat = statSync(path);
-  const file = stat.dev + ':' + stat.ino;
-  const held = connections.get(path);
-  if (held && held.file === file) return held.db;
-  if (held) held.db.close();
-  const db = open(path);
-  connections.set(path, { db, file });
-  return db;
-};
-self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode } = event.data;
-  if (op === 'release') {
-    const held = connections.get(path);
-    connections.delete(path);
-    try { held?.db.close(); } catch {}
-    for (const idle of idleSnapshots.get(path) ?? []) { try { idle.db.close(); } catch {} }
-    idleSnapshots.delete(path);
-    // A snapshot still open on the released store closes, rather than idles, when it ends.
-    for (const open of snapshots.values()) if (open.path === path) open.discard = true;
-    return;
-  }
-  try {
-    if (op === 'open') {
-      const held = snapshotConnection(path);
-      try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; }
-      snapshots.set(snapshot, held);
-      postMessage({ id, ok: true, rows: null });
-    } else if (op === 'close') {
-      const held = snapshots.get(snapshot);
-      snapshots.delete(snapshot);
-      if (held) {
-        let reusable = false;
-        try { held.db.exec('COMMIT'); reusable = true; } finally {
-          const idle = idleSnapshots.get(held.path) ?? [];
-          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
-        }
-      }
-      postMessage({ id, ok: true, rows: null });
-    } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
-      if (!db) throw new Error('unknown snapshot');
-      const started = performance.now();
-      const query = db.query(sql);
-      const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows, ms: performance.now() - started });
-    }
-  } catch (error) {
-    const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
-    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
-  }
-};
-`;
   startedStores = new Set;
   storeOpens = new Map;
   queues = new Map;

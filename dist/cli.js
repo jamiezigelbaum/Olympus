@@ -50696,7 +50696,7 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
+    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
     counters.starts += 1;
@@ -51017,24 +51017,7 @@ function dispatch() {
     });
   }
 }
-var READ_POOL_SIZE = 1, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA, WORKER_SOURCE, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases;
-var init_off_thread_reads = __esm(() => {
-  init_answer_latency_trace();
-  OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
-    code = SOURCE_INDEX_LANE_BUSY_CODE;
-    constructor() {
-      super("The store is busy; try again.");
-      this.name = "OffThreadReadBusyError";
-    }
-  };
-  REAL_CLOCK = {
-    now: () => Date.now(),
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (timer) => clearTimeout(timer)
-  };
-  clock2 = REAL_CLOCK;
-  MMAP_PRAGMA = sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
-  WORKER_SOURCE = `
+var READ_POOL_SIZE = 1, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/", mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "", WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
@@ -51043,7 +51026,7 @@ const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
-  ${MMAP_PRAGMA}
+  /*olympus-mmap-pragma*/
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
@@ -51120,7 +51103,22 @@ self.onmessage = (event) => {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   }
 };
-`;
+`, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases;
+var init_off_thread_reads = __esm(() => {
+  init_answer_latency_trace();
+  OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
+    code = SOURCE_INDEX_LANE_BUSY_CODE;
+    constructor() {
+      super("The store is busy; try again.");
+      this.name = "OffThreadReadBusyError";
+    }
+  };
+  REAL_CLOCK = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
+  };
+  clock2 = REAL_CLOCK;
   threads = [];
   counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
   startedStores = new Set;

@@ -18477,7 +18477,8 @@ var clock2 = REAL_CLOCK;
 var observer;
 var observeSnapshots = false;
 var workerFactory = (url) => new Worker(url);
-var MMAP_PRAGMA = sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
+var MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/";
+var mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
 var WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
@@ -18487,7 +18488,7 @@ const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
-  ${MMAP_PRAGMA}
+  /*olympus-mmap-pragma*/
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
@@ -18586,7 +18587,7 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
+    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
     counters.starts += 1;
