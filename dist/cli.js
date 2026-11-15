@@ -40241,9 +40241,11 @@ async function runStepsInTurns(steps) {
 class MutablePkList {
   values = [];
   positions = new Map;
+  generation = 0;
   add(pk) {
     if (this.positions.has(pk))
       return;
+    this.generation += 1;
     this.positions.set(pk, this.values.length);
     this.values.push(pk);
   }
@@ -40251,6 +40253,7 @@ class MutablePkList {
     const index = this.positions.get(pk);
     if (index === undefined)
       return;
+    this.generation += 1;
     const last = this.values.pop();
     this.positions.delete(pk);
     if (index < this.values.length) {
@@ -50581,15 +50584,30 @@ ${parentKey(ref)}`, { ref, origin });
           return;
         }
       }
-      let value;
+      let base;
+      let children;
       try {
-        value = this.tierHiddenItemPks();
+        base = this.tierLedgerHiddenItemPks();
+        children = this.hiddenChildItemPks();
       } catch {
         return;
       }
-      const set = new Set([...value.hidden, ...value.held, ...value.metadataLayer]);
-      return set.size > 0 ? set : undefined;
+      const memo = this.tierLedgerHiddenMemo;
+      const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
+      const cached = this.vectorScanExclusion;
+      let excluded;
+      if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
+        excluded = cached.set;
+      } else {
+        excluded = new Set([...base.hidden, ...base.held, ...base.metadataLayer]);
+        this.vectorScanExclusion = lists ? { lists, generations: lists.map((list) => list.generation), set: excluded } : undefined;
+      }
+      if (children.length === 0)
+        return excluded.size > 0 ? excluded : undefined;
+      const hiddenChildren = new Set(children);
+      return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
     }
+    vectorScanExclusion;
     async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
       const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;

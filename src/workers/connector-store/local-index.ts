@@ -1121,14 +1121,18 @@ interface TierLedgerHiddenItemPks {
 class MutablePkList {
   readonly values: number[] = [];
   private readonly positions = new Map<number, number>();
+  /** Bumped by every change, so a copy built from `values` knows when it is stale. */
+  generation = 0;
   add(pk: number): void {
     if (this.positions.has(pk)) return;
+    this.generation += 1;
     this.positions.set(pk, this.values.length);
     this.values.push(pk);
   }
   delete(pk: number): void {
     const index = this.positions.get(pk);
     if (index === undefined) return;
+    this.generation += 1;
     const last = this.values.pop()!;
     this.positions.delete(pk);
     if (index < this.values.length) {
@@ -2253,7 +2257,7 @@ interface ConnectorStoreCurrentEmbeddingRowsOptions {
    * its top K are servable by construction. A pre-filter only: every winner
    * is still checked against the live ledger after ranking.
    */
-  excludedItemPks?: ReadonlySet<number>;
+  excludedItemPks?: { has(itemPk: number): boolean };
 }
 
 const CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
@@ -14011,7 +14015,7 @@ export class LocalConnectorStore {
    * Undefined when nothing is excluded or
    * the set cannot be read (the scan then ranks everything, as before).
    */
-  private vectorScanExcludedItemPks(): ReadonlySet<number> | undefined {
+  private vectorScanExcludedItemPks(): { has(itemPk: number): boolean } | undefined {
     // No set built yet (the first search after a start): building it here
     // would run the whole build on the request thread, as vectorLaneServable
     // also refuses. Build it in turns for the next search; this one ranks
@@ -14024,13 +14028,32 @@ export class LocalConnectorStore {
         return undefined;
       }
     }
-    let value: TierLedgerHiddenItemPks;
-    try { value = this.tierHiddenItemPks(); } catch { return undefined; }
-    // Built per scan: the set's lists change in place as verdicts land, so
-    // no copy of them can be keyed on the object.
-    const set = new Set<number>([...value.hidden, ...value.held, ...value.metadataLayer]);
-    return set.size > 0 ? set : undefined;
+    let base: TierLedgerHiddenItemPks;
+    let children: number[];
+    try {
+      base = this.tierLedgerHiddenItemPks();
+      children = this.hiddenChildItemPks();
+    } catch { return undefined; }
+    // The set's lists change in place as verdicts land. The copy is kept
+    // between searches while every list is the same one at the same
+    // generation: rebuilt per search it cost up to a few hundred ms per big
+    // store on the front's loop, and every other store's lane waited.
+    const memo = this.tierLedgerHiddenMemo;
+    const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
+    const cached = this.vectorScanExclusion;
+    let excluded: Set<number>;
+    if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
+      excluded = cached.set;
+    } else {
+      excluded = new Set<number>([...base.hidden, ...base.held, ...base.metadataLayer]);
+      this.vectorScanExclusion = lists ? { lists, generations: lists.map(list => list.generation), set: excluded } : undefined;
+    }
+    if (children.length === 0) return excluded.size > 0 ? excluded : undefined;
+    const hiddenChildren = new Set(children);
+    return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
   }
+
+  private vectorScanExclusion: { lists: MutablePkList[]; generations: number[]; set: Set<number> } | undefined;
 
   /**
    * The vector scan for a store the read pool does not serve (an in-memory
