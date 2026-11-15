@@ -61,7 +61,7 @@ import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/wo
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   createFileExtractionRuntime,
@@ -638,13 +638,17 @@ export async function main(): Promise<void> {
   // Every statement that holds this process's loop past LOOP_SLOW_SQL_MS is
   // named in the log and counted in health, from before the first store opens
   // (loop-stall step-back, 15 Nov 2026): the next stall names itself.
-  startSlowMainThreadSqlLog(LOOP_SLOW_SQL_MS);
+  // The loop-stall test also collects them as JSON lines (site and text id, never values).
+  const slowSqlFile = process.env.OLYMPUS_MAIN_THREAD_SQL_LOG;
+  startSlowMainThreadSqlLog(LOOP_SLOW_SQL_MS, slowSqlFile
+    ? (line, entry) => { console.warn(line); appendFileSync(slowSqlFile, `${JSON.stringify({ pid: process.pid, ...entry })}\n`); }
+    : undefined);
   // The waits on this boot read its progress, not a fixed ceiling (#1494). The
   // front does not own the data root's boot work and never writes that file;
   // it reports its own start, each store it opens a step (#1563).
   // The heartbeat, from a thread this loop cannot hold: the supervisor and
   // the upgrade wait read it, never how fast this process answers.
-  if (engineRole !== 'front') {
+  if (engineRole !== 'front' || process.env.OLYMPUS_ENGINE_LOOP_METRICS_DIR) {
     startEngineHeartbeat(process.env, engineRole);
     setEngineStep('starting');
   }
@@ -2271,6 +2275,11 @@ export async function main(): Promise<void> {
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
+  // Test-only workloads; the hook requires an explicitly named synthetic fixture.
+  const loopStallModule = '../../../scripts/loop-stall-test.ts';
+  const loopStallFixture = process.env.NODE_ENV === 'test' && process.env.OLYMPUS_LOOP_STALL_DIR
+    ? await ((await import(loopStallModule)) as typeof import('../../../scripts/loop-stall-test.ts')).attachEngineFixture(connectorStores, engineRole)
+    : undefined;
   // Every store's hidden-copy set, built and then kept current on a timer.
   // The front does it before it reports ready, so an Ask (the first included)
   // applies a small delta at most instead of building a set on its thread.
@@ -3395,7 +3404,7 @@ export async function main(): Promise<void> {
           ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
           : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
       ), { serialize: false });
-      const defaultLocal = createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
+      const defaultLocal = createAnalyst(loopStallFixture?.answerModel ?? localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
       const localEndpoint = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
         ? olympusConfig.argus.lanes[analystLane] : olympusConfig.argus.modelProfiles[analystProfile];
       const localReport = { analyst: 'local-source-answer', model: localEndpoint.model };
@@ -3447,7 +3456,7 @@ export async function main(): Promise<void> {
           () => secureDerivativeDefault ?? 'allow',
           chunkReleaseOptions,
         ),
-        queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
+        queryPlanner: createAnalystQueryPlanner(loopStallFixture?.answerModel ?? localSourceAnswerModel),
         reranker: sourceReranker,
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
@@ -6613,6 +6622,7 @@ export async function main(): Promise<void> {
         extraction_queue: ({ request }) => runForwarded(request),
         people: ({ request }) => runForwarded(request),
         source_sync: ({ request }) => runForwarded(request),
+        source_item_read: ({ request }) => runForwarded(request),
         data_export: ({ request }) => runForwarded(request),
         owner_limits: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
@@ -6732,6 +6742,7 @@ export async function main(): Promise<void> {
     shuttingDown = true;
     privateAgentListeners?.close();
     sourceRuntimeClosed = true;
+    loopStallFixture?.stop();
     localFilesCleanupRecovery?.close();
     sourceScheduler?.stop();
     worker.close();
