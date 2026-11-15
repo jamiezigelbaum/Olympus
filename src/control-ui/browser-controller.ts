@@ -287,6 +287,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (slot) slot.textContent = message;
   }
 
+  /** The pairing failures whose own words the engine sends (dashboardMessagingFailure). */
+  const MESSAGING_NAMED_FAILURES: ReadonlySet<string> = new Set(['bridge_missing', 'bridge_build_failed', 'chat_list_timeout']);
+
   function errorCode(result: OlympusDashboardControlResult): string | undefined {
     const error = result.body.error;
     if (!error || typeof error !== 'object' || Array.isArray(error)) return undefined;
@@ -1367,7 +1370,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           if (status) status.textContent = stillWorkingWords(source);
           return;
         }
-        if (status) status.textContent = result.status === 401 || result.status === 403 ? 'Open dashboard controls on this computer to use this, then try again.' : 'Could not complete this step. Try again from this computer.';
+        // A failure the engine names (a missing WhatsApp helper, a chat listing that timed out) is shown in its words.
+        const named = MESSAGING_NAMED_FAILURES.has(errorCode(result) ?? '') ? (result.body.error as { message?: unknown }).message : undefined;
+        if (status) status.textContent = result.status === 401 || result.status === 403 ? 'Open dashboard controls on this computer to use this, then try again.'
+          : typeof named === 'string' && named ? named : 'Could not complete this step. Try again from this computer.';
         if (qr) { qr.hidden = true; qr.removeAttribute('src'); }
         if (inputSlot) inputSlot.replaceChildren();
         return;

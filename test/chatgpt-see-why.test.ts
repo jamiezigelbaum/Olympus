@@ -99,8 +99,8 @@ describe('the view model carries a count per closed reason', () => {
     expect('many' in dropboxOf(viewModelOf(card(2))).unreadable!).toBe(false);
   });
 
-  test('the engine knows one reason today', () => {
-    expect(DASHBOARD_UNREADABLE_REASON_CODES).toEqual(['damaged_or_unsupported', 'privacy_check_missing']);
+  test('the engine knows its reasons', () => {
+    expect(DASHBOARD_UNREADABLE_REASON_CODES).toEqual(['damaged_or_unsupported', 'unsupported_format', 'privacy_check_missing']);
   });
 });
 

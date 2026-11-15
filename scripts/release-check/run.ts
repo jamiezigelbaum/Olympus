@@ -90,6 +90,7 @@ import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation }
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { FRONT_WATCH_S, frontSteadyChecks, type FrontStoreSet, type FrontSteadyObservation, type FrontWatch } from './front-steady.ts';
+import { bundleWhatsAppBridgeName, whatsappBridgeCheck } from './helper-files.ts';
 import { STORES_PUT_BACK, brokenBundle, forcedFailureChecks, storesKeptCheck, type ForcedFailureObservation, type StoreFileCount } from './upgrade-split.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { JOURNEYS, type JourneyMachine } from './journeys.ts';
@@ -530,6 +531,12 @@ async function settleIngest(run: Run): Promise<{ settled: boolean; snap?: Record
     });
   }
   return { settled: settled.result?.settled === true, ...(snap ? { snap } : {}) };
+}
+
+/** The WhatsApp bridges installed on the machine, or undefined when the agent could not say (helper-files.ts). */
+async function installedBridges(run: Run): Promise<string[] | undefined> {
+  const files = await run.agent('helper-files', '', 60_000);
+  return Array.isArray(files.result?.whatsappBridges) ? (files.result.whatsappBridges as unknown[]).map(String) : undefined;
 }
 
 async function setupMachine(run: Run, workDir: string, bundlePath: string, installTitle = 'The candidate installed and the engine is running'): Promise<boolean> {
@@ -1584,6 +1591,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   run.use('before');
   const ready = await setupMachine(run, workDir, bundlePath, `The earlier release${expected.from ? ` (${expected.from})` : ''} installed fresh and the engine is running`);
   if (!ready) { run.errors.push('the earlier release did not reach a settled install, so the update was not attempted'); return; }
+  const bridgesBefore = { expected: bundleWhatsAppBridgeName(options.upgradeFromDir!), installed: await installedBridges(run) };
   if (Date.now() >= deadline) { run.errors.push('the run exceeded its time budget before the earlier release\'s suite'); return; }
   await runSuite(run, workDir, judge, { mintToken: true });
 
@@ -1617,6 +1625,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   run.add({ id: 'upgrade.engine-ready', title: 'The engine came back ready (models included) after the update', status: back.result?.ok === true ? 'pass' : 'fail', detail: back.result?.ok === true ? `ready after ${Math.round(Number(back.result.readyMs) / 1000)} s` : agentDetail(back), ms: back.ms });
   if (split) await checkSplitUpdate(run, split, { ok: back.result?.ok === true, ms: back.ms, ...(back.result?.ok === true ? {} : { detail: agentDetail(back) }) });
   if (back.result?.ok !== true) return;
+  run.add(whatsappBridgeCheck({ id: 'upgrade.whatsapp-bridge', expected: bundleWhatsAppBridgeName(options.candidateDir), installed: await installedBridges(run), before: bridgesBefore }));
   if (options.upgradeSelftest === 'revert-policy') {
     const fault = await run.agent('upgrade-selftest', '--mode revert-policy', 60_000);
     if (fault.result?.ok !== true) { run.errors.push('the self-test fault could not be made (revert-policy)'); return; }
@@ -1720,6 +1729,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       await runUpgradeLeg(run, workDir, bundlePath, judge, deadline, versions);
     } else {
       const ready = await setupMachine(run, workDir, bundlePath);
+      if (ready) run.add(whatsappBridgeCheck({ id: 'install.whatsapp-bridge', expected: bundleWhatsAppBridgeName(options.candidateDir), installed: await installedBridges(run) }));
       if (ready && !options.skipSuite && Date.now() < deadline) {
         await run.inLeg('suite', () => runSuite(run, workDir, judge, { mintToken: true }));
       } else if (ready && !options.skipSuite) {

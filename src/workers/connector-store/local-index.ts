@@ -1085,6 +1085,8 @@ function runSteps<T>(steps: Generator<void, T>): T {
 const EXTRACTION_CANDIDATE_WINDOW = 500;
 /** Item pks one extraction-candidate call examines before it returns a short page. */
 export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 2_000;
+/** Chunk pks one query of the embedding sweep's work list reads before a turn. */
+export const MISSING_EMBEDDING_CHUNK_WINDOW = 20_000;
 
 /** Ledger lookups per step when the settled-unreadable list is built in turns. */
 const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
@@ -7581,7 +7583,19 @@ export class LocalConnectorStore {
    * author (no sender id and no sender label). Counts only.
    */
   authorCoverage(): Array<{ provider: string; items: number; itemsWithoutAuthor: number }> {
-    return (this.db.query(`
+    const read = this.authorCoverageRead();
+    return authorCoverageRows(this.db.query(read.sql).all(...read.params as never[]) as AuthorCoverageRow[]);
+  }
+
+  /** authorCoverage, read on the store's read thread (the status count runs it on every store). */
+  async authorCoverageOffThread(): Promise<Array<{ provider: string; items: number; itemsWithoutAuthor: number }>> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.authorCoverage();
+    const read = this.authorCoverageRead();
+    return authorCoverageRows(await withOffThreadSnapshot(this.dbPath, async (run) => run(read)) as AuthorCoverageRow[]);
+  }
+
+  private authorCoverageRead(): StoreRead {
+    return { mode: 'all', params: [], sql: `
       SELECT provider, COUNT(*) AS items,
         SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
           THEN 1 ELSE 0 END) AS without_author
@@ -7589,11 +7603,7 @@ export class LocalConnectorStore {
       WHERE tombstoned = 0 AND parent_local_item_id IS NULL
       GROUP BY provider
       ORDER BY provider
-    `).all() as Array<{ provider: string; items: number; without_author: number | null }>).map((row) => ({
-      provider: row.provider,
-      items: row.items,
-      itemsWithoutAuthor: row.without_author ?? 0,
-    }));
+    ` };
   }
 
   /**
@@ -8423,6 +8433,24 @@ export class LocalConnectorStore {
     const version = sourceVersion ?? (this.db.query('SELECT source_version FROM items WHERE local_item_id = ? AND tombstoned = 0')
       .get(localItemId) as { source_version: string | null } | null)?.source_version ?? '';
     return grant.source_version === version;
+  }
+
+  /**
+   * Whether this exact item holds an on-demand read grant, by its full
+   * identity: one lookup on the items' unique key and one on the grants'.
+   * The judge asks it of every question on every pass; asking
+   * `onDemandReadCandidate` instead looked items up by provider item id
+   * alone, which no index covers, so each ask read the whole items table
+   * (the background's longest freezes on Sparta, rc.17, 15 Nov 2026).
+   */
+  hasOnDemandGrant(identity: { provider: string; accountScope: string; providerConversationId?: string; providerItemId: string }): boolean {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get()) return false;
+    return this.db.query(`
+      SELECT 1 FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
   }
 
   onDemandReadCandidate(providerItemId: string): { identity: SourceItemIdentity; metadata: ConnectorStoreItemMetadataSnapshot; readableOnRequest: boolean } | undefined {
@@ -12524,10 +12552,49 @@ export class LocalConnectorStore {
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
     limit: number,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+    windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
   ): Promise<string[]> {
     if (limit <= 0) return [];
     const tierHidden = await this.tierHiddenItemPksInTurns();
-    return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
+    // The same list as missingEmbeddingItemIds (items in order of their first
+    // chunk), read one window of chunk pks at a time with a turn between.
+    // One query over every chunk held the background for 1.5-2.7 s on each
+    // sweep once most chunks were embedded (Sparta, rc.17, 15 Nov 2026).
+    const modelId = embedder.modelId;
+    const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
+    const failed = this.embeddingFailureState;
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
+    const query = this.db.query(`
+      SELECT c.chunk_pk AS chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+      ORDER BY c.chunk_pk ASC
+    `);
+    const maxChunkPk = (this.db.query('SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks').get() as { n: number }).n;
+    // An item already listed from an earlier chunk keeps that place.
+    const seen = new Set<number>();
+    const found: string[] = [];
+    for (let after = 0; after < maxChunkPk && found.length < limit; after += windowChunks) {
+      if (after > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      const rows = query.all(modelId, after, after + windowChunks, ...params) as Array<{ item_pk: number; local_item_id: string }>;
+      for (const row of rows) {
+        if (seen.has(row.item_pk)) continue;
+        seen.add(row.item_pk);
+        if (failed?.has(row.local_item_id)) continue;
+        found.push(row.local_item_id);
+        if (found.length === limit) break;
+      }
+    }
+    return found;
   }
 
   /**
@@ -12637,12 +12704,42 @@ export class LocalConnectorStore {
     scope?: ConnectorStoreStatusScope,
     options: { countsMaxAgeMs?: number } = {},
   ): { missingChunks: number; estimatedTokens: number } {
-    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
+    const read = this.embeddingBacklogRead(modelId, embedder, scope, options, true);
+    const row = this.db.query(read.sql).get(...read.params as never[]) as { missing: number; chars: number };
+    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+  }
+
+  /**
+   * embeddingBacklogEstimate on the store's read thread: a count over every
+   * chunk without a current vector, which held the background's loop for
+   * 3-4 s inside each status count (Sparta, rc.17, 15 Nov 2026). The hidden
+   * copies go as one JSON list, since the read thread has no connection-local
+   * set.
+   */
+  async embeddingBacklogEstimateOffThread(
+    modelId: string,
+    embedder?: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>,
+    scope?: ConnectorStoreStatusScope,
+    options: { countsMaxAgeMs?: number } = {},
+  ): Promise<{ missingChunks: number; estimatedTokens: number }> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
+    const read = this.embeddingBacklogRead(modelId, embedder, scope, options, false);
+    const row = await withOffThreadSnapshot(this.dbPath, async (run) => run(read)) as { missing: number; chars: number };
+    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+  }
+
+  private embeddingBacklogRead(
+    modelId: string,
+    embedder: Pick<SourceEmbeddingProvider, 'provider' | 'backend'> | undefined,
+    scope: ConnectorStoreStatusScope | undefined,
+    options: { countsMaxAgeMs?: number },
+    connectionLocal: boolean,
+  ): StoreRead {
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
     const scoped = statusScopeContentFilter(scope);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
-    const params = [...tierExclusion.params, ...privateTier.params, ...scoped.params];
-    const row = this.db.query(`
+    return { mode: 'get', params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
@@ -12650,8 +12747,7 @@ export class LocalConnectorStore {
       WHERE i.tombstoned = 0
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
-    `).get(modelId, ...params) as { missing: number; chars: number };
-    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    ` };
   }
 
   /**
@@ -12660,22 +12756,13 @@ export class LocalConnectorStore {
    * rest would cost once they are read.
    */
   pdfExtractionBacklog(): { pendingPdfs: number; extractedPdfs: number; extractedChars: number } {
-    const row = this.db.query(`
-      SELECT
-        SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
-        SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
-        COALESCE(SUM(chars), 0) AS chars
-      FROM (
-        SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
-        FROM items i
-        WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
-      )
-    `).get() as { pending: number | null; extracted: number | null; chars: number };
-    return {
-      pendingPdfs: row.pending ?? 0,
-      extractedPdfs: row.extracted ?? 0,
-      extractedChars: row.chars,
-    };
+    return pdfBacklogFromRow(this.db.query(PDF_EXTRACTION_BACKLOG_SQL).get() as PdfBacklogRow);
+  }
+
+  /** pdfExtractionBacklog on the store's read thread. */
+  async pdfExtractionBacklogOffThread(): Promise<{ pendingPdfs: number; extractedPdfs: number; extractedChars: number }> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.pdfExtractionBacklog();
+    return pdfBacklogFromRow(await withOffThreadSnapshot(this.dbPath, async (run) => run({ sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: 'get' })) as PdfBacklogRow);
   }
 
   /** `countsMaxAgeMs` only for counts a status snapshot shows (see STATUS_COUNTS_MAX_AGE_MS); never for what is embedded. */
@@ -12683,9 +12770,11 @@ export class LocalConnectorStore {
     countsMaxAgeMs = 0,
     tierHidden?: TierLedgerHiddenItemPks,
     allowHeld = false,
+    /** False for a read on another connection (the read thread), which has no temp tables of this one. */
+    connectionLocal = true,
   ): { filter: string; params: string[] } {
     const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
-    if (this.visibilityJournal && this.visibilitySqlMemo) {
+    if (connectionLocal && this.visibilityJournal && this.visibilitySqlMemo) {
       // Reuse SQLite's indexed membership set. Re-encoding a 535k-element JSON
       // exclusion on every verdict would merely move the scan out of the cache.
       const children = tierExcluded.hidden === this.visibilitySqlMemo.value.hidden ? []
@@ -18218,6 +18307,30 @@ function connectorStoreEmbeddingInputSha256(
  * contentAllowed, account, content filters), for counts that must agree with
  * that parity. The tier-ledger exclusions are applied by the caller.
  */
+type AuthorCoverageRow = { provider: string; items: number; without_author: number | null };
+
+function authorCoverageRows(rows: readonly AuthorCoverageRow[]): Array<{ provider: string; items: number; itemsWithoutAuthor: number }> {
+  return rows.map((row) => ({ provider: row.provider, items: row.items, itemsWithoutAuthor: row.without_author ?? 0 }));
+}
+
+const PDF_EXTRACTION_BACKLOG_SQL = `
+  SELECT
+    SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
+    SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
+    COALESCE(SUM(chars), 0) AS chars
+  FROM (
+    SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
+    FROM items i
+    WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
+  )
+`;
+
+type PdfBacklogRow = { pending: number | null; extracted: number | null; chars: number };
+
+function pdfBacklogFromRow(row: PdfBacklogRow): { pendingPdfs: number; extractedPdfs: number; extractedChars: number } {
+  return { pendingPdfs: row.pending ?? 0, extractedPdfs: row.extracted ?? 0, extractedChars: row.chars };
+}
+
 function statusScopeContentFilter(scope: ConnectorStoreStatusScope | undefined): { filter: string; params: string[] } {
   if (!scope) return { filter: '', params: [] };
   const accountScope = normalizeOptionalAccountScope(scope.accountScope);

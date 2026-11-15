@@ -230,6 +230,25 @@ describe('an import-only source\'s card', () => {
     expect(archivesRow.primary?.label).toBe('Import another archive');
   });
 
+  test('a card whose imports finished is past its first sync: it never says Start Sync now', async () => {
+    const f = fixture();
+    const started = await approveStaged(f.dashboard, f.write('Reflect notes.json', reflectJson(reflectNotes(2))), { sourceId: 'reflect.archive' });
+    if (!started.ok || started.status !== 'started') throw new Error('not started');
+    f.runtime.state.update(started.archive_id, (entry) => { entry.status = 'imported'; entry.completed_at = new Date().toISOString(); });
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: { kind: 'source_index_status', generated_at: new Date().toISOString(), corpora: [], policy: {} } as never,
+      sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+      connectedHandleRegistry: { version: 1, handles: [] },
+      apiKeyAvailability: {},
+      importedArchives: f.dashboard.present(),
+      importedArchivesByCard: f.dashboard.presentCards(),
+    });
+    const reflect = view.sources.find((entry) => entry.source_id === 'reflect.archive')!;
+    expect(reflect.connection.label).toMatch(/1 archive imported/);
+    expect(reflect.setup?.stage).not.toBe('initial_sync');
+    expect(reflect.setup?.next_action ?? '').not.toMatch(/Sync now/);
+  });
+
   test('a card with nothing imported, beside notes another card imported, never reads as a disconnected account', () => {
     // An Evernote import is the only one: its items sit in the notes store set Other archives owns.
     const result = previewDashboardToolResult('archives-notes-evernote', false) as unknown as {

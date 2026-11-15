@@ -1054,9 +1054,13 @@ export class LocalXBookmarksReconcileStateStore {
         });
         naturalWindowBoundaryVerified = matches
           && row.global_boundary_fingerprint_sha256 === verificationFingerprint;
-        if (!naturalWindowBoundaryVerified) {
-          throw new ReconcileWindowBoundaryMismatchError('mixed_termination');
-        }
+        // A list that moved between the two passes (a bookmark added at the
+        // top, one removed in the middle) proves nothing about removals, but
+        // every post the traversal read is still real. The run finishes
+        // without removal authority, so what it read is kept and indexed,
+        // never thrown away and paid for again (Sparta, 15 Nov 2026: a $5.30
+        // traversal was discarded this way).
+        if (!naturalWindowBoundaryVerified) matches = false;
       }
       this.db.query(`
         UPDATE x_reconcile_runs
@@ -1500,6 +1504,9 @@ export class LocalXBookmarksReconcileStateStore {
       const verificationCardinality = providerCounts.verifyPosts;
       if (
         coverageScope === 'recency_window'
+        // A run that already lost removal authority promotes as degraded:
+        // nothing it holds is removed on its word.
+        && run.global_removal_authoritative === 1
         && (
           run.window_boundary_verified !== 1
           || traversalDigestSha256 !== verificationDigestSha256
@@ -2538,8 +2545,12 @@ export class LocalXBookmarksReconcileStateStore {
     const coverageScope = requireCoverageScope(snapshot.coverage_scope);
     normalizeRequiredSha256(snapshot.traversal_digest_sha256, 'X traversal digest');
     normalizeRequiredSha256(snapshot.verification_digest_sha256, 'X verification digest');
+    // Only a snapshot that holds removal authority carries the window proof;
+    // a degraded one (the list moved between passes) keeps what it read and
+    // removes nothing.
     if (
       coverageScope === 'recency_window'
+      && snapshot.global_removal_authoritative === 1
       && (
         snapshot.window_boundary_verified !== 1
         || snapshot.window_boundary_algorithm_version < 1

@@ -59,6 +59,7 @@ import {
   DASHBOARD_ARCHIVE_COPY,
   DASHBOARD_CAPTURE_BLOCKED_LABEL,
   DASHBOARD_CAPTURE_COPY,
+  dashboardCaptureHelperNeverStarted,
   DASHBOARD_CAPTURE_STALE_LABEL,
   dashboardAttentionLine,
   dashboardAttentionParts,
@@ -78,6 +79,7 @@ import {
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
   DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY,
   DASHBOARD_CHATGPT_PRIVACY_JUDGE_OFF_COPY,
+  DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY,
   DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
   DASHBOARD_MANY_UNREADABLE_LABEL,
@@ -216,6 +218,14 @@ export interface ChatGptDashboardOptions {
      * or the check is switched off where Olympus runs ('turned_off').
      */
     judgeMissing?: 'no_model' | 'turned_off';
+    /** Items a minute the private model checks, when measured (judge observations). */
+    judgePerMinute?: number;
+    /**
+     * The privacy check has stopped while items wait, with its plain reason
+     * (sniffer-service backlog `waiting`): its model is not answering, cloud
+     * checking is stopped, or its pass failed. Only then do waiting items need the owner.
+     */
+    judgeStopped?: keyof typeof DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY.reason;
   };
   /**
    * The built-in private model (analyst-built-in.ts builtInPrivateModelStatus),
@@ -295,7 +305,8 @@ export function buildChatGptDashboardViewModel(
     const stopped = stops.some((stop) => limitStopSubjects(stop).includes(definition.source_id));
     if (!connecting && !credentials && imports.length === 0 && (status === 'Needs you' || status === 'Failing')
       && ownerHasNothingToDo(scrubbed, stopped, degraded)) {
-      status = 'Working';
+      // Many unreadable files are Olympus's problem, said on the row with its See why: a finished source stays Fresh.
+      status = scrubbed.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL && (!progress || progress.stage === 'done') ? 'Fresh' : 'Working';
     }
     // Whether this worker can sync the source at all: the raw card's own
     // flag, which the scrubbed card does not carry.
@@ -407,6 +418,18 @@ export function buildChatGptDashboardViewModel(
       fix: { label: copy.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
     });
   }
+  // Items waiting for the private model are machine work, In progress on
+  // Home. They need the owner only when the check has stopped: then the
+  // sentence says exactly why, and the button opens the model to look at.
+  else if (options.privacy?.judgeStopped && options.privacy.pendingCount > 0) {
+    const copy = DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY;
+    needsYou.push({
+      id: 'privacy:judge_stopped',
+      sentence: copy.sentence.replace('{n}', Math.floor(options.privacy.pendingCount).toLocaleString('en-US'))
+        .replace('{reason}', copy.reason[options.privacy.judgeStopped]),
+      fix: { label: copy.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
+    });
+  }
 
   const transcription = transcriptionModel(options.transcription);
 
@@ -440,6 +463,8 @@ export function buildChatGptDashboardViewModel(
             configured: options.privacy.configured,
             pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)),
             ruleCount: Math.max(0, Math.floor(options.privacy.ruleCount)),
+            ...(typeof options.privacy.judgePerMinute === 'number' && Number.isFinite(options.privacy.judgePerMinute) && options.privacy.judgePerMinute > 0
+              ? { judgePerMinute: options.privacy.judgePerMinute } : {}),
           },
         }
       : {}),
@@ -497,7 +522,11 @@ function ownerHasNothingToDo(card: DashboardSourceCard, waiting: boolean, degrad
   if (parts.capture || parts.media || card.storage_notice || missingScope(card)) return false;
   if (!CONNECTED_STATES.has(card.connection.state)) return false;
   if (card.queue_health.needs_attention > 0 || dashboardSyncKeepsFailing(card)) return false;
-  return waiting || parts.reason === DASHBOARD_RETRYING_ON_ITS_OWN;
+  // Many files Olympus can't read point at a reader that broke, not at
+  // anything the owner can do: the row states it under See why, for every
+  // source alike, finished or still indexing (rc.17: Dropbox showed it, Gmail
+  // did not, only because Gmail was still indexing).
+  return waiting || parts.reason === DASHBOARD_RETRYING_ON_ITS_OWN || card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL;
 }
 
 /** Problems first, then connected sources, then sources not connected yet. */
@@ -563,12 +592,12 @@ function sourceEntry(
       : scopePending(card) || missingScope(card)
         ? scopeFix(definition, card)
         : reconnect ?? (late && captureOnly
-          ? captureFix(definition)
+          ? captureFix(definition, card)
           : late && mediaStorageOnly(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) })
             ? checkAgainFix()
           // Beside another problem the other problem's fix leads when it has
           // one; a chat source has no Sync now, so Check capture is then the row's fix.
-          : late ? sync ?? (capture ? captureFix(definition) : undefined)
+          : late ? sync ?? (capture ? captureFix(definition, card) : undefined)
             : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu: DashboardFix[] = [];
   // Sync now sits first in the ⋯ menu of every connected source that can
@@ -577,7 +606,7 @@ function sourceEntry(
   if (sync) menu.push(sync);
   // Check capture, for a live feed in trouble beside some other problem; the
   // panel drops it from the menu when it is the row's own fix.
-  if (capture && !connecting && status !== 'Off') menu.push(captureFix(definition));
+  if (capture && !connecting && status !== 'Off') menu.push(captureFix(definition, card));
   // Another archive is imported the way the first was: from the dashboard on
   // the computer it is on. Never over a record that cannot be read, which an
   // import would write over.
@@ -662,11 +691,13 @@ function unreadableView(definition: DashboardSupportedSourceDefinition, card: Da
   const names = unreadableNames(card.unreadable_files?.names).slice(0, Math.min(count, UNREADABLE_NAMES_IN_RESULT));
   const rest = count - names.length;
   const target = openUnreadableSourceFor(definition.source_id);
+  const settled = Math.min(count, card.coverage.settled_unreadable_items ?? 0);
+  const unsupported = Math.min(count - settled, Math.max(0, Math.trunc(card.coverage.unreadable_unsupported_items ?? 0)));
   return {
     count,
     reasons: [
-      ...(count > (card.coverage.settled_unreadable_items ?? 0)
-        ? [{ code: 'damaged_or_unsupported' as const, count: count - (card.coverage.settled_unreadable_items ?? 0) }] : []),
+      ...(count - settled - unsupported > 0 ? [{ code: 'damaged_or_unsupported' as const, count: count - settled - unsupported }] : []),
+      ...(unsupported > 0 ? [{ code: 'unsupported_format' as const, count: unsupported }] : []),
       ...((card.coverage.settled_unreadable_items ?? 0) > 0
         ? [{ code: 'privacy_check_missing' as const, count: Math.min(count, card.coverage.settled_unreadable_items!) }] : []),
     ],
@@ -706,15 +737,18 @@ function attentionItem(
   const mediaOnly = mediaStorageOnly(card, attentionOptions);
   // A late or unresponsive source's fix is Sync now where this worker can
   // sync it: Check again only re-read the page (owner, 2026-10-09).
+  // A Needs you button never only re-reads the page: with no fix of its
+  // own, it opens this source on the computer, where the owner can act.
+  const onComputer = checkAgainFix(openOnComputer(definition, 'reconnect'));
   const fix = scopePending(card) || missingScope(card)
-    ? scopeFix(definition, card) ?? checkAgainFix()
+    ? scopeFix(definition, card) ?? onComputer
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
       ? reconnectFix(definition, card)
       : captureOnly
-        ? captureFix(definition)
+        ? captureFix(definition, card)
         : mediaOnly
-          ? checkAgainFix()
-          : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
+          ? onComputer
+          : sync ?? (captureProblem(card) ? captureFix(definition, card) : onComputer);
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 
@@ -772,7 +806,10 @@ function mediaStorageOnly(card: DashboardSourceCard, options: Parameters<typeof 
   return card.media_storage !== undefined && !captureProblem(card) && dashboardAttentionParts(card, options).reason === '';
 }
 
-function captureFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
+function captureFix(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard): DashboardFix {
+  // A helper that never started is not a link problem: Check capture would open the re-pair for nothing. The card's
+  // line names the step (reinstall or restart); the control checks again after it.
+  if (dashboardCaptureHelperNeverStarted(card)) return checkAgainFix();
   return helpLinkFix(DASHBOARD_CAPTURE_COPY.fixLabel, openOnComputer(definition, 'reconnect'));
 }
 
@@ -1338,6 +1375,11 @@ function unitFor(card: DashboardSourceCard): Unit {
  * sum of the sources' own stage counts: read but not yet indexed is not done.
  * Absent once every source is done.
  */
+/** The source has never finished a sync (its freshness says so), or holds nothing yet. */
+function neverSynced(card: DashboardSourceCard): boolean {
+  return card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || card.coverage.indexed_items === 0;
+}
+
 function overallProgress(
   rows: ReadonlyArray<{ card: DashboardSourceCard; progress?: SourceProgress | undefined; counts?: StageCounts | undefined }>,
 ): DashboardViewModelV1['progress'] | undefined {
@@ -1379,7 +1421,9 @@ function overallProgress(
     }
     ownTotal += progress.total;
     ownDone += progress.total > 0 ? Math.min(progress.done ?? 0, progress.total) : 0;
-    if (card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || progress.stage === 'listing') initial = true;
+    // First index only for a source that has never finished a sync: a re-list
+    // after a restart is a normal check (rc.17: Drive re-listing read "First index").
+    if (neverSynced(card)) initial = true;
     const minutes = card.progress?.eta_minutes;
     if (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) {
       eta = Math.max(eta ?? 0, Math.round(minutes * 60));
@@ -1400,7 +1444,10 @@ function overallProgress(
       itemsLeft: Math.max(0, total - done),
     }),
     ...(eta !== undefined ? { etaSeconds: eta } : {}),
-    stalled: open.some((row) => row.progress.stalled),
+    // Stalled only when nothing is moving: one source idle between runs, or
+    // parked on its own budget, beside others reading and indexing is not a
+    // stalled page (rc.17: stalled with reading and indexing moving hid the time left).
+    stalled: open.every((row) => row.progress.stalled),
     details,
   };
 }
@@ -1495,6 +1542,13 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
         : {}),
       ...(finite(card.coverage.unsupported_kind_items)
         ? { unsupported_kind_items: count(card.coverage.unsupported_kind_items) }
+        : {}),
+      ...(finite(card.coverage.unreadable_unsupported_items) && card.coverage.unreadable_unsupported_items! > 0
+        ? { unreadable_unsupported_items: count(card.coverage.unreadable_unsupported_items) }
+        : {}),
+      // A format is an extension or media subtype (unreadable-files.ts unreadableFileFormat), never a name.
+      ...(Array.isArray(card.coverage.unsupported_formats)
+        ? { unsupported_formats: card.coverage.unsupported_formats.filter((format) => typeof format === 'string' && /^\.?[a-z0-9][a-z0-9.+-]{0,39}$/.test(format)).slice(0, 3) }
         : {}),
       ...(finite(card.coverage.pictures_not_read_here_items)
         ? { pictures_not_read_here_items: count(card.coverage.pictures_not_read_here_items) }
@@ -1624,6 +1678,8 @@ const CAPTURE_SUPERVISOR_REASONS: ReadonlySet<string> = new Set([
   'session_missing',
   'secret_missing',
   'start_failed',
+  'helper_missing',
+  'helper_build_failed',
   'helper_exited',
   'restarting',
   'helper_running',

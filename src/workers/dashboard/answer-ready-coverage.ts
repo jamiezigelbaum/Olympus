@@ -51,6 +51,16 @@ export const UNREADABLE_ITEMS_COUNT_KEY = 'extraction_items_unreadable';
 export const UNSUPPORTED_KIND_COUNT_KEY = 'extraction_items_unsupported_kind';
 
 /**
+ * Of UNREADABLE_ITEMS_COUNT_KEY, the files that failed because their format has
+ * no reader (unreadable-files.ts reason 'unsupported'). A known gap, not a
+ * broken reader: stated as its own count and kept out of the many-unreadable alarm.
+ */
+export const UNREADABLE_UNSUPPORTED_COUNT_KEY = 'extraction_items_unreadable_unsupported';
+
+/** How many formats a count of those files names. */
+export const UNSUPPORTED_FORMATS_SHOWN = 3;
+
+/**
  * In-scope pictures with no reader on this computer. These stay in the eligible
  * denominator: Olympus is meant to read them and lacks a picture reader here.
  */

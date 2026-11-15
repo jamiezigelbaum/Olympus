@@ -258,6 +258,9 @@ describe('upgrade run arguments', () => {
 // ---------------------------------------------------------------------------
 // The whole flow against a scripted machine
 
+const OLD_BRIDGE = 'olympus-whatsapp-bridge-0123456789abcdef';
+const NEW_BRIDGE = 'olympus-whatsapp-bridge-fedcba9876543210';
+
 const SCRIPTED_DRIVER = String.raw`#!/usr/bin/env bun
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 const [verb, ...rest] = process.argv.slice(2);
@@ -299,7 +302,8 @@ if (verb === 'provision') {
   const life = JSON.parse(readFileSync(state + '/life.json', 'utf8'));
   const migrated = upgraded && process.env.FAKE_NO_MIGRATION !== '1';
   const counts = { seen: life.seen, indexed: life.stored, contentReady: life.stored, embedded: migrated ? life.stored : life.stored - life.privateItems, secretsLocated: life.secrets, pending: 0, queueWaiting: 0, queueActive: 0, personal: life.personal, privateItems: life.privateItems, lastRun: 'completed', missingChunks: 0 };
-  if (sub === 'engine-build') say({ ok: true, build: (upgraded ? '1.0.1' : '1.0.0') + '+abc', version: upgraded ? '1.0.1' : '1.0.0', remoteMode: 'relay', relay: {} });
+  if (sub === 'helper-files') say({ ok: true, whatsappBridges: upgraded && process.env.FAKE_NO_BRIDGE !== '1' ? ['${OLD_BRIDGE}', '${NEW_BRIDGE}'] : ['${OLD_BRIDGE}'] });
+  else if (sub === 'engine-build') say({ ok: true, build: (upgraded ? '1.0.1' : '1.0.0') + '+abc', version: upgraded ? '1.0.1' : '1.0.0', remoteMode: 'relay', relay: {} });
   else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000 });
   else if (sub === 'connect-source') say({ ok: true, message: 'Connected' });
   else if (sub === 'settle') say({ ok: true, settled: true, polls: 2, waitedMs: 1000, snapshot: counts });
@@ -348,7 +352,7 @@ let candidateDir: string;
 let baselineDir: string;
 const saved: Record<string, string | undefined> = {};
 const SPLIT_KEYS = ['FAKE_BROKEN_ACCEPTED', 'FAKE_LOST_STORE', 'FAKE_FRONT_CRASH', 'FAKE_DRIVER_ERROR'];
-const ENV_KEYS = ['FAKE_STATE', 'FAKE_OLD_POLICY', 'FAKE_NEW_POLICY', 'FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED', ...SPLIT_KEYS];
+const ENV_KEYS = ['FAKE_STATE', 'FAKE_OLD_POLICY', 'FAKE_NEW_POLICY', 'FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED', 'FAKE_NO_BRIDGE', ...SPLIT_KEYS];
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'rc-upgrade-flow-'));
@@ -359,6 +363,8 @@ beforeEach(() => {
     const bundleDir = join(dir, name);
     mkdirSync(bundleDir);
     writeFileSync(join(bundleDir, `olympus-${version}.tgz`), 'x');
+    // Each release pins its own WhatsApp bridge, and the fake machine has it installed (helper-files.ts).
+    writeFileSync(join(bundleDir, 'install-linux.sh'), `#!/bin/sh\nOLYMPUS_VERSION=${version}\nOLYMPUS_SHA256=${'0'.repeat(64)}\nOLYMPUS_BYTES=1\nWHATSAPP_BRIDGE_NAME=${bundle === 'candidateDir' ? NEW_BRIDGE : OLD_BRIDGE}\n`);
     if (bundle === 'candidateDir') candidateDir = bundleDir; else baselineDir = bundleDir;
   }
   writeFileSync(join(dir, 'old.json'), JSON.stringify(OLD_POLICY));
@@ -369,7 +375,7 @@ beforeEach(() => {
   process.env.FAKE_STATE = dir;
   process.env.FAKE_OLD_POLICY = join(dir, 'old.json');
   process.env.FAKE_NEW_POLICY = join(dir, 'new.json');
-  for (const key of ['FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED', ...SPLIT_KEYS]) delete process.env[key];
+  for (const key of ['FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED', 'FAKE_NO_BRIDGE', ...SPLIT_KEYS]) delete process.env[key];
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -448,6 +454,14 @@ describe('the upgrade leg end to end, against a scripted machine', () => {
     expect(driverLog().some((line) => line === `destroy --machine fake-${opts.runId}`)).toBe(true);
   }, 120_000);
 
+  test('an update that leaves only the earlier release\'s WhatsApp bridge fails on it, naming both', async () => {
+    // Sparta 2026-11-15: the fingerprint changed, no bridge came with the update, and capture never started again.
+    process.env.FAKE_NO_BRIDGE = '1';
+    const report = await runReleaseCheck(options());
+    expect(failedIds(report)).toEqual(['upgrade.whatsapp-bridge']);
+    expect(JSON.stringify(report)).toContain(`${NEW_BRIDGE} is not installed (found: ${OLD_BRIDGE}); before the update ${OLD_BRIDGE} was`);
+  }, 120_000);
+
   test('an earlier token the update no longer honours fails the connection check after the update', async () => {
     process.env.FAKE_TOKEN_REFUSED = '1';
     const report = await runReleaseCheck(options());
@@ -510,7 +524,7 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
     writeFileSync(join(work, 'package', 'dist', 'cli.js'), '#!/usr/bin/env bun\nconsole.log("olympus");\n');
     rmSync(join(candidateDir, 'olympus-1.0.1.tgz'));
     expect(Bun.spawnSync(['tar', '-czf', join(candidateDir, 'olympus-1.0.1.tgz'), '-C', work, 'package']).exitCode).toBe(0);
-    writeFileSync(join(candidateDir, 'install-linux.sh'), `#!/bin/sh\nOLYMPUS_VERSION=1.0.1\nOLYMPUS_SHA256=${'0'.repeat(64)}\nOLYMPUS_BYTES=1\n`);
+    writeFileSync(join(candidateDir, 'install-linux.sh'), `#!/bin/sh\nOLYMPUS_VERSION=1.0.1\nOLYMPUS_SHA256=${'0'.repeat(64)}\nOLYMPUS_BYTES=1\nWHATSAPP_BRIDGE_NAME=${NEW_BRIDGE}\n`);
     writeFileSync(join(candidateDir, 'SHA256SUMS'), `${'0'.repeat(64)}  olympus-1.0.1.tgz\n${'0'.repeat(64)}  install-linux.sh\n`);
   }
   const splitOptions = () => options({ engineSplit: true });

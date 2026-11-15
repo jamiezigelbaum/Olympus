@@ -1161,6 +1161,7 @@ export class SourceScheduler {
           }));
         }
       }
+      const startedCheckpoint = state.checkpoint;
       const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance, stopsAtStart);
       const completedAt = this.now().toISOString();
       // The streak is derived BEFORE state.lastResult is replaced, so it reads
@@ -1186,7 +1187,13 @@ export class SourceScheduler {
       const configuredIntervalMs = taskIntervalMs(state.source, state.task);
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
       const continueAt = Date.parse(completedAt) + this.continueAfterMs;
-      const continuing = result.continueSoon === true && !retryAt;
+      // A pass that ends with work still to do continues within seconds, whatever source it is: one that said so, and a
+      // sync that left its walk open at a cursor it moved (cut at its item cap or time slice). Only a pass that found
+      // nothing new, or finished its walk, waits for the cadence (a 1,000-item cap otherwise drains one cap per interval).
+      const cursorLeftOpen = runningTask.kind === 'sync'
+        && typeof result.checkpoint === 'string' && result.checkpoint !== startedCheckpoint
+        && result.counts?.traversal_complete !== 1;
+      const continuing = (result.continueSoon === true || cursorLeftOpen) && !retryAt;
       const cadenceRunAt = nextCadenceAfter(cadenceAnchor, effectiveIntervalMs, Date.parse(completedAt));
       const wakeAt = retryAt ? undefined : normalizeWakeAt(result.wakeAt, completedAt);
       const scheduledRunAt = retryAt?.at

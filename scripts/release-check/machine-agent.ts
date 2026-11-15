@@ -2390,6 +2390,28 @@ function jsonOf(result: CliResult): any {
   try { return JSON.parse(result.stdout); } catch { return undefined; }
 }
 
+/**
+ * The WhatsApp bridges installed where capture and pairing look first (core/messaging-pairing.ts readyWhatsAppBridge): the Mac
+ * app's own tools/whatsapp-bridge/bin, and the Linux per-user cache. Owner-executable files only; names, never contents.
+ */
+function installedWhatsAppBridges(): string[] {
+  const home = homedir();
+  const dirs = [
+    join(home, 'Library', 'Application Support', 'Olympus', 'app', 'tools', 'whatsapp-bridge', 'bin'),
+    join(process.env.XDG_CACHE_HOME?.trim() || join(home, '.cache'), 'olympus', 'bin'),
+  ];
+  const names = new Set<string>();
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (!/^olympus-whatsapp-bridge-[0-9a-f]{16}$/.test(name)) continue;
+      const stat = lstatSync(join(dir, name));
+      if (stat.isFile() && (stat.mode & 0o100) !== 0) names.add(name);
+    }
+  }
+  return [...names].sort();
+}
+
 async function snapshotState(): Promise<never> {
   const p = platform();
   const version = /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\b/.exec(olympus(['--version']).stdout)?.[1] ?? null;
@@ -2543,6 +2565,7 @@ async function main(): Promise<void> {
     case 'mcp-call': return await mcpCall(rest[0] ?? '', rest[1] ?? '{}');
     case 'mcp-rpc': return await mcpRpcRelay(flag('--input'));
     case 'smoke': return await smoke(flag('--questions'));
+    case 'helper-files': return emit({ ok: true, whatsappBridges: installedWhatsAppBridges() });
     case 'dashboard-json': {
       const dash = await dashboardJson();
       console.log(JSON.stringify({ ok: dash.status === 200, status: dash.status, body: dash.text }));

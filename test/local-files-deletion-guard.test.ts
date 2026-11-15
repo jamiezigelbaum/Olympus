@@ -104,9 +104,6 @@ function fixture(selectionFor: (proj: string) => Selection[] = (proj) => [{ key:
   };
 }
 
-/** The operating system reports file changes a moment after they happen. */
-const settleFileEvents = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 1500));
-
 function names(store: LocalConnectorStore, query: string): string[] {
   return store.searchItems(query, 50, 'this_computer').map((row) => String(row.title ?? '')).sort();
 }

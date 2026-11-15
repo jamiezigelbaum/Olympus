@@ -49,9 +49,10 @@ import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/mo
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import {
+  type MessagingCaptureStartFailure,
   type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
-import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
+import { readyWhatsAppBridge } from '../../core/messaging-pairing.ts';
 import { unlinkHelper } from './dashboard/dashboard-messaging-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
@@ -465,7 +466,7 @@ import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classificati
 import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { controlPathHeadroom, ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
@@ -796,6 +797,8 @@ export async function main(): Promise<void> {
   // Set once the judge's model is built (below): a lane whose model cannot be
   // built queues questions nothing answers, the same as no judge (#1316).
   let snifferModelBuilt: boolean | undefined;
+  // Stops of the privacy check the owner can look into: waiting items then need them (Home's Needs you).
+  const DASHBOARD_JUDGE_STOP_REASONS: ReadonlySet<string> = new Set(['model_not_answering', 'cloud_stopped', 'failed']);
   const judgeMissing = (): 'no_model' | 'turned_off' | undefined => (
     !tierSnifferServiceEnv(process.env).enabled ? 'turned_off'
       : snifferRuntime.source === 'off' || snifferModelBuilt === false ? 'no_model'
@@ -869,13 +872,13 @@ export async function main(): Promise<void> {
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
-  const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+  const captureFailures: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStartFailure>> = {};
   // What each supervisor last reported, for the dashboard. Absent for a source
   // whose capture the native service owns: this worker runs nothing there.
   const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
-    onResumeFailure: (source) => { captureFailures[source] = true; },
+    onResumeFailure: (source, kind) => { captureFailures[source] = kind; },
     onResumeSuccess: (source, status) => { delete captureFailures[source]; captureStatuses[source] = status; },
     registryPath: connectedHandleRegistryPath!,
     packageRoot,
@@ -908,8 +911,8 @@ export async function main(): Promise<void> {
   const stopMessagingCapture = engineFront
     ? frontCaptureStop(engineFront.client)
     : async (source: 'telegram' | 'whatsapp') => { await captureOwnership.stopForUnpair(source); };
-  const unlinkWhatsAppDevice = (stateDir: string) => unlinkHelper(
-    whatsappBridgePathForPackage(packageRoot, { env: process.env }),
+  const unlinkWhatsAppDevice = async (stateDir: string) => unlinkHelper(
+    await readyWhatsAppBridge({ env: process.env }, packageRoot),
     { ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: stateDir },
   );
 
@@ -6026,6 +6029,11 @@ export async function main(): Promise<void> {
     },
     privacy: () => {
       const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
+      // The local judge's measured speed, for Home's time left on the waiting items.
+      const judgePerMinute = (): number | undefined => {
+        const rate = judgeObservations.observed().localItemsPerMinute;
+        return rate !== undefined && Number.isFinite(rate) && rate > 0 ? rate : undefined;
+      };
       const backlog = tierSnifferBacklog?.();
       const missing = judgeMissing();
       return {
@@ -6033,6 +6041,9 @@ export async function main(): Promise<void> {
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         // No judge: every new item waits, held, until one is set up (#1316).
         ...(missing ? { judgeMissing: missing } : {}),
+        ...(backlog?.waiting && DASHBOARD_JUDGE_STOP_REASONS.has(backlog.waiting.reason)
+          ? { judgeStopped: backlog.waiting.reason as 'model_not_answering' | 'cloud_stopped' | 'failed' } : {}),
+        ...((rate) => (rate !== undefined ? { judgePerMinute: rate } : {}))(judgePerMinute()),
         ...(backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}),
       };
     },
@@ -6194,7 +6205,11 @@ export async function main(): Promise<void> {
     const standBackCounts = standBack.counts();
     const standBackSeen = Object.keys(standBackCounts).length > 0;
     const statusRecountHealth = statusRecount?.health();
-    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront || rerankOutcomes || localPromptBudgets.length || standBackSeen || statusRecountHealth)) {
+    // How late this process's loop turned: the last beat, the worst since start, and how many beats missed the 250 ms budget.
+    const loopLag = (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot());
+    const backgroundSnapshot = engineFront?.status()?.snapshot;
+    const backgroundLoopLag = backgroundSnapshot?.loop_lag;
+    if ((path === '/v1/health' || path === '/health') && response?.ok) {
       return Response.json({
         ...await response.json() as object,
         ...(rerankOutcomes ? {
@@ -6213,7 +6228,9 @@ export async function main(): Promise<void> {
         // Background work that stood back for the owner's Ask: never silent.
         ...(standBackSeen ? { stand_back: standBackCounts } : {}),
         // The background's paced recount of what the dashboard shows: how long the last took and how old it is.
-        ...(statusRecountHealth ? { status_recount: statusRecountHealth } : {}),
+        ...(statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {}),
+        loop_lag: loopLag,
+        ...(backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {}),
         // The front answers while its background restarts or crash-loops: an
         // upgrade or rollback reads this before it calls the engine healthy
         // (#1563 review).
@@ -6632,6 +6649,8 @@ export async function main(): Promise<void> {
         } : {}),
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
+        loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
+        ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
       }),
     });
     // A delete the front forwarded: stop answering ready (so no new front

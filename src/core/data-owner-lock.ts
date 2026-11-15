@@ -32,6 +32,7 @@ import { olympusDataRoot, SHARED_DATA_FILES, sharedDataPath, type LayoutEnv } fr
 const runtimeRequire = createRequire(import.meta.url);
 
 // <sys/file.h>: the same values on Linux and macOS.
+const LOCK_SH = 1;
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 const LOCK_UN = 8;
@@ -78,7 +79,7 @@ export function dataOwnerLockPath(env: LayoutEnv = process.env): string {
 
 /** Whether `name` (a file name, not a path) is the owner lock. */
 export function isDataOwnerLockName(name: string): boolean {
-  return name === SHARED_DATA_FILES['data-owner-lock'];
+  return name === SHARED_DATA_FILES['data-owner-lock'] || name === SHARED_DATA_FILES['engine-process-lock'];
 }
 
 /** Take the lock and hold it until `release()` or the process dies. Throws `DataOwnerBusyError`. */
@@ -112,13 +113,13 @@ export function holdDataOwnerLock(env: LayoutEnv = process.env, options: DataOwn
  * filesystem without locks) throws, so it is never mistaken for a running
  * Olympus and never passed over as a free one.
  */
-function tryFlock(lockPath: string): number | undefined {
+function tryFlock(lockPath: string, mode: number = LOCK_EX): number | undefined {
   const fd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT | O_CLOEXEC, 0o600);
   let failure: number;
   try {
     const kernel = flockLibrary();
     do {
-      if (kernel.flock(fd, LOCK_EX | LOCK_NB) === 0) return fd;
+      if (kernel.flock(fd, mode | LOCK_NB) === 0) return fd;
       failure = kernel.errno();
     } while (failure === osConstants.errno.EINTR);
   } catch (error) {
@@ -268,8 +269,10 @@ export function takeWorkerDataOwnerLock(
   env: LayoutEnv = process.env,
   options: { waitMs?: number; exit?: (code: number) => never; report?: (line: string) => void; engineRole?: 'single' | 'background' | 'front' } = {},
 ): HeldDataOwnerLock | undefined {
-  if (options.engineRole === 'front') return undefined;
   try {
+    // Every engine role, the front included, so an update's put-back waits for each of them to exit.
+    if (options.engineRole !== undefined) holdEngineProcessShare(env, options.waitMs ?? WORKER_OWNER_LOCK_WAIT_MS);
+    if (options.engineRole === 'front') return undefined;
     return holdDataOwnerLock(env, { waitMs: options.waitMs ?? WORKER_OWNER_LOCK_WAIT_MS });
   } catch (error) {
     if (!(error instanceof DataOwnerBusyError)) throw error;
@@ -282,4 +285,55 @@ export function takeWorkerDataOwnerLock(
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   return typeof value === 'object' && value !== null && typeof (value as { then?: unknown }).then === 'function';
+}
+
+/**
+ * The engine process lock, `<data>/engine-process.lock`: every engine process (single, background and the split's front)
+ * holds it shared for its whole life, and what must know that no engine process is left (an update's copy and put-back)
+ * takes it exclusive. The front takes no owner lock, so the owner lock alone does not prove it has exited (Codex, 15 Nov 2026).
+ */
+function holdEngineProcessLock(env: LayoutEnv, mode: number, waitMs: number): HeldDataOwnerLock {
+  const lockPath = sharedDataPath('engine-process-lock', env);
+  const deadline = Date.now() + Math.max(0, waitMs);
+  if (!existsSync(dirname(lockPath))) mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+  while (true) {
+    const fd = tryFlock(lockPath, mode);
+    if (fd !== undefined) {
+      let held = true;
+      return {
+        root: olympusDataRoot(env),
+        lockPath,
+        release() {
+          if (!held) return;
+          held = false;
+          flockLibrary().flock(fd, LOCK_UN);
+          closeSync(fd);
+        },
+      };
+    }
+    if (Date.now() >= deadline) throw new DataOwnerBusyError(olympusDataRoot(env));
+    sleepSync(25);
+  }
+}
+
+let engineProcessLock: HeldDataOwnerLock | undefined;
+
+/** This engine process's shared hold, taken once and kept until it exits. Throws `DataOwnerBusyError` while an update is putting stores back. */
+export function holdEngineProcessShare(env: LayoutEnv = process.env, waitMs = WORKER_OWNER_LOCK_WAIT_MS): void {
+  engineProcessLock ??= holdEngineProcessLock(env, LOCK_SH, waitMs);
+}
+
+/**
+ * Runs `run` once no engine process of any version is left with the data: the engine process lock exclusive (every
+ * process of this version's engine has exited) and the owner lock (an earlier version's worker, which predates the
+ * engine process lock, has exited too). Throws `DataOwnerBusyError` after `waitMs`, without running it.
+ */
+export function withNoEngineProcess<T>(env: LayoutEnv, run: () => T, waitMs: number): T {
+  const started = Date.now();
+  const processes = holdEngineProcessLock(env, LOCK_EX, waitMs);
+  try {
+    return withDataOwnerLock(env, run, { waitMs: Math.max(0, waitMs - (Date.now() - started)) });
+  } finally {
+    processes.release();
+  }
 }

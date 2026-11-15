@@ -627,6 +627,7 @@ function olympusDataPath(env, ...segments) {
 var SHARED_DATA_FILES = {
   registry: "registry.json",
   "data-owner-lock": "data-owner.lock",
+  "engine-process-lock": "engine-process.lock",
   "remote-connections": "remote-connections.sqlite",
   "source-dashboard": "source-dashboard.sqlite",
   "source-scheduler": "source-scheduler.sqlite",
@@ -3135,6 +3136,7 @@ var CONTROL_PATH_SLICE_MS = 20;
 var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
 var CONTROL_PATH_REST_MS = 25;
 var HEARTBEAT_MS = 50;
+var CONTROL_PATH_LAG_COUNTED_MS = 250;
 var CONTROL_PATH_FREEZE_LOG_MS = 2000;
 function controlPathFreezeSubject(role, mainThread = true) {
   if (!mainThread)
@@ -3162,6 +3164,8 @@ class ControlPathHeadroom {
   lastTurnAt;
   pendingTurn;
   lastLagMs = 0;
+  maxLagMs = 0;
+  overBudget = 0;
   heartbeat;
   expectedBeatAt = 0;
   turns = 0;
@@ -3218,7 +3222,14 @@ class ControlPathHeadroom {
     return pending;
   }
   snapshot() {
-    return { turns: this.turns, rests: this.rests, freezes: this.freezes, lagMs: Math.round(this.lastLagMs) };
+    return {
+      turns: this.turns,
+      rests: this.rests,
+      freezes: this.freezes,
+      lagMs: Math.round(this.lastLagMs),
+      maxLagMs: Math.round(this.maxLagMs),
+      overBudget: this.overBudget
+    };
   }
   stop() {
     if (this.heartbeat)
@@ -3233,6 +3244,10 @@ class ControlPathHeadroom {
       const now = this.now();
       this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
       this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.lastLagMs > this.maxLagMs)
+        this.maxLagMs = this.lastLagMs;
+      if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)
+        this.overBudget += 1;
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(",") || "none";
@@ -6130,13 +6145,13 @@ function holdDataOwnerLock(env = process.env, options = {}) {
     sleepSync2(25);
   }
 }
-function tryFlock(lockPath) {
+function tryFlock(lockPath, mode = LOCK_EX) {
   const fd = openSync6(lockPath, constants3.O_RDWR | constants3.O_CREAT | O_CLOEXEC, 384);
   let failure;
   try {
     const kernel = flockLibrary();
     do {
-      if (kernel.flock(fd, LOCK_EX | LOCK_NB) === 0)
+      if (kernel.flock(fd, mode | LOCK_NB) === 0)
         return fd;
       failure = kernel.errno();
     } while (failure === osConstants.errno.EINTR);
@@ -12213,6 +12228,8 @@ class TierLedger {
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
+        ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       settleStaleEmbedHolds(db, this.now().toISOString());
       if (onDisk)
         restrictLedgerFiles(this.dbPath);
@@ -13814,25 +13831,35 @@ class TierLedger {
     return row?.f ?? "";
   }
   listClearedOverrideRows(limit = 100, after) {
+    const restoreKeys = this.db.query(`
+      SELECT key FROM tier_ledger_meta
+      WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;' AND value <> ''
+    `).all();
+    const restoreIdentities = restoreKeys.flatMap(({ key }) => {
+      const parts = key.slice("tier-owner-restore:".length).split("\x00");
+      return parts.length === 4 ? [parts] : [];
+    });
     const rows = this.db.query(`
-      SELECT i.* FROM tier_items i
-      WHERE i.routed = 1 AND i.state = 'current'
-        AND i.metadata_tier <> 'secrets' AND i.content_tier <> 'secrets'
-        AND (i.decided_by = 'override' OR EXISTS (
-          SELECT 1 FROM tier_ledger_meta m
-          WHERE m.key = 'tier-owner-restore:' || i.provider || char(0) || i.account_scope || char(0)
-            || i.conversation_key || char(0) || i.provider_item_id
-            AND m.value <> ''
-        ))
-        AND (? IS NULL OR (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?))
+      SELECT * FROM (
+        SELECT i.* FROM tier_items i INDEXED BY tier_items_override_rows
+        WHERE i.decided_by = 'override'
+        UNION
+        -- CROSS JOIN keeps the saved undos outer: each is a primary-key lookup.
+        SELECT i.* FROM json_each(?) j
+        CROSS JOIN tier_items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
+          AND i.conversation_key = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
+      ) cleared
+      WHERE cleared.routed = 1 AND cleared.state = 'current'
+        AND cleared.metadata_tier <> 'secrets' AND cleared.content_tier <> 'secrets'
+        AND (? IS NULL OR (cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id) > (?, ?, ?, ?))
         AND NOT EXISTS (
           SELECT 1 FROM tier_overrides o
-          WHERE o.provider = i.provider AND o.account_scope = i.account_scope
-            AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+          WHERE o.provider = cleared.provider AND o.account_scope = cleared.account_scope
+            AND o.conversation_key = cleared.conversation_key AND o.provider_item_id = cleared.provider_item_id
         )
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+      ORDER BY cleared.provider, cleared.account_scope, cleared.conversation_key, cleared.provider_item_id
       LIMIT ?
-    `).all(after ? 1 : null, after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null, Math.max(1, Math.min(limit, 1000)));
+    `).all(JSON.stringify(restoreIdentities), after ? 1 : null, after?.provider ?? null, after?.accountScope ?? null, after?.conversationKey ?? null, after?.providerItemId ?? null, Math.max(1, Math.min(limit, 1000)));
     return rows.map(recordFromRow);
   }
   settledDecisionBeforeOverride(identity) {
@@ -21453,6 +21480,7 @@ function runSteps(steps) {
 }
 var EXTRACTION_CANDIDATE_WINDOW = 500;
 var EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000;
+var MISSING_EMBEDDING_CHUNK_WINDOW = 20000;
 var SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 var HIDDEN_CHILD_PARENT_SLICE = 500;
 async function runStepsInTurns(steps) {
@@ -24867,7 +24895,17 @@ ${parentKey(ref)}`, { ref, origin });
     }));
   }
   authorCoverage() {
-    return this.db.query(`
+    const read = this.authorCoverageRead();
+    return authorCoverageRows(this.db.query(read.sql).all(...read.params));
+  }
+  async authorCoverageOffThread() {
+    if (!offThreadReadsSupported(this.dbPath))
+      return this.authorCoverage();
+    const read = this.authorCoverageRead();
+    return authorCoverageRows(await withOffThreadSnapshot(this.dbPath, async (run) => run(read)));
+  }
+  authorCoverageRead() {
+    return { mode: "all", params: [], sql: `
       SELECT provider, COUNT(*) AS items,
         SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
           THEN 1 ELSE 0 END) AS without_author
@@ -24875,11 +24913,7 @@ ${parentKey(ref)}`, { ref, origin });
       WHERE tombstoned = 0 AND parent_local_item_id IS NULL
       GROUP BY provider
       ORDER BY provider
-    `).all().map((row) => ({
-      provider: row.provider,
-      items: row.items,
-      itemsWithoutAuthor: row.without_author ?? 0
-    }));
+    ` };
   }
   senderAggregation(options) {
     if (this.family !== "chat") {
@@ -25413,6 +25447,16 @@ ${parentKey(ref)}`, { ref, origin });
       return false;
     const version = sourceVersion ?? this.db.query("SELECT source_version FROM items WHERE local_item_id = ? AND tombstoned = 0").get(localItemId)?.source_version ?? "";
     return grant.source_version === version;
+  }
+  hasOnDemandGrant(identity) {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get())
+      return false;
+    return this.db.query(`
+      SELECT 1 FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
   }
   onDemandReadCandidate(providerItemId) {
     const rows = this.db.query("SELECT local_item_id FROM items WHERE provider_item_id = ? AND tombstoned = 0 LIMIT 2").all(providerItemId);
@@ -27905,11 +27949,48 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
     return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
   }
-  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}) {
+  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
     if (limit <= 0)
       return [];
     const tierHidden = await this.tierHiddenItemPksInTurns();
-    return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
+    const modelId = embedder.modelId;
+    const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
+    const failed = this.embeddingFailureState;
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
+    const query = this.db.query(`
+      SELECT c.chunk_pk AS chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+      ORDER BY c.chunk_pk ASC
+    `);
+    const maxChunkPk = this.db.query("SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks").get().n;
+    const seen = new Set;
+    const found = [];
+    for (let after = 0;after < maxChunkPk && found.length < limit; after += windowChunks) {
+      if (after > 0)
+        await new Promise((resolve) => setImmediate(resolve));
+      const rows = query.all(modelId, after, after + windowChunks, ...params);
+      for (const row of rows) {
+        if (seen.has(row.item_pk))
+          continue;
+        seen.add(row.item_pk);
+        if (failed?.has(row.local_item_id))
+          continue;
+        found.push(row.local_item_id);
+        if (found.length === limit)
+          break;
+      }
+    }
+    return found;
   }
   async embeddingSweepInventory(provider, scope = {}, stopAtMs) {
     const started = Date.now();
@@ -27989,12 +28070,23 @@ ${parentKey(ref)}`, { ref, origin });
     return rows.map((row) => row.local_item_id);
   }
   embeddingBacklogEstimate(modelId, embedder, scope, options = {}) {
-    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
+    const read = this.embeddingBacklogRead(modelId, embedder, scope, options, true);
+    const row = this.db.query(read.sql).get(...read.params);
+    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+  }
+  async embeddingBacklogEstimateOffThread(modelId, embedder, scope, options = {}) {
+    if (!offThreadReadsSupported(this.dbPath))
+      return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
+    const read = this.embeddingBacklogRead(modelId, embedder, scope, options, false);
+    const row = await withOffThreadSnapshot(this.dbPath, async (run) => run(read));
+    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+  }
+  embeddingBacklogRead(modelId, embedder, scope, options, connectionLocal) {
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
     const scoped = statusScopeContentFilter(scope);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
-    const params = [...tierExclusion.params, ...privateTier.params, ...scoped.params];
-    const row = this.db.query(`
+    return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
@@ -28002,30 +28094,19 @@ ${parentKey(ref)}`, { ref, origin });
       WHERE i.tombstoned = 0
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
-    `).get(modelId, ...params);
-    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    ` };
   }
   pdfExtractionBacklog() {
-    const row = this.db.query(`
-      SELECT
-        SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
-        SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
-        COALESCE(SUM(chars), 0) AS chars
-      FROM (
-        SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
-        FROM items i
-        WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
-      )
-    `).get();
-    return {
-      pendingPdfs: row.pending ?? 0,
-      extractedPdfs: row.extracted ?? 0,
-      extractedChars: row.chars
-    };
+    return pdfBacklogFromRow(this.db.query(PDF_EXTRACTION_BACKLOG_SQL).get());
   }
-  embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false) {
+  async pdfExtractionBacklogOffThread() {
+    if (!offThreadReadsSupported(this.dbPath))
+      return this.pdfExtractionBacklog();
+    return pdfBacklogFromRow(await withOffThreadSnapshot(this.dbPath, async (run) => run({ sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: "get" })));
+  }
+  embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false, connectionLocal = true) {
     const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
-    if (this.visibilityJournal && this.visibilitySqlMemo) {
+    if (connectionLocal && this.visibilityJournal && this.visibilitySqlMemo) {
       const children = tierExcluded.hidden === this.visibilitySqlMemo.value.hidden ? [] : tierExcluded.hidden;
       return {
         filter: `AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v
@@ -30453,6 +30534,23 @@ function connectorStoreEmbeddingInputSha256(rows) {
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
   return digest.digest("hex");
+}
+function authorCoverageRows(rows) {
+  return rows.map((row) => ({ provider: row.provider, items: row.items, itemsWithoutAuthor: row.without_author ?? 0 }));
+}
+var PDF_EXTRACTION_BACKLOG_SQL = `
+  SELECT
+    SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
+    SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
+    COALESCE(SUM(chars), 0) AS chars
+  FROM (
+    SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
+    FROM items i
+    WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
+  )
+`;
+function pdfBacklogFromRow(row) {
+  return { pendingPdfs: row.pending ?? 0, extractedPdfs: row.extracted ?? 0, extractedChars: row.chars };
 }
 function statusScopeContentFilter(scope) {
   if (!scope)

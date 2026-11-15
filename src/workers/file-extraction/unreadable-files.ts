@@ -22,6 +22,8 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { archiveFormatForProvider } from '../../core/archive-formats.ts';
+import { sourceExclusionFileExtension } from '../../core/source-ingestion-exclusions.ts';
+import { UNSUPPORTED_FORMATS_SHOWN } from '../dashboard/answer-ready-coverage.ts';
 import type { ExtractionItemRef } from './types.ts';
 import type { ExtractionUnreadableItem, ExtractionUnreadableVerdict, ItemExtractionOutcome } from './job-store.ts';
 import type { TierLedgerIdentity } from '../classification/tier-ledger.ts';
@@ -263,6 +265,51 @@ export interface UnreadableFileEntry {
 export interface UnreadableRecheck {
   unreadable: number;
   blocked: number;
+  /**
+   * Of `unreadable`, the files in a format Olympus has no reader for
+   * (unreadableFileReason 'unsupported'): a known gap, not a broken reader,
+   * so they never raise the many-unreadable alarm.
+   */
+  unsupported?: number;
+  /**
+   * The commonest formats of those files (".heic"), most first, at most UNSUPPORTED_FORMATS_SHOWN.
+   */
+  unsupportedFormats?: string[];
+}
+
+/**
+ * A file's format as the owner knows it: its extension, else the subtype of its media type.
+ */
+export function unreadableFileFormat(item: Pick<ExtractionUnreadableItem, 'ref'>): string | undefined {
+  const ext = sourceExclusionFileExtension(item.ref.name ?? '');
+  if (ext && ext.length <= 9) return ext;
+  const subtype = item.ref.mimeType?.split(';')[0]?.split('/')[1]?.trim().toLowerCase();
+  return subtype && subtype.length <= 40 && [...subtype].every((c) => SUBTYPE_CHARS.includes(c)) ? subtype : undefined;
+}
+const SUBTYPE_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789.+-';
+
+/**
+ * Counts the listed items of a corpus by verdict; turn() yields between slices on a long list.
+ */
+class RecheckTally {
+  private unreadable = 0;
+  private blocked = 0;
+  private unsupported = 0;
+  private readonly formats = new Map<string, number>();
+  add(item: ExtractionUnreadableItem, verdict: ExtractionUnreadableVerdict): void {
+    if (verdict === 'blocked_policy') { this.blocked += 1; return; }
+    if (verdict !== 'unreadable') return;
+    this.unreadable += 1;
+    if (unreadableFileReason(item.errorKind) !== 'unsupported') return;
+    this.unsupported += 1;
+    const format = unreadableFileFormat(item);
+    if (format) this.formats.set(format, (this.formats.get(format) ?? 0) + 1);
+  }
+  value(): UnreadableRecheck {
+    const formats = [...this.formats].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, UNSUPPORTED_FORMATS_SHOWN).map(([format]) => format);
+    return { unreadable: this.unreadable, blocked: this.blocked,
+      ...(this.unsupported > 0 ? { unsupported: this.unsupported, unsupportedFormats: formats } : {}) };
+  }
 }
 
 export interface UnreadableFiles {
@@ -520,17 +567,14 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
 
   async function recount(corpusId: string): Promise<void> {
     const items = listed(corpusId);
-    let unreadable = 0;
-    let blocked = 0;
+    const tally = new RecheckTally();
     for (let index = 0; index < items.length; index += 1) {
       if (index > 0 && index % RECOUNT_SLICE === 0) {
         await (options.turn?.() ?? new Promise<void>((resolve) => setImmediate(resolve)));
       }
-      const verdict = verdictOf(items[index]!);
-      if (verdict === 'unreadable') unreadable += 1;
-      else if (verdict === 'blocked_policy') blocked += 1;
+      tally.add(items[index]!, verdictOf(items[index]!));
     }
-    counted.set(corpusId, { at: now(), value: { unreadable, blocked } });
+    counted.set(corpusId, { at: now(), value: tally.value() });
   }
 
   function scheduleRecount(corpusId: string): void {
@@ -548,14 +592,9 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
         if (!last || now() - last.at >= options.countsMaxAgeMs) scheduleRecount(corpusId);
         return last?.value;
       }
-      let unreadable = 0;
-      let blocked = 0;
-      for (const item of listed(corpusId)) {
-        const verdict = verdictOf(item);
-        if (verdict === 'unreadable') unreadable += 1;
-        else if (verdict === 'blocked_policy') blocked += 1;
-      }
-      return { unreadable, blocked };
+      const tally = new RecheckTally();
+      for (const item of listed(corpusId)) tally.add(item, verdictOf(item));
+      return tally.value();
     },
 
     names(corpusIds, limit) {

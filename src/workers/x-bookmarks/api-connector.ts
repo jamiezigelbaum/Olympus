@@ -1023,7 +1023,7 @@ function completedReconciliationAcquisition(
         ...(!completed.globalVerificationMatched
           ? ['x_reconcile_global_verification_mismatch_removals_preserved']
           : []),
-        ...(completed.coverageScope === 'recency_window'
+        ...(completed.coverageScope === 'recency_window' && completed.windowBoundaryVerified
           ? ['x_reconcile_provider_window_boundary_verified']
           : []),
         ...(completed.truncationRetries > 0

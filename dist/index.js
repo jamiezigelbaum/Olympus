@@ -2878,6 +2878,7 @@ var init_olympus_layout = __esm(() => {
   SHARED_DATA_FILES = {
     registry: "registry.json",
     "data-owner-lock": "data-owner.lock",
+    "engine-process-lock": "engine-process.lock",
     "remote-connections": "remote-connections.sqlite",
     "source-dashboard": "source-dashboard.sqlite",
     "source-scheduler": "source-scheduler.sqlite",
@@ -3085,6 +3086,8 @@ class ControlPathHeadroom {
   lastTurnAt;
   pendingTurn;
   lastLagMs = 0;
+  maxLagMs = 0;
+  overBudget = 0;
   heartbeat;
   expectedBeatAt = 0;
   turns = 0;
@@ -3141,7 +3144,14 @@ class ControlPathHeadroom {
     return pending;
   }
   snapshot() {
-    return { turns: this.turns, rests: this.rests, freezes: this.freezes, lagMs: Math.round(this.lastLagMs) };
+    return {
+      turns: this.turns,
+      rests: this.rests,
+      freezes: this.freezes,
+      lagMs: Math.round(this.lastLagMs),
+      maxLagMs: Math.round(this.maxLagMs),
+      overBudget: this.overBudget
+    };
   }
   stop() {
     if (this.heartbeat)
@@ -3156,6 +3166,10 @@ class ControlPathHeadroom {
       const now = this.now();
       this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
       this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.lastLagMs > this.maxLagMs)
+        this.maxLagMs = this.lastLagMs;
+      if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)
+        this.overBudget += 1;
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(",") || "none";
@@ -3165,7 +3179,7 @@ class ControlPathHeadroom {
     this.heartbeat.unref?.();
   }
 }
-var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
+var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_LAG_COUNTED_MS = 250, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
 var init_control_path_headroom = __esm(() => {
   init_engine_split();
   controlPathHeadroom = new ControlPathHeadroom;
@@ -13815,6 +13829,10 @@ var init_vocabulary = __esm(() => {
     damaged_or_unsupported: {
       one: "{count} file Olympus can't read at all",
       other: "{count} files Olympus can't read at all"
+    },
+    unsupported_format: {
+      one: "{count} file in a format Olympus can't read yet",
+      other: "{count} files in formats Olympus can't read yet"
     }
   };
   DASHBOARD_SOURCE_FAILURE_WORDS = {
@@ -13885,7 +13903,6 @@ var init_vocabulary = __esm(() => {
       checked: "checked {when}",
       progress: "In progress",
       left: "about {duration} left",
-      openPrivacy: "Open Privacy",
       waitBudget: "daily {api} API budget used",
       waitRateLimit: "{api} rate limit reached",
       resumes: "resumes at {local} ({utc} UTC)",
@@ -14694,8 +14711,8 @@ var init_vocabulary = __esm(() => {
     descriptionStart: "Describe what's private",
     editLabel: "Edit what's private",
     dashboardPending: {
-      one: "{n} item waiting to be checked",
-      many: "{n} items waiting to be checked"
+      one: "{n} item waiting for the private model",
+      many: "{n} items waiting for the private model"
     }
   };
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
@@ -15438,6 +15455,8 @@ var init_main_thread_sql_trace = __esm(() => {
 var NO_EXTRACTION_JOB_OUTCOME, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
   init_archive_formats();
+  init_source_ingestion_exclusions();
+  init_answer_ready_coverage();
   NO_EXTRACTION_JOB_OUTCOME = Object.freeze({
     status: "skipped_unsupported",
     lastErrorKind: "no_extractor",
@@ -19637,7 +19656,7 @@ var init_telegram_messages = __esm(() => {
 });
 
 // src/workers/source-index/status.ts
-var DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS;
+var DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, STORE_UNCHANGED_REUSE_MS;
 var init_status = __esm(() => {
   init_corpus();
   init_embedding_cost_estimates();
@@ -19661,6 +19680,7 @@ var init_status = __esm(() => {
     readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS
   });
   STORE_STATUS_REUSE_MS = 5 * 60000;
+  STORE_UNCHANGED_REUSE_MS = 60 * 60000;
 });
 
 // src/core/public-source-capabilities.ts
@@ -26045,6 +26065,8 @@ var installing = new Map;
 
 // src/core/engine-store-copies.ts
 init_boot_progress();
+init_data_owner_lock();
+init_operation_error();
 init_upgrade_store_copies();
 
 // src/core/linux-engine-service.ts

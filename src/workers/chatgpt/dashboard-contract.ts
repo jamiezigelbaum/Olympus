@@ -353,7 +353,16 @@ export interface DashboardViewModelV1 {
    * `needsYou` carries `{id: 'privacy:setup'}` whose fix is
    * `olympus_privacy_get`. Counts only; never a description or a rule.
    */
-  privacy?: { configured: boolean; pendingCount: number; ruleCount: number };
+  privacy?: {
+    configured: boolean; pendingCount: number; ruleCount: number;
+    /**
+     * Contract v1 addition (2026-11-15): how many items a minute the private
+     * model has been checking, when measured, so Home can say about how long
+     * the waiting items take. The waiting items are machine work, In progress
+     * on Home, never Needs you.
+     */
+    judgePerMinute?: number;
+  };
   /**
    * Contract v1 addition (2026-10-10, remote mode): present only when the
    * engine declares it runs on a server (core/remote-open.ts; owner decision:

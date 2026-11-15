@@ -864,7 +864,7 @@ export async function installEngineVerified(options: EngineInstallOptions & { he
   // The new version is stopped before the stores go back, so the previous
   // one the installer puts back next opens them as they were (#1639).
   const restored = copied ? putMacStoresBack(copied) : [];
-  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` Its stores were put back as they were before it (${restored.length}), and it was stopped.` : ''}` };
+  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` It was stopped. Stores put back as they were before the update: ${[...new Set(restored)].join(', ')}.` : ''}` };
 }
 
 interface MacStoreCopies { env: Record<string, string>; exec: EngineExec; target: string }
@@ -891,9 +891,15 @@ function copyMacStoresBeforeReplacing(options: EngineInstallOptions): MacStoreCo
   waitForQuietEngine(options);
   mustSucceed(exec('launchctl', ['bootout', target]), 'stop the previous engine to copy its stores');
   for (let waited = 0; waited < 10_000 && launchctlLoaded(exec, target); waited += 250) sleepSync(250);
-  const env = { HOME: homeDir, OLYMPUS_ENGINE_HOST: '1' };
+  // The data root the engine's workers resolve: their worker.env can move it (XDG_DATA_HOME), so the copies, the put-back
+  // and the locks they hold read it too, never only the default under HOME (Codex, 15 Nov 2026).
+  const env = definedValues(environmentWithWorkerSetupEnv({ env: { HOME: homeDir, OLYMPUS_ENGINE_HOST: '1' }, workerEnvPath: paths.workerEnvPath }));
   copyEngineStores(env, { bunBin: program.runtimePath, log: (line) => process.stderr.write(`${line}\n`) });
   return { env, exec, target };
+}
+
+function definedValues(env: Record<string, string | undefined>): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
 }
 
 function putMacStoresBack(copied: MacStoreCopies): string[] {

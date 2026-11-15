@@ -60,3 +60,38 @@ describe('the store copies an engine install takes', () => {
     expect(existsSync(`${store}.pre-schema-upgrade.bak`)).toBe(true);
   }, 30_000);
 });
+
+describe('the copy and the put-back wait for the stopped engine to let go of its data', () => {
+  // Mac forced-failure leg, 15 Nov 2026: launchd reported the new version stopped while it was still shutting down, it
+  // opened a store the put-back had just restored and migrated it again, and the restored previous version refused it.
+  // The owner (the background or a single engine), and the split's front, which holds only the engine process share.
+  for (const [who, take] of [['the data owner', 'holdDataOwnerLock(env)'], ['the split front', "takeWorkerDataOwnerLock(env, { engineRole: 'front' })"]] as const) test(`while ${who} is still alive, nothing is put back and the refusal says so`, () => {
+    const { env, body, update } = setup();
+    copyEngineStores(env, { bunBin: process.execPath });
+    update();
+    const owner = Bun.spawn([process.execPath, '-e', `
+      const { holdDataOwnerLock, takeWorkerDataOwnerLock } = await import(${JSON.stringify(join(import.meta.dir, '..', 'src', 'core', 'data-owner-lock.ts'))});
+      const env = ${JSON.stringify(env)};
+      ${take};
+      console.log('held');
+      await new Promise(() => {});
+    `], { stdout: 'pipe' });
+    try {
+      const reader = owner.stdout.getReader();
+      return reader.read().then(() => {
+        expect(() => restoreEngineStores(env, { ownerWaitMs: 200 })).toThrow('an Olympus process still owns its data');
+        expect(body()).toBe('new');
+        expect(workerUpgradeInFlight(env)).toBe(true);
+        owner.kill('SIGKILL');
+        return owner.exited;
+      }).then(() => {
+        // Once it has exited, the put-back goes ahead.
+        expect(restoreEngineStores(env, { ownerWaitMs: 5_000 })).toEqual(['ledger.sqlite']);
+        expect(body()).toBe('old');
+      });
+    } catch (error) {
+      owner.kill('SIGKILL');
+      throw error;
+    }
+  }, 30_000);
+});

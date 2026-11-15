@@ -13,7 +13,7 @@ import {
 import {
   DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
   STORE_STATUS_CHANGED_REUSE_MS,
-  STORE_STATUS_REUSE_MS,
+  STORE_STATUS_REUSE_MS, STORE_UNCHANGED_REUSE_MS,
   createSourceIndexStatusHandler,
   resolveStatusRetrievalAvailability,
 } from '../src/workers/source-index/status.ts';
@@ -70,6 +70,7 @@ describe('connector-store status readiness', () => {
       // The reused sets are built in turns before the one count, not again while it is fresh.
       expect(prepared).toBe(1);
       now += STORE_STATUS_REUSE_MS + 1;
+      writtenSinceEveryRead(store);
       // The dashboard gets the last status at once; the recount runs behind it.
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
       await handler.settled!();
@@ -79,6 +80,37 @@ describe('connector-store status readiness', () => {
       await handler.status({ include_items: false });
       expect(reads).toBe(4);
       expect(prepared).toBe(2);
+    } finally { store.close(); }
+  });
+
+  test('a store nothing has written to is not counted again until the unchanged window ends', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let reads = 0;
+    const read = store.status.bind(store);
+    store.status = ((...args: Parameters<typeof store.status>) => { reads += 1; return read(...args); }) as typeof store.status;
+    let now = 1_000_000;
+    try {
+      await store.syncFromConnector(connector([file('first.txt', 'synthetic text')]), { fetchContent: true });
+      const handler = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now });
+      const shown = async () => {
+        await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+        await handler.settled!();
+        return (await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 })).corpora[0] as { counts: Record<string, number> };
+      };
+      expect((await shown()).counts.indexed_items).toBe(1);
+      expect(reads).toBe(1);
+      // Past the plain reuse window, an untouched store keeps its counts.
+      now += STORE_STATUS_REUSE_MS * 3;
+      expect((await shown()).counts.indexed_items).toBe(1);
+      expect(reads).toBe(1);
+      // A write is counted at the next recount.
+      await store.syncFromConnector(connector([file('first.txt', 'synthetic text'), file('second.txt', 'more synthetic text')]), { fetchContent: true });
+      expect((await shown()).counts.indexed_items).toBe(2);
+      expect(reads).toBe(2);
+      // And an untouched store is still counted again once the unchanged window ends.
+      now += STORE_UNCHANGED_REUSE_MS + 1;
+      await shown();
+      expect(reads).toBe(3);
     } finally { store.close(); }
   });
 
@@ -137,6 +169,7 @@ describe('connector-store status readiness', () => {
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
       expect([backlogReads, pdfReads]).toEqual([1, 1]);
       now += STORE_STATUS_REUSE_MS + 1;
+      writtenSinceEveryRead(store);
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
       await handler.settled!();
       expect([backlogReads, pdfReads]).toEqual([2, 2]);
@@ -620,7 +653,10 @@ describe('connector-store status readiness', () => {
     try {
       await handler.status({ corpus_id: CORPUS_ID }, { countsMaxAgeMs: 300_000 });
       await handler.status({ corpus_id: CORPUS_ID });
-      expect(seen).toEqual([300_000, undefined]);
+      // A snapshot may build a corpus twice (once more after its first off-thread counts land): every ask carries its age.
+      expect(seen.length).toBeGreaterThanOrEqual(2);
+      expect(seen.slice(0, -1).every((age) => age === 300_000)).toBe(true);
+      expect(seen.at(-1)).toBeUndefined();
     } finally {
       store.close();
     }
@@ -725,3 +761,9 @@ describe('status build shares the worker thread', () => {
     } finally { for (const store of stores) store.close(); }
   });
 });
+
+/** The store reads as written to since every count, as a busy store would (status.ts unchangedMarker). */
+function writtenSinceEveryRead(store: LocalConnectorStore): void {
+  let writes = 0;
+  store.changeMarker = () => `written:${writes++}`;
+}

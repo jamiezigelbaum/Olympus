@@ -154,12 +154,14 @@ describe('X provider-window reconciliation', () => {
       boundaryFingerprintSha256: evidence.fingerprintSha256,
       algorithmVersion: evidence.algorithmVersion,
     });
-    expect(() => mixed.recordGlobalVerificationPage({
+    // A mixed termination proves nothing about removals: the run goes on
+    // without removal authority and keeps what it read (15 Nov 2026).
+    expect(mixed.recordGlobalVerificationPage({
       account: ACCOUNT,
       page: { posts: [bookmark('3')] },
       requestedSize: 100,
       limits: LIMITS,
-    })).toThrow(ReconcileWindowBoundaryMismatchError);
+    })).toMatchObject({ phase: 'folders', globalRemovalAuthoritative: false, windowBoundaryVerified: false });
     mixed.close();
 
     const tokenFree = new LocalXBookmarksReconcileStateStore(':memory:');

@@ -1224,7 +1224,7 @@ describe('the dashboard Privacy row', () => {
     const host = mount({ olympus_dashboard: () => ({ structuredContent: dashboard }), [P.get]: () => privacyResult(DESCRIPTION, SAVED_RULES) });
     host.push({ structuredContent: dashboard });
     const text = host.text();
-    const order = ['Sources', W.section, 'Uses your description and 3 always-private rules.', '4 items waiting to be checked', 'Progress', 'Models'];
+    const order = ['Sources', W.section, 'Uses your description and 3 always-private rules.', '4 items waiting for the private model', 'Progress', 'Models'];
     let at = -1;
     for (const marker of order) {
       const next = text.indexOf(marker, at + 1);
@@ -1234,7 +1234,7 @@ describe('the dashboard Privacy row', () => {
     const edit = host.button(W.editLabel);
     expect(edit.textContent).toBe(W.edit);
     expect(edit.className).toBe('btn');
-    expect(host.doc.querySelector('.privacy-row .muted')!.textContent).toBe('4 items waiting to be checked');
+    expect(host.doc.querySelector('.privacy-row .muted')!.textContent).toBe('4 items waiting for the private model');
     edit.click();
     await host.settle();
     expect(host.text()).toContain(W.title);
