@@ -2068,12 +2068,14 @@ async function scaleHost(): Promise<ScaleHost> {
   };
 }
 
-async function archiveScaleCommand(format: string, seed: string): Promise<never> {
+async function archiveScaleCommand(format: string, seed: string, count?: number, boundS?: number): Promise<never> {
   const roles = ownEngineRoles();
   if (!roles || roles.front < 1 || roles.background < 1) throw new Error('archive scale needs both split-engine processes running');
   if (!(SCALE_FORMATS as readonly string[]).includes(format)) throw new Error('unknown archive scale format');
   const host = await scaleHost();
-  const observation = format === 'readwise' ? await scaleReadwiseStage(host, seed) : await scaleArchiveStage(host, format as Exclude<ScaleFormat, 'readwise'>, seed);
+  const observation = format === 'readwise'
+    ? await scaleReadwiseStage(host, seed, boundS)
+    : await scaleArchiveStage(host, format as Exclude<ScaleFormat, 'readwise'>, seed, boundS !== undefined ? { importS: boundS } : {}, count);
   emit({ ...observation });
 }
 
@@ -2600,7 +2602,11 @@ async function main(): Promise<void> {
     case 'engine-split-on': return engineSplitOnCommand();
     case 'store-files': return storeFilesCommand(process.argv.includes('--save') ? flag('--save') : undefined, process.argv.includes('--compare') ? flag('--compare') : undefined);
     case 'archive-changed': return await archiveChangedCommand(flag('--seed'), flag('--sizes').split(',').map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0));
-    case 'archive-scale': return await archiveScaleCommand(flag('--format'), flag('--seed'));
+    case 'archive-scale': {
+      const count = rest.includes('--count') ? Number(flag('--count')) : undefined;
+      const boundS = rest.includes('--bound-s') ? Number(flag('--bound-s')) : undefined;
+      return await archiveScaleCommand(flag('--format'), flag('--seed'), count, boundS);
+    }
     case 'archive-scale-cleanup': {
       const host = await scaleHost();
       let restoreError: string | undefined;

@@ -114,3 +114,10 @@ test('scaled Readwise serves every book and document across real API cursors, wi
   const second = await api.fetchExportBooks({ maxPages: 20 });
   expect(second.books).toEqual(scaled.books);
 });
+
+test('a scale fixture cut for a short slot keeps its shape at the smaller count, and is never cut below its special items', () => {
+  const fx = scaleFixture('mbox', 'seed-one', 2_000);
+  expect(fx.expect.messages).toBe(1_995);
+  expect(Buffer.from(fx.bytes).toString('utf8').match(/^From scale@example\.test /gm)?.length).toBe(2_000);
+  expect(() => scaleFixture('mbox', 'seed-one', 300)).toThrow(/at least/);
+});

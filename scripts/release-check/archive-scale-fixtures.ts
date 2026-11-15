@@ -24,10 +24,13 @@ export const SCALE_ENCODINGS = [
 ] as const;
 const qp = (bytes: Uint8Array): string => Array.from(bytes, byte => `=${byte.toString(16).padStart(2, '0').toUpperCase()}`).join('').match(/.{1,60}/g)!.join('=\n');
 
-export function scaleMbox(token: string): Uint8Array {
+/** The smallest count a scale fixture may be cut to: the mbox's special messages run to index 320. */
+export const SCALE_MIN_COUNT = 400;
+
+export function scaleMbox(token: string, total: number = SCALE_COUNTS.mbox): Uint8Array {
   const chunks: string[] = [];
-  const readable = SCALE_COUNTS.mbox - 5;
-  for (let i = 0; i < SCALE_COUNTS.mbox; i++) {
+  const readable = total - 5;
+  for (let i = 0; i < total; i++) {
     const day = scaleDate(Math.min(i, readable - 1), readable);
     const date = new Date(day);
     const [weekday, month, dayOfMonth, year] = [date.toUTCString().slice(0, 3), date.toUTCString().slice(8, 11), date.getUTCDate(), date.getUTCFullYear()];
@@ -58,15 +61,16 @@ export function scaleMbox(token: string): Uint8Array {
   return utf8(chunks.join(''));
 }
 
-export function scaleFixture(format: Exclude<ScaleFormat, 'readwise'>, seed: string): LegFixture {
+/** `count` cuts the fixture to fewer items than its real size (a step that must fit a short VM slot); never below SCALE_MIN_COUNT. */
+export function scaleFixture(format: Exclude<ScaleFormat, 'readwise'>, seed: string, count: number = SCALE_COUNTS[format]): LegFixture {
+  if (!Number.isSafeInteger(count) || count < SCALE_MIN_COUNT) throw new Error(`a scale fixture holds at least ${SCALE_MIN_COUNT} items`);
   const token = fixtureToken(seed, 'scale', format);
   let bytes: Uint8Array;
   let productFormat: string;
   let label: string;
   let extension = '.json';
-  const count = SCALE_COUNTS[format];
   if (format === 'mbox') {
-    bytes = scaleMbox(token); productFormat = 'mbox'; label = 'Mail (mbox)'; extension = '.mbox';
+    bytes = scaleMbox(token, count); productFormat = 'mbox'; label = 'Mail (mbox)'; extension = '.mbox';
   } else if (format === 'roam') {
     productFormat = 'roam-json'; label = 'Roam notes (JSON)';
     bytes = utf8(roamJson(Array.from({ length: count }, (_, i) => {

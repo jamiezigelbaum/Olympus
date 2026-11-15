@@ -198,6 +198,10 @@ export interface RunOptions {
   archiveScale?: boolean;
   /** Only these archive scale formats (default all), to rerun one without the whole ~6 h stage. */
   archiveScaleFormats?: ScaleFormat[];
+  /** Cuts each scale archive to this many items (a step that must fit a short VM slot); its real size when unset. */
+  archiveScaleCount?: number;
+  /** Each scale step's own time bound, in seconds: past it the step fails with what it measured, not with no result. */
+  archiveScaleBoundS?: number;
   budgetMs?: number;
   /** An incremental run (impact.ts): the tested report, its path, and the plan for the change since its commit. The plan's skips are set. */
   carry?: { base: ReleaseReport; path: string; plan: ImpactPlan };
@@ -1443,8 +1447,11 @@ async function runArchiveScaleLeg(run: Run, outDir: string, deadline: number): P
         continue;
       }
       run.log(`archive scale: ${format} (seed ${seed})`);
-      const result = await run.phase(`archive-scale-${format}`, () => run.agent('archive-scale', `--format ${format} --seed ${sh(seed)}`,
-        (SCALE_BOUND_S * (format === 'readwise' ? 2 : 1) + SCALE_REPEAT_S * 2 + SCALE_REMOVE_S * 2 + 600) * 1_000));
+      const count = run.options.archiveScaleCount;
+      const boundS = run.options.archiveScaleBoundS ?? SCALE_BOUND_S;
+      const extra = `${count !== undefined && format !== 'readwise' ? ` --count ${count}` : ''}${run.options.archiveScaleBoundS !== undefined ? ` --bound-s ${boundS}` : ''}`;
+      const result = await run.phase(`archive-scale-${format}`, () => run.agent('archive-scale', `--format ${format} --seed ${sh(seed)}${extra}`,
+        (boundS * (format === 'readwise' ? 2 : 1) + SCALE_REPEAT_S * 2 + SCALE_REMOVE_S * 2 + 600) * 1_000));
       const obs = result.result as ScaleObservation | undefined;
       for (const check of scaleChecks(format, obs)) run.add(check);
       if (obs?.measurement) (run.stage.archiveScale ??= []).push(obs.measurement);
@@ -1896,7 +1903,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-restore] [--skip-server-mode] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>] [--engine-split] [--archive-scale [--archive-scale-formats <format,format>]]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-restore] [--skip-server-mode] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>] [--engine-split] [--archive-scale [--archive-scale-formats <format,format>] [--archive-scale-count <n>] [--archive-scale-bound-s <s>]]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1933,6 +1940,15 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if (archiveScale && has('--carry-from')) throw new Error('--archive-scale cannot carry results');
   const scaleFormats = get('--archive-scale-formats')?.split(',').map((format) => format.trim()).filter(Boolean);
   if (scaleFormats && !archiveScale) throw new Error('--archive-scale-formats needs --archive-scale');
+  const positive = (value: string | undefined, name: string): number | undefined => {
+    if (value === undefined || value === '') return undefined;
+    const n = Number(value);
+    if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`${name} takes a positive whole number`);
+    if (!archiveScale) throw new Error(`${name} needs --archive-scale`);
+    return n;
+  };
+  const scaleCount = positive(get('--archive-scale-count') ?? process.env.RC_ARCHIVE_SCALE_COUNT, '--archive-scale-count');
+  const scaleBoundS = positive(get('--archive-scale-bound-s') ?? process.env.RC_ARCHIVE_SCALE_BOUND_S, '--archive-scale-bound-s');
   if (scaleFormats?.some((format) => !(SCALE_FORMATS as readonly string[]).includes(format)) || scaleFormats?.length === 0) {
     throw new Error(`--archive-scale-formats takes a comma list of ${SCALE_FORMATS.join(', ')}`);
   }
@@ -1992,6 +2008,8 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(has('--engine-split') || archiveScale ? { engineSplit: true } : {}),
     ...(archiveScale ? { archiveScale: true } : {}),
     ...(scaleFormats ? { archiveScaleFormats: scaleFormats as ScaleFormat[] } : {}),
+    ...(scaleCount !== undefined ? { archiveScaleCount: scaleCount } : {}),
+    ...(scaleBoundS !== undefined ? { archiveScaleBoundS: scaleBoundS } : {}),
     ...(carry ? { carry } : {}),
   };
 }

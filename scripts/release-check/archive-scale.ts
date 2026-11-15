@@ -183,8 +183,8 @@ async function repeatImport(host: ScaleHost, driver: JourneyDriver, fx: LegFixtu
   return { already, added: after?.ok && after.archives.every(a => a.messages !== undefined) ? after.archives.reduce((sum, a) => sum + a.messages!, 0) - count : null, ...(already ? {} : { state: last }) };
 }
 
-export async function scaleArchiveStage(host: ScaleHost, format: Exclude<ScaleFormat, 'readwise'>, seed: string, bounds: { importS?: number; repeatS?: number; removeS?: number } = {}): Promise<ScaleObservation> {
-  const fx = scaleFixture(format, seed);
+export async function scaleArchiveStage(host: ScaleHost, format: Exclude<ScaleFormat, 'readwise'>, seed: string, bounds: { importS?: number; repeatS?: number; removeS?: number } = {}, count?: number): Promise<ScaleObservation> {
+  const fx = count === undefined ? scaleFixture(format, seed) : scaleFixture(format, seed, count);
   const obs = empty(format, fx.expect.messages);
   obs.boundS = bounds.importS ?? SCALE_BOUND_S;
   const path = writeFixture(host.home, fx);
