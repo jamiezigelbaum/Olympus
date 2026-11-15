@@ -29,6 +29,7 @@ import {
   LocalXBookmarksApiUsageStore,
   X_BOOKMARKS_WINDOW_REMOVAL_DEBT_STALE_CADENCE_FACTOR,
   defaultXBookmarksLiveSyncConfig,
+  withOwnerXSpend,
   xApiInvocationProvenance,
   xBookmarksReconcileEvidenceCounts,
   type XApiInvocationProvenance,
@@ -347,6 +348,9 @@ export function createXBookmarksConnectorStoreSyncHandler(
 
     async reconcile(request: XBookmarksReconcileRequest = {}): Promise<XBookmarksLiveSyncResult> {
       const attemptedAt = validAttemptedAt(request.attempted_at, now);
+      if (xApiInvocationProvenance(request.provenance) === 'scheduled' && reconcileStateStore) {
+        assertReconcileCanFinishToday({ reconcileStateStore, usageStore, account, config, at: attemptedAt });
+      }
       const connector = createXBookmarksApiSourceConnector({
         ...connectorBase,
         mode: 'reconcile',
@@ -732,6 +736,66 @@ function headReceiptCounts(
   return receipt;
 }
 
+// What one bookmark costs a full check, in X's billed resources: the full
+// pass reads each post with its author and media (about 2.2 on Sparta, 15 Nov
+// 2026: 7,280 for about 3,300 posts), and the verification pass reads it again.
+const RECONCILE_GLOBAL_RESOURCES_PER_POST = 3;
+const RECONCILE_VERIFY_RESOURCES_PER_POST = 1;
+
+export const X_RECONCILE_COST_TO_FINISH_GUARD = 'reconcile_cost_to_finish_guard';
+
+/**
+ * A scheduled full check starts only when it can finish inside the rest of
+ * today's budget (plan, 15 Nov 2026): one that cannot spends the day's budget
+ * and, while a traversal that crosses days is not kept, buys nothing. The
+ * scheduler parks it until the next UTC day with a limit stop that says what
+ * finishing costs, and Run once (operator provenance, never held here) does
+ * finish it.
+ */
+function assertReconcileCanFinishToday(input: {
+  reconcileStateStore: LocalXBookmarksReconcileStateStore;
+  usageStore: LocalXBookmarksApiUsageStore;
+  account: string;
+  config: XBookmarksLiveSyncConfig;
+  at: Date;
+}): void {
+  const expected = input.reconcileStateStore.completedSnapshot(input.account)?.itemsObserved;
+  let staged = 0;
+  let verified = 0;
+  try {
+    const progress = input.reconcileStateStore.progress(input.account);
+    staged = progress.itemsStaged;
+    verified = progress.globalVerifyItemsStaged;
+  } catch {
+    // No traversal under way: a fresh check reads everything.
+  }
+  const usage = input.usageStore.status({ account: input.account, config: input.config, now: input.at });
+  // Today's budget as the owner may have raised it.
+  const budget = withOwnerXSpend(input.config, input.at).dailyEstimatedSpendMicrousd;
+  const remaining = Math.max(0, budget - usage.estimated_spend_microusd);
+  const toFinish = expected === undefined
+    ? undefined
+    : (Math.max(0, expected - staged) * RECONCILE_GLOBAL_RESOURCES_PER_POST
+      + Math.max(0, expected - verified) * RECONCILE_VERIFY_RESOURCES_PER_POST)
+      * input.config.estimatedUnitCostMicrousd;
+  // A size never measured is only known to be too big once a check has been
+  // thrown away unfinished: a first check (a new install) runs and measures.
+  const knownUnfinished = expected === undefined
+    && input.reconcileStateStore.stagedRecoveryStatus(input.account, input.at).last_recovery_receipt_sha256 !== undefined;
+  if (expected === undefined ? !knownUnfinished : toFinish! <= remaining) return;
+  throw new XBookmarksLiveSyncError({
+    errorKind: 'api_request_guard',
+    message: 'X bookmarks full check would not finish inside today\'s budget.',
+    retryAt: nextUtcDay(input.at),
+    degradedReason: X_RECONCILE_COST_TO_FINISH_GUARD,
+    counts: {
+      limit_stop_limit: budget,
+      limit_stop_used: usage.estimated_spend_microusd,
+      ...(toFinish === undefined ? {} : { limit_stop_to_continue: toFinish }),
+    },
+  });
+}
+
 function withGuard(
   result: Omit<XBookmarksLiveSyncResult, 'api_usage'>,
   usage: XApiUsageStatus,
@@ -763,6 +827,10 @@ function withGuard(
   return { ...result, counts: { ...result.counts, ...amounts }, ...(retry ? { retry_at: retry } : {}), api_usage: usage };
 }
 
+function nextUtcDay(date: Date): string {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1)).toISOString();
+}
+
 function validAttemptedAt(value: string | undefined, now: () => Date): Date {
   const attemptedAt = value ? new Date(value) : now();
   if (!Number.isFinite(attemptedAt.getTime())) throw new TypeError('X sync attempted_at must be valid.');
@@ -789,3 +857,4 @@ function validSnapshotTimestamp(value: string | undefined): Date {
 }
 
 // limit-retry: retry:withGuard:retry_at -> x.rate_limit
+// limit-retry: retry:assertReconcileCanFinishToday:retryAt -> x.reconcile_to_finish

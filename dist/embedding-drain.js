@@ -34752,6 +34752,7 @@ var DAILY_LIMITS = new Map(Object.entries({
   head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "X request reserve for new bookmarks reached" },
   head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "X resource-read reserve for new bookmarks reached" },
   head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "X spending reserve for new bookmarks reached" },
+  reconcile_cost_to_finish_guard: { id: "x.reconcile_to_finish", kind: "cost", label: "X full bookmark check costs more than today's budget left" },
   readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
   gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
   google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
@@ -35762,6 +35763,7 @@ var UTC_DAY_SCOPED_DEGRADED_REASONS = new Set([
   "head_api_request_reserve_guard",
   "head_resource_read_reserve_guard",
   "head_cost_reserve_guard",
+  "reconcile_cost_to_finish_guard",
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON

@@ -66991,6 +66991,7 @@ var init_scheduler_markers = __esm(() => {
     "head_api_request_reserve_guard",
     "head_resource_read_reserve_guard",
     "head_cost_reserve_guard",
+    "reconcile_cost_to_finish_guard",
     "provider_rate_limit",
     "x.rate_limit",
     "evernote.rate_limit",
@@ -90995,6 +90996,9 @@ function createXBookmarksConnectorStoreSyncHandler(options) {
     },
     async reconcile(request = {}) {
       const attemptedAt = validAttemptedAt(request.attempted_at, now);
+      if (xApiInvocationProvenance(request.provenance) === "scheduled" && reconcileStateStore) {
+        assertReconcileCanFinishToday({ reconcileStateStore, usageStore, account, config, at: attemptedAt });
+      }
       const connector = createXBookmarksApiSourceConnector({
         ...connectorBase,
         mode: "reconcile",
@@ -91261,6 +91265,34 @@ function headReceiptCounts(counts) {
   });
   return receipt;
 }
+function assertReconcileCanFinishToday(input) {
+  const expected = input.reconcileStateStore.completedSnapshot(input.account)?.itemsObserved;
+  let staged = 0;
+  let verified = 0;
+  try {
+    const progress = input.reconcileStateStore.progress(input.account);
+    staged = progress.itemsStaged;
+    verified = progress.globalVerifyItemsStaged;
+  } catch {}
+  const usage = input.usageStore.status({ account: input.account, config: input.config, now: input.at });
+  const budget = withOwnerXSpend(input.config, input.at).dailyEstimatedSpendMicrousd;
+  const remaining = Math.max(0, budget - usage.estimated_spend_microusd);
+  const toFinish = expected === undefined ? undefined : (Math.max(0, expected - staged) * RECONCILE_GLOBAL_RESOURCES_PER_POST + Math.max(0, expected - verified) * RECONCILE_VERIFY_RESOURCES_PER_POST) * input.config.estimatedUnitCostMicrousd;
+  const knownUnfinished = expected === undefined && input.reconcileStateStore.stagedRecoveryStatus(input.account, input.at).last_recovery_receipt_sha256 !== undefined;
+  if (expected === undefined ? !knownUnfinished : toFinish <= remaining)
+    return;
+  throw new XBookmarksLiveSyncError({
+    errorKind: "api_request_guard",
+    message: "X bookmarks full check would not finish inside today's budget.",
+    retryAt: nextUtcDay4(input.at),
+    degradedReason: X_RECONCILE_COST_TO_FINISH_GUARD,
+    counts: {
+      limit_stop_limit: budget,
+      limit_stop_used: usage.estimated_spend_microusd,
+      ...toFinish === undefined ? {} : { limit_stop_to_continue: toFinish }
+    }
+  });
+}
 function withGuard(result, usage, config) {
   const guardRetry = usage.guard.state === "ok" || !usage.guard.retry_at || !usage.guard.degraded_reason ? undefined : {
     at: usage.guard.retry_at,
@@ -91273,6 +91305,9 @@ function withGuard(result, usage, config) {
   if (retry === guardRetry && usage.guard.state === "approaching" && Object.keys(amounts).length > 0)
     amounts.limit_stop_advisory = 1;
   return { ...result, counts: { ...result.counts, ...amounts }, ...retry ? { retry_at: retry } : {}, api_usage: usage };
+}
+function nextUtcDay4(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1)).toISOString();
 }
 function validAttemptedAt(value, now) {
   const attemptedAt = value ? new Date(value) : now();
@@ -91297,6 +91332,7 @@ function validSnapshotTimestamp(value) {
   }
   return timestamp;
 }
+var RECONCILE_GLOBAL_RESOURCES_PER_POST = 3, RECONCILE_VERIFY_RESOURCES_PER_POST = 1, X_RECONCILE_COST_TO_FINISH_GUARD = "reconcile_cost_to_finish_guard";
 var init_live_sync2 = __esm(() => {
   init_tiered_store_set();
   init_api_connector();
@@ -91327,6 +91363,9 @@ function syncSchedulerLimitStop(db, previousReason, state) {
       since: state.updatedAt,
       limit: state.lastCounts?.limit_stop_limit === undefined ? null : state.lastCounts.limit_stop_limit / (current.kind === "cost" ? 1e6 : 1),
       used: state.lastCounts?.limit_stop_used === undefined ? null : state.lastCounts.limit_stop_used / (current.kind === "cost" ? 1e6 : 1),
+      ...state.lastCounts?.limit_stop_to_continue === undefined ? {} : {
+        toContinue: { cost: state.lastCounts.limit_stop_to_continue / (current.kind === "cost" ? 1e6 : 1) }
+      },
       resumesAt: dailyResume(state.updatedAt, state.notBeforeAt)
     }, db);
 }
@@ -91346,6 +91385,7 @@ var init_scheduler_limit_stops = __esm(() => {
     head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "X request reserve for new bookmarks reached" },
     head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "X resource-read reserve for new bookmarks reached" },
     head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "X spending reserve for new bookmarks reached" },
+    reconcile_cost_to_finish_guard: { id: "x.reconcile_to_finish", kind: "cost", label: "X full bookmark check costs more than today's budget left" },
     readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
     gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
     google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
@@ -205208,6 +205248,7 @@ var init_source_scheduler = __esm(() => {
     "head_api_request_reserve_guard",
     "head_resource_read_reserve_guard",
     "head_cost_reserve_guard",
+    "reconcile_cost_to_finish_guard",
     READWISE_DAILY_REQUEST_GUARD_REASON,
     GMAIL_DAILY_REQUEST_GUARD_REASON,
     GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON

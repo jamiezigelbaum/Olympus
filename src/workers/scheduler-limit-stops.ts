@@ -16,6 +16,8 @@ export const DAILY_LIMITS = new Map<string, { id: string; kind: 'cost' | 'reques
   head_api_request_reserve_guard: { id: 'x.head_reserve_requests', kind: 'requests', label: 'X request reserve for new bookmarks reached' },
   head_resource_read_reserve_guard: { id: 'x.head_reserve_reads', kind: 'requests', label: 'X resource-read reserve for new bookmarks reached' },
   head_cost_reserve_guard: { id: 'x.head_reserve_cost', kind: 'cost', label: 'X spending reserve for new bookmarks reached' },
+  // A scheduled full check that would not finish inside today's budget waits for Run once.
+  reconcile_cost_to_finish_guard: { id: 'x.reconcile_to_finish', kind: 'cost', label: 'X full bookmark check costs more than today\'s budget left' },
   readwise_daily_api_request_guard: { id: 'readwise.daily_requests', kind: 'requests', label: 'daily Readwise API budget used' },
   gmail_daily_api_request_guard: { id: 'gmail.daily_requests', kind: 'requests', label: 'daily Gmail API budget used' },
   google_drive_daily_api_request_guard: { id: 'drive.daily_requests', kind: 'requests', label: 'daily Google Drive API budget used' },
@@ -50,6 +52,9 @@ export function syncSchedulerLimitStop(db: Database, previousReason: string | un
     id: current.id, subject, since: state.updatedAt,
     limit: state.lastCounts?.limit_stop_limit === undefined ? null : state.lastCounts.limit_stop_limit / (current.kind === 'cost' ? 1_000_000 : 1),
     used: state.lastCounts?.limit_stop_used === undefined ? null : state.lastCounts.limit_stop_used / (current.kind === 'cost' ? 1_000_000 : 1),
+    ...(state.lastCounts?.limit_stop_to_continue === undefined ? {} : {
+      toContinue: { cost: state.lastCounts.limit_stop_to_continue / (current.kind === 'cost' ? 1_000_000 : 1) },
+    }),
     resumesAt: dailyResume(state.updatedAt, state.notBeforeAt),
   }, db);
 }

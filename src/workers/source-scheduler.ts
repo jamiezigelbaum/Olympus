@@ -3079,6 +3079,7 @@ const UTC_DAY_SCOPED_DEGRADED_REASONS: ReadonlySet<string> = new Set([
   'head_api_request_reserve_guard',
   'head_resource_read_reserve_guard',
   'head_cost_reserve_guard',
+  'reconcile_cost_to_finish_guard',
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
