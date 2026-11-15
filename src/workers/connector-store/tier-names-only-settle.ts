@@ -54,9 +54,13 @@ function* namesOnlySettlePass(options: { set: TieredStoreSet; limit?: number }):
   const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   // A bounded window of the ledger per call, matching or not (listAwaitingTextWindow).
   const { records: rows, resumeAfter } = yield* findInLedger(ledger, () => ledger.listAwaitingTextWindowSteps({ limit, ...(after ? { after } : {}) }));
-  for (const record of rows) {
+  for (const found of rows) {
     yield* turn();
     report.checked += 1;
+    // Found on an older snapshot: settled from the row as it is now, read by
+    // key, and only while its text is still unread.
+    const record = set.ledger.getCurrent(tierLedgerIdentityOfRecord(found));
+    if (!record?.routed || record.contentRead || record.metadataPending || record.state === 'moving') continue;
     try {
       if (settleOne(set, record)) report.settled += 1;
     } catch {

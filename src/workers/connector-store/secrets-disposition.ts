@@ -288,6 +288,10 @@ export function* retrySecretSideStoreDebtsPass(ledger: TierLedger, limit = 100):
   }
   for (const { holdsCopies, ...identity } of unsettled) {
     yield* turn();
+    // Found on an older snapshot: scrubbed only while the item is still Secrets now.
+    let current: ReturnType<TierLedger['getCurrent']>;
+    try { current = ledger.getCurrent(identity); } catch { continue; }
+    if (current?.contentTier !== 'secrets' && current?.metadataTier !== 'secrets') continue;
     // A settlement the sniffer retries from its queued question (a refused
     // credential: sniffer-resolver.ts `stillOpen`) needs that question: it
     // clears the side stores itself. Any other question is cleared here.

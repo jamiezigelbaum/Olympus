@@ -2501,6 +2501,11 @@ export class TierLedger {
    * What `work` wrote stays written whether it returns or throws, as it would
    * without the hold. Keep `work` short: every other writer waits for it.
    */
+  /** Whether this connection is inside a transaction (a `holdingWrites` hold): what it reads may not be committed yet. */
+  writesHeld(): boolean {
+    return this.db.inTransaction;
+  }
+
   async holdingWrites<T>(work: () => Promise<T>): Promise<T> {
     if (this.db.inTransaction) return work();
     this.db.exec('BEGIN IMMEDIATE');

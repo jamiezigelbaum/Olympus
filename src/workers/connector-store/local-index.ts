@@ -1112,6 +1112,9 @@ type HiddenStep = void | { find: LoopFinder<unknown> };
 type IdentityRow = { idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null };
 type VisibilityUpdate = { identity: TierLedgerIdentity; pks: number[]; flags: TierCorpusVisibility | undefined };
 
+/** Turns the bootstrap finder waits for a write hold on the loop's connections to end before it walks here instead. */
+const VISIBILITY_HOLD_TURNS = 50;
+
 function visibilityFlagged(row: TierCorpusVisibility): boolean {
   return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
 }
@@ -4719,6 +4722,16 @@ export class LocalConnectorStore {
         return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
       },
       offThread: async () => {
+        // The feed cursors were read on this thread's connections. Inside a
+        // transaction (a ledger hold across an await) they can cover writes
+        // the worker's snapshot can't see yet, and the set would install past
+        // a hide it never applied. Wait for the hold to end, a turn at a time;
+        // a hold that outlasts that is walked here, on the connections that
+        // read the cursors.
+        for (let turns = 0; ledger.writesHeld() || this.db.inTransaction; turns += 1) {
+          if (turns >= VISIBILITY_HOLD_TURNS) return this.visibilityBootstrapFinder(ledger).here();
+          await ingestionTurn();
+        }
         const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId));
         if (flagged.length === 0 || !offThreadReadsSupported(this.dbPath)) {
           return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));

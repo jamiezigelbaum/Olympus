@@ -13561,6 +13561,9 @@ class TierLedger {
       return typeof row?.value === "string" && row.value !== "" ? row.value : undefined;
     });
   }
+  writesHeld() {
+    return this.db.inTransaction;
+  }
   async holdingWrites(work) {
     if (this.db.inTransaction)
       return work();
@@ -21925,6 +21928,7 @@ var EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000;
 var MISSING_EMBEDDING_CHUNK_WINDOW = 20000;
 var SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 var HIDDEN_CHILD_PARENT_SLICE = 500;
+var VISIBILITY_HOLD_TURNS = 50;
 function visibilityFlagged(row) {
   return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
 }
@@ -23211,6 +23215,11 @@ class LocalConnectorStore {
         return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
       },
       offThread: async () => {
+        for (let turns = 0;ledger.writesHeld() || this.db.inTransaction; turns += 1) {
+          if (turns >= VISIBILITY_HOLD_TURNS)
+            return this.visibilityBootstrapFinder(ledger).here();
+          await ingestionTurn();
+        }
         const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId));
         if (flagged.length === 0 || !offThreadReadsSupported(this.dbPath)) {
           return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));

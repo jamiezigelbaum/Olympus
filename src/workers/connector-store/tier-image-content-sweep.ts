@@ -54,24 +54,48 @@ function* imageContentSweepPass(options: { set: TieredStoreSet; limit?: number }
   const ledger = set.ledger;
   const state = readState(ledger.readMeta(SWEEP_META_KEY));
   if (state.done) return report;
-  const limit = Math.max(1, options.limit ?? DEFAULT_IMAGE_CONTENT_SWEEP_ROWS);
-  const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...(state.after ? { after: state.after } : {}), limit }));
-  for (const found of rows) {
-    yield* turn();
-    report.scanned += 1;
-    // Found on an older snapshot: judged from the row as it is now, by key.
-    const record = ledger.getCurrent(identityOf(found));
-    if (!record?.routed) continue;
+  // An image that can't be judged yet (a move in flight, a failure) is held
+  // and tried again before the sweep is recorded as done, so its raise is
+  // delayed, never skipped. Too many to remember: the walk starts over.
+  const held: TierLedgerIdentity[] = [];
+  let overflow = state.overflow === true;
+  const attempt = (identity: TierLedgerIdentity): void => {
+    // Found on an older snapshot (or held): judged from the row as it is now, by key.
+    const record = ledger.getCurrent(identity);
+    if (!record?.routed) return;
+    let outcome: boolean | 'deferred';
     try {
-      if (raiseIfImage(set, record)) report.raised += 1;
+      outcome = record.state === 'moving' ? 'deferred' : raiseIfImage(set, record);
     } catch {
-      // Left as it was; the item's next landing judges it as an image.
+      outcome = 'deferred';
     }
-  }
-  if (rows.length >= limit) {
-    report.complete = false;
-    ledger.writeMeta(SWEEP_META_KEY, JSON.stringify({ done: false, after: identityOf(rows.at(-1)!) }));
-    return report;
+    if (outcome === true) report.raised += 1;
+    else if (outcome === 'deferred') {
+      if (held.length < MAX_HELD_IMAGES) held.push(identity);
+      else overflow = true;
+    }
+  };
+  const save = (next: SweepState) => ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(next));
+  if (state.retry) {
+    for (const identity of state.held ?? []) {
+      yield* turn();
+      report.scanned += 1;
+      attempt(identity);
+    }
+  } else {
+    const limit = Math.max(1, options.limit ?? DEFAULT_IMAGE_CONTENT_SWEEP_ROWS);
+    const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...(state.after ? { after: state.after } : {}), limit }));
+    held.push(...(state.held ?? []));
+    for (const found of rows) {
+      yield* turn();
+      report.scanned += 1;
+      attempt(identityOf(found));
+    }
+    if (rows.length >= limit) {
+      report.complete = false;
+      save({ done: false, after: identityOf(rows.at(-1)!), held, ...(overflow ? { overflow: true } : {}) });
+      return report;
+    }
   }
   for (const domain of ['public_safe', 'internal'] as const) {
     const store = set.store(domain);
@@ -82,7 +106,13 @@ function* imageContentSweepPass(options: { set: TieredStoreSet; limit?: number }
       report.stripped += store.stripImageContentRows(found.slice(at, at + STRIP_BATCH), { keep: (identity) => ledger.isRouted(identity) });
     }
   }
-  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify({ done: true }));
+  // Stripping never waits on a held image; only the sweep's done does.
+  if (held.length > 0 || overflow) {
+    report.complete = false;
+    save(overflow ? { done: false } : { done: false, held, retry: true });
+    return report;
+  }
+  save({ done: true });
   return report;
 }
 
@@ -120,11 +150,28 @@ function raiseIfImage(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   return true;
 }
 
-function readState(raw: string | undefined): { done: boolean; after?: TierLedgerIdentity } {
+/** Images held for a retry at most; past it the walk starts over. */
+const MAX_HELD_IMAGES = 1_000;
+
+interface SweepState {
+  done: boolean;
+  after?: TierLedgerIdentity;
+  held?: TierLedgerIdentity[];
+  retry?: boolean;
+  overflow?: boolean;
+}
+
+function readState(raw: string | undefined): SweepState {
   if (!raw) return { done: false };
   try {
-    const parsed = JSON.parse(raw) as { done?: unknown; after?: TierLedgerIdentity };
-    return { done: parsed.done === true, ...(parsed.after ? { after: parsed.after } : {}) };
+    const parsed = JSON.parse(raw) as { done?: unknown; after?: TierLedgerIdentity; held?: unknown; retry?: unknown; overflow?: unknown };
+    return {
+      done: parsed.done === true,
+      ...(parsed.after ? { after: parsed.after } : {}),
+      ...(Array.isArray(parsed.held) ? { held: parsed.held as TierLedgerIdentity[] } : {}),
+      ...(parsed.retry === true ? { retry: true } : {}),
+      ...(parsed.overflow === true ? { overflow: true } : {}),
+    };
   } catch {
     return { done: false };
   }

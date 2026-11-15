@@ -37877,13 +37877,16 @@ function bootProgressPath(env) {
 function workerUpgradeInFlight(env) {
   return existsSync21(sharedDataPath("upgrade-in-flight", env));
 }
-function dataRootFiles(env, keep) {
+function dataRootFiles(env, keep, options = {}) {
   const files = [];
+  const root = olympusDataRoot(env);
   const walk = (directory, top) => {
     let names;
     try {
       names = readdirSync5(directory);
-    } catch {
+    } catch (error) {
+      if (options.strict && !(top && error.code === "ENOENT"))
+        throw error;
       return;
     }
     for (const name of names) {
@@ -37893,7 +37896,9 @@ function dataRootFiles(env, keep) {
       let stat;
       try {
         stat = lstatSync17(path);
-      } catch {
+      } catch (error) {
+        if (options.strict && error.code !== "ENOENT")
+          throw error;
         continue;
       }
       if (stat.isDirectory())
@@ -37902,49 +37907,52 @@ function dataRootFiles(env, keep) {
         files.push(path);
     }
   };
-  walk(olympusDataRoot(env), true);
+  walk(root, true);
   return files.sort();
 }
-function stateFiles(env) {
+function stateFiles(env, strict = false) {
   const record = basename5(sharedDataPath("schema-backups", env));
-  return dataRootFiles(env, (name) => /\.(sqlite|db|jsonl)$/.test(name) && name !== record);
+  return dataRootFiles(env, (name) => /\.(sqlite|db|jsonl)$/.test(name) && name !== record, { strict });
 }
 function markWorkerUpgradeInFlight(env, startedAt) {
   const path = sharedDataPath("upgrade-in-flight", env);
   mkdirSync13(dirname27(path), { recursive: true, mode: 448 });
   const root = olympusDataRoot(env);
-  const stateNow = stateFiles(env).map((file) => relative8(root, file));
+  const stateNow = stateFiles(env, true).map((file) => relative8(root, file));
   writePrivateFileAtomicSync(path, `${JSON.stringify({ started_at: startedAt, state_files: stateNow })}
 `);
 }
-function failedUpdateSetAsidePath(path) {
-  return `${path}.pre-schema-failed.bak`;
+function failedUpdateSetAsidePath(path, startedMs) {
+  return `${path}.pre-schema-${startedMs}.bak`;
 }
-function setAsideStateFilesMadeSinceMark(env, putBack) {
+function markedStateFiles(env) {
   let listed;
   try {
     listed = JSON.parse(readFileSync29(sharedDataPath("upgrade-in-flight", env), "utf8")).state_files;
   } catch {
-    return [];
+    return;
   }
-  if (!Array.isArray(listed))
-    return [];
-  const before = new Set(listed.filter((entry) => typeof entry === "string"));
+  return Array.isArray(listed) ? new Set(listed.filter((entry) => typeof entry === "string")) : undefined;
+}
+function setAsideStateFilesMadeSinceMark(env, before, startedMs) {
   const root = olympusDataRoot(env);
   const setAside = [];
   for (const file of stateFiles(env)) {
     const id = relative8(root, file);
-    if (before.has(id) || putBack.has(file))
+    if (before.has(id))
       continue;
-    const target = failedUpdateSetAsidePath(file);
-    recordSchemaBackup(env, { storeId: id, dbPath: file, backupPath: target });
-    for (const suffix of COMPANIONS)
-      rmSync9(`${target}${suffix}`, { force: true });
-    renameSync4(file, target);
-    for (const suffix of COMPANIONS)
-      if (existsSync21(`${file}${suffix}`))
+    const target = failedUpdateSetAsidePath(file, startedMs);
+    if (existsSync21(target)) {
+      setAside.push(`${id} (made by the update, not set aside: ${basename5(target)} is already there)`);
+      continue;
+    }
+    recordSchemaBackup(env, { storeId: id, dbPath: file, backupPath: target, setAside: true });
+    for (const suffix of COMPANIONS) {
+      if (existsSync21(`${file}${suffix}`) && !existsSync21(`${target}${suffix}`))
         renameSync4(`${file}${suffix}`, `${target}${suffix}`);
-    setAside.push(id);
+    }
+    renameSync4(file, target);
+    setAside.push(`${id} (made by the update, set aside)`);
   }
   return setAside;
 }
@@ -38006,7 +38014,7 @@ function removeAbandonedBackupCopies(backup) {
 function preSchemaBackupsOf(dbPath) {
   const prefix = `${basename5(dbPath)}.pre-schema-`;
   try {
-    return readdirSync5(dirname27(dbPath)).filter((name) => name.startsWith(prefix) && /^(?:\d+|retired|upgrade|failed)\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length))).map((name) => join34(dirname27(dbPath), name));
+    return readdirSync5(dirname27(dbPath)).filter((name) => name.startsWith(prefix) && /^(?:\d+|retired|upgrade)\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length))).map((name) => join34(dirname27(dbPath), name));
   } catch {
     return [];
   }
@@ -38062,7 +38070,7 @@ function ownedBackupName(dbPath, backupPath) {
 }
 function backupsSince(env, sinceMs) {
   return schemaBackups(env).filter((entry) => {
-    if (entry.backupPath === failedUpdateSetAsidePath(entry.dbPath))
+    if (entry.setAside === true)
       return false;
     try {
       return statSync11(entry.backupPath).mtimeMs >= sinceMs;
@@ -38073,26 +38081,31 @@ function backupsSince(env, sinceMs) {
 }
 function restoreSchemaBackupsSince(env, sinceMs) {
   const restored = [];
+  const before = markedStateFiles(env);
+  const root = olympusDataRoot(env);
   const byFile = new Map;
-  for (const entry of backupsSince(env, sinceMs))
+  for (const entry of backupsSince(env, sinceMs)) {
+    if (before && !before.has(relative8(root, entry.dbPath)))
+      continue;
     byFile.set(entry.dbPath, [...byFile.get(entry.dbPath) ?? [], entry]);
+  }
   for (const [dbPath, entries] of byFile) {
     const [earliest, ...later] = entries.sort((a, b) => statSync11(a.backupPath).mtimeMs - statSync11(b.backupPath).mtimeMs);
-    for (const suffix of ["-wal", "-shm", "-journal"])
+    for (const suffix of COMPANIONS)
       rmSync9(`${dbPath}${suffix}`, { force: true });
     renameSync4(earliest.backupPath, dbPath);
     for (const entry of later)
       rmSync9(entry.backupPath, { recursive: true, force: true });
     restored.push(...entries.map((entry) => entry.storeId));
   }
-  for (const id of setAsideStateFilesMadeSinceMark(env, new Set(byFile.keys())))
-    restored.push(`${id} (made by the update, set aside)`);
+  if (before)
+    restored.push(...setAsideStateFilesMadeSinceMark(env, before, sinceMs));
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return restored;
 }
 function removeRecordedSchemaBackups(env) {
-  const removed = schemaBackups(env).filter((entry) => existsSync21(entry.backupPath));
+  const removed = schemaBackups(env).filter((entry) => copyOrPartLeft(entry.backupPath));
   for (const entry of removed)
     removeCopy(entry.backupPath);
   removeAbandonedCopiesOfRecorded(env);
@@ -38105,7 +38118,11 @@ function removeAbandonedCopiesOfRecorded(env) {
     removeAbandonedBackupCopies(backup);
 }
 function removeAllSchemaBackups(env, dryRun) {
-  const copies = [...new Set(schemaBackups(env, false).flatMap((entry) => preSchemaBackupsOf(entry.dbPath)))];
+  const recorded = schemaBackups(env, false);
+  const copies = [...new Set([
+    ...recorded.flatMap((entry) => preSchemaBackupsOf(entry.dbPath)),
+    ...recorded.filter((entry) => entry.setAside === true && copyOrPartLeft(entry.backupPath)).map((entry) => entry.backupPath)
+  ])];
   if (dryRun)
     return copies.length;
   for (const copy of copies)
@@ -38114,15 +38131,18 @@ function removeAllSchemaBackups(env, dryRun) {
   return copies.length;
 }
 function removeCopy(path) {
-  rmSync9(path, { recursive: true, force: true });
   for (const suffix of COMPANIONS)
     rmSync9(`${path}${suffix}`, { force: true });
+  rmSync9(path, { recursive: true, force: true });
+}
+function copyOrPartLeft(path) {
+  return existsSync21(path) || COMPANIONS.some((suffix) => existsSync21(`${path}${suffix}`));
 }
 function pruneSchemaBackupRecord(env) {
   const path = sharedDataPath("schema-backups", env);
   if (!existsSync21(path))
     return;
-  const kept = schemaBackups(env, false).filter((entry) => existsSync21(entry.backupPath));
+  const kept = schemaBackups(env, false).filter((entry) => copyOrPartLeft(entry.backupPath));
   if (kept.length === 0)
     rmSync9(path, { force: true });
   else
@@ -38136,7 +38156,7 @@ var init_boot_progress = __esm(() => {
   init_olympus_layout();
   STORELESS_FOLDERS = new Set(["models", "backup-staging"]);
   COMPANIONS = ["-wal", "-shm", "-journal"];
-  BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade|failed)\.bak$/;
+  BACKUP_NAME = /\.pre-schema-(?:\d+|retired|upgrade)\.bak$/;
 });
 
 // src/core/engine-heartbeat.ts
@@ -42489,6 +42509,9 @@ class TierLedger {
       const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
       return typeof row?.value === "string" && row.value !== "" ? row.value : undefined;
     });
+  }
+  writesHeld() {
+    return this.db.inTransaction;
   }
   async holdingWrites(work) {
     if (this.db.inTransaction)
@@ -56311,6 +56334,14 @@ function* retrySecretSideStoreDebtsPass(ledger, limit = 100) {
   } catch {}
   for (const { holdsCopies, ...identity } of unsettled) {
     yield* turn();
+    let current;
+    try {
+      current = ledger.getCurrent(identity);
+    } catch {
+      continue;
+    }
+    if (current?.contentTier !== "secrets" && current?.metadataTier !== "secrets")
+      continue;
     if (holdsCopies && snifferRetriesSettlement(ledger, identity))
       continue;
     const result = forgetSecretInSideStores({ ledger, identity });
@@ -60776,7 +60807,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_HOLD_TURNS = 50, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -61725,6 +61756,11 @@ var init_local_index = __esm(() => {
           return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
         },
         offThread: async () => {
+          for (let turns = 0;ledger.writesHeld() || this.db.inTransaction; turns += 1) {
+            if (turns >= VISIBILITY_HOLD_TURNS)
+              return this.visibilityBootstrapFinder(ledger).here();
+            await ingestionTurn();
+          }
           const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId));
           if (flagged.length === 0 || !offThreadReadsSupported(this.dbPath)) {
             return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
@@ -90757,9 +90793,12 @@ function* namesOnlySettlePass(options) {
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
   const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   const { records: rows, resumeAfter } = yield* findInLedger(ledger, () => ledger.listAwaitingTextWindowSteps({ limit, ...after ? { after } : {} }));
-  for (const record of rows) {
+  for (const found of rows) {
     yield* turn();
     report.checked += 1;
+    const record = set.ledger.getCurrent(tierLedgerIdentityOfRecord(found));
+    if (!record?.routed || record.contentRead || record.metadataPending || record.state === "moving")
+      continue;
     try {
       if (settleOne(set, record))
         report.settled += 1;
@@ -90828,9 +90867,12 @@ function* personalFirstSettlePass(options) {
   const limit = Math.max(1, options.limit ?? DEFAULT_HELD_SETTLE_ROWS);
   const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY2));
   const { records, resumeAfter } = yield* findInLedger(ledger, () => ledger.listPersonalFirstWindowSteps({ limit, ...after ? { after } : {} }));
-  for (const record of records) {
+  for (const found of records) {
     yield* turn();
     report.checked += 1;
+    const record = set.ledger.getCurrent(tierLedgerIdentityOfRecord(found));
+    if (!record?.routed || !record.contentPending || record.state === "moving" || !record.reasons.includes(PERSONAL_FIRST_REASON))
+      continue;
     try {
       const outcome = settleOne2(set, record);
       if (outcome === "queued_move")
@@ -95446,23 +95488,48 @@ function* imageContentSweepPass(options) {
   const state = readState6(ledger.readMeta(SWEEP_META_KEY2));
   if (state.done)
     return report;
-  const limit = Math.max(1, options.limit ?? DEFAULT_IMAGE_CONTENT_SWEEP_ROWS);
-  const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...state.after ? { after: state.after } : {}, limit }));
-  for (const found of rows) {
-    yield* turn();
-    report.scanned += 1;
-    const record = ledger.getCurrent(identityOf5(found));
+  const held = [];
+  let overflow = state.overflow === true;
+  const attempt = (identity) => {
+    const record = ledger.getCurrent(identity);
     if (!record?.routed)
-      continue;
+      return;
+    let outcome;
     try {
-      if (raiseIfImage(set, record))
-        report.raised += 1;
-    } catch {}
-  }
-  if (rows.length >= limit) {
-    report.complete = false;
-    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf5(rows.at(-1)) }));
-    return report;
+      outcome = record.state === "moving" ? "deferred" : raiseIfImage(set, record);
+    } catch {
+      outcome = "deferred";
+    }
+    if (outcome === true)
+      report.raised += 1;
+    else if (outcome === "deferred") {
+      if (held.length < MAX_HELD_IMAGES)
+        held.push(identity);
+      else
+        overflow = true;
+    }
+  };
+  const save = (next) => ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify(next));
+  if (state.retry) {
+    for (const identity of state.held ?? []) {
+      yield* turn();
+      report.scanned += 1;
+      attempt(identity);
+    }
+  } else {
+    const limit = Math.max(1, options.limit ?? DEFAULT_IMAGE_CONTENT_SWEEP_ROWS);
+    const rows = yield* findInLedger(ledger, () => ledger.listRoutedSteps({ ...state.after ? { after: state.after } : {}, limit }));
+    held.push(...state.held ?? []);
+    for (const found of rows) {
+      yield* turn();
+      report.scanned += 1;
+      attempt(identityOf5(found));
+    }
+    if (rows.length >= limit) {
+      report.complete = false;
+      save({ done: false, after: identityOf5(rows.at(-1)), held, ...overflow ? { overflow: true } : {} });
+      return report;
+    }
   }
   for (const domain of ["public_safe", "internal"]) {
     const store = set.store(domain);
@@ -95474,7 +95541,12 @@ function* imageContentSweepPass(options) {
       report.stripped += store.stripImageContentRows(found.slice(at, at + STRIP_BATCH), { keep: (identity) => ledger.isRouted(identity) });
     }
   }
-  ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: true }));
+  if (held.length > 0 || overflow) {
+    report.complete = false;
+    save(overflow ? { done: false } : { done: false, held, retry: true });
+    return report;
+  }
+  save({ done: true });
   return report;
 }
 function raiseIfImage(set, record) {
@@ -95521,7 +95593,13 @@ function readState6(raw) {
     return { done: false };
   try {
     const parsed = JSON.parse(raw);
-    return { done: parsed.done === true, ...parsed.after ? { after: parsed.after } : {} };
+    return {
+      done: parsed.done === true,
+      ...parsed.after ? { after: parsed.after } : {},
+      ...Array.isArray(parsed.held) ? { held: parsed.held } : {},
+      ...parsed.retry === true ? { retry: true } : {},
+      ...parsed.overflow === true ? { overflow: true } : {}
+    };
   } catch {
     return { done: false };
   }
@@ -95534,7 +95612,7 @@ function identityOf5(record) {
     ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
   };
 }
-var SWEEP_META_KEY2 = "image_content_private_sweep", DEFAULT_IMAGE_CONTENT_SWEEP_ROWS = 1000, STRIP_BATCH = 50;
+var SWEEP_META_KEY2 = "image_content_private_sweep", DEFAULT_IMAGE_CONTENT_SWEEP_ROWS = 1000, STRIP_BATCH = 50, MAX_HELD_IMAGES = 1000;
 var init_tier_image_content_sweep = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
@@ -95651,8 +95729,11 @@ async function sweepSecretsFloor(options) {
   }
   const limit = Math.max(1, options.limit ?? DEFAULT_SECRETS_FLOOR_SWEEP_ROWS);
   const rows = await ledgerReadOffThread(ledger, ledger.listRoutedSteps({ ...progress?.after ? { after: progress.after } : {}, limit }));
-  for (const record of rows)
-    await attempt(record);
+  for (const found of rows) {
+    const record = ledger.getCurrent(identityOf6(found));
+    if (record?.routed)
+      await attempt(record);
+  }
   if (rows.length < limit) {
     if (held.length === 0 && !overflow)
       writeState3(ledger, { done: SECRETS_FLOOR_VERSION });
@@ -95705,6 +95786,10 @@ async function applyFloor(set, record) {
   const latest = set.ledger.getCurrent(identity);
   if (!latest?.routed || latest.contentTier === "secrets" || latest.metadataTier === "secrets")
     return "clear";
+  if (set.ledger.getOverride(identity))
+    return "clear";
+  if (latest.generation !== record.generation)
+    return "failed";
   const findingKinds = [...new Set([...nameKinds, ...textKinds])].sort();
   const decision = {
     metadataTier: nameKinds.size > 0 ? "secrets" : latest.metadataTier,
@@ -139786,7 +139871,7 @@ var init_first_run_privacy = __esm(() => {
 });
 
 // src/core/engine-store-copies.ts
-function withStoppedEngine(env, what, step, waitMs) {
+function withStoppedEngine(env, what, step, waitMs = ENGINE_STORES_OWNER_WAIT_MS) {
   try {
     return withNoEngineProcess(env, step, waitMs);
   } catch (error) {
@@ -271145,6 +271230,7 @@ init_atomic_file();
 init_boot_progress();
 init_engine_heartbeat();
 init_upgrade_store_copies();
+init_engine_store_copies();
 import { createHash as createHash88 } from "node:crypto";
 import { spawnSync as spawnSync18 } from "node:child_process";
 import { existsSync as existsSync90, lstatSync as lstatSync46, mkdirSync as mkdirSync57, readFileSync as readFileSync81 } from "node:fs";
@@ -271977,7 +272063,7 @@ function rollbackTransaction(options, intent) {
   const paths = transactionPaths(options.homeDir);
   if (intent.touchServiceManager)
     quiesceAttemptedWorker(options);
-  const restored = intent.touchServiceManager ? restoreSchemaBackupsSince(lifecycleEnv2(options), Date.parse(transaction.started_at)) : [];
+  const restored = intent.touchServiceManager ? withStoppedEngine(lifecycleEnv2(options), "put back", () => restoreSchemaBackupsSince(lifecycleEnv2(options), Date.parse(transaction.started_at))) : [];
   restoreManagedFile(options.homeDir, transaction.unit_path, paths.unitBackup, transaction.previous_unit_present, transaction.previous_unit_sha256);
   restoreManagedFile(options.homeDir, transaction.env_path, paths.envBackup, transaction.previous_env_present, transaction.previous_env_sha256);
   if (transaction.previous_launcher_present !== undefined) {
@@ -272029,10 +272115,12 @@ function copyStoresForUpgrade(options, stopFirst) {
     runWorkerServiceAction("stop", serviceActionOptions(options));
   }
   try {
-    markWorkerUpgradeInFlight(lifecycleEnv2(options), readTransaction(options)?.started_at ?? new Date().toISOString());
-    const copied = copyStoresBeforeUpgrade(lifecycleEnv2(options), {
-      ...options.bunBin ? { bunBin: options.bunBin } : {},
-      log: progressLine
+    const copied = withStoppedEngine(lifecycleEnv2(options), "copied", () => {
+      markWorkerUpgradeInFlight(lifecycleEnv2(options), readTransaction(options)?.started_at ?? new Date().toISOString());
+      return copyStoresBeforeUpgrade(lifecycleEnv2(options), {
+        ...options.bunBin ? { bunBin: options.bunBin } : {},
+        log: progressLine
+      });
     });
     if (copied.stores > 0)
       progressLine(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);

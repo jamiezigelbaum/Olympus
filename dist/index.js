@@ -6490,13 +6490,16 @@ var init_native_process_service = __esm(() => {
 // src/core/boot-progress.ts
 import { appendFileSync, existsSync as existsSync9, lstatSync as lstatSync8, mkdirSync as mkdirSync9, readdirSync as readdirSync3, readFileSync as readFileSync14, realpathSync as realpathSync4, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync6, utimesSync } from "node:fs";
 import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute10, join as join19, relative as relative5, resolve as resolve6 } from "node:path";
-function dataRootFiles(env, keep) {
+function dataRootFiles(env, keep, options = {}) {
   const files = [];
+  const root = olympusDataRoot(env);
   const walk = (directory, top) => {
     let names;
     try {
       names = readdirSync3(directory);
-    } catch {
+    } catch (error) {
+      if (options.strict && !(top && error.code === "ENOENT"))
+        throw error;
       return;
     }
     for (const name of names) {
@@ -6506,7 +6509,9 @@ function dataRootFiles(env, keep) {
       let stat;
       try {
         stat = lstatSync8(path);
-      } catch {
+      } catch (error) {
+        if (options.strict && error.code !== "ENOENT")
+          throw error;
         continue;
       }
       if (stat.isDirectory())
@@ -6515,7 +6520,7 @@ function dataRootFiles(env, keep) {
         files.push(path);
     }
   };
-  walk(olympusDataRoot(env), true);
+  walk(root, true);
   return files.sort();
 }
 var STORELESS_FOLDERS;

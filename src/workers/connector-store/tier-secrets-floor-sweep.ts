@@ -107,7 +107,11 @@ export async function sweepSecretsFloor(options: {
   const limit = Math.max(1, options.limit ?? DEFAULT_SECRETS_FLOOR_SWEEP_ROWS);
   // Found on the ledger's read worker: the loop only applies the floor to each row.
   const rows = await ledgerReadOffThread(ledger, ledger.listRoutedSteps({ ...(progress?.after ? { after: progress.after } : {}), limit }));
-  for (const record of rows) await attempt(record);
+  for (const found of rows) {
+    // Found on an older snapshot: scanned from the row as it is now, by key.
+    const record = ledger.getCurrent(identityOf(found));
+    if (record?.routed) await attempt(record);
+  }
   if (rows.length < limit) {
     if (held.length === 0 && !overflow) writeState(ledger, { done: SECRETS_FLOOR_VERSION });
     else {
@@ -162,6 +166,10 @@ async function applyFloor(set: TieredStoreSet, record: TierLedgerRecord): Promis
   // The item may have changed while the scan ran: settle only what is still there.
   const latest = set.ledger.getCurrent(identity);
   if (!latest?.routed || latest.contentTier === 'secrets' || latest.metadataTier === 'secrets') return 'clear';
+  // An owner's word given while the scan ran wins; a row that changed is
+  // scanned again from what it is now (held, then retried by key).
+  if (set.ledger.getOverride(identity)) return 'clear';
+  if (latest.generation !== record.generation) return 'failed';
   const findingKinds = [...new Set([...nameKinds, ...textKinds])].sort();
   const decision: TierDecision = {
     // A secret in the names makes the names Secrets too, so none is released

@@ -51,9 +51,14 @@ function* personalFirstSettlePass(options: { set: TieredStoreSet; limit?: number
   const limit = Math.max(1, options.limit ?? DEFAULT_HELD_SETTLE_ROWS);
   const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   const { records, resumeAfter } = yield* findInLedger(ledger, () => ledger.listPersonalFirstWindowSteps({ limit, ...(after ? { after } : {}) }));
-  for (const record of records) {
+  for (const found of records) {
     yield* turn();
     report.checked += 1;
+    // Found on an older snapshot: settled from the row as it is now, read by
+    // key, and only while it still waits Personal-first (a verdict that
+    // landed meanwhile keeps the same generation and must not be undone).
+    const record = set.ledger.getCurrent(tierLedgerIdentityOfRecord(found));
+    if (!record?.routed || !record.contentPending || record.state === 'moving' || !record.reasons.includes(PERSONAL_FIRST_REASON)) continue;
     try {
       const outcome = settleOne(set, record);
       if (outcome === 'queued_move') report.movesQueued += 1;
