@@ -864,7 +864,7 @@ export async function installEngineVerified(options: EngineInstallOptions & { he
   // The new version is stopped before the stores go back, so the previous
   // one the installer puts back next opens them as they were (#1639).
   const restored = copied ? putMacStoresBack(copied) : [];
-  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` Its stores were put back as they were before it (${restored.length}), and it was stopped.` : ''}` };
+  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` It was stopped. Stores put back as they were before the update: ${[...new Set(restored)].join(', ')}.` : ''}` };
 }
 
 interface MacStoreCopies { env: Record<string, string>; exec: EngineExec; target: string }

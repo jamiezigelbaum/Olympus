@@ -984,7 +984,7 @@ describe('install and rollback succeed only on proof the new build is healthy', 
       const db = new Database(store, { readonly: true });
       expect(db.query('SELECT body FROM kept').get()).toEqual({ body: healthy ? 'new' : 'old' });
       db.close();
-      if (!healthy) expect(result.reason).toContain('Its stores were put back as they were before it (1), and it was stopped.');
+      if (!healthy) expect(result.reason).toMatch(/It was stopped\. Stores put back as they were before the update: \S+\./);
       expect(existsSync(`${store}.pre-schema-upgrade.bak`)).toBe(false);
       expect(marked()).toBe(false);
     }, 30_000);

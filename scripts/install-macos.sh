@@ -574,8 +574,13 @@ main() {
   #    plist names the build, so an upgrade reloads the agent; --restart covers
   #    an agent loaded from an identical plist. The command succeeds only once
   #    the engine proves this build healthy.
+  LOG_MARK=0
+  if [ -f "$LOG" ]; then LOG_MARK=$(wc -l < "$LOG" | tr -d ' '); fi
   if ! start_engine; then
     if [ "$UPGRADE" = 1 ] && [ -d "$APP.previous" ]; then
+      # The new version's own engine install put back the stores it copied, and says which (the same words as Linux's).
+      PUT_BACK=$(tail -n "+$((LOG_MARK + 1))" "$LOG" 2>/dev/null | grep -o 'Stores put back as they were before the update: [^"]*' | head -1)
+      if [ -n "$PUT_BACK" ]; then printf '%s\n' "$PUT_BACK" >&2; fi
       step "The new version did not start; restoring the previous one..."
       rm -rf "$APP.failed"
       mv "$APP" "$APP.failed"
