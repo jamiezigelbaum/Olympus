@@ -281,7 +281,7 @@ describe('P1b: new items are routed by their recorded tiers', () => {
     try {
       await fixture.set.sync(fixtureConnector(() => NEW), { fetchContent: true, placement: FIXTURE_PLACEMENT });
       const status = fixture.stores.secure_local!.status();
-      expect(status.tier).toEqual({ pendingClassificationItems: 1, supersededChunks: 0, tierMoveInProgress: 0 });
+      expect(status.tier).toEqual({ pendingClassificationItems: 1, pendingClassificationItemsOnce: 0, supersededChunks: 0, tierMoveInProgress: 0 });
       // Parity: every chunk in the denominator is embedded (the held one is out of it).
       expect(status.counts.embeddedChunks).toBe(status.counts.chunks);
       // A store with no routed copies reports no tier block at all (unchanged shape).

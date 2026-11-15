@@ -7,15 +7,21 @@
  * vectorSearchLane on it the way a question does, so a fix can be judged before it reaches a live machine.
  *
  *   bun scripts/vector-lane-timing.ts build   --dir <folder> [--chunks 200000] [--dimension 768]
- *   bun scripts/vector-lane-timing.ts measure --dir <folder> --scenario held|scope|both|none [--trials 5] [--contend keyword,writer]
+ *   bun scripts/vector-lane-timing.ts measure --dir <folder> --scenario held|scope|both|folders|folders-held|none [--trials 5] [--contend keyword,writer]
  *
  * build writes <folder>/store.sqlite once (one chunk per item) and is skipped when a store of the same shape is
- * there. Item i's vector leans away from the query as i grows, so low i ranks highest, and each share is periodic in
- * i, so it holds for the best-ranked items as much as for the whole store:
+ * there (version 2 since 15 Nov: shuffled layout). Item i's vector leans away from the shared direction as i grows, so low
+ * i ranks highest; each question lies near one of the best-ranked 2,000 plus noise. Items are written in a seeded shuffle,
+ * and each trial starts with the store out of the page cache. Each share is periodic in i, so it holds for the
+ * best-ranked items as much as for the whole store:
  *   - held for judging: every item with i % 10 != 0 (90%), through the store's own visibility seams;
  *   - out of scope: every item with i % 100 >= 10 (90%), filed under /other instead of /allowed, and asked with a
  *     locatorPathScope of /allowed;
  *   - both: the two together, so 1% of the store is servable.
+ *   - folders: the owner's real folder scope (lane 2, 15 Nov): item i sits in folder i % 100 under one scope generation
+ *     and revision; the question names folders 0-79 approved, 80-99 excluded and 70-79 names only, with account scope 'a',
+ *     so 70% is servable (the shape of connector-store-vector-digest.test.ts "folder scope shaped like the owner's");
+ *   - folders-held: that scope with the 90% held share too.
  * measure prints one JSON line: per trial the lane's time, rows and skippedReason (vector_scan_deadline_exceeded is a
  * deadline cut). The caller runs measure under a memory cap below the store's size, so pages come from disk.
  * --contend adds load while the lane runs (lane 2's suspect, 15 Nov: the live keyword lane took 18.8 s on the same store,
@@ -25,7 +31,8 @@
  *     background's judge does beside a question.
  * Synthetic data only: nothing here reads a real store.
  */
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
@@ -50,10 +57,20 @@ function random(seed: number): () => number {
   return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; };
 }
 
-function queryVector(dimension: number): number[] {
-  const v = new Array<number>(dimension).fill(0);
-  v[0] = 1;
-  return v;
+/**
+ * A question's vector, shaped like a real one: near a stored item's vector (one of the best-ranked 2,000, picked by the
+ * seed) plus noise, rather than a basis vector every item leans toward.
+ */
+function queryVector(seed: number, count: number, dimension: number): number[] {
+  // Spread the seed first: xorshift's first draws from neighbouring seeds are close.
+  const next = random(Math.imul(seed + 1, 2654435761) >>> 0);
+  next();
+  const near = itemVector(Math.floor(next() * Math.min(count, 2_000)), count, dimension);
+  // Noise of about 0.2 in all, whatever the dimension.
+  const scale = 0.7 / Math.sqrt(dimension);
+  const v = near.map((x) => x + (next() - 0.5) * scale);
+  const norm = Math.hypot(...v);
+  return v.map((x) => x / norm);
 }
 
 /** Item i's vector: the query's direction, weaker as i grows, plus seeded noise. */
@@ -74,13 +91,26 @@ function provider(count: number, dimension: number): SourceEmbeddingProvider {
     async embed(inputs) {
       return inputs.map((input) => {
         const n = /#(\d+)\s*$/.exec(input.text)?.[1];
-        return n === undefined ? queryVector(dimension) : itemVector(Number(n), count, dimension);
+        const seed = Number(/seed (\d+)/.exec(input.text)?.[1] ?? 0);
+        return n === undefined ? queryVector(seed, count, dimension) : itemVector(Number(n), count, dimension);
       });
     },
   };
 }
 
 const inScope = (i: number) => i % 100 < 10;
+const inFolders = (i: number) => i % 100 < 70;
+const SCOPE_GENERATION = 'b'.repeat(64);
+const SCOPE_REVISION = '00000000-0000-4000-8000-000000000002';
+const folderKeys = (from: number, to: number) => Array.from({ length: to - from }, (_, at) => `f${from + at}`);
+
+/** Every item in its folder (i % 100) under one scope generation, as a folder-scoped Dropbox sync files them. Idempotent. */
+function fileInFolders(store: LocalConnectorStore): void {
+  (store as unknown as { db: { query(sql: string): { run(...params: unknown[]): unknown } } }).db
+    .query(`UPDATE items SET source_scope_generation = ?, source_scope_revision = ?,
+      source_scope_folder_keys_json = json_array('f' || (CAST(provider_item_id AS INTEGER) % 100)) WHERE source_scope_generation IS NOT ?`)
+    .run(SCOPE_GENERATION, SCOPE_REVISION, SCOPE_GENERATION);
+}
 const held = (i: number) => i % 10 !== 0;
 
 function connector(count: number): SourceConnector {
@@ -96,11 +126,16 @@ function connector(count: number): SourceConnector {
   };
   return {
     id: 'fixture', family: 'file', async authenticate() {},
+    // Items arrive in a seeded shuffle, so chunk_pk order is unrelated to rank and a re-score reads scattered pages,
+    // as on a live store filled over years.
     async *listItems() {
+      const order = Array.from({ length: count }, (_, k) => k);
+      const next = random(99991);
+      for (let k = count - 1; k > 0; k--) { const j = Math.floor(next() * (k + 1)); [order[k], order[j]] = [order[j]!, order[k]!]; }
       const page = 2_000;
       for (let start = 0; start < count; start += page) {
         const end = Math.min(count, start + page);
-        yield { items: Array.from({ length: end - start }, (_, k) => item(start + k)), done: end === count };
+        yield { items: order.slice(start, end).map(item), done: end === count };
       }
     },
     async fetchItem(id) { return item(Number(id.split(':')[1])); },
@@ -119,16 +154,21 @@ async function build(dir: string, count: number, dimension: number): Promise<voi
   mkdirSync(dir, { recursive: true });
   const dbPath = join(dir, 'store.sqlite');
   const shapePath = join(dir, 'shape.json');
-  const shape = JSON.stringify({ count, dimension, version: 1 });
+  const shape = JSON.stringify({ count, dimension, version: 2 });
   if (existsSync(dbPath) && existsSync(shapePath) && readFileSync(shapePath, 'utf8') === shape) {
+    const store = open(dbPath);
+    try { fileInFolders(store); } finally { store.close(); }
     console.log(JSON.stringify({ phase: 'build', reused: true, bytes: statSync(dbPath).size }));
     return;
   }
+  // Another shape (version 1 wrote items in rank order): start over, so no row of it survives.
+  for (const name of readdirSync(dir)) if (name.startsWith('store.sqlite') || name === 'shape.json' || name === 'home') rmSync(join(dir, name), { recursive: true, force: true });
   const started = Date.now();
   const store = open(dbPath);
   try {
     (store as unknown as { db: { exec(sql: string): void } }).db.exec('PRAGMA synchronous=OFF');
     await store.syncFromConnector(connector(count), { fetchContent: true });
+    fileInFolders(store);
     const synced = Date.now();
     const embedder = provider(count, dimension);
     for (;;) {
@@ -175,7 +215,9 @@ async function measure(dir: string, scenario: string, trials: number, contend: R
     for (const row of (store as unknown as { db: { query(sql: string): { all(): Array<{ item_pk: number; provider_item_id: string }> } } }).db
       .query('SELECT item_pk, provider_item_id FROM items').all()) pks.set(row.item_pk, Number(row.provider_item_id));
     if (pks.size !== shape.count) throw new Error(`the store holds ${pks.size} items, not ${shape.count}`);
-    if (scenario === 'held' || scenario === 'both') {
+    const holds = scenario === 'held' || scenario === 'both' || scenario === 'folders-held';
+    const foldered = scenario === 'folders' || scenario === 'folders-held';
+    if (holds) {
       // The store's own seams, as the unit test sets them: the tier hide set and the live visibility check agree.
       const heldPks = [...pks].filter(([, i]) => held(i)).map(([pk]) => pk);
       const heldSet = new Set(heldPks);
@@ -184,7 +226,11 @@ async function measure(dir: string, scenario: string, trials: number, contend: R
       lane.tierHiddenItemPks = () => value;
       lane.visibleVectorItemPks = (candidates) => new Set(candidates.filter((pk) => !heldSet.has(pk)));
     }
-    const filters: ConnectorStoreSearchFilters | undefined = scenario === 'scope' || scenario === 'both' ? { locatorPathScope: '/allowed' } : undefined;
+    const filters: ConnectorStoreSearchFilters | undefined = foldered
+      ? { provider: 'fixture', sourceScopeGeneration: SCOPE_GENERATION, sourceScopeRevision: SCOPE_REVISION, sourceScopeFolderAnyKeys: folderKeys(0, 80),
+        sourceScopeFolderNoneKeys: folderKeys(80, 100), metadataOnlySourceScopeFolderKeys: folderKeys(70, 80) }
+      : scenario === 'scope' || scenario === 'both' ? { locatorPathScope: '/allowed' } : undefined;
+    const accountScope = foldered ? 'a' : undefined;
     const embedder = provider(shape.count, shape.dimension);
     const results: Array<{ ms: number; rows: number; skippedReason?: string; servable: boolean; ids: string }> = [];
     // The process's resident memory, sampled through the run: the read pool's workers are threads of this process.
@@ -200,21 +246,23 @@ async function measure(dir: string, scenario: string, trials: number, contend: R
     const keywordLoop = contend.has('keyword') ? (async () => {
       for (let k = 0; measuring; k++) {
         const started = performance.now();
-        try { await store.searchItemsDetailedOffThread(`${WORDS[k % WORDS.length]} ${WORDS[(k * 7 + 3) % WORDS.length]} coverage`, 20, undefined, filters, {}, { deadlineAtMs: Date.now() + LANE_DEADLINE_MS }); }
+        try { await store.searchItemsDetailedOffThread(`${WORDS[k % WORDS.length]} ${WORDS[(k * 7 + 3) % WORDS.length]} coverage`, 20, accountScope, filters, {}, { deadlineAtMs: Date.now() + LANE_DEADLINE_MS }); }
         catch { keywordBusy += 1; }
         keyword.push(Math.round(performance.now() - started));
       }
     })() : undefined;
     if (keywordLoop) await Bun.sleep(500);
     for (let t = 0; t < trials; t++) {
-      // A different question each trial (same direction, different words), so no memo answers it.
+      // Every trial starts cold: the store's pages leave the page cache (posix_fadvise DONTNEED through dd, no root).
+      for (const suffix of ['', '-wal', '-shm']) spawnSync('dd', [`if=${join(dir, `store.sqlite${suffix}`)}`, 'iflag=nocache', 'count=0', 'status=none']);
+      // A different question each trial, near a different stored item, so no memo answers it.
       const started = performance.now();
-      const result = await store.vectorSearchLane(`coverage question ${t} ${Date.now()}`, embedder, 20, undefined, filters, Date.now() + LANE_DEADLINE_MS);
+      const result = await store.vectorSearchLane(`coverage question seed ${t + 1} ${Date.now()}`, embedder, 20, accountScope, filters, Date.now() + LANE_DEADLINE_MS);
       const ms = Math.round(performance.now() - started);
       // Every row must be one the store may serve: in scope, and not held.
       const servable = result.rows.every((row) => {
         const i = Number(row.sourceItem.providerItemId);
-        return (!filters || inScope(i)) && (scenario === 'held' || scenario === 'both' ? !held(i) : true);
+        return (!filters || (foldered ? inFolders(i) : inScope(i))) && (holds ? !held(i) : true);
       });
       // Which items, in rank order, so two heads can be compared row for row.
       const ids = result.rows.map((row) => row.sourceItem.providerItemId).join(' ');
@@ -245,7 +293,7 @@ const [command, ...rest] = process.argv.slice(2);
 const values = args(rest);
 const dir = values.get('dir');
 if (!dir || (command !== 'build' && command !== 'measure' && command !== 'write')) {
-  console.error('Usage: bun scripts/vector-lane-timing.ts build|measure --dir <folder> [--chunks N] [--dimension D] [--scenario held|scope|both|none] [--trials N] [--contend keyword,writer]');
+  console.error('Usage: bun scripts/vector-lane-timing.ts build|measure --dir <folder> [--chunks N] [--dimension D] [--scenario held|scope|both|folders|folders-held|none] [--trials N] [--contend keyword,writer]');
   process.exit(2);
 }
 if (command === 'build') await build(dir, Number(values.get('chunks') ?? 200_000), Number(values.get('dimension') ?? 768));

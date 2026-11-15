@@ -17,7 +17,7 @@ import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith 
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -121,14 +121,11 @@ import {
   memoVisibilityItemsHere,
   visibilityRead,
   visibilityHere,
-  visibilityOffThread,
   visibilityAwaited,
   judgedAwaited,
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
   hiddenChildKeysSteps,
-  VISIBILITY_CHANGE_RETRIES,
-  VisibilityChangedError,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
   type VisibilityRead,
@@ -1088,6 +1085,8 @@ function runSteps<T>(steps: Generator<void, T>): T {
 const EXTRACTION_CANDIDATE_WINDOW = 500;
 /** Item pks one extraction-candidate call examines before it returns a short page. */
 export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 2_000;
+/** Chunk pks one query of the embedding sweep's work list reads before a turn. */
+export const MISSING_EMBEDDING_CHUNK_WINDOW = 20_000;
 
 /** Ledger lookups per step when the settled-unreadable list is built in turns. */
 const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
@@ -1124,14 +1123,18 @@ interface TierLedgerHiddenItemPks {
 class MutablePkList {
   readonly values: number[] = [];
   private readonly positions = new Map<number, number>();
+  /** Bumped by every change, so a copy built from `values` knows when it is stale. */
+  generation = 0;
   add(pk: number): void {
     if (this.positions.has(pk)) return;
+    this.generation += 1;
     this.positions.set(pk, this.values.length);
     this.values.push(pk);
   }
   delete(pk: number): void {
     const index = this.positions.get(pk);
     if (index === undefined) return;
+    this.generation += 1;
     const last = this.values.pop()!;
     this.positions.delete(pk);
     if (index < this.values.length) {
@@ -1487,6 +1490,13 @@ export interface ConnectorStoreItemCopyImportSummary {
 export interface ConnectorStoreTierStatus {
   /** Items whose tier is not final yet: stored and searchable by keyword; vectors stay out of search. */
   pendingClassificationItems: number;
+  /**
+   * The same items, counted once across a tiered store set: an item whose
+   * copies wait in two tier stores is counted only in the first (by corpus
+   * id) that holds it. What a source's card adds up, so it says how many
+   * items the owner has waiting, not how many copies.
+   */
+  pendingClassificationItemsOnce?: number;
   /** Chunks of superseded or staged copies: kept, never searched, counted or served. */
   supersededChunks: number;
   /** Items with a copy here that are mid-move. */
@@ -2249,7 +2259,7 @@ interface ConnectorStoreCurrentEmbeddingRowsOptions {
    * its top K are servable by construction. A pre-filter only: every winner
    * is still checked against the live ledger after ranking.
    */
-  excludedItemPks?: ReadonlySet<number>;
+  excludedItemPks?: { has(itemPk: number): boolean };
 }
 
 const CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
@@ -2280,6 +2290,39 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
+  if (options.chunkPks) {
+    // A re-score names its chunks: the plan must start from that list and
+    // seek each chunk's vector by key. Left to the planner, an account scope
+    // or provider filter made it walk every item of the account through the
+    // items index and match the list afterwards: about 2 s per 256-row page
+    // on the live Dropbox store, cut at the deadline (ops#151 WORKER SAMPLE,
+    // 15 Nov). CROSS JOIN fixes SQLite's join order to the order written.
+    return {
+      sql: `
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+        FROM json_each(?) pick
+        CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
+        CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+        CROSS JOIN items i ON i.item_pk = emb.item_pk
+        WHERE i.tombstoned = 0
+          AND emb.content_hash = c.embedding_input_hash
+          ${page ? 'AND emb.chunk_pk > ?' : ''}
+          ${accountScope ? 'AND i.account_scope = ?' : ''}
+          ${selectedFilters.sql}
+          ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ''}
+        ${page ? 'ORDER BY emb.chunk_pk ASC LIMIT ?' : ordered ? 'ORDER BY emb.item_pk ASC, emb.chunk_pk ASC' : ''}
+      `,
+      params: [
+        JSON.stringify(options.chunkPks),
+        modelId,
+        ...(page ? [page.afterChunkPk] : []),
+        ...(accountScope ? [accountScope] : []),
+        ...selectedFilters.params,
+        ...metadataOnly.params,
+        ...(page ? [Math.max(1, Math.floor(page.limit))] : []),
+      ],
+    };
+  }
   return {
     sql: `
       SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
@@ -2287,7 +2330,6 @@ function connectorStoreCurrentEmbeddingRowsQuery(
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? '+emb.model_id' : 'emb.model_id'} = ?
         ${page ? 'AND emb.chunk_pk > ?' : ''}
-        ${options.chunkPks ? 'AND emb.chunk_pk IN (SELECT value FROM json_each(?))' : ''}
         ${accountScope ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
         ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ''}
@@ -2296,7 +2338,6 @@ function connectorStoreCurrentEmbeddingRowsQuery(
     params: [
       modelId,
       ...(page ? [page.afterChunkPk] : []),
-      ...(options.chunkPks ? [JSON.stringify(options.chunkPks)] : []),
       ...(accountScope ? [accountScope] : []),
       ...selectedFilters.params,
       ...metadataOnly.params,
@@ -2385,6 +2426,7 @@ async function scanVectorPages(
   deadlineAtMs: number | undefined,
   pageSize: number,
   resultLimit: number,
+  sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
 ): Promise<VectorScan> {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
@@ -2399,7 +2441,7 @@ async function scanVectorPages(
   // vectorDigestSearchDisabled).
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
-  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
+  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
   const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -2448,6 +2490,19 @@ const VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 const VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
 const VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
 const VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+
+/**
+ * Whether every store's digest backfill stands back now: the engine's
+ * bounded, logged stand-back for the owner's Ask (engine/stand-back.ts),
+ * set once by the engine. Nothing else holds it: not the shared
+ * read-priority lease, another lane on the store or waiting pool work,
+ * which background answers keep busy too, so a backfill on a busy install
+ * never finished and its store stayed on the slow exact scan.
+ */
+let vectorDigestBackfillHold: () => boolean = () => false;
+export function setVectorDigestBackfillHold(hold?: () => boolean): void {
+  vectorDigestBackfillHold = hold ?? (() => false);
+}
 /**
  * A store that opens with an incomplete digest waits this long before its
  * first turn: on upgrade every store opens at once, and the backfills must
@@ -2469,6 +2524,16 @@ export async function scanDigestPages(
   options: ConnectorStoreCurrentEmbeddingRowsOptions,
   deadlineAtMs: number | undefined,
   limit: number,
+  /** A lower re-score cap, for the offline recall comparison only (eval/vector-rescore-cap.ts). */
+  maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES,
+  /**
+   * Readers of the same store on other connections, asked for once a batch
+   * needs more than one page: its pages are then read side by side. Each
+   * page carries every eligibility check in its own SQL, so a page read on
+   * another snapshot can return only rows that were servable when it ran;
+   * the ledger check after ranking has the final say, as for every winner.
+   */
+  sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
 ): Promise<VectorScan> {
   const heap = new VectorDigestHeap();
   const query = encodeVectorDigest(queryVector);
@@ -2518,11 +2583,12 @@ export async function scanDigestPages(
   let candidates = 0;
   let qualifiedItems = 0;
   let batches = 0;
+  let readers: ReadonlyArray<(query: StoreRead) => Promise<unknown>> | undefined;
   while (heap.length > 0) {
     // Until `limit` items qualify the pass reads on as before (a narrow filter
     // drains the heap rather than restarting wider); the cap bounds only the
     // score-driven reading past that point.
-    if (qualifiedItems >= limit && (candidates >= VECTOR_DIGEST_MAX_CANDIDATES
+    if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES)
       || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) break;
     if (expired()) return cutWith();
     if (batches++ > 0) await yieldConnectorStoreVectorScan();
@@ -2532,13 +2598,21 @@ export async function scanDigestPages(
       digestScores.set(heap.pop(), score);
     }
     candidates += digestScores.size;
-    const chunkPks = [...digestScores.keys()];
-    let after = 0;
-    let rePages = 0;
-    while (true) {
+    // Each page names only its own 256 chunks, so a page reads those
+    // vectors by key and nothing else (a filtered-out chunk shortens a page
+    // without ending the batch).
+    const chunkPks = [...digestScores.keys()].sort((a, b) => a - b);
+    if (chunkPks.length > CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE && sideReaders && !readers) readers = [read, ...await sideReaders()];
+    const width = readers?.length ?? 1;
+    for (let at = 0, rePages = 0; at < chunkPks.length; at += CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width, rePages++) {
       if (expired()) return cutWith();
-      const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks }, after);
-      const rows = await read({ mode: 'all', ...page }) as VectorScoreRow[];
+      const pages = await Promise.all(Array.from({ length: width }, (_, lane) => {
+        const pagePks = chunkPks.slice(at + lane * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, at + (lane + 1) * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+        if (pagePks.length === 0) return [] as VectorScoreRow[];
+        const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
+        return (readers?.[lane] ?? read)({ mode: 'all', ...page }) as Promise<VectorScoreRow[]>;
+      }));
+      const rows = pages.flat();
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired()) return cutWith();
         const folded = foldVectorScore(bestByItem, row, queryVector);
@@ -2547,9 +2621,7 @@ export async function scanDigestPages(
         const digestScore = digestScores.get(row.chunk_pk);
         if (folded.score !== undefined && digestScore !== undefined) underestimate = Math.max(underestimate, folded.score - digestScore);
       }
-      if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
-      after = rows.at(-1)!.chunk_pk;
-      if (rePages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
+      if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
     }
   }
   return { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
@@ -2559,10 +2631,12 @@ const VECTOR_DIGEST_PAGE_ROWS = 4096;
 /** The least the digest is assumed to underestimate an exact cosine by. */
 const VECTOR_DIGEST_MIN_MARGIN = 0.05;
 /**
- * Re-scored chunks per digest pass once enough items qualify: about 60 MB
- * of 768-dimension vectors, a few percent of a 600K-chunk exact scan.
+ * Re-scored chunks per digest pass once enough items qualify: about 15 MB
+ * of 768-dimension vectors. On 83 real questions against his Dropbox store
+ * 5,000 kept the exact top 24 of every one, in about a third of the reads
+ * of 20,000 (eval/vector-rescore-cap.ts, 15 Nov).
  */
-const VECTOR_DIGEST_MAX_CANDIDATES = 20_000;
+const VECTOR_DIGEST_MAX_CANDIDATES = 5_000;
 
 /** The K-th best item's exact cosine so far; -Infinity with fewer than K items. */
 function kthBestCosine(bestByItem: VectorWinners, k: number): number {
@@ -2644,10 +2718,20 @@ async function scanVectorPagesOnPool(
   deadlineAtMs: number | undefined,
   resultLimit: number,
 ): Promise<VectorScan> {
+  // Side readers for the re-score, opened on first need and only on free
+  // workers: a store whose re-score workers are all in use reads one page
+  // at a time, as before.
+  const side: Array<{ read: (query: StoreRead) => Promise<unknown>; close: () => Promise<void> }> = [];
+  const sideReaders = async () => {
+    const opened = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () =>
+      openOffThreadSnapshot(dbPath, { lane: 'rescore', noWait: true }).catch(() => undefined)));
+    for (const reader of opened) if (reader) side.push(reader);
+    return side.map((reader) => reader.read);
+  };
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
-    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit,
+    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders,
   // Its own worker of the store: the scan never queues behind keyword reads.
-  ), { lane: 'scan' }).catch((error: unknown): VectorScan => {
+  ), { lane: 'scan' }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error: unknown): VectorScan => {
     if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
     throw error;
   });
@@ -3739,9 +3823,10 @@ export class LocalConnectorStore {
       // overlapping old and new models never oscillate.
       const model = this.vectorDigestBackfillModel;
       if (!model) return;
-      // An Ask in flight on this store, or any owner-visible read waiting
-      // for the pool (a status count, another store's lane), goes first.
-      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || storeReadHasPriority() || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      // The owner's Ask goes first, for at most the stand-back's bound.
+      let held = false;
+      try { held = vectorDigestBackfillHold(); } catch { held = false; }
+      if (this.reclaimProcess || held) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
@@ -4030,7 +4115,9 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), ledger.newArrival(item.identity, { consume: true })) } : {}),
+          ...(inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), ledger.newArrival(item.identity, { consume: true })
+            // A file read on demand is judged as a new arrival: a question is waiting on it.
+            || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? '')) } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
@@ -4091,6 +4178,29 @@ export class LocalConnectorStore {
    * exist yet cannot hold a routed copy, so everything in it is legacy and
    * visible exactly as before P1b.
    */
+  /**
+   * Of the held items here, those this store counts for its tier set: an item
+   * also held in another tier store of the set is counted in the first one
+   * (by corpus id) of its held copies. Without a ledger every held item is
+   * counted here.
+   */
+  private *heldCountedHereSteps(heldPks: readonly number[]): Generator<StoreRead, number[], unknown> {
+    const ledger = this.visibilityLedger();
+    if (!ledger) return [...heldPks];
+    const rows = (yield { sql: `SELECT item_pk, provider, account_scope, provider_conversation_id, provider_item_id
+      FROM items WHERE item_pk IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(heldPks)], mode: 'all' }) as Array<{
+        item_pk: number; provider: string; account_scope: string; provider_conversation_id: string | null; provider_item_id: string }>;
+    const identities = rows.map((row) => ({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}) }));
+    const copies = ledger.copiesForMany(identities);
+    return rows.filter((row, index) => {
+      const held = (copies.get(tierLedgerIdentityKey(identities[index]!)) ?? [])
+        .filter((copy) => copy.state === 'current' && copy.embedHold)
+        .map((copy) => copy.corpusId).sort();
+      return held.length === 0 || held[0] === this.corpusId || !held.includes(this.corpusId);
+    }).map((row) => row.item_pk);
+  }
+
   private visibilityLedger(): TierLedger | undefined {
     // A store that has received routed copies is BOUND to its tiered store
     // set's ledger. Every handle on it — a set leg, a read-only reader, an
@@ -4408,19 +4518,24 @@ export class LocalConnectorStore {
    * every pooled build met one, so the embedding pass failed, its memo never
    * filled and every retry started the full build again (Sparta rc.13,
    * 14 Nov 2026: telegram.messages_embeddings failed every 1-3 minutes and
-   * kept the disk busy). After VISIBILITY_CHANGE_RETRIES such tries the build
-   * runs on this thread in turns, where a step's reads cannot be torn, and
-   * the memo it leaves makes the next build incremental.
+   * kept the disk busy). A read that meets a write is taken again by itself,
+   * up to VISIBILITY_CHANGE_RETRIES times on the pool and then once here,
+   * never the whole build: a store-sized build retried as one unit fails
+   * again under constant writes and then ran in full on the front's loop.
+   * One slice-sized read here is the most this thread ever pays, and the
+   * memo it leaves (installed at the start-of-build cursors) makes the next
+   * build incremental.
    */
   private async hiddenChildItemPksInTurns(): Promise<number[]> {
-    for (let tries = 0; tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
-      try {
-        return await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false });
-      } catch (error) {
-        if (!(error instanceof VisibilityChangedError)) throw error;
-      }
+    const steps = this.hiddenChildReadSteps();
+    let next = steps.next();
+    while (!next.done) {
+      let result: unknown;
+      try { result = await visibilityStepAwaited(next.value); }
+      catch (error) { next = steps.throw(error); continue; }
+      next = steps.next(result);
     }
-    return runStepsInTurns(this.hiddenChildSteps());
+    return next.value;
   }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
@@ -5684,13 +5799,18 @@ export class LocalConnectorStore {
     // Another reader may have advanced the shared memo while this one awaited
     // SQL. Redo against that reader's state, never overwrite it with this delta.
     if (this.hiddenChildMemo !== expected) return yield* this.hiddenChildReadSteps();
+    // Installed when the lane is still the one it was built for, even if
+    // changes landed while it was built: the memo keeps the cursors read
+    // before any of its reads, so the next build replays those changes. A
+    // build that refused to install whenever a cursor moved never installed
+    // on a busy install, and every search and status walked every parent
+    // again on the front's loop (11 s reads on Sparta rc.15, 14 Nov).
     let stable = false;
     try {
       const current = lane.stores();
       stable = lane.ledger() === ledger && this.visibilityLedger() === ledger
-        && ledger.visibilityChangesSince().cursor === ledgerChanges.cursor
         && current.length === stores.length && stores.every(store => current.includes(store)
-          && store.visibilityFeedPresent && store.itemVisibilityChangesSince().cursor === storeChanges.get(store)!.cursor);
+          && store.visibilityFeedPresent);
     } catch { /* An unverifiable build is never installed. */ }
     if (!stable) {
       // Counts retain their start-of-build semantics. The next read consumes
@@ -8305,6 +8425,24 @@ export class LocalConnectorStore {
     const version = sourceVersion ?? (this.db.query('SELECT source_version FROM items WHERE local_item_id = ? AND tombstoned = 0')
       .get(localItemId) as { source_version: string | null } | null)?.source_version ?? '';
     return grant.source_version === version;
+  }
+
+  /**
+   * Whether this exact item holds an on-demand read grant, by its full
+   * identity: one lookup on the items' unique key and one on the grants'.
+   * The judge asks it of every question on every pass; asking
+   * `onDemandReadCandidate` instead looked items up by provider item id
+   * alone, which no index covers, so each ask read the whole items table
+   * (the background's longest freezes on Sparta, rc.17, 15 Nov 2026).
+   */
+  hasOnDemandGrant(identity: { provider: string; accountScope: string; providerConversationId?: string; providerItemId: string }): boolean {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get()) return false;
+    return this.db.query(`
+      SELECT 1 FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
   }
 
   onDemandReadCandidate(providerItemId: string): { identity: SourceItemIdentity; metadata: ConnectorStoreItemMetadataSnapshot; readableOnRequest: boolean } | undefined {
@@ -12406,10 +12544,49 @@ export class LocalConnectorStore {
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
     limit: number,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+    windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
   ): Promise<string[]> {
     if (limit <= 0) return [];
     const tierHidden = await this.tierHiddenItemPksInTurns();
-    return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
+    // The same list as missingEmbeddingItemIds (items in order of their first
+    // chunk), read one window of chunk pks at a time with a turn between.
+    // One query over every chunk held the background for 1.5-2.7 s on each
+    // sweep once most chunks were embedded (Sparta, rc.17, 15 Nov 2026).
+    const modelId = embedder.modelId;
+    const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
+    const failed = this.embeddingFailureState;
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
+    const query = this.db.query(`
+      SELECT c.chunk_pk AS chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+      ORDER BY c.chunk_pk ASC
+    `);
+    const maxChunkPk = (this.db.query('SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks').get() as { n: number }).n;
+    // An item already listed from an earlier chunk keeps that place.
+    const seen = new Set<number>();
+    const found: string[] = [];
+    for (let after = 0; after < maxChunkPk && found.length < limit; after += windowChunks) {
+      if (after > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      const rows = query.all(modelId, after, after + windowChunks, ...params) as Array<{ item_pk: number; local_item_id: string }>;
+      for (const row of rows) {
+        if (seen.has(row.item_pk)) continue;
+        seen.add(row.item_pk);
+        if (failed?.has(row.local_item_id)) continue;
+        found.push(row.local_item_id);
+        if (found.length === limit) break;
+      }
+    }
+    return found;
   }
 
   /**
@@ -13972,14 +14149,45 @@ export class LocalConnectorStore {
    * Undefined when nothing is excluded or
    * the set cannot be read (the scan then ranks everything, as before).
    */
-  private vectorScanExcludedItemPks(): ReadonlySet<number> | undefined {
-    let value: TierLedgerHiddenItemPks;
-    try { value = this.tierHiddenItemPks(); } catch { return undefined; }
-    // Built per scan: the set's lists change in place as verdicts land, so
-    // no copy of them can be keyed on the object.
-    const set = new Set<number>([...value.hidden, ...value.held, ...value.metadataLayer]);
-    return set.size > 0 ? set : undefined;
+  private vectorScanExcludedItemPks(): { has(itemPk: number): boolean } | undefined {
+    // No set built yet (the first search after a start): building it here
+    // would run the whole build on the request thread, as vectorLaneServable
+    // also refuses. Build it in turns for the next search; this one ranks
+    // everything and the live check filters.
+    if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
+      let ledger: TierLedger | undefined;
+      try { ledger = this.visibilityLedger(); } catch { return undefined; }
+      if (ledger) {
+        void this.refreshTierHiddenCountsInTurns();
+        return undefined;
+      }
+    }
+    let base: TierLedgerHiddenItemPks;
+    let children: number[];
+    try {
+      base = this.tierLedgerHiddenItemPks();
+      children = this.hiddenChildItemPks();
+    } catch { return undefined; }
+    // The set's lists change in place as verdicts land. The copy is kept
+    // between searches while every list is the same one at the same
+    // generation: rebuilt per search it cost up to a few hundred ms per big
+    // store on the front's loop, and every other store's lane waited.
+    const memo = this.tierLedgerHiddenMemo;
+    const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
+    const cached = this.vectorScanExclusion;
+    let excluded: Set<number>;
+    if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
+      excluded = cached.set;
+    } else {
+      excluded = new Set<number>([...base.hidden, ...base.held, ...base.metadataLayer]);
+      this.vectorScanExclusion = lists ? { lists, generations: lists.map(list => list.generation), set: excluded } : undefined;
+    }
+    if (children.length === 0) return excluded.size > 0 ? excluded : undefined;
+    const hiddenChildren = new Set(children);
+    return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
   }
+
+  private vectorScanExclusion: { lists: MutablePkList[]; generations: number[]; set: Set<number> } | undefined;
 
   /**
    * The vector scan for a store the read pool does not serve (an in-memory
@@ -15787,6 +15995,12 @@ export class LocalConnectorStore {
       || tier.moving > 0 || tier.metadataLayer.length > 0
       ? {
           pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
+          ...(tier.held.length > 0
+            ? { pendingClassificationItemsOnce: new Set([
+              ...(yield* this.heldCountedHereSteps(tier.held)),
+              ...unreadHolds.waitingPks,
+            ]).size }
+            : {}),
           supersededChunks: tier.hidden.length > 0
             ? ((yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))

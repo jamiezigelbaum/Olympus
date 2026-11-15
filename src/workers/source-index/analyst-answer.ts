@@ -330,7 +330,11 @@ async function readNamesOnlyMatches(
 ): Promise<{ started: number; pending: number; failed: number; limit?: OnDemandReadLimit }> {
   const questionId = randomUUID();
   const requests = new Map<string, Parameters<RequestOnDemandRead>[0]>();
-  for (const index of detail.namesOnlyCandidateIndexes ?? []) {
+  // A held match may be a file the owner just asked to read, still waiting
+  // for its judge: asking again only reports that read, so it is waited for
+  // too. A settled Private item reports settled, and a bulk-read one is
+  // refused: neither is waited for.
+  for (const index of [...new Set([...(detail.namesOnlyCandidateIndexes ?? []), ...(detail.contentPrivateCandidateIndexes ?? [])])].sort((a, b) => a - b)) {
     if (index >= 3) continue;
     const candidate = detail.pack.candidates[index];
     if (!candidate) continue;

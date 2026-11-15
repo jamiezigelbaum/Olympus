@@ -53,6 +53,11 @@ export interface DashboardFix {
    * that predates this field.
    */
   openHref?: true;
+  /**
+   * The control runs its source once (a budget's Run once): the row reads
+   * "Checking…" until that run's result arrives, as Sync now does.
+   */
+  runsSource?: true;
   /** Shown on a disabled control. */
   disabledReason?: string;
   /** The UI confirms first; matches the tool's destructive annotation. */
@@ -990,6 +995,8 @@ export interface ScopeFolderNode {
   access?: ScopeFolderAccess;
   /** A mounted disk rather than a folder: listed after the folders, tagged Disk. */
   is_disk?: true;
+  /** The folder is an Obsidian vault. */
+  notes_app?: 'obsidian' | 'reflect';
 }
 
 /** Where the computer's own privacy rules stand for a folder, in the words the picker shows. */

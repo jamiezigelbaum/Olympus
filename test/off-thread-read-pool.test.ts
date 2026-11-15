@@ -13,6 +13,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
   OffThreadReadBusyError,
+  openOffThreadSnapshot,
+  READ_POOL_RESCORE_READERS,
   READ_POOL_SIZE,
   readOnPool,
   readPoolDiagnostics,
@@ -72,6 +74,22 @@ describe('read pool', () => {
     // Releasing the store stops both of its workers.
     releaseOffThreadReads(path);
     await waitFor(() => readPoolThreadsForTests().live === 0, { description: 'both workers released' });
+  });
+
+  test('re-score side readers each take a worker of their own, and one more is refused rather than queued', async () => {
+    const path = storeFile();
+    const side = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () => openOffThreadSnapshot(path, { lane: 'rescore', noWait: true })));
+    expect(readPoolThreadsForTests().live).toBe(READ_POOL_RESCORE_READERS);
+    const counts = await Promise.all(side.map((reader) => reader.read(COUNT))) as Array<{ c: number }>;
+    expect(counts.map((row) => row.c)).toEqual(side.map(() => 3));
+    expect(await openOffThreadSnapshot(path, { lane: 'rescore', noWait: true }).then(() => 'opened', (error) => error)).toBeInstanceOf(OffThreadReadBusyError);
+    await Promise.all(side.map((reader) => reader.close()));
+    // Free again once closed.
+    const again = await openOffThreadSnapshot(path, { lane: 'rescore', noWait: true });
+    await again.close();
+    expect(readPoolThreadsForTests().live).toBe(READ_POOL_RESCORE_READERS);
+    releaseOffThreadReads(path);
+    await waitFor(() => readPoolThreadsForTests().live === 0, { description: 'the side workers released' });
   });
 
   test('abandoned queries fail busy, retain their store executor until SQL ends, and the next query then runs', async () => {

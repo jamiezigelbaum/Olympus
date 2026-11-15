@@ -11,7 +11,8 @@
 
 import { lstatSync, readdirSync, realpathSync, type Dirent, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { knownNotesAppFolders, notesAppOfFolder, type NotesAppId } from '../../core/notes-app-folders.ts';
 import type { OlympusFolderAccess, OlympusFolderScopeNode } from '../../control-ui-contract.ts';
 import {
   decodeCursor,
@@ -50,11 +51,24 @@ export interface LocalFilesFolderScopeBrowserOptions {
   permissions?: MacPermissions;
   /** Test seam: what to do when the person saves the whole computer without Full Disk Access. */
   openFullDiskAccess?: () => void;
+  /** Test seam: the libraries of notes apps know about on this computer (Obsidian vaults), as real paths. */
+  notesAppFolders?: () => Array<{ path: string; app: NotesAppId }>;
+  /** Test seam: whether a real folder (not a link) is at this path. */
+  isFolder?: (realPath: string) => boolean;
 }
 
 /** Thrown inside a listing when the Mac refused the read: the level reports it, it is not an error. */
 class AccessRefused extends Error {
   constructor(readonly access: OlympusFolderAccess) { super(access.message); }
+}
+
+function realFolder(path: string): boolean {
+  try {
+    const stat = lstatSync(path);
+    return stat.isDirectory() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 function safeRealpath(path: string): string {
@@ -84,6 +98,8 @@ function localFilesListing(options: LocalFilesFolderScopeBrowserOptions) {
   };
   const readDirectory = options.readDirectory
     ?? ((realPath: string) => readdirSync(realPath, { withFileTypes: true }));
+  const isFolder = options.isFolder ?? realFolder;
+  const notesAppFolders = options.notesAppFolders ?? (() => knownNotesAppFolders({ home }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
     memoryPath: folderAccessMemoryPath(),
@@ -144,7 +160,11 @@ function localFilesListing(options: LocalFilesFolderScopeBrowserOptions) {
         const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
         // Only the top of a guarded place is labelled; inside it the answer already holds.
         const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
-        return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey, access);
+        const listed = node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey, access);
+        // A folder of notes an app keeps (an Obsidian vault) is tagged. A
+        // guarded place is not looked inside before the Mac said yes.
+        const app = !guard && listed.selectable ? notesAppOfFolder(childReal, isFolder) : undefined;
+        return app ? { ...listed, notes_app: app } : listed;
       })
       .sort((a, b) => {
         const aHidden = a.name.startsWith('.');
@@ -171,8 +191,23 @@ function localFilesListing(options: LocalFilesFolderScopeBrowserOptions) {
     if (parent === undefined) {
       // The home folder's folders, then the disks mounted now.
       volumes.refresh();
+      const homeFolders = childFolders(home, undefined);
+      // Vaults Obsidian knows about that are not directly in the home folder
+      // (one kept in iCloud lies deep inside the Mac's Library): offered here
+      // by name, so the person does not have to dig for them.
+      const vaultShortcuts = notesAppFolders()
+        .filter((vault) => dirname(vault.path) !== home)
+        .map((vault) => {
+          // A vault in iCloud Drive is in a place the Mac asks about: say so, as for any folder there.
+          const guard = permissions.guardOf(vault.path, volumes.volumeOf(vault.path));
+          const access = guard ? permissions.nodeAccess(guard) : undefined;
+          const name = vault.path.slice(vault.path.lastIndexOf('/') + 1);
+          return { ...node(scopePathOfRealPath(volumes, vault.path), name, undefined, access), notes_app: vault.app };
+        })
+        .filter((vaultNode) => vaultNode.selectable && !homeFolders.some((folder) => folder.key === vaultNode.key));
       all = [
-        ...childFolders(home, undefined),
+        ...homeFolders,
+        ...vaultShortcuts,
         ...volumes.locations().map((volume) => {
           const guard = permissions.guardOf(volume.mountPoint, volume);
           const diskAccess = guard ? permissions.nodeAccess(guard) : undefined;

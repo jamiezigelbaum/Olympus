@@ -7,7 +7,7 @@ import { withFileLease } from '../../../core/file-lease.ts';
 import { defaultMessagingCaptureGrantPath, saveMessagingCaptureGrant } from '../../../core/messaging-capture.ts';
 import { readCaptureGrantFile } from '../../../core/messaging-capture-grant-file.ts';
 import { formatAllowedChatList, parseAllowedChatList, SOURCE_CHAT_KINDS, type MessagingChatKind } from '../../../core/messaging-chat-kinds.ts';
-import { pairMessagingSource, TELEGRAM_API_HASH_SECRET_KEY, TELEGRAM_API_ID_SECRET_KEY, whatsappBridgePathForPackage } from '../../../core/messaging-pairing.ts';
+import { pairMessagingSource, TELEGRAM_API_HASH_SECRET_KEY, TELEGRAM_API_ID_SECRET_KEY, readyWhatsAppBridge } from '../../../core/messaging-pairing.ts';
 import { telegramPythonExecutable } from '../../../core/messaging-runtime.ts';
 import { olympusPackageRoot } from '../../../core/package-root.ts';
 import { telegramSessionBasePath, whatsappStateDir } from '../../../core/pairing-session-paths.ts';
@@ -153,8 +153,11 @@ export function createDashboardMessagingService(options: {
   listCommand?: typeof listHelper;
   unlinkCommand?: typeof unlinkHelper;
   pairSource?: typeof pairMessagingSource;
+  /** The WhatsApp bridge to list and unlink with; by default this package's, made ready (readyWhatsAppBridge). */
+  whatsappBridge?: () => Promise<string>;
 }) {
   const packageRoot = olympusPackageRoot();
+  const whatsappBridge = options.whatsappBridge ?? (() => readyWhatsAppBridge({ env: process.env }, packageRoot));
   const available = new Map<MessagingSource, { fingerprint: string; chats: PairingChat[] }>();
   const selecting = new Set<MessagingSource>();
   const held = new Map<MessagingSource, number>();
@@ -197,7 +200,7 @@ export function createDashboardMessagingService(options: {
             } else {
               let choices: readonly PairingChat[] = chats;
               if (source === 'whatsapp') {
-                const listing = await (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ['--list-chats'], {
+                const listing = await (options.listCommand ?? listHelper)(await whatsappBridge(), ['--list-chats'], {
                   ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
                 });
                 choices = parseChats(source, listing);
@@ -222,9 +225,10 @@ export function createDashboardMessagingService(options: {
         return result;
       } catch (error) {
         if (source === 'whatsapp' && created !== undefined) {
-          const unlinked = await (options.unlinkCommand ?? unlinkHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), {
+          // A bridge that cannot be made ready is an unlink that failed, never a new error over the pairing's own.
+          const unlinked = await whatsappBridge().then((bridge) => (options.unlinkCommand ?? unlinkHelper)(bridge, {
             ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: created,
-          }).catch(() => 'failed' as const);
+          })).catch(() => 'failed' as const);
           console.warn(`[messaging] whatsapp unlink after a failed pairing: ${unlinked}`);
           const coded = (error && typeof error === 'object' ? error : codedError('Pairing failed.', undefined)) as { unlinked?: string };
           coded.unlinked = unlinked;
@@ -257,7 +261,7 @@ export function createDashboardMessagingService(options: {
           ...process.env, OLYMPUS_TELEGRAM_LIST_CHATS: '1', OLYMPUS_TELEGRAM_SESSION_PATH: session,
         }, `${JSON.stringify({ api_id: Number(apiId), api_hash: apiHash })}\n`), { acquireTimeoutMs: 1 });
       }
-      return (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ['--list-chats'], {
+      return (options.listCommand ?? listHelper)(await whatsappBridge(), ['--list-chats'], {
         ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: current.grant.sessionPath ?? whatsappStateDir({ env: process.env }),
       });
     });
@@ -372,4 +376,23 @@ export function createDashboardMessagingService(options: {
     },
     close: () => manager.close(),
   };
+}
+
+/** Plain words for the fixed codes a pairing step can fail with; anything else gets the generic sentence. */
+const DASHBOARD_MESSAGING_FAILURE_WORDS: Record<string, string> = {
+  bridge_missing: 'The WhatsApp helper for this version of Olympus is not on this computer. Reinstall Olympus to put it back; what you linked is kept.',
+  bridge_build_failed: 'The WhatsApp helper for this version of Olympus could not be built on this computer. Reinstall Olympus to get the prebuilt one; what you linked is kept.',
+  chat_list_timeout: 'Listing your chats took too long. Try again from this computer.',
+};
+
+/**
+ * What a failed dashboard pairing step tells the page: a fixed code (the error's own when it is one of ours, with the
+ * bridge's "no build tools" named for what the owner sees, a missing bridge) and its words. Never the error's message,
+ * which can name paths.
+ */
+export function dashboardMessagingFailure(error: unknown): { code: string; message: string } {
+  const raw = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  const own = typeof raw === 'string' && /^[a-z][a-z0-9_]{2,63}$/.test(raw) ? raw : undefined;
+  const code = own === 'bridge_build_tools_missing' ? 'bridge_missing' : own ?? 'messaging_request_failed';
+  return { code, message: DASHBOARD_MESSAGING_FAILURE_WORDS[code] ?? 'Could not complete this pairing step. Try again from this computer.' };
 }

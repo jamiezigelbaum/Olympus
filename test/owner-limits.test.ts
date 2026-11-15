@@ -1,3 +1,4 @@
+import { defaultXBookmarksLiveSyncConfig, withOwnerXSpend } from '../src/workers/x-bookmarks/live-control.ts';
 import { limitStopReference } from '../src/core/limit-stops.ts';
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -177,16 +178,40 @@ test('bounded automatic Venice re-check resumes an external refill, and shutdown
 
 test('run_once selects the exact subject, keeps costs tracked, and refuses ambiguous or irrelevant options', async () => {
   const time = clock(); const store = new LocalSourceSchedulerStateStore();
-  try { for (const taskId of ['head', 'reconcile']) store.recordSuccess({ sourceId: 'x.bookmarks', corpusId: 'internal.x', taskId, resultStatus: 'idle', completedAt: time.date().toISOString(), degradedReason: 'daily_cost_guard', counts: { limit_stop_limit: 2_000_000, limit_stop_used: 2_100_000 } }); }
+  try { for (const taskId of ['head', 'reconcile']) store.recordSuccess({ sourceId: 'x.bookmarks', corpusId: 'internal.x', taskId, resultStatus: 'idle', completedAt: time.date().toISOString(), degradedReason: 'daily_api_request_guard', counts: { limit_stop_limit: 4_000, limit_stop_used: 4_100 } }); }
   finally { store.close(); }
-  await expect(ownerLimits({ action: 'continue', id: 'x.daily_cost' }, { now: time.date })).rejects.toThrow('More than one');
+  await expect(ownerLimits({ action: 'continue', id: 'x.daily_requests' }, { now: time.date })).rejects.toThrow('More than one');
   const subject = stops(time.date())[0]!.subject;
   let selected: string | undefined;
-  const result = await ownerLimits({ action: 'continue', id: 'x.daily_cost', subject }, { now: time.date, runOnce: async value => { selected = value; return { status: 'checking' }; } });
+  const result = await ownerLimits({ action: 'continue', id: 'x.daily_requests', subject }, { now: time.date, runOnce: async value => { selected = value; return { status: 'checking' }; } });
   expect(selected).toBe(subject); expect(result.ok).toBe(true);
   // Until the source's operator pass actually runs, the stop and truthful amounts stay visible.
-  expect(stops(time.date())[0]).toMatchObject({ limit: 2, used: 2.1 });
-  await expect(ownerLimits({ action: 'continue', id: 'x.daily_cost', subject, keep: true }, { now: time.date })).rejects.toThrow('only to Raise');
+  expect(stops(time.date())[0]).toMatchObject({ limit: 4_000, used: 4_100 });
+  await expect(ownerLimits({ action: 'continue', id: 'x.daily_requests', subject, keep: true }, { now: time.date })).rejects.toThrow('only to Raise');
+});
+
+test('X spending stops Raise for today in one press, and X sees the raised budget (owner, 2026-11-15)', async () => {
+  const time = clock(); const store = new LocalSourceSchedulerStateStore();
+  try {
+    store.recordSuccess({ sourceId: 'x.bookmarks', corpusId: 'internal.x', taskId: 'reconcile', resultStatus: 'idle', completedAt: time.date().toISOString(), degradedReason: 'head_cost_reserve_guard', counts: { limit_stop_limit: 1_921_875, limit_stop_used: 1_945_000 } });
+    // Near the budget but still running: advice, never a stop on Home.
+    store.recordSuccess({ sourceId: 'x.bookmarks', corpusId: 'internal.x', taskId: 'head', resultStatus: 'idle', completedAt: time.date().toISOString(), degradedReason: 'daily_cost_guard', counts: { limit_stop_limit: 2_000_000, limit_stop_used: 1_945_000, limit_stop_advisory: 1 } });
+  } finally { store.close(); }
+  const open = stops(time.date());
+  expect(open.map(stop => stop.id)).toEqual(['x.head_reserve_cost']);
+  const model = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), { now: time.date(), limitStops: open }));
+  const wait = model.waits!.find(row => row.fix?.args?.id === 'x.head_reserve_cost')!;
+  expect(wait.fix).toMatchObject({ label: 'Raise to $4 today', args: { action: 'continue', id: 'x.head_reserve_cost', to: 4 } });
+  const wakes: string[] = [];
+  const result = await ownerLimits({ action: 'continue', id: 'x.head_reserve_cost', subject: open[0]!.subject, to: 4 }, { now: time.date, wake: id => wakes.push(String(id)) });
+  expect(result).toMatchObject({ ok: true, action: 'raise', to: 4 });
+  // The woken X run records its new state, which ends the stop.
+  expect(wakes).toEqual(['x.head_reserve_cost']);
+  expect(limitsToolResult(result).content[0]!.text).toBe('Raised to $4 for today (UTC). Work continues now.');
+  const config = defaultXBookmarksLiveSyncConfig({});
+  expect(withOwnerXSpend(config, time.date()).dailyEstimatedSpendMicrousd).toBe(4_000_000);
+  // The raise is for this UTC day only.
+  expect(withOwnerXSpend(config, new Date(time.date().getTime() + 86_400_000)).dailyEstimatedSpendMicrousd).toBe(config.dailyEstimatedSpendMicrousd);
 });
 
 test('Home Raise and Refill buttons call the shared operation; local tools list it and the reviewer list does not', async () => {

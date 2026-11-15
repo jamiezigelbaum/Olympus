@@ -41,7 +41,16 @@ export const READ_POOL_SIZE = 1;
  * leg, 15 Nov: 29 to 54 s behind keyword reads on one thread). Every store
  * gets the same treatment; nothing is chosen by source.
  */
-export type ReadPoolLane = 'shared' | 'scan';
+export type ReadPoolLane = 'shared' | 'scan' | 'rescore';
+
+/**
+ * Workers a store may give the vector re-score beside its scan worker. The
+ * re-score reads a few thousand vectors scattered over the file; a cold
+ * disk serves several such reads at once about as fast as one, so its pages
+ * are read side by side on these (his Dropbox store copy, 15 Nov: 22 cold
+ * reads took 3.2 s one at a time). Each holds only its own read snapshot.
+ */
+export const READ_POOL_RESCORE_READERS = 3;
 
 /** Queries one store may have waiting at once; more are refused as busy. */
 export const READ_POOL_QUEUE_PER_STORE = 8;
@@ -263,7 +272,7 @@ function runtimeHasWorkers(): boolean {
 
 // A failed start is not remembered: the next request tries again.
 function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread | undefined {
-  const limit = lane === 'shared' ? READ_POOL_SIZE : 1;
+  const limit = lane === 'shared' ? READ_POOL_SIZE : lane === 'rescore' ? READ_POOL_RESCORE_READERS : 1;
   if (threads.filter(reader => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers()) return undefined;
   try {
     const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'application/javascript' }));
@@ -372,20 +381,29 @@ function send(
 export async function withOffThreadSnapshot<T>(
   dbPath: string,
   work: (read: (query: StoreRead) => Promise<unknown>) => Promise<T>,
-  options: { lane?: ReadPoolLane } = {},
+  options: { lane?: ReadPoolLane; noWait?: boolean } = {},
 ): Promise<T> {
   const lane = options.lane ?? 'shared';
   if (!runtimeHasWorkers()) throw new Error('off-thread reads are unavailable');
   // Tied to the store's lifetime: a release while the snapshot waits for a
   // thread, or between its reservation and its open, cancels it.
   const generation = releases.get(dbPath) ?? 0;
-  const reader = await snapshotThread(dbPath, lane);
+  // noWait: a helper that is only worth having now (a re-score reader)
+  // takes a free worker or none.
+  const askedAtMs = clock.now();
+  const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
+  if (options.noWait && !free) throw new OffThreadReadBusyError();
+  if (free) free.snapshots += 1;
+  const reader = free ?? await snapshotThread(dbPath, lane);
   if ((releases.get(dbPath) ?? 0) !== generation) {
     reader.snapshots -= 1;
     dispatch();
     throw new OffThreadReadBusyError();
   }
   const snapshot = nextId++;
+  // The wait for the store's worker, counted once, on the snapshot's first
+  // read: a lane's time behind other snapshots shows in its queue wait.
+  let reserveWaitMs = clock.now() - askedAtMs;
   try {
     await send(reader, { op: 'open', snapshot, path: dbPath });
     try {
@@ -394,15 +412,17 @@ export async function withOffThreadSnapshot<T>(
         // A snapshot read made by a traced Ask lane counts in its pool reads.
         const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
         const sentAtMs = clock.now();
+        const queueWaitMs = reserveWaitMs;
+        reserveWaitMs = 0;
         let sqlMs = 0;
         try {
           const rows = await send(reader, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
             sqlMs = ms;
           });
-          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows', snapshot: true });
+          report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows', snapshot: true });
           return rows;
         } catch (error) {
-          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error', snapshot: true });
+          report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error', snapshot: true });
           throw error;
         } finally {
           // A search waiting for this thread takes its turn before the next read.
@@ -425,8 +445,28 @@ const releases = new Map<string, number>();
 
 /** A snapshot shares only its store's executor of its lane, once no search is executing. */
 function snapshotThreadNow(store: string, lane: ReadPoolLane): ReaderThread | undefined {
-  return live().find(reader => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job)
+  // A re-score reader is worth having only on a worker of its own.
+  return live().find(reader => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job
+    && (lane !== 'rescore' || reader.snapshots === 0))
     ?? startThread(store, lane);
+}
+
+/**
+ * A snapshot held open until `close`: withOffThreadSnapshot for a reader
+ * whose work is not one callback (the re-score's side readers).
+ */
+export function openOffThreadSnapshot(
+  dbPath: string,
+  options: { lane?: ReadPoolLane; noWait?: boolean } = {},
+): Promise<{ read: (query: StoreRead) => Promise<unknown>; close: () => Promise<void> }> {
+  return new Promise((resolve, reject) => {
+    let opened = false;
+    const done = withOffThreadSnapshot(dbPath, (read) => new Promise<void>((release) => {
+      opened = true;
+      resolve({ read, close: async () => { release(); await done.catch(() => undefined); } });
+    }), options);
+    done.catch((error: unknown) => { if (!opened) reject(error); });
+  });
 }
 
 /** Reserves the store worker, waiting while its current search is executing. */
@@ -462,21 +502,6 @@ function serveSnapshotWaiters(): void {
     reader.snapshots += 1;
     waiter.resolve(reader);
   }
-}
-
-/**
- * Whether any store's pool work is waiting for a thread: a queued read or a
- * snapshot (a status count, an Ask lane). Background maintenance stands back
- * while this is true, so owner-visible reads go first.
- */
-export function readPoolHasWaitingWork(): boolean {
-  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
-}
-
-let waitingWorkForTests: (() => boolean) | undefined;
-/** Tests only: what readPoolHasWaitingWork answers. Left out, the pool's own state. */
-export function setReadPoolWaitingWorkForTests(waiting?: () => boolean): void {
-  waitingWorkForTests = waiting;
 }
 
 /**

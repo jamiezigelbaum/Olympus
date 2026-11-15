@@ -33,3 +33,25 @@ test('cleared overrides page past earlier rows', () => {
   expect(ledger.listClearedOverrideRows(2, next[0])).toEqual([]);
   ledger.close();
 });
+
+// The undo pass reads every routed item, so the background skips it while its
+// inputs are unchanged (the 5 to 33 s background freezes on Sparta, 14 Nov).
+test('the cleared-override fingerprint moves with overrides, undo requests and moves, and only with them', () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const a = { provider: 'gmail', accountScope: 'acct', providerItemId: 'a' };
+  const b = { provider: 'gmail', accountScope: 'acct', providerItemId: 'b' };
+  ledger.recordRoutedPlacement(a, { ...decision, decidedBy: 'sniffer', reasons: ['content:sniffer:test:personal'] }, placement);
+  const quiet = ledger.clearedOverrideFingerprint();
+  // An ordinary judgment of another item leaves it as it was.
+  ledger.recordRoutedPlacement(b, { ...decision, decidedBy: 'sniffer', reasons: ['content:sniffer:test:private'] }, placement);
+  expect(ledger.clearedOverrideFingerprint()).toBe(quiet);
+  ledger.setOverride(a, { kind: 'tier', tier: 'secure' });
+  const set = ledger.clearedOverrideFingerprint();
+  expect(set).not.toBe(quiet);
+  ledger.clearOverride(a);
+  expect(ledger.clearedOverrideFingerprint()).not.toBe(set);
+  const cleared = ledger.clearedOverrideFingerprint();
+  ledger.recordRoutedPlacement(b, { ...decision, decidedBy: 'sniffer', reasons: ['content:sniffer:test:private'], state: 'moving' } as unknown as TierDecision, placement);
+  expect(ledger.clearedOverrideFingerprint()).not.toBe(cleared);
+  ledger.close();
+});

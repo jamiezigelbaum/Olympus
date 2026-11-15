@@ -301,6 +301,34 @@ describe('read on demand', () => {
     expect(asks).toBe(3);
   });
 
+  test('a file the owner just read, still held for its judge, is waited for the same way', async () => {
+    const corpusId = 'internal.fixture.files';
+    const identity = (id: string) => ({ family: 'file' as const, provider: 'fixture', accountScope: 'one', providerItemId: id, localItemId: id });
+    let asks = 0;
+    const packs: string[][] = [];
+    const handler = createAnalystSourceIndexAnswerHandler({
+      // The store reports a finished read as settled; until then it is queued.
+      requestOnDemandRead: async () => (++asks >= 3 ? { state: 'reading', etaSeconds: 60, settled: true } : { state: 'queued', etaSeconds: 60 }),
+      onDemandReadWaitMs: 10_000,
+      analyst: { async analyze(pack) {
+        packs.push(pack.candidates.flatMap(candidate => candidate.chunks));
+        return { answer: 'The code is 4417.', citations: [], unanswered: [] };
+      } },
+      lanes: () => ({
+        registry: buildSourceIndexCorpusRegistry([defineSourceIndexCorpus({ corpusId, family: 'file', trustDomain: 'internal' })]),
+        adapters: { [corpusId]: () => ({ hits: [{ sourceItem: identity('a'), provenance: { sourceItem: identity('a'), citation: { title: 'a' } }, score: 1, rawExposed: false as const }], latencyMs: 0, rawExposed: false as const }) },
+        contentProviders: { [corpusId]: { async fetchLocalContent() {
+          const sensitivity = buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' });
+          return asks >= 3 ? { sensitivity, chunks: ['The code is 4417.'] } : { sensitivity, chunks: [], contentPrivate: true };
+        } } },
+      }),
+    });
+    const answer = await handler.answer({ question: 'What is the code?', include_internal: true });
+    expect(packs).toEqual([['The code is 4417.']]);
+    expect(answer.answer).not.toContain('Reading 1 file');
+    expect(asks).toBe(3);
+  });
+
   test('a names-only scope starts one real extraction immediately and uses its persisted size', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'on-demand-runtime-'));
     const corpusId = 'internal.fixture.files';
@@ -483,6 +511,9 @@ describe('read on demand', () => {
     await assertSearch(['current', 'unversioned']);
     // Also exercise the exact scan used when the digest is unavailable.
     const db = new Database(dbPath);
+    // Every store connection waits on a lock; so does this one. A closed
+    // store's pool threads release the file as they stop, after close().
+    db.exec('PRAGMA busy_timeout = 10000');
     db.exec('UPDATE chunk_vector_digest_meta SET completed = 0');
     await assertSearch(['current', 'unversioned']);
     // Older read-only stores have no grant table: both lanes fail closed

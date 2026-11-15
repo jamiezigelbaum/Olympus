@@ -642,13 +642,15 @@ describe('X daily reconciliation restart state', () => {
           await connector.markReconciliationDisposition('applied');
         } else {
           // No removal authority without an identical ordered verification
-          // pass — and the unusable stage is handed to staged recovery rather
-          // than parked on a retry loop that replays the same mismatch.
-          await expect(connector.probe()).rejects.toMatchObject({
-            errorKind: 'reconcile_incomplete',
-            degradedReason: 'x_reconcile_window_boundary_drift',
-            counts: { staged_failure_count: 1, staged_recovery_eligible: 1 },
+          // pass; the run still finishes and keeps every post it read, so a
+          // list that moved between passes is never read and paid for twice.
+          const status = await connector.probe();
+          expect(status).toMatchObject({
+            complete: true,
+            removalAuthoritative: false,
+            counts: { itemsSeen: 3, globalVerificationMatched: 0 },
           });
+          await connector.markReconciliationDisposition('degraded');
         }
       }
     });

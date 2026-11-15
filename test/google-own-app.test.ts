@@ -89,6 +89,10 @@ for (const accepted of [false, true]) test(`Google file route checks before sign
       expect(drive.status).toBe(200);
       expect(await drive.text()).not.toContain(secret);
       expect(starts).toBe(2);
+      // One-press Reconnect sends only the source: the saved own app signs in on loopback.
+      const reconnect = await withWorkerBearerAuth(worker.fetch, { authToken: 'fixture' })(new Request('https://dashboard.example/dashboard/connect/oauth/start', { method: 'POST', headers: { Authorization: 'Bearer fixture', 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'gmail' }) }));
+      expect(reconnect.status).toBe(200);
+      expect(starts).toBe(3);
     }
     if (!accepted) expect(values.size).toBe(0);
   } finally { rmSync(dir, { recursive: true, force: true }); }

@@ -227,7 +227,7 @@ describe('the card walks the owner through registering the callback itself', () 
 
     expect(sheet).toContain('<summary>Ask your agent to walk you through it</summary>');
     expect(sheet).toContain('>Copy prompt</button>');
-    expect(sheet.indexOf('<ol class="steps">')).toBeLessThan(sheet.indexOf('agentprompt'));
+    expect(sheet.indexOf('<ol class="steps">')).toBeLessThan(sheet.indexOf('<summary>Ask your agent'));
   });
 
   test('the refusal sentence names the same setting the steps name', () => {

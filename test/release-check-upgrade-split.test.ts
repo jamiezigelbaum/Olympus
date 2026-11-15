@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
-  BROKEN_FRONT_LINE, breakFront, brokenBundle, compareStoreFiles, forcedFailureChecks, rehash, repinInstaller, retiredStoreFile, storeFiles, storesKeptCheck, STORES_PUT_BACK, leftoverFiles,
+  BROKEN_FRONT_LINE, breakFront, brokenBundle, compareStoreFiles, forcedFailureChecks, rehash, repinInstaller, retiredStoreFile, storeFiles, storesKeptCheck, STORES_PUT_BACK, leftoverFiles, leftoverFileNames,
 } from '../scripts/release-check/upgrade-split.ts';
 
 let dir: string;
@@ -60,6 +60,24 @@ describe('the copy whose front cannot start', () => {
     expect(background.exitCode).toBe(0);
     expect(background.stdout.toString()).toBe('booted\nserved\n');
   }, 30_000);
+
+  test('a Mac bundle: its install.sh and SHA256SUMS are repinned to the broken tarball', () => {
+    const candidate = join(dir, 'candidate');
+    const work = join(dir, 'work');
+    mkdirSync(join(work, 'package', 'dist'), { recursive: true });
+    mkdirSync(candidate);
+    writeFileSync(join(work, 'package', 'dist', 'cli.js'), 'console.log("booted");\n');
+    expect(Bun.spawnSync(['tar', '-czf', join(candidate, 'olympus-1.5.0.tgz'), '-C', work, 'package']).exitCode).toBe(0);
+    const original = sha(join(candidate, 'olympus-1.5.0.tgz'));
+    writeFileSync(join(candidate, 'install.sh'), `#!/bin/sh\nOLYMPUS_SHA256=${original}\nOLYMPUS_BYTES=1\n`);
+    writeFileSync(join(candidate, 'SHA256SUMS'), `${original}  olympus-1.5.0.tgz\n`);
+    const broken = brokenBundle(candidate, join(dir, 'out'));
+    const tgz = join(broken, 'olympus-1.5.0.tgz');
+    expect(sha(tgz)).not.toBe(original);
+    expect(readFileSync(join(broken, 'install.sh'), 'utf8')).toContain(`OLYMPUS_SHA256=${sha(tgz)}`);
+    expect(readFileSync(join(broken, 'install.sh'), 'utf8')).toContain(`OLYMPUS_BYTES=${readFileSync(tgz).length}`);
+    expect(readFileSync(join(broken, 'SHA256SUMS'), 'utf8')).toBe(`${sha(tgz)}  olympus-1.5.0.tgz\n`);
+  }, 30_000);
 });
 
 describe('store files', () => {
@@ -112,6 +130,8 @@ describe('store files', () => {
       writeFileSync(join(dir, path), '');
     }
     expect(leftoverFiles(dir)).toBe(3);
+    // Named, so a failed check says which file an update left.
+    expect(leftoverFileNames(dir)).toEqual(['jobs.db-journal', 'stores/a.sqlite.pre-schema-12.bak', 'stores/b.sqlite.partial-1']);
   });
 
   test('an update that failed before the broken front ever started proves no rollback: every forced-failure check fails', () => {

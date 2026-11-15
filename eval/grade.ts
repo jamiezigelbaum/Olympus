@@ -5,6 +5,7 @@
 import type { AnalystResult, EvidenceCandidate, EvidencePack } from '../src/core/contracts.ts';
 import { isWithheldAnswer, type OpsecReleaseAudit } from '../src/core/opsec.ts';
 import type { SourceIndexProvenance, SourceItemIdentity } from '../src/core/source-index/types.ts';
+import { passageContainsQuote } from './passage-match.ts';
 import type { EvalExpectedEvidence, EvalQuestion } from './types.ts';
 
 export interface EvalGrade {
@@ -21,6 +22,8 @@ export interface EvalGrade {
 export interface EvalGradeContext {
   packContainsSecureLocal?: boolean;
   citationCorpusIds?: readonly (string | undefined)[];
+  /** Each citation's item text as the pack carried it, to recognise a copy of the expected item. */
+  citationChunks?: readonly (readonly string[] | undefined)[];
   genuineCoverageGapKinds?: readonly GenuineCoverageGapKind[];
 }
 
@@ -299,7 +302,10 @@ function gradeEvidenceCited(
         context.citationCorpusIds?.[citationIndex],
       ),
     );
-    if (!matched) {
+    const copy = !matched && result.citations.some((citation, citationIndex) =>
+      citedCopyOfExpected(want, citation.provenance, context.citationCorpusIds?.[citationIndex], context.citationChunks?.[citationIndex]));
+    if (copy) detail.push(`evidenceCited: a copy of expected evidence item ${expected.indexOf(want) + 1} was cited`);
+    if (!matched && !copy) {
       detail.push(`evidenceCited: no citation for expected evidence item ${expected.indexOf(want) + 1}`);
       return false;
     }
@@ -459,6 +465,34 @@ export function expectedEvidenceMatches(
   const wantCorpusId = want.corpusId.trim();
   if (wantCorpusId && corpusId !== wantCorpusId) return false;
   return true;
+}
+
+/**
+ * A citation of another copy of the expected item counts as citing it: the
+ * same provider item in another tier store of its source (internal.x and
+ * secure_local.x), or a cited item whose text holds the expected passage
+ * itself (the passage rule of passage-match.ts). Ids and text only; no model.
+ */
+export function citedCopyOfExpected(
+  want: EvalExpectedEvidence,
+  provenance: SourceIndexProvenance,
+  corpusId: string | undefined,
+  citedChunks: readonly string[] | undefined,
+): boolean {
+  const source = (id: string | undefined) => id?.trim().split('.').slice(1).join('.') || undefined;
+  const sameItem = [want, ...(want.alternates ?? [])].some((identity) => identity.providerItemId
+    && identity.providerItemId === provenance.sourceItem.providerItemId
+    && identity.corpusId.trim() !== corpusId
+    && source(identity.corpusId) !== undefined && source(identity.corpusId) === source(corpusId));
+  if (sameItem) return true;
+  return Boolean(want.quote && citedChunks?.length && passageContainsQuote(citedChunks.join('\n'), want.quote));
+}
+
+/** The chunks the pack carried for a citation's item, for citedCopyOfExpected. */
+export function citationItemChunks(provenance: SourceIndexProvenance, candidates: readonly EvidenceCandidate[]): string[] | undefined {
+  const local = provenance.sourceItem.localItemId;
+  const chunks = candidates.filter((candidate) => candidate.provenance.sourceItem.localItemId === local).flatMap((candidate) => candidate.chunks);
+  return chunks.length ? chunks : undefined;
 }
 
 export type GenuineCoverageGapKind =

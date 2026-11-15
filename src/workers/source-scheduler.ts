@@ -3079,6 +3079,7 @@ const UTC_DAY_SCOPED_DEGRADED_REASONS: ReadonlySet<string> = new Set([
   'head_api_request_reserve_guard',
   'head_resource_read_reserve_guard',
   'head_cost_reserve_guard',
+  'reconcile_cost_to_finish_guard',
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
@@ -3246,6 +3247,7 @@ export const LOCAL_FILES_SCHEDULER_WARNINGS = [
   'local_files_unreadable_folders',
   'local_files_watch_limit_reached',
   'local_files_live_updates_off',
+  'local_files_deletions_held',
 ] as const;
 
 const VERBATIM_SCHEDULER_WARNINGS: ReadonlySet<string> = new Set([

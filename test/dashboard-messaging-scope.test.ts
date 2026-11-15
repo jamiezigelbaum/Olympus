@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MessagingCaptureSupervisor } from '../src/core/messaging-capture.ts';
 import { createWorkerMessagingCaptureOwnership } from '../src/workers/engine/runtime/messaging-capture.ts';
-import { createDashboardMessagingService, retainApprovedCaptureScope } from '../src/workers/engine/dashboard/dashboard-messaging-service.ts';
+import { createDashboardMessagingService, dashboardMessagingFailure, retainApprovedCaptureScope } from '../src/workers/engine/dashboard/dashboard-messaging-service.ts';
 import { waitFor as waitUntil } from './helpers/test-clock.ts';
 
 const dirs: string[] = [];
@@ -61,7 +61,7 @@ for (const scenario of [
           return result;
         } }),
       });
-      const service = createDashboardMessagingService({ registryPath, secretStore: memorySecrets,
+      const service = createDashboardMessagingService({ whatsappBridge: async () => 'olympus-whatsapp-bridge-test', registryPath, secretStore: memorySecrets,
         withMessagingCapturePaused: ownership.withMessagingCapturePaused,
         withGrantMutation: async operation => operation(),
         listCommand: async () => ({ dialogs: [{ chat_scope: chatScope, title: 'One', kind: 'dm' }] }),
@@ -116,7 +116,7 @@ test('chat selection writes the pairing grant, stops capture during the change, 
   let writes = 0;
   let finishListing!: () => void;
   const listingHeld = new Promise<void>((resolve) => { finishListing = resolve; });
-  const service = createDashboardMessagingService({ registryPath,
+  const service = createDashboardMessagingService({ whatsappBridge: async () => 'olympus-whatsapp-bridge-test', registryPath,
     secretStore: { label: 'memory', get: async (key) => key.endsWith('api_id') ? '123' : 'fixture-hash', getSync: () => undefined, set: async () => {}, delete: async () => {}, list: async () => [] },
     withMessagingCapturePaused: async (_source, operation) => { paused = true; try { return await operation(); } finally { paused = false; } },
     withGrantMutation: async (operation) => { writes++; return operation(); },
@@ -146,7 +146,7 @@ test('re-pair never widens a grant removed during pairing', async () => {
   writeFileSync(grantPath, JSON.stringify({ version: 1, source: 'whatsapp', handle: 'whatsapp.personal', sessionPath: dir, grantedAt: '2026-01-01', producer: { source: 'whatsapp', env: { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: '123@s.whatsapp.net' }, secretEnvironment: [] } }), { mode: 0o600 });
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
-  const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'),
+  const service = createDashboardMessagingService({ whatsappBridge: async () => 'olympus-whatsapp-bridge-test', registryPath: join(dir, 'handles.json'),
     secretStore: { label: 'memory', get: async () => undefined, getSync: () => undefined, set: async () => {}, delete: async () => {}, list: async () => [] },
     withMessagingCapturePaused: async (_source, operation) => operation(), withGrantMutation: async (operation) => operation(),
     pairSource: async () => { await held; return { ok: true, source: 'whatsapp', status: 'connected', registered: true, captureStarted: false, sessionPath: dir, accountProof: 'account', chats: [], handles: ['whatsapp.personal'], secretRefs: [], producer: { source: 'whatsapp', executable: 'fixture', args: [], env: { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: '*' }, secretEnvironment: [], captureStarted: false } }; },
@@ -166,7 +166,7 @@ for (const source of ['telegram', 'whatsapp'] as const) {
     const chatScope = source === 'telegram' ? 'telegram.personal:chat:101' : 'whatsapp.personal:chat:123@s.whatsapp.net';
     const grantPath = join(dir, `messaging-capture.${source}.json`);
     let registered = false;
-    const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'),
+    const service = createDashboardMessagingService({ whatsappBridge: async () => 'olympus-whatsapp-bridge-test', registryPath: join(dir, 'handles.json'),
       secretStore: { label: 'memory', get: async () => undefined, getSync: () => undefined, set: async () => {}, delete: async () => {}, list: async () => [] },
       withMessagingCapturePaused: async (_source, operation) => operation(), withGrantMutation: async operation => operation(),
       listCommand: async () => ({ dialogs: [{ chat_scope: chatScope, title: 'One', kind: 'dm' }] }),
@@ -200,7 +200,7 @@ for (const source of ['telegram', 'whatsapp'] as const) {
 
 test('Choose chats before pairing is an answer (not_paired), not a failed request', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'messaging-unpaired-')); dirs.push(dir);
-  const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'), secretStore: memorySecrets, withMessagingCapturePaused: (_s, op) => op(), withGrantMutation: op => op() });
+  const service = createDashboardMessagingService({ whatsappBridge: async () => 'olympus-whatsapp-bridge-test', registryPath: join(dir, 'handles.json'), secretStore: memorySecrets, withMessagingCapturePaused: (_s, op) => op(), withGrantMutation: op => op() });
   for (const source of ['telegram', 'whatsapp'] as const) expect(await service.handle('chats', { source })).toEqual({ ok: true, state: 'not_paired' });
 });
 
@@ -212,7 +212,7 @@ for (const ending of ['listing-fails', 'cancelled', 'existing-device-fails', 'fa
     const unlinks: Array<string | undefined> = [];
     let cancelled!: () => void;
     const waitForCancel = new Promise<void>((resolve) => { cancelled = resolve; });
-    const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'),
+    const service = createDashboardMessagingService({ whatsappBridge: async () => 'olympus-whatsapp-bridge-test', registryPath: join(dir, 'handles.json'),
       secretStore: memorySecrets,
       withMessagingCapturePaused: async (_source, operation) => operation(), withGrantMutation: async operation => operation(),
       unlinkCommand: async (_command, env) => { unlinks.push(env.OLYMPUS_WHATSAPP_STATE_DIR); return 'removed'; },
@@ -253,7 +253,7 @@ test('no pairing can start between Disconnect stopping the running one and finis
   const dir = mkdtempSync(join(tmpdir(), 'messaging-hold-')); dirs.push(dir);
   const registryPath = join(dir, 'handles.json');
   let pairs = 0;
-  const service = createDashboardMessagingService({ registryPath, secretStore: memorySecrets,
+  const service = createDashboardMessagingService({ whatsappBridge: async () => 'olympus-whatsapp-bridge-test', registryPath, secretStore: memorySecrets,
     withMessagingCapturePaused: async (_source, operation) => operation(),
     withGrantMutation: async operation => operation(),
     pairSource: async options => {
@@ -290,7 +290,7 @@ for (const source of ['telegram', 'whatsapp'] as const) {
     const env = source === 'telegram' ? { [key]: '*', OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: '*' } : { [key]: '*' };
     const grantPath = join(dir, `messaging-capture.${source}.json`);
     writeFileSync(grantPath, JSON.stringify({ version: 1, source, handle: `${source}.personal`, sessionPath: dir, grantedAt: '2026-01-01', producer: { source, env, secretEnvironment: [] } }), { mode: 0o600 });
-    const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'),
+    const service = createDashboardMessagingService({ whatsappBridge: async () => 'olympus-whatsapp-bridge-test', registryPath: join(dir, 'handles.json'),
       secretStore: { label: 'memory', get: async (name) => name.endsWith('api_id') ? '123' : 'fixture-hash', getSync: () => undefined, set: async () => {}, delete: async () => {}, list: async () => [] },
       withMessagingCapturePaused: async (_source, operation) => operation(), withGrantMutation: async operation => operation(),
       listCommand: async () => ({ dialogs: [{ chat_scope: chatScope, title: 'Family', kind: 'group', last_message_at: '2026-11-09T10:00:00Z' }] }),
@@ -308,3 +308,19 @@ for (const source of ['telegram', 'whatsapp'] as const) {
     } finally { service.close(); }
   });
 }
+
+test('a dashboard messaging failure is a fixed code the card can word, never the raw error', () => {
+  const coded = (message: string, code: string) => Object.assign(new Error(message), { code });
+  // No Go on a user machine is a missing helper, not a pairing problem.
+  expect(dashboardMessagingFailure(coded('WhatsApp pairing requires Go and a C compiler.', 'bridge_build_tools_missing')))
+    .toEqual({ code: 'bridge_missing', message: expect.stringContaining('not on this computer') });
+  expect(dashboardMessagingFailure(coded('go build exited 2', 'bridge_build_failed')).code).toBe('bridge_build_failed');
+  expect(dashboardMessagingFailure(coded('anything', 'chat_list_timeout')).message).toContain('took too long');
+  // An unknown code is kept so the log names it; the words stay generic.
+  expect(dashboardMessagingFailure(coded('/Users/someone/x', 'session_locked'))).toEqual({ code: 'session_locked', message: expect.stringContaining('Try again') });
+  for (const error of [new Error('/Users/someone/secret path'), coded('x', 'Has Spaces/../'), 'plain', undefined]) {
+    const failure = dashboardMessagingFailure(error);
+    expect(failure.code).toBe('messaging_request_failed');
+    expect(JSON.stringify(failure)).not.toContain('someone');
+  }
+});

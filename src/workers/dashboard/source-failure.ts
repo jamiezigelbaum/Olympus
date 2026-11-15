@@ -32,6 +32,7 @@ export const SOURCE_FAILURE_KINDS = [
   'search_model_unavailable',
   'reader_unavailable',
   'busy_here',
+  'incomplete',
   'setup',
   'not_started',
   'unknown',
@@ -58,6 +59,7 @@ const EXACT: Readonly<Record<string, SourceFailureKind>> = {
   'evernote.rate_limit': SOURCE_RATE_LIMITED,
   'readwise.rate_limit': SOURCE_RATE_LIMITED,
   temporary: 'provider_busy',
+  reconcile_incomplete: 'incomplete',
   api_request_guard: 'provider_refused',
   embedding_backend_unavailable: 'search_model_unavailable',
   embedding_provider_unavailable: 'search_model_unavailable',
@@ -71,6 +73,12 @@ const EXACT: Readonly<Record<string, SourceFailureKind>> = {
  * for anything Olympus did not classify (its log has the message).
  */
 export function sourceFailureKind(errorKind: string | undefined, degradedReason?: string): SourceFailureKind {
+  // A pause Olympus set itself (a daily budget, a provider's rate limit)
+  // outranks the error kind the lane carried in, the same rule the card
+  // follows: a cost guard trip once read as X refusing the request.
+  if (typeof degradedReason === 'string' && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(degradedReason)) {
+    return EXACT[degradedReason] ?? 'daily_limit';
+  }
   for (const value of [errorKind, degradedReason]) {
     if (typeof value !== 'string' || !value) continue;
     const exact = EXACT[value];

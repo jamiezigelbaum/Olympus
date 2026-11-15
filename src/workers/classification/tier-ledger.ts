@@ -2981,6 +2981,23 @@ export class TierLedger {
    * back to the decision the override took it over from
    * (`settledDecisionBeforeOverride`).
    */
+  /**
+   * Changes whenever an override is set or cleared, or an undo request is
+   * saved or settled, or a move starts or lands (an undo can wait for its
+   * landing): the inputs of `listClearedOverrideRows` that change. Read from
+   * indexes only (the overrides table, a key range of the meta table, and the
+   * state index's non-current ranges), so it is cheap on any ledger.
+   */
+  clearedOverrideFingerprint(): string {
+    const row = this.db.query(`
+      SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
+        || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
+          FROM tier_ledger_meta WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;')
+        || '|' || (SELECT count(*) FROM tier_items WHERE state > 'current' OR state < 'current') AS f
+    `).get() as { f: string } | null;
+    return row?.f ?? '';
+  }
+
   listClearedOverrideRows(limit = 100, after?: Pick<TierLedgerRecord, 'provider' | 'accountScope' | 'conversationKey' | 'providerItemId'>): TierLedgerRecord[] {
     // `after` pages past rows a pass could not restore, so they never block the rest.
     const rows = this.db.query(`

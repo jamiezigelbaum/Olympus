@@ -167,6 +167,15 @@ export interface ArchiveScaleMeasurement {
   frontP95Ms: number | null;
   frontSamples: number;
   frontFailures: number;
+  /** Under the running import and judge (archive-scale.ts responsiveCheck); absent in reports from before 15 Nov 2026. */
+  frontMaxMs?: number | null;
+  statusMaxMs?: number | null;
+  statusSamples?: number;
+  statusFailures?: number;
+  searchP95Ms?: number | null;
+  searchMaxMs?: number | null;
+  searchSamples?: number;
+  searchFailures?: number;
 }
 
 export interface ReleaseReportInput {

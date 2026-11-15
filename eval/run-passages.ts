@@ -17,9 +17,10 @@ import { openEvalDataRoot, type EvalStoreCount, type EvalSkippedStore } from './
 import { parseDataRootArgs } from './data-root-args.ts';
 import { buildEvalPack, createEvalSourceLanes, configuredEvalEmbedding, prepareEvalEmbedding, type EvalStoreSearch } from './retrieval.ts';
 import { passageContainsQuote, passageWords, PASSAGE_MATCH_RULE } from './passage-match.ts';
-import { resolveCitationCorpusId } from './grade.ts';
+import { citationItemChunks, citedCopyOfExpected, resolveCitationCorpusId } from './grade.ts';
 import { validatePassageDataset, type EvalDataset, type EvalQuestion } from './types.ts';
 import { localEvalModel, type DraftModel } from './local-model.ts';
+import { answerMeaningJudge } from './answer-judge.ts';
 import { enterStage, failureCode, runEvalCli, type EvalStage } from './cli-failure.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -55,6 +56,19 @@ export interface LaneProbe { keyword: number | null; vector: number | null; exac
 export interface QuestionJudgement { answers: boolean | null; specific: boolean | null }
 export interface PassageAnswer {
   outcome: 'answered' | 'failed'; cited?: boolean; coverage?: number; right?: boolean; answerMs?: number; code?: string;
+  /** How the citation matched: the expected item itself, or another copy of it (grade.ts citedCopyOfExpected). */
+  citedBy?: 'item' | 'copy';
+  /** The answer's length in characters and its number of citations (counts only). */
+  answerChars?: number; citations?: number;
+  /**
+   * For an expected item seated in the fitted prompt: its text in characters
+   * as packed and as fitted, and whether the packed text held the expected
+   * passage. Packed without it, the pack chose other parts of the item;
+   * packed with it and fitted without it, the fit cut it.
+   */
+  seat?: { packedChars: number; fittedChars: number; passageInPacked: boolean };
+  /** The meaning judge's verdict (answer-judge.ts), when it ran: a second number, never the bar. */
+  meaning?: 'correct' | 'partial' | 'wrong' | null;
 }
 export interface PassageSummary {
   /** Questions scored; a degraded question is counted in `degraded` instead. */
@@ -65,7 +79,7 @@ export interface PassageSummary {
   /** The question judge's counts, when it ran. */
   judged?: { answers: number; notAnswers: number; specific: number; generic: number; unclear: number };
   /** All answer attempts; median and nearest-rank p90 use successful calls only (zero when none succeeded). */
-  answer?: { asked: number; right: number; cited: number; failed: number; medianMs: number; p90Ms: number };
+  answer?: { asked: number; right: number; cited: number; failed: number; medianMs: number; p90Ms: number; correctByMeaning?: number };
   timings: { buildPackMs: number; fitMs: number; totalMs: number; storeSearchMs: number };
   /** Answerable questions whose item got at least this far: found by a lane or returned, returned by its store, seated in the pack, kept by the fit, with the exact passage. */
   reach: { found: number; returned: number; seated: number; fitted: number; passage: number };
@@ -136,6 +150,7 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
     ...(answers.length ? { answer: {
       asked: answers.length,
       right: answers.filter(answer => answer.right).length,
+      ...(answers.some(answer => answer.meaning !== undefined) ? { correctByMeaning: answers.filter(answer => answer.meaning === 'correct').length } : {}),
       cited: answers.filter(answer => answer.cited).length,
       failed: answers.filter(answer => answer.outcome === 'failed').length,
       medianMs: answerTimes.length ? (answerTimes[middle]! + answerTimes[answerTimes.length % 2 ? middle : middle - 1]!) / 2 : 0,
@@ -160,19 +175,23 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
 const ANSWER_STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'these', 'those', 'are', 'was', 'were', 'has', 'had', 'have', 'been', 'being', 'but', 'not', 'you', 'your', 'our', 'its', 'into', 'than', 'then', 'they', 'their', 'there', 'will', 'would', 'can', 'could', 'should']);
 
 /** Alternative evidence items follow the retrieval metric: any one can answer the question. */
-function gradePassageAnswer(question: EvalQuestion, result: AnalystResult, detail: EvidencePackBuildDetail): Pick<PassageAnswer, 'cited' | 'coverage' | 'right'> {
+function gradePassageAnswer(question: EvalQuestion, result: AnalystResult, detail: EvidencePackBuildDetail): Pick<PassageAnswer, 'cited' | 'coverage' | 'right' | 'citedBy'> {
   const expected = question.expectedEvidence ?? [];
-  const cited = result.citations.some(citation => {
-    const corpusId = resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds);
+  const corpusOf = (citation: AnalystResult['citations'][number]) => resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds);
+  const itself = result.citations.some(citation => {
+    const corpusId = corpusOf(citation);
     return expected.some(item => [item, ...(item.alternates ?? [])].some(identity =>
       identity.corpusId === corpusId && identity.providerItemId === citation.provenance.sourceItem.providerItemId));
   });
+  const copy = !itself && result.citations.some(citation => expected.some(item =>
+    citedCopyOfExpected(item, citation.provenance, corpusOf(citation), citationItemChunks(citation.provenance, detail.pack.candidates))));
+  const cited = itself || copy;
   const words = new Set(passageWords(result.answer));
   const coverage = Math.max(0, ...expected.map(item => {
     const content = passageWords(item.quote ?? '').filter(word => /^\p{L}{3,}$/u.test(word) && !ANSWER_STOP_WORDS.has(word));
     return content.length ? content.filter(word => words.has(word)).length / content.length : 0;
   }));
-  return { cited, coverage, right: cited && coverage >= 0.8 };
+  return { cited, coverage, right: cited && coverage >= 0.8, ...(cited ? { citedBy: itself ? 'item' as const : 'copy' as const } : {}) };
 }
 function grouped(rows: readonly PassageRow[], ks: readonly number[], groups: (row: PassageRow) => string[]): Record<string, PassageSummary> {
   const buckets = new Map<string, PassageRow[]>();
@@ -191,6 +210,8 @@ export async function runPassageEval(input: {
   judgeQuestion?: (question: string, quote: string) => Promise<QuestionJudgement>;
   /** Answer the exact fitted pack; only deterministic scores enter the receipt. */
   answer?: (question: EvalQuestion, pack: EvidencePack) => Promise<AnalystResult>;
+  /** Judge an answer's meaning against the expected passage (answer-judge.ts); the verdict only enters the receipt. */
+  judgeAnswer?: (question: string, expected: string, answer: string) => Promise<'correct' | 'partial' | 'wrong' | null>;
   /** How many chunks an item has in its store (undefined when unknown). */
   itemChunks?: (corpusId: string, providerItemId: string) => number | undefined;
   /** Called as each question enters a step (1-based index; step names only). */
@@ -229,6 +250,8 @@ export async function runPassageEval(input: {
       'compact', new Map(original.candidates.map((candidate, index) => [candidate.provenance, detail.candidateExtractionGapIndexes?.[index] ?? []])));
     let objectRank: number | null = null;
     let passageRank: number | null = null;
+    const seatText = (seat: EvidencePack['candidates'][number]) => [...seat.chunks, ...(seat.facts ?? []).map(fact => fact.claim), ...(seat.tables ?? []).flatMap(table => [table.caption ?? '', ...table.columns, ...table.rows.map(row => row.join(' '))])].join('\n');
+    let seated: { packedChars: number; fittedChars: number; passageInPacked: boolean } | undefined;
     for (const [index, seat] of pack.candidates.entries()) {
       const originalIndex = original.candidates.findIndex(candidate => candidate.provenance === seat.provenance);
       const corpusId = detail.candidateCorpusIds[originalIndex];
@@ -236,7 +259,12 @@ export async function runPassageEval(input: {
         const identities = [expected, ...(expected.alternates ?? [])];
         if (!identities.some(item => item.corpusId === corpusId && item.providerItemId === seat.provenance.sourceItem.providerItemId)) continue;
         objectRank ??= index + 1;
-        if (expected.quote && passageContainsQuote([...seat.chunks, ...(seat.facts ?? []).map(fact => fact.claim), ...(seat.tables ?? []).flatMap(table => [table.caption ?? '', ...table.columns, ...table.rows.map(row => row.join(' '))])].join('\n'), expected.quote)) passageRank ??= index + 1;
+        if (!seated) {
+          const packed = original.candidates[originalIndex];
+          seated = { packedChars: packed ? seatText(packed).length : 0, fittedChars: seatText(seat).length,
+            passageInPacked: Boolean(packed && expected.quote && passageContainsQuote(seatText(packed), expected.quote)) };
+        }
+        if (expected.quote && passageContainsQuote(seatText(seat), expected.quote)) passageRank ??= index + 1;
       }
     }
     // Retrieval and fitting end here; answer and diagnostic calls have separate timings.
@@ -248,7 +276,9 @@ export async function runPassageEval(input: {
       try {
         const result = await input.answer(question, pack);
         const answerMs = performance.now() - answerStarted;
-        answer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs };
+        answer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs, answerChars: result.answer.length, citations: result.citations.length, ...(seated ? { seat: seated } : {}) };
+        const expectedText = (question.expectedEvidence ?? []).map(item => item.quote).filter(Boolean).join('\n') || (question.expectedAnswerContains ?? []).join('; ');
+        if (input.judgeAnswer && expectedText) answer.meaning = await input.judgeAnswer(question.question, expectedText, result.answer);
       } catch (error) { answer = { outcome: 'failed', code: failureCode(error) ?? 'UNKNOWN' }; }
     }
     const expectedStores = (question.expectedEvidence ?? []).map(e => stores.get(e.corpusId));
@@ -481,7 +511,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const arg = rest[index]!;
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
-      if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
+      if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer' || key === '--judge-answers') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
       if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes'].includes(key!)) throw new Error('Unsupported passage eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Passage eval option requires a value.');
@@ -530,6 +560,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     let searches: EvalStoreSearch[] = [];
     const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor, onStoreSearch: search => { searches.push(search); } });
     const judge = values.has('--judge-questions') ? questionJudge(localEvalModel(config)) : undefined;
+    const judgeAnswer = values.has('--judge-answers') && answer ? answerMeaningJudge(localEvalModel(config)) : undefined;
     const probe = values.has('--probe-lanes') ? laneProbe(opened.stores, embedding.embeddingFor) : undefined;
     const storeTimes = values.has('--trace') ? new StoreTimes() : undefined;
     const itemChunks = storedChunkCounter(opened.stores);
@@ -551,6 +582,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       },
       ...(probe ? { probeLanes: probe } : {}),
       ...(judge ? { judgeQuestion: judge } : {}),
+      ...(judgeAnswer ? { judgeAnswer } : {}),
       ...(answer ? { answer } : {}),
       itemChunks: itemChunks.count,
       onProgress: (index, total, step) => enter(`question ${index}/${total}: ${step}`),

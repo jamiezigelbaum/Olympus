@@ -55,7 +55,7 @@ test('measurement percentiles and row counts preserve missing data', () => {
 });
 
 /** Only the Sources-tab opening is scripted; progress always comes from that tab's visible row. */
-async function readwiseStage(options: { held?: number; throwAtStart?: boolean; cleanupFails?: boolean } = {}) {
+async function readwiseStage(options: { held?: number; throwAtStart?: boolean; cleanupFails?: boolean; statusMs?: number } = {}) {
   const clock = createTestClock(0);
   let currentItems = 100;
   let syncs = 0;
@@ -82,6 +82,8 @@ async function readwiseStage(options: { held?: number; throwAtStart?: boolean; c
     withBrowser: async (work: (session: { driver: JourneyDriver }) => Promise<unknown>) => work({ driver }),
     engineRss: () => 12_000,
     frontStatus: async () => { await clock.sleep(5); return true; },
+    sourceStatus: async () => { await clock.sleep(options.statusMs ?? 7); return true; },
+    search: async () => { await clock.sleep(9); return { ok: true, isError: false, structured: null }; },
     beginReadwise: async () => { if (options.throwAtStart) throw new Error('connection failed'); },
     readwiseSnapshot: async () => {
       currentItems = clock.now() >= 20_000 ? 3_800 : 100;
@@ -107,6 +109,16 @@ test('Readwise samples the Sources row, measures the front independently, retrie
   expect(obs.measurement).toMatchObject({ items: 3_800, peakRssBytes: 12_000, frontP50Ms: 5, frontP95Ms: 5, frontFailures: 0 });
   expect(obs.measurement.frontSamples).toBeGreaterThan(1);
   expect(obs.measurement.itemsPerMinute).toBeGreaterThan(0);
+  expect(obs.measurement).toMatchObject({ statusMaxMs: 7, statusFailures: 0, searchMaxMs: 9, searchFailures: 0 });
+  expect(obs.measurement.statusSamples).toBeGreaterThan(0);
+  expect(scaleChecks('readwise', obs).find(c => c.id.endsWith('.responsive'))!.status).toBe('pass');
+});
+
+test('a status that takes 10 s or more while the import runs fails the responsive check', async () => {
+  const { obs } = await readwiseStage({ statusMs: 12_000 });
+  const responsive = scaleChecks('readwise', obs).find(c => c.id.endsWith('.responsive'))!;
+  expect(responsive.status).toBe('fail');
+  expect(responsive.detail).toContain('source_index_status slowest 12.0 s');
 });
 
 test('Readwise held timeout reports the population, and failed starts still run cleanup', async () => {
@@ -123,10 +135,10 @@ test('Readwise held timeout reports the population, and failed starts still run 
 });
 
 
-test('the report renders scale measurements without imposing performance thresholds', () => {
+test('the report renders scale measurements; only the 10 s responsive bound judges them', () => {
   const obs = observation();
   obs.measurement = { ...obs.measurement, wallMs: 123_000, itemsPerMinute: 9753.7, peakRssBytes: 64 * 1024 * 1024, frontP50Ms: 12.5, frontP95Ms: 95000, frontSamples: 62, frontFailures: 3 };
-  expect(failures(obs)).toEqual([]);
+  expect(failures(obs)).toEqual(['archive.scale.mbox.responsive']);
   const report = buildReport({ runId: 'scale-report', candidate: { label: 'synthetic' }, startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T01:00:00Z', errors: [],
     machines: [{ id: 'linux', label: 'Synthetic VM', os: 'linux', driver: 'synthetic', timings: {}, checks: [], agents: [], screenshots: [], logs: [], archiveScale: [obs.measurement] }] });
   const html = renderHtml(report);

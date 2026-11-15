@@ -47,7 +47,7 @@ function viewOf(card: DashboardSourceCard, limitStops: import('../src/core/limit
 }
 
 describe('Needs you holds only what the owner must act on (#1044)', () => {
-  test('an open daily stop makes one row from the record, with Run once; clearing removes it', () => {
+  test('an open daily spending stop makes one row from the record, with Raise for today; clearing removes it', () => {
     const db = new Database(':memory:');
     initializeLimitStops(db);
     const stop = { id: 'x.daily_cost', subject: JSON.stringify(['x.bookmarks', 'internal.x.bookmarks', 'pull']),
@@ -60,7 +60,7 @@ describe('Needs you holds only what the owner must act on (#1044)', () => {
       expect(view.needsYou).toEqual([]);
       expect(view.waits).toEqual([{ sourceId: 'x.bookmarks', label: 'X bookmarks', api: 'X bookmarks', reason: 'limit',
         limitLabel: 'daily X spending budget used', since: stop.since, limit: 1, used: 1, unit: 'usd', waiting: stop.waiting, resumesAt: stop.resumesAt,
-        fix: { label: 'Run once', tool: 'olympus_limits', args: { action: 'continue', id: stop.id, subject: limitStopReference(stop) } } }]);
+        fix: { label: 'Raise to $2 today', tool: 'olympus_limits', args: { action: 'continue', id: stop.id, subject: limitStopReference(stop), to: 2 } } }]);
       clearLimitStop(stop.id, stop.subject, db);
       expect(viewOf(card, listOpenLimitStops(db, NOW)).waits).toBeUndefined();
     } finally { db.close(); }

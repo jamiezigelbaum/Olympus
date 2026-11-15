@@ -248,7 +248,7 @@ test('a yielded build never installs over a memo advanced by another reader', as
   expect(h.hidden()).toEqual(h.full());
 });
 
-test('off-thread and synchronous readers share the memo; an intervening write is not installed', async () => {
+test('off-thread and synchronous readers share the memo; a write during the build is replayed by the next one', async () => {
   const h = await setup();
   const before = h.target.hiddenChildMemo;
   h.setCopyState('parent', 'superseded');
@@ -260,7 +260,9 @@ test('off-thread and synchronous readers share the memo; an intervening write is
     h.db.query('UPDATE items SET tombstoned = tombstoned WHERE provider_item_id = ?').run('template');
     step = steps.next(result);
   }
-  expect(h.target.hiddenChildMemo).toBe(before);
+  // Installed at the cursors read before the build: the writes during it are
+  // the next build's delta (a busy install never installed one, 14 Nov).
+  expect(h.target.hiddenChildMemo).not.toBe(before);
   h.assertHidden();
   const walk = spyOn(h.target, 'hiddenChildFullReadSteps');
   await h.target.tierHiddenItemPksInTurns();
@@ -269,7 +271,7 @@ test('off-thread and synchronous readers share the memo; an intervening write is
   walk.mockRestore();
 });
 
-test('a cold off-thread walk cannot install a result across a moved cursor', async () => {
+test('a cold off-thread walk installs at its starting cursor, and the next read replays what moved', async () => {
   const h = await setup();
   h.target.hiddenChildMemo = undefined;
   const steps = h.target.hiddenChildReadSteps();
@@ -280,9 +282,12 @@ test('a cold off-thread walk cannot install a result across a moved cursor', asy
     if (!changed) { h.setCopyState('parent', 'superseded'); changed = true; }
     step = steps.next(result);
   }
-  expect(h.target.hiddenChildMemo).toBeUndefined();
-  h.assertHidden();
   expect(h.target.hiddenChildMemo).toBeDefined();
+  const walk = spyOn(h.target, 'hiddenChildFullReadSteps');
+  expect(h.hidden()).toContain(h.child);
+  expect(walk).toHaveBeenCalledTimes(0);
+  walk.mockRestore();
+  h.assertHidden();
 });
 
 test('an unavailable feed in another lane store forces the full walk', async () => {

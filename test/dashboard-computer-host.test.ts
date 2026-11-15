@@ -655,10 +655,26 @@ describe('the panel on the computer', () => {
     expect(wait.closest('.home-progress')).not.toBeNull();
     const at = new Date('2026-11-11T00:00:00.000Z');
     const local = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
-    expect(wait.textContent).toBe(`X bookmarks · daily X API budget used · since 2026-11-10T12:00:00.000Z · resumes at ${local} (00:00 UTC)Sync now`);
+    // No raw timestamps (owner, 2026-11-15); the resume time is said once when this computer keeps UTC.
+    expect(wait.textContent).toBe(`X bookmarks · daily X API budget used · resumes at ${local === '00:00' ? '00:00 UTC' : `${local} (00:00 UTC)`}Sync now`);
     expect(wait.querySelector('button')!.textContent).toBe('Sync now');
     expect(doc.querySelectorAll('[data-source-wait]')).toHaveLength(1);
     expect(page.text()).not.toContain('Needs you');
+  });
+
+  test('a spending stop reads in dollars, and Run once says it is checking (owner, 2026-11-15)', async () => {
+    const X = { id: 'x.bookmarks', label: 'X bookmarks', group: 'cloud', status: 'Working', lastSyncAt: ago(12 * 60 * MIN),
+      lastManualSync: { at: ago(MIN), outcome: 'checking' } } as unknown as DashboardViewModelV1['sources'][number];
+    const data = model({ sources: [X], waits: [
+      { sourceId: 'x.bookmarks', label: 'X bookmarks', reason: 'limit', api: 'X', limitLabel: 'X spending reserve for new bookmarks reached', limit: 1.921875, used: 1.945, unit: 'usd',
+        fix: { label: 'Run once', tool: 'olympus_limits', args: { action: 'continue', id: 'x.daily_requests', subject: 'limit:' + 'a'.repeat(64) }, runsSource: true } },
+    ] } as unknown as Partial<DashboardViewModelV1>);
+    delete data.progress;
+    const page = await onHost(COMPUTER, data);
+    const wait = page.win.document.querySelector('[data-source-wait="x.bookmarks"]')!;
+    expect(wait.textContent).toContain('$1.95 of $1.92');
+    expect(wait.textContent).not.toContain('1.921875');
+    expect(wait.querySelector('button')!.getAttribute('aria-busy')).toBe('true');
   });
 
   test('a limit Sync now uses Checking while that source is running', async () => {

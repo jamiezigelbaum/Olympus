@@ -45,6 +45,8 @@ import {
   dashboardGoogleProviderNote,
   dashboardNeedsSetupSheet,
   dashboardOAuthConnectSheet,
+  dashboardOAuthOneClickReconnect,
+  dashboardOAuthUsesSavedApp,
   escapeHtml,
   pageShell,
   rowMenu,
@@ -339,9 +341,17 @@ function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: 
   if (kept) items.push(confirm('delete_source_data', `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, 'Delete indexed data', true, 'Delete indexed data'));
   const fixLabel = kept ? 'Reconnect' : source.connection.state === 'reauth_required' ? 'Sign in'
     : needsSetupAgain(source) && 'label' in source.connection.action ? dashboardActionLabel(source.connection.action.label) : '';
-  const needs = fixLabel
-    ? `<button class="btn${kept ? '' : ' primary'}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml(source.source_id)}"${off}>${escapeHtml(fixLabel)}</button>`
-    : '';
+  // Reconnect is one press when nothing needs typing (owner, 2026-11-15): the
+  // row's own button starts the sign-in with the stored app settings. A
+  // source that needs input, or whose last attempt the provider refused,
+  // opens its setup instead.
+  const action = source.connection.action;
+  const needs = !fixLabel ? ''
+    : action.kind === 'oauth' && dashboardOAuthOneClickReconnect(source)
+      ? `<form class="rowform" data-connect-kind="oauth" data-one-click-reconnect><input type="hidden" name="source" value="${escapeHtml(action.source)}">`
+        + `<button class="btn${kept ? '' : ' primary'}" type="submit"${off}>${escapeHtml(fixLabel)}</button>`
+        + '<span class="actmsg" data-action-message role="status"></span><span class="authfallback" data-authorization-fallback></span></form>'
+      : `<button class="btn${kept ? '' : ' primary'}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml(source.source_id)}"${off}>${escapeHtml(fixLabel)}</button>`;
   const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString('en-US')} items` : sourceFacts(source);
   const row = `<div class="srcrow${kept ? ' kept' : ''}" data-source-row="${escapeHtml(source.source_id)}"${kept ? ' data-source-kept' : ''}>${sourceLogoTile(source.source_id, kept ? 'off' : sourceStatus(source))}`
     + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml(facts)}</span>` : ''}</div>`
@@ -433,6 +443,8 @@ const SOURCES_CSS = `
 .srcrow { display: flex; align-items: center; gap: 14px; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
 .srcmain { flex: 1; min-width: 0; }
 .srcact { display: flex; align-items: center; gap: 10px; }
+.srcact .rowform { flex-direction: row-reverse; align-items: center; gap: 8px; margin: 0; }
+.srcact .rowform .actmsg:empty, .srcact .rowform .authfallback:empty { display: none; }
 .srcact .rowmenu { position: relative; }
 .srcact .rowmenu .menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; min-width: 220px; display: grid; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel, var(--bg)); box-shadow: 0 8px 24px rgba(0,0,0,.35); }
 .menuitem { font: inherit; text-align: left; background: none; border: 0; color: var(--t1); padding: 9px 12px; border-radius: 6px; cursor: pointer; width: 100%; }
@@ -453,6 +465,12 @@ const SOURCES_CSS = `
 .srctile[hidden] { display: none; }
 .srctiles + .pnote { margin-top: 14px; }
 .srcsetup .plainlink { margin: 8px 0 12px; }
+/* The sheet is at most 480px wide, too narrow for a setup row's four columns
+   (the description got 0px and printed one letter per line, 2026-11-15).
+   In the sheet the description always sits on its own line under the name. */
+.srcsheet .setrow { grid-template-columns: 20px minmax(0, 1fr) auto; padding: 12px 0; }
+.srcsheet .setrow .blurb { grid-column: 1 / -1; grid-row: 2; }
+.srcsheet .setrow .btn { justify-self: end; width: max-content; }
 .linkbtn { font: inherit; color: var(--link); background: none; border: 0; padding: 0; text-decoration: underline; cursor: pointer; }
 #build-connector > .pnote { margin: 12px 0 0; }
 #build-connector .promptbox { margin: 12px 0 0; word-break: normal; overflow-wrap: anywhere; }
@@ -569,11 +587,13 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
   if (action.kind === 'oauth') {
     const connect = dashboardOAuthConnectSheet(source, action, { ...refusalNotice(source), ...providerNote(view, action) });
     if (connect) {
+      // A saved app has nothing to set up, so the "set up your own app" lead does not apply to it.
+      const lead = dashboardOAuthUsesSavedApp(action) ? undefined : providerNote(view, action).lead;
       const row = setupRow({
         ...id,
         label: source.label,
-        blurb: providerNote(view, action).lead?.title ?? setupBlurb(source),
-        action: { label: providerNote(view, action).lead?.button ?? action.label, kind: 'none', sheet: connect.sheetId, ...gate },
+        blurb: lead?.title ?? setupBlurb(source),
+        action: { label: lead?.button ?? action.label, kind: 'none', sheet: connect.sheetId, ...gate },
       });
       return `${row}\n${connect.sheet}`;
     }

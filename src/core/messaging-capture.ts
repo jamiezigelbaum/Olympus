@@ -1,6 +1,5 @@
 import { readyTelegramPython, type TelegramPythonSeams } from './messaging-runtime.ts';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
@@ -23,7 +22,7 @@ import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry } from '.
 import { tryHoldFileFlock } from './data-owner-lock.ts';
 import { recordAccountPlacement } from './source-storage.ts';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
-import type { MessagingPairingConnectedResult, MessagingProducerLaunch, MessagingPairingSource } from './messaging-pairing.ts';
+import { readyWhatsAppBridge, type MessagingPairingConnectedResult, type MessagingProducerLaunch, type MessagingPairingSource, type WhatsAppBridgeOptions } from './messaging-pairing.ts';
 import { withoutUnpairedLaneHandles } from '../workers/credential-broker/unpaired-sources.ts';
 import {
   defaultHandleRegistryPath,
@@ -194,6 +193,10 @@ export type MessagingCaptureReason =
   | 'session_missing'
   | 'secret_missing'
   | 'start_failed'
+  /** This version's helper program is not installed, and this computer has no Go or C compiler to build it. */
+  | 'helper_missing'
+  /** This version's helper program could not be built. */
+  | 'helper_build_failed'
   | 'helper_exited'
   | 'restarting'
   | 'helper_running'
@@ -224,12 +227,13 @@ const STABLE_RUN_MS = 60_000;
 export function effectiveMessagingCaptureStatus(input: {
   status: MessagingCaptureStatus | undefined;
   liveness?: MessagingCaptureLiveness | undefined;
-  reconcileFailed?: boolean | undefined;
+  /** The last reconcile threw: true, or the kind of start failure it was (messagingCaptureStartFailure). */
+  reconcileFailed?: boolean | MessagingCaptureStartFailure | undefined;
 }): MessagingCaptureStatus | undefined {
   const { status } = input;
   const source = status?.source;
   if (input.reconcileFailed) {
-    return { ...(source ? { source } : {}), state: 'blocked', reason: 'start_failed' };
+    return { ...(source ? { source } : {}), state: 'blocked', reason: input.reconcileFailed === true ? 'start_failed' : input.reconcileFailed };
   }
   if (status?.state === 'running' && input.liveness && input.liveness.unexpectedExits >= MESSAGING_CAPTURE_REPEATED_EXITS) {
     return { ...(source ? { source } : {}), state: 'blocked', reason: 'helper_exited' };
@@ -238,6 +242,15 @@ export function effectiveMessagingCaptureStatus(input: {
     return { ...(source ? { source } : {}), state: 'stopped', reason: 'restarting' };
   }
   return status;
+}
+
+/** The kinds of reconcile that threw before a helper ran. */
+export type MessagingCaptureStartFailure = 'start_failed' | 'helper_missing' | 'helper_build_failed';
+
+/** Which kind of start failure a thrown reconcile was, from its error's code; never its message. */
+export function messagingCaptureStartFailure(error: unknown): MessagingCaptureStartFailure {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  return code === 'bridge_build_tools_missing' ? 'helper_missing' : code === 'bridge_build_failed' ? 'helper_build_failed' : 'start_failed';
 }
 
 /** One worker-owned child at a time; callers reconcile on boot and grant/handle changes. */
@@ -261,7 +274,7 @@ export class MessagingCaptureSupervisor {
     whatsappBridgePath?: string;
     stopTimeoutMs?: number;
     now?: () => number;
-  } & TelegramPythonSeams) {}
+  } & TelegramPythonSeams & Pick<WhatsAppBridgeOptions, 'which' | 'buildWhatsAppBridge'>) {}
 
   /** Whether the helper is alive right now, for the dashboard: a cached reconcile result can be ten seconds old. */
   liveness(): MessagingCaptureLiveness {
@@ -415,7 +428,7 @@ async function resolveCurrentLaunch(
     packageRoot?: string;
     pythonExecutable?: string;
     whatsappBridgePath?: string;
-  } & TelegramPythonSeams,
+  } & TelegramPythonSeams & Pick<WhatsAppBridgeOptions, 'which' | 'buildWhatsAppBridge'>,
   source: MessagingPairingSource,
   env: Record<string, string>,
 ): Promise<{ executable: string; args: string[] }> {
@@ -431,10 +444,16 @@ async function resolveCurrentLaunch(
     const packageRoot = options.packageRoot ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     return { executable, args: [join(packageRoot, 'scripts', 'telegram-telethon-reader.py'), '--gateway'] };
   }
-  return {
-    executable: options.whatsappBridgePath ?? join(homedir(), '.cache', 'olympus', 'bin', 'olympus-whatsapp-bridge'),
-    args: ['--capture-approved'],
-  };
+  // This package's bridge, built now if an upgrade left only an older build (Sparta, 14 Nov: capture dead from the first
+  // split install, the supervisor starting a bridge path no install creates). Pairing makes it ready the same way.
+  const packageRoot = options.packageRoot ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const executable = await readyWhatsAppBridge({
+    env,
+    ...(options.whatsappBridgePath ? { whatsappBridgePath: options.whatsappBridgePath } : {}),
+    ...(options.which ? { which: options.which } : {}),
+    ...(options.buildWhatsAppBridge ? { buildWhatsAppBridge: options.buildWhatsAppBridge } : {}),
+  }, packageRoot);
+  return { executable, args: ['--capture-approved'] };
 }
 
 function handleAllowsCapture(handle: ConnectedCredentialHandle | undefined, source: MessagingPairingSource): boolean {

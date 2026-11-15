@@ -276,18 +276,19 @@ export function evaluateUpgrade(before: StateSnapshot, after: StateSnapshot, exp
 }
 
 /**
- * Counts after the upgraded install settled, against the baseline's settled counts. The upgraded install was never
- * told to sync again, so equal counts mean nothing was re-ingested or lost. Embedded may grow: the new default
- * embeds Private items, which the old default did not.
+ * Counts after the upgraded install settled, against the baseline's settled counts: equal counts mean nothing was
+ * re-ingested or lost. Embedded may grow: the new default embeds Private items, which the old default did not.
+ * Seen is not a kept count: it is the latest pass's, and the upgraded engine checks live sources for new items on its
+ * own, so an incremental pass that finds nothing new reports 0 (mac-upgrade run 43730130383, seen 4 -> 0).
  */
 export function evaluateCounts(before: DashboardCounts | null, after: DashboardCounts | null): CheckResult[] {
   if (!before || !after) return [check('upgrade.counts-kept', 'Ingest counts are unchanged without another sync', false, 'the dashboard counts could not be read before or after the upgrade')];
-  const fields: Array<keyof DashboardCounts> = ['seen', 'indexed', 'contentReady', 'secretsLocated', 'personal', 'privateItems'];
+  const fields: Array<keyof DashboardCounts> = ['indexed', 'contentReady', 'secretsLocated', 'personal', 'privateItems'];
   const moved = fields.filter((field) => before[field] !== after[field]);
   const embeddedOk = after.embedded >= before.embedded;
   return [check(
     'upgrade.counts-kept',
-    'Ingest counts are unchanged without another sync (embedded may only grow)',
+    'Ingest counts are unchanged (embedded may only grow)',
     moved.length === 0 && embeddedOk,
     moved.length === 0 && embeddedOk
       ? `seen ${after.seen}, indexed ${after.indexed}, Personal ${after.personal}, Private ${after.privateItems}, Secrets ${after.secretsLocated}; embedded ${before.embedded} -> ${after.embedded}`

@@ -76,7 +76,9 @@ export function brokenBundle(candidateDir: string, outDir: string): string {
   } finally { rmSync(scratch, { recursive: true, force: true }); }
   const hash = sha256(join(dir, tarball));
   const hashes: Record<string, string> = { [tarball]: hash };
-  for (const installer of ['install-linux.sh', 'install-macos.sh']) {
+  // The Mac bundle (publish-release-to-site.ts --mac-local) names its installer install.sh; missing it left the Mac
+  // installer refusing the copy's checksum, so the broken front never started (mac-upgrade run 43730130383).
+  for (const installer of ['install-linux.sh', 'install-macos.sh', 'install.sh']) {
     const path = join(dir, installer);
     if (!existsSync(path)) continue;
     writeFileSync(path, repinInstaller(readFileSync(path, 'utf8'), hash, statSync(join(dir, tarball)).size));
@@ -108,7 +110,7 @@ export function storeFiles(root: string): string[] {
 }
 
 /** `missing` leaves out `retired`: the files a newer version moves aside on purpose (the removed pre-filter's ledger and weights, #1415). */
-export interface StoreFileCount { count: number; missing: number; retired: number; extra: number; leftovers?: number }
+export interface StoreFileCount { count: number; missing: number; retired: number; extra: number; leftovers?: number; leftoverNames?: string[] }
 
 const RETIRED_LEDGER_SUFFIX = embeddingPrefilterInstallLedgerPath('');
 const RETIRED_DIRECTORY_SUFFIX = embeddingPrefilterDirectory('');
@@ -120,18 +122,23 @@ export function retiredStoreFile(path: string): boolean {
 
 /** Files an update leaves only while it runs: schema backups, partial copies and SQLite journals. None may outlast it. */
 export function leftoverFiles(root: string): number {
-  let count = 0;
+  return leftoverFileNames(root).length;
+}
+
+/** The same files, by their path under `root`, so a failed check names what was left. */
+export function leftoverFileNames(root: string): string[] {
+  const names: string[] = [];
   const walk = (dir: string): void => {
     let entries: import('node:fs').Dirent[];
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path);
-      else if (/\.pre-schema-.*\.bak$|\.partial|-journal$/.test(entry.name)) count += 1;
+      else if (/\.pre-schema-.*\.bak$|\.partial|-journal$/.test(entry.name)) names.push(relative(root, path));
     }
   };
   walk(root);
-  return count;
+  return names.sort();
 }
 
 /** What the installer says on stderr when it rolled the stores back (L1, floor c013270b). */
@@ -146,7 +153,7 @@ export function compareStoreFiles(before: readonly string[], now: readonly strin
 }
 
 const filesDetail = (before: number, after: StoreFileCount): string =>
-  `${before} before, ${after.count} after: ${after.missing} missing, ${after.retired ?? 0} retired on purpose, ${after.extra} new, ${after.leftovers ?? 'uncounted'} backup, partial or journal file(s) left`;
+  `${before} before, ${after.count} after: ${after.missing} missing, ${after.retired ?? 0} retired on purpose, ${after.extra} new, ${after.leftovers ?? 'uncounted'} backup, partial or journal file(s) left${after.leftoverNames?.length ? ` (${after.leftoverNames.slice(0, 5).join(', ')})` : ''}`;
 
 export interface ForcedFailureObservation {
   /** The installer's own verdict on the broken copy: it must report a failure. */

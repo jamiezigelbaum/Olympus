@@ -68,8 +68,14 @@ export interface TierOverrideSettleReport {
   restored: number;
 }
 
+/** How often the cleared-override search runs when nothing it reads has changed. */
+export const CLEARED_RECHECK_MS = 10 * 60_000;
+const clearedChecks = new WeakMap<object, { fingerprint: string; atMs: number }>();
+
 export function applyOwnerOverrides(options: {
   set: TieredStoreSet;
+  /** @internal Test clock. */
+  nowMs?: () => number;
   /** @internal Test hook: runs after the overrides are read, before any is applied (another process's write). */
   afterRead?: () => void;
 }): TierOverrideSettleReport {
@@ -104,17 +110,30 @@ export function applyOwnerOverrides(options: {
   // router write a listing makes.
   // Paged by identity, so items that cannot be restored (set by the owner
   // before anything else decided them) never hold back the ones after them.
-  const CLEARED_PAGE = 100;
-  for (let after: TierLedgerRecord | undefined, page: TierLedgerRecord[]; ; after = page[page.length - 1]) {
-    page = ledger.listClearedOverrideRows(CLEARED_PAGE, after);
-    for (const record of page) {
-      try {
-        if (restoreClearedOverride(set, record)) report.restored += 1;
-      } catch {
-        // Left as it was; the next pass tries again.
+  // The search reads every routed item (seconds a tick on a large ledger,
+  // the background's freezes on Sparta, 14 Nov). It runs again only when an
+  // override or an undo request changed, when a restore failed, or after
+  // CLEARED_RECHECK_MS, which covers an undo that waited for a move to land.
+  const fingerprint = ledger.clearedOverrideFingerprint();
+  const nowMs = (options.nowMs ?? Date.now)();
+  const last = clearedChecks.get(ledger);
+  if (!last || last.fingerprint !== fingerprint || nowMs - last.atMs >= CLEARED_RECHECK_MS) {
+    let failed = false;
+    const CLEARED_PAGE = 100;
+    for (let after: TierLedgerRecord | undefined, page: TierLedgerRecord[]; ; after = page[page.length - 1]) {
+      page = ledger.listClearedOverrideRows(CLEARED_PAGE, after);
+      for (const record of page) {
+        try {
+          if (restoreClearedOverride(set, record)) report.restored += 1;
+        } catch {
+          // Left as it was; the next pass tries again.
+          failed = true;
+        }
       }
+      if (page.length < CLEARED_PAGE) break;
     }
-    if (page.length < CLEARED_PAGE) break;
+    if (failed) clearedChecks.delete(ledger);
+    else clearedChecks.set(ledger, { fingerprint: ledger.clearedOverrideFingerprint(), atMs: nowMs });
   }
   // Items that left Secrets since the last tick (here, in a listing, a move
   // landing or another process): their job names come back.

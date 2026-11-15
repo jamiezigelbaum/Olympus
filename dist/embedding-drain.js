@@ -647,6 +647,7 @@ var SHARED_DATA_FILES = {
   "tier-migration": "tier-migration",
   "engine-run": "engine-run",
   "engine-status": "engine-background-status.json",
+  "source-status-snapshot": "source-status-snapshot.json",
   "backup-staging": "backup-staging",
   "people-index": "people-index.sqlite",
   "boot-progress": "boot-progress.json",
@@ -2316,8 +2317,8 @@ function withSqliteFiles(path) {
 
 // scripts/source-embedding-drain.ts
 import { createHash as createHash13 } from "node:crypto";
-import { existsSync as existsSync23, lstatSync as lstatSync12, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname25, isAbsolute as isAbsolute15 } from "node:path";
+import { existsSync as existsSync24, lstatSync as lstatSync13, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname26, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
 import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
@@ -3134,6 +3135,7 @@ var CONTROL_PATH_SLICE_MS = 20;
 var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
 var CONTROL_PATH_REST_MS = 25;
 var HEARTBEAT_MS = 50;
+var CONTROL_PATH_LAG_COUNTED_MS = 250;
 var CONTROL_PATH_FREEZE_LOG_MS = 2000;
 function controlPathFreezeSubject(role, mainThread = true) {
   if (!mainThread)
@@ -3161,6 +3163,8 @@ class ControlPathHeadroom {
   lastTurnAt;
   pendingTurn;
   lastLagMs = 0;
+  maxLagMs = 0;
+  overBudget = 0;
   heartbeat;
   expectedBeatAt = 0;
   turns = 0;
@@ -3217,7 +3221,14 @@ class ControlPathHeadroom {
     return pending;
   }
   snapshot() {
-    return { turns: this.turns, rests: this.rests, freezes: this.freezes, lagMs: Math.round(this.lastLagMs) };
+    return {
+      turns: this.turns,
+      rests: this.rests,
+      freezes: this.freezes,
+      lagMs: Math.round(this.lastLagMs),
+      maxLagMs: Math.round(this.maxLagMs),
+      overBudget: this.overBudget
+    };
   }
   stop() {
     if (this.heartbeat)
@@ -3232,6 +3243,10 @@ class ControlPathHeadroom {
       const now = this.now();
       this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
       this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.lastLagMs > this.maxLagMs)
+        this.maxLagMs = this.lastLagMs;
+      if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)
+        this.overBudget += 1;
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(",") || "none";
@@ -11392,6 +11407,23 @@ function normalizedContentHash(text) {
   return createHash5("sha256").update(text.normalize("NFC").replace(/\r\n?/g, `
 `).trim()).digest("hex");
 }
+var FRONT_MATTER_PRIVATE_REASON = "content:rule:front_matter_private";
+var FRONT_MATTER_MAX_LINES = 100;
+function frontMatterMarksPrivate(text) {
+  const plain = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+  if (!/^---[ \t]*\r?\n/.test(plain))
+    return false;
+  const lines = plain.split(/\r?\n/, FRONT_MATTER_MAX_LINES + 1);
+  let marked = false;
+  for (let index = 1;index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^(?:---|\.\.\.)\s*$/.test(line))
+      return marked;
+    if (/^private\s*:\s*(["']?)(?:true|yes)\1\s*(?:#.*)?$/i.test(line))
+      marked = true;
+  }
+  return false;
+}
 function trivialContentRule(text, parentContext) {
   const own = text.trim();
   if (!own)
@@ -11736,6 +11768,14 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
+  if (frontMatterMarksPrivate(text)) {
+    return {
+      tier: maxTier(metadata.tier, "secure"),
+      decidedBy: "content_rule",
+      reasons: [FRONT_MATTER_PRIVATE_REASON, ...mark],
+      pending: false
+    };
+  }
   if (isBareShareLink(text)) {
     const recorded = args.sniffer.recordedContentVerdict;
     if (recorded && recorded.mapRevision === args.mapRevision) {
@@ -13777,6 +13817,15 @@ class TierLedger {
       ORDER BY decided_at DESC, provider, account_scope, conversation_key, provider_item_id LIMIT ?
     `).all(...params);
     return rows.map(recordFromRow);
+  }
+  clearedOverrideFingerprint() {
+    const row = this.db.query(`
+      SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
+        || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
+          FROM tier_ledger_meta WHERE key >= 'tier-owner-restore:' AND key < 'tier-owner-restore;')
+        || '|' || (SELECT count(*) FROM tier_items WHERE state > 'current' OR state < 'current') AS f
+    `).get();
+    return row?.f ?? "";
   }
   listClearedOverrideRows(limit = 100, after) {
     const rows = this.db.query(`
@@ -18114,6 +18163,7 @@ var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
 // src/workers/connector-store/off-thread-reads.ts
 var READ_POOL_SIZE = 1;
+var READ_POOL_RESCORE_READERS = 3;
 var READ_POOL_QUEUE_PER_STORE = 8;
 var OFF_THREAD_READ_TIMEOUT_MS = 120000;
 
@@ -18236,7 +18286,7 @@ function runtimeHasWorkers() {
   return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
 }
 function startThread(store, lane = "shared") {
-  const limit = lane === "shared" ? READ_POOL_SIZE : 1;
+  const limit = lane === "shared" ? READ_POOL_SIZE : lane === "rescore" ? READ_POOL_RESCORE_READERS : 1;
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
@@ -18333,13 +18383,20 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
   if (!runtimeHasWorkers())
     throw new Error("off-thread reads are unavailable");
   const generation = releases.get(dbPath) ?? 0;
-  const reader = await snapshotThread(dbPath, lane);
+  const askedAtMs = clock2.now();
+  const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
+  if (options.noWait && !free)
+    throw new OffThreadReadBusyError;
+  if (free)
+    free.snapshots += 1;
+  const reader = free ?? await snapshotThread(dbPath, lane);
   if ((releases.get(dbPath) ?? 0) !== generation) {
     reader.snapshots -= 1;
     dispatch();
     throw new OffThreadReadBusyError;
   }
   const snapshot = nextId++;
+  let reserveWaitMs = clock2.now() - askedAtMs;
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
     try {
@@ -18348,15 +18405,17 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
           observer?.(dbPath, query);
         const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
         const sentAtMs = clock2.now();
+        const queueWaitMs = reserveWaitMs;
+        reserveWaitMs = 0;
         let sqlMs = 0;
         try {
           const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
             sqlMs = ms;
           });
-          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
-          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
           throw error;
         } finally {
           dispatch();
@@ -18375,7 +18434,25 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
 var snapshotWaiters = [];
 var releases = new Map;
 function snapshotThreadNow(store, lane) {
-  return live().find((reader) => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job) ?? startThread(store, lane);
+  return live().find((reader) => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job && (lane !== "rescore" || reader.snapshots === 0)) ?? startThread(store, lane);
+}
+function openOffThreadSnapshot(dbPath, options = {}) {
+  return new Promise((resolve, reject) => {
+    let opened = false;
+    const done = withOffThreadSnapshot(dbPath, (read) => new Promise((release) => {
+      opened = true;
+      resolve({ read, close: async () => {
+        release();
+        await done.catch(() => {
+          return;
+        });
+      } });
+    }), options);
+    done.catch((error) => {
+      if (!opened)
+        reject(error);
+    });
+  });
 }
 function snapshotThread(store, lane) {
   const reader = snapshotThreadNow(store, lane);
@@ -18410,10 +18487,6 @@ function serveSnapshotWaiters() {
     waiter.resolve(reader);
   }
 }
-function readPoolHasWaitingWork() {
-  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
-}
-var waitingWorkForTests;
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
@@ -21394,6 +21467,7 @@ function runSteps(steps) {
 }
 var EXTRACTION_CANDIDATE_WINDOW = 500;
 var EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000;
+var MISSING_EMBEDDING_CHUNK_WINDOW = 20000;
 var SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 var HIDDEN_CHILD_PARENT_SLICE = 500;
 async function runStepsInTurns(steps) {
@@ -21409,9 +21483,11 @@ async function runStepsInTurns(steps) {
 class MutablePkList {
   values = [];
   positions = new Map;
+  generation = 0;
   add(pk) {
     if (this.positions.has(pk))
       return;
+    this.generation += 1;
     this.positions.set(pk, this.values.length);
     this.values.push(pk);
   }
@@ -21419,6 +21495,7 @@ class MutablePkList {
     const index = this.positions.get(pk);
     if (index === undefined)
       return;
+    this.generation += 1;
     const last = this.values.pop();
     this.positions.delete(pk);
     if (index < this.values.length) {
@@ -21517,6 +21594,33 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
+  if (options.chunkPks) {
+    return {
+      sql: `
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+        FROM json_each(?) pick
+        CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
+        CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+        CROSS JOIN items i ON i.item_pk = emb.item_pk
+        WHERE i.tombstoned = 0
+          AND emb.content_hash = c.embedding_input_hash
+          ${page ? "AND emb.chunk_pk > ?" : ""}
+          ${accountScope ? "AND i.account_scope = ?" : ""}
+          ${selectedFilters.sql}
+          ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}
+        ${page ? "ORDER BY emb.chunk_pk ASC LIMIT ?" : ordered ? "ORDER BY emb.item_pk ASC, emb.chunk_pk ASC" : ""}
+      `,
+      params: [
+        JSON.stringify(options.chunkPks),
+        modelId,
+        ...page ? [page.afterChunkPk] : [],
+        ...accountScope ? [accountScope] : [],
+        ...selectedFilters.params,
+        ...metadataOnly.params,
+        ...page ? [Math.max(1, Math.floor(page.limit))] : []
+      ]
+    };
+  }
   return {
     sql: `
       SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
@@ -21524,7 +21628,6 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? "+emb.model_id" : "emb.model_id"} = ?
         ${page ? "AND emb.chunk_pk > ?" : ""}
-        ${options.chunkPks ? "AND emb.chunk_pk IN (SELECT value FROM json_each(?))" : ""}
         ${accountScope ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
         ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}
@@ -21533,7 +21636,6 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
     params: [
       modelId,
       ...page ? [page.afterChunkPk] : [],
-      ...options.chunkPks ? [JSON.stringify(options.chunkPks)] : [],
       ...accountScope ? [accountScope] : [],
       ...selectedFilters.params,
       ...metadataOnly.params,
@@ -21554,7 +21656,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
   }
   return { mismatch: 0, qualified, score };
 }
-async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit) {
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders) {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority), provider);
   if (after.skippedReason)
@@ -21571,7 +21673,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
   if (digestReady)
-    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
+    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -21607,6 +21709,7 @@ var VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 var VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
 var VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
 var VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+var vectorDigestBackfillHold = () => false;
 var VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000;
 function nextVectorDigestBackfillRows(rows, turnMs) {
   if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
@@ -21615,7 +21718,7 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
     return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
   return rows;
 }
-async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders) {
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
@@ -21660,8 +21763,9 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
   let candidates = 0;
   let qualifiedItems = 0;
   let batches = 0;
+  let readers;
   while (heap.length > 0) {
-    if (qualifiedItems >= limit && (candidates >= VECTOR_DIGEST_MAX_CANDIDATES || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
+    if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES) || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
       break;
     if (expired())
       return cutWith();
@@ -21673,14 +21777,21 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
       digestScores.set(heap.pop(), score);
     }
     candidates += digestScores.size;
-    const chunkPks = [...digestScores.keys()];
-    let after = 0;
-    let rePages = 0;
-    while (true) {
+    const chunkPks = [...digestScores.keys()].sort((a, b) => a - b);
+    if (chunkPks.length > CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE && sideReaders && !readers)
+      readers = [read, ...await sideReaders()];
+    const width = readers?.length ?? 1;
+    for (let at = 0, rePages = 0;at < chunkPks.length; at += CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width, rePages++) {
       if (expired())
         return cutWith();
-      const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks }, after);
-      const rows = await read({ mode: "all", ...page });
+      const pages = await Promise.all(Array.from({ length: width }, (_, lane) => {
+        const pagePks = chunkPks.slice(at + lane * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, at + (lane + 1) * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+        if (pagePks.length === 0)
+          return [];
+        const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
+        return (readers?.[lane] ?? read)({ mode: "all", ...page });
+      }));
+      const rows = pages.flat();
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired())
           return cutWith();
@@ -21691,10 +21802,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
         if (folded.score !== undefined && digestScore !== undefined)
           underestimate = Math.max(underestimate, folded.score - digestScore);
       }
-      if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
-        break;
-      after = rows.at(-1).chunk_pk;
-      if (rePages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+      if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
         await yieldConnectorStoreVectorScan();
     }
   }
@@ -21702,7 +21810,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
 }
 var VECTOR_DIGEST_PAGE_ROWS = 4096;
 var VECTOR_DIGEST_MIN_MARGIN = 0.05;
-var VECTOR_DIGEST_MAX_CANDIDATES = 20000;
+var VECTOR_DIGEST_MAX_CANDIDATES = 5000;
 function kthBestCosine(bestByItem, k) {
   if (bestByItem.size < k)
     return -Infinity;
@@ -21755,7 +21863,17 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECT
 }
 var VECTOR_SCAN_BACKSTOP_GRACE_MS = 250;
 async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit), { lane: "scan" }).catch((error) => {
+  const side = [];
+  const sideReaders = async () => {
+    const opened = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () => openOffThreadSnapshot(dbPath, { lane: "rescore", noWait: true }).catch(() => {
+      return;
+    })));
+    for (const reader of opened)
+      if (reader)
+        side.push(reader);
+    return side.map((reader) => reader.read);
+  };
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;
@@ -22008,7 +22126,13 @@ class LocalConnectorStore {
       const model = this.vectorDigestBackfillModel;
       if (!model)
         return;
-      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || storeReadHasPriority() || offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork()) {
+      let held = false;
+      try {
+        held = vectorDigestBackfillHold();
+      } catch {
+        held = false;
+      }
+      if (this.reclaimProcess || held) {
         this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
         return;
       }
@@ -22276,7 +22400,7 @@ class LocalConnectorStore {
         ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? "") ? { holdUntilJudged: true } : {},
         subject: item.identity
       }, {
-        ...inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), ledger.newArrival(item.identity, { consume: true })) } : {},
+        ...inputs?.sniffer ? { sniffer: arrivalOrderedSniffer(conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata), ledger.newArrival(item.identity, { consume: true }) || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? "")) } : {},
         ...override ? { override } : {},
         ...inputs?.retirePublic ? { retirePublic: true } : {}
       });
@@ -22316,6 +22440,24 @@ class LocalConnectorStore {
     } catch {
       return false;
     }
+  }
+  *heldCountedHereSteps(heldPks) {
+    const ledger = this.visibilityLedger();
+    if (!ledger)
+      return [...heldPks];
+    const rows = yield { sql: `SELECT item_pk, provider, account_scope, provider_conversation_id, provider_item_id
+      FROM items WHERE item_pk IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(heldPks)], mode: "all" };
+    const identities = rows.map((row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+    }));
+    const copies = ledger.copiesForMany(identities);
+    return rows.filter((row, index) => {
+      const held = (copies.get(tierLedgerIdentityKey(identities[index])) ?? []).filter((copy) => copy.state === "current" && copy.embedHold).map((copy) => copy.corpusId).sort();
+      return held.length === 0 || held[0] === this.corpusId || !held.includes(this.corpusId);
+    }).map((row) => row.item_pk);
   }
   visibilityLedger() {
     const binding = this.tierSetBinding();
@@ -22496,15 +22638,19 @@ class LocalConnectorStore {
     return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
   }
   async hiddenChildItemPksInTurns() {
-    for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    const steps = this.hiddenChildReadSteps();
+    let next = steps.next();
+    while (!next.done) {
+      let result;
       try {
-        return await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false });
+        result = await visibilityStepAwaited(next.value);
       } catch (error) {
-        if (!(error instanceof VisibilityChangedError))
-          throw error;
+        next = steps.throw(error);
+        continue;
       }
+      next = steps.next(result);
     }
-    return runStepsInTurns(this.hiddenChildSteps());
+    return next.value;
   }
   tierLedgerHiddenItemPks() {
     return runSteps(this.tierLedgerHiddenSteps());
@@ -23475,7 +23621,7 @@ class LocalConnectorStore {
     let stable = false;
     try {
       const current = lane.stores();
-      stable = lane.ledger() === ledger && this.visibilityLedger() === ledger && ledger.visibilityChangesSince().cursor === ledgerChanges.cursor && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent && store.itemVisibilityChangesSince().cursor === storeChanges.get(store).cursor);
+      stable = lane.ledger() === ledger && this.visibilityLedger() === ledger && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent);
     } catch {}
     if (!stable) {
       if (full)
@@ -25282,6 +25428,16 @@ ${parentKey(ref)}`, { ref, origin });
       return false;
     const version = sourceVersion ?? this.db.query("SELECT source_version FROM items WHERE local_item_id = ? AND tombstoned = 0").get(localItemId)?.source_version ?? "";
     return grant.source_version === version;
+  }
+  hasOnDemandGrant(identity) {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get())
+      return false;
+    return this.db.query(`
+      SELECT 1 FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
   }
   onDemandReadCandidate(providerItemId) {
     const rows = this.db.query("SELECT local_item_id FROM items WHERE provider_item_id = ? AND tombstoned = 0 LIMIT 2").all(providerItemId);
@@ -27774,11 +27930,48 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
     return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
   }
-  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}) {
+  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
     if (limit <= 0)
       return [];
     const tierHidden = await this.tierHiddenItemPksInTurns();
-    return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
+    const modelId = embedder.modelId;
+    const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
+    const failed = this.embeddingFailureState;
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
+    const query = this.db.query(`
+      SELECT c.chunk_pk AS chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+      ORDER BY c.chunk_pk ASC
+    `);
+    const maxChunkPk = this.db.query("SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks").get().n;
+    const seen = new Set;
+    const found = [];
+    for (let after = 0;after < maxChunkPk && found.length < limit; after += windowChunks) {
+      if (after > 0)
+        await new Promise((resolve) => setImmediate(resolve));
+      const rows = query.all(modelId, after, after + windowChunks, ...params);
+      for (const row of rows) {
+        if (seen.has(row.item_pk))
+          continue;
+        seen.add(row.item_pk);
+        if (failed?.has(row.local_item_id))
+          continue;
+        found.push(row.local_item_id);
+        if (found.length === limit)
+          break;
+      }
+    }
+    return found;
   }
   async embeddingSweepInventory(provider, scope = {}, stopAtMs) {
     const started = Date.now();
@@ -28696,15 +28889,42 @@ ${parentKey(ref)}`, { ref, origin });
     };
   }
   vectorScanExcludedItemPks() {
-    let value;
+    if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
+      let ledger;
+      try {
+        ledger = this.visibilityLedger();
+      } catch {
+        return;
+      }
+      if (ledger) {
+        this.refreshTierHiddenCountsInTurns();
+        return;
+      }
+    }
+    let base;
+    let children;
     try {
-      value = this.tierHiddenItemPks();
+      base = this.tierLedgerHiddenItemPks();
+      children = this.hiddenChildItemPks();
     } catch {
       return;
     }
-    const set = new Set([...value.hidden, ...value.held, ...value.metadataLayer]);
-    return set.size > 0 ? set : undefined;
+    const memo = this.tierLedgerHiddenMemo;
+    const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
+    const cached = this.vectorScanExclusion;
+    let excluded;
+    if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
+      excluded = cached.set;
+    } else {
+      excluded = new Set([...base.hidden, ...base.held, ...base.metadataLayer]);
+      this.vectorScanExclusion = lists ? { lists, generations: lists.map((list) => list.generation), set: excluded } : undefined;
+    }
+    if (children.length === 0)
+      return excluded.size > 0 ? excluded : undefined;
+    const hiddenChildren = new Set(children);
+    return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
   }
+  vectorScanExclusion;
   async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
     const scanDb = this.dbPath === ":memory:" ? this.db : new Database6(this.dbPath, { readonly: true, create: false, strict: true });
     const ownsScanDb = scanDb !== this.db;
@@ -29899,6 +30119,10 @@ ${parentKey(ref)}`, { ref, origin });
     const digestByModel = new Map(digestRows.map((row) => [row.model_id, row.completed === 1 ? 1 : row.last_rowid ? Math.min(0.999, row.cursor_rowid / row.last_rowid) : 0]));
     const tierStatus = tier.hidden.length > 0 || tier.held.length > 0 || tier.moving > 0 || tier.metadataLayer.length > 0 ? {
       pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
+      ...tier.held.length > 0 ? { pendingClassificationItemsOnce: new Set([
+        ...yield* this.heldCountedHereSteps(tier.held),
+        ...unreadHolds.waitingPks
+      ]).size } : {},
       supersededChunks: tier.hidden.length > 0 ? (yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
               `, params: [JSON.stringify(tier.hidden)], mode: "get" }).n : 0,
@@ -33665,6 +33889,10 @@ function sharedBuiltInSourceEmbeddingProvider(options) {
 // src/workers/connector-store/tier-row-rehome.ts
 var MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
 
+// src/workers/connector-store/tier-override-settle.ts
+var CLEARED_RECHECK_MS = 10 * 60000;
+var clearedChecks = new WeakMap;
+
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 
@@ -34586,12 +34814,14 @@ var DAILY_LIMITS = new Map(Object.entries({
   head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "X request reserve for new bookmarks reached" },
   head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "X resource-read reserve for new bookmarks reached" },
   head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "X spending reserve for new bookmarks reached" },
+  reconcile_cost_to_finish_guard: { id: "x.reconcile_to_finish", kind: "cost", label: "X full bookmark check costs more than today's budget left" },
   readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
   gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
   google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
 }));
+var RAISABLE_SPEND_LIMITS = new Set(["x.daily_cost", "x.head_reserve_cost"]);
 for (const limit of DAILY_LIMITS.values()) {
-  registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+  registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: RAISABLE_SPEND_LIMITS.has(limit.id) ? "raise" : "run_once" });
 }
 
 // src/workers/x-bookmarks/content-recovery.ts
@@ -35341,6 +35571,122 @@ var PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 // src/workers/file-extraction/size-limit-stops.ts
 var reporter = createLimitStopReporter();
 
+// src/core/notes-app-folders.ts
+import { existsSync as existsSync23, lstatSync as lstatSync12, readdirSync as readdirSync6, readFileSync as readFileSync20 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { dirname as dirname25, join as join26, relative as relative6, sep as sep7 } from "node:path";
+var OBSIDIAN_SETTINGS_FOLDER = ".obsidian";
+var REFLECT_SETTINGS_FOLDER = ".reflect";
+var NOTES_APPS = Object.freeze([
+  { id: "obsidian", settingsFolder: OBSIDIAN_SETTINGS_FOLDER, knownFolders: (lookup) => obsidianVaultFolders(lookup) },
+  { id: "reflect", settingsFolder: REFLECT_SETTINGS_FOLDER, knownFolders: (lookup) => reflectGraphFolders(lookup) }
+]);
+var NOTES_APP_SETTINGS_FOLDERS = Object.freeze([OBSIDIAN_SETTINGS_FOLDER, REFLECT_SETTINGS_FOLDER]);
+function realFolder(path) {
+  try {
+    const stat = lstatSync12(path);
+    return stat.isDirectory() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+function readTextFile(path) {
+  try {
+    return readFileSync20(path, "utf8");
+  } catch {
+    return;
+  }
+}
+function obsidianConfigFiles(lookup = {}) {
+  const home = lookup.home ?? homedir11();
+  const platform = lookup.platform ?? process.platform;
+  const env = lookup.env ?? process.env;
+  if (platform === "darwin")
+    return [join26(home, "Library/Application Support/obsidian/obsidian.json")];
+  if (platform === "win32") {
+    return env.APPDATA ? [join26(env.APPDATA, "obsidian", "obsidian.json")] : [];
+  }
+  const config = env.XDG_CONFIG_HOME?.trim() || join26(home, ".config");
+  return [
+    join26(config, "obsidian/obsidian.json"),
+    join26(home, ".var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json"),
+    join26(home, "snap/obsidian/current/.config/obsidian/obsidian.json")
+  ];
+}
+function obsidianVaultFolders(lookup = {}) {
+  const readText = lookup.readText ?? readTextFile;
+  const isFolder = lookup.isFolder ?? realFolder;
+  const found = [];
+  for (const file of obsidianConfigFiles(lookup)) {
+    const text = readText(file);
+    if (!text)
+      continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    const vaults = parsed?.vaults;
+    if (!vaults || typeof vaults !== "object")
+      continue;
+    for (const entry of Object.values(vaults)) {
+      const path = entry?.path;
+      if (typeof path !== "string" || !path.startsWith("/") || path.includes("\x00"))
+        continue;
+      const folder = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+      if (found.includes(folder))
+        continue;
+      if (isFolder(folder) && isFolder(join26(folder, OBSIDIAN_SETTINGS_FOLDER)))
+        found.push(folder);
+    }
+  }
+  return found;
+}
+function reflectGraphFolders(lookup = {}) {
+  const home = lookup.home ?? homedir11();
+  if ((lookup.platform ?? process.platform) !== "darwin")
+    return [];
+  const readText = lookup.readText ?? readTextFile;
+  const isFolder = lookup.isFolder ?? realFolder;
+  const listFolder = lookup.listFolder ?? listChildren;
+  const candidates = [];
+  const recent = readText(join26(home, "Library/Application Support/reflect-open/recent-graphs.json"));
+  if (recent) {
+    try {
+      const parsed = JSON.parse(recent);
+      const entries = Array.isArray(parsed) ? parsed : parsed?.graphs;
+      if (Array.isArray(entries)) {
+        for (const entry of entries) {
+          const root = entry?.root;
+          if (typeof root === "string" && root.startsWith("/") && !root.includes("\x00"))
+            candidates.push(root);
+        }
+      }
+    } catch {}
+  }
+  const icloud = join26(home, "Library/Mobile Documents/iCloud~app~reflect/Documents");
+  for (const name of listFolder(icloud))
+    if (!name.startsWith("."))
+      candidates.push(join26(icloud, name));
+  const found = [];
+  for (const candidate of candidates) {
+    const folder = candidate.length > 1 && candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
+    if (found.includes(folder))
+      continue;
+    if (isFolder(folder) && isFolder(join26(folder, REFLECT_SETTINGS_FOLDER)))
+      found.push(folder);
+  }
+  return found;
+}
+function listChildren(path) {
+  try {
+    return readdirSync6(path);
+  } catch {
+    return [];
+  }
+}
+
 // src/workers/local-files/paths.ts
 var UNSAFE_PATH_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
 var DEFAULT_EXCLUSION_LABELS = Object.freeze({
@@ -35351,6 +35697,7 @@ var DEFAULT_EXCLUSION_LABELS = Object.freeze({
   dependencies: "Installed dependencies",
   build_output: "Build output",
   app_bundle: "Application",
+  app_settings: "App settings",
   olympus_data: "Olympus's own data",
   synced_by_another_source: "Already indexed through its own source"
 });
@@ -35370,6 +35717,7 @@ var BUILD_SEGMENTS = new Set([
   ".build",
   ".tox"
 ]);
+var APP_SETTINGS_SEGMENTS = new Set(NOTES_APP_SETTINGS_FOLDERS);
 var SYNCED_FOLDER_NAMES = new Set(["dropbox", "google drive"]);
 var ownRootIndexes = new WeakMap;
 
@@ -35477,6 +35825,7 @@ var UTC_DAY_SCOPED_DEGRADED_REASONS = new Set([
   "head_api_request_reserve_guard",
   "head_resource_read_reserve_guard",
   "head_cost_reserve_guard",
+  "reconcile_cost_to_finish_guard",
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON
@@ -35493,7 +35842,8 @@ var EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused";
 var LOCAL_FILES_SCHEDULER_WARNINGS = [
   "local_files_unreadable_folders",
   "local_files_watch_limit_reached",
-  "local_files_live_updates_off"
+  "local_files_live_updates_off",
+  "local_files_deletions_held"
 ];
 var VERBATIM_SCHEDULER_WARNINGS = new Set([
   EXTRACTION_JOBS_REFUSED_WARNING,
@@ -36173,7 +36523,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync23(config.dbPath))
+    if (!config.dbPath || !existsSync24(config.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config), { ...config, dbPath: config.dbPath, readOnly: true }, env);
     try {
@@ -36525,9 +36875,9 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute15(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname25(readinessPath);
+  const directory = dirname26(readinessPath);
   mkdirSync14(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync12(directory);
+  const parent = lstatSync13(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -36556,7 +36906,7 @@ if (__require.main == __require.module) {
     }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync14(dirname25(args.reportPath), { recursive: true });
+      mkdirSync14(dirname26(args.reportPath), { recursive: true });
       writeFileSync6(args.reportPath, `${json}
 `);
     }
@@ -36566,7 +36916,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync14(dirname25(args.reportPath), { recursive: true });
+      mkdirSync14(dirname26(args.reportPath), { recursive: true });
       options.onProgress = (report) => {
         writeFileSync6(args.reportPath, `${JSON.stringify(report, null, 2)}
 `);

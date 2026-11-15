@@ -4,13 +4,15 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
-import { LocalConnectorStore, nextVectorDigestBackfillRows, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, forEachPackedVectorDigest, scanDigestPages, type VectorDigestPackedPage } from '../src/workers/connector-store/local-index.ts';
+import { LocalConnectorStore, nextVectorDigestBackfillRows, setVectorDigestBackfillHold, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, forEachPackedVectorDigest, scanDigestPages, type VectorDigestPackedPage } from '../src/workers/connector-store/local-index.ts';
 import { applyVectorDigestWindow, backfillVectorDigests, createVectorDigestSchema, vectorDigestSourceQuery, vectorDigestState, writeVectorDigest, type VectorDigestSourceRow } from '../src/workers/connector-store/vector-digest.ts';
 import { cosineSimilarity, decodeEmbedding, encodeEmbedding, type SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { encodeVectorDigest, scoreVectorDigest } from '../src/workers/source-index/vector-digest.ts';
 import type { StoreRead } from '../src/workers/connector-store/off-thread-reads.ts';
 import { waitFor } from './helpers/test-clock.ts';
-import { setReadPoolObserverForTests, setReadPoolWaitingWorkForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import { storeReadHasPriority, withStoreReadPriority } from '../src/core/store-reclaim-admission.ts';
+import { createStandBack, ownerAskReason } from '../src/workers/engine/stand-back.ts';
+import { READ_POOL_RESCORE_READERS, readPoolDiagnostics, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { probeVectorDigest, seededVectorRandom } from '../eval/vector-digest-probe.ts';
 
 // The digest pass is opt-in while olympus-ops#151 is open; these tests cover it on.
@@ -165,17 +167,17 @@ test('SQL eligibility excludes account, filter, tombstone and stale-hash rows be
     let exactReads = 0, fullRows = 0;
     const options = { modelId, accountScope: 'a', filters: { provider: 'fixture', locatorPathScope: '/allowed' } };
     const result = await scanDigestPages(reader(db, (q, rows) => {
-      if (q.sql.includes('FROM chunk_embeddings emb')) {
+      if (q.sql.includes('FROM json_each(?) pick')) {
         exactReads++;
         for (const row of rows as Array<{ item_pk: number }>) { fullRows++; expect(row.item_pk).toBeGreaterThan(1200); }
-        expect(q.sql).toContain('emb.chunk_pk IN');
+        expect(q.sql).toContain('FROM json_each(?) pick');
         expect(q.sql).toContain('i.account_scope = ?');
       }
     }), [1, 0, 0], options, undefined, 20);
     expect(rank(result)).toEqual(exact(db, [1, 0, 0], options));
     // The scope filters apply in the digest pass too, so rejected rows never
     // take a ranking slot: one re-score batch reaches the eligible tail.
-    expect(exactReads).toBe(1);
+    expect(exactReads).toBe(2); // one batch, read 256 named chunks a page
     expect(fullRows).toBe(100);
     // Sequential rowid range scan; no temp sort or secondary index.
     const page = connectorStoreVectorDigestPageQuery(options, 0);
@@ -261,7 +263,7 @@ test('v15 migration leaves vectors intact, creates an empty projection, and resu
     try {
       expect((await store.vectorSearchLane('harbor', provider, 5, 'a')).rows).toHaveLength(5);
       expect(queries.some(sql => sql.includes('FROM chunk_vector_digest'))).toBe(true);
-      expect(queries.some(sql => sql.includes('emb.chunk_pk IN'))).toBe(true);
+      expect(queries.some(sql => sql.includes('FROM json_each(?) pick'))).toBe(true);
     } finally { setReadPoolObserverForTests(); }
     // The eval API works on the same read-only connection used by its CLI.
     const readOnly = new Database(path, { readonly: true, create: false });
@@ -298,7 +300,7 @@ test('every filter uses the shared SQL eligibility builder for restricted full-v
       const options = { modelId, accountScope: 'a', filters };
       const allowed = exact(db, [1, 0, 0], options);
       const result = await scanDigestPages(reader(db, (query, rows) => {
-        if (query.sql.includes('FROM chunk_embeddings emb')) {
+        if (query.sql.includes('FROM json_each(?) pick')) {
           for (const row of rows as Array<{ item_pk: number }>) expect(allowed).toContain(row.item_pk);
         }
       }), [1, 0, 0], options, undefined, 20);
@@ -339,7 +341,7 @@ test('automatic maintenance yields between bounded slices and completes without 
   } finally { store.close(); }
 });
 
-test('backfill turns shrink when slow, regrow when fast, and stand back while an Ask reads the store', async () => {
+test('backfill turns shrink when slow, regrow when fast, and stand back while the owner asks', async () => {
   expect(nextVectorDigestBackfillRows(128, 60)).toBe(64);
   expect(nextVectorDigestBackfillRows(8, 60)).toBe(8);
   expect(nextVectorDigestBackfillRows(64, 2)).toBe(128);
@@ -350,8 +352,8 @@ test('backfill turns shrink when slow, regrow when fast, and stand back while an
     await store.syncFromConnector(connector(200), { fetchContent: true });
     await store.embedChunks({ provider });
     const db = database(store);
-    const lanes = store as unknown as { vectorLanesInFlight: number };
-    lanes.vectorLanesInFlight = 1;
+    let ownerAsking = true;
+    setVectorDigestBackfillHold(() => ownerAsking);
     db.exec('DELETE FROM chunk_vector_digest; DELETE FROM chunk_vector_digest_meta');
     let slices = 0;
     const advance = store.backfillVectorDigest.bind(store);
@@ -363,10 +365,10 @@ test('backfill turns shrink when slow, regrow when fast, and stand back while an
     scheduler.scheduleVectorDigestBackfill(modelId);
     await waitFor(() => backoffs >= 2);
     expect(slices).toBe(0);
-    lanes.vectorLanesInFlight = 0;
+    ownerAsking = false;
     await waitFor(() => vectorDigestState(db, modelId).completed);
     expect(slices).toBeGreaterThan(0);
-  } finally { store.close(); }
+  } finally { setVectorDigestBackfillHold(); store.close(); }
 });
 
 test('many winning chunks of one item cannot fill the item budget: the pass expands to distinct items', async () => {
@@ -440,27 +442,43 @@ test('with OLYMPUS_VECTOR_DIGEST=off, a store with a complete digest runs the ex
   }
 });
 
-test('a file store backfill stands back while owner-visible reads wait for the pool (#1487)', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'vector-digest-pool-wait-'));
+// A backfill that stands back for anything but the owner, or without a
+// bound, never finishes on a busy install, and its store stays on the slow
+// exact scan (plan thread, 15 Nov). It stands back by the engine's one rule.
+test('a background lease held and the owner asking every 10 s never keeps a file store backfill waiting past the bound', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vector-digest-stand-back-'));
   const store = open(join(dir, 'store.sqlite'));
-  let waiting = true;
-  setReadPoolWaitingWorkForTests(() => waiting);
+  let releaseLease!: () => void;
+  const lease = withStoreReadPriority(() => new Promise<void>(resolve => { releaseLease = resolve; }));
+  // A scaled clock: one real millisecond is 100 of the owner's, so the
+  // 60 s bound is 600 ms here, and the owner asks 4 s of every 10 s.
+  const started = Date.now();
+  const at = () => (Date.now() - started) * 100;
+  const owner = { get busy() { return at() % 10_000 < 4_000 || at() < 400_000; } };
+  const lines: string[] = [];
+  const standBack = createStandBack({ reason: () => ownerAskReason(owner, () => false), now: at, log: line => lines.push(line) });
+  setVectorDigestBackfillHold(() => standBack.holds('digest'));
   try {
     await store.syncFromConnector(connector(40), { fetchContent: true });
     await store.embedChunks({ provider });
     const db = database(store);
     db.exec('DELETE FROM chunk_vector_digest; DELETE FROM chunk_vector_digest_meta');
-    const scheduler = store as unknown as { scheduleVectorDigestBackfill(model?: string, delayMs?: number): void };
-    const schedule = scheduler.scheduleVectorDigestBackfill.bind(store);
-    let backoffs = 0;
-    scheduler.scheduleVectorDigestBackfill = (model, delayMs) => { if (delayMs === 250) backoffs++; schedule(model, delayMs); };
-    scheduler.scheduleVectorDigestBackfill(modelId);
-    await waitFor(() => backoffs >= 2);
-    expect(vectorDigestState(db, modelId).cursorRowid).toBe(0);
-    waiting = false;
-    await waitFor(() => vectorDigestState(db, modelId).completed);
+    expect(storeReadHasPriority()).toBe(true);
+    (store as unknown as { scheduleVectorDigestBackfill(model?: string, delayMs?: number): void }).scheduleVectorDigestBackfill(modelId);
+    // The owner is busy for the first 400 s; the backfill still finishes, on its share.
+    await waitFor(() => vectorDigestState(db, modelId).completed, { description: 'the backfill finished' });
+    expect(at()).toBeLessThan(400_000);
     expect(db.query('SELECT COUNT(*) AS n FROM chunk_vector_digest').get()).toEqual({ n: 40 });
-  } finally { setReadPoolWaitingWorkForTests(); store.close(); rmSync(dir, { recursive: true, force: true }); }
+    const counts = standBack.counts().digest!;
+    expect(counts.holds).toBeGreaterThan(0);
+    expect(counts.bound_reached).toBeGreaterThan(0);
+    expect(lines.some(line => line.includes('digest stands back'))).toBe(true);
+  } finally {
+    setVectorDigestBackfillHold();
+    releaseLease?.();
+    await lease;
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a locked digest write on the pool path retries instead of stalling the backfill (#1469)', async () => {
@@ -610,7 +628,7 @@ test('re-scoring stops by score, not count: an item the 256-dimension digest ran
     const options = { modelId };
     let rescored = 0;
     const result = await scanDigestPages(reader(db, (q, rows) => {
-      if (q.sql.includes('FROM chunk_embeddings emb')) rescored += (rows as unknown[]).length;
+      if (q.sql.includes('FROM json_each(?) pick')) rescored += (rows as unknown[]).length;
     }), query, options, undefined, 5);
     expect(rank(result, 5)).toEqual(exact(db, query, options, 5));
     expect(rank(result, 5)[0]).toBe(1001);
@@ -665,7 +683,7 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
     const reads = { digestPages: 0, rescoreStatements: 0 };
     setReadPoolObserverForTests((_, query) => {
       if (query.sql.includes('FROM chunk_vector_digest d')) reads.digestPages += 1;
-      if (query.sql.includes('FROM chunk_embeddings emb') && query.sql.includes('emb.chunk_pk IN')) reads.rescoreStatements += 1;
+      if (query.sql.includes('FROM json_each(?) pick')) reads.rescoreStatements += 1;
     }, { snapshots: true });
     return reads;
   }
@@ -676,11 +694,11 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
       // The store's own visibility set and the live ledger agree: the top 90% are held.
       const held = new Set(pks.slice(0, count * 0.9));
       const lane = store as unknown as {
-        tierHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
+        tierLedgerHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
         visibleVectorItemPks(pks: readonly number[]): Set<number>;
       };
       const value = { hidden: [], held: [...held], heldForJudgment: [...held], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
-      lane.tierHiddenItemPks = () => value;
+      lane.tierLedgerHiddenItemPks = () => value;
       lane.visibleVectorItemPks = (candidates) => new Set(candidates.filter((pk) => !held.has(pk)));
       const reads = counted();
       try {
@@ -708,6 +726,51 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
     } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 
+  // ASK SPEED (ops#151, 15 Nov): with his approved Dropbox folder scope in
+  // place the re-score page was planned from the items index (every item of
+  // the account), about 2 s a page, and the lane hit its 54 s deadline. Every
+  // speed number before this was taken without the scope.
+  test('under a folder scope shaped like the owner\'s, the re-score seeks its named chunks, and nothing out of scope or names-only comes back', async () => {
+    const { store, dir, pks } = await seeded();
+    try {
+      const db = database(store);
+      // 100 folders: 0-79 approved (70-79 names only), 80-99 excluded.
+      const generation = 'b'.repeat(64);
+      const revision = '00000000-0000-4000-8000-000000000002';
+      db.query(`UPDATE items SET source_scope_generation = ?, source_scope_revision = ?,
+        source_scope_folder_keys_json = json_array('f' || ((CAST(provider_item_id AS INTEGER)) % 100))`).run(generation, revision);
+      await store.ensureVectorDigestReady(modelId, 4_096);
+      const folderOf = new Map(pks.map((pk, i) => [pk, i % 100]));
+      const keys = (from: number, to: number) => Array.from({ length: to - from }, (_, at) => `f${from + at}`);
+      const filters = {
+        provider: 'fixture', sourceScopeGeneration: generation, sourceScopeRevision: revision,
+        sourceScopeFolderAnyKeys: keys(0, 80), sourceScopeFolderNoneKeys: keys(80, 100),
+        metadataOnlySourceScopeFolderKeys: keys(70, 80),
+      };
+      const rescores: StoreRead[] = [];
+      setReadPoolObserverForTests((_, query) => { if (query.sql.includes('FROM json_each(?) pick')) rescores.push(query); }, { snapshots: true });
+      let result: Awaited<ReturnType<typeof store.vectorSearchLane>>;
+      try { result = await store.vectorSearchLane('harbor note', graded, 24, 'a', filters); } finally { setReadPoolObserverForTests(); }
+      expect(result.skippedReason).toBeUndefined();
+      expect(result.rows).toHaveLength(24);
+      const itemPkOf = new Map((db.query('SELECT item_pk, local_item_id FROM items').all() as Array<{ item_pk: number; local_item_id: string }>)
+        .map((row) => [row.local_item_id, row.item_pk]));
+      for (const row of result.rows) expect(folderOf.get(itemPkOf.get(row.sourceItem.localItemId)!)!).toBeLessThan(70);
+      // The best-ranked items sit in every folder, so a leak would show at once.
+      expect(result.rows.map((row) => itemPkOf.get(row.sourceItem.localItemId))).toEqual(pks.filter((_, i) => i % 100 < 70).slice(0, 24));
+      expect(rescores.length).toBeGreaterThan(0);
+      // A batch of more than one page is read side by side: the scan's worker and the re-score's.
+      expect(readPoolDiagnostics().threads).toBeGreaterThanOrEqual(1 + READ_POOL_RESCORE_READERS);
+      for (const read of rescores) {
+        const plan = (db.query(`EXPLAIN QUERY PLAN ${read.sql}`).all(...(read.params as Array<string | number | null>)) as Array<{ detail: string; parent: number }>)
+          .filter((row) => row.parent === 0).map((row) => row.detail);
+        expect(plan[0]).toMatch(/^SCAN pick/);
+        expect(plan[1]).toMatch(/^SEARCH emb USING (PRIMARY KEY|INDEX sqlite_autoindex_chunk_embeddings_1) \(chunk_pk=\? AND model_id=\?\)/);
+        expect(plan.some((detail) => /^(SCAN|SEARCH) i USING (COVERING )?INDEX/.test(detail) && !/item_pk=\?/.test(detail))).toBe(false);
+      }
+    } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test('a scan cut after ranking began keeps the winners it found, and names the cut', async () => {
     const db = numericStore();
     try {
@@ -716,7 +779,7 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
       const deadlineAtMs = Date.now() + 3_000;
       let rescored = 0;
       const result = await scanDigestPages(reader(db, (query) => {
-        if (!query.sql.includes('emb.chunk_pk IN')) return;
+        if (!query.sql.includes('FROM json_each(?) pick')) return;
         // The first re-score page is folded, then the clock runs out on the next.
         if (++rescored === 2) { const until = deadlineAtMs + 1; while (Date.now() < until) { /* past the deadline */ } }
       }), [1, 0, 0], { modelId }, deadlineAtMs, 20);

@@ -59,7 +59,7 @@ import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import type { StoreView } from './archive-leg.ts';
 import { frontSteadyStage, logMark, seedFrontStoreSet, watchFront, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
-import { compareStoreFiles, leftoverFiles, storeFiles } from './upgrade-split.ts';
+import { compareStoreFiles, leftoverFileNames, storeFiles } from './upgrade-split.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -591,8 +591,10 @@ export function isSettled(s: SettleSnapshot | undefined, config: AgentConfig, pr
   if (!s) return false;
   const stored = config.expectedItems - config.expectedSecrets;
   const embeddable = stored - (privateEmbedded ? 0 : config.expectedPrivate);
+  // Seen counts the latest pass only: a later incremental pass (live sources are checked every 5 minutes) sees
+  // just what changed, often nothing. Every item stored, and every Secret located, covers the same ground.
   return s.lastRun === 'completed'
-    && s.seen >= config.expectedItems
+    && (s.seen >= config.expectedItems || (s.indexed >= stored && s.secretsLocated >= config.expectedSecrets))
     && s.indexed >= stored
     && s.contentReady >= stored
     && s.embedded >= embeddable
@@ -1979,6 +1981,12 @@ async function scaleHost(): Promise<ScaleHost> {
       const response = await session.call('GET', '/dashboard.json', undefined, AbortSignal.timeout(30_000));
       return response.status === 200;
     },
+    async sourceStatus() {
+      ensureMcpToken();
+      const called = await mcpRpc(await mcpSession(), { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'source_index_status', arguments: {} } });
+      const message = parseRpc(called.text);
+      return called.status === 200 && !message.error && message.result?.isError !== true;
+    },
     engineRss: scaleEngineRss,
     archiveGaps(id) { return new ArchiveImportStateStore({ path: defaultArchiveImportStatePath() }).get(id)?.findings.gaps; },
     async beginReadwise(seed) {
@@ -2181,7 +2189,8 @@ function storeFilesCommand(save: string | undefined, compare: string | undefined
   try { before = JSON.parse(readFileSync(storeList(compare ?? ''), 'utf8')) as string[]; } catch {
     emit({ ok: false, detail: `no saved store-file list ${compare ?? ''}` });
   }
-  emit({ ok: true, before: before.length, ...compareStoreFiles(before, now), leftovers: leftoverFiles(platform().dataDir) });
+  const leftoverNames = leftoverFileNames(platform().dataDir);
+  emit({ ok: true, before: before.length, ...compareStoreFiles(before, now), leftovers: leftoverNames.length, leftoverNames });
 }
 
 async function archiveChangedCommand(seed: string, sizes: number[]): Promise<never> {

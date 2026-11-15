@@ -53,6 +53,7 @@ import {
   DASHBOARD_CAPTURE_STALE_LABEL,
   DASHBOARD_MANY_UNREADABLE_LABEL,
   DASHBOARD_MEDIA_STORAGE_COPY,
+  dashboardCaptureHelperNextAction,
   dashboardCaptureProblem,
   dashboardNoneReadSentence,
 } from './dashboard/vocabulary.ts';
@@ -856,6 +857,10 @@ export type DashboardCaptureSupervisorReason =
   | 'secret_missing'
   /** The helper process could not be started at all (no Python, the executable is gone). */
   | 'start_failed'
+  /** This version's helper program is not installed, and this computer cannot build it (no Go or C compiler). */
+  | 'helper_missing'
+  /** This version's helper program could not be built. */
+  | 'helper_build_failed'
   /** The helper keeps exiting on its own shortly after it starts. */
   | 'helper_exited'
   /** The helper exited and has not been started again yet. Not a fault by itself. */
@@ -3196,7 +3201,7 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       stage: 'source_health',
       condition: 'degraded',
       next_action: captureProblem.cause === 'helper'
-        ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
+        ? dashboardCaptureHelperNextAction(card, card.label)
         : captureProblem.cause === 'disk'
           ? DASHBOARD_CAPTURE_COPY.nextAction.disk(card.label)
           : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
@@ -3247,7 +3252,7 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
         // A live-feed problem beside this one keeps its own step, which Sync now does not do.
         + (captureProblem
           ? ` ${captureProblem.cause === 'helper'
-            ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
+            ? dashboardCaptureHelperNextAction(card, card.label)
             : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label)}`
           : ''),
       dependencies,
@@ -3812,7 +3817,10 @@ function tierClassificationFromCorpora(
   const counts = corpora.map(numericCounts);
   const sum = (key: string) => counts.reduce((total, entry) => total + (entry[key] ?? 0), 0);
   const secrets = sum('secret_locations');
-  const pending = sum('pending_classification_items');
+  // An item waiting in two tier stores is one item to the owner: each store
+  // reports the ones it counts for its set (`_once`), so the sum is items.
+  const pending = counts.reduce((total, entry) =>
+    total + (entry.pending_classification_items_once ?? entry.pending_classification_items ?? 0), 0);
   const superseded = sum('superseded_chunks');
   const namesOnlyKept = sum('names_only_kept_chunks');
   const ids = new Set(corpora.map((corpus) => corpus.corpus_id));
