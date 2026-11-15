@@ -18447,10 +18447,6 @@ function serveSnapshotWaiters() {
     waiter.resolve(reader);
   }
 }
-function readPoolHasWaitingWork() {
-  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
-}
-var waitingWorkForTests;
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
@@ -21672,6 +21668,7 @@ var VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 var VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
 var VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
 var VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+var vectorDigestBackfillHold = () => false;
 var VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000;
 function nextVectorDigestBackfillRows(rows, turnMs) {
   if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
@@ -22088,7 +22085,13 @@ class LocalConnectorStore {
       const model = this.vectorDigestBackfillModel;
       if (!model)
         return;
-      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || storeReadHasPriority() || offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork()) {
+      let held = false;
+      try {
+        held = vectorDigestBackfillHold();
+      } catch {
+        held = false;
+      }
+      if (this.reclaimProcess || held) {
         this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
         return;
       }

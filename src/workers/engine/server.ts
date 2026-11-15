@@ -259,6 +259,7 @@ import {
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
 import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RESOURCE } from './runtime/source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
+import { setVectorDigestBackfillHold } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
 import {
@@ -835,6 +836,7 @@ export async function main(): Promise<void> {
   const standBack = createStandBack({
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
   });
+  setVectorDigestBackfillHold(() => standBack.holds('digest'));
   // UI answer leases coordinate owner/background jobs. Actual local model
   // dispatches have separate leases; cloud searches never preempt sorting.
   const answerActivity = createAnswerActivity(() => undefined, {

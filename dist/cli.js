@@ -33706,9 +33706,6 @@ function serveSnapshotWaiters() {
     waiter.resolve(reader);
   }
 }
-function readPoolHasWaitingWork() {
-  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
-}
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
@@ -33920,7 +33917,7 @@ self.onmessage = (event) => {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   }
 };
-`, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases, waitingWorkForTests;
+`, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
   init_answer_latency_trace();
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
@@ -40563,6 +40560,9 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
 function vectorDigestSearchDisabled(env = process.env) {
   return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === "off";
 }
+function setVectorDigestBackfillHold(hold) {
+  vectorDigestBackfillHold = hold ?? (() => false);
+}
 function nextVectorDigestBackfillRows(rows, turnMs) {
   if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
     return Math.max(VECTOR_DIGEST_BACKFILL_MIN_ROWS, Math.floor(rows / 2));
@@ -43598,7 +43598,7 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 // core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
@@ -43929,7 +43929,13 @@ var init_local_index = __esm(() => {
         const model = this.vectorDigestBackfillModel;
         if (!model)
           return;
-        if (this.reclaimProcess || this.vectorLanesInFlight > 0 || storeReadHasPriority() || offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork()) {
+        let held = false;
+        try {
+          held = vectorDigestBackfillHold();
+        } catch {
+          held = false;
+        }
+        if (this.reclaimProcess || held) {
           this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
           return;
         }
@@ -248564,6 +248570,7 @@ async function main() {
   const standBack = createStandBack({
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
   });
+  setVectorDigestBackfillHold(() => standBack.holds("digest"));
   const answerActivity = createAnswerActivity(() => {
     return;
   }, {
@@ -253294,6 +253301,7 @@ var init_server5 = __esm(async () => {
   init_connector_store();
   init_principal();
   init_source_answer_lanes();
+  init_local_index();
   init_gmail_status_scope();
   init_tiered_store_set();
   init_archive_target();

@@ -5,13 +5,14 @@
 import { describe, expect, test } from 'bun:test';
 import { storeReadHasPriority, withStoreReadPriority } from '../src/core/store-reclaim-admission.ts';
 import { createStandBack, ownerAskReason, STAND_BACK_MAX_MS, STAND_BACK_SHARE_MS } from '../src/workers/engine/stand-back.ts';
+import { waitFor } from './helpers/test-clock.ts';
 
 describe('stand-back for the owner\'s Ask', () => {
   test('a ten-minute background lease plus an owner asking every 10 s still leaves imports their share', async () => {
     let releaseLease!: () => void;
     const lease = withStoreReadPriority(() => new Promise<void>(resolve => { releaseLease = resolve; }));
     try {
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await waitFor(() => storeReadHasPriority(), { description: 'the background lease held' });
       expect(storeReadHasPriority()).toBe(true);
       let at = 0;
       // The owner's question runs 4 s of every 10 s, and once for 3 minutes straight.

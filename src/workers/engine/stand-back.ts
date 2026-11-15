@@ -1,6 +1,7 @@
 // Background work stands back while the owner asks something, and never
 // without a bound. One rule for every kind of background work: imports
-// (the scheduler), embedding and the privacy judge each stand back for at
+// (the scheduler), embedding, the privacy judge and each store's vector
+// digest backfill stand back for at
 // most STAND_BACK_MAX_MS at a time and then get STAND_BACK_SHARE_MS to run
 // even while the owner keeps asking, so each keeps a guaranteed share.
 //
@@ -9,7 +10,7 @@
 // Lane 6 archive-scale leg, 15 Nov 2026: an unbounded, unlogged stand-back
 // held imports for most of an hour (mbox passes 5 to 20 min apart).
 
-export type StandBackWork = 'import' | 'embed' | 'judge';
+export type StandBackWork = 'import' | 'embed' | 'judge' | 'digest';
 
 /** The longest one kind of work waits for the owner's Ask before it runs anyway. */
 export const STAND_BACK_MAX_MS = 60_000;

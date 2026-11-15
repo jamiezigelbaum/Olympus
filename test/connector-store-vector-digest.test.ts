@@ -4,13 +4,15 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
-import { LocalConnectorStore, nextVectorDigestBackfillRows, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, forEachPackedVectorDigest, scanDigestPages, type VectorDigestPackedPage } from '../src/workers/connector-store/local-index.ts';
+import { LocalConnectorStore, nextVectorDigestBackfillRows, setVectorDigestBackfillHold, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, forEachPackedVectorDigest, scanDigestPages, type VectorDigestPackedPage } from '../src/workers/connector-store/local-index.ts';
 import { applyVectorDigestWindow, backfillVectorDigests, createVectorDigestSchema, vectorDigestSourceQuery, vectorDigestState, writeVectorDigest, type VectorDigestSourceRow } from '../src/workers/connector-store/vector-digest.ts';
 import { cosineSimilarity, decodeEmbedding, encodeEmbedding, type SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { encodeVectorDigest, scoreVectorDigest } from '../src/workers/source-index/vector-digest.ts';
 import type { StoreRead } from '../src/workers/connector-store/off-thread-reads.ts';
 import { waitFor } from './helpers/test-clock.ts';
-import { READ_POOL_RESCORE_READERS, readPoolDiagnostics, setReadPoolObserverForTests, setReadPoolWaitingWorkForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import { storeReadHasPriority, withStoreReadPriority } from '../src/core/store-reclaim-admission.ts';
+import { createStandBack, ownerAskReason } from '../src/workers/engine/stand-back.ts';
+import { READ_POOL_RESCORE_READERS, readPoolDiagnostics, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { probeVectorDigest, seededVectorRandom } from '../eval/vector-digest-probe.ts';
 
 // The digest pass is opt-in while olympus-ops#151 is open; these tests cover it on.
@@ -339,7 +341,7 @@ test('automatic maintenance yields between bounded slices and completes without 
   } finally { store.close(); }
 });
 
-test('backfill turns shrink when slow, regrow when fast, and stand back while an Ask reads the store', async () => {
+test('backfill turns shrink when slow, regrow when fast, and stand back while the owner asks', async () => {
   expect(nextVectorDigestBackfillRows(128, 60)).toBe(64);
   expect(nextVectorDigestBackfillRows(8, 60)).toBe(8);
   expect(nextVectorDigestBackfillRows(64, 2)).toBe(128);
@@ -350,8 +352,8 @@ test('backfill turns shrink when slow, regrow when fast, and stand back while an
     await store.syncFromConnector(connector(200), { fetchContent: true });
     await store.embedChunks({ provider });
     const db = database(store);
-    const lanes = store as unknown as { vectorLanesInFlight: number };
-    lanes.vectorLanesInFlight = 1;
+    let ownerAsking = true;
+    setVectorDigestBackfillHold(() => ownerAsking);
     db.exec('DELETE FROM chunk_vector_digest; DELETE FROM chunk_vector_digest_meta');
     let slices = 0;
     const advance = store.backfillVectorDigest.bind(store);
@@ -363,10 +365,10 @@ test('backfill turns shrink when slow, regrow when fast, and stand back while an
     scheduler.scheduleVectorDigestBackfill(modelId);
     await waitFor(() => backoffs >= 2);
     expect(slices).toBe(0);
-    lanes.vectorLanesInFlight = 0;
+    ownerAsking = false;
     await waitFor(() => vectorDigestState(db, modelId).completed);
     expect(slices).toBeGreaterThan(0);
-  } finally { store.close(); }
+  } finally { setVectorDigestBackfillHold(); store.close(); }
 });
 
 test('many winning chunks of one item cannot fill the item budget: the pass expands to distinct items', async () => {
@@ -440,27 +442,43 @@ test('with OLYMPUS_VECTOR_DIGEST=off, a store with a complete digest runs the ex
   }
 });
 
-test('a file store backfill stands back while owner-visible reads wait for the pool (#1487)', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'vector-digest-pool-wait-'));
+// A backfill that stands back for anything but the owner, or without a
+// bound, never finishes on a busy install, and its store stays on the slow
+// exact scan (plan thread, 15 Nov). It stands back by the engine's one rule.
+test('a background lease held and the owner asking every 10 s never keeps a file store backfill waiting past the bound', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vector-digest-stand-back-'));
   const store = open(join(dir, 'store.sqlite'));
-  let waiting = true;
-  setReadPoolWaitingWorkForTests(() => waiting);
+  let releaseLease!: () => void;
+  const lease = withStoreReadPriority(() => new Promise<void>(resolve => { releaseLease = resolve; }));
+  // A scaled clock: one real millisecond is 100 of the owner's, so the
+  // 60 s bound is 600 ms here, and the owner asks 4 s of every 10 s.
+  const started = Date.now();
+  const at = () => (Date.now() - started) * 100;
+  const owner = { get busy() { return at() % 10_000 < 4_000 || at() < 400_000; } };
+  const lines: string[] = [];
+  const standBack = createStandBack({ reason: () => ownerAskReason(owner, () => false), now: at, log: line => lines.push(line) });
+  setVectorDigestBackfillHold(() => standBack.holds('digest'));
   try {
     await store.syncFromConnector(connector(40), { fetchContent: true });
     await store.embedChunks({ provider });
     const db = database(store);
     db.exec('DELETE FROM chunk_vector_digest; DELETE FROM chunk_vector_digest_meta');
-    const scheduler = store as unknown as { scheduleVectorDigestBackfill(model?: string, delayMs?: number): void };
-    const schedule = scheduler.scheduleVectorDigestBackfill.bind(store);
-    let backoffs = 0;
-    scheduler.scheduleVectorDigestBackfill = (model, delayMs) => { if (delayMs === 250) backoffs++; schedule(model, delayMs); };
-    scheduler.scheduleVectorDigestBackfill(modelId);
-    await waitFor(() => backoffs >= 2);
-    expect(vectorDigestState(db, modelId).cursorRowid).toBe(0);
-    waiting = false;
-    await waitFor(() => vectorDigestState(db, modelId).completed);
+    expect(storeReadHasPriority()).toBe(true);
+    (store as unknown as { scheduleVectorDigestBackfill(model?: string, delayMs?: number): void }).scheduleVectorDigestBackfill(modelId);
+    // The owner is busy for the first 400 s; the backfill still finishes, on its share.
+    await waitFor(() => vectorDigestState(db, modelId).completed, { description: 'the backfill finished' });
+    expect(at()).toBeLessThan(400_000);
     expect(db.query('SELECT COUNT(*) AS n FROM chunk_vector_digest').get()).toEqual({ n: 40 });
-  } finally { setReadPoolWaitingWorkForTests(); store.close(); rmSync(dir, { recursive: true, force: true }); }
+    const counts = standBack.counts().digest!;
+    expect(counts.holds).toBeGreaterThan(0);
+    expect(counts.bound_reached).toBeGreaterThan(0);
+    expect(lines.some(line => line.includes('digest stands back'))).toBe(true);
+  } finally {
+    setVectorDigestBackfillHold();
+    releaseLease?.();
+    await lease;
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a locked digest write on the pool path retries instead of stalling the backfill (#1469)', async () => {

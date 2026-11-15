@@ -17,7 +17,7 @@ import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith 
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -2488,6 +2488,19 @@ const VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 const VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
 const VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
 const VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+
+/**
+ * Whether every store's digest backfill stands back now: the engine's
+ * bounded, logged stand-back for the owner's Ask (engine/stand-back.ts),
+ * set once by the engine. Nothing else holds it: not the shared
+ * read-priority lease, another lane on the store or waiting pool work,
+ * which background answers keep busy too, so a backfill on a busy install
+ * never finished and its store stayed on the slow exact scan.
+ */
+let vectorDigestBackfillHold: () => boolean = () => false;
+export function setVectorDigestBackfillHold(hold?: () => boolean): void {
+  vectorDigestBackfillHold = hold ?? (() => false);
+}
 /**
  * A store that opens with an incomplete digest waits this long before its
  * first turn: on upgrade every store opens at once, and the backfills must
@@ -3808,9 +3821,10 @@ export class LocalConnectorStore {
       // overlapping old and new models never oscillate.
       const model = this.vectorDigestBackfillModel;
       if (!model) return;
-      // An Ask in flight on this store, or any owner-visible read waiting
-      // for the pool (a status count, another store's lane), goes first.
-      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || storeReadHasPriority() || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      // The owner's Ask goes first, for at most the stand-back's bound.
+      let held = false;
+      try { held = vectorDigestBackfillHold(); } catch { held = false; }
+      if (this.reclaimProcess || held) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
