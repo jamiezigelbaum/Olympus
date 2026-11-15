@@ -10,7 +10,7 @@
 // Lane 6 archive-scale leg, 15 Nov 2026: an unbounded, unlogged stand-back
 // held imports for most of an hour (mbox passes 5 to 20 min apart).
 
-export type StandBackWork = 'import' | 'embed' | 'judge' | 'digest';
+export type StandBackWork = 'import' | 'embed' | 'judge' | 'digest' | 'status';
 
 /** The longest one kind of work waits for the owner's Ask before it runs anyway. */
 export const STAND_BACK_MAX_MS = 60_000;

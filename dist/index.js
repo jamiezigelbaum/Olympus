@@ -19637,7 +19637,7 @@ var init_telegram_messages = __esm(() => {
 });
 
 // src/workers/source-index/status.ts
-var STORE_STATUS_REUSE_MS;
+var DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS;
 var init_status = __esm(() => {
   init_corpus();
   init_embedding_cost_estimates();
@@ -19654,6 +19654,12 @@ var init_status = __esm(() => {
   init_atomic_file();
   init_control_path_headroom();
   init_secret_locations();
+  PLAIN_STATUS_REQUEST = Object.freeze({ include_items: false });
+  DASHBOARD_STATUS_REQUEST = Object.freeze({
+    include_items: false,
+    include_readiness_ledger: true,
+    readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS
+  });
   STORE_STATUS_REUSE_MS = 5 * 60000;
 });
 

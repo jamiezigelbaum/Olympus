@@ -11,7 +11,9 @@ import { join } from 'node:path';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { defineDropboxFilesCorpus } from '../src/workers/dropbox-files/index.ts';
 import { flushMicrotasks } from './helpers/test-clock.ts';
-import { STORE_STATUS_REUSE_MS, createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
+import { DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
+import { STATUS_RECOUNT_MIN_GAP_MS, STATUS_RECOUNT_PACE_FACTOR, startPacedStatusRecount } from '../src/workers/engine/status-recount.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 
 const CORPUS_ID = 'secure_local.dropbox.files';
 const SNAPSHOT = { countsMaxAgeMs: 300_000 };
@@ -67,5 +69,110 @@ describe('status snapshot for the dashboard', () => {
       store.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("the split's front serves the background's recount and never counts a store itself", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'status-snapshot-'));
+    const snapshotPath = join(dir, 'source-status-snapshot.json');
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let now = 1_000_000;
+    try {
+      const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'writer' });
+      const counted = await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      // A background snapshot read serves what it kept and starts no recount: only its paced recount counts.
+      let counts = 0;
+      const realPrepare = store.prepareStatusCounts.bind(store);
+      store.prepareStatusCounts = (scope) => { counts += 1; return realPrepare(scope); };
+      now += STORE_STATUS_REUSE_MS + 1;
+      expect((await within(background.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)) as typeof counted).corpora).toEqual(counted.corpora);
+      await background.settled!();
+      expect(counts).toBe(0);
+      // The front: its store is stuck, and it is never asked.
+      store.prepareStatusCounts = () => { counts += 1; return new Promise<void>(() => {}); };
+      const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
+      for (let poll = 0; poll < 3; poll += 1) {
+        now += 2_000;
+        const shown = await within(front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT));
+        expect(shown).not.toBe('waited');
+        expect((shown as typeof counted).corpora).toEqual(counted.corpora);
+        expect((shown as typeof counted).snapshot_age_ms).toBe(STORE_STATUS_REUSE_MS + 1 + 2_000 * (poll + 1));
+      }
+      await front.settled!();
+      expect(counts).toBe(0);
+      // The background's next recount reaches the front with a fresh age.
+      store.prepareStatusCounts = realPrepare;
+      await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      now += 1_000;
+      expect((await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)).snapshot_age_ms).toBe(1_000);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the background's paced status recount", () => {
+  test('rests several times as long as each recount took, stands back for the owner, and reports it', async () => {
+    const clock = createTestClock();
+    let held = false;
+    const starts: number[] = [];
+    const lines: string[] = [];
+    const recount = startPacedStatusRecount({
+      holds: () => held,
+      // Each recount takes 20 s of the clock: the rest is then 5 x 20 s, not the 30 s floor.
+      recount: async () => { starts.push(clock.now()); await clock.sleep(20_000); },
+      sleep: (ms) => clock.sleep(ms),
+      now: () => clock.now(),
+      log: (line) => lines.push(line),
+    });
+    try {
+      const t0 = clock.now();
+      await flushMicrotasks();
+      expect(recount.health().counting).toBe(true);
+      await clock.advance(20_000);
+      expect(recount.health()).toMatchObject({ runs: 1, failures: 0, last_ms: 20_000, age_ms: 0, counting: false });
+      expect(lines.at(-1)).toContain('status recount took 20000 ms; next in 100 s');
+      await clock.advance(STATUS_RECOUNT_PACE_FACTOR * 20_000 - 1);
+      expect(starts.length).toBe(1);
+      expect(recount.health().age_ms).toBe(STATUS_RECOUNT_PACE_FACTOR * 20_000 - 1);
+      // The owner asks: the next recount waits for the hold to end.
+      held = true;
+      await clock.advance(60_000);
+      expect(starts.length).toBe(1);
+      held = false;
+      await clock.advance(5_000);
+      expect(starts.length).toBe(2);
+      expect(starts[1]! - t0).toBeGreaterThan(20_000 + STATUS_RECOUNT_PACE_FACTOR * 20_000);
+      expect(STATUS_RECOUNT_MIN_GAP_MS).toBeLessThan(STATUS_RECOUNT_PACE_FACTOR * 20_000);
+    } finally { recount.stop(); }
+  });
+
+  test('a change counts again without the idle floor, but never sooner than the pace allows', async () => {
+    const clock = createTestClock();
+    let took = 1_000;
+    const starts: number[] = [];
+    const recount = startPacedStatusRecount({
+      holds: () => false,
+      recount: async () => { starts.push(clock.now()); await clock.sleep(took); },
+      sleep: (ms) => clock.sleep(ms),
+      now: () => clock.now(),
+    });
+    try {
+      await clock.advance(1_000);
+      expect(starts.length).toBe(1);
+      // A quick recount: a sync pass finishing 6 s later counts at once, not after the 30 s floor.
+      await clock.advance(6_000);
+      took = 20_000;
+      recount.soon();
+      await flushMicrotasks();
+      expect(starts.length).toBe(2);
+      // That one took 20 s: a change right after it waits out five times its length.
+      await clock.advance(20_000);
+      recount.soon();
+      await clock.advance(STATUS_RECOUNT_PACE_FACTOR * 20_000 - 1);
+      expect(starts.length).toBe(2);
+      await clock.advance(1);
+      expect(starts.length).toBe(3);
+    } finally { recount.stop(); }
   });
 });

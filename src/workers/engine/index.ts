@@ -72,7 +72,7 @@ import { TEXT_EXTRACTOR_KIND } from '../file-extraction/extractors/text.ts';
 import { TRANSCRIPTION_EXTRACTOR_KIND } from '../file-extraction/extractors/transcription.ts';
 import { drainPdfExtraction } from '../file-extraction/runner.ts';
 import { createSourceAnswerTrace, runWithSourceAnswerTrace } from '../source-index/answer-latency-trace.ts';
-import { DASHBOARD_READINESS_LEDGER_MAX_AGE_MS } from '../source-index/status.ts';
+import { DASHBOARD_STATUS_REQUEST } from '../source-index/status.ts';
 import { READWISE_LIBRARY_CORPUS_ID } from '../readwise/index.ts';
 import {
   X_BOOKMARKS_CORPUS_ID,
@@ -1226,11 +1226,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // accept, stated rather than assumed. Nothing caches against it
               // today; it is the standing allowance for a readiness owner too
               // expensive to score on every one of this page's polls.
-              await sourceIndexStatus.status({
-                include_items: false,
-                include_readiness_ledger: true,
-                readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
-              }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS }),
+              // The split's background counts this same request on its own pace.
+              await sourceIndexStatus.status({ ...DASHBOARD_STATUS_REQUEST }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS }),
               credentialDegradations?.() ?? [],
             );
             const schedulerDashboardStatus = sourceScheduler?.status();
