@@ -3113,7 +3113,10 @@ function googlePilotStatus(configured: boolean): NonNullable<SourceDashboardView
 
 function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceSetupStatus {
   const connection = card.connection;
-  const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined;
+  // A card whose connection is its imports owns no corpus and never syncs: its imports finishing is its first sync, and
+  // it has no Sync now to send anyone to (Reflect and Roam read "Start Sync now" after both imported, 15 Nov).
+  const importsDone = connection.action.kind === 'archive_import' && connection.state === 'connected';
+  const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined || importsDone;
   // A source whose embedding lane is switched off, or which is served without
   // embeddings at all, does not depend on an embedding lane. Listing it anyway
   // put "Approved local embedding lane" on a Dropbox card under a posture with

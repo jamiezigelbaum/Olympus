@@ -116399,7 +116399,8 @@ function googlePilotStatus(configured) {
 }
 function dashboardSourceSetupStatus(card) {
   const connection = card.connection;
-  const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined;
+  const importsDone = connection.action.kind === "archive_import" && connection.state === "connected";
+  const synced = card.coverage.indexed_items > 0 || card.last_sync_at !== undefined || importsDone;
   const embeddingLaneApplies = card.embedding_lane_state !== "embedding_lane_disabled" && card.embedding_required !== false;
   const dependencies = (card.capabilities?.dependencies ?? []).filter((dependency) => dependency.id !== "local_embedding_lane" || embeddingLaneApplies).map((dependency) => {
     const ready = dependency.id === "local_document_extractors" ? card.coverage.content_ready_items > 0 : dependency.id === "local_embedding_lane" ? (card.coverage.embedded_files ?? 0) > 0 : synced;
