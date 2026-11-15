@@ -1,7 +1,7 @@
 // Why a question's expected item is never found by either lane, for the rows
 // a passage receipt marks not_found. Read-only on an offline data-root copy;
 // prints ids, codes and numbers only, never item or question text.
-//   bun eval/never-found.ts --data-root <copy> --receipt <passage receipt.json> [dataset.json]
+//   bun eval/never-found.ts --data-root <copy> --receipt <passage receipt.json> [--window] [dataset.json]
 // Per expected item (alternates included):
 //   miss: not_in_store | tombstoned | no_chunks | not_embedded | hidden | held | servable
 //   exactRank: the item's rank among all items of its store by best exact
@@ -12,6 +12,10 @@
 //     not the message
 //   chars and quoteWords: the item's stored text length and the expected
 //     quote's word count.
+//   windowRank (--window): the rank the item's ±3 message window would take
+//     if it were embedded as one document (the messages' stored text in
+//     authored order), against every item's best current vector; a test of
+//     message-window chunks before building them.
 import { Database } from 'bun:sqlite';
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/core/config.ts';
@@ -23,6 +27,8 @@ import { configuredEvalEmbedding, prepareEvalEmbedding } from './retrieval.ts';
 import { validatePassageDataset } from './types.ts';
 
 const NEIGHBOURS = 3;
+// The longest window text embedded, within the embedding model's input.
+const WINDOW_MAX_CHARS = 6_000;
 
 async function main(): Promise<void> {
   const { isolation, rest } = parseDataRootArgs(process.argv.slice(2));
@@ -30,6 +36,7 @@ async function main(): Promise<void> {
   const at = rest.indexOf('--receipt');
   const receiptPath = at >= 0 ? rest[at + 1] : undefined;
   if (!receiptPath) throw new Error('--receipt is required.');
+  const windowed = rest.includes('--window');
   const datasetPath = rest.filter((arg, index) => !arg.startsWith('--') && index !== at + 1)[0] ?? 'eval/private/passage-questions.json';
   const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as { questions?: Array<{ questionId: string; funnel?: { stage: string } }> };
   const wanted = new Set((receipt.questions ?? []).filter(row => row.funnel?.stage === 'not_found').map(row => row.questionId));
@@ -68,7 +75,7 @@ async function main(): Promise<void> {
               SELECT item_pk FROM (SELECT item_pk FROM items WHERE provider_conversation_id = ? AND tombstoned = 0 AND authored_at < ? ORDER BY authored_at DESC LIMIT ${NEIGHBOURS})
               UNION ALL SELECT item_pk FROM (SELECT item_pk FROM items WHERE provider_conversation_id = ? AND tombstoned = 0 AND authored_at > ? ORDER BY authored_at ASC LIMIT ${NEIGHBOURS})`)
               .all(item.conversation, item.authored_at ?? '', item.conversation, item.authored_at ?? '') as Array<{ item_pk: number }>).map(row => row.item_pk) : [];
-            let exactRank: number | null = null; let neighbourRank: number | null = null;
+            let exactRank: number | null = null; let neighbourRank: number | null = null; let windowRank: number | null = null;
             if (provider && embedded > 0) {
               const [vector] = await provider.embed([{ text: question.question }], { taskType: 'RETRIEVAL_QUERY' });
               const best = new Map<number, number>();
@@ -86,9 +93,19 @@ async function main(): Promise<void> {
               exactRank = rankOf(item.item_pk);
               const ranks = neighbours.map(rankOf).filter((rank): rank is number => rank !== null);
               neighbourRank = ranks.length ? Math.min(...ranks) : null;
+              if (windowed && vector && neighbours.length) {
+                const members = db.query(`SELECT i.item_pk, (SELECT group_concat(c.bounded_text, ' ') FROM (SELECT bounded_text FROM chunks WHERE item_pk = i.item_pk ORDER BY chunk_index) c) AS text
+                  FROM items i WHERE i.item_pk IN (${[item.item_pk, ...neighbours].join(',')}) ORDER BY i.authored_at, i.item_pk`).all() as Array<{ item_pk: number; text: string | null }>;
+                const text = members.map(member => member.text ?? '').filter(Boolean).join('\n').slice(0, WINDOW_MAX_CHARS);
+                const [windowVector] = text ? await provider.embed([{ text }], { taskType: 'RETRIEVAL_DOCUMENT' }) : [];
+                if (windowVector && windowVector.length === vector.length) {
+                  const score = cosineSimilarity(vector, windowVector);
+                  windowRank = 1 + [...best.values()].filter(other => other > score).length;
+                }
+              }
             }
             console.log(JSON.stringify({ ...base, miss, chunks: chars.chunks, embeddedChunks: embedded, chars: chars.n,
-              inConversation: Boolean(item.conversation), neighbours: neighbours.length, exactRank, neighbourRank }));
+              inConversation: Boolean(item.conversation), neighbours: neighbours.length, exactRank, neighbourRank, ...(windowed ? { windowRank } : {}) }));
           } finally { db.close(); }
         }
       }
