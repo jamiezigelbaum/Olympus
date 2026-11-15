@@ -511,6 +511,9 @@ describe('read on demand', () => {
     await assertSearch(['current', 'unversioned']);
     // Also exercise the exact scan used when the digest is unavailable.
     const db = new Database(dbPath);
+    // Every store connection waits on a lock; so does this one. A closed
+    // store's pool threads release the file as they stop, after close().
+    db.exec('PRAGMA busy_timeout = 10000');
     db.exec('UPDATE chunk_vector_digest_meta SET completed = 0');
     await assertSearch(['current', 'unversioned']);
     // Older read-only stores have no grant table: both lanes fail closed
