@@ -10,6 +10,7 @@ import {
   genuineCoverageGapKinds,
   provenanceCorpusId,
   resolveCitationCorpusId,
+  citationItemChunks,
   type EvalGrade,
   type EvalGradeContext,
   type EvalPackGradeContext,
@@ -336,6 +337,9 @@ function buildEvalGradeContext(
       result.citations.map((citation) =>
         resolveCitationCorpusId(citation.provenance, pack.candidates, candidateCorpusIds),
       ),
+    citationChunks:
+      provided?.citationChunks ??
+      result.citations.map((citation) => citationItemChunks(citation.provenance, pack.candidates)),
     genuineCoverageGapKinds:
       provided?.genuineCoverageGapKinds ?? genuineCoverageGapKinds(pack),
   };

@@ -501,6 +501,28 @@ describe('held-out eval harness wiring', () => {
     ).evidenceCited).toBe(false);
   });
 
+  test('a citation of another copy of the expected item counts: the same item in another tier store, or an item holding the passage', () => {
+    const question: EvalQuestion = {
+      id: 'copy', shape: 'value_lookup', question: 'What is the deductible?',
+      expectedEvidence: [{ corpusId: 'internal.dropbox.files', providerItemId: 'policy-1', quote: 'the annual deductible is five hundred dollars per person', hint: 'policy' }],
+    };
+    const cite = (providerItemId: string) => ({
+      answer: 'Five hundred dollars.',
+      citations: [{ provenance: { sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId, localItemId: `personal:${providerItemId}` } }, claim: 'Deductible' }],
+      unanswered: [],
+    });
+    const graded = (providerItemId: string, corpusId: string, chunks?: string[]) =>
+      gradeAnswer(question, cite(providerItemId), undefined, { citationCorpusIds: [corpusId], citationChunks: [chunks] });
+    expect(graded('policy-1', 'internal.dropbox.files').evidenceCited).toBe(true);
+    const tierCopy = graded('policy-1', 'secure_local.dropbox.files');
+    expect(tierCopy.evidenceCited).toBe(true);
+    expect(tierCopy.detail).toContain('evidenceCited: a copy of expected evidence item 1 was cited');
+    expect(graded('policy-2', 'internal.dropbox.files', ['Plan summary. The annual deductible is five hundred dollars per person.']).evidenceCited).toBe(true);
+    // Another item without the passage, or the same id in another source, is still a miss.
+    expect(graded('policy-2', 'internal.dropbox.files', ['A different document about claims.']).evidenceCited).toBe(false);
+    expect(graded('policy-1', 'internal.gmail.messages').evidenceCited).toBe(false);
+  });
+
   test('grades the released answer projection instead of the raw analyst draft', async () => {
     const releaseDataset: EvalDataset = {
       version: 'test',
@@ -1030,7 +1052,10 @@ describe('held-out eval harness wiring', () => {
     expect(report.grades[0]!.privacyRespected).toBe(true);
   });
 
-  test('expected evidence requires the cited item to come from the expected corpus', async () => {
+  // Plan thread ruling, 15 Nov: the same item in another tier store of its
+  // source is a copy of it, and citing the copy cites the item. The grade
+  // says so in its detail; privacy is graded on its own.
+  test('a cited item from another tier store of the expected source counts as a copy, and says so', async () => {
     const collisionDataset: EvalDataset = {
       version: 'test',
       description: 'duplicate provider id fixture',
@@ -1080,10 +1105,9 @@ describe('held-out eval harness wiring', () => {
       }),
     });
 
-    expect(report.passed).toBe(0);
     expect(report.grades[0]!.answerCorrect).toBe(true);
-    expect(report.grades[0]!.evidenceCited).toBe(false);
-    expect(report.grades[0]!.detail).toContain('evidenceCited: no citation for expected evidence item 1');
+    expect(report.grades[0]!.evidenceCited).toBe(true);
+    expect(report.grades[0]!.detail).toContain('evidenceCited: a copy of expected evidence item 1 was cited');
     expect(JSON.stringify(report)).not.toContain('secure lab PDF');
   });
 

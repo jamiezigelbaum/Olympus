@@ -17,7 +17,7 @@ import { openEvalDataRoot, type EvalStoreCount, type EvalSkippedStore } from './
 import { parseDataRootArgs } from './data-root-args.ts';
 import { buildEvalPack, createEvalSourceLanes, configuredEvalEmbedding, prepareEvalEmbedding, type EvalStoreSearch } from './retrieval.ts';
 import { passageContainsQuote, passageWords, PASSAGE_MATCH_RULE } from './passage-match.ts';
-import { resolveCitationCorpusId } from './grade.ts';
+import { citationItemChunks, citedCopyOfExpected, resolveCitationCorpusId } from './grade.ts';
 import { validatePassageDataset, type EvalDataset, type EvalQuestion } from './types.ts';
 import { localEvalModel, type DraftModel } from './local-model.ts';
 import { enterStage, failureCode, runEvalCli, type EvalStage } from './cli-failure.ts';
@@ -55,6 +55,8 @@ export interface LaneProbe { keyword: number | null; vector: number | null; exac
 export interface QuestionJudgement { answers: boolean | null; specific: boolean | null }
 export interface PassageAnswer {
   outcome: 'answered' | 'failed'; cited?: boolean; coverage?: number; right?: boolean; answerMs?: number; code?: string;
+  /** How the citation matched: the expected item itself, or another copy of it (grade.ts citedCopyOfExpected). */
+  citedBy?: 'item' | 'copy';
 }
 export interface PassageSummary {
   /** Questions scored; a degraded question is counted in `degraded` instead. */
@@ -160,19 +162,23 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
 const ANSWER_STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'these', 'those', 'are', 'was', 'were', 'has', 'had', 'have', 'been', 'being', 'but', 'not', 'you', 'your', 'our', 'its', 'into', 'than', 'then', 'they', 'their', 'there', 'will', 'would', 'can', 'could', 'should']);
 
 /** Alternative evidence items follow the retrieval metric: any one can answer the question. */
-function gradePassageAnswer(question: EvalQuestion, result: AnalystResult, detail: EvidencePackBuildDetail): Pick<PassageAnswer, 'cited' | 'coverage' | 'right'> {
+function gradePassageAnswer(question: EvalQuestion, result: AnalystResult, detail: EvidencePackBuildDetail): Pick<PassageAnswer, 'cited' | 'coverage' | 'right' | 'citedBy'> {
   const expected = question.expectedEvidence ?? [];
-  const cited = result.citations.some(citation => {
-    const corpusId = resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds);
+  const corpusOf = (citation: AnalystResult['citations'][number]) => resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds);
+  const itself = result.citations.some(citation => {
+    const corpusId = corpusOf(citation);
     return expected.some(item => [item, ...(item.alternates ?? [])].some(identity =>
       identity.corpusId === corpusId && identity.providerItemId === citation.provenance.sourceItem.providerItemId));
   });
+  const copy = !itself && result.citations.some(citation => expected.some(item =>
+    citedCopyOfExpected(item, citation.provenance, corpusOf(citation), citationItemChunks(citation.provenance, detail.pack.candidates))));
+  const cited = itself || copy;
   const words = new Set(passageWords(result.answer));
   const coverage = Math.max(0, ...expected.map(item => {
     const content = passageWords(item.quote ?? '').filter(word => /^\p{L}{3,}$/u.test(word) && !ANSWER_STOP_WORDS.has(word));
     return content.length ? content.filter(word => words.has(word)).length / content.length : 0;
   }));
-  return { cited, coverage, right: cited && coverage >= 0.8 };
+  return { cited, coverage, right: cited && coverage >= 0.8, ...(cited ? { citedBy: itself ? 'item' as const : 'copy' as const } : {}) };
 }
 function grouped(rows: readonly PassageRow[], ks: readonly number[], groups: (row: PassageRow) => string[]): Record<string, PassageSummary> {
   const buckets = new Map<string, PassageRow[]>();
