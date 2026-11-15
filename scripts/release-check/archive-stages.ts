@@ -485,6 +485,8 @@ export async function removeStage(host: ArchiveHost, args: { targets: readonly R
       const driver = session.driver;
       for (const [index, target] of args.targets.entries()) {
         const before = await statusNow(host, target.token, 30_000);
+        const heldBefore = new Map(args.targets.slice(index + 1).map((other) => [other.fileName,
+          host.readStores(formatSpec(other.format), undefined, other.token).reduce((sum, store) => sum + store.tokenRows, 0)] as const));
         const archiveId = before?.archives.find((archive) => archive.name === target.fileName)?.id;
         const journey = removeJourney(removalLabel(target), target.fileName, args.removeS);
         const trace = await runJourney(driver, journey);
@@ -492,9 +494,13 @@ export async function removeStage(host: ArchiveHost, args: { targets: readonly R
         const gone = stepMs(trace, 'Confirm');
         const after = await statusNow(host, target.token, 30_000);
         // What is left of each archive still to be removed is read in its own format's stores: a chat archive is not in the mail stores.
-        const others = args.targets.slice(index + 1).map((other) => ({
-          role: other.role, format: other.format, fileName: other.fileName, stores: host.readStores(formatSpec(other.format), undefined, other.token),
-        }));
+        // Only an archive whose content was there before this Remove can have been taken by it: one that never imported (its stage
+        // failed first) has nothing to lose, and counting it blamed every removal for it (run 43736059061).
+        const others = args.targets.slice(index + 1)
+          .filter((other) => (heldBefore.get(other.fileName) ?? 0) > 0)
+          .map((other) => ({
+            role: other.role, format: other.format, fileName: other.fileName, stores: host.readStores(formatSpec(other.format), undefined, other.token),
+          }));
         obs.removals.push({
           role: target.role,
           format: target.format,
@@ -547,8 +553,10 @@ async function listedArchives(host: ArchiveHost, driver: JourneyDriver, token: s
   if (!status) return { unreadable: 'the agent\'s status of the archives could not be read, so what is left is not known' };
   const panel = await until(host, () => readPanel(driver), waitMs, 500);
   if (!panel) return { unreadable: 'the dashboard could not be read, so what is left is not known' };
-  // An import inside a source's card has no Remove: it goes with the source's Delete, not from here.
-  return { names: [...new Set([...status.archives.map((archive) => archive.name), ...panel.rows.filter((row) => !row.sourceImport).map((row) => row.name)])] };
+  // An import inside a source's card has no Remove: it goes with the source's Delete, not from here. The agent's status lists it
+  // too, so it is left out by the name the page shows it under (the front check's Gmail import, run 43736059061).
+  const inSource = new Set(panel.rows.filter((row) => row.sourceImport).map((row) => row.name));
+  return { names: [...new Set([...status.archives.map((archive) => archive.name), ...panel.rows.filter((row) => !row.sourceImport).map((row) => row.name)])].filter((name) => !inSource.has(name)) };
 }
 
 /**

@@ -540,6 +540,44 @@ describe('removing an archive', () => {
   });
 });
 
+describe('removing one of two archives that share messages', () => {
+  test('takes only its own copy: the other archive keeps every shared message and its own', async () => {
+    // The same messages (same Message-ID, same text) in two exports, the second with one more: removing the first must leave
+    // the second whole, however much they share.
+    const shared = Array.from({ length: 4 }, (_, index) => mail(index, { tag: 'shared' }));
+    const f = fixture();
+    const removed = f.start('First export.mbox', mbox(shared));
+    const kept = f.start('Second export.mbox', mbox([...shared, mail(9, { tag: 'only-kept' })]));
+    await importAll(f.runtime, removed);
+    await importAll(f.runtime, kept);
+    const lane = f.runtime.lane('email');
+    const keptBefore = itemsByArchive(f.env).get(kept);
+    expect(keptBefore?.size).toBe(5);
+    expect(lane.ledger.accountScopeCounts('mbox', kept).items).toBe(5);
+    const keptRowsBefore = storedRows(f.env, kept).length;
+
+    requestArchiveRemoval(f.runtime.state, removed);
+    let outcome = await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: removed, openWaitingQuestions: () => f.runtime.openWaitingQuestions() });
+    for (let run = 0; run < 20 && outcome.kind === 'progress'; run += 1) {
+      outcome = await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: removed, openWaitingQuestions: () => f.runtime.openWaitingQuestions() });
+    }
+    expect(outcome.kind).toBe('removed');
+
+    const after = itemsByArchive(f.env);
+    expect(after.has(removed)).toBe(false);
+    expect([...(after.get(kept) ?? [])].sort()).toEqual([...keptBefore!].sort());
+    expect(storedRows(f.env, kept).length).toBe(keptRowsBefore);
+    expect(lane.ledger.accountScopeCounts('mbox', kept).items).toBe(5);
+    const keptRows = storedRows(f.env, kept);
+    const keptCopies = lane.ledger.copiesForMany(keptRows.map((row) => row.identity));
+    for (const row of keptRows) {
+      const forItem = keptCopies.get(tierLedgerIdentityKey(row.identity));
+      expect(tierRowVisible(forItem, row.corpusId, 'metadata') || tierRowVisible(forItem, row.corpusId, 'content')).toBe(true);
+    }
+    expect(f.runtime.state.list().map((record) => record.archive_id)).toEqual([kept]);
+  });
+});
+
 describe('removing an archive from what AI apps received', () => {
   test('takes the names its items were released under, and keeps the other archive\'s', async () => {
     const f = fixture();
