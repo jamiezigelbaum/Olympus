@@ -10,7 +10,7 @@ import { cosineSimilarity, decodeEmbedding, encodeEmbedding, type SourceEmbeddin
 import { encodeVectorDigest, scoreVectorDigest } from '../src/workers/source-index/vector-digest.ts';
 import type { StoreRead } from '../src/workers/connector-store/off-thread-reads.ts';
 import { waitFor } from './helpers/test-clock.ts';
-import { setReadPoolObserverForTests, setReadPoolWaitingWorkForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import { READ_POOL_RESCORE_READERS, readPoolDiagnostics, setReadPoolObserverForTests, setReadPoolWaitingWorkForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { probeVectorDigest, seededVectorRandom } from '../eval/vector-digest-probe.ts';
 
 // The digest pass is opt-in while olympus-ops#151 is open; these tests cover it on.
@@ -741,6 +741,8 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
       // The best-ranked items sit in every folder, so a leak would show at once.
       expect(result.rows.map((row) => itemPkOf.get(row.sourceItem.localItemId))).toEqual(pks.filter((_, i) => i % 100 < 70).slice(0, 24));
       expect(rescores.length).toBeGreaterThan(0);
+      // A batch of more than one page is read side by side: the scan's worker and the re-score's.
+      expect(readPoolDiagnostics().threads).toBeGreaterThanOrEqual(1 + READ_POOL_RESCORE_READERS);
       for (const read of rescores) {
         const plan = (db.query(`EXPLAIN QUERY PLAN ${read.sql}`).all(...(read.params as Array<string | number | null>)) as Array<{ detail: string; parent: number }>)
           .filter((row) => row.parent === 0).map((row) => row.detail);

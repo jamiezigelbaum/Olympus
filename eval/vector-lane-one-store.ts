@@ -13,14 +13,16 @@
 // Plans name tables and indexes only, never a searched value.
 // --writer runs a writer on the copy's store during the trials (a no-op
 // update in its own transaction every 50 ms, from another thread), so a
-// read is timed while the WAL grows, as it does during ingest.
+// read is timed while the WAL grows, as it does during ingest. Each trial
+// prints the read pool's worker count and the process RSS, so the memory
+// of the re-score's side readers shows beside its time.
 // Read-only. Each read's time is measured from when it is sent to when the
 // next read of that store is sent; the scan's reads run one at a time.
 import { Database } from 'bun:sqlite';
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/core/config.ts';
 import { connectorStoreCurrentEmbeddingPageQuery, type ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
-import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import { readPoolDiagnostics, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { FileSourceScopeAuthority, fileSourceScopeMetadataFilters } from '../src/workers/source-scope-runtime.ts';
 import { poolSqlSite } from '../src/workers/source-index/answer-latency-trace.ts';
 import { openEvalDataRoot } from './data-root.ts';
@@ -111,7 +113,7 @@ async function main(): Promise<void> {
       slowest.set(read.site, Math.max(slowest.get(read.site) ?? 0, ms));
     });
     console.log(JSON.stringify({
-      trial, corpus, lane: keywordLane ? 'keyword' : 'vector', liveScope: filters !== undefined, laneMs: Math.round(ended - started), rows: lane.rows.length,
+      trial, corpus, lane: keywordLane ? 'keyword' : 'vector', poolThreads: readPoolDiagnostics().threads, rssMb: Math.round(process.memoryUsage().rss / 1e6), liveScope: filters !== undefined, laneMs: Math.round(ended - started), rows: lane.rows.length,
       ...(lane.skippedReason ? { skippedReason: lane.skippedReason } : {}),
       itemIds: lane.rows.map(row => row.sourceItem.localItemId),
       sites: [...sites].sort((a, b) => b[1].ms - a[1].ms).slice(0, 6)

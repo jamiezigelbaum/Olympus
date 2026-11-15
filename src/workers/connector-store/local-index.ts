@@ -17,7 +17,7 @@ import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith 
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -2424,6 +2424,7 @@ async function scanVectorPages(
   deadlineAtMs: number | undefined,
   pageSize: number,
   resultLimit: number,
+  sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
 ): Promise<VectorScan> {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
@@ -2438,7 +2439,7 @@ async function scanVectorPages(
   // vectorDigestSearchDisabled).
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
-  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
+  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
   const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -2510,6 +2511,14 @@ export async function scanDigestPages(
   limit: number,
   /** A lower re-score cap, for the offline recall comparison only (eval/vector-rescore-cap.ts). */
   maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES,
+  /**
+   * Readers of the same store on other connections, asked for once a batch
+   * needs more than one page: its pages are then read side by side. Each
+   * page carries every eligibility check in its own SQL, so a page read on
+   * another snapshot can return only rows that were servable when it ran;
+   * the ledger check after ranking has the final say, as for every winner.
+   */
+  sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
 ): Promise<VectorScan> {
   const heap = new VectorDigestHeap();
   const query = encodeVectorDigest(queryVector);
@@ -2559,6 +2568,7 @@ export async function scanDigestPages(
   let candidates = 0;
   let qualifiedItems = 0;
   let batches = 0;
+  let readers: ReadonlyArray<(query: StoreRead) => Promise<unknown>> | undefined;
   while (heap.length > 0) {
     // Until `limit` items qualify the pass reads on as before (a narrow filter
     // drains the heap rather than restarting wider); the cap bounds only the
@@ -2577,11 +2587,17 @@ export async function scanDigestPages(
     // vectors by key and nothing else (a filtered-out chunk shortens a page
     // without ending the batch).
     const chunkPks = [...digestScores.keys()].sort((a, b) => a - b);
-    for (let at = 0, rePages = 0; at < chunkPks.length; at += CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, rePages++) {
+    if (chunkPks.length > CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE && sideReaders && !readers) readers = [read, ...await sideReaders()];
+    const width = readers?.length ?? 1;
+    for (let at = 0, rePages = 0; at < chunkPks.length; at += CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width, rePages++) {
       if (expired()) return cutWith();
-      const pagePks = chunkPks.slice(at, at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
-      const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
-      const rows = await read({ mode: 'all', ...page }) as VectorScoreRow[];
+      const pages = await Promise.all(Array.from({ length: width }, (_, lane) => {
+        const pagePks = chunkPks.slice(at + lane * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, at + (lane + 1) * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+        if (pagePks.length === 0) return [] as VectorScoreRow[];
+        const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
+        return (readers?.[lane] ?? read)({ mode: 'all', ...page }) as Promise<VectorScoreRow[]>;
+      }));
+      const rows = pages.flat();
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired()) return cutWith();
         const folded = foldVectorScore(bestByItem, row, queryVector);
@@ -2590,7 +2606,7 @@ export async function scanDigestPages(
         const digestScore = digestScores.get(row.chunk_pk);
         if (folded.score !== undefined && digestScore !== undefined) underestimate = Math.max(underestimate, folded.score - digestScore);
       }
-      if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
+      if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
     }
   }
   return { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
@@ -2687,10 +2703,20 @@ async function scanVectorPagesOnPool(
   deadlineAtMs: number | undefined,
   resultLimit: number,
 ): Promise<VectorScan> {
+  // Side readers for the re-score, opened on first need and only on free
+  // workers: a store whose re-score workers are all in use reads one page
+  // at a time, as before.
+  const side: Array<{ read: (query: StoreRead) => Promise<unknown>; close: () => Promise<void> }> = [];
+  const sideReaders = async () => {
+    const opened = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () =>
+      openOffThreadSnapshot(dbPath, { lane: 'rescore', noWait: true }).catch(() => undefined)));
+    for (const reader of opened) if (reader) side.push(reader);
+    return side.map((reader) => reader.read);
+  };
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
-    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit,
+    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders,
   // Its own worker of the store: the scan never queues behind keyword reads.
-  ), { lane: 'scan' }).catch((error: unknown): VectorScan => {
+  ), { lane: 'scan' }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error: unknown): VectorScan => {
     if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
     throw error;
   });

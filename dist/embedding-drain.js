@@ -18123,6 +18123,7 @@ var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
 // src/workers/connector-store/off-thread-reads.ts
 var READ_POOL_SIZE = 1;
+var READ_POOL_RESCORE_READERS = 3;
 var READ_POOL_QUEUE_PER_STORE = 8;
 var OFF_THREAD_READ_TIMEOUT_MS = 120000;
 
@@ -18245,7 +18246,7 @@ function runtimeHasWorkers() {
   return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
 }
 function startThread(store, lane = "shared") {
-  const limit = lane === "shared" ? READ_POOL_SIZE : 1;
+  const limit = lane === "shared" ? READ_POOL_SIZE : lane === "rescore" ? READ_POOL_RESCORE_READERS : 1;
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
@@ -18342,7 +18343,12 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
   if (!runtimeHasWorkers())
     throw new Error("off-thread reads are unavailable");
   const generation = releases.get(dbPath) ?? 0;
-  const reader = await snapshotThread(dbPath, lane);
+  const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
+  if (options.noWait && !free)
+    throw new OffThreadReadBusyError;
+  if (free)
+    free.snapshots += 1;
+  const reader = free ?? await snapshotThread(dbPath, lane);
   if ((releases.get(dbPath) ?? 0) !== generation) {
     reader.snapshots -= 1;
     dispatch();
@@ -18384,7 +18390,25 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
 var snapshotWaiters = [];
 var releases = new Map;
 function snapshotThreadNow(store, lane) {
-  return live().find((reader) => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job) ?? startThread(store, lane);
+  return live().find((reader) => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job && (lane !== "rescore" || reader.snapshots === 0)) ?? startThread(store, lane);
+}
+function openOffThreadSnapshot(dbPath, options = {}) {
+  return new Promise((resolve, reject) => {
+    let opened = false;
+    const done = withOffThreadSnapshot(dbPath, (read) => new Promise((release) => {
+      opened = true;
+      resolve({ read, close: async () => {
+        release();
+        await done.catch(() => {
+          return;
+        });
+      } });
+    }), options);
+    done.catch((error) => {
+      if (!opened)
+        reject(error);
+    });
+  });
 }
 function snapshotThread(store, lane) {
   const reader = snapshotThreadNow(store, lane);
@@ -21591,7 +21615,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
   }
   return { mismatch: 0, qualified, score };
 }
-async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit) {
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders) {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority), provider);
   if (after.skippedReason)
@@ -21608,7 +21632,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
   if (digestReady)
-    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
+    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -21652,7 +21676,7 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
     return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
   return rows;
 }
-async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES) {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders) {
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
@@ -21697,6 +21721,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
   let candidates = 0;
   let qualifiedItems = 0;
   let batches = 0;
+  let readers;
   while (heap.length > 0) {
     if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES) || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
       break;
@@ -21711,12 +21736,20 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
     }
     candidates += digestScores.size;
     const chunkPks = [...digestScores.keys()].sort((a, b) => a - b);
-    for (let at = 0, rePages = 0;at < chunkPks.length; at += CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, rePages++) {
+    if (chunkPks.length > CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE && sideReaders && !readers)
+      readers = [read, ...await sideReaders()];
+    const width = readers?.length ?? 1;
+    for (let at = 0, rePages = 0;at < chunkPks.length; at += CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width, rePages++) {
       if (expired())
         return cutWith();
-      const pagePks = chunkPks.slice(at, at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
-      const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
-      const rows = await read({ mode: "all", ...page });
+      const pages = await Promise.all(Array.from({ length: width }, (_, lane) => {
+        const pagePks = chunkPks.slice(at + lane * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, at + (lane + 1) * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+        if (pagePks.length === 0)
+          return [];
+        const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
+        return (readers?.[lane] ?? read)({ mode: "all", ...page });
+      }));
+      const rows = pages.flat();
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired())
           return cutWith();
@@ -21727,7 +21760,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         if (folded.score !== undefined && digestScore !== undefined)
           underestimate = Math.max(underestimate, folded.score - digestScore);
       }
-      if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+      if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
         await yieldConnectorStoreVectorScan();
     }
   }
@@ -21788,7 +21821,17 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECT
 }
 var VECTOR_SCAN_BACKSTOP_GRACE_MS = 250;
 async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit), { lane: "scan" }).catch((error) => {
+  const side = [];
+  const sideReaders = async () => {
+    const opened = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () => openOffThreadSnapshot(dbPath, { lane: "rescore", noWait: true }).catch(() => {
+      return;
+    })));
+    for (const reader of opened)
+      if (reader)
+        side.push(reader);
+    return side.map((reader) => reader.read);
+  };
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;
