@@ -14012,6 +14012,18 @@ export class LocalConnectorStore {
    * the set cannot be read (the scan then ranks everything, as before).
    */
   private vectorScanExcludedItemPks(): ReadonlySet<number> | undefined {
+    // No set built yet (the first search after a start): building it here
+    // would run the whole build on the request thread, as vectorLaneServable
+    // also refuses. Build it in turns for the next search; this one ranks
+    // everything and the live check filters.
+    if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
+      let ledger: TierLedger | undefined;
+      try { ledger = this.visibilityLedger(); } catch { return undefined; }
+      if (ledger) {
+        void this.refreshTierHiddenCountsInTurns();
+        return undefined;
+      }
+    }
     let value: TierLedgerHiddenItemPks;
     try { value = this.tierHiddenItemPks(); } catch { return undefined; }
     // Built per scan: the set's lists change in place as verdicts land, so

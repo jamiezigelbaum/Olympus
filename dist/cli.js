@@ -50569,6 +50569,18 @@ ${parentKey(ref)}`, { ref, origin });
       };
     }
     vectorScanExcludedItemPks() {
+      if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
+        let ledger;
+        try {
+          ledger = this.visibilityLedger();
+        } catch {
+          return;
+        }
+        if (ledger) {
+          this.refreshTierHiddenCountsInTurns();
+          return;
+        }
+      }
       let value;
       try {
         value = this.tierHiddenItemPks();
