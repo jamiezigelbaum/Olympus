@@ -82,7 +82,7 @@ describe('X reconciliation window-boundary drift', () => {
     });
   });
 
-  test('a drifted verification tail classifies into staged recovery instead of wedging the run', async () => {
+  test('a drifted verification tail finishes without removal authority and keeps what it read', async () => {
     await withStateFiles(async ({ usage, statePath }) => {
       const posts = [bookmark('drift-a'), bookmark('drift-b'), bookmark('drift-c')];
       // The live sequence: the rich pass observes three items, the verification
@@ -110,35 +110,25 @@ describe('X reconciliation window-boundary drift', () => {
           sourceClient: client(verifyTail),
         });
 
-      // First encounter: the drift is recorded as a staged failure the existing
-      // recovery machinery owns, not as an anonymous provider_temporary retry.
-      await expect(connector(ATTEMPT_1, []).probe()).rejects.toMatchObject({
-        errorKind: 'reconcile_incomplete',
-        degradedReason: 'x_reconcile_window_boundary_drift',
-        counts: { staged_failure_count: 1, staged_recovery_eligible: 1 },
+      // The verification tail no longer matches, so the run holds no removal
+      // authority, but it finishes and keeps all three posts it paid for: no
+      // staged failure, no recovery, nothing read twice (Sparta, 15 Nov 2026,
+      // where a $5.30 traversal was thrown away this way).
+      const drifted = connector(ATTEMPT_1, []);
+      expect(await drifted.probe()).toMatchObject({
+        complete: true,
+        removalAuthoritative: false,
+        counts: { itemsSeen: 3, globalVerificationMatched: 0 },
       });
-      let state = new LocalXBookmarksReconcileStateStore(statePath);
+      await drifted.markReconciliationDisposition('degraded');
+      const state = new LocalXBookmarksReconcileStateStore(statePath);
       expect(state.stagedRecoveryStatus(ACCOUNT, ATTEMPT_1)).toMatchObject({
-        staged: true,
-        failure_class: 'window_boundary_drift',
-        recovery_eligible: true,
-      });
-      state.close();
-
-      // Second encounter: automatic staged recovery clears the poisoned stage
-      // without an operator, exactly as a poisoned cursor does.
-      await expect(connector(ATTEMPT_2, []).probe()).rejects.toMatchObject({
-        degradedReason: 'x_reconcile_staged_recovery_completed',
-        counts: { staged_recovery_completed: 1 },
-      });
-      state = new LocalXBookmarksReconcileStateStore(statePath);
-      expect(state.stagedRecoveryStatus(ACCOUNT, ATTEMPT_2)).toMatchObject({
         staged: false,
-        staged_recovery: 'completed',
+        staged_recovery: 'not_needed',
       });
       state.close();
 
-      // The next run traverses a settled list and completes on its own.
+      // The next run traverses a settled list and regains removal authority.
       const healthy = connector(ATTEMPT_3, posts.slice(2));
       expect(await healthy.probe()).toMatchObject({
         complete: true,
