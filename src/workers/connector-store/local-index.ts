@@ -2590,7 +2590,7 @@ export async function scanDigestPages(
         const digestScore = digestScores.get(row.chunk_pk);
         if (folded.score !== undefined && digestScore !== undefined) underestimate = Math.max(underestimate, folded.score - digestScore);
       }
-      if (rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
+      if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
     }
   }
   return { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };

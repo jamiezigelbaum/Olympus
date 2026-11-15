@@ -40425,6 +40425,33 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
+  if (options.chunkPks) {
+    return {
+      sql: `
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+        FROM json_each(?) pick
+        CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
+        CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+        CROSS JOIN items i ON i.item_pk = emb.item_pk
+        WHERE i.tombstoned = 0
+          AND emb.content_hash = c.embedding_input_hash
+          ${page ? "AND emb.chunk_pk > ?" : ""}
+          ${accountScope ? "AND i.account_scope = ?" : ""}
+          ${selectedFilters.sql}
+          ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}
+        ${page ? "ORDER BY emb.chunk_pk ASC LIMIT ?" : ordered ? "ORDER BY emb.item_pk ASC, emb.chunk_pk ASC" : ""}
+      `,
+      params: [
+        JSON.stringify(options.chunkPks),
+        modelId,
+        ...page ? [page.afterChunkPk] : [],
+        ...accountScope ? [accountScope] : [],
+        ...selectedFilters.params,
+        ...metadataOnly.params,
+        ...page ? [Math.max(1, Math.floor(page.limit))] : []
+      ]
+    };
+  }
   return {
     sql: `
       SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
@@ -40432,7 +40459,6 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? "+emb.model_id" : "emb.model_id"} = ?
         ${page ? "AND emb.chunk_pk > ?" : ""}
-        ${options.chunkPks ? "AND emb.chunk_pk IN (SELECT value FROM json_each(?))" : ""}
         ${accountScope ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
         ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}
@@ -40441,7 +40467,6 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
     params: [
       modelId,
       ...page ? [page.afterChunkPk] : [],
-      ...options.chunkPks ? [JSON.stringify(options.chunkPks)] : [],
       ...accountScope ? [accountScope] : [],
       ...selectedFilters.params,
       ...metadataOnly.params,
@@ -40576,13 +40601,12 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
       digestScores.set(heap.pop(), score);
     }
     candidates += digestScores.size;
-    const chunkPks = [...digestScores.keys()];
-    let after = 0;
-    let rePages = 0;
-    while (true) {
+    const chunkPks = [...digestScores.keys()].sort((a, b) => a - b);
+    for (let at = 0, rePages = 0;at < chunkPks.length; at += CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, rePages++) {
       if (expired())
         return cutWith();
-      const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks }, after);
+      const pagePks = chunkPks.slice(at, at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+      const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
       const rows = await read({ mode: "all", ...page });
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired())
@@ -40594,10 +40618,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         if (folded.score !== undefined && digestScore !== undefined)
           underestimate = Math.max(underestimate, folded.score - digestScore);
       }
-      if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
-        break;
-      after = rows.at(-1).chunk_pk;
-      if (rePages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+      if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
         await yieldConnectorStoreVectorScan();
     }
   }
@@ -43531,7 +43552,7 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 20000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 // core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
