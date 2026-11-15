@@ -3246,6 +3246,7 @@ export const LOCAL_FILES_SCHEDULER_WARNINGS = [
   'local_files_unreadable_folders',
   'local_files_watch_limit_reached',
   'local_files_live_updates_off',
+  'local_files_deletions_held',
 ] as const;
 
 const VERBATIM_SCHEDULER_WARNINGS: ReadonlySet<string> = new Set([

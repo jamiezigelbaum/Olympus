@@ -122,7 +122,20 @@ export interface LocalFilesWalkStats {
   unreadablePaths?: string[];
   /** The folders directly under the walked root that the walk met. */
   topLevel?: string[];
+  /** Deletions a complete walk found but held back (`LocalFilesDeletionGuard`). */
+  deletionsHeld?: number;
 }
+
+/**
+ * Decides which deletions a complete walk may apply now. A folder that is
+ * suddenly empty or much smaller (an unmounted disk, a mirror half copied, a
+ * sync client starting over) must not take its indexed files with it.
+ * `indexed` is how many indexed items the walk compared against.
+ */
+export type LocalFilesDeletionGuard = (input: {
+  absent: readonly RawItem[];
+  indexed: number;
+}) => readonly RawItem[];
 
 export interface LocalFilesConnectorOptions {
   /** The store's connector id for this folder and approval. */
@@ -142,6 +155,8 @@ export interface LocalFilesConnectorOptions {
   deletedDescendantBatch?: number;
   now?: () => Date;
   onWalk?: (stats: LocalFilesWalkStats) => void;
+  /** Which of a complete walk's deletions apply now; absent: all of them. */
+  deletionGuard?: LocalFilesDeletionGuard;
 }
 
 export interface LocalFilesSourceConnector extends SourceConnector {
@@ -381,18 +396,20 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
     deletedSeen: Set<string>,
     unreadable: readonly string[],
     topLevel: readonly string[],
-  ): RawItem[] => {
+  ): { absent: RawItem[]; indexed: number } => {
     const store = options.store;
-    if (!store?.activeItemsUnderLocatorIfIndexed) return [];
-    if (store.lookupsReady && !store.lookupsReady()) return [];
+    if (!store?.activeItemsUnderLocatorIfIndexed) return { absent: [], indexed: 0 };
+    if (store.lookupsReady && !store.lookupsReady()) return { absent: [], indexed: 0 };
     const bases = root === '/'
       ? [...new Set([...topLevel, ...options.scope.roots().map((entry) => entry.scopePath).filter((path) => path !== '/')])]
       : [root];
     const absent: RawItem[] = [];
+    let indexed = 0;
     const judge = (stored: { identity: SourceItemIdentity; locatorUri: string }, base?: string): void => {
       // The store's range ignores ASCII case; on a volume that keeps case a
       // sibling spelled differently (`/a` beside `/A`) is not under `base`.
       if (base !== undefined && !pathIsAtOrBelow(stored.locatorUri, base)) return;
+      indexed += 1;
       if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId)) return;
       if (unreadable.some((path) => pathIsAtOrBelow(stored.locatorUri, path))) return;
       deletedSeen.add(stored.identity.providerItemId);
@@ -417,7 +434,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
         judge(stored, base);
       }
     }
-    return absent;
+    return { absent, indexed };
   };
 
   /** True when a folder the person chose lies at or below `scopePath`. */
@@ -653,7 +670,12 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
           // indexed under it and was not seen has been deleted or moved away
           // (for example while Olympus was not running).
           if (!events) {
-            for (const deletion of absentFromWalk(seenIds, deletedSeen, stats.unreadablePaths ?? [], stats.topLevel ?? [])) {
+            const found = absentFromWalk(seenIds, deletedSeen, stats.unreadablePaths ?? [], stats.topLevel ?? []);
+            const applied = options.deletionGuard && found.absent.length > 0
+              ? options.deletionGuard({ absent: found.absent, indexed: found.indexed })
+              : found.absent;
+            if (applied.length < found.absent.length) stats.deletionsHeld = found.absent.length - applied.length;
+            for (const deletion of applied) {
               page.push(deletion);
               if (page.length >= pageSize) {
                 options.scope.assertCurrent();

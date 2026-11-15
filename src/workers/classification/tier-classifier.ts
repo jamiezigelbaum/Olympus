@@ -453,6 +453,29 @@ export function normalizedContentHash(text: string): string {
   return createHash('sha256').update(text.normalize('NFC').replace(/\r\n?/g, '\n').trim()).digest('hex');
 }
 
+export const FRONT_MATTER_PRIVATE_REASON = 'content:rule:front_matter_private';
+const FRONT_MATTER_MAX_LINES = 100;
+
+/**
+ * True when the text opens with a front-matter block (`---` lines, within the
+ * first 100 lines) holding `private: true` (or yes, quoted or not) as a
+ * top-level key. Only the opening block counts: a `private:` line further
+ * down is the note's text.
+ */
+export function frontMatterMarksPrivate(text: string): boolean {
+  const plain = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  if (!/^---[ \t]*\r?\n/.test(plain)) return false;
+  const lines = plain.split(/\r?\n/, FRONT_MATTER_MAX_LINES + 1);
+  let marked = false;
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    // The block must close: a lone `---` rule opening a note is not front matter.
+    if (/^(?:---|\.\.\.)\s*$/.test(line)) return marked;
+    if (/^private\s*:\s*(["']?)(?:true|yes)\1\s*(?:#.*)?$/i.test(line)) marked = true;
+  }
+  return false;
+}
+
 function trivialContentRule(text: string, parentContext?: string): string | undefined {
   const own = text.trim();
   if (!own) return parentContext?.trim() ? undefined : 'empty_text';
@@ -1172,6 +1195,19 @@ function contentPass(args: {
   }
 
   let decided: ResolvedVerdict = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
+
+  // The owner's own mark on this one note: a Markdown note whose leading
+  // front matter says `private: true` (Reflect Open, Obsidian and most note
+  // apps use it). At least Private, from whatever source the file came; only
+  // Secrets (above) rank higher. It is the item's own text, never a folder.
+  if (frontMatterMarksPrivate(text)) {
+    return {
+      tier: maxTier(metadata.tier, 'secure'),
+      decidedBy: 'content_rule',
+      reasons: [FRONT_MATTER_PRIVATE_REASON, ...mark],
+      pending: false,
+    };
+  }
 
   // The link itself may grant access. This rests on own text only, after
   // Secrets and owner force rules, and cannot lower the names' tier.
