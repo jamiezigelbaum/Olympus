@@ -32,6 +32,8 @@ export const CONTROL_PATH_SLICE_MS = 20;
 export const CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
 export const CONTROL_PATH_REST_MS = 25;
 const HEARTBEAT_MS = 50;
+/** The loop's budget: a turn later than this is counted in health (loop_lag.over_budget). */
+export const CONTROL_PATH_LAG_BUDGET_MS = 250;
 /** A freeze this long is logged, with what was running, so the next one is named. */
 export const CONTROL_PATH_FREEZE_LOG_MS = 2_000;
 
@@ -73,6 +75,8 @@ export class ControlPathHeadroom {
   private lastTurnAt: number;
   private pendingTurn: Promise<void> | undefined;
   private lastLagMs = 0;
+  private maxLagMs = 0;
+  private overBudget = 0;
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private expectedBeatAt = 0;
   private turns = 0;
@@ -137,8 +141,11 @@ export class ControlPathHeadroom {
   }
 
   /** Counts only, for status and tests. */
-  snapshot(): { turns: number; rests: number; freezes: number; lagMs: number } {
-    return { turns: this.turns, rests: this.rests, freezes: this.freezes, lagMs: Math.round(this.lastLagMs) };
+  snapshot(): { turns: number; rests: number; freezes: number; lagMs: number; maxLagMs: number; overBudget: number } {
+    return {
+      turns: this.turns, rests: this.rests, freezes: this.freezes, lagMs: Math.round(this.lastLagMs),
+      maxLagMs: Math.round(this.maxLagMs), overBudget: this.overBudget,
+    };
   }
 
   stop(): void {
@@ -158,6 +165,8 @@ export class ControlPathHeadroom {
       const now = this.now();
       this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
       this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.lastLagMs > this.maxLagMs) this.maxLagMs = this.lastLagMs;
+      if (this.lastLagMs >= CONTROL_PATH_LAG_BUDGET_MS) this.overBudget += 1;
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(',') || 'none';

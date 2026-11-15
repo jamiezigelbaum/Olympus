@@ -94,6 +94,7 @@ export interface TierSnifferServiceStore {
   tierSetLedgerPath?(): string | undefined;
   tierLedgerPathInUse?: LocalConnectorStore['tierLedgerPathInUse'];
   onDemandReadCandidate?: LocalConnectorStore['onDemandReadCandidate'];
+  hasOnDemandGrant?: LocalConnectorStore['hasOnDemandGrant'];
   readOnDemand?: LocalConnectorStore['readOnDemand'];
   exportItemCopy?: LocalConnectorStore['exportItemCopy'];
   changeMarker?: LocalConnectorStore['changeMarker'];
@@ -1143,6 +1144,9 @@ export class TierSnifferService {
 
   private isOnDemandRead(question: SnifferQuestion): boolean {
     return this.options.stores().some(store => {
+      // Most items hold no grant: an indexed lookup rules them out before the
+      // candidate's own checks, which find the item by its provider id alone.
+      if (store.hasOnDemandGrant && !store.hasOnDemandGrant(question)) return false;
       const candidate = store.onDemandReadCandidate?.(question.providerItemId);
       return !!candidate && candidate.identity.provider === question.provider && candidate.identity.accountScope === question.accountScope
         && store.readOnDemand?.(candidate.identity.localItemId) === true;

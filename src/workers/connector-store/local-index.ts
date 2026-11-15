@@ -1085,6 +1085,8 @@ function runSteps<T>(steps: Generator<void, T>): T {
 const EXTRACTION_CANDIDATE_WINDOW = 500;
 /** Item pks one extraction-candidate call examines before it returns a short page. */
 export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 2_000;
+/** Chunk pks one query of the embedding sweep's work list reads before a turn. */
+export const MISSING_EMBEDDING_CHUNK_WINDOW = 20_000;
 
 /** Ledger lookups per step when the settled-unreadable list is built in turns. */
 const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
@@ -8425,6 +8427,24 @@ export class LocalConnectorStore {
     return grant.source_version === version;
   }
 
+  /**
+   * Whether this exact item holds an on-demand read grant, by its full
+   * identity: one lookup on the items' unique key and one on the grants'.
+   * The judge asks it of every question on every pass; asking
+   * `onDemandReadCandidate` instead looked items up by provider item id
+   * alone, which no index covers, so each ask read the whole items table
+   * (the background's longest freezes on Sparta, rc.17, 15 Nov 2026).
+   */
+  hasOnDemandGrant(identity: { provider: string; accountScope: string; providerConversationId?: string; providerItemId: string }): boolean {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get()) return false;
+    return this.db.query(`
+      SELECT 1 FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
+  }
+
   onDemandReadCandidate(providerItemId: string): { identity: SourceItemIdentity; metadata: ConnectorStoreItemMetadataSnapshot; readableOnRequest: boolean } | undefined {
     const rows = this.db.query('SELECT local_item_id FROM items WHERE provider_item_id = ? AND tombstoned = 0 LIMIT 2')
       .all(providerItemId) as Array<{ local_item_id: string }>;
@@ -12524,10 +12544,49 @@ export class LocalConnectorStore {
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
     limit: number,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+    windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
   ): Promise<string[]> {
     if (limit <= 0) return [];
     const tierHidden = await this.tierHiddenItemPksInTurns();
-    return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
+    // The same list as missingEmbeddingItemIds (items in order of their first
+    // chunk), read one window of chunk pks at a time with a turn between.
+    // One query over every chunk held the background for 1.5-2.7 s on each
+    // sweep once most chunks were embedded (Sparta, rc.17, 15 Nov 2026).
+    const modelId = embedder.modelId;
+    const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
+    const failed = this.embeddingFailureState;
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
+    const query = this.db.query(`
+      SELECT c.chunk_pk AS chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+      ORDER BY c.chunk_pk ASC
+    `);
+    const maxChunkPk = (this.db.query('SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks').get() as { n: number }).n;
+    // An item already listed from an earlier chunk keeps that place.
+    const seen = new Set<number>();
+    const found: string[] = [];
+    for (let after = 0; after < maxChunkPk && found.length < limit; after += windowChunks) {
+      if (after > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      const rows = query.all(modelId, after, after + windowChunks, ...params) as Array<{ item_pk: number; local_item_id: string }>;
+      for (const row of rows) {
+        if (seen.has(row.item_pk)) continue;
+        seen.add(row.item_pk);
+        if (failed?.has(row.local_item_id)) continue;
+        found.push(row.local_item_id);
+        if (found.length === limit) break;
+      }
+    }
+    return found;
   }
 
   /**

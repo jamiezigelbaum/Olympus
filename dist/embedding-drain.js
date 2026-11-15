@@ -3135,6 +3135,7 @@ var CONTROL_PATH_SLICE_MS = 20;
 var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
 var CONTROL_PATH_REST_MS = 25;
 var HEARTBEAT_MS = 50;
+var CONTROL_PATH_LAG_BUDGET_MS = 250;
 var CONTROL_PATH_FREEZE_LOG_MS = 2000;
 function controlPathFreezeSubject(role, mainThread = true) {
   if (!mainThread)
@@ -3162,6 +3163,8 @@ class ControlPathHeadroom {
   lastTurnAt;
   pendingTurn;
   lastLagMs = 0;
+  maxLagMs = 0;
+  overBudget = 0;
   heartbeat;
   expectedBeatAt = 0;
   turns = 0;
@@ -3218,7 +3221,14 @@ class ControlPathHeadroom {
     return pending;
   }
   snapshot() {
-    return { turns: this.turns, rests: this.rests, freezes: this.freezes, lagMs: Math.round(this.lastLagMs) };
+    return {
+      turns: this.turns,
+      rests: this.rests,
+      freezes: this.freezes,
+      lagMs: Math.round(this.lastLagMs),
+      maxLagMs: Math.round(this.maxLagMs),
+      overBudget: this.overBudget
+    };
   }
   stop() {
     if (this.heartbeat)
@@ -3233,6 +3243,10 @@ class ControlPathHeadroom {
       const now = this.now();
       this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
       this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.lastLagMs > this.maxLagMs)
+        this.maxLagMs = this.lastLagMs;
+      if (this.lastLagMs >= CONTROL_PATH_LAG_BUDGET_MS)
+        this.overBudget += 1;
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(",") || "none";
@@ -21453,6 +21467,7 @@ function runSteps(steps) {
 }
 var EXTRACTION_CANDIDATE_WINDOW = 500;
 var EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000;
+var MISSING_EMBEDDING_CHUNK_WINDOW = 20000;
 var SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 var HIDDEN_CHILD_PARENT_SLICE = 500;
 async function runStepsInTurns(steps) {
@@ -25414,6 +25429,16 @@ ${parentKey(ref)}`, { ref, origin });
     const version = sourceVersion ?? this.db.query("SELECT source_version FROM items WHERE local_item_id = ? AND tombstoned = 0").get(localItemId)?.source_version ?? "";
     return grant.source_version === version;
   }
+  hasOnDemandGrant(identity) {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get())
+      return false;
+    return this.db.query(`
+      SELECT 1 FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0
+      LIMIT 1
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
+  }
   onDemandReadCandidate(providerItemId) {
     const rows = this.db.query("SELECT local_item_id FROM items WHERE provider_item_id = ? AND tombstoned = 0 LIMIT 2").all(providerItemId);
     if (rows.length !== 1)
@@ -27905,11 +27930,48 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
     return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
   }
-  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}) {
+  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
     if (limit <= 0)
       return [];
     const tierHidden = await this.tierHiddenItemPksInTurns();
-    return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
+    const modelId = embedder.modelId;
+    const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
+    const failed = this.embeddingFailureState;
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
+    const query = this.db.query(`
+      SELECT c.chunk_pk AS chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+      ORDER BY c.chunk_pk ASC
+    `);
+    const maxChunkPk = this.db.query("SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks").get().n;
+    const seen = new Set;
+    const found = [];
+    for (let after = 0;after < maxChunkPk && found.length < limit; after += windowChunks) {
+      if (after > 0)
+        await new Promise((resolve) => setImmediate(resolve));
+      const rows = query.all(modelId, after, after + windowChunks, ...params);
+      for (const row of rows) {
+        if (seen.has(row.item_pk))
+          continue;
+        seen.add(row.item_pk);
+        if (failed?.has(row.local_item_id))
+          continue;
+        found.push(row.local_item_id);
+        if (found.length === limit)
+          break;
+      }
+    }
+    return found;
   }
   async embeddingSweepInventory(provider, scope = {}, stopAtMs) {
     const started = Date.now();

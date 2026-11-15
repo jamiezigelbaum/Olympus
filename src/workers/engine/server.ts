@@ -464,7 +464,7 @@ import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classificati
 import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { controlPathHeadroom, ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
@@ -6186,7 +6186,11 @@ export async function main(): Promise<void> {
     const standBackCounts = standBack.counts();
     const standBackSeen = Object.keys(standBackCounts).length > 0;
     const statusRecountHealth = statusRecount?.health();
-    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront || rerankOutcomes || localPromptBudgets.length || standBackSeen || statusRecountHealth)) {
+    // How late this process's loop turned: the last beat, the worst since start, and how many beats missed the 250 ms budget.
+    const loopLag = (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot());
+    const backgroundSnapshot = engineFront?.status()?.snapshot;
+    const backgroundLoopLag = backgroundSnapshot?.loop_lag;
+    if ((path === '/v1/health' || path === '/health') && response?.ok) {
       return Response.json({
         ...await response.json() as object,
         ...(rerankOutcomes ? {
@@ -6205,7 +6209,9 @@ export async function main(): Promise<void> {
         // Background work that stood back for the owner's Ask: never silent.
         ...(standBackSeen ? { stand_back: standBackCounts } : {}),
         // The background's paced recount of what the dashboard shows: how long the last took and how old it is.
-        ...(statusRecountHealth ? { status_recount: statusRecountHealth } : {}),
+        ...(statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {}),
+        loop_lag: loopLag,
+        ...(backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {}),
         // The front answers while its background restarts or crash-loops: an
         // upgrade or rollback reads this before it calls the engine healthy
         // (#1563 review).
@@ -6624,6 +6630,8 @@ export async function main(): Promise<void> {
         } : {}),
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
+        loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
+        ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
       }),
     });
     // A delete the front forwarded: stop answering ready (so no new front
