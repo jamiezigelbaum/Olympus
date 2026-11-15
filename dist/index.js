@@ -13828,6 +13828,10 @@ var init_vocabulary = __esm(() => {
     damaged_or_unsupported: {
       one: "{count} file Olympus can't read at all",
       other: "{count} files Olympus can't read at all"
+    },
+    unsupported_format: {
+      one: "{count} file in a format Olympus can't read yet",
+      other: "{count} files in formats Olympus can't read yet"
     }
   };
   DASHBOARD_SOURCE_FAILURE_WORDS = {
@@ -13898,7 +13902,6 @@ var init_vocabulary = __esm(() => {
       checked: "checked {when}",
       progress: "In progress",
       left: "about {duration} left",
-      openPrivacy: "Open Privacy",
       waitBudget: "daily {api} API budget used",
       waitRateLimit: "{api} rate limit reached",
       resumes: "resumes at {local} ({utc} UTC)",
@@ -14707,8 +14710,8 @@ var init_vocabulary = __esm(() => {
     descriptionStart: "Describe what's private",
     editLabel: "Edit what's private",
     dashboardPending: {
-      one: "{n} item waiting to be checked",
-      many: "{n} items waiting to be checked"
+      one: "{n} item waiting for the private model",
+      many: "{n} items waiting for the private model"
     }
   };
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
@@ -15451,6 +15454,8 @@ var init_main_thread_sql_trace = __esm(() => {
 var NO_EXTRACTION_JOB_OUTCOME, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
   init_archive_formats();
+  init_source_ingestion_exclusions();
+  init_answer_ready_coverage();
   NO_EXTRACTION_JOB_OUTCOME = Object.freeze({
     status: "skipped_unsupported",
     lastErrorKind: "no_extractor",
