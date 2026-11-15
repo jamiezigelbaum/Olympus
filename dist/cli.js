@@ -85226,7 +85226,7 @@ import { randomUUID as randomUUID20 } from "node:crypto";
 async function readNamesOnlyMatches(detail, read, waitMs) {
   const questionId = randomUUID20();
   const requests = new Map;
-  for (const index of detail.namesOnlyCandidateIndexes ?? []) {
+  for (const index of [...new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []])].sort((a, b) => a - b)) {
     if (index >= 3)
       continue;
     const candidate = detail.pack.candidates[index];
