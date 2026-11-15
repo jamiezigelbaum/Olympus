@@ -2646,7 +2646,8 @@ async function scanVectorPagesOnPool(
 ): Promise<VectorScan> {
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
     read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit,
-  )).catch((error: unknown): VectorScan => {
+  // Its own worker of the store: the scan never queues behind keyword reads.
+  ), { lane: 'scan' }).catch((error: unknown): VectorScan => {
     if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
     throw error;
   });
