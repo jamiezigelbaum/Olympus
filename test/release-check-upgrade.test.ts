@@ -304,6 +304,7 @@ if (verb === 'provision') {
   const counts = { seen: life.seen, indexed: life.stored, contentReady: life.stored, embedded: migrated ? life.stored : life.stored - life.privateItems, secretsLocated: life.secrets, pending: 0, queueWaiting: 0, queueActive: 0, personal: life.personal, privateItems: life.privateItems, lastRun: 'completed', missingChunks: 0 };
   if (sub === 'helper-files') say({ ok: true, whatsappBridges: upgraded && process.env.FAKE_NO_BRIDGE !== '1' ? ['${OLD_BRIDGE}', '${NEW_BRIDGE}'] : ['${OLD_BRIDGE}'] });
   else if (sub === 'engine-build') say({ ok: true, build: (upgraded ? '1.0.1' : '1.0.0') + '+abc', version: upgraded ? '1.0.1' : '1.0.0', remoteMode: 'relay', relay: {} });
+  else if (sub === 'fixture-judge-stats') say({ ok: true, calls: 3, ms: 1 });
   else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000 });
   else if (sub === 'connect-source') say({ ok: true, message: 'Connected' });
   else if (sub === 'settle') say({ ok: true, settled: true, polls: 2, waitedMs: 1000, snapshot: counts });

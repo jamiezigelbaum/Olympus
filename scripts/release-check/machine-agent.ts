@@ -21,6 +21,10 @@ import { sourceCard, sourceConnected } from './source-cards.ts';
 import { archiveStateSiblingPath, olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import { isPendingPrivacyPolicy, readComputerUseState } from '../../src/core/first-run-privacy.ts';
+import { FIXTURE_JUDGE_MODEL, FIXTURE_JUDGE_PORT, startFixtureJudge } from './fixture-judge.ts';
+import { answerModelTiming } from './model-timing.ts';
+import { resolveSourceAnswerLatencyLogPath } from '../../src/workers/source-index/answer-latency-log.ts';
+import { saveFixtureJudge } from './fixture-judge-settings.ts';
 import { privateAnswerOptions } from '../../src/core/privacy-language.ts';
 import { validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
 import { ENGINE_ROLE_ENV } from '../../src/core/engine-split.ts';
@@ -98,6 +102,8 @@ export interface AgentConfig {
   };
   /** `run.ts --engine-split`: prepare-source turns `worker.engineSplit` on in the engine's config before its restart. */
   engineSplit?: boolean;
+  /** Only disposable VM runs set this; canaries and fresh-install hardware never do. */
+  fixtureJudge?: boolean;
 }
 
 const WORKDIR = join(homedir(), 'rc');
@@ -289,6 +295,26 @@ async function startFakeDetached(config: AgentConfig): Promise<void> {
   throw new Error('the Readwise stand-in did not start');
 }
 
+async function startJudgeDetached(): Promise<void> {
+  const ready = async () => {
+    try {
+      const reply = await fetch(`http://127.0.0.1:${FIXTURE_JUDGE_PORT}/stats`, { signal: AbortSignal.timeout(1_000) });
+      return (await reply.json() as { model?: string }).model === FIXTURE_JUDGE_MODEL;
+    } catch { return false; }
+  };
+  if (await ready()) return;
+  const logFd = openSync(join(WORKDIR, 'fixture-judge.log'), 'a');
+  const child = spawn(process.execPath, [process.argv[1]!, 'fixture-judge'], { detached: true, stdio: ['ignore', logFd, logFd] });
+  child.unref();
+  closeSync(logFd);
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (await ready()) return;
+    await sleep(250);
+  }
+  throw new Error('the fixture judge did not start on loopback');
+}
+
 async function waitForEngine(timeoutMs: number): Promise<number> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -432,6 +458,20 @@ async function prepareSource(): Promise<never> {
     if (added.code !== 0) emit({ ok: false, step: 'tier-rules', detail: `could not add rule ${rule.id}` });
   }
   say('tier rules pinned');
+  if (config.fixtureJudge) {
+    await startJudgeDetached();
+    const policy = readPolicy();
+    if (!policy) emit({ ok: false, step: 'fixture-judge-policy', detail: 'no owner policy file' });
+    saveFixtureJudge(p.sovereigntyPath, validateSovereigntyConfig(policy!.json as SovereigntyConfig));
+    const approval = olympus(['tier', 'classifier', 'approve', '--why', 'Synthetic VM fixtures: deterministic per-item marker judge on loopback.']);
+    if (approval.code !== 0) emit({ ok: false, step: 'fixture-judge-approval', detail: approval.stderr.slice(0, 300) });
+    const status = olympus(['tier', 'classifier', 'status']);
+    const selected = JSON.parse(status.stdout);
+    if (selected.modelId !== FIXTURE_JUDGE_MODEL || selected.approved !== true) {
+      emit({ ok: false, step: 'fixture-judge-selection', detail: 'the installed product did not select and approve the fixture judge' });
+    }
+    say('fixture judge selected through owner policy and exact-model CLI approval');
+  }
   if (config.engineSplit) {
     try { turnOnEngineSplit(join(p.configDir, 'engine.json')); } catch (error) {
       emit({ ok: false, step: 'engine-split', detail: error instanceof Error ? error.message : String(error) });
@@ -2547,6 +2587,17 @@ async function main(): Promise<void> {
       console.log('owner-bridge ready');
       await new Promise(() => undefined);
       return;
+    }
+    case 'fixture-judge': {
+      startFixtureJudge();
+      await new Promise(() => undefined);
+      return;
+    }
+    case 'fixture-judge-stats': {
+      const response = await fetch(`http://127.0.0.1:${FIXTURE_JUDGE_PORT}/stats`, { signal: AbortSignal.timeout(5_000) });
+      const latency = resolveSourceAnswerLatencyLogPath();
+      const lines = latency ? [latency + '.1', latency].flatMap(path => existsSync(path) ? readFileSync(path, 'utf8').split('\n') : []) : [];
+      return emit({ ok: response.ok, ...await response.json() as object, answers: answerModelTiming(lines) });
     }
     case 'fake-readwise': {
       const config = existsSync(CONFIG_PATH) ? readConfig() : undefined;

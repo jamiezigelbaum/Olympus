@@ -34,7 +34,9 @@ import { prepareLinuxLocalBundle } from '../publish-release-to-site.ts';
 import { FRESH_LEG, redactFreshTimeline, runFreshInstall, validateFreshSources } from './fresh-install.ts';
 import { openFreshDashboard, parseCdpEndpoint } from './fresh-dashboard.ts';
 import { MAC_ENGINE_LOG, MAC_MACHINE_SAMPLE, memoryCheck, splitRestartCheck, startRssSampler, type RssSample } from './split-watch.ts';
-import { bundleAgent } from './run.ts';
+import { bundleAgent, LEG_BUDGET_MINUTES } from './run.ts';
+import { LegBudget } from './leg-budget.ts';
+import { liveChecks, publishFailedCheck } from './live-checks.ts';
 import { readAgentKey } from './agents.ts';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -71,6 +73,7 @@ export interface CanaryReport {
 }
 
 export interface CanaryOptions {
+  budget?: LegBudget;
   os: CanaryOs;
   /** How the install is brought up to date first. */
   update: { kind: 'candidate'; dir: string } | { kind: 'published'; site: string } | { kind: 'installed' };
@@ -202,7 +205,8 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
   const accounts = options.accounts;
   // A failed update leaves nothing worth asking.
   if (!accounts || desktop.checks.some((check) => check.id === 'canary.update' && check.status === 'fail')) return desktop;
-  const checks = [...desktop.checks];
+  const checks = liveChecks(publishFailedCheck);
+  Array.prototype.push.apply(checks, desktop.checks);
   const screens = [...desktop.screens];
   let onDemandTiming: OnDemandTimingResult | undefined;
   if (accounts.sources.length > 0 || options.onDemandTiming) {
@@ -280,12 +284,14 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
 }
 
 async function runDesktopChecks(machine: Machine, options: CanaryOptions): Promise<{ checks: CheckResult[]; screens: CanaryScreen[] }> {
-  const checks: CheckResult[] = [];
+  const checks: CheckResult[] = liveChecks(publishFailedCheck);
   const screens: CanaryScreen[] = [];
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
   const pollMs = options.pollMs ?? 1_500;
   const record = (id: string, title: string, status: CheckStatus, detail: string, started: number): void => {
-    checks.push({ id, title, status, detail, ms: Date.now() - started });
+    const ms = Date.now() - started;
+    if (options.budget) options.budget.timings[id] = ms;
+    checks.push({ id, title, status, detail, ms });
   };
   const sh = (script: string, timeoutMs = 60_000) => machine.exec(script, { timeoutMs });
 
@@ -630,22 +636,33 @@ if (import.meta.main) {
   const startedAt = new Date().toISOString();
   const bundle = freshInstall && candidate ? prepareLinuxLocalBundle({ root: resolve(import.meta.dir, '../..'), artifact: resolve(candidate), output: join(runDir, 'candidate') }) : undefined;
   if (bundle) expectVersion = bundle.version;
-  const { checks, screens, ...extras } = freshInstall ? await runFreshInstall(machine, {
-    sources: accounts!.sources, cdp,
-    ...(onDemandTimingEnabled ? { onDemandTiming: { ...(accounts!.on_demand_timing ? { accounts: accounts!.on_demand_timing } : {}) } } : {}),
-    bridgeAgent: await bundleAgent(runDir),
-    ...(accounts!.venice_key_command ? { veniceKey: await readAgentKey({ keyCommand: accounts!.venice_key_command }) ?? '' } : {}),
-    ...(bundle ? { bundle: { installer: join(bundle.directory, 'install-linux.sh'), tarball: join(bundle.directory, `olympus-${bundle.version}.tgz`) } } : {}),
-  }) : await runCanary(machine, {
-    os,
-    update: candidate ? { kind: 'candidate', dir: resolve(candidate) } : published ? { kind: 'published', site: published } : { kind: 'installed' },
-    ...(expectVersion ? { expectVersion } : {}),
-    ...(accounts ? { accounts } : {}),
-    accountsOnly: argv.includes('--accounts-only'),
-    ...(onDemandTimingEnabled ? { onDemandTiming: true, cdp } : {}),
-    screensDir: join(runDir, 'screens'),
-    ...(os === 'linux' && accounts && (accounts.clients.length > 0 || onDemandTimingEnabled) ? { bridgeAgent: await bundleAgent(runDir) } : {}),
-  });
+  const budgetChecks = liveChecks(publishFailedCheck);
+  const kind = freshInstall ? 'fresh-install' : accounts ? 'accounts' : 'canary';
+  const budget = new LegBudget(kind, LEG_BUDGET_MINUTES[kind] * 60_000, check => { budgetChecks.push(check); });
+  const timedMachine = budget.machine(machine);
+  const result = await (async () => {
+    try {
+      return freshInstall ? await runFreshInstall(timedMachine, {
+        budget,
+        sources: accounts!.sources, cdp,
+        ...(onDemandTimingEnabled ? { onDemandTiming: { ...(accounts!.on_demand_timing ? { accounts: accounts!.on_demand_timing } : {}) } } : {}),
+        bridgeAgent: await bundleAgent(runDir),
+        ...(accounts!.venice_key_command ? { veniceKey: await readAgentKey({ keyCommand: accounts!.venice_key_command }) ?? '' } : {}),
+        ...(bundle ? { bundle: { installer: join(bundle.directory, 'install-linux.sh'), tarball: join(bundle.directory, `olympus-${bundle.version}.tgz`) } } : {}),
+      }) : await runCanary(timedMachine, {
+        budget, os,
+        update: candidate ? { kind: 'candidate', dir: resolve(candidate) } : published ? { kind: 'published', site: published } : { kind: 'installed' },
+        ...(expectVersion ? { expectVersion } : {}),
+        ...(accounts ? { accounts } : {}),
+        accountsOnly: argv.includes('--accounts-only'),
+        ...(onDemandTimingEnabled ? { onDemandTiming: true, cdp } : {}),
+        screensDir: join(runDir, 'screens'),
+        ...(os === 'linux' && accounts && (accounts.clients.length > 0 || onDemandTimingEnabled) ? { bridgeAgent: await bundleAgent(runDir) } : {}),
+      });
+    } finally { budget.finish(); }
+  })();
+  const { checks, screens, ...extras } = result;
+  checks.push(...budgetChecks);
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, warn: 0, skip: 0 };
   for (const check of checks) counts[check.status] += 1;
   const sha = option('--sha');

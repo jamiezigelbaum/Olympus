@@ -1,3 +1,4 @@
+import { liveChecks, publishFailedCheck } from './live-checks.ts';
 /**
  * The live-accounts canary (release testing design, layer 5): the canary machine's Olympus connected to real test accounts
  * (Gmail, Dropbox, Telegram, WhatsApp, whatever the accounts file lists), asked the way a connected agent asks it, over the
@@ -226,7 +227,7 @@ const defaultPlant = (argv: readonly string[], env: Record<string, string>): { c
 };
 
 export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOptions): Promise<CheckResult[]> {
-  const checks: CheckResult[] = [];
+  const checks: CheckResult[] = liveChecks(publishFailedCheck);
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
   const pollMs = options.pollMs ?? 30_000;
   const runPlant = options.runPlant ?? defaultPlant;

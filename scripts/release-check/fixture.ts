@@ -11,6 +11,8 @@
  * rules (`olympus tier rules add`), the supported way an owner pins a tier.
  */
 
+import { fixtureText } from './fixture-judge.ts';
+
 export type FixtureTier = 'personal' | 'private' | 'secrets';
 
 import type { ItemRow } from './upgrade.ts';
@@ -197,7 +199,10 @@ export const INBOX_ASK = {
 
 /** The Readwise documents the fake API serves, in the shape both of its endpoints return. */
 export function fixtureDocuments(items: readonly FixtureItem[] = FIXTURE_ITEMS): FixtureDocument[] {
-  return items.map((item) => item.document);
+  return items.map((item) => ({ ...item.document,
+    summary: fixtureText(item.document.summary, item.tier),
+    html_content: fixtureText(item.document.html_content, item.tier),
+  }));
 }
 
 export interface FixtureTierRule {

@@ -60,6 +60,7 @@
  * Exit status: 0 the report passed, 1 the report failed, 2 the run could not
  * start (arguments, config, bundle).
  */
+import { liveChecks, publishFailedCheck } from './live-checks.ts';
 import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -253,7 +254,7 @@ interface Stage {
   archiveScale?: ArchiveScaleMeasurement[];
 }
 
-const newStage = (id: string, label: string): Stage => ({ id, label, timings: {}, checks: [], agents: [], screenshots: [], logs: [] });
+const newStage = (id: string, label: string, checks: CheckResult[]): Stage => ({ id, label, timings: {}, checks, agents: [], screenshots: [], logs: [] });
 
 /** A leg an option left out or cut down: it lends no results, since the tested run never made them all (Codex on #635). */
 export function legPartial(leg: Leg, options: RunOptions): boolean {
@@ -272,7 +273,14 @@ export function legPartial(leg: Leg, options: RunOptions): boolean {
   }
 }
 
-class Run {
+export interface RunClock {
+  now(): number;
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(timer: any): void;
+}
+const runClock: RunClock = { now: Date.now, setTimeout, clearTimeout };
+
+export class Run {
   readonly markers: LeakMarker[] = forbiddenMarkers();
   readonly logLines: string[] = [];
   readonly errors: string[] = [];
@@ -281,6 +289,18 @@ class Run {
    * run inside its budget with the call named, instead of each phase waiting out its own long bound (olympus-ops#156).
    */
   deadline = Number.POSITIVE_INFINITY;
+  phaseDeadline = Number.POSITIVE_INFINITY;
+  private phaseStarted = 0;
+  private phaseName: string | undefined;
+
+  checkList(): CheckResult[] {
+    return liveChecks(check => publishFailedCheck(redactDeep(check, this.markers)));
+  }
+
+  phaseTimings(): string {
+    return [...this.stages.values()].flatMap(stage => Object.entries(stage.timings)
+      .map(([name, ms]) => `${stage.id}.${name}=${Math.round(ms / 1000)}s`)).concat(this.phaseName ? [`${this.stage.id}.${this.phaseName}=${Math.round((this.clock.now() - this.phaseStarted) / 1000)}s (running)`] : []).join('; ');
+  }
   readonly stages = new Map<string, Stage>();
   /** What the update changed, for the report. */
   differences: Difference[] = [];
@@ -291,16 +311,26 @@ class Run {
   /** The check the wrong-link-id self-test failed on, which depends on whether this install issues agents a link. */
   inboxSelftestFailsOn?: string;
   stage: Stage;
-  machine?: Machine;
+  private currentMachine: Machine | undefined;
+  get machine(): Machine | undefined { return this.currentMachine; }
+  set machine(machine: Machine | undefined) {
+    if (!machine) { this.currentMachine = undefined; return; }
+    this.currentMachine = { ...machine,
+      upgrade: (candidate, options = {}) => machine.upgrade(candidate, { ...options,
+        timeoutMs: Math.min(options.timeoutMs ?? 25 * 60_000, Math.max(1, Math.min(this.deadline, this.phaseDeadline) - this.clock.now())) }),
+      exec: (script, options = {}) => machine.exec(script, { ...options,
+        timeoutMs: Math.min(options.timeoutMs ?? 120_000, Math.max(1, this.phaseDeadline - this.clock.now())) }),
+    };
+  }
   /** The legs that ran in full: an incremental run may borrow only these from this report (carry.ts). */
   readonly legsRan: Leg[] = [];
 
-  constructor(readonly options: RunOptions, readonly driver: CommandDriver) {
+  constructor(readonly options: RunOptions, readonly driver: CommandDriver, readonly clock: RunClock = runClock) {
     this.stage = this.addStage('install', 'Olympus installed fresh');
   }
 
   addStage(id: string, label: string): Stage {
-    const stage = newStage(id, label);
+    const stage = newStage(id, label, this.checkList());
     this.stages.set(id, stage);
     return stage;
   }
@@ -327,13 +357,32 @@ class Run {
   }
 
   async phase<T>(name: string, work: () => Promise<T>): Promise<T> {
-    const started = Date.now();
+    const started = this.clock.now();
     this.log(`phase ${name}: start`);
+    const budget = phaseBudgetMs(name);
+    const prior = { deadline: this.phaseDeadline, name: this.phaseName, started: this.phaseStarted };
+    this.phaseDeadline = Math.min(this.deadline, started + budget);
+    this.phaseName = name;
+    this.phaseStarted = started;
+    let exceeded = false;
+    const fail = () => {
+      if (exceeded) return;
+      exceeded = true;
+      this.add({ id: `phase.${name}.time-budget`, title: `${name} stays within its wall-clock budget`, status: 'fail',
+        detail: `${name} exceeded ${Math.round(budget / 1000)}s; ${this.phaseTimings()}` });
+    };
+    const timer = this.clock.setTimeout(fail, budget);
     try {
       return await work();
     } finally {
-      this.timings[name] = (this.timings[name] ?? 0) + (Date.now() - started);
-      this.log(`phase ${name}: ${((Date.now() - started) / 1000).toFixed(1)} s`);
+      this.clock.clearTimeout(timer);
+      const elapsed = this.clock.now() - started;
+      this.timings[name] = (this.timings[name] ?? 0) + elapsed;
+      if (elapsed > budget) fail();
+      this.phaseDeadline = prior.deadline;
+      this.phaseName = prior.name;
+      this.phaseStarted = prior.started;
+      this.log(`phase ${name}: ${(elapsed / 1000).toFixed(1)} s (budget ${Math.round(budget / 1000)} s)`);
     }
   }
 
@@ -371,9 +420,13 @@ class Run {
   }
 
   async agent(sub: string, args = '', timeoutMs = 120_000): Promise<AgentCall> {
-    const allowed = agentTimeoutMs(timeoutMs, this.deadline, Date.now());
+    const phaseBound = Math.max(1, this.phaseDeadline - this.clock.now());
+    const allowed = Math.min(agentTimeoutMs(timeoutMs, this.deadline, this.clock.now()), phaseBound, phaseBudgetMs(sub));
     const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs: allowed });
-    if (stoppedByBudget(exec, allowed, timeoutMs)) this.errors.push(`${sub} was stopped when the run's time budget ran out (after ${Math.round(exec.ms / 1000)} s of its ${Math.round(timeoutMs / 1000)} s bound)`);
+    if (exec.timedOut || exec.code === 124) this.add({ id: `phase.${this.phaseName ?? sub}.time-budget`,
+      title: `${this.phaseName ?? sub} finishes within its bound`, status: 'fail',
+      detail: `${sub} stopped after ${Math.round(exec.ms / 1000)}s (allowed ${Math.round(allowed / 1000)}s); ${this.phaseTimings()}` });
+    if (this.clock.now() >= this.deadline && stoppedByBudget(exec, allowed, timeoutMs)) this.errors.push(`${sub} was stopped when the run's time budget ran out (after ${Math.round(exec.ms / 1000)} s of its ${Math.round(timeoutMs / 1000)} s bound)`);
     return { result: parseAgentLine(exec.stdout), stdout: exec.stdout, stderr: exec.stderr, code: exec.code, ms: exec.ms, timedOut: exec.timedOut };
   }
 }
@@ -406,18 +459,36 @@ export function agentTimeoutMs(timeoutMs: number, deadline: number, now: number)
   return Math.min(timeoutMs, Math.max(deadline - now, AGENT_PAST_BUDGET_MS));
 }
 
-/**
- * The run's time budget when none is given. Fresh runs took about 20 to 30 minutes without the archive-import leg and about 65 with
- * it, update runs about 75 to 80 with it (green legs, 8 to 10 Nov 2026); each budget is about twice that or more, so only a degraded
- * candidate reaches it (olympus-ops#156).
- */
 /** A call cut by the budget that then ran out of time: the harness's timer fired, or the driver stopped it (its timeout exit, 124). */
 export function stoppedByBudget(exec: { code: number; timedOut: boolean }, allowedMs: number, requestedMs: number): boolean {
   return allowedMs < requestedMs && (exec.timedOut || exec.code === 124);
 }
 
-export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean): number {
-  return (upgrading ? (skipArchive ? 120 : 195) : (skipArchive ? 60 : 135)) * 60_000;
+/** Provisional VM budgets in minutes, pending final-main VM timing receipts.
+ * Shared across Linux/Ubuntu/macOS; archive-scale includes the ordinary leg.
+ * No CPU judging allowance. Recalibrate from measured post-change wall time + margin. */
+export const LEG_BUDGET_MINUTES = { fresh: 60, upgrade: 90, 'archive-scale': 180, canary: 30, accounts: 90, 'fresh-install': 120 } as const;
+export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean, archiveScale = false): number {
+  return (archiveScale ? LEG_BUDGET_MINUTES['archive-scale']
+    : LEG_BUDGET_MINUTES[upgrading ? 'upgrade' : 'fresh'] - (skipArchive ? 20 : 0)) * 60_000;
+}
+
+/** Each VM call also keeps a bound; named long phases get tighter limits.
+ * Driver transfers and teardown have their own 2/3-minute bounds. */
+export function phaseBudgetMs(name: string): number {
+  const minutes: Record<string, number> = {
+    provision: 25, 'restore-provision': 25, install: 25, 'reranker-ready': 16, 'restore-zig': 5, prepare: 7, 'prepare-source': 7,
+    ingest: 5, settle: 5, 'front-seed': 6, 'front-steady': 10, 'front-watch': 5,
+    'archive-beside-live': 8, 'archive-import': 12, 'archive-changed': 12,
+    'archive-drain': 8, 'archive-remove': 5, 'archive-model': 7,
+    'archive-scale-mbox': 30, 'archive-scale-readwise': 20,
+    'archive-scale-roam': 15, 'archive-scale-reflect-json': 12, 'archive-scale-reflect-markdown': 12,
+    'archive-scale': 30, 'archive-scale-cleanup': 10,
+    upgrade: 25, 'upgrade-forced-failure': 25, 'forced-failure-engine': 6, 'engine-restart': 6,
+    inbox: 15, 'inbox-check': 15, journeys: 30, explore: 30, screenshots: 4,
+    'restore-restore-from': 15, 'restore-restore-to': 15, 'server-mode': 15, limits: 15,
+  };
+  return (minutes[name] ?? (name.endsWith('.first-items') ? 16 : name.startsWith('agent-') ? 15 : 10)) * 60_000;
 }
 
 /**
@@ -485,6 +556,7 @@ function agentConfig(options: RunOptions): AgentConfig {
   return {
     documents: fixtureDocuments(options.mistier ? leakyFixture(options.mistier) : FIXTURE_ITEMS),
     tierRules: tierRules(),
+    fixtureJudge: true,
     fakePort: FAKE_READWISE_PORT,
     fakeToken: FAKE_READWISE_TOKEN,
     expectedItems: FIXTURE_ITEMS.length,
@@ -628,7 +700,7 @@ function machineRelay(run: Run): Relay {
 }
 
 function skipped(run: Run, spec: AgentSpec, reason: string): void {
-  run.agents.push({ id: spec.id, label: spec.label, kind: 'model', ran: false, skipReason: reason, checks: [] });
+  run.agents.push({ id: spec.id, label: spec.label, kind: 'model', ran: false, skipReason: reason, checks: run.checkList() });
   run.log(`agent ${spec.id}: ${reason}`);
 }
 
@@ -711,7 +783,7 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
   };
   for (const spec of specs) {
     const usage: AgentUsage = { invocations: 0, modelCalls: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, billing: '' };
-    const agent: AgentReport = { id: spec.id, label: spec.label, kind: 'model', ran: true, usage, checks: [] };
+    const agent: AgentReport = { id: spec.id, label: spec.label, kind: 'model', ran: true, usage, checks: run.checkList() };
     let ask: ((question: SuiteQuestion) => Promise<{ observation: QuestionObservation; answer: string }>) | undefined;
 
     if (spec.kind === 'xai-api') {
@@ -819,14 +891,14 @@ async function runProtocolAgent(run: Run, workDir: string): Promise<void> {
   if (run.options.skipRelay || !relay) {
     run.agents.push({
       id: 'chatgpt-protocol', label: 'ChatGPT protocol (production relay)', kind: 'protocol', ran: false,
-      skipReason: run.options.skipRelay ? 'skipped by option' : 'no relay configured for this run', checks: [],
+      skipReason: run.options.skipRelay ? 'skipped by option' : 'no relay configured for this run', checks: run.checkList(),
     });
     return;
   }
   const questionsPath = join(workDir, 'questions.json');
   writeFileSync(questionsPath, JSON.stringify(SUITE_QUESTIONS.map((q) => ({ id: q.id, text: q.text, kind: q.kind }))));
   await run.machine!.put(questionsPath, '~/rc/questions.json');
-  const agent: AgentReport = { id: 'chatgpt-protocol', label: 'ChatGPT protocol (production relay)', kind: 'protocol', ran: true, checks: [] };
+  const agent: AgentReport = { id: 'chatgpt-protocol', label: 'ChatGPT protocol (production relay)', kind: 'protocol', ran: true, checks: run.checkList() };
   await run.phase('agent-chatgpt-protocol', async () => {
     const out = await run.agent('smoke', '--questions ~/rc/questions.json', 900_000);
     const results = (out.result?.results ?? []) as Array<Record<string, any>>;
@@ -875,6 +947,15 @@ function listFiles(dir: string): string[] {
 }
 
 async function collectEvidence(run: Run, outDir: string): Promise<void> {
+  const stats = await run.agent('fixture-judge-stats', '', 15_000);
+  run.add({ id: 'judge.fixture-used', title: 'The VM classified through the loopback fixture judge',
+    status: Number(stats.result?.calls) > 0 ? 'pass' : 'fail',
+    detail: stats.result?.ok ? `${stats.result.calls} calls, ${stats.result.ms} ms server time; answer model unchanged` : agentDetail(stats) });
+  const answers = stats.result?.answers;
+  if (answers) run.add({ id: 'model.answer-time', title: 'Recorded answer model time (product latency ledger)',
+    status: Number(answers.recordedCalls) > 0 ? 'pass' : 'warn',
+    detail: `${answers.recordedCalls} recorded answers; analyst ${answers.analystMs} ms, local ${answers.localMs} ms (summed call time; ledger coverage only)` });
+
   const dash = await run.agent('dashboard-json', '', 60_000);
   if (dash.result?.ok === true) {
     const body = String(dash.result.body ?? '');
@@ -991,7 +1072,7 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
   const question = privateQuestion();
   const selftest = run.options.inboxSelftest;
 
-  const scripted: AgentReport = { id: 'scripted', label: 'Scripted agent over MCP (no model, nothing billed)', kind: 'model', scripted: true, ran: true, checks: [] };
+  const scripted: AgentReport = { id: 'scripted', label: 'Scripted agent over MCP (no model, nothing billed)', kind: 'model', scripted: true, ran: true, checks: run.checkList() };
   // The scripted agent asks as an agent on a standard install does, with olympus_search: on a Private match it records the question for
   // the Inbox and carries the note with the Open link. source_answer (collected with source_answer_result) is asked only where the
   // search is not offered. An install that offers neither has no link path to exercise, and the report says so.
@@ -1715,8 +1796,20 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   run = new Run(options, driver);
   const judge: Judge | undefined = options.config.judge ? commandJudge(options.config.judge) : undefined;
   const upgrading = options.upgradeFromDir !== undefined;
-  const deadline = Date.now() + (options.budgetMs ?? (defaultBudgetMs(upgrading, options.skipArchive === true) + (options.archiveScale ? 8 * 60 * 60_000 : 0)));
+  const legStarted = Date.now();
+  const budgetMs = options.budgetMs ?? defaultBudgetMs(upgrading, options.skipArchive === true, options.archiveScale);
+  const deadline = legStarted + budgetMs;
   run.deadline = deadline;
+  run.log(`leg ${options.archiveScale ? 'archive-scale' : upgrading ? 'upgrade' : 'fresh'}: budget ${budgetMs / 60_000} minutes`);
+  let budgetResult: CheckResult | undefined;
+  const budgetCheck = (status: 'pass' | 'fail') => {
+    const detail = `${Math.round((Date.now() - legStarted) / 1000)}s / ${Math.round(budgetMs / 1000)}s; ${run.phaseTimings()}`;
+    if (budgetResult) { budgetResult.detail = detail; budgetResult.ms = Date.now() - legStarted; return; }
+    budgetResult = { id: 'leg.time-budget', title: 'The leg finishes within its wall-clock budget', status,
+      ms: Date.now() - legStarted, detail };
+    run.add(budgetResult);
+  };
+  const budgetTimer = setTimeout(() => budgetCheck('fail'), budgetMs);
   const versions = { from: upgrading ? tarballVersion(options.upgradeFromDir!) : undefined, to: upgrading ? tarballVersion(options.candidateDir) : undefined };
   if (upgrading) {
     run.stages.clear();
@@ -1804,6 +1897,8 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   }
 
   const last = run.stages.get(upgrading ? 'after' : 'install')!;
+  clearTimeout(budgetTimer);
+  budgetCheck(Date.now() > deadline ? 'fail' : 'pass');
   const toPhase = (stage: Stage): PhaseReport => ({
     id: stage.id, label: stage.label,
     ...(stage.version ? { version: stage.version } : {}), ...(stage.build ? { build: stage.build } : {}),

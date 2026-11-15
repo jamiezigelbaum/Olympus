@@ -66,7 +66,7 @@ export interface Machine extends MachineInfo {
   /** Set only by provision, never by machineFor (which can address an existing owner machine). */
   readonly disposable?: true;
   /** Updates the install on the machine with a newer build's installer bundle, the way a user does. */
-  upgrade(candidateDir: string): Promise<void>;
+  upgrade(candidateDir: string, options?: ExecOptions): Promise<void>;
   exec(script: string, options?: ExecOptions): Promise<ExecResult>;
   put(from: string, to: string): Promise<void>;
   get(from: string, to: string): Promise<void>;
@@ -212,8 +212,8 @@ export class CommandDriver {
         // The harness always sends the script on stdin; data goes through put.
         { stdin: script, timeoutMs: (options.timeoutMs ?? 120_000) + 15_000 },
       ),
-      upgrade: async (candidateDir) => {
-        const r = await run([...base, 'upgrade', '--machine', info.handle, '--candidate', candidateDir], { timeoutMs: 25 * 60_000, onStderr: log });
+      upgrade: async (candidateDir, options = {}) => {
+        const r = await run([...base, 'upgrade', '--machine', info.handle, '--candidate', candidateDir], { timeoutMs: options.timeoutMs ?? 25 * 60_000, onStderr: log });
         if (r.code !== 0) {
           // The installer's own "Fix:" line says what it put back; the forced-failure check reads it.
           // The Mac installer says it on a line of its own, before its failure message.

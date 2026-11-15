@@ -4,6 +4,7 @@
  * written by hand. The messages are the two of `whatsappBesideLive` the export shares with live capture, at the instants their wall
  * times name in UTC, so the export's zone is found by matching (whatever zone the machine is set to).
  */
+import { fixtureText } from './fixture-judge.ts';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { WHATSAPP_SOURCE_ID } from '../../src/core/olympus-layout.ts';
@@ -25,8 +26,8 @@ const CHAT_JID = '15550100001@s.whatsapp.net';
 
 /** The messages live capture holds: [wall time, sender (undefined: the owner), text]. */
 export const WHATSAPP_BESIDE_SHARED: ReadonlyArray<readonly [string, string | undefined, string]> = [
-  ['2024-04-14T12:00:00', WHATSAPP_BESIDE_CHAT, 'Ferry tickets are booked for the morning.'],
-  ['2024-04-14T12:05:00', undefined, 'Great, I will bring the map.'],
+  ['2024-04-14T12:00:00', WHATSAPP_BESIDE_CHAT, fixtureText('Ferry tickets are booked for the morning.')],
+  ['2024-04-14T12:05:00', undefined, fixtureText('Great, I will bring the map.')],
 ];
 
 function spoolLine(index: number, [at, sender, text]: readonly [string, string | undefined, string]): string {

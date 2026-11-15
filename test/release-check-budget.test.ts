@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { engineStatePaths } from '../scripts/release-check/machine-agent.ts';
-import { AGENT_PAST_BUDGET_MS, agentDetail, agentTimeoutMs, defaultBudgetMs, stoppedByBudget } from '../scripts/release-check/run.ts';
+import { AGENT_PAST_BUDGET_MS, agentDetail, agentTimeoutMs, defaultBudgetMs, phaseBudgetMs, stoppedByBudget } from '../scripts/release-check/run.ts';
 
 describe('release-check time budget (olympus-ops#156)', () => {
   test('an in-machine call keeps its own bound while the budget has room', () => {
@@ -25,10 +25,13 @@ describe('release-check time budget (olympus-ops#156)', () => {
   });
 
   test('a run without the archive-import leg gets a shorter budget than one with it', () => {
-    expect(defaultBudgetMs(false, true)).toBe(60 * 60_000);
-    expect(defaultBudgetMs(false, false)).toBe(135 * 60_000);
-    expect(defaultBudgetMs(true, true)).toBe(120 * 60_000);
-    expect(defaultBudgetMs(true, false)).toBe(195 * 60_000);
+    expect(defaultBudgetMs(false, true)).toBe(40 * 60_000);
+    expect(defaultBudgetMs(false, false)).toBe(60 * 60_000);
+    expect(defaultBudgetMs(true, true)).toBe(70 * 60_000);
+    expect(defaultBudgetMs(true, false)).toBe(90 * 60_000);
+    expect(defaultBudgetMs(false, false, true)).toBe(180 * 60_000);
+    expect(phaseBudgetMs('archive-beside-live')).toBe(8 * 60_000);
+    expect(phaseBudgetMs('archive-scale-readwise')).toBe(20 * 60_000);
   });
 });
 
@@ -58,4 +61,72 @@ describe('why an in-machine call failed', () => {
     expect(agentDetail(call({ result: { ok: false }, stderr: 'boom' }))).toBe('boom');
     expect(agentDetail(call({ result: { ok: false }, code: 3 }))).toBe('the agent gave no reason (exit 3)');
   });
+});
+
+// A stuck VM call must fail by phase name immediately, without waiting for teardown.
+import { Run } from '../scripts/release-check/run.ts';
+import { CommandDriver, type Machine } from '../scripts/release-check/machine.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
+
+test('a phase budget clamps the VM timeout, reports while still running, and permits independent checks', async () => {
+  const clock = createTestClock(0);
+  const run = new Run({ runId: 'clock', candidateDir: '/tmp', candidateLabel: 'clock', outDir: '/tmp', config: { driver: ['unused'] } }, new CommandDriver({ argv: ['unused'] }), clock);
+  let allowed = 0;
+  let finish!: () => void;
+  run.machine = { handle: 'clock', label: 'clock', os: 'linux', driver: 'clock',
+    exec: async (_script, options) => {
+      allowed = options?.timeoutMs ?? 0;
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { code: 124, timedOut: true, stdout: '', stderr: '', ms: clock.now() };
+    }, upgrade: async () => {}, put: async () => {}, get: async () => {},
+  } satisfies Machine;
+  const phase = run.phase('ingest', () => run.agent('settle', '', 900_000));
+  await flushMicrotasks();
+  expect(allowed).toBe(phaseBudgetMs('ingest'));
+  await clock.advance(phaseBudgetMs('ingest'));
+  expect(run.checks.some(check => check.id === 'phase.ingest.time-budget' && check.status === 'fail')).toBe(true);
+  finish();
+  await phase;
+  run.add({ id: 'independent', title: 'later check', status: 'pass' });
+  expect(run.checks.at(-1)?.id).toBe('independent');
+  expect(run.timings.ingest).toBe(phaseBudgetMs('ingest'));
+});
+
+test('an over-budget phase also names its driver upgrade timeout', async () => {
+  const clock = createTestClock(0);
+  const run = new Run({ runId: 'clock', candidateDir: '/tmp', candidateLabel: 'clock', outDir: '/tmp', config: { driver: ['unused'] } }, new CommandDriver({ argv: ['unused'] }), clock);
+  let allowed = 0;
+  run.deadline = 10_000;
+  run.machine = { handle: 'clock', label: 'clock', os: 'linux', driver: 'clock',
+    exec: async () => ({ code: 0, timedOut: false, stdout: '', stderr: '', ms: 0 }),
+    upgrade: async (_candidate, options) => { allowed = options?.timeoutMs ?? 0; },
+    put: async () => {}, get: async () => {},
+  } satisfies Machine;
+  await run.phase('upgrade', () => run.machine!.upgrade('/tmp'));
+  expect(allowed).toBe(10_000);
+});
+
+import { LegBudget } from '../scripts/release-check/leg-budget.ts';
+test('a real-machine leg reports its deadline live and still allows bounded restoration', async () => {
+  const clock = createTestClock(0);
+  const checks: import('../scripts/release-check/report.ts').CheckResult[] = [];
+  const budget = new LegBudget('fresh-install', 1_000, check => { checks.push(check); }, clock);
+  let allowed = 0;
+  const machine = budget.machine({ handle: 'clock', label: 'clock', os: 'linux', driver: 'clock',
+    exec: async (_script, options) => {
+      allowed = options?.timeoutMs ?? 0;
+      return { code: 0, timedOut: false, stdout: '', stderr: '', ms: 0 };
+    }, upgrade: async () => {}, put: async () => {}, get: async () => {},
+  });
+  budget.timings.install = 500;
+  await clock.advance(1_001);
+  expect(checks[0]?.id).toBe('leg.time-budget');
+  expect(checks[0]?.status).toBe('fail');
+  expect(checks[0]?.detail).toContain('install');
+  budget.cleanup();
+  await budget.phase('restore-zig', 5_000, () => machine.exec('restore', { timeoutMs: 4_000 }));
+  expect(allowed).toBe(4_000);
+  budget.finish();
+  expect(checks).toHaveLength(1);
+  expect(checks[0]?.status).toBe('fail');
 });

@@ -16,20 +16,44 @@
  * searches for its token, and removes it. Nothing else in the leg names a format. The model-off and changed-file stages use `STRESS_FORMAT`, which also needs a plain archive, a large
  * one, and the bytes that change a file (`ArchiveStressSpec`); a later format only has to supply them to be used there too.
  */
+import { fixtureText } from './fixture-judge.ts';
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { reflectNoteRecord } from '../../test/support/archive-fixtures-reflect.ts';
-import { roamJson, roamJsonZip } from '../../test/support/archive-fixtures-roam.ts';
-import { RECO_INDEX, enexExport, pngBytes } from '../../test/support/archive-fixtures-evernote.ts';
+import { reflectNoteRecord as rawReflectNoteRecord } from '../../test/support/archive-fixtures-reflect.ts';
+import { roamJson as rawRoamJson, roamJsonZip } from '../../test/support/archive-fixtures-roam.ts';
+import { RECO_INDEX, enexExport as rawEnexExport, pngBytes } from '../../test/support/archive-fixtures-evernote.ts';
 import {
-  telegramChat, telegramFullExport, telegramJson, telegramPhoto, telegramService, telegramText,
+  telegramChat, telegramFullExport, telegramJson, telegramPhoto, telegramService, telegramText as rawTelegramText,
 } from '../../test/support/archive-fixtures-telegram.ts';
-import { chatText, chatZip, mediaNames, notice, type SyntheticMessage } from '../../test/support/archive-fixtures-whatsapp.ts';
+import { chatText as rawChatText, chatZip, mediaNames, notice, type SyntheticMessage } from '../../test/support/archive-fixtures-whatsapp.ts';
 import { WHATSAPP_SOURCE_ID } from '../../src/core/olympus-layout.ts';
 import { WHATSAPP_BESIDE_CHAT, WHATSAPP_BESIDE_OWNER, WHATSAPP_BESIDE_SHARED, WHATSAPP_SEED_HOOK } from './archive-live-seed-whatsapp.ts';
-import { apiMessage as gmailApiMessage, mail as gmailMail, takeoutMbox } from '../../test/support/archive-fixtures-gmail.ts';
+import { apiMessage as gmailApiMessage, mail as rawGmailMail, takeoutMbox } from '../../test/support/archive-fixtures-gmail.ts';
 import type { GmailMessage } from '../../src/workers/google-connectors/gmail.ts';
+
+// Mark individual synthetic contents before serializing the archive; empty and
+// media-only records retain their original meaning and coverage gaps.
+const telegramText: typeof rawTelegramText = (id, text, options) => rawTelegramText(id, fixtureText(text), options);
+const chatText: typeof rawChatText = (messages, options) => rawChatText(messages.map(message => ({ ...message,
+  text: message.sender && !message.text.startsWith('<attached:') ? fixtureText(message.text) : message.text,
+})), options);
+const reflectNoteRecord: typeof rawReflectNoteRecord = (note, style) => rawReflectNoteRecord({ ...note,
+  ...(note.body ? { body: fixtureText(note.body) } : {}),
+  ...(note.doc ? { doc: note.doc.map(text => fixtureText(text)) } : {}),
+}, style);
+const roamJson: typeof rawRoamJson = pages => {
+  const mark = (value: unknown): unknown => Array.isArray(value) ? value.map(mark)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, entry]) =>
+      [key, key === 'string' && typeof entry === 'string' ? fixtureText(entry) : mark(entry)])) : value;
+  return rawRoamJson(mark(pages) as typeof pages);
+};
+const enexExport: typeof rawEnexExport = notes => rawEnexExport(notes.map(note => ({ ...note,
+  ...(note.enml ? { enml: `<div>${fixtureText('Synthetic note.')}</div>${note.enml}` } : {}),
+})));
+const gmailMail: typeof rawGmailMail = (id, options) => rawGmailMail(id, { ...options,
+  ...(options?.body ? { body: fixtureText(options.body) } : {}),
+});
 
 /** The folder under the home directory the archives are written to, and the picker's first press. */
 export const FIXTURE_FOLDER = 'rc-archives';
@@ -183,7 +207,7 @@ function mailMessage(input: MailInput): string {
     'MIME-Version: 1.0',
   ];
   if (!input.attachment) {
-    return [...head, 'Content-Type: text/plain; charset="UTF-8"', '', input.body, '', ''].join('\n');
+    return [...head, 'Content-Type: text/plain; charset="UTF-8"', '', fixtureText(input.body), '', ''].join('\n');
   }
   const attachment = input.attachment;
   return [
@@ -193,14 +217,14 @@ function mailMessage(input: MailInput): string {
     '--rc-boundary',
     'Content-Type: text/plain; charset="UTF-8"',
     '',
-    input.body,
+    fixtureText(input.body),
     '',
     '--rc-boundary',
     `Content-Type: ${attachment.mime}; name="${attachment.name}"`,
     `Content-Disposition: attachment; filename="${attachment.name}"`,
     'Content-Transfer-Encoding: base64',
     '',
-    Buffer.from(attachment.text).toString('base64'),
+    Buffer.from(fixtureText(attachment.text)).toString('base64'),
     '--rc-boundary--',
     '',
     '',
@@ -361,8 +385,8 @@ export const TELEGRAM_BESIDE_LIVE = {
   chatId: 1_000_001,
   chatName: 'Release Check Live Group',
   shared: [
-    { index: 0, day: '2024-04-01', text: 'The boat leaves from the north quay at eight.' },
-    { index: 1, day: '2024-04-02', text: 'Bring the blue tarp and the spare rope.' },
+    { index: 0, day: '2024-04-01', text: fixtureText('The boat leaves from the north quay at eight.') },
+    { index: 1, day: '2024-04-02', text: fixtureText('Bring the blue tarp and the spare rope.') },
   ],
 } as const;
 

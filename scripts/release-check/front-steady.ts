@@ -1,3 +1,4 @@
+import { fixtureText } from './fixture-judge.ts';
 /**
  * The split front stays up on a store set like a real one (engine split, #1240).
  *
@@ -70,11 +71,11 @@ export interface FrontSteadyObservation {
 /** A Takeout mbox of the owner's Gmail: two messages, one with a text attachment the attachment lane reads. */
 export function frontGmailMbox(token: string): string {
   return takeoutMbox([
-    gmailMail(201, { date: '2024-05-02T12:00:00.000Z', body: `Front check, plain message. Word: ${token}.` }),
+    gmailMail(201, { date: '2024-05-02T12:00:00.000Z', body: fixtureText(`Front check, plain message. Word: ${token}.`) }),
     gmailMail(202, {
       date: '2024-05-03T12:00:00.000Z',
-      body: `Front check, message with an attachment. Word: ${token}.`,
-      attachment: { name: 'front-check-notes.txt', mime: 'text/plain', text: `Notes attached to the front check. Word: ${token}.` },
+      body: fixtureText(`Front check, message with an attachment. Word: ${token}.`),
+      attachment: { name: 'front-check-notes.txt', mime: 'text/plain', text: fixtureText(`Notes attached to the front check. Word: ${token}.`) },
     }),
   ]);
 }

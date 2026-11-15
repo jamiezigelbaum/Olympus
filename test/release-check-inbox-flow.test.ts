@@ -51,6 +51,7 @@ if (verb === 'provision') {
   const mode = process.env.FAKE_INBOX_MODE ?? '';
   if (sub === 'helper-files') say({ ok: true, whatsappBridges: ['olympus-whatsapp-bridge-0123456789abcdef'] });
   else if (sub === 'engine-build') say({ ok: true, build: '1.1.0+abc', version: '1.1.0', remoteMode: 'relay', relay: {} });
+  else if (sub === 'fixture-judge-stats') say({ ok: true, calls: 3, ms: 1 });
   else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000 });
   else if (sub === 'connect-source') say({ ok: true, message: 'Connected' });
   else if (sub === 'settle') say({ ok: true, settled: true, polls: 2, waitedMs: 1000, snapshot: counts });

@@ -1,3 +1,6 @@
+import { liveChecks, publishFailedCheck } from './live-checks.ts';
+import type { LegBudget } from './leg-budget.ts';
+import { phaseBudgetMs } from './run.ts';
 /** Fresh-user canary. All lifecycle commands run on the machine; no provider credentials leave it. */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -153,6 +156,7 @@ for i in $(seq 1 7200); do [ -e ${ROOT}/lease ] || exit 0; sleep 1; done
 exit 1`;
 
 export interface FreshOptions {
+  budget?: LegBudget;
   sources: LiveSourceSpec[];
   /** Local installer/tarball prepared by the site's Linux bundle builder; absent uses the published installer. */
   bundle?: { installer: string; tarball: string };
@@ -175,7 +179,7 @@ export async function runFreshInstall(machine: Machine, options: FreshOptions): 
   const sources = validateFreshSources(options.sources);
   if (machine.os !== 'linux') throw new Error('fresh install requires Linux');
   if (!options.dashboard && !options.bridgeAgent) throw new Error('fresh install needs the machine-agent bundle');
-  const checks: CheckResult[] = [];
+  const checks: CheckResult[] = liveChecks(publishFailedCheck);
   let onDemandTiming: OnDemandTimingResult | undefined;
   let limits: LimitsResult | undefined;
   let sampler: { stop(): Promise<RssSample[]> } | undefined;
@@ -193,7 +197,7 @@ export async function runFreshInstall(machine: Machine, options: FreshOptions): 
     current = id;
     const start = Date.now();
     if (interrupted && id !== 'restore-zig') throw new Error('run interrupted');
-    const detail = await action();
+    const detail = options.budget ? await options.budget.phase(id, phaseBudgetMs(id), action) : await action();
     if (interrupted && id !== 'restore-zig') throw new Error('run interrupted');
     checks.push({ id: `fresh.${id}`, title: id, status: 'pass', detail: detail ?? 'persisted effect verified', ms: Date.now() - start });
   };
@@ -453,6 +457,7 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
   } catch (error) {
     checks.push({ id: `fresh.${current}`, title: current, status: error instanceof FreshInconclusive ? 'skip' : 'fail', detail: error instanceof FreshInconclusive ? `Inconclusive: ${error.message}` : `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
   } finally {
+    options.budget?.cleanup();
     // Cleanup errors must not prevent service restoration or the report.
     await sampler?.stop().catch(() => undefined);
     await engine?.close().catch(() => {});

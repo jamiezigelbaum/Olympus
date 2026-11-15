@@ -1,3 +1,4 @@
+import { fixtureTierMarker } from './fixture-judge.ts';
 /** Runtime-only, seeded synthetic archives. No fixture files belong in the checkout. */
 import { fixtureToken, FIXTURE_FOLDER, type LegFixture } from './archive-fixtures.ts';
 import { reflectJson, reflectMarkdown, reflectMarkdownZip } from '../../test/support/archive-fixtures-reflect.ts';
@@ -43,7 +44,7 @@ export function scaleMbox(token: string, total: number = SCALE_COUNTS.mbox): Uin
     const encoding = SCALE_ENCODINGS[i % SCALE_ENCODINGS.length]!;
     const transfer = i % 3 === 0 ? '7bit' : i % 3 === 1 ? 'quoted-printable' : 'base64';
     const charset = transfer === '7bit' ? 'UTF-8' : encoding.charset;
-    const bodyBytes = Buffer.concat([Buffer.from(`Synthetic Zorava trip log ${i}, ${token}. Bring bread and a blue tent. `), transfer === '7bit' ? Buffer.from('Vexli Numo') : encoding.bytes]);
+    const bodyBytes = Buffer.concat([Buffer.from(`${fixtureTierMarker('personal')} Synthetic Zorava trip log ${i}, ${token}. Bring bread and a blue tent. `), transfer === '7bit' ? Buffer.from('Vexli Numo') : encoding.bytes]);
     const body = transfer === 'base64' ? bodyBytes.toString('base64').match(/.{1,76}/g)!.join('\n') : transfer === 'quoted-printable' ? qp(bodyBytes) : `${bodyBytes.toString('utf8')}\n>From a remembered ferry log\n>>From an older log`;
     // RFC 822 two-digit years, and both obsolete named and unknown-offset zones.
     const zone = ['EST', 'GMT', '-0000'][i % 3]!;
@@ -80,13 +81,13 @@ export function scaleFixture(format: Exclude<ScaleFormat, 'readwise'>, seed: str
       const ordinal = day % 100 >= 11 && day % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[day % 10] ?? 'th';
       return { title: i % 10 === 0 ? `${date.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' })} ${day}${ordinal}, ${date.getUTCFullYear()}` : `Zorava field page ${i}`, uid: `${token}-${i}`,
         'create-time': at, 'edit-time': at + 3_600_000,
-        children: [{ string: `Vexli Numo packs a tent for Zorava. ${token} entry ${i}.`, uid: `${token}-${i}-a`, 'create-time': at + 60_000,
-          children: [{ string: `Nested ferry detail ${i}`, uid: `${token}-${i}-b`, 'edit-time': at + 3_600_000 }] }] };
+        children: [{ string: `${fixtureTierMarker('personal')} Vexli Numo packs a tent for Zorava. ${token} entry ${i}.`, uid: `${token}-${i}-a`, 'create-time': at + 60_000,
+          children: [{ string: `${fixtureTierMarker('personal')} Nested ferry detail ${i}`, uid: `${token}-${i}-b`, 'edit-time': at + 3_600_000 }] }] };
     })));
   } else {
     productFormat = 'reflect-json'; label = 'Reflect notes (JSON)';
     const notes = Array.from({ length: count }, (_, i) => ({ id: `${token}-${i}`, title: `Zorava field note ${i}`,
-      body: `Vexli Numo packs bread and a blue tent for Zorava. ${token} entry ${i}.`, created: scaleDate(i, count), updated: new Date(Date.parse(scaleDate(i, count)) + 3_600_000).toISOString() }));
+      body: `${fixtureTierMarker('personal')} Vexli Numo packs bread and a blue tent for Zorava. ${token} entry ${i}.`, created: scaleDate(i, count), updated: new Date(Date.parse(scaleDate(i, count)) + 3_600_000).toISOString() }));
     if (format === 'reflect-json') bytes = utf8(reflectJson(notes, { wrap: true }));
     else { productFormat = 'reflect-markdown'; label = 'Reflect notes (Markdown zip)'; extension = '.zip'; bytes = reflectMarkdownZip(notes.map((note, i) => ({ name: `reflect-${i}.md`, text: reflectMarkdown(note) }))); }
   }
@@ -100,10 +101,10 @@ export function scaleFixture(format: Exclude<ScaleFormat, 'readwise'>, seed: str
 export function scaleReadwise(seed: string): { documents: ReadwiseReaderDocument[]; books: ReadwiseExportBook[]; items: number; token: string } {
   const token = fixtureToken(seed, 'scale', 'readwise');
   const documents = Array.from({ length: SCALE_COUNTS.documents }, (_, i) => ({ id: `${token}-doc-${i}`, title: `Zorava reading ${i}`,
-    author: 'Vexli Numo', category: 'article', location: 'new', url: `https://example.test/${token}/${i}`, html_content: `<p>${token} Ferry plans for Zorava, entry ${i}.</p>`,
+    author: 'Vexli Numo', category: 'article', location: 'new', url: `https://example.test/${token}/${i}`, html_content: `<p>${fixtureTierMarker('personal')} ${token} Ferry plans for Zorava, entry ${i}.</p>`,
     created_at: scaleDate(i, SCALE_COUNTS.documents), updated_at: '2025-01-01T12:00:00Z' }));
   const books = Array.from({ length: SCALE_COUNTS.books }, (_, i) => ({ id: `${token}-book-${i}`, title: `Zorava field book ${i}`, author: 'Nuvlo Zemi', category: 'books',
-    highlights: [0, 1].map(j => ({ id: `${token}-highlight-${i}-${j}`, text: `${token} Pack a blue tent for the Zorava ferry, entry ${i}/${j}.`,
+    highlights: [0, 1].map(j => ({ id: `${token}-highlight-${i}-${j}`, text: `${fixtureTierMarker('personal')} ${token} Pack a blue tent for the Zorava ferry, entry ${i}/${j}.`,
       highlighted_at: scaleDate(i, SCALE_COUNTS.books), updated_at: '2025-01-01T12:00:00Z' })) }));
   return { documents, books, items: documents.length + books.length * 2, token };
 }
