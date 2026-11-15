@@ -203,6 +203,28 @@ function meterTinfoil(send: import('../../src/core/analyst-openai.ts').OpenAIAna
   };
 }
 
+let limitWaits = 0;
+/**
+ * Tinfoil answers 429 with retry-after when the key's rate is exceeded. A run
+ * waits that long and tries the same item again (bounded), so it finishes
+ * without hand-tuned --max-rpm. 402/403 and anything else still stop the run.
+ */
+async function completeWithLimitWait(model: AnalystModel, request: SnifferModelRequest): Promise<SnifferModelCompletion> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await model.complete(request) as SnifferModelCompletion;
+    } catch (error) {
+      const limit = error as { name?: string; status?: number; retryAfter?: string | null };
+      if (limit?.name !== 'TinfoilLimitError' || limit.status !== 429 || attempt >= 12) throw error;
+      limitWaits += 1;
+      const raw = limit.retryAfter ?? '';
+      const seconds = /^\d/.test(raw) ? Number(raw) : Number.isFinite(Date.parse(raw)) ? (Date.parse(raw) - Date.now()) / 1000 : 1;
+      const wait = Math.max(1, Number.isFinite(seconds) ? seconds : 1) * 1000 * (1 + Math.min(attempt, 4) * 0.5) + Math.random() * 500;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+}
+
 async function askVenice(model: AnalystModel, material: string, ownerContext: string | undefined): Promise<Answer> {
   // Wait for a pacing slot before complete() starts its timeout, so queueing never eats it.
   await paced();
@@ -216,7 +238,7 @@ async function askVenice(model: AnalystModel, material: string, ownerContext: st
       responseSchema: SNIFFER_RESPONSE_SCHEMA,
       maxOutputChars: 110 + 200,
     };
-    completion = await model.complete(request);
+    completion = await completeWithLimitWait(model, request);
     if (completion.decisionVerdict) {
       const v = completion.decisionVerdict;
       return { judge: snifferTierKey(v) === 'secure' ? 'private' : 'personal', via: v.failSafe ? 'no_answer' : 'judge', ...(completion.decisionMetrics?.privateProbability != null ? { pPrivate: completion.decisionMetrics.privateProbability } : {}) };
@@ -622,6 +644,7 @@ async function mainVenice(): Promise<void> {
     [tinfoil ? 'tinfoil' : 'venice']: {
       warm: meterSummary(warm.meter, modelItems),
       timed: timed.map((pass) => meterSummary(pass.meter, modelItems)),
+      ...(tinfoil ? { rateLimitWaits: limitWaits } : {}),
     },
     unweighted: {
       all: confusion(rows),

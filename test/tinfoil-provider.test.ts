@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTinfoilAnalystModel, readTinfoilStatus, tinfoilCacheSecret, TinfoilRefusalError, TinfoilLimitError, TINFOIL_MODELS, TINFOIL_PRICES, type TinfoilTransportOptions } from '../src/core/analyst-tinfoil.ts';
-import { createTinfoilJudgeModel } from '../src/workers/classification/sniffer-tinfoil.ts';
+import { createTinfoilJudgeModel, tinfoilDecisionInstructions } from '../src/workers/classification/sniffer-tinfoil.ts';
 import { JudgeSpending, JudgeCloudStopped, judgeArchiveEstimate, DEFAULT_VENICE_JUDGE_MODEL } from '../src/workers/classification/judge-spending.ts';
 import { resolveJudgeChoiceRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset, validateSovereigntyConfig } from '../src/core/sovereignty.ts';
@@ -31,7 +31,7 @@ function fixture() {
 }
 const request = { system: 'generic system', prompt: 'synthetic evidence', localOnly: true, maxOutputChars: 800 };
 const chatReply = () => Response.json({ choices: [{ message: { content: 'synthetic answer' } }] });
-const decisionReply = (p: number) => Response.json({ answers: [{ type: 'choice', name: 'privacy', choice: p >= .5 ? 'Private' : 'Personal', probabilities: [{ value: 'Private', probability: p }, { value: 'Personal', probability: 1 - p }], confidence: Math.max(p, 1 - p) }], usage: { input_tokens: 100, output_tokens: 0 } });
+const decisionReply = (p: number) => Response.json({ answers: [{ type: 'choice', name: 'tier', choice: p >= .5 ? 'Private' : 'Personal', probabilities: [{ value: 'Private', probability: p }, { value: 'Personal', probability: 1 - p }], confidence: Math.max(p, 1 - p) }], usage: { input_tokens: 100, output_tokens: 0 } });
 function fake(options: { env: Record<string, string>; ready?: () => Promise<void>; send?: (url: string, init: RequestInit) => Promise<Response> }): TinfoilTransportOptions {
   return { apiKey: 'synthetic-tinfoil-key', env: options.env, clientFactory: config => {
     expect(config.transport).toBe('ehbp');
@@ -100,14 +100,14 @@ describe('Tinfoil Decision medium production judge', () => {
     const { env } = fixture();
     const model = createTinfoilJudgeModel(fake({ env, send: async (url, init) => {
       const body = JSON.parse(String(init.body)); expect(url).toBe('/v1/decisions'); expect(body.model).toBe('decision-medium');
-      expect(body.input).toContain('synthetic material'); expect(body.input).toContain('Owner context'); expect(body.questions[0].choices).toEqual([{ value: 'Private' }, { value: 'Personal' }]);
-      expect(body.questions[0].instructions).toContain('owner_privacy'); return decisionReply(p);
+      expect(body.input).toBe('synthetic material'); expect(body.questions[0].name).toBe('tier'); expect(body.questions[0].choices).toEqual([{ value: 'Personal' }, { value: 'Private' }]);
+      expect(body.questions[0].instructions).toBe(tinfoilDecisionInstructions('content', 'Owner context')); expect(body.questions[0].instructions).toContain('Owner description: "Owner context"'); return decisionReply(p);
     } }));
     const completion = await model.complete({ ...request, snifferItem: { pass: 'content', flags: [], material: 'synthetic material', ownerContext: 'Owner context' } } as Parameters<typeof model.complete>[0]);
     expect(snifferTierKey(completion.decisionVerdict!)).toBe(p >= .5 ? 'secure' : 'private');
   });
 
-  test.each([{}, { answers: [{ type: 'choice', name: 'privacy', probabilities: [{ value: 'Private', probability: 0.1 }] }] }, { answers: [{ type: 'choice', name: 'privacy', probabilities: [{ value: 'Private', probability: -1 }, { value: 'Personal', probability: 2 }] }] }])('malformed response holds Private', async data => {
+  test.each([{}, { answers: [{ type: 'choice', name: 'tier', probabilities: [{ value: 'Private', probability: 0.1 }] }] }, { answers: [{ type: 'choice', name: 'tier', probabilities: [{ value: 'Private', probability: -1 }, { value: 'Personal', probability: 2 }] }] }])('malformed response holds Private', async data => {
     const { env } = fixture();
     const completion = await createTinfoilJudgeModel(fake({ env, send: async () => Response.json(data) })).complete(request);
     expect(completion.decisionVerdict?.failSafe).toBe(true); expect(snifferTierKey(completion.decisionVerdict!)).toBe('secure');
