@@ -14,7 +14,7 @@ import { defineDropboxFilesCorpus } from '../src/workers/dropbox-files/index.ts'
 import { flushMicrotasks } from './helpers/test-clock.ts';
 import { DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import { STATUS_RECOUNT_MIN_GAP_MS, STATUS_RECOUNT_PACE_FACTOR, startPacedStatusRecount } from '../src/workers/engine/status-recount.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 
 const CORPUS_ID = 'secure_local.dropbox.files';
 const SNAPSHOT = { countsMaxAgeMs: 300_000 };
@@ -46,7 +46,9 @@ describe('status snapshot for the dashboard', () => {
         expect((shown as typeof first).corpora).toEqual(first.corpora);
         expect((shown as typeof first).snapshot_age_ms).toBe(STORE_STATUS_REUSE_MS + 1 + 2_000 * (poll + 1));
       }
-      // One recount runs behind the polls, not one per poll.
+      // One recount runs behind the polls, not one per poll (it starts after a turn).
+      await waitFor(() => reads >= 1);
+      await flushMicrotasks();
       expect(reads).toBe(1);
       // A live read (no allowance) still reads now.
       expect((await handler.status({ include_items: false })).snapshot_age_ms).toBeUndefined();
