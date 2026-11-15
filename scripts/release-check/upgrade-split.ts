@@ -76,7 +76,9 @@ export function brokenBundle(candidateDir: string, outDir: string): string {
   } finally { rmSync(scratch, { recursive: true, force: true }); }
   const hash = sha256(join(dir, tarball));
   const hashes: Record<string, string> = { [tarball]: hash };
-  for (const installer of ['install-linux.sh', 'install-macos.sh']) {
+  // The Mac bundle (publish-release-to-site.ts --mac-local) names its installer install.sh; missing it left the Mac
+  // installer refusing the copy's checksum, so the broken front never started (mac-upgrade run 43730130383).
+  for (const installer of ['install-linux.sh', 'install-macos.sh', 'install.sh']) {
     const path = join(dir, installer);
     if (!existsSync(path)) continue;
     writeFileSync(path, repinInstaller(readFileSync(path, 'utf8'), hash, statSync(join(dir, tarball)).size));
