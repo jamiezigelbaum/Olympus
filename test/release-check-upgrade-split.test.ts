@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
-  BROKEN_FRONT_LINE, breakFront, brokenBundle, compareStoreFiles, forcedFailureChecks, rehash, repinInstaller, retiredStoreFile, storeFiles, storesKeptCheck, STORES_PUT_BACK, leftoverFiles,
+  BROKEN_FRONT_LINE, breakFront, brokenBundle, compareStoreFiles, forcedFailureChecks, rehash, repinInstaller, retiredStoreFile, storeFiles, storesKeptCheck, STORES_PUT_BACK, leftoverFiles, leftoverFileNames,
 } from '../scripts/release-check/upgrade-split.ts';
 
 let dir: string;
@@ -112,6 +112,8 @@ describe('store files', () => {
       writeFileSync(join(dir, path), '');
     }
     expect(leftoverFiles(dir)).toBe(3);
+    // Named, so a failed check says which file an update left.
+    expect(leftoverFileNames(dir)).toEqual(['jobs.db-journal', 'stores/a.sqlite.pre-schema-12.bak', 'stores/b.sqlite.partial-1']);
   });
 
   test('an update that failed before the broken front ever started proves no rollback: every forced-failure check fails', () => {
