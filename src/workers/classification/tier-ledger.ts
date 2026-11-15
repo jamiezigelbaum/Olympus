@@ -20,6 +20,7 @@
 // keys, content-free reason codes and version ids. Never a title, path,
 // sender, text or excerpt. The file is created owner-only (0600).
 
+import { applySqliteMmap } from '../connector-store/sqlite-mmap.ts';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
@@ -556,6 +557,7 @@ export class TierLedger {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
         db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+        applySqliteMmap(db);
         if (!sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)) {
           throw new TierLedgerSchemaError(readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
         }
@@ -563,6 +565,7 @@ export class TierLedger {
         return;
       }
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
+      applySqliteMmap(db);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       // The owner's overridden items, for the cleared-override search
       // (listClearedOverrideRows). An index only, with no schema version:

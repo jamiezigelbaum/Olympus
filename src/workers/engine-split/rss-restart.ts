@@ -14,6 +14,7 @@
  * the status snapshot (`rss_restarts`), carried from one background to the
  * next through the snapshot it left.
  */
+import { readFileSync } from 'node:fs';
 import type { EngineStatusRead } from './snapshot.ts';
 
 export { ENGINE_RSS_RESTART_DEFAULT_MB } from '../../core/config.ts';
@@ -53,7 +54,7 @@ export function startEngineRssRestart(input: {
   log?: (line: string) => void;
 }): { restarts(): EngineRssRestarts; stop(): void } {
   const now = input.now ?? (() => Date.now());
-  const rss = input.rss ?? (() => process.memoryUsage.rss());
+  const rss = input.rss ?? engineMemoryRss;
   const log = input.log ?? ((line: string) => console.warn(line));
   let restarts: EngineRssRestarts = input.previous;
   let overSince: number | undefined;
@@ -82,4 +83,20 @@ export function startEngineRssRestart(input: {
     restarts: () => restarts,
     stop: () => (input.clearInterval ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>)))(timer),
   };
+}
+
+/**
+ * The memory the restart measures: on Linux the process's anonymous RSS
+ * (RssAnon), so the SQLite files it maps for reads (sqlite-mmap.ts), which
+ * are the files' own page cache, never count as its memory; elsewhere total
+ * RSS, as before (mapping is Linux-only too).
+ */
+export function engineMemoryRss(): number {
+  if (process.platform === 'linux') {
+    try {
+      const line = /^RssAnon:\s+(\d+)\s+kB$/m.exec(readFileSync('/proc/self/status', 'utf8'));
+      if (line) return Number(line[1]) * 1024;
+    } catch { /* fall through */ }
+  }
+  return process.memoryUsage.rss();
 }

@@ -12021,6 +12021,19 @@ function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
 
+// src/workers/connector-store/sqlite-mmap.ts
+var SQLITE_MMAP_BYTES = 2147418112;
+function sqliteMmapEnabled(env = process.env) {
+  return process.platform === "linux" && env.OLYMPUS_SQLITE_MMAP !== "off";
+}
+function applySqliteMmap(db, env = process.env) {
+  if (!sqliteMmapEnabled(env))
+    return;
+  try {
+    db.exec(`PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}`);
+  } catch {}
+}
+
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
 import { randomUUID as randomUUID5 } from "node:crypto";
@@ -12222,6 +12235,7 @@ class TierLedger {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+        applySqliteMmap(db);
         if (!sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)) {
           throw new TierLedgerSchemaError(readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
         }
@@ -12229,6 +12243,7 @@ class TierLedger {
         return;
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      applySqliteMmap(db);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
@@ -18462,6 +18477,7 @@ var clock2 = REAL_CLOCK;
 var observer;
 var observeSnapshots = false;
 var workerFactory = (url) => new Worker(url);
+var MMAP_PRAGMA = sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
 var WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
@@ -18471,6 +18487,7 @@ const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+  ${MMAP_PRAGMA}
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
@@ -22332,6 +22349,7 @@ class LocalConnectorStore {
     this.openedFile = fileIdentity(this.dbPath);
     try {
       this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : creatingFile ? "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+      applySqliteMmap(this.db);
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
       const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
       const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;

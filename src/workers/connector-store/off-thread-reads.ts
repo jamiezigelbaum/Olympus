@@ -20,6 +20,7 @@
 // a keyword read wait for all of it (#1305). The worker runs one statement at
 // a time either way; the snapshot's transaction is on its own connection.
 
+import { SQLITE_MMAP_BYTES, sqliteMmapEnabled } from './sqlite-mmap.ts';
 import { errorFromBoundary } from '../../core/log-redaction.ts';
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
 import { beginSourceAnswerPoolRead, poolSqlSite, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
@@ -110,6 +111,8 @@ export function setReadPoolWorkerFactoryForTests(factory?: (url: string) => Work
 // transaction: SQLite reads it in one that ends with the statement. That
 // connection is reopened when the path names a different file, and closed
 // when the store releases it.
+// The worker's connections map their file as the engine's do (sqlite-mmap.ts).
+const MMAP_PRAGMA = sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : '';
 const WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
@@ -119,6 +122,7 @@ const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+  ${MMAP_PRAGMA}
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };

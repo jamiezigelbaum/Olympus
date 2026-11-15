@@ -91,6 +91,8 @@ const IMPORT_ALLOWLIST = new Set([
   '../../core/owner-limit-state.ts',
   // The pinned built-in model list (pure data, no imports): which lanes are the small model.
   '../source-index/built-in-reasoning/manifest.ts',
+  // Mapped reads for the ledger's file (one pragma, no source names).
+  '../connector-store/sqlite-mmap.ts',
 ]);
 
 const SOURCE_NAMES = [

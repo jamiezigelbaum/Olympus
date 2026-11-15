@@ -1,4 +1,5 @@
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
+import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
   applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreWriteSequence, storeTotalsCountSql, storeTotalsInstalled,
   type StoreTotals, type StoreTotalsCount,
@@ -3726,6 +3727,7 @@ export class LocalConnectorStore {
         : creatingFile
         ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;'
         : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+      applySqliteMmap(this.db);
       // New stores need no conversion. Existing stores are converted only by
       // background reclaim, after the sweep, never by opening a request's store.
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);

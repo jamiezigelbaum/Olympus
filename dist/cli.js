@@ -40978,6 +40978,19 @@ var init_sniffer_store = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/workers/connector-store/sqlite-mmap.ts
+function sqliteMmapEnabled(env = process.env) {
+  return process.platform === "linux" && env.OLYMPUS_SQLITE_MMAP !== "off";
+}
+function applySqliteMmap(db, env = process.env) {
+  if (!sqliteMmapEnabled(env))
+    return;
+  try {
+    db.exec(`PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}`);
+  } catch {}
+}
+var SQLITE_MMAP_BYTES = 2147418112;
+
 // src/workers/classification/tier-ledger.ts
 import { Database as Database3 } from "bun:sqlite";
 import { randomUUID as randomUUID6 } from "node:crypto";
@@ -41161,6 +41174,7 @@ class TierLedger {
       db = new Database3(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+        applySqliteMmap(db);
         if (!sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)) {
           throw new TierLedgerSchemaError(readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
         }
@@ -41168,6 +41182,7 @@ class TierLedger {
         return;
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      applySqliteMmap(db);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
@@ -51002,7 +51017,24 @@ function dispatch() {
     });
   }
 }
-var READ_POOL_SIZE = 1, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
+var READ_POOL_SIZE = 1, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA, WORKER_SOURCE, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases;
+var init_off_thread_reads = __esm(() => {
+  init_answer_latency_trace();
+  OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
+    code = SOURCE_INDEX_LANE_BUSY_CODE;
+    constructor() {
+      super("The store is busy; try again.");
+      this.name = "OffThreadReadBusyError";
+    }
+  };
+  REAL_CLOCK = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
+  };
+  clock2 = REAL_CLOCK;
+  MMAP_PRAGMA = sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
+  WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
@@ -51011,6 +51043,7 @@ const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+  ${MMAP_PRAGMA}
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
@@ -51087,22 +51120,7 @@ self.onmessage = (event) => {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   }
 };
-`, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases;
-var init_off_thread_reads = __esm(() => {
-  init_answer_latency_trace();
-  OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
-    code = SOURCE_INDEX_LANE_BUSY_CODE;
-    constructor() {
-      super("The store is busy; try again.");
-      this.name = "OffThreadReadBusyError";
-    }
-  };
-  REAL_CLOCK = {
-    now: () => Date.now(),
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (timer) => clearTimeout(timer)
-  };
-  clock2 = REAL_CLOCK;
+`;
   threads = [];
   counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
   startedStores = new Set;
@@ -60745,6 +60763,7 @@ var init_local_index = __esm(() => {
       this.openedFile = fileIdentity(this.dbPath);
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : creatingFile ? "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+        applySqliteMmap(this.db);
         assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
         const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
@@ -117720,6 +117739,7 @@ class LocalFileExtractionJobStore {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
     } else {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;`);
+      applySqliteMmap(this.db);
     }
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
     if (!this.readonly) {
@@ -238892,6 +238912,7 @@ var init_front_state = __esm(() => {
 });
 
 // src/workers/engine-split/rss-restart.ts
+import { readFileSync as readFileSync110 } from "node:fs";
 function engineRssRestartsFrom(read) {
   const value = read?.snapshot.rss_restarts;
   if (!value || !Number.isSafeInteger(value.count) || value.count < 0)
@@ -238904,7 +238925,7 @@ function engineRssRestartsFrom(read) {
 }
 function startEngineRssRestart(input) {
   const now = input.now ?? (() => Date.now());
-  const rss = input.rss ?? (() => process.memoryUsage.rss());
+  const rss = input.rss ?? engineMemoryRss;
   const log = input.log ?? ((line) => console.warn(line));
   let restarts = input.previous;
   let overSince;
@@ -238942,6 +238963,16 @@ function startEngineRssRestart(input) {
     restarts: () => restarts,
     stop: () => (input.clearInterval ?? ((handle) => clearInterval(handle)))(timer)
   };
+}
+function engineMemoryRss() {
+  if (process.platform === "linux") {
+    try {
+      const line = /^RssAnon:\s+(\d+)\s+kB$/m.exec(readFileSync110("/proc/self/status", "utf8"));
+      if (line)
+        return Number(line[1]) * 1024;
+    } catch {}
+  }
+  return process.memoryUsage.rss();
 }
 var ENGINE_RSS_CHECK_INTERVAL_MS = 60000, ENGINE_RSS_RESTART_MAX_WAIT_MS;
 var init_rss_restart = __esm(() => {
@@ -262946,7 +262977,7 @@ var init_handoff = __esm(() => {
 });
 
 // src/workers/chatgpt/setup-backend.ts
-import { readFileSync as readFileSync110 } from "node:fs";
+import { readFileSync as readFileSync111 } from "node:fs";
 import { totalmem as totalmem7 } from "node:os";
 import { createHash as createHash120 } from "node:crypto";
 function privacyRuleView(rule) {
@@ -262981,7 +263012,7 @@ function privacyRevision(profile) {
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
   const privacySettings = () => {
-    const current = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync110(options.sovereignty.path, "utf8"))) : policy;
+    const current = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync111(options.sovereignty.path, "utf8"))) : policy;
     policy = current;
     const policyRevision = createHash120("sha256").update(JSON.stringify(current)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current))
@@ -264451,7 +264482,7 @@ var init_dashboard_panel_tools = __esm(() => {
 });
 
 // src/workers/setup-status.ts
-import { readFileSync as readFileSync111 } from "node:fs";
+import { readFileSync as readFileSync112 } from "node:fs";
 function sourceState(card) {
   if (card.connection.state === "reauth_required")
     return "needs_you";
@@ -264487,7 +264518,7 @@ function currentPolicy(policy) {
   if (!policy.path)
     return policy.config;
   try {
-    return validateSovereigntyConfig(JSON.parse(readFileSync111(policy.path, "utf8")));
+    return validateSovereigntyConfig(JSON.parse(readFileSync112(policy.path, "utf8")));
   } catch {
     return policy.config;
   }
@@ -264685,7 +264716,7 @@ __export(exports_server, {
 });
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile5 } from "node:child_process";
-import { existsSync as existsSync126, readFileSync as readFileSync112 } from "node:fs";
+import { existsSync as existsSync126, readFileSync as readFileSync113 } from "node:fs";
 import { dirname as dirname121, join as join152 } from "node:path";
 async function startWorkerWithLaunch(launch) {
   workerLaunch = { ...launch };
@@ -268004,7 +268035,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return { ok: false, message: "This Olympus has no policy file to change." };
           let current;
           try {
-            current = validateSovereigntyConfig(JSON.parse(readFileSync112(sovereigntyEngine.path, "utf8")));
+            current = validateSovereigntyConfig(JSON.parse(readFileSync113(sovereigntyEngine.path, "utf8")));
           } catch {
             return { ok: false, message: "The privacy policy file cannot be read." };
           }
@@ -270158,7 +270189,7 @@ init_messaging_capture();
 init_config2();
 import { randomBytes as randomBytes41 } from "node:crypto";
 import { spawnSync as spawnSync23 } from "node:child_process";
-import { existsSync as existsSync127, readFileSync as readFileSync113, openSync as openSync37, closeSync as closeSync38, writeSync as writeSync10 } from "node:fs";
+import { existsSync as existsSync127, readFileSync as readFileSync114, openSync as openSync37, closeSync as closeSync38, writeSync as writeSync10 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve33 } from "node:path";
@@ -273805,7 +273836,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync113("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync114("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -274160,7 +274191,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync113(resolve33(input2), "utf8");
+    raw = readFileSync114(resolve33(input2), "utf8");
   } catch (error) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error.message}`);
   }
@@ -275798,7 +275829,7 @@ async function runSettingsPropose(args, env, options) {
     throw new OperationError("invalid_params", SETTINGS_USAGE);
   let text;
   try {
-    text = file === "-" ? (options.readStdin ?? (() => readFileSync113(0, "utf8")))() : readFileSync113(file, "utf8");
+    text = file === "-" ? (options.readStdin ?? (() => readFileSync114(0, "utf8")))() : readFileSync114(file, "utf8");
   } catch (error) {
     throw new OperationError("invalid_params", `Could not read ${file === "-" ? "the proposal from standard input" : file}: ${error instanceof Error ? error.message : String(error)}`);
   }

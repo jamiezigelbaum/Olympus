@@ -1,4 +1,5 @@
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
+import { applySqliteMmap } from '../connector-store/sqlite-mmap.ts';
 import type { OnDemandReadRequest, OnDemandReadResult } from './on-demand-read.ts';
 /**
  * The generic extraction job side database.
@@ -680,6 +681,7 @@ export class LocalFileExtractionJobStore {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
     } else {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;`);
+      applySqliteMmap(this.db);
     }
 
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
