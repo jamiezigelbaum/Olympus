@@ -131,7 +131,9 @@ export function resolveJudgeChoiceRuntime(
 ): TierSnifferRuntime {
   const original = resolveTierSnifferRuntime(input);
   if (original.source === 'off' && original.reason !== 'no_private_lane') return original;
-  const kind = choice.choice === 'tinfoil' ? 'tinfoil' : choice.choice === 'venice' && !choice.stop && (choice.uncapped === true || choice.remainingDollars > 0) ? 'venice' : 'local';
+  // A cloud judge runs only while its spending allows; a stop is reported and falls back to local, never to another cloud.
+  const cloudAllowed = !choice.stop && (choice.uncapped === true || choice.remainingDollars > 0);
+  const kind = (choice.choice === 'tinfoil' || choice.choice === 'venice') && cloudAllowed ? choice.choice : 'local';
   const kept = Object.entries(input.engine.config.modelProfiles)
     .filter(([, profile]) => profile.purpose !== 'classification' || (kind !== 'local' ? profile.provider === kind : profile.trust === 'local'));
   const engine = {

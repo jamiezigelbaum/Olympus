@@ -43,9 +43,11 @@ export function createTinfoilJudgeModel(options: TinfoilTransportOptions): { com
       });
       let chance: number | undefined;
       try {
-        const data = await response.json() as { answers?: Array<{ type?: string; name?: string; probabilities?: Array<{ value?: string; probability?: number }> }> };
-        const answer = data.answers?.find(a => a.type === 'choice' && a.name === 'tier');
-        const probabilities = answer?.probabilities;
+        const data = await response.json() as { answers?: Array<{ type?: string; name?: string; refusal?: unknown; error?: unknown; probabilities?: Array<{ value?: string; probability?: number }> }> };
+        // Exactly one answer, to the one question asked, with no refusal or
+        // error: anything else (duplicates, conflicts, extras) holds Private.
+        const answer = Array.isArray(data.answers) && data.answers.length === 1 ? data.answers[0] : undefined;
+        const probabilities = answer && answer.type === 'choice' && answer.name === 'tier' && answer.refusal == null && answer.error == null ? answer.probabilities : undefined;
         if (probabilities?.length === 2 && probabilities.every(p => typeof p.probability === 'number' && Number.isFinite(p.probability) && p.probability >= 0 && p.probability <= 1)
           && probabilities.filter(p => p.value === 'Private').length === 1 && probabilities.filter(p => p.value === 'Personal').length === 1
           && Math.abs(probabilities.reduce((sum, p) => sum + p.probability!, 0) - 1) < 0.001) chance = probabilities.find(p => p.value === 'Private')!.probability;

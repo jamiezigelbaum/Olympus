@@ -5,7 +5,7 @@ import { afterEach, describe, expect, test, spyOn } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createTinfoilAnalystModel, readTinfoilStatus, tinfoilCacheSecret, TinfoilRefusalError, TinfoilLimitError, TINFOIL_MODELS, TINFOIL_PRICES, type TinfoilTransportOptions } from '../src/core/analyst-tinfoil.ts';
+import { createTinfoilAnalystModel, readTinfoilStatus, normalizedRetryAfter, tinfoilCacheSecret, TinfoilRefusalError, TinfoilLimitError, TINFOIL_MODELS, TINFOIL_PRICES, type TinfoilTransportOptions } from '../src/core/analyst-tinfoil.ts';
 import { createTinfoilJudgeModel, tinfoilDecisionInstructions } from '../src/workers/classification/sniffer-tinfoil.ts';
 import { JudgeSpending, JudgeCloudStopped, judgeArchiveEstimate, DEFAULT_VENICE_JUDGE_MODEL } from '../src/workers/classification/judge-spending.ts';
 import { resolveJudgeChoiceRuntime } from '../src/workers/classification/built-in-sniffer.ts';
@@ -107,7 +107,11 @@ describe('Tinfoil Decision medium production judge', () => {
     expect(snifferTierKey(completion.decisionVerdict!)).toBe(p >= .5 ? 'secure' : 'private');
   });
 
-  test.each([{}, { answers: [{ type: 'choice', name: 'tier', probabilities: [{ value: 'Private', probability: 0.1 }] }] }, { answers: [{ type: 'choice', name: 'tier', probabilities: [{ value: 'Private', probability: -1 }, { value: 'Personal', probability: 2 }] }] }])('malformed response holds Private', async data => {
+  test.each([{}, { answers: [{ type: 'choice', name: 'tier', probabilities: [{ value: 'Private', probability: 0.1 }] }] }, { answers: [{ type: 'choice', name: 'tier', probabilities: [{ value: 'Private', probability: -1 }, { value: 'Personal', probability: 2 }] }] },
+    // Duplicate or conflicting answers, and a refusal beside an answer, are malformed too.
+    { answers: [{ type: 'choice', name: 'tier', probabilities: [{ value: 'Private', probability: .9 }, { value: 'Personal', probability: .1 }] }, { type: 'choice', name: 'tier', probabilities: [{ value: 'Private', probability: .1 }, { value: 'Personal', probability: .9 }] }] },
+    { answers: [{ type: 'choice', name: 'tier', refusal: 'cannot judge', probabilities: [{ value: 'Private', probability: .1 }, { value: 'Personal', probability: .9 }] }] },
+    { answers: [{ type: 'refusal', name: 'tier' }, { type: 'choice', name: 'tier', probabilities: [{ value: 'Private', probability: .1 }, { value: 'Personal', probability: .9 }] }] }])('malformed response holds Private', async data => {
     const { env } = fixture();
     const completion = await createTinfoilJudgeModel(fake({ env, send: async () => Response.json(data) })).complete(request);
     expect(completion.decisionVerdict?.failSafe).toBe(true); expect(snifferTierKey(completion.decisionVerdict!)).toBe('secure');
@@ -132,6 +136,15 @@ describe('Tinfoil Decision medium production judge', () => {
     await expect(model.complete(request)).rejects.toMatchObject({ status: 429, retryAfter: '52' });
     await expect(model.complete(request)).rejects.toBeInstanceOf(TinfoilLimitError); expect(calls).toBe(1); expect(budget.status().spentDollars).toBe(0);
     expect(readTinfoilStatus(env)).toMatchObject({ state: 'limited' }); expect(readTinfoilStatus(env)?.reason).toContain('52');
+  });
+
+  test('a hostile Retry-After is normalized to seconds and never surfaced raw', async () => {
+    const { env } = fixture(); const key = 'synthetic-tinfoil-key';
+    expect(normalizedRetryAfter('52')).toBe('52'); expect(normalizedRetryAfter('9999999')).toBeNull(); expect(normalizedRetryAfter(`Wed, ${key} GMT`)).toBeNull();
+    expect(normalizedRetryAfter(new Date(Date.now() + 30_000).toUTCString())).toMatch(/^(29|30|31)$/);
+    const model = createTinfoilJudgeModel(fake({ env, send: async () => new Response(null, { status: 429, headers: { 'retry-after': `Wed, ${key} GMT` } }) }));
+    const error = await model.complete(request).then(() => new Error("resolved"), (e: Error) => e);
+    expect(String(error.message)).not.toContain(key); expect(JSON.stringify(readTinfoilStatus(env))).not.toContain(key);
   });
 
   test('cap/payment stop is durable and reversible; decision usage is reconciled', async () => {

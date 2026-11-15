@@ -64,6 +64,8 @@ test('fresh local-first install: the saved Venice choice judges held items and r
   const spending = new JudgeSpending(spendingPath);
   expect(spending.hasRecord()).toBe(false);
   expect(resolveJudgeChoiceRuntime(runtimeInput, spending.status()).source).toBe('built_in');
+  // A stopped Tinfoil judge falls back to this computer like a stopped Venice one.
+  expect(resolveJudgeChoiceRuntime(runtimeInput, { choice: 'tinfoil', stop: 'cap', remainingDollars: 0 }).source).toBe('built_in');
   const cap = 1;
   const classificationLedgerPath = join(root, 'classification-ledger.jsonl');
   const setup = createJudgeSetup({

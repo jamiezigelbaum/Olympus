@@ -93,9 +93,8 @@ export function createTinfoilFetch(options: TinfoilTransportOptions): OpenAIAnal
       report({ state: 'refused', reason }); throw new TinfoilRefusalError(reason);
     }
     if ([402, 403, 429].includes(response.status)) {
-      const raw = response.headers.get('retry-after');
-      const retryAfter = raw && /^(?:\d+(?:\.\d+)?|[A-Za-z]{3}, [\w :]+GMT)$/.test(raw) ? raw : null;
-      const until = retryAfter ? (/^\d/.test(retryAfter) ? Date.now() + Number(retryAfter) * 1000 : Date.parse(retryAfter)) : NaN;
+      const retryAfter = normalizedRetryAfter(response.headers.get('retry-after'));
+      const until = retryAfter ? Date.now() + Number(retryAfter) * 1000 : NaN;
       const error = new TinfoilLimitError(response.status, retryAfter);
       report({ state: 'limited', reason: error.safeReason, ...(Number.isFinite(until) ? { retryAt: new Date(until).toISOString() } : {}) });
       // The shared spender/pacer reads status and headers; never expose a body
@@ -131,8 +130,8 @@ export function createTinfoilFetch(options: TinfoilTransportOptions): OpenAIAnal
     // exact provider choice after verification and immediately before dispatch.
     const response = await wrapped(url, { ...init, signal });
     if ([402, 403, 429].includes(response.status)) {
-      const retry = response.headers.get('retry-after');
-      if (retry) blockedUntil = /^\d/.test(retry) ? Date.now() + Number(retry) * 1000 : Date.parse(retry);
+      const retry = normalizedRetryAfter(response.headers.get('retry-after'));
+      if (retry) blockedUntil = Date.now() + Number(retry) * 1000;
       throw new TinfoilLimitError(response.status, retry);
     }
     if (!response.ok) throw new TinfoilRefusalError(`Tinfoil returned HTTP ${response.status}.`);
@@ -157,6 +156,20 @@ export function createTinfoilAnalystModel(options: TinfoilTransportOptions & { m
       throw new TinfoilRefusalError('Tinfoil did not produce a usable answer.');
     }
   } };
+}
+
+/**
+ * Retry-After as whole seconds (0 to one day), or null. Only this normalized
+ * number is ever surfaced: the raw header never reaches a reason, status file
+ * or card, so an upstream echo of a credential cannot leak through it.
+ */
+export function normalizedRetryAfter(raw: string | null): string | null {
+  const value = raw?.trim() ?? '';
+  let seconds = NaN;
+  if (/^\d{1,6}$/.test(value)) seconds = Number(value);
+  else if (/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value)) seconds = Math.ceil((Date.parse(value) - Date.now()) / 1000);
+  if (!Number.isFinite(seconds)) return null;
+  return String(Math.min(86_400, Math.max(0, seconds)));
 }
 
 async function withSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
