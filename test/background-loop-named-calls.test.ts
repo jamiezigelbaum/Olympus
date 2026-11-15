@@ -63,3 +63,18 @@ describe('the background loop on the calls its profile named', () => {
     expect(turns).toBeGreaterThanOrEqual(4);
   }, 60_000);
 });
+
+describe("the status count's whole-store estimates", () => {
+  test('are read on the read thread for a snapshot, and match the same reads on this thread', async () => {
+    const { dir, cleanup } = tempDir();
+    const fixture = openTierFixture(dir, { embed: false });
+    cleanups.push(() => { fixture.close(); cleanup(); });
+    const specs: FixtureSpec[] = Array.from({ length: 40 }, (_, index) => ({ id: `row-${index}`, name: `row-${index}.pdf`, text: `meadow row ${index}` }));
+    await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const store = fixture.stores.internal!;
+    expect(await store.embeddingBacklogEstimateOffThread('gemini-embedding-2')).toEqual(store.embeddingBacklogEstimate('gemini-embedding-2'));
+    expect(await store.pdfExtractionBacklogOffThread()).toEqual(store.pdfExtractionBacklog());
+    expect(await store.authorCoverageOffThread()).toEqual(store.authorCoverage());
+    expect(store.embeddingBacklogEstimate('gemini-embedding-2').missingChunks).toBeGreaterThan(0);
+  }, 60_000);
+});

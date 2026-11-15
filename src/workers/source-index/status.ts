@@ -228,9 +228,12 @@ export interface SourceIndexAuthorCoverage {
   by_provider: Array<{ provider: string; items: number; items_without_author: number }>;
 }
 
-function authorCoverageStatus(store: LocalConnectorStore): SourceIndexAuthorCoverage | undefined {
+function authorCoverageStatus(
+  store: LocalConnectorStore,
+  reused: (read: () => ReturnType<LocalConnectorStore['authorCoverage']>) => ReturnType<LocalConnectorStore['authorCoverage']> = (read) => read(),
+): SourceIndexAuthorCoverage | undefined {
   try {
-    const rows = store.authorCoverage();
+    const rows = reused(() => store.authorCoverage());
     return {
       items: rows.reduce((total, row) => total + row.items, 0),
       items_without_author: rows.reduce((total, row) => total + row.itemsWithoutAuthor, 0),
@@ -499,12 +502,40 @@ export function createSourceIndexStatusHandler(
   // every dashboard status outside that reuse: 15-20% of Sparta's sampled
   // freezes on 14b9be8 (2026-11-05). Reused for the same window.
   const storeReadCache = new Map<string, { recordedAtMs: number; value: unknown }>();
-  const reusedStoreRead = <T>(countsMaxAgeMs: number, key: unknown[], read: () => T): T => {
+  // A read that has an off-thread form is never run on this thread for a
+  // snapshot caller: the older value serves while the read thread recounts,
+  // and a first one is waited for by the status count (`pending`), which
+  // then builds that corpus again. Sparta rc.17, 15 Nov 2026: the embedding
+  // backlog count alone held the background's loop for 3-4 s per status.
+  const storeReadRefreshing = new Map<string, Promise<void>>();
+  const reusedStoreRead = <T>(
+    countsMaxAgeMs: number,
+    key: unknown[],
+    read: () => T,
+    offThread?: { read: () => Promise<T>; empty: T },
+    pending?: Promise<void>[],
+  ): T => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
     if (reuseMs <= 0) return read();
     const cacheKey = JSON.stringify(key);
     const cached = storeReadCache.get(cacheKey);
     if (cached && nowMs() - cached.recordedAtMs <= reuseMs) return cached.value as T;
+    if (offThread && pending) {
+      let running = storeReadRefreshing.get(cacheKey);
+      if (!running) {
+        const remember = (value: T) => {
+          if (storeReadCache.size > 256) storeReadCache.clear();
+          storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
+        };
+        // A read thread that cannot take it (a closed or busy pool) counts here once, as before.
+        running = offThread.read().then(remember, () => { try { remember(read()); } catch { /* the next status tries again */ } })
+          .finally(() => storeReadRefreshing.delete(cacheKey));
+        storeReadRefreshing.set(cacheKey, running);
+      }
+      if (cached) return cached.value as T;
+      pending.push(running);
+      return offThread.empty;
+    }
     const value = read();
     if (storeReadCache.size > 256) storeReadCache.clear();
     storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
@@ -587,7 +618,12 @@ export function createSourceIndexStatusHandler(
       const corpora = currentRegistry()
         .list()
         .filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
+      // Off-thread reads a corpus started and has no value for yet (reusedStoreRead).
+      const pending: Promise<void>[] = [];
+      const reusedRead = <T>(countsMaxAgeMs: number, key: unknown[], read: () => T, offThread?: { read: () => Promise<T>; empty: T }): T =>
+        reusedStoreRead(countsMaxAgeMs, key, read, offThread, pending);
       const statusFor = (declaredCorpus: (typeof corpora)[number]): SourceIndexStatusCorpus => {
+        const pendingBefore = pending.length;
         const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
         const embeddingDisabled = policy !== undefined
           && (!policy.embeddingProfile || policy.activationMode === 'metadata_only' || policy.activationMode === 'lexical_only');
@@ -652,19 +688,23 @@ export function createSourceIndexStatusHandler(
           if (unreadable !== undefined) status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;
         }
         if (status.configured && store && PEOPLE_AUTHORED_FAMILIES.has(corpus.family)) {
-          const coverage = authorCoverageStatus(store);
+          const coverage = authorCoverageStatus(store, (read) => reusedRead(snapshot.countsMaxAgeMs ?? 0, ['authors', store.corpusId], read,
+            typeof store.authorCoverageOffThread === 'function' ? { read: () => store.authorCoverageOffThread(), empty: [] } : undefined));
           if (coverage) status.author_coverage = coverage;
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId
-          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0, reusedStoreRead)
+          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0, reusedRead)
           : enforced;
         const resolved = store && corpus.family === 'file'
           ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true
             ? availability?.modelId
-            : undefined, (read) => reusedStoreRead(snapshot.countsMaxAgeMs ?? 0, ['pdf', store.corpusId], read))
+            : undefined, (read) => reusedRead(snapshot.countsMaxAgeMs ?? 0, ['pdf', store.corpusId], read,
+              typeof store.pdfExtractionBacklogOffThread === 'function'
+                ? { read: () => store.pdfExtractionBacklogOffThread(), empty: { pendingPdfs: 0, extractedPdfs: 0, extractedChars: 0 } } : undefined))
           : withBacklog;
-        if (maxAgeMs > 0) cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
+        // Not kept while an off-thread read it shows a stand-in for is still running.
+        if (maxAgeMs > 0 && pending.length === pendingBefore) cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
       };
       // Each corpus's counts are synchronous SQLite reads over its whole store;
@@ -688,7 +728,14 @@ export function createSourceIndexStatusHandler(
             if (typeof store.statusOffThread === 'function') await refreshStoreStatusOffThread(store, statusScope, countsMaxAgeMs);
           }
         }
-        statuses.push(statusFor(declaredCorpus));
+        let shown = statusFor(declaredCorpus);
+        if (pending.length > 0) {
+          // A first off-thread count for this corpus: wait for it on the read thread, then build the corpus with it.
+          await Promise.allSettled(pending.splice(0));
+          shown = statusFor(declaredCorpus);
+          pending.splice(0);
+        }
+        statuses.push(shown);
       }
       const tierClassification = options.tierClassification?.();
       let tierMigration: SourceIndexTierMigrationStatus | undefined;
@@ -1039,7 +1086,7 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
   availability: SourceIndexHybridAvailability,
   scope: ConnectorStoreStatusScope | undefined,
   countsMaxAgeMs: number,
-  reused: <R>(countsMaxAgeMs: number, key: unknown[], read: () => R) => R = (_age, _key, read) => read(),
+  reused: <R>(countsMaxAgeMs: number, key: unknown[], read: () => R, offThread?: { read: () => Promise<R>; empty: R }) => R = (_age, _key, read) => read(),
 ): T {
   const parity = status.embedding_parity;
   if (!parity?.required) return status;
@@ -1050,7 +1097,10 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
     : undefined;
   // The same scoped population as the parity counts above (store.status(scope)).
   const backlog = reused(countsMaxAgeMs, ['embedding-backlog', store.corpusId, modelId, embedder ?? null, scope ?? null],
-    () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }));
+    () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }),
+    typeof store.embeddingBacklogEstimateOffThread === 'function'
+      ? { read: () => store.embeddingBacklogEstimateOffThread(modelId, embedder, scope, { countsMaxAgeMs }), empty: { missingChunks: 0, estimatedTokens: 0 } }
+      : undefined);
   const withheld = embedder
     ? reused(countsMaxAgeMs, ['private-withheld', store.corpusId, embedder, scope ?? null],
       () => store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs }))
@@ -1087,7 +1137,7 @@ function withPdfExtractionBacklog<T extends SourceIndexStatusCorpus>(
   status: T,
   store: LocalConnectorStore,
   modelId: string | undefined,
-  reused: <R>(read: () => R) => R = (read) => read(),
+  reused: (read: () => ReturnType<LocalConnectorStore['pdfExtractionBacklog']>) => ReturnType<LocalConnectorStore['pdfExtractionBacklog']> = (read) => read(),
 ): T {
   const backlog = reused(() => store.pdfExtractionBacklog());
   if (backlog.pendingPdfs === 0 && backlog.extractedPdfs === 0) return status;
