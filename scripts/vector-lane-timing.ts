@@ -186,7 +186,10 @@ async function measure(dir: string, scenario: string, trials: number, contend: R
     }
     const filters: ConnectorStoreSearchFilters | undefined = scenario === 'scope' || scenario === 'both' ? { locatorPathScope: '/allowed' } : undefined;
     const embedder = provider(shape.count, shape.dimension);
-    const results: Array<{ ms: number; rows: number; skippedReason?: string; servable: boolean }> = [];
+    const results: Array<{ ms: number; rows: number; skippedReason?: string; servable: boolean; ids: string }> = [];
+    // The process's resident memory, sampled through the run: the read pool's workers are threads of this process.
+    let rssPeak = process.memoryUsage().rss;
+    const rssTimer = setInterval(() => { rssPeak = Math.max(rssPeak, process.memoryUsage().rss); }, 100);
     const writer = contend.has('writer')
       ? Bun.spawn(['bun', import.meta.path, 'write', '--dir', dir, '--interval', '300'], { stdout: 'pipe', stderr: 'inherit' })
       : undefined;
@@ -213,9 +216,13 @@ async function measure(dir: string, scenario: string, trials: number, contend: R
         const i = Number(row.sourceItem.providerItemId);
         return (!filters || inScope(i)) && (scenario === 'held' || scenario === 'both' ? !held(i) : true);
       });
-      results.push({ ms, rows: result.rows.length, ...(result.skippedReason ? { skippedReason: result.skippedReason } : {}), servable });
+      // Which items, in rank order, so two heads can be compared row for row.
+      const ids = result.rows.map((row) => row.sourceItem.providerItemId).join(' ');
+      results.push({ ms, rows: result.rows.length, ...(result.skippedReason ? { skippedReason: result.skippedReason } : {}), servable, ids });
     }
     measuring = false;
+    clearInterval(rssTimer);
+    rssPeak = Math.max(rssPeak, process.memoryUsage().rss);
     await keywordLoop;
     let commits: number | undefined;
     if (writer) {
@@ -230,7 +237,7 @@ async function measure(dir: string, scenario: string, trials: number, contend: R
       ...(writer ? { writer: { commits: commits ?? null, intervalMs: 300 } } : {}),
     };
     const pass = results.every((r) => r.ms < PASS_MS && !r.skippedReason && r.rows > 0 && r.servable);
-    console.log(JSON.stringify({ phase: 'measure', scenario, contend: [...contend].join(',') || 'none', ...load, chunks: shape.count, dimension: shape.dimension, bytes: statSync(join(dir, 'store.sqlite')).size, digest: process.env.OLYMPUS_VECTOR_DIGEST ?? 'default', pass, trials: results }));
+    console.log(JSON.stringify({ phase: 'measure', scenario, contend: [...contend].join(',') || 'none', ...load, rssPeakMb: Math.round(rssPeak / 1024 / 1024), chunks: shape.count, dimension: shape.dimension, bytes: statSync(join(dir, 'store.sqlite')).size, digest: process.env.OLYMPUS_VECTOR_DIGEST ?? 'default', pass, trials: results }));
   } finally { store.close(); }
 }
 
