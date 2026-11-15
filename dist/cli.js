@@ -130288,6 +130288,7 @@ function createSourceIndexStatusHandler(options = {}) {
   const staticRegistry = typeof options.corpusDefinitions === "function" ? undefined : buildSourceIndexCorpusRegistry(options.corpusDefinitions ?? defaultCorpusDefinitions());
   const currentRegistry = () => staticRegistry ?? buildSourceIndexCorpusRegistry(options.corpusDefinitions());
   const cache = new Map;
+  const servedStaleAfterPoolFailure = new Set;
   const storeStatusCache = new Map;
   const unchangedMarker = (store) => {
     try {
@@ -130326,6 +130327,8 @@ function createSourceIndexStatusHandler(options = {}) {
     const cached = storeStatusCache.get(key);
     if (cached && storeStatusFresh(store, statusScope, countsMaxAgeMs))
       return cached.status;
+    if (cached && servedStaleAfterPoolFailure.delete(key))
+      return cached.status;
     const marker = visibilityMarker(store);
     const unchanged = unchangedMarker(store);
     const status = store.status(statusScope, { countsMaxAgeMs });
@@ -130344,7 +130347,10 @@ function createSourceIndexStatusHandler(options = {}) {
         const unchanged = unchangedMarker(store);
         const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
         storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, unchanged, status });
-      } catch {} finally {
+      } catch {
+        if (storeStatusCache.has(key))
+          servedStaleAfterPoolFailure.add(key);
+      } finally {
         storeStatusRefreshing.delete(key);
       }
     })();
@@ -130373,9 +130379,7 @@ function createSourceIndexStatusHandler(options = {}) {
           storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value, unchanged });
         };
         running = offThread.read().then(remember, () => {
-          try {
-            remember(read());
-          } catch {}
+          return;
         }).finally(() => storeReadRefreshing.delete(cacheKey));
         storeReadRefreshing.set(cacheKey, running);
       }

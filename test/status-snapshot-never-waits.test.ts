@@ -117,6 +117,36 @@ describe('status snapshot for the dashboard', () => {
   });
 });
 
+describe('a busy read pool', () => {
+  test('keeps the last counts and estimates, and never counts on the loop instead', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let now = 1_000_000;
+    try {
+      await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
+      const handler = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now });
+      const first = await handler.status({ include_items: false }, SNAPSHOT);
+      await handler.settled!();
+      // From here the pool refuses every read, and the store has been written to.
+      let onLoop = 0;
+      const status = store.status.bind(store);
+      store.status = ((...args: Parameters<typeof store.status>) => { onLoop += 1; return status(...args); }) as typeof store.status;
+      store.statusOffThread = async () => { throw new Error('pool busy'); };
+      store.pdfExtractionBacklogOffThread = async () => { throw new Error('pool busy'); };
+      const pdf = store.pdfExtractionBacklog.bind(store);
+      store.pdfExtractionBacklog = () => { onLoop += 1; return pdf(); };
+      let writes = 1_000_000_000;
+      store.writeSequence = () => writes++;
+      now += STORE_STATUS_REUSE_MS + 1;
+      await handler.status({ include_items: false }, SNAPSHOT);
+      await handler.settled!();
+      const shown = await handler.status({ include_items: false }, SNAPSHOT);
+      await handler.settled!();
+      expect(onLoop).toBe(0);
+      expect(shown.corpora).toEqual(first.corpora);
+    } finally { store.close(); }
+  });
+});
+
 describe('live totals beside kept counts', () => {
   test("the front's dashboard shows a write in the totals at once, while the counts keep their age", async () => {
     const dir = mkdtempSync(join(tmpdir(), 'status-totals-'));

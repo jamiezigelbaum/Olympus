@@ -463,6 +463,7 @@ export function createSourceIndexStatusHandler(
   // the scheduler's status publish) for up to STORE_STATUS_REUSE_MS: each read is a
   // synchronous pass over the whole store, and the two callers' separate
   // reads were most of the worker's freezes (Sparta CPU samples, 2026-11-05).
+  const servedStaleAfterPoolFailure = new Set<string>();
   const storeStatusCache = new Map<string, { recordedAtMs: number; marker: string | undefined; unchanged?: string | undefined; status: ConnectorStoreStatus }>();
   // A store nothing has written to (and whose copies' visibility has not
   // moved) since its last count is not counted again, up to
@@ -505,6 +506,7 @@ export function createSourceIndexStatusHandler(
     const key = storeStatusKey(store, statusScope);
     const cached = storeStatusCache.get(key);
     if (cached && storeStatusFresh(store, statusScope, countsMaxAgeMs)) return cached.status;
+    if (cached && servedStaleAfterPoolFailure.delete(key)) return cached.status;
     const marker = visibilityMarker(store);
     const unchanged = unchangedMarker(store);
     const status = store.status(statusScope, { countsMaxAgeMs });
@@ -529,7 +531,10 @@ export function createSourceIndexStatusHandler(
         const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
         storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, unchanged, status });
       } catch {
-        // Read on this thread by statusFor, as before.
+        // A pool that cannot take it: the last counts serve, and the next
+        // recount tries the pool again. Only a store never counted is counted
+        // on this thread by statusFor.
+        if (storeStatusCache.has(key)) servedStaleAfterPoolFailure.add(key);
       } finally {
         storeStatusRefreshing.delete(key);
       }
@@ -571,8 +576,10 @@ export function createSourceIndexStatusHandler(
           if (storeReadCache.size > 256) storeReadCache.clear();
           storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value, unchanged });
         };
-        // A read thread that cannot take it (a closed or busy pool) counts here once, as before.
-        running = offThread.read().then(remember, () => { try { remember(read()); } catch { /* the next status tries again */ } })
+        // A read thread that cannot take it (a closed or busy pool) is tried
+        // again by the next status; its last value serves meanwhile. Never
+        // read on this thread instead: it is the loop (step-back, 15 Nov 2026).
+        running = offThread.read().then(remember, () => undefined)
           .finally(() => storeReadRefreshing.delete(cacheKey));
         storeReadRefreshing.set(cacheKey, running);
       }
