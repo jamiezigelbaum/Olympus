@@ -117,11 +117,12 @@ export class JudgeRateLimitPacer {
       if (response.status === 429) {
         const now = this.clock.now();
         const reset = header(response, 'x-ratelimit-reset-requests');
-        const retryAfter = header(response, 'retry-after');
+        const rawRetry = response.headers.get('retry-after');
+        const retryAfter = header(response, 'retry-after') ?? (rawRetry && Number.isFinite(Date.parse(rawRetry)) ? Math.max(0, (Date.parse(rawRetry) - now) / 1000) : undefined);
         const until = reset !== undefined && reset > now ? reset
           : retryAfter !== undefined ? now + retryAfter * 1_000 : undefined;
         if (call) { call.limited = true; if (until !== undefined) call.retryAt = until; }
-        if (until !== undefined) this.blockedUntil = Math.max(this.blockedUntil, Math.min(until, now + MAX_WAIT_MS));
+        if (until !== undefined) this.blockedUntil = Math.max(this.blockedUntil, until);
         this.remaining = 0;
       }
       return response;

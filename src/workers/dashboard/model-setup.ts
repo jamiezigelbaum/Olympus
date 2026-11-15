@@ -124,8 +124,9 @@ function firstRunJudgeForm(options: ModelSetupOptions): string {
   return '<form id="first-run-judge-form" method="post" action="/dashboard/models/judge" data-judge-choice data-first-run-judge>'
     + `<label class="modelcard"><input type="radio" name="choice" value="local"${slow ? '' : ' checked'}> <b>This computer</b><p>Free. ${escapeHtml(localTime)}</p></label>`
     + `<label class="modelcard"><input type="radio" name="choice" value="venice"${slow ? ' checked' : ''}> <b>Venice${slow ? ' — Recommended' : ''}</b><p>${escapeHtml(judgeDuration(estimate.cloudHours))} and ${escapeHtml(judgeMoney(estimate.cloudDollars).toLowerCase())} for ${count} items, charged to your Venice account.</p></label>`
+    + `<label class="modelcard"><input type="radio" name="choice" value="tinfoil"> <b>Tinfoil Decision medium</b><p>Experimental at Tinfoil. 89% agreement with the owner's labels in our tests, 15 Nov 2026. Attested encrypted requests. About $0.05 per 1,000 items (800 input tokens each), charged to your Tinfoil account. Add your Tinfoil key in Keys.</p></label>`
     + '<p>Choosing Venice lets it read every item, including Private items, to check privacy. End-to-end encryption is not available yet.</p>'
-    + `<label>Total Venice spending limit in dollars<input class="keyfield" type="number" name="cap_dollars" min="0" step="0.01" value="${judgeDefaultCapDollars(estimate.cloudDollars)}"></label>`
+    + `<label>Total cloud judge spending limit in dollars<input class="keyfield" type="number" name="cap_dollars" min="0" step="0.01" value="${judgeDefaultCapDollars(estimate.cloudDollars)}"></label>`
     + '<p>Olympus stops sending privacy checks to Venice at this limit. You can change your choice and limit later in Privacy settings.</p>'
     + '<span data-action-message role="status"></span></form>';
 }
@@ -232,7 +233,7 @@ function modelKeyAction(card: ModelSetupCard, lead: string): string {
     return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, shortcut: VENICE_SETUP_SHORTCUT, finalForm: (formId) => modelKeyForm(card, formId) });
   }
   if (card.id === 'gemini') return `<div class="modelaction">${lead}<span class="modelnote">Existing Gemini installations only. New embedding setup uses built-in local EmbeddingGemma or Venice. See the embedding migration guide above.</span></div>`;
-  const href = 'https://venice.ai';
+  const href = card.id === 'tinfoil' ? 'https://tinfoil.sh' : 'https://venice.ai';
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
 }
 

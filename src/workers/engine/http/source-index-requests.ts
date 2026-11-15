@@ -361,15 +361,15 @@ export function asOptionalRetrievalMode(value: unknown): 'keyword' | 'hybrid' | 
   throw new EmailSourceWorkerError(400, 'invalid_request', 'retrieval_mode must be keyword or hybrid.');
 }
 
-function asOptionalSourceAnswerAnalystProvider(value: unknown): 'default' | 'local' | 'venice' | 'cloud' | undefined {
+function asOptionalSourceAnswerAnalystProvider(value: unknown): 'default' | 'local' | 'venice' | 'tinfoil' | 'cloud' | undefined {
   if (value === undefined || value === null || value === '') return undefined;
-  if (value === 'default' || value === 'local' || value === 'venice' || value === 'cloud') return value;
-  throw new EmailSourceWorkerError(400, 'invalid_request', 'analyst_provider must be default, local, venice, or cloud.');
+  if (value === 'default' || value === 'local' || value === 'venice' || value === 'tinfoil' || value === 'cloud') return value;
+  throw new EmailSourceWorkerError(400, 'invalid_request', 'analyst_provider must be default, local, venice, tinfoil, or cloud.');
 }
 
 function asOptionalAnalystModel(
   value: unknown,
-  analystProvider?: 'default' | 'local' | 'venice' | 'cloud',
+  analystProvider?: 'default' | 'local' | 'venice' | 'tinfoil' | 'cloud',
 ): string | undefined {
   const model = asOptionalString(value)?.trim();
   if (model === undefined) return undefined;

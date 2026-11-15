@@ -274,7 +274,7 @@ export interface EmailSourceWorkerOptions {
     savePrivateAnswerMode?: (choice: SovereigntyPresetName) => { ok: true; message?: string } | { ok: false; message: string };
     /** Hold the reloads the writers request until a whole settings proposal is saved. */
     deferReloads?: <T>(writes: () => Promise<T>) => Promise<T>;
-    connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
+    connectModelKey?: (source: 'gemini' | 'venice' | 'tinfoil', apiKey: string) => Promise<void>;
     /**
      * Outside help (consults): the Mac dashboard card's backend
      * (dashboard-consult.ts), the one caller of the settings writer. Absent:
@@ -477,11 +477,11 @@ export function settingsProposalHolderFor(dashboard: NonNullable<EmailSourceWork
     ...(saveComputerUse ? { saveComputerUse: (choice: 'everyday' | 'server') => ({ ok: true as const, message: saveComputerUse(choice).status_message }) } : {}),
     ...(judge ? {
       judge: judge.status,
-      saveJudge: async (choice: 'local' | 'venice', cap: number) => ({ ok: true as const, message: (await judge.save(choice, cap)).status_message }),
+      saveJudge: async (choice: JudgeChoice, cap: number) => ({ ok: true as const, message: (await judge.save(choice, cap)).status_message }),
     } : {}),
     ...(models ? {
       modelChoices: () => models.status(),
-      saveModel: async (provider: 'local' | 'venice' | 'zkapi', value: string) => {
+      saveModel: async (provider: 'local' | 'venice' | 'tinfoil' | 'zkapi', value: string) => {
         const saved = await models.save(provider, value);
         return saved.ok ? { ok: true as const, message: saved.status_message } : { ok: false as const, message: saved.message };
       },

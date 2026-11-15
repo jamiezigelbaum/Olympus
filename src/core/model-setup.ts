@@ -9,7 +9,7 @@ import type {
 import { canonicalEmbeddingDimension } from '../workers/source-index/embedding-identity.ts';
 
 export interface ModelSetupCard {
-  id: 'gemini' | 'venice' | 'local';
+  id: 'gemini' | 'venice' | 'tinfoil' | 'local';
   label: string;
   required: boolean;
   state: 'not_configured' | 'applying' | 'needs_attention' | 'ready';
@@ -81,6 +81,7 @@ const CARD_COPY: Record<ModelSetupCard['id'], {
     applying: 'Applying the Gemini key.',
     ready: 'The Gemini key is connected.',
   },
+  tinfoil: { label: 'Tinfoil', missing: 'Add your Tinfoil key. Content is sent only after you choose Tinfoil and attestation verifies.', applying: 'Applying the Tinfoil key.', ready: 'The Tinfoil key is connected.' },
   venice: {
     label: 'Venice',
     missing: 'Venice handles Private data according to your privacy choice. Add its API key to continue.',
@@ -215,12 +216,14 @@ export class ModelSetupService {
     const local = required.filter(({ profile }) => profile.provider === 'local-openai-compatible');
     if (local.length > 0) cards.push(this.localCard(local));
 
-    const additional = required.filter(({ profile }) => !['google-gemini', 'venice', 'local-openai-compatible', 'openclaw-infer'].includes(profile.provider));
+    const tinfoil = required.filter(({ profile }) => profile.provider === 'tinfoil');
+    if (tinfoil.length) cards.push(this.credentialCard('tinfoil', tinfoil));
+    const additional = required.filter(({ profile }) => !['google-gemini', 'venice', 'tinfoil', 'local-openai-compatible', 'openclaw-infer'].includes(profile.provider));
     const additionalReady = this.aggregateCredentialState(additional) === 'ready';
     return {
       ready: !isPendingPrivacyPolicy(this.config) && additionalReady && cards.every((card) => !card.required || card.state === 'ready'),
       ...(isPendingPrivacyPolicy(this.config) ? { privacy_choice_pending: true } : {}),
-      ...(!additionalReady ? { attention: 'An additional model provider in your policy needs agent-assisted setup. These key forms manage Venice and existing legacy Gemini credentials only.' } : {}),
+      ...(!additionalReady ? { attention: 'An additional model provider in your policy needs agent-assisted setup. These key forms manage Venice, Tinfoil and existing legacy Gemini credentials.' } : {}),
       ...(legacyEmbeddings ? { migration_notes: ['Your saved policy uses a legacy embedding provider. Existing settings and vectors are preserved. New setup offers built-in local EmbeddingGemma or Venice only. To migrate, follow docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration; changing models requires explicit approval and a planned re-embed. Nothing is migrated automatically.'] } : {}),
       checked_at: this.now().toISOString(),
       cards,
@@ -264,7 +267,7 @@ export class ModelSetupService {
     return check;
   }
 
-  private credentialCard(id: 'gemini' | 'venice', profiles: RequiredProfile[]): ModelSetupCard {
+  private credentialCard(id: 'gemini' | 'venice' | 'tinfoil', profiles: RequiredProfile[]): ModelSetupCard {
     const state = this.aggregateCredentialState(profiles);
     const copy = CARD_COPY[id];
     return {

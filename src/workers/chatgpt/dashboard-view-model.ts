@@ -117,7 +117,7 @@ import {
 } from './dashboard-contract.ts';
 
 /** Static, product-owned labels for answer models. Never the card's own text. */
-const ANSWER_MODEL_LABELS = { venice: 'Venice', local: 'Local models', built_in: 'Built-in' } as const;
+const ANSWER_MODEL_LABELS = { tinfoil: 'Tinfoil', venice: 'Venice', local: 'Local models', built_in: 'Built-in' } as const;
 
 /**
  * A source mid-sign-in, in ChatGPT's words. The engine's own line for this
@@ -207,7 +207,7 @@ export interface ChatGptDashboardOptions {
     /** The privacy check waits for the owner to approve its model (sniffer-service `awaiting_owner_approval`). */
     classifierAwaitingApproval?: boolean;
     /** What waits: its lane and model name (sniffer-service backlog `awaitingApproval`), no item content. */
-    classifierWaiting?: { lane: 'local' | 'venice'; modelId: string };
+    classifierWaiting?: { lane: 'local' | 'venice' | 'tinfoil'; modelId: string };
     /** The computer's own unlocked dashboard, which may approve a local model in place (dashboard-panel-tools.ts). */
     approveHere?: boolean;
     /**
@@ -1312,6 +1312,8 @@ function builtInInstall(model: BuiltInPrivateModelView): ModelInstall {
 
 function answersFromModelSetup(setup: ModelSetupView | undefined): DashboardViewModelV1['models']['answers'] {
   if (!setup) return undefined;
+  const tinfoil = setup.cards.find(card => card.id === 'tinfoil' && card.required);
+  if (tinfoil) return { kind: 'tinfoil', label: 'Tinfoil', ready: tinfoil.state === 'ready' };
   const venice = setup.cards.find((card) => card.id === 'venice' && card.required);
   if (venice) return { kind: 'venice', label: ANSWER_MODEL_LABELS.venice, ready: venice.state === 'ready' };
   const local = setup.cards.find((card) => card.id === 'local' && card.required);

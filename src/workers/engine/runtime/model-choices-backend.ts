@@ -1,3 +1,5 @@
+import { TINFOIL_MODELS } from '../../../core/analyst-tinfoil.ts';
+import { answerProfile } from '../../chatgpt/model-choice.ts';
 /**
  * The backend for the model pickers on Privacy rules (owner, 2026-11-07,
  * mockups final-4 and final-5): what each picker lists, and saving a pick.
@@ -148,7 +150,7 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
     async status() {
       const [venice, local] = await Promise.all([veniceList(), localList()]);
       const zkapi = zkapiList();
-      return { ...(local ? { local } : {}), ...(venice ? { venice } : {}), ...(zkapi ? { zkapi } : {}) };
+      return { ...(local ? { local } : {}), ...(venice ? { venice } : {}), tinfoil: { provider: 'tinfoil' as const, current: profileModel('tinfoil-private') ?? '', options: TINFOIL_MODELS.map(value => ({ value, label: value, note: 'Attested encrypted requests · bring your own key' })) }, ...(zkapi ? { zkapi } : {}) };
     },
 
     async save(provider, value) {
@@ -169,6 +171,14 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
         if (options.builtInSize() === size) return { ok: true, status_message: 'That model is already in use.' };
         writeModelChoices(options.policyPath, { builtIn: size });
         return applied(`Saved. Olympus is getting ${sizeName(size)} ready; it answers once it has downloaded and checked it.`);
+      }
+      if (provider === 'tinfoil') {
+        if (!(TINFOIL_MODELS as readonly string[]).includes(value)) return { ok: false, message: 'Choose one of the listed Tinfoil models.' };
+        const saved = updateSovereigntyConfigFile({ path: options.policyPath, expect: options.config(), patch: current => {
+          if (current.routes.secure_local?.mode === 'disabled') throw new Error('Enable Private answers before choosing Tinfoil.');
+          return { ...current, modelProfiles: { ...current.modelProfiles, 'tinfoil-private': { ...answerProfile('tinfoil'), model: value } }, routes: { ...current.routes, secure_local: { pool: { members: ['tinfoil-private'], order: ['tinfoil-private'] } } } };
+        } });
+        return saved.ok ? applied(`Saved. Private answers use Tinfoil ${value} after attestation verifies. Add your Tinfoil key in Keys.`) : { ok: false, message: 'The policy changed. Refresh and try again.' };
       }
       if (provider === 'venice') {
         if (!profileModel(VENICE_PROFILE_ID)) return { ok: false, message: 'Connect Venice first.' };

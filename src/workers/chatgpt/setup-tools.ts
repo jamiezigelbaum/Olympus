@@ -142,7 +142,7 @@ export interface ChatGptSetupBackend {
    */
   syncSource(sourceId: ChatGptSyncSourceId): Promise<SyncSourceResult['status']>;
   /** Switches between configured models; throws ModelChoiceRefusal for one that is not set up. */
-  setModels(choice: ChatGptModelChoice): Promise<{ changed: boolean; embedding: 'built_in' | 'custom'; answers?: 'local' | 'venice'; restarting: boolean }>;
+  setModels(choice: ChatGptModelChoice): Promise<{ changed: boolean; embedding: 'built_in' | 'custom'; answers?: 'local' | 'venice' | 'tinfoil'; restarting: boolean }>;
   /**
    * Starts a built-in model's install again (resuming a partial download);
    * answers at once. False when that model is not the built-in one here.
@@ -321,7 +321,7 @@ export const MODEL_SET_TOOL: ToolDefinition = {
     type: 'object',
     properties: {
       embedding: { type: 'string', enum: ['built_in'] },
-      answers: { type: 'string', enum: ['local', 'venice'] },
+      answers: { type: 'string', enum: ['local', 'venice', 'tinfoil'] },
     },
     additionalProperties: false,
   },
@@ -505,7 +505,7 @@ export async function callSetupTool(
       case MODEL_SET_TOOL_NAME: {
         const choice: ChatGptModelChoice = {};
         if (args.embedding !== undefined) choice.embedding = oneOf(args.embedding, ['built_in'] as const);
-        if (args.answers !== undefined) choice.answers = oneOf(args.answers, ['local', 'venice'] as const);
+        if (args.answers !== undefined) choice.answers = oneOf(args.answers, ['local', 'venice', 'tinfoil'] as const);
         const result = await backend.setModels(choice);
         return modelSetToolResult({
           status: result.changed ? 'applied' : 'unchanged',

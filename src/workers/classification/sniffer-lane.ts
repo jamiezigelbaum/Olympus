@@ -42,7 +42,7 @@ export class SnifferLaneRefusedError extends OperationError {
       reason === 'standard_cloud'
         ? `The privacy sniffer refuses model profile "${profileId}": it is a standard cloud model.`
         : reason === 'unsupported_provider'
-          ? `The privacy sniffer refuses model profile "${profileId}": only a local model or Venice Private may read possibly-private names.`
+          ? `The privacy sniffer refuses model profile "${profileId}": only a local model, Venice Private or attested Tinfoil Decision medium may read possibly-private names.`
           : reason === 'outside_private_policy'
             ? `The privacy sniffer refuses model profile "${profileId}": the secure_local route does not approve that kind of model for Private data.`
             : 'No private model lane is configured for the privacy sniffer.',
@@ -61,6 +61,7 @@ export interface SnifferLane extends SnifferLaneIdentity {
 
 /** Known before synchronous classification is installed; auto must probe first. */
 export function initialSnifferMode(profile: SovereigntyModelProfile): 'pending' | 'decision' | 'full' {
+  if (profile.provider === 'tinfoil') return 'decision';
   if (profile.provider !== 'local-openai-compatible') return 'full';
   return profile.snifferMode === 'decision' ? 'decision' : profile.snifferMode === 'full' ? 'full' : 'pending';
 }
@@ -90,6 +91,7 @@ export function assertSnifferProfileAllowed(profileId: string, profile: Sovereig
   // computer, reached only through its own fixed identity.
   if (profile.provider === 'built-in' && profile.trust === 'local' && profileId === 'built_in'
     && profile.purpose === 'classification') return 'local';
+  if (profile.provider === 'tinfoil' && profile.trust === 'encrypted_cloud' && profile.model === 'decision-medium') return 'tinfoil';
   if (profile.provider === 'venice' && profile.trust === 'encrypted_cloud') {
     assertSecureAnalystPoolModelIdAllowed(profileId, profile.model);
     return 'venice';
@@ -121,7 +123,7 @@ export function resolveSnifferLane(
   const poolKinds = new Set<SnifferLaneKind>();
   for (const member of pool) {
     try {
-      poolKinds.add(assertSnifferProfileAllowed(member.id, member.profile));
+      poolKinds.add(assertSnifferProfileAllowed(member.id, judgeProfile(member.profile)));
     } catch {
       // A member the sniffer may not use contributes no kind.
     }
@@ -145,7 +147,10 @@ export function resolveSnifferLane(
 function pickLane(candidates: readonly SovereigntyResolvedProfile[]): SnifferLane {
   const allowed: SnifferLane[] = [];
   let firstRefusal: SnifferLaneRefusedError | undefined;
-  for (const candidate of candidates) {
+  for (const entry of candidates) {
+    // Answer models never become Tinfoil chat judges: derive Decision medium
+    // in this resolver's view, retaining the owner's provider/key identity.
+    const candidate = { ...entry, profile: judgeProfile(entry.profile) };
     try {
       const kind = assertSnifferProfileAllowed(candidate.id, candidate.profile);
       const modelId = 'model' in candidate.profile && candidate.profile.model ? candidate.profile.model : candidate.id;
@@ -163,4 +168,10 @@ function pickLane(candidates: readonly SovereigntyResolvedProfile[]): SnifferLan
   const lane = allowed.find((candidate) => candidate.kind === 'local') ?? allowed[0];
   if (lane) return lane;
   throw firstRefusal ?? new SnifferLaneRefusedError('no_private_lane');
+}
+
+/** A Tinfoil answer profile lends credentials, never chat weights, to judging. */
+function judgeProfile(profile: SovereigntyModelProfile): SovereigntyModelProfile {
+  return profile.provider === 'tinfoil' && profile.purpose !== 'classification'
+    ? { ...profile, model: 'decision-medium', purpose: 'classification' } : profile;
 }

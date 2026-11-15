@@ -34,9 +34,9 @@ export interface SettingsProposalTargets {
   computerSetup?: () => { computer_use_pending?: boolean | undefined; engine_server_mode?: { enabled: boolean; pending: boolean } | undefined };
   saveComputerUse?: (choice: 'everyday' | 'server') => Saved;
   judge?: () => DashboardJudgeSetup;
-  saveJudge?: (choice: 'local' | 'venice', capDollars: number) => Promise<Saved>;
+  saveJudge?: (choice: 'local' | 'venice' | 'tinfoil', capDollars: number) => Promise<Saved>;
   modelChoices?: () => Promise<DashboardModelChoices>;
-  saveModel?: (provider: 'local' | 'venice' | 'zkapi', value: string) => Promise<Saved>;
+  saveModel?: (provider: 'local' | 'venice' | 'tinfoil' | 'zkapi', value: string) => Promise<Saved>;
   /** Hold the restarts the writers ask for until every write is done, so a restart cannot cut the batch short. */
   deferReloads?: <T>(writes: () => Promise<T>) => Promise<T>;
 }
@@ -46,7 +46,7 @@ export interface SettingsProposalApplyResult {
   rows: Array<SettingsProposalRow & { applied: boolean; message?: string }>;
 }
 
-const MODEL_LABELS: Record<string, string> = { local: 'Local model', venice: 'Venice model', zkapi: 'zkAPI model' };
+const MODEL_LABELS: Record<string, string> = { local: 'Local model', venice: 'Venice model', tinfoil: 'Tinfoil model', zkapi: 'zkAPI model' };
 
 function modeLabel(id: string): string {
   return (PRIVACY_PRESET_LABELS as Record<string, string>)[id] ?? id;
@@ -56,7 +56,7 @@ function judgeLabel(choice: JudgeChoice, cap: number | null): string {
   if (choice === 'local') return 'Local (free)';
   const limit = cap === null ? 'no spending limit' : `up to $${cap}`;
   if (choice === 'local-then-venice') return `This computer, then Venice double-checks, ${limit}`;
-  return `Venice, ${limit}`;
+  return `${choice === 'tinfoil' ? 'Tinfoil Decision medium' : 'Venice'}, ${limit}`;
 }
 
 export function createSettingsProposalHolder(targets: SettingsProposalTargets, now: () => Date = () => new Date()) {
@@ -99,6 +99,7 @@ export function createSettingsProposalHolder(targets: SettingsProposalTargets, n
       if (input.privacy_judge.choice === 'venice' && !judge.cloudAvailable) {
         throw new SettingsProposalError('Venice judging needs a Venice key and an allowed Venice model first. Connect Venice, then propose again.');
       }
+      if (input.privacy_judge.choice === 'tinfoil' && !judge.tinfoilAvailable) throw new SettingsProposalError('Tinfoil judging is unavailable under this privacy policy.');
       rows.push({
         key: 'privacy_judge',
         label: 'Privacy judge',

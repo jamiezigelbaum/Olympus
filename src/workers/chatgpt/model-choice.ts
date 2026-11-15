@@ -19,7 +19,7 @@ import {
   type SovereigntyModelProfile,
 } from '../../core/sovereignty.ts';
 
-export type ChatGptAnswerChoice = 'local' | 'venice';
+export type ChatGptAnswerChoice = 'local' | 'venice' | 'tinfoil';
 
 export interface ChatGptModelChoice {
   embedding?: 'built_in';
@@ -37,6 +37,7 @@ const DOMAINS = ['public_safe', 'internal', 'secure_local'] as const;
 
 /** Profile ids and definitions, as the shipped presets name them. */
 const ANSWER_PROFILES: Record<ChatGptAnswerChoice, { id: string; profile: SovereigntyModelProfile }> = {
+  tinfoil: { id: 'tinfoil-private', profile: { provider: 'tinfoil', trust: 'encrypted_cloud', model: 'kimi-k3-1-pro', secretRef: 'store:tinfoil.api_key', purpose: 'analyst' } },
   venice: {
     id: 'venice-private',
     profile: {
@@ -62,6 +63,7 @@ const ANSWER_PROFILES: Record<ChatGptAnswerChoice, { id: string; profile: Sovere
 
 export const ANSWER_PROFILE_IDS: Readonly<Record<ChatGptAnswerChoice, string>> = {
   venice: ANSWER_PROFILES.venice.id,
+  tinfoil: ANSWER_PROFILES.tinfoil.id,
   local: ANSWER_PROFILES.local.id,
 };
 
@@ -84,7 +86,7 @@ export function embeddingIsBuiltIn(config: SovereigntyConfig): boolean {
 
 /** The answer choice the policy already makes, when it is exactly one of ours. */
 export function currentAnswerChoice(config: SovereigntyConfig): ChatGptAnswerChoice | undefined {
-  for (const choice of ['venice', 'local'] as const) {
+  for (const choice of ['venice', 'local', 'tinfoil'] as const) {
     const { id } = ANSWER_PROFILES[choice];
     // A tier the policy does not define (no Public tier) has no say.
     const routes = (['public_safe', 'internal'] as const)
@@ -103,7 +105,7 @@ export function currentAnswerChoice(config: SovereigntyConfig): ChatGptAnswerCho
 export function applyModelChoice(
   config: SovereigntyConfig,
   choice: ChatGptModelChoice,
-  configured: Readonly<Record<ChatGptAnswerChoice, boolean>>,
+  configured: Readonly<Partial<Record<ChatGptAnswerChoice, boolean>>>,
 ): { config: SovereigntyConfig; changed: boolean } {
   if (choice.embedding === 'built_in' && !embeddingIsBuiltIn(config)) {
     throw new ModelChoiceRefusal('embedding_change_needs_approval');

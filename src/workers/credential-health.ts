@@ -1,3 +1,5 @@
+import { createTinfoilFetch, type TinfoilTransportOptions } from '../core/analyst-tinfoil.ts';
+import { resolveSecretRefValueSync } from '../core/secret-store.ts';
 import { sharedDataPath } from '../core/olympus-layout.ts';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir, uptime } from 'node:os';
@@ -217,6 +219,7 @@ export function credentialHealthReportIsStale(report: CredentialHealthReport, no
 }
 
 export async function runCredentialHealthProbe(options: {
+  tinfoil?: Omit<TinfoilTransportOptions, 'apiKey' | 'env'>;
   env?: Record<string, string | undefined>;
   registryPath?: string;
   brokerStatePath?: string;
@@ -249,6 +252,8 @@ export async function runCredentialHealthProbe(options: {
     results.push(await probeConnectedHandle(handle, { env, broker, fetchImpl, brokerState, checkedAt, now }));
   }
   results.push(await probeVeniceApiKey({ env, fetchImpl, checkedAt }));
+  const tinfoil = await probeTinfoilApiKey({ env, checkedAt, ...options.tinfoil });
+  if (tinfoil) results.push(tinfoil);
 
   const report: CredentialHealthReport = {
     kind: 'credential_health_report',
@@ -986,4 +991,17 @@ function isProbeMode(value: unknown): value is CredentialProbeMode {
 
 function isMissingFile(error: unknown): boolean {
   return !!error && typeof error === 'object' && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+async function probeTinfoilApiKey(options: Omit<TinfoilTransportOptions, 'apiKey'> & { env: Record<string, string | undefined>; checkedAt: string }): Promise<CredentialHealthResult | undefined> {
+  const handle = { handle: 'tinfoil.api-key', provider: 'tinfoil' };
+  const result = (status: CredentialHealthStatus, reason?: string) => healthResult(handle, ['tinfoil.api'], 'static_api_key', status, options.checkedAt, 'active', reason);
+  let apiKey: string | undefined;
+  try { apiKey = resolveSecretRefValueSync('store:tinfoil.api_key', { env: options.env }); }
+  catch { if (options.env.OLYMPUS_CREDENTIAL_HEALTH_TINFOIL_REQUIRED === '1') return result('degraded', 'credential_cache_unavailable'); return undefined; }
+  if (!apiKey) return options.env.OLYMPUS_CREDENTIAL_HEALTH_TINFOIL_REQUIRED === '1' ? result('missing', 'credential_missing') : undefined;
+  try {
+    await createTinfoilFetch({ ...options, apiKey })('https://tinfoil.invalid/v1/models', { method: 'GET' });
+    return result('healthy');
+  } catch { return result('degraded', 'attested_probe_unavailable'); }
 }

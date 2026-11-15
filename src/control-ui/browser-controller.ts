@@ -553,13 +553,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (form.hasAttribute('data-local-models-test')) return { action: 'save_local_answer_model', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '' };
     if (form.hasAttribute('data-judge-choice')) {
       // A spending limit only governs Venice: Local saves without one (#950).
-      const choice = body.choice === 'venice' || body.choice === 'local-then-venice' ? body.choice : 'local';
+      const choice = body.choice === 'venice' || body.choice === 'local-then-venice' || body.choice === 'tinfoil' ? body.choice : 'local';
       const cap = (body.cap_dollars ?? '').trim();
-      if (choice !== 'local' && cap === '') { say(form, 'Enter a total cloud spending limit in dollars to use Venice.'); return undefined; }
+      if (choice !== 'local' && cap === '') { say(form, choice === 'tinfoil' ? 'Enter a total cloud judge spending limit in dollars.' : 'Enter a total cloud spending limit in dollars to use Venice.'); return undefined; }
       return { action: 'save_judge', choice, cap_dollars: cap === '' ? 0 : Number(cap) };
     }
     if (form.hasAttribute('data-model-choice')) {
-      const provider = body.provider === 'local' || body.provider === 'venice' || body.provider === 'zkapi' ? body.provider : undefined;
+      const provider = body.provider === 'local' || body.provider === 'venice' || body.provider === 'tinfoil' || body.provider === 'zkapi' ? body.provider : undefined;
       const model = (body.model ?? '').trim();
       if (!provider || model === '') { say(form, 'Choose a model.'); return undefined; }
       return { action: 'save_model_choice', provider, model };
@@ -2152,7 +2152,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (!form || !input.checked) return;
     // An unset limit follows the picked choice: its own estimate plus 25% (#884).
     const cap = form.querySelector<HTMLInputElement>('input[name="cap_dollars"][data-cap-auto="true"]');
-    const auto = input.value === 'venice' ? cap?.dataset.capVenice : input.value === 'local-then-venice' ? cap?.dataset.capLocalThenVenice : undefined;
+    const auto = input.value === 'tinfoil' ? cap?.dataset.capTinfoil : input.value === 'venice' ? cap?.dataset.capVenice : input.value === 'local-then-venice' ? cap?.dataset.capLocalThenVenice : undefined;
     if (cap && auto) cap.value = auto;
     if (input.value === form.dataset.judgeCurrent) return;
     const dialog = judgeDialog(form, input.value);

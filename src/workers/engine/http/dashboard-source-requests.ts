@@ -105,10 +105,10 @@ export function parseDashboardOAuthSource(value: unknown): DashboardOAuthSource 
   throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be google, gmail, google-drive, dropbox, x, or evernote.');
 }
 
-export function parseDashboardApiKeySource(value: unknown): DashboardApiKeySource | 'gemini' {
+export function parseDashboardApiKeySource(value: unknown): DashboardApiKeySource | 'gemini' | 'tinfoil' {
   const source = asOptionalString(value);
-  if (source === 'gemini' || source === 'venice' || source === 'readwise') return source;
-  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be gemini, venice, or readwise.');
+  if (source === 'gemini' || source === 'venice' || source === 'readwise' || source === 'tinfoil') return source;
+  throw new EmailSourceWorkerError(400, 'invalid_request', 'source must be gemini, venice, tinfoil, or readwise.');
 }
 
 export function parseDashboardSyncSource(value: unknown): DashboardSyncSource {

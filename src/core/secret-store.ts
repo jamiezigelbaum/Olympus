@@ -457,10 +457,11 @@ export async function resolveSecretRefValue(
   const parsed = normalizeSecretRef(secretRef);
   if (!parsed) return undefined;
   if (parsed.kind === 'env') return (options.env ?? process.env)[parsed.key]?.trim() || undefined;
-  const store = options.secretStore ?? createDefaultSecretStore({
-    ...(options.env ? { env: options.env } : {}),
-  });
-  return store.get(parsed.key);
+  const fallback = tinfoilEnvKey(parsed.key, options.env ?? process.env);
+  try {
+    const store = options.secretStore ?? createDefaultSecretStore({ ...(options.env ? { env: options.env } : {}) });
+    return await store.get(parsed.key) || fallback;
+  } catch (error) { if (fallback) return fallback; throw error; }
 }
 
 export function resolveSecretRefValueSync(
@@ -474,11 +475,16 @@ export function resolveSecretRefValueSync(
   const parsed = normalizeSecretRef(secretRef);
   if (!parsed) return undefined;
   if (parsed.kind === 'env') return (options.env ?? process.env)[parsed.key]?.trim() || undefined;
-  const store = options.secretStore ?? createDefaultSecretStore({
-    ...(options.env ? { env: options.env } : {}),
-  });
-  if (!store.getSync) throw new Error('Configured Olympus secret store does not support synchronous reads.');
-  return store.getSync(parsed.key);
+  const fallback = tinfoilEnvKey(parsed.key, options.env ?? process.env);
+  try {
+    const store = options.secretStore ?? createDefaultSecretStore({ ...(options.env ? { env: options.env } : {}) });
+    if (!store.getSync) throw new Error('Configured Olympus secret store does not support synchronous reads.');
+    return store.getSync(parsed.key) || fallback;
+  } catch (error) { if (fallback) return fallback; throw error; }
+}
+
+function tinfoilEnvKey(key: string, env: Record<string, string | undefined>): string | undefined {
+  return key === 'tinfoil.api_key' ? env.OLYMPUS_SOURCE_INDEX_TINFOIL_API_KEY?.trim() || env.TINFOIL_API_KEY?.trim() : undefined;
 }
 
 function assertSafeKey(key: string): void {

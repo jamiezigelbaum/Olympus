@@ -399,3 +399,22 @@ another checkout's `sniffer.ts` (a `main` checkout, say) and lists that
 screen's hits too, each with the rule today's screen fires on it or `clear`.
 
 2026-11-11: embedding pre-filter removed; it could not save 15% of judge calls at zero owner-label Private misses (#1025).
+
+
+### Tinfoil calibration
+
+Use the production Decision medium adapter with `--tinfoil --allow-tinfoil`,
+or a supported chat model with `--tinfoil-chat MODEL --allow-tinfoil --mode full`.
+Both require `TINFOIL_API_KEY` in the environment only. Never pass a key as an
+argument. The explicit allow flag permits the selected sample's item text to
+reach the attested Tinfoil enclave. Existing owner-context, split, importance,
+scoring and content-free output rules apply. For example:
+
+```sh
+bun eval/calibration/judge-run.ts --tinfoil --allow-tinfoil --dir /tmp/sample --owner-words /tmp/owner-words
+bun eval/calibration/judge-run.ts --tinfoil-chat kimi-k3-1-pro --allow-tinfoil --mode full --dir /tmp/sample --no-owner-words
+```
+
+The decision bar is fixed at P(Private) >= 0.5. This runner does not make
+Tinfoil DeepSeek a production judge option. Attestation/provider-limit failures
+stop the run with a credential-free reason; they are not calibration verdicts.

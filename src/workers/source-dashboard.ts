@@ -5728,6 +5728,8 @@ function providerLabel(provider: SovereigntyProfileProvider): string {
       return 'OpenClaw subscription';
     case 'venice':
       return 'Venice';
+    case 'tinfoil':
+      return 'Tinfoil';
     case 'google-gemini':
       return 'Gemini';
     case 'anthropic':

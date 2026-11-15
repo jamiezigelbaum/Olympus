@@ -16,14 +16,14 @@
  */
 import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from './sovereignty.ts';
 
-export const SETTINGS_PROPOSAL_MODEL_PROVIDERS = ['local', 'venice', 'zkapi'] as const;
+export const SETTINGS_PROPOSAL_MODEL_PROVIDERS = ['local', 'venice', 'tinfoil', 'zkapi'] as const;
 export type SettingsProposalModelProvider = (typeof SETTINGS_PROPOSAL_MODEL_PROVIDERS)[number];
 
 /** What a proposal file holds. Every key is optional; at least one is set. */
 export interface SettingsProposalInput {
   private_answer_mode?: SovereigntyPresetName;
   computer_use?: 'everyday' | 'server';
-  privacy_judge?: { choice: 'local' | 'venice'; spending_limit_dollars: number };
+  privacy_judge?: { choice: 'local' | 'venice' | 'tinfoil'; spending_limit_dollars: number };
   models?: Partial<Record<SettingsProposalModelProvider, string>>;
 }
 
@@ -53,7 +53,7 @@ export const SETTINGS_PROPOSAL_SCHEMA = {
     privacy_judge: {
       type: 'object',
       fields: {
-        choice: { type: 'string', allowed: ['local', 'venice'] },
+        choice: { type: 'string', allowed: ['local', 'venice', 'tinfoil'] },
         spending_limit_dollars: { type: 'number', note: 'Zero or more. Required for both choices.' },
         note: { type: 'note', note: 'Propose privacy_judge on its own. Propose any models or private_answer_mode change first, separately.' },
       },
@@ -100,7 +100,7 @@ export function parseSettingsProposalInput(value: unknown): SettingsProposalInpu
   if (record.privacy_judge !== undefined) {
     const judge = record.privacy_judge as Record<string, unknown> | null;
     if (!judge || typeof judge !== 'object' || Array.isArray(judge)) throw new SettingsProposalError('privacy_judge must be an object with choice and spending_limit_dollars.');
-    if (judge.choice !== 'local' && judge.choice !== 'venice') throw new SettingsProposalError('privacy_judge.choice must be local or venice.');
+    if (judge.choice !== 'local' && judge.choice !== 'venice' && judge.choice !== 'tinfoil') throw new SettingsProposalError('privacy_judge.choice must be local, venice, or tinfoil.');
     const cap = judge.spending_limit_dollars;
     if (typeof cap !== 'number' || !Number.isFinite(cap) || cap < 0) throw new SettingsProposalError('privacy_judge.spending_limit_dollars must be a number, zero or more.');
     const extra = Object.keys(judge).filter((key) => key !== 'choice' && key !== 'spending_limit_dollars');

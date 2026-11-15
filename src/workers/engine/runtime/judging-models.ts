@@ -1,3 +1,4 @@
+import { createTinfoilJudgeModel } from '../../classification/sniffer-tinfoil.ts';
 import { withJudgeSpendingStop } from '../../classification/judge-spending.ts';
 import { JUDGE_PROMPT_CACHE_KEY, JUDGE_SAMPLING, JudgeRateLimitPacer } from '../../classification/judge-pacing.ts';
 import { createDecisionSnifferModel } from '../../classification/sniffer-decision.ts';
@@ -230,6 +231,7 @@ export function frontBuiltInModel(
  * per item.
  */
 export function createTierSnifferModel(input: {
+  judgeWrapFetch?: (fetch: import('../../../core/analyst-openai.ts').OpenAIAnalystFetch) => import('../../../core/analyst-openai.ts').OpenAIAnalystFetch;
   judgeFetch?: import('../../../core/analyst-openai.ts').OpenAIAnalystFetch;
   judgeStatus?: () => import('../../classification/judge-spending.ts').JudgeSpendingStatus;
   judgeOnStop?: () => void;
@@ -269,6 +271,13 @@ export function createTierSnifferModel(input: {
       profile: 'source_answer',
       preflightTimeoutMs: 5_000,
     }), { apiKey, log: (line) => console.warn(line) });
+  }
+  if (lane.kind === 'tinfoil' && profile.provider === 'tinfoil') {
+    const apiKey = resolveSecretRefSync(profile.secretRef ?? 'store:tinfoil.api_key', input.env, 'Tinfoil judge', bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile: input.configuredProfile ?? profile }));
+    if (!apiKey) return undefined;
+    const pacer = new JudgeRateLimitPacer();
+    const model = pacer.model(createTinfoilJudgeModel({ apiKey, env: input.env, wrapFetch: fetch => pacer.fetch(input.judgeWrapFetch?.(fetch) ?? fetch) }));
+    return input.judgeStatus ? withJudgeSpendingStop(model, input.judgeStatus, input.judgeOnStop) : model;
   }
   if (lane.kind === 'venice' && profile.provider === 'venice') {
     const apiKey = resolveSecretRefSync(

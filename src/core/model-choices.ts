@@ -18,7 +18,7 @@ import type { VenicePrivacyCategory } from './venice-models.ts';
 export const STRONGEST_MODEL = 'strongest';
 export const BUILT_IN_SIZES = ['small', 'standard', 'large'] as const;
 export type BuiltInSize = typeof BUILT_IN_SIZES[number];
-export type ModelChoiceProvider = 'local' | 'venice' | 'zkapi';
+export type ModelChoiceProvider = 'local' | 'venice' | 'tinfoil' | 'zkapi';
 
 export interface ModelChoicesState {
   schema: 'olympus.model-choices.v1';
@@ -123,6 +123,7 @@ export interface ModelChoiceList {
 export interface DashboardModelChoices {
   local?: ModelChoiceList;
   venice?: ModelChoiceList;
+  tinfoil?: ModelChoiceList;
   zkapi?: ModelChoiceList;
 }
 

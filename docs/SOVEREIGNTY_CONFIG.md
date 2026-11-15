@@ -60,6 +60,42 @@ legal, and similarly sensitive material. Secrets are denied to every model.
 | Local models with Venice fallback (`local-first`) | Built-in model | Built-in model | Local answer model, with approved Venice escalation | All local-only requirements plus Venice account, API balance and key |
 | Private meaning search on this computer (`no-sensitive`) | Built-in model | Built-in model, on this computer | Built-in private model in Ask privately and the sealed panel; no agent answer lane | Nothing |
 
+### Owner-chosen Tinfoil (1.5)
+
+Tinfoil is optional for Private answers and privacy checks. Add your own key
+in **Keys → Tinfoil**, then explicitly choose a Tinfoil answer model in the
+Private-answer picker or Tinfoil Decision medium on the privacy judge card.
+Adding a key alone grants no content access. Existing defaults stay unchanged.
+
+An answer profile uses the fixed attested router; do not set `baseUrl`:
+
+```json
+"tinfoil-private": {
+  "provider": "tinfoil",
+  "trust": "encrypted_cloud",
+  "model": "kimi-k3-1-pro",
+  "purpose": "analyst",
+  "secretRef": "store:tinfoil.api_key"
+}
+```
+
+Add that id to the chosen answer route's pool to permit it to read that tier.
+Other answer choices are `glm-5-3` and `deepseek-v4-1-flash`. Tinfoil is
+never an embedding provider. The optional classification profile uses model
+`decision-medium`, purpose `classification`, and the same key reference.
+The judge card choice is required independently of the answer choice, with a
+total dollar cap. Decision medium is experimental at Tinfoil: 89% agreement
+with the owner's labels in our tests, 15 Nov 2026. It holds Private at
+P(Private) >= 0.5. Venice DeepSeek remains the default cloud judge.
+
+Environment key fallbacks: `OLYMPUS_SOURCE_INDEX_TINFOIL_API_KEY`, then
+`TINFOIL_API_KEY`. Never put a key in a CLI argument, URL, or policy JSON.
+Verification failures refuse without sending content or changing providers;
+inspect the Tinfoil status/card reason and retry after fixing it. Rate limits
+show Retry-After; account usage/payment stops need an account repair and retry.
+A cap stop needs a raised cap. You may explicitly change providers at any time.
+See the [normative policy](CONTRACTS.md#tinfoil-s4-policy-normative).
+
 ### Built-in embeddings
 
 New installs embed every tier with the **built-in model**: Google's

@@ -350,6 +350,10 @@ The long-term routing posture is:
 - local models may see raw S4 when policy allows
 - Venice S4 routing follows the
   [canonical Venice S4 policy](CONTRACTS.md#venice-s4-policy-normative)
+- owner-chosen Tinfoil may read S4 only after enclave attestation verifies,
+  through encrypted requests; refusal never silently changes providers. See the
+  [Tinfoil S4 policy](CONTRACTS.md#tinfoil-s4-policy-normative). It has no
+  embedding role and never receives S5 or blocked-sensitive content.
 - ordinary cloud models may see S0-S3 when policy allows
 - S5 should not be exposed as ordinary model context
 - sanitized derivatives may be reclassified only when the transformation is

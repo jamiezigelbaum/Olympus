@@ -2,7 +2,7 @@
 
 Status: stable, versioned architecture canon
 Owner: CTO
-Updated: 2026-10-25
+Updated: 2026-11-15
 
 ## Display terminology
 
@@ -265,6 +265,43 @@ low-intelligence work, though the local Qwen normally covers that tier.
 S5 and `blocked_sensitive` content never leaves local and never enters any
 cloud analyst, including Venice.
 
+### Tinfoil S4 policy (normative)
+
+Owner decision, Jamie, 2026-11-15, “Add Tinfoil to Olympus 1.5?”:
+“Answers + judge option”. Tinfoil is an additional `encrypted_cloud`
+provider for S4 packs **only when the owner explicitly chooses it** in the
+answer policy or privacy judge choice. It is never selected by a default,
+recommendation, missing key, or failure of another provider. The answer
+adapter uses the shared OpenAI-compatible transport and generic Analyst
+prompt; no question or source logic is added.
+
+Before sending any content, SDK `tinfoil` 1.4.0 `SecureClient.ready()` must
+verify attestation for the fixed `tinfoilsh/confidential-model-router` repo,
+using the SDK's default attestation bundle URL. Only `SecureClient.fetch`
+may carry a request, with EHBP body encryption to the attested key. Neither
+router nor attestation authority is configurable. A verification failure or
+inability to complete verification throws `TinfoilRefusalError` carrying the
+credential-redacted reason. The owner's status/card shows that reason;
+there is no unattested retry or silent fallback to another provider.
+Successful answer audit/status reports `egress_destination: tinfoil_attested`.
+S5 and `blocked_sensitive` remain forbidden for every remote provider.
+
+Answer models: `kimi-k3-1-pro` (default only after choosing Tinfoil),
+`glm-5-3`, `deepseek-v4-1-flash`. The optional judge is **Decision medium**,
+never Tinfoil DeepSeek: one Private/Personal decision over the production
+judge material and owner context, held Private at P(Private) >= 0.5; an
+unusable answer holds Private. The existing per-item screens still apply.
+It is experimental at Tinfoil: 89% agreement with the owner's labels in our
+tests, 15 Nov 2026. Venice DeepSeek remains the default cloud judge.
+
+The key stays in the shared secret store (`store:tinfoil.api_key`), with
+`OLYMPUS_SOURCE_INDEX_TINFOIL_API_KEY` / `TINFOIL_API_KEY` environment
+fallbacks. It travels only in Authorization headers, never logs, URLs or
+arguments. The prompt-cache secret derives from a private seed under the
+installation data root; the SDK never writes `~/.tinfoil`. Provider limits,
+Retry-After and the existing durable judge cap remain visible and recoverable.
+Tinfoil has no embedding role: secure embeddings remain local or Venice.
+
 ### Secure embeddings
 
 Owner decision, 2026-09-10: when an installation has no local embedding
@@ -372,6 +409,21 @@ decoding (`snifferCompletionVerdict`); the remote search surface now runs one
 final release/connection check after its optional Private probe.
 
 ### Change log
+
+- 2026-11-15 (no contract type version change): owner-chosen, attested Tinfoil
+  answers and optional Decision medium privacy judge. This extends the approved
+  provider policy, preserving the existing meaning of `localOnly`: only the
+  configured privacy-safe lane may read S4. SourceConnector, EvidencePack and
+  Analyst shapes and their canonical reachable-type fingerprint remain 2.2.0.
+  `scripts/contract-version.ts` rejects a version entry with an unchanged
+  fingerprint; no artificial shape change is made to obtain a bump. Existing
+  installs, defaults, schemas, tiers, vectors and prompt remain unchanged; no
+  migration or re-embedding. Explicit selection is the compatibility boundary.
+  Focused receipts: `test/tinfoil-provider.test.ts` plus the existing sovereignty,
+  Venice/judge and architecture/privacy/public-surface suites. Independent
+  fresh-context review covered credentials, money and trust routing; findings
+  were fixed. A live/private held-out evaluation cannot run in this offline
+  checkout; the owner's measured labels are prior evidence, not a new receipt.
 
 - 2026-11-10 (no contract type version change; native sniffer cache stays
   `decision-v2`): **a measured bar follows the weights, not the server's

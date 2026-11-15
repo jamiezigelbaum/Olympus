@@ -127,18 +127,23 @@ function withDefaultVeniceJudge(
 export function resolveJudgeChoiceRuntime(
   input: Parameters<typeof resolveTierSnifferRuntime>[0],
   // 'local-then-venice' judges on this computer first; Venice is only its second round (judge-second-round.ts).
-  choice: { choice: 'local' | 'local-then-venice' | 'venice'; stop: string | null; remainingDollars: number; uncapped?: boolean },
+  choice: { choice: 'local' | 'local-then-venice' | 'venice' | 'tinfoil'; stop: string | null; remainingDollars: number; uncapped?: boolean },
 ): TierSnifferRuntime {
   const original = resolveTierSnifferRuntime(input);
   if (original.source === 'off' && original.reason !== 'no_private_lane') return original;
-  const kind = choice.choice === 'venice' && !choice.stop && (choice.uncapped === true || choice.remainingDollars > 0) ? 'venice' : 'local';
+  const kind = choice.choice === 'tinfoil' ? 'tinfoil' : choice.choice === 'venice' && !choice.stop && (choice.uncapped === true || choice.remainingDollars > 0) ? 'venice' : 'local';
   const kept = Object.entries(input.engine.config.modelProfiles)
-    .filter(([, profile]) => profile.purpose !== 'classification' || (kind === 'venice' ? profile.provider === 'venice' : profile.trust === 'local'));
+    .filter(([, profile]) => profile.purpose !== 'classification' || (kind !== 'local' ? profile.provider === kind : profile.trust === 'local'));
   const engine = {
-    config: { ...input.engine.config, modelProfiles: Object.fromEntries(kind === 'venice' ? withDefaultVeniceJudge(kept, input.engine) : kept) },
+    config: { ...input.engine.config, modelProfiles: Object.fromEntries(kind === 'venice' ? withDefaultVeniceJudge(kept, input.engine) : kind === 'tinfoil' ? withDefaultTinfoilJudge(kept, input.engine) : kept) },
     resolveAnalystPool: (...args: Parameters<typeof input.engine.resolveAnalystPool>) => {
       const pool = input.engine.resolveAnalystPool(...args);
-      const accepts = (member: { profile: { provider: string; trust: string } }) => kind === 'venice' ? member.profile.provider === 'venice' : member.profile.trust === 'local';
+      const accepts = (member: { profile: { provider: string; trust: string } }) => kind !== 'local' ? member.profile.provider === kind : member.profile.trust === 'local';
+      if (kind === 'tinfoil') {
+        const profiles = withDefaultTinfoilJudge(kept, input.engine);
+        const judge = profiles.find(([, p]) => p.provider === 'tinfoil' && p.purpose === 'classification');
+        if (judge) return { members: [{ id: judge[0], profile: judge[1] }] };
+      }
       return { ...pool, members: pool.members.filter(accepts), ...(pool.explicitOrder ? { explicitOrder: pool.explicitOrder.filter(accepts) } : {}) };
     },
   };
@@ -146,4 +151,12 @@ export function resolveJudgeChoiceRuntime(
   const selected = resolveTierSnifferRuntime({ ...rest, engine, ...(kind === 'local' && builtIn ? { builtIn } : {}) });
   return selected.source === 'off' && selected.reason === 'no_private_lane' && original.source !== 'off' && original.lane.kind === 'venice'
     ? { ...selected, cloudChoiceRequired: true, cloudLane: original.lane } : selected;
+}
+
+function withDefaultTinfoilJudge(profiles: Array<[string, SovereigntyModelProfile]>, engine: Pick<SovereigntyEngine, 'resolveAnalystPool'>): Array<[string, SovereigntyModelProfile]> {
+  if (profiles.some(([, p]) => p.provider === 'tinfoil' && p.purpose === 'classification')) return profiles;
+  let member: { profile: SovereigntyModelProfile } | undefined;
+  try { member = engine.resolveAnalystPool({ trustDomain: 'secure_local' }).members.find(m => m.profile.provider === 'tinfoil'); }
+  catch { return profiles; }
+  return [...profiles, ['tinfoil-judge', { provider: 'tinfoil', trust: 'encrypted_cloud', model: 'decision-medium', purpose: 'classification', secretRef: member?.profile.secretRef ?? 'store:tinfoil.api_key' }]];
 }

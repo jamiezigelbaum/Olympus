@@ -1,7 +1,8 @@
+import { TINFOIL_PRICES, readTinfoilStatus } from '../../core/analyst-tinfoil.ts';
 import { approveClassifier, CLASSIFICATION_LEDGER_OWNER_APPROVAL, isClassifierApproved, readClassificationLedger, revokeClassifier } from '../classification-ledger.ts';
 import { resolveTierSnifferRuntime, type TierSnifferRuntime } from './built-in-sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
-import { JudgeSpending, judgeCapMicros, judgeChoiceUsesVenice, JUDGE_PRICES, type JudgeChoice, type JudgeObserved } from './judge-spending.ts';
+import { JudgeSpending, judgeCapMicros, judgeChoiceUsesVenice, judgeChoiceUsesCloud, JUDGE_PRICES, type JudgeChoice, type JudgeObserved } from './judge-spending.ts';
 import { SecondRoundSweep } from './judge-second-round.ts';
 import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
 
@@ -46,6 +47,7 @@ export async function carryCloudJudgeApproval(spending: JudgeSpending, cloud: Ti
 export function createJudgeSetup(options: {
   spending: JudgeSpending;
   cloud: TierSnifferRuntime;
+  tinfoil?: TierSnifferRuntime;
   local: () => TierSnifferRuntime;
   ledgerPath: string;
   promptVersion: () => string;
@@ -61,6 +63,8 @@ export function createJudgeSetup(options: {
     chosen: options.spending.hasRecord(),
     cloudModel: cloud.source === 'off' ? null : cloud.lane.modelId,
     cloudAvailable: cloud.source !== 'off' && Boolean(JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)]),
+    tinfoilAvailable: options.tinfoil?.source === 'configured',
+    tinfoilStatus: readTinfoilStatus(),
     observed: options.observed?.() ?? {},
   });
   return {
@@ -68,12 +72,15 @@ export function createJudgeSetup(options: {
     pageStatus: () => ({ ...status(), upgradeNote: options.spending.takeUpgradeNote() }),
     async save(choice: JudgeChoice, capDollars: number): Promise<{ ok: true; status_message: string }> {
       judgeCapMicros(capDollars);
+      const cloud = choice === 'tinfoil' ? options.tinfoil ?? { source: 'off' as const, reason: 'no_private_lane' as const } : options.cloud;
+      const provider = choice === 'tinfoil' ? 'Tinfoil' : 'Venice';
       if (choice === 'local') {
         const unreadable = options.spending.status().stop === 'storage';
         if (!unreadable) options.spending.choose('local', capDollars); // Immediately closes the dispatch gate.
         // A corrupt record already blocks every send. Withdraw cloud consent
         // independently so restoring that record cannot restore this approval.
         if (cloud.source !== 'off') await revokeClassifier(options.ledgerPath, cloud.lane, options.promptVersion(), 'Owner chose local judging on this computer.');
+        if (options.tinfoil && options.tinfoil.source !== 'off') await revokeClassifier(options.ledgerPath, options.tinfoil.lane, options.promptVersion(), 'Owner chose local judging.');
         const local = options.local();
         if (local.source === 'off') {
           options.requestReload();
@@ -88,16 +95,16 @@ export function createJudgeSetup(options: {
         return { ok: true, status_message: options.requestReload() ? 'Cloud judging is off. Olympus is applying local judging.' : 'Cloud judging is off. Restart Olympus to start local judging.' };
       }
       const current = options.spending.status();
-      if (judgeChoiceUsesVenice(current.choice) && capDollars < current.capDollars) options.spending.lowerCap(capDollars);
-      if (cloud.source === 'off') throw new Error('Set up an allowed Venice model in Private answers first.');
-      if (!JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)]) throw new Error('A listed price is needed before this model can judge in the cloud.');
-      if (!options.credentialReady(cloud.lane)) throw new Error('Add your own Venice API key in Keys first.');
+      if (judgeChoiceUsesCloud(current.choice) && capDollars < current.capDollars) options.spending.lowerCap(capDollars);
+      if (cloud.source === 'off') throw new Error('Set up an allowed private model first.');
+      if (!(cloud.lane.kind === 'tinfoil' ? TINFOIL_PRICES[cloud.lane.modelId] : JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)])) throw new Error('A listed price is needed before this model can judge in the cloud.');
+      if (!options.credentialReady(cloud.lane)) throw new Error(`Add your own ${provider} API key in Keys first.`);
       const fallback = options.local();
       if (choice === 'local-then-venice' && fallback.source === 'off') throw new Error('The double-check needs the judge on this computer first. Choose Venice sorts everything instead.');
-      await approveClassifier(options.ledgerPath, cloud.lane, options.promptVersion(), choice === 'local-then-venice'
+      await approveClassifier(options.ledgerPath, cloud.lane, options.promptVersion(), choice === 'tinfoil' ? 'Owner chose the experimental Tinfoil Decision medium judge, reading each item through verified attestation and encrypted requests.' : choice === 'local-then-venice'
         ? 'Owner opted in on this computer: Venice re-reads only the items the local judge held Private, the items most likely to be Private; E2EE is not available yet.'
         : 'Owner opted in on this computer: Venice reads every item, including Private items; E2EE is not available yet.');
-      if (fallback.source !== 'off') await approveClassifier(options.ledgerPath, fallback.lane, options.promptVersion(), choice === 'local-then-venice'
+      if (choice !== 'tinfoil' && fallback.source !== 'off') await approveClassifier(options.ledgerPath, fallback.lane, options.promptVersion(), choice === 'local-then-venice'
         ? 'Owner chose free local judging on this computer, double-checked by Venice.'
         : 'Owner chose cloud judging with free local judging when the spending limit stops cloud calls.');
       // A new choice of the second round re-asks everything held so far, and so does resuming after a

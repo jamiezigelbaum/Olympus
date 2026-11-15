@@ -284,6 +284,7 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
 
     async setModels(choice) {
       const configured = {
+        tinfoil: options.credentialPresent(ANSWER_PROFILE_IDS.tinfoil, policy.modelProfiles[ANSWER_PROFILE_IDS.tinfoil] ?? answerProfile('tinfoil')),
         venice: options.credentialPresent(ANSWER_PROFILE_IDS.venice, policy.modelProfiles[ANSWER_PROFILE_IDS.venice] ?? answerProfile('venice')),
         local: Object.values(policy.modelProfiles).some((profile) => profile.provider === 'local-openai-compatible' && profile.purpose !== 'embedding'),
       };

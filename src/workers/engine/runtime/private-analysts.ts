@@ -1,3 +1,4 @@
+import { createTinfoilAnalystModel } from '../../../core/analyst-tinfoil.ts';
 import { reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../../source-index/local-analyst-window.ts';
 import {
   type SecureLocalAnalystRouteStatus,
@@ -229,7 +230,7 @@ export function workerSovereigntyAnalystRoutePlan(input: {
   engine: SovereigntyEngine;
   env: Record<string, string | undefined>;
   trustDomain: SourceTrustDomain;
-  requestedProvider: 'default' | 'local' | 'cloud' | 'venice';
+  requestedProvider: 'default' | 'local' | 'cloud' | 'venice' | 'tinfoil';
   analysts: ReadonlyMap<string, SovereigntyAnalystRouteStep>;
   defaultLocal: Analyst;
 }): SovereigntyAnalystRoutePlan {
@@ -260,7 +261,7 @@ export function workerSovereigntyAnalystRoutePlan(input: {
       });
     }
     // Do not turn a provider-specific request into an unrequested local run.
-    if (requestedProvider === 'venice') throw new OperationError('config_error', 'No standalone Venice analyst route is configured.');
+    if (requestedProvider === 'venice' || requestedProvider === 'tinfoil') throw new OperationError('config_error', 'No standalone Venice analyst route is configured.');
     const profile: SovereigntyResolvedProfile = {
       id: 'standalone-source-answer',
       profile: { provider: 'built-in', trust: 'local', model: 'default', purpose: 'analyst' },
@@ -284,7 +285,7 @@ export function workerSovereigntyAnalystRoutePlan(input: {
 export function secureLocalAnalystRouteStatus(input: {
   engine: Pick<SovereigntyEngine, 'config' | 'resolveAnalystPool'>;
   analysts: ReadonlyMap<string, SovereigntyAnalystRouteStep>;
-  requestedProvider: 'default' | 'local' | 'cloud' | 'venice';
+  requestedProvider: 'default' | 'local' | 'cloud' | 'venice' | 'tinfoil';
 }): SecureLocalAnalystRouteStatus {
   if (input.engine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
     return { approved: false, reason: 'secure_local_metadata_only_policy' };
@@ -327,7 +328,7 @@ export async function validateSecureVeniceAnalystProfileAtConstruction(input: {
 }
 
 function analystBackendForSovereigntyProfile(profile: SovereigntyModelProfile): AnalystBackend | undefined {
-  if (profile.provider === 'venice') return 'venice';
+  if (profile.provider === 'venice' || profile.provider === 'tinfoil') return profile.provider;
   if (profile.trust === 'local') return 'local';
   if (profile.trust === 'standard_cloud') return 'cloud';
   if (profile.provider === 'openai-compatible') return 'cloud';
@@ -405,6 +406,11 @@ export function createAnalystForSovereigntyProfile(input: {
         ? { command: input.env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_COMMAND.trim() }
         : {}),
     }));
+  }
+  if (profile.provider === 'tinfoil') {
+    const apiKey = resolveSecretRefSync(profile.secretRef ?? 'store:tinfoil.api_key', input.env, 'Tinfoil analyst', bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }));
+    if (!apiKey) return undefined;
+    return createAnalyst(createTinfoilAnalystModel({ apiKey, model: profile.model, env: input.env }));
   }
   if (profile.provider === 'venice') {
     const apiKey = resolveSecretRefSync(

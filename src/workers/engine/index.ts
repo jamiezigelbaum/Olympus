@@ -1846,7 +1846,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             if (input.provider !== 'venice') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a provider.');
             return json({ ok: true, models: await sourceDashboard.modelChoices.addable('venice') });
           }
-          if ((input.provider !== 'local' && input.provider !== 'venice' && input.provider !== 'zkapi') || typeof input.model !== 'string' || input.model.trim() === '') {
+          if ((input.provider !== 'local' && input.provider !== 'venice' && input.provider !== 'tinfoil' && input.provider !== 'zkapi') || typeof input.model !== 'string' || input.model.trim() === '') {
             throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a model.');
           }
           const result = await sourceDashboard.modelChoices.save(input.provider, input.model.trim());
@@ -2103,7 +2103,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const apiKey = asOptionalString(record.api_key);
           if (!apiKey) throw new EmailSourceWorkerError(400, 'invalid_request', 'api_key is required.');
-          if (source === 'gemini' || (source === 'venice' && sourceDashboard.connectModelKey)) {
+          if (source === 'gemini' || source === 'tinfoil' || (source === 'venice' && sourceDashboard.connectModelKey)) {
             if (!sourceDashboard.connectModelKey) {
               throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Upgrade the worker to connect model keys here.');
             }

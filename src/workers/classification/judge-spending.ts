@@ -1,3 +1,4 @@
+import { TINFOIL_PRICES } from '../../core/analyst-tinfoil.ts';
 import { registerLimit, createLimitStopReporter } from '../../core/limit-stops.ts';
 registerLimit({ id: 'judge.spend_cap', kind: 'cost', scope: 'judge', label: 'Privacy judge spending cap reached', unit: 'usd', continue: 'raise' });
 registerLimit({ id: 'judge.payment', kind: 'funding', scope: 'judge', label: 'Privacy judge provider refused payment (402)', unit: 'usd', continue: 'refill' });
@@ -55,7 +56,7 @@ export function judgeArchiveEstimate(count: number, model: string, observed: Jud
   const shortHours = items / LOCAL_JUDGE_MEASUREMENT.shortPerMinute / 60;
   const longHours = items / LOCAL_JUDGE_MEASUREMENT.longPerMinute / 60;
   const measuredHours = observed.localItemsPerMinute ? items / observed.localItemsPerMinute / 60 : undefined;
-  const price = JUDGE_PRICES[normalizeVeniceAnalystModelId(model)];
+  const price = TINFOIL_PRICES[model] ?? JUDGE_PRICES[normalizeVeniceAnalystModelId(model)];
   const cloudDollars = price ? items * (VENICE_JUDGE_ESTIMATE.inputTokensPerItem * price.input + VENICE_JUDGE_ESTIMATE.outputTokensPerItem * price.output) / 1_000_000 : null;
   const heldFraction = observed.heldFraction ?? SECOND_ROUND_HELD_ASSUMPTION;
   const secondRoundItems = Math.ceil(items * heldFraction);
@@ -75,11 +76,12 @@ export function judgeDefaultCapDollars(estimateDollars: number | null): number {
   return estimateDollars === null ? JUDGE_DEFAULT_CAP_FLOOR_DOLLARS : Math.max(1, Math.ceil(estimateDollars * 1.25));
 }
 /** Whether a choice sends anything to Venice. */
-export function judgeChoiceUsesVenice(choice: JudgeChoice): boolean { return choice !== 'local'; }
+export function judgeChoiceUsesVenice(choice: JudgeChoice): boolean { return choice === 'venice' || choice === 'local-then-venice'; }
 /** local: the free judge on this computer. local-then-venice: it judges everything, and Venice
  * double-checks only what it held Private (#891). venice: Venice judges everything. */
-export type JudgeChoice = 'local' | 'local-then-venice' | 'venice';
-export const JUDGE_CHOICES: readonly JudgeChoice[] = ['local', 'local-then-venice', 'venice'];
+export function judgeChoiceUsesCloud(choice: JudgeChoice): boolean { return choice !== 'local'; }
+export type JudgeChoice = 'local' | 'local-then-venice' | 'venice' | 'tinfoil';
+export const JUDGE_CHOICES: readonly JudgeChoice[] = ['local', 'local-then-venice', 'venice', 'tinfoil'];
 
 export interface JudgeSpendingStatus {
   choice: JudgeChoice; capDollars: number; spentDollars: number; remainingDollars: number;
@@ -168,9 +170,9 @@ export class JudgeSpending {
     const cap = judgeCapMicros(capDollars);
     this.change(row => { row.cap = Math.min(row.cap, cap); if (!row.stop && row.spent >= row.cap) row.stop = 'cap'; this.report(row); });
   }
-  private reserve(cost: number): void {
+  private reserve(cost: number, provider: 'venice' | 'tinfoil'): void {
     const stopped = this.change(row => {
-      if (!judgeChoiceUsesVenice(row.choice)) return 'opt_in' as const;
+      if (provider === 'tinfoil' ? row.choice !== 'tinfoil' : !judgeChoiceUsesVenice(row.choice)) return 'opt_in' as const;
       if (row.stop) { this.report(row, cost); return row.stop; }
       if (row.spent + cost > row.cap) { row.stop = 'cap'; this.report(row, cost); return row.stop; }
       this.report(row);
@@ -182,32 +184,33 @@ export class JudgeSpending {
     if (stopped) throw new JudgeCloudStopped(stopped);
   }
   /** Wrap only the judge's completion transport, never answers or catalog reads. */
-  fetch(fetchImpl: OpenAIAnalystFetch, onStop: () => void = () => {}): OpenAIAnalystFetch {
+  fetch(fetchImpl: OpenAIAnalystFetch, onStop: () => void = () => {}, provider: 'venice' | 'tinfoil' = 'venice'): OpenAIAnalystFetch {
     return async (url, init) => {
       // No limit set yet: exactly the calls this install made before limits existed.
       const status = this.status();
+      if (provider === 'tinfoil' ? status.choice !== 'tinfoil' : !judgeChoiceUsesVenice(status.choice)) throw new JudgeCloudStopped('opt_in');
       if (status.uncapped) {
         if (status.stop) { onStop(); throw new JudgeCloudStopped(status.stop); }
         const response = await fetchImpl(url, init);
-        if (response.status === 402) {
+        if ((response.status === 402 || (provider === 'tinfoil' && response.status === 403))) {
           this.change(row => { row.stop = 'payment'; this.report(row); });
           onStop();
           throw new JudgeCloudStopped('payment');
         }
         return response;
       }
-      const body = JSON.parse(String(init.body)) as { model: string; messages: unknown; max_completion_tokens: number };
-      const price = JUDGE_PRICES[normalizeVeniceAnalystModelId(body.model)];
+      const body = JSON.parse(String(init.body)) as { model: string; messages?: unknown; input?: unknown; questions?: unknown; max_completion_tokens?: number; max_tokens?: number };
+      const price = provider === 'tinfoil' ? TINFOIL_PRICES[body.model] : JUDGE_PRICES[normalizeVeniceAnalystModelId(body.model)];
       if (!price) throw new JudgeCloudStopped('price');
       // Byte count is a conservative input-token allowance including chat framing.
       // Reserve the full output limit before dispatch, then reconcile provider usage.
-      const input = Buffer.byteLength(JSON.stringify(body.messages), 'utf8') + 64;
-      const output = body.max_completion_tokens;
+      const input = Buffer.byteLength(JSON.stringify(body.messages ?? { input: body.input, questions: body.questions }), 'utf8') + 64;
+      const output = body.model === 'decision-medium' ? 0 : body.max_completion_tokens ?? body.max_tokens ?? -1;
       if (!Number.isSafeInteger(output) || output < 0) throw new Error('The judge output allowance is missing.');
       const cost = Math.ceil(input * price.input + output * price.output);
-      try { this.reserve(cost); } catch (error) { if (error instanceof JudgeCloudStopped) onStop(); throw error; }
+      try { this.reserve(cost, provider); } catch (error) { if (error instanceof JudgeCloudStopped) onStop(); throw error; }
       const response = await fetchImpl(url, init);
-      if (response.status === 402) {
+      if ((response.status === 402 || (provider === 'tinfoil' && response.status === 403))) {
         this.change(row => { row.spent -= cost; row.stop = 'payment'; this.report(row); });
         onStop();
         throw new JudgeCloudStopped('payment');
@@ -218,8 +221,8 @@ export class JudgeSpending {
       }
       if (response.ok) {
         try {
-          const reply = await response.clone().json() as { usage?: { prompt_tokens?: number; completion_tokens?: number } };
-          const usage = reply.usage;
+          const reply = await response.clone().json() as { usage?: { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number } };
+          const usage = reply.usage ? { prompt_tokens: reply.usage.prompt_tokens ?? reply.usage.input_tokens, completion_tokens: reply.usage.completion_tokens ?? reply.usage.output_tokens } : undefined;
           if (usage && Number.isSafeInteger(usage.prompt_tokens) && Number.isSafeInteger(usage.completion_tokens)
             && usage.prompt_tokens! >= 0 && usage.completion_tokens! >= 0) {
             const actual = Math.ceil(usage.prompt_tokens! * price.input + usage.completion_tokens! * price.output);

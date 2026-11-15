@@ -11,6 +11,7 @@ import { LOCAL_MODELS_SETUP_PROMPT } from './model-setup.ts';
 
 const TITLES: Record<ModelChoiceProvider, { row: string; pick: string; intro: string; add: string; addTitle: string }> = {
   local: { row: 'Local', pick: 'Choose your local model', intro: 'Models on this computer that Olympus can use. Nothing leaves this computer.', add: '+ Add a model', addTitle: 'Add a local model' },
+  tinfoil: { row: 'Tinfoil', pick: 'Choose your Tinfoil model', intro: 'Private answers use attested enclaves and encrypted request bodies. Bring your own Tinfoil key.', add: 'About Tinfoil', addTitle: 'Tinfoil models' },
   venice: { row: 'Venice', pick: 'Choose your Venice model', intro: "Private models only: Venice doesn't keep what you send.", add: '+ Add a Venice model', addTitle: 'Add a Venice model' },
   zkapi: { row: 'zkAPI', pick: 'Choose your zkAPI model', intro: "zkAPI can't tell who's asking, whichever model you pick.", add: '+ Add', addTitle: 'Add a zkAPI model' },
 };
@@ -55,6 +56,7 @@ function addDialog(provider: ModelChoiceProvider): string {
       + `<div class="promptbox" id="add-model-request" hidden>${escapeHtml(LOCAL_MODEL_AGENT_REQUEST)}</div><button class="btn" type="button" data-copy-target="#add-model-request">Copy request</button><span class="copystatus" data-copy-status aria-live="polite"></span></section>`
       + '</dialog>';
   }
+  if (provider === 'tinfoil') return head + '<p>Choose one of the three Tinfoil answer models in the picker. Add your key in Keys.</p></dialog>';
   if (provider === 'venice') {
     return head + '<p class="pnote">Every private model Venice offers you now. Olympus never sends Private items to a model Venice keeps data on.</p>'
       + '<form data-model-choice data-addable-list="venice"><input type="hidden" name="provider" value="venice"><div data-addable-models><p class="pnote" role="status">Loading Venice\'s models…</p></div>'
@@ -76,7 +78,7 @@ function pickerRow(list: ModelChoiceList, disabled: boolean, extra = ''): string
 /** Local and Venice pickers, for "How Private items are answered". */
 export function renderAnswerModelPickers(choices: DashboardModelChoices | undefined, unlocked: boolean): string {
   if (!choices) return '';
-  const rows = [choices.local, choices.venice].filter((list): list is ModelChoiceList => list !== undefined).map(list => pickerRow(list, !unlocked));
+  const rows = [choices.local, choices.venice, choices.tinfoil].filter((list): list is ModelChoiceList => list !== undefined).map(list => pickerRow(list, !unlocked));
   return rows.length ? `<div class="pickrows">${rows.join('')}</div>` : '';
 }
 

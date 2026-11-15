@@ -174,6 +174,7 @@ export const PRIVACY_TABS_CSS = `
 .judgenote { color: var(--t2); font-size: var(--fs-caption); }
 .judgecapbox { display: none; margin: 12px 0; }
 .judgecapbox .pnote { margin: 0 0 8px; }
+form[data-judge-choice]:has(input[name="choice"][value="tinfoil"]:checked) .judgecapbox,
 form[data-judge-choice]:has(input[name="choice"][value="venice"]:checked) .judgecapbox,
 form[data-judge-choice]:has(input[name="choice"][value="local-then-venice"]:checked) .judgecapbox { display: block; }
 .judgecapbox input[type="number"] { width: 110px; }

@@ -89,7 +89,7 @@ export class JudgeCloudStopped extends Error {
   constructor(readonly reason: 'cap' | 'payment' | 'opt_in' | 'price' | 'storage') { super(`Cloud judging stopped: ${reason}`); }
 }
 
-export type SnifferLaneKind = 'local' | 'venice';
+export type SnifferLaneKind = 'local' | 'venice' | 'tinfoil';
 
 export interface SnifferLaneIdentity {
   kind: SnifferLaneKind;

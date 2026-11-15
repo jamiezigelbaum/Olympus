@@ -100,7 +100,7 @@ export interface SetupFacts {
   /** The running Olympus answered. */
   running: boolean;
   privateAnswers?: { chosen: boolean; label?: string };
-  judge?: { chosen: boolean; choice?: 'local' | 'local-then-venice' | 'venice'; limitDollars?: number | null };
+  judge?: { chosen: boolean; choice?: 'local' | 'local-then-venice' | 'venice' | 'tinfoil'; limitDollars?: number | null };
   sources?: readonly SetupSourceEntry[];
   messaging?: readonly SetupMessagingFact[];
   /** Agent names: approved connections, and the host agent Olympus runs inside. */
@@ -175,10 +175,10 @@ function judgeStep(facts: SetupFacts): Draft {
   const forward = owner(SETUP_DASHBOARD_LINKS.privacyJudge, 'spending');
   if (!fact) return { id: 'privacy_judge', title: 'Privacy judge', status: 'open', detail: NOT_RUNNING, forward };
   if (!fact.chosen) {
-    return { id: 'privacy_judge', title: 'Choose your privacy judge', status: 'open', detail: 'Not chosen yet: on this computer for free, or Venice.', forward };
+    return { id: 'privacy_judge', title: 'Choose your privacy judge', status: 'open', detail: 'Not chosen yet: on this computer for free, Venice, or experimental Tinfoil.', forward };
   }
   const limit = typeof fact.limitDollars === 'number' ? `up to ${dollars(fact.limitDollars)}` : 'no spending limit set';
-  const detail = fact.choice === 'venice' ? `Venice, ${limit}`
+  const detail = fact.choice === 'tinfoil' ? `Tinfoil Decision medium, ${limit}` : fact.choice === 'venice' ? `Venice, ${limit}`
     : fact.choice === 'local-then-venice' ? `This computer, then Venice double-checks, ${limit}`
       : 'On this computer, free';
   return { id: 'privacy_judge', title: 'Privacy judge', status: 'done', detail, forward };

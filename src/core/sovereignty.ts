@@ -44,6 +44,7 @@ export type SovereigntyProfileProvider =
   | 'openclaw-infer'
   | 'google-gemini'
   | 'venice'
+  | 'tinfoil'
   | 'anthropic'
   | 'openai-compatible'
   // The in-process embedding model: embedding only, always local trust, no
@@ -58,6 +59,7 @@ const SUPPORTED_PROVIDERS: readonly SovereigntyProfileProvider[] = [
   'openclaw-infer',
   'google-gemini',
   'venice',
+  'tinfoil',
   'anthropic',
   'openai-compatible',
   'built-in',
@@ -146,11 +148,11 @@ export interface SovereigntyEngine {
   readonly path?: string;
   resolveAnalystRoute(input: {
     trustDomain: SourceTrustDomain;
-    requestedProvider?: 'default' | 'local' | 'cloud' | 'venice';
+    requestedProvider?: 'default' | 'local' | 'cloud' | 'venice' | 'tinfoil';
   }): SovereigntyResolvedProfile[];
   resolveAnalystPool(input: {
     trustDomain: SourceTrustDomain;
-    requestedProvider?: 'default' | 'local' | 'cloud' | 'venice';
+    requestedProvider?: 'default' | 'local' | 'cloud' | 'venice' | 'tinfoil';
   }): SovereigntyResolvedAnalystPool;
   resolveEmbeddingProfile(trustDomain: SourceTrustDomain): SovereigntyResolvedProfile | undefined;
   assertTrustTierAllowed(trustTier: SourceTrustTier): void;
@@ -266,7 +268,7 @@ export function createSovereigntyEngine(
   const config = validateSovereigntyConfig(rawConfig);
   const resolveAnalystPool = (input: {
     trustDomain: SourceTrustDomain;
-    requestedProvider?: 'default' | 'local' | 'cloud' | 'venice';
+    requestedProvider?: 'default' | 'local' | 'cloud' | 'venice' | 'tinfoil';
   }): SovereigntyResolvedAnalystPool => {
     if (config.privacyChoicePending) throw new OperationError('source_index_policy_violation', 'Choose the first-run privacy policy before answering from source data.');
     const trustDomain = builtinTrustDomain(input.trustDomain);
@@ -298,7 +300,7 @@ export function createSovereigntyEngine(
     // least as trusted as the request asked for; substituting a WEAKER lane is
     // the silent fall-through the error below exists to prevent, so a pool
     // with nothing that trusted still fails closed.
-    const members = requested.length > 0
+    const members = requested.length > 0 || requestedProvider === 'tinfoil'
       ? requested
       : approved.filter((profile) => (
         TRUST_ORDER[profile.profile.trust] >= requestedProviderTrust(requestedProvider)
@@ -1044,6 +1046,11 @@ function validateProfile(id: string, profile: SovereigntyModelProfile, daemonPor
     || profile.snifferDecisionBar <= 0 || profile.snifferDecisionBar > 0.5)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" snifferDecisionBar requires a local profile and a number above 0 and at most 0.5.`);
   }
+  if (profile.provider === 'tinfoil') {
+    if (profile.trust !== 'encrypted_cloud' || profile.baseUrl !== undefined || !['analyst', 'classification', undefined].includes(profile.purpose)) throw new OperationError('config_error', 'Tinfoil requires encrypted_cloud trust, the fixed attested router, and an answer or classification role.');
+    const models = profile.purpose === 'classification' ? ['decision-medium'] : ['kimi-k3-1-pro', 'glm-5-3', 'deepseek-v4-1-flash'];
+    if (!models.includes(profile.model)) throw new OperationError('config_error', 'Unsupported Tinfoil model for this role.');
+  }
   if (profile.provider === 'zkapi') validateZkapiProfile(id, profile);
   if (profile.provider === 'built-in') {
     validateBuiltInProfile(id, profile);
@@ -1217,6 +1224,7 @@ function validateRetrievalPolicy(
   if (policy.embeddingProfile) {
     const resolved = resolveProfile(config, policy.embeddingProfile, `retrieval policy ${domain}`);
     assertNotConsultOnly(resolved, `the ${domain} embedding policy`);
+    if (resolved.profile.provider === 'tinfoil') throw new OperationError('config_error', 'Tinfoil cannot serve an embedding policy. Choose local embeddings or Venice.');
     if (!policy.allowedEmbeddingTrust.includes(resolved.profile.trust)) {
       throw new OperationError('config_error', `${domain} embedding profile "${policy.embeddingProfile}" is outside allowedEmbeddingTrust.`);
     }
@@ -1255,7 +1263,7 @@ function profileAllowedForDomain(
       && profile.provider === 'local-openai-compatible'
     ) || (
       profile.trust === 'encrypted_cloud'
-      && profile.provider === 'venice'
+      && (profile.provider === 'venice' || profile.provider === 'tinfoil')
     );
   }
   const policyTrust = domain === 'public_safe' ? 'standard_cloud' : 'encrypted_cloud';
@@ -1263,19 +1271,19 @@ function profileAllowedForDomain(
 }
 
 function requestedProviderTrust(
-  requestedProvider: 'default' | 'local' | 'cloud' | 'venice',
+  requestedProvider: 'default' | 'local' | 'cloud' | 'venice' | 'tinfoil',
 ): number {
   if (requestedProvider === 'local') return TRUST_ORDER.local;
-  if (requestedProvider === 'venice') return TRUST_ORDER.encrypted_cloud;
+  if (requestedProvider === 'venice' || requestedProvider === 'tinfoil') return TRUST_ORDER.encrypted_cloud;
   return TRUST_ORDER.standard_cloud;
 }
 
 function analystProfileMatchesRequest(
   profile: SovereigntyModelProfile,
-  requestedProvider: 'default' | 'local' | 'cloud' | 'venice',
+  requestedProvider: 'default' | 'local' | 'cloud' | 'venice' | 'tinfoil',
 ): boolean {
   if (requestedProvider === 'local') return profile.trust === 'local';
-  if (requestedProvider === 'venice') return profile.provider === 'venice';
+  if (requestedProvider === 'venice' || requestedProvider === 'tinfoil') return profile.provider === requestedProvider;
   if (requestedProvider === 'cloud') return profile.trust === 'standard_cloud';
   return true;
 }

@@ -903,6 +903,7 @@ export function createAnalystSourceIndexAnswerHandler(
             internal_items_consulted: internalCandidates.length,
             internal_content_failures: 0,
             analyst_backend: analystBackend,
+            ...(analystBackend === 'tinfoil' ? { egress_destination: 'tinfoil_attested' as const } : {}),
             ...(requestedAnalystProvider !== 'default'
               ? { requested_analyst_provider: requestedAnalystProvider }
               : {}),
@@ -1685,6 +1686,7 @@ async function routeAnalysis(input: RouteAnalysisInput): Promise<RoutedAnalysis>
     secureAnalystPoolLastLegTimeoutMs,
   } = input;
   assertEvidencePackModelEligible(pack);
+  if (requestedProvider === 'tinfoil' && !sovereigntyAnalystRoute) throw new OperationError('source_index_policy_violation', 'No owner-chosen Tinfoil route is configured.');
   const canUseCloud = !localOnly && cloud !== undefined;
 
   // MEMBRANE GUARD (defense in depth): even though localOnly already implies
@@ -2003,7 +2005,7 @@ async function routeAnalysisThroughSovereignty(input: {
     const budgetMs = isLastAvailableSecureLeg
       ? input.secureAnalystPoolLastLegTimeoutMs
       : secureLegBudgets?.get(step.profile.id)
-        ?? (step.backend === 'venice'
+        ?? ((step.backend === 'venice' || step.profile.profile.trust === 'encrypted_cloud')
           ? input.trustedAnalystTimeoutMs
           : step.backend === 'local'
             ? input.localAnalystTimeoutMs
@@ -2045,7 +2047,7 @@ async function routeAnalysisThroughSovereignty(input: {
     }
     const attemptStartedAt = Date.now();
     try {
-      if (step.backend === 'venice') {
+      if ((step.backend === 'venice' || step.profile.profile.trust === 'encrypted_cloud')) {
         const attempt = await observeSourceAnswerAnalystLeg({
           ...traceStep,
           budgetMs,
@@ -2062,7 +2064,7 @@ async function routeAnalysisThroughSovereignty(input: {
             attempt.elapsedMs,
           );
         }
-        return { result: attempt.result, backend: 'venice', ...(lastFallback ? { fallback: lastFallback } : {}) };
+        return { result: attempt.result, backend: step.backend, ...(lastFallback ? { fallback: lastFallback } : {}) };
       }
       // Every non-venice backend takes the same bounded helper: local on the
       // generous local ceiling, ordinary cloud on the cloud bound. The helper
@@ -2105,10 +2107,10 @@ async function routeAnalysisThroughSovereignty(input: {
       lastFallback = step.backend === 'local'
         ? undefined
         : analystFallback(step.backend, fallbackReason(step.backend, error), {
-            elapsedMs: step.backend === 'venice'
+            elapsedMs: (step.backend === 'venice' || step.profile.profile.trust === 'encrypted_cloud')
               ? trustedAnalystElapsedMs(error, attemptStartedAt)
               : Math.max(0, Date.now() - attemptStartedAt),
-            ...(step.backend === 'venice' ? { timeoutMs: budgetMs } : {}),
+            ...((step.backend === 'venice' || step.profile.profile.trust === 'encrypted_cloud') ? { timeoutMs: budgetMs } : {}),
           });
     }
   }

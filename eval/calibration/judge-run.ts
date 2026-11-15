@@ -1,3 +1,6 @@
+import { createTinfoilJudgeModel } from '../../src/workers/classification/sniffer-tinfoil.ts';
+import { createTinfoilAnalystModel } from '../../src/core/analyst-tinfoil.ts';
+import type { SnifferModelRequest, SnifferModelCompletion } from '../../src/workers/classification/sniffer-decision.ts';
 // Run the private judge over a labeled sample on a llama.cpp server, and score
 // it against the owner's labels. The prompt, the screens and the answer parser
 // are production's own, imported from sniffer.ts, so they cannot drift.
@@ -87,6 +90,10 @@ const nProbs = numberFlag('--n-probs', 40);
 const passes = numberFlag('--passes', 3);
 const primedCheck = numberFlag('--primed-check', 0);
 const veniceModel = flag('--venice');
+const tinfoilDecision = argv.includes('--tinfoil');
+const tinfoilChat = flag('--tinfoil-chat');
+const tinfoil = tinfoilDecision || tinfoilChat !== undefined;
+const remoteModel = tinfoil ? tinfoilChat ?? 'decision-medium' : veniceModel;
 /** Venice runs on a cluster, so the test may go past the sniffer's local cap of 8 to find the key's real limit. */
 const VENICE_MAX_CONCURRENCY = 64;
 const concurrency = Math.max(1, Math.min(VENICE_MAX_CONCURRENCY, Math.floor(numberFlag('--concurrency', 1))));
@@ -174,25 +181,53 @@ function veniceJudge(model: string): AnalystModel {
   });
 }
 
+/** Same metering for attested calls: counts and limit headers only. */
+function meterTinfoil(send: import('../../src/core/analyst-openai.ts').OpenAIAnalystFetch): import('../../src/core/analyst-openai.ts').OpenAIAnalystFetch {
+  return async (url, init) => {
+    meter.calls++;
+    const started = performance.now();
+    try {
+      const response = await send(url, init);
+      meter.statuses[response.status] = (meter.statuses[response.status] ?? 0) + 1;
+      if (!response.ok) meter.failedCalls++;
+      const retry = response.headers.get('retry-after');
+      if (retry) meter.rateLimits['retry-after'] = retry;
+      try {
+        const usage = (await response.clone().json() as { usage?: { input_tokens?: number; output_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
+        meter.promptTokens += usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
+        meter.completionTokens += usage?.output_tokens ?? usage?.completion_tokens ?? 0;
+      } catch { /* No usage; do not retain response text. */ }
+      return response;
+    } catch (error) { meter.failedCalls++; throw error; }
+    finally { meter.latencyMs.push(performance.now() - started); }
+  };
+}
+
 async function askVenice(model: AnalystModel, material: string, ownerContext: string | undefined): Promise<Answer> {
   // Wait for a pacing slot before complete() starts its timeout, so queueing never eats it.
   await paced();
-  let text: string;
+  let completion: SnifferModelCompletion;
   try {
-    text = (await model.complete({
+    const request: SnifferModelRequest = {
+      ...(tinfoilDecision ? { snifferItem: { pass: 'content', material, ownerContext } } : {}),
       system: SNIFFER_SYSTEM_PROMPT,
       prompt: buildSnifferBatchPrompt('content', [{ i: 1, material }], ownerContext),
       localOnly: true,
       responseSchema: SNIFFER_RESPONSE_SCHEMA,
       maxOutputChars: 110 + 200,
-    })).text;
+    };
+    completion = await model.complete(request);
+    if (completion.decisionVerdict) {
+      const v = completion.decisionVerdict;
+      return { judge: snifferTierKey(v) === 'secure' ? 'private' : 'personal', via: v.failSafe ? 'no_answer' : 'judge', ...(completion.decisionMetrics?.privateProbability != null ? { pPrivate: completion.decisionMetrics.privateProbability } : {}) };
+    }
   } catch (error) {
     // A policy refusal (the model is not Venice Private) stops the run; any
     // other failure is production's fail-safe for this item.
-    if (error instanceof Error && error.name === 'VeniceModelPolicyDeniedError') throw error;
+    if (error instanceof Error && ['VeniceModelPolicyDeniedError', 'TinfoilRefusalError', 'TinfoilLimitError'].includes(error.name)) throw error;
     return { judge: 'private', via: 'no_answer' };
   }
-  const verdict = parseSnifferBatchResponse(text, new Set([1])).get(1);
+  const verdict = parseSnifferBatchResponse(completion.text, new Set([1])).get(1);
   if (!verdict) return { judge: 'private', via: 'no_answer' };
   return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge', privateKind: verdict.privateKind, modelTier: verdict.tier, confidence: verdict.confidence, ownRecord: verdict.ownRecord, heldBy: heldBy(verdict) };
 }
@@ -403,7 +438,7 @@ function count<T extends string>(values: readonly T[]): Record<string, number> {
 }
 
 async function main(): Promise<void> {
-  if (veniceModel !== undefined || argv.includes('--allow-venice')) return await mainVenice();
+  if (tinfoil || argv.includes('--allow-tinfoil') || veniceModel !== undefined || argv.includes('--allow-venice')) return await mainVenice();
   assertLoopback(endpoint);
   if (mode !== 'decision' && mode !== 'full') throw new Error('--mode is decision or full.');
   if (!modelName) throw new Error('--model NAME is required, so a result always says what produced it.');
@@ -536,15 +571,19 @@ function readOwnerContext(): string | undefined {
 }
 
 async function mainVenice(): Promise<void> {
-  if (!veniceModel || !argv.includes('--allow-venice')) {
+  if (argv.includes('--allow-tinfoil') && !tinfoil) throw new Error('Choose --tinfoil or --tinfoil-chat MODEL with --allow-tinfoil.');
+  if (tinfoil && (!argv.includes('--allow-tinfoil') || veniceModel || (tinfoilDecision && tinfoilChat))) throw new Error('Use --tinfoil or --tinfoil-chat MODEL with --allow-tinfoil, without --venice.');
+  if (!tinfoil && (!veniceModel || !argv.includes('--allow-venice'))) {
     throw new Error('Venice needs both --venice MODEL_ID and --allow-venice: item text goes to api.venice.ai.');
   }
   if (flag('--endpoint') !== undefined) throw new Error('--endpoint does not apply to --venice.');
-  if (flag('--mode') !== undefined && flag('--mode') !== 'full') throw new Error('--venice runs full mode only.');
+  if (flag('--mode') !== undefined && flag('--mode') !== (tinfoilDecision ? 'decision' : 'full')) throw new Error('--venice runs full mode only.');
   const ownerContext = readOwnerContext();
   const { sample, labels, labeled, excluded } = selectLabeled();
   const asked = labeled.map(ask);
-  const judge = veniceJudge(veniceModel);
+  if (tinfoil && !process.env.TINFOIL_API_KEY?.trim()) throw new Error('Set TINFOIL_API_KEY. It is read only from the environment and never printed.');
+  const tinfoilOptions = { apiKey: process.env.TINFOIL_API_KEY ?? '', wrapFetch: meterTinfoil };
+  const judge = tinfoil ? (tinfoilDecision ? createTinfoilJudgeModel(tinfoilOptions) : createTinfoilAnalystModel({ ...tinfoilOptions, model: tinfoilChat! })) : veniceJudge(veniceModel!);
 
   const warm = await runVenicePass(asked, judge, ownerContext);
   const timed: Array<Awaited<ReturnType<typeof runVenicePass>>> = [];
@@ -568,9 +607,10 @@ async function mainVenice(): Promise<void> {
     // First, because a missed Important item is the mistake that matters most.
     privateMissed: Object.keys(importance).length > 0 ? privateByImportance(rows, importance) : undefined,
     at: new Date().toISOString(),
-    mode: 'full',
-    backend: 'venice',
-    model: veniceModel,
+    mode: tinfoilDecision ? 'decision' : 'full',
+    backend: tinfoil ? 'tinfoil' : 'venice',
+    privateBar: tinfoilDecision ? PRIVATE_BAR : undefined,
+    model: remoteModel,
     concurrency,
     prompt: snifferPromptVersions(ownerContext).cache,
     ownerWords: ownerContext ? 'supplied' : 'none',
@@ -579,7 +619,7 @@ async function mainVenice(): Promise<void> {
     answeredBy: count([...warm.answers.values()].map((answer) => answer.via)),
     verdictsMovedAcrossPasses: moved.length,
     speedItemsPerMinute: timed.length > 0 ? medianAndRange(timed.map((pass) => pass.itemsPerMinute)) : undefined,
-    venice: {
+    [tinfoil ? 'tinfoil' : 'venice']: {
       warm: meterSummary(warm.meter, modelItems),
       timed: timed.map((pass) => meterSummary(pass.meter, modelItems)),
     },
@@ -593,7 +633,7 @@ async function mainVenice(): Promise<void> {
       ? { all: confusion(weighted), bySource: groupedConfusion(weighted, (row) => row.source) }
       : undefined,
   };
-  const path = join(dir, `judge-venice-${veniceModel.replace(/[^a-z0-9.-]/gi, '_')}-${result.at.replace(/[:.]/g, '-')}.json`);
+  const path = join(dir, `judge-${tinfoil ? 'tinfoil' : 'venice'}-${remoteModel!.replace(/[^a-z0-9.-]/gi, '_')}-${result.at.replace(/[:.]/g, '-')}.json`);
   const perItem = rows.map((row) => ({ ...row, ...warm.answers.get(row.id) }));
   writeFileSync(path, JSON.stringify({ ...result, rows: perItem }, null, 1), { mode: 0o600 });
   chmodSync(path, 0o600);

@@ -1,3 +1,4 @@
+import { readTinfoilStatus } from '../../core/analyst-tinfoil.ts';
 import { rerankOutcomeCounts } from '../../core/evidence-reranker.ts';
 import { localAnalystWindowReports, reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../source-index/local-analyst-window.ts';
 import { X_CONTENT_RECOVERY_LIMIT_SUBJECT } from '../x-bookmarks/content-recovery.ts';
@@ -782,6 +783,7 @@ export async function main(): Promise<void> {
     ...(registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel()! } : {}),
     standaloneEngine: isStandaloneEngineProcess(process.env),
   };
+  const tinfoilJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'tinfoil', stop: null, remainingDollars: 1 });
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   await carryCloudJudgeApproval(judgeSpending, cloudJudgeRuntime, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
@@ -1008,14 +1010,15 @@ export async function main(): Promise<void> {
   const googleDriveDocsEmbeddingProvider = sourceIndexEmbeddingProvider;
   const requiredProfiles = requiredModelProfiles(sovereigntyEngine.config);
   const safeModelCredential = (profile: typeof requiredProfiles[number]['profile'], env: Record<string, string | undefined>): string | undefined => {
-    if (!profile.secretRef) return undefined;
-    try { return resolveSecretRefValueSync(profile.secretRef, { env })?.trim() || undefined; }
+    const secretRef = profile.secretRef ?? (profile.provider === 'tinfoil' ? 'store:tinfoil.api_key' : undefined);
+    if (!secretRef) return undefined;
+    try { return resolveSecretRefValueSync(secretRef, { env })?.trim() || undefined; }
     catch { return undefined; }
   };
   // Only used inside this process to distinguish stored from applied keys.
   const bootModelCredentials = new Map(requiredProfiles.map(({ id, profile }) => [id, safeModelCredential(profile, process.env)]));
   const modelCredentialState = (id: string, profile: typeof requiredProfiles[number]['profile']): ModelCredentialState => {
-    if (!profile.secretRef) return bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)) ? 'missing' : 'ready';
+    if (!profile.secretRef && profile.provider !== 'tinfoil') return bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)) ? 'missing' : 'ready';
     const storedEnv = { ...process.env, ...(readWorkerSetupEnv() ?? {}) };
     const current = safeModelCredential(profile, storedEnv);
     if (!current) return 'missing';
@@ -1082,6 +1085,11 @@ export async function main(): Promise<void> {
   const getModelSetup = () => {
     const status = workerBuiltInModel ? builtInPrivateModelStatus(process.env) : undefined;
     const view = { ...modelSetup.getStatus(), ...macComputerSetupView(), ...(status?.enabled ? { private_model: { state: status.state, bytesDone: status.bytesDone, bytesTotal: status.bytesTotal ?? status.downloadBytes } } : {}) };
+    const tinfoilStatus = readTinfoilStatus();
+    if (tinfoilStatus && tinfoilStatus.state !== 'ready') {
+      view.cards = view.cards.map(card => card.id === 'tinfoil' ? { ...card, state: 'needs_attention', detail: tinfoilStatus.reason } : card);
+      if (view.cards.some(card => card.id === 'tinfoil' && card.required)) view.ready = false;
+    }
     if (!modelReloadUnavailable) return view;
     return { ...view, ready: false, cards: view.cards.map((card) => card.state === 'applying'
       ? { ...card, state: 'needs_attention' as const, detail: 'Key saved. Ask your agent to restart the managed Olympus worker to apply it; this foreground worker cannot restart itself.' }
@@ -1130,9 +1138,9 @@ export async function main(): Promise<void> {
   });
   // Set once Outside help's adapter exists: the one writer of consult.json.
   let saveZkapiModel: ((model: string | undefined) => Promise<{ ok: true } | { ok: false; message: string }>) | undefined;
-  const connectModelKey = async (provider: 'gemini' | 'venice', apiKey: string): Promise<void> => {
+  const connectModelKey = async (provider: 'gemini' | 'venice' | 'tinfoil', apiKey: string): Promise<void> => {
     if (provider === 'gemini') await connectGeminiApiKey({ apiKey });
-    else await connectPublicApiKeySource({ source: 'venice', apiKey });
+    else await connectPublicApiKeySource({ source: provider, apiKey });
     const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile));
     if (!credentials.includes('missing') && credentials.includes('applying')) {
       modelReloadUnavailable = !requestModelReload();
@@ -4978,7 +4986,7 @@ export async function main(): Promise<void> {
               },
             },
             judgeSetup: createJudgeSetup({
-              spending: judgeSpending, cloud: cloudJudgeRuntime,
+              spending: judgeSpending, cloud: cloudJudgeRuntime, tinfoil: tinfoilJudgeRuntime,
               local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'local', stop: null, remainingDollars: 0 }),
               ledgerPath: resolveClassificationLedgerPath(process.env), promptVersion: () => snifferPromptVersions(privacyOwnerWords()).approval,
               credentialReady: lane => Boolean(safeModelCredential(lane.profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) })),
@@ -6337,7 +6345,7 @@ export async function main(): Promise<void> {
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
-      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } });
+      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeWrapFetch: fetch => judgeSpending.fetch(fetch, undefined, 'tinfoil'), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } });
   snifferModelBuilt = rawSnifferModel !== undefined;
   // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
@@ -6354,7 +6362,7 @@ export async function main(): Promise<void> {
       lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
       promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
     })
-    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeWrapFetch: fetch => judgeSpending.fetch(fetch, undefined, 'tinfoil'), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } })
     : undefined;
   if (!engineFront && judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
     console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
@@ -6404,8 +6412,8 @@ export async function main(): Promise<void> {
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls }
-          : snifferLane.kind === 'venice' ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {}),
-        ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'venice' && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
+          : snifferLane.kind === 'tinfoil' ? { concurrentCalls: 4 } : snifferLane.kind === 'venice' ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {}),
+        ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind !== 'local' && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
         ownerInFlight: () => standBack.holds('judge') || (snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource))),

@@ -19,8 +19,8 @@ import type {
 // 'local' = Argus on Delphi/local models; 'venice' = explicitly requested
 // approved encrypted-cloud escalation; 'cloud' = ordinary cloud analyst for
 // internal/public packs only.
-export type AnalystBackend = 'local' | 'venice' | 'cloud';
-export type SourceAnswerAnalystProvider = 'default' | 'local' | 'venice' | 'cloud';
+export type AnalystBackend = 'local' | 'venice' | 'tinfoil' | 'cloud';
+export type SourceAnswerAnalystProvider = 'default' | 'local' | 'venice' | 'tinfoil' | 'cloud';
 
 export interface SourceIndexAnswerRequest {
   question: string;
@@ -122,6 +122,7 @@ export interface SourceIndexAnswerResult {
       // is in the pack. 'venice' is only possible when explicitly selected as
       // approved encrypted-cloud escalation.
       analyst_backend: AnalystBackend;
+      egress_destination?: 'tinfoil_attested';
       requested_analyst_provider?: SourceAnswerAnalystProvider;
       requested_analyst_model?: string;
       analyst_fallback?: SourceIndexAnalystFallback;

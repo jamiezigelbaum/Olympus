@@ -180,7 +180,7 @@ const SOURCE_ANSWER_PARAMS = {
   authored_before: { type: 'string', description: 'Optional inclusive ISO upper bound on authored time.' },
   selected_items: { type: 'array', description: 'Optional selected evidence from a prior source_index_search; prefer hit.selected_item. Never source text.' },
   retrieval_mode: { type: 'string', enum: ['keyword', 'hybrid'], description: 'Optional retrieval override. Omit for the shared hybrid path; set keyword only for an explicit lexical-only request.' },
-  analyst_provider: { type: 'string', enum: ['default', 'local', 'venice', 'cloud'], description: 'Optional analyst constraint. Leave default; set local or venice only when {{ownerName}} explicitly asks. Presets: local-first = local then Venice; private-cloud-only = Venice only.' },
+  analyst_provider: { type: 'string', enum: ['default', 'local', 'venice', 'tinfoil', 'cloud'], description: 'Optional analyst constraint. Leave default; set local or venice only when {{ownerName}} explicitly asks. Presets: local-first = local then Venice; private-cloud-only = Venice only.' },
   analyst_model: { type: 'string', description: 'Optional Venice model id for an explicit Venice request. e2ee-* ids are refused; defaults kimi-k3 (strong), inkling (normal).' },
   max_results: { type: 'number', description: 'Max evidence items. Omit for the budgeted default (up to 24 passages across sources); set lower only for a narrow lookup. Worker-capped at 48.' },
   include_secure_local: { type: 'boolean', description: 'Whether to search secure-local (Private) corpora. Omit to search them whenever the sovereignty policy approves a private analyst (Argus) for them; only Argus reads that evidence, and you receive its derived answer plus citation labels (title, locator path or link, source, conversation, author), which are secret-scanned and released because item metadata defaults to Personal; never Private source text. Set false to opt out.' },
@@ -1214,16 +1214,16 @@ function optionalRetrievalMode(value: unknown): 'keyword' | 'hybrid' | undefined
   throw new OperationError('invalid_params', 'retrieval_mode must be keyword or hybrid.');
 }
 
-function optionalSourceAnswerAnalystProvider(value: unknown): 'default' | 'local' | 'venice' | 'cloud' | undefined {
+function optionalSourceAnswerAnalystProvider(value: unknown): 'default' | 'local' | 'venice' | 'tinfoil' | 'cloud' | undefined {
   if (value === undefined || value === null || value === '') return undefined;
-  if (value === 'default' || value === 'local' || value === 'venice' || value === 'cloud') return value;
-  throw new OperationError('invalid_params', 'analyst_provider must be default, local, venice, or cloud.');
+  if (value === 'default' || value === 'local' || value === 'venice' || value === 'tinfoil' || value === 'cloud') return value;
+  throw new OperationError('invalid_params', 'analyst_provider must be default, local, venice, tinfoil, or cloud.');
 }
 
 function optionalAnalystModel(
   value: unknown,
   name: string,
-  analystProvider?: 'default' | 'local' | 'venice' | 'cloud',
+  analystProvider?: 'default' | 'local' | 'venice' | 'tinfoil' | 'cloud',
 ): string | undefined {
   const model = optionalString(value)?.trim();
   if (model === undefined) return undefined;

@@ -112,7 +112,7 @@ export interface SourceIndexAnswerOptions {
   authoredBefore?: string;
   selectedItems?: SourceAnswerSelectedItemOption[];
   retrievalMode?: 'keyword' | 'hybrid';
-  analystProvider?: 'default' | 'local' | 'venice' | 'cloud';
+  analystProvider?: 'default' | 'local' | 'venice' | 'tinfoil' | 'cloud';
   analystModel?: string;
   maxResults?: number;
   includeSecureLocal?: boolean;
@@ -266,8 +266,8 @@ export interface SourceIndexAnswerResult {
       reason?: string;
     };
     answer_synthesis?: {
-      analyst_backend?: 'local' | 'venice' | 'cloud';
-      requested_analyst_provider?: 'default' | 'local' | 'venice' | 'cloud';
+      analyst_backend?: 'local' | 'venice' | 'tinfoil' | 'cloud';
+      requested_analyst_provider?: 'default' | 'local' | 'venice' | 'tinfoil' | 'cloud';
       requested_analyst_model?: string;
       analyst_fallback?: {
         from: 'venice' | 'cloud';
@@ -1358,13 +1358,14 @@ function parseSourceAnswerSynthesisAudit(value: unknown): NonNullable<SourceInde
     throw new OperationError('email_error', 'source answer synthesis audit must be raw-source-safe.');
   }
   const analystBackend =
-    audit.analyst_backend === 'local' || audit.analyst_backend === 'venice' || audit.analyst_backend === 'cloud'
+    audit.analyst_backend === 'local' || audit.analyst_backend === 'venice' || audit.analyst_backend === 'tinfoil' || audit.analyst_backend === 'cloud'
       ? audit.analyst_backend
       : undefined;
   const requestedProvider =
     audit.requested_analyst_provider === 'default'
     || audit.requested_analyst_provider === 'local'
     || audit.requested_analyst_provider === 'venice'
+    || audit.requested_analyst_provider === 'tinfoil'
     || audit.requested_analyst_provider === 'cloud'
       ? audit.requested_analyst_provider
       : undefined;

@@ -116,7 +116,7 @@ export interface OlympusFolderScopeBrowseResult {
 }
 
 export type OlympusDashboardOAuthSource = 'gmail' | 'google-drive' | 'dropbox' | 'x';
-export type OlympusDashboardApiKeySource = 'gemini' | 'venice' | 'readwise';
+export type OlympusDashboardApiKeySource = 'gemini' | 'venice' | 'tinfoil' | 'readwise';
 export type OlympusSourceDispositionState = 'ingest' | 'metadata_only' | 'on_demand' | 'exclude';
 
 /** What a form on the computer's local pages submits (browser-controller.ts). */
@@ -126,8 +126,8 @@ export type OlympusDashboardControlParams =
   | { action: 'test_local_models'; base_url: string; answer_model: string }
   | { action: 'save_local_answer_model'; base_url: string; answer_model: string }
   | { action: 'save_first_run_privacy'; choice: string }
-  | { action: 'save_judge'; choice: 'local' | 'local-then-venice' | 'venice'; cap_dollars: number }
-  | { action: 'save_model_choice'; provider: 'local' | 'venice' | 'zkapi'; model: string }
+  | { action: 'save_judge'; choice: 'local' | 'local-then-venice' | 'venice' | 'tinfoil'; cap_dollars: number }
+  | { action: 'save_model_choice'; provider: 'local' | 'venice' | 'tinfoil' | 'zkapi'; model: string }
   | { action: 'list_addable_models'; provider: 'venice' }
   /** Sources (?connect): check a connected source now, by the sync route's own name for it. */
   | { action: 'sync_now'; source: string }

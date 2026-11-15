@@ -1,3 +1,4 @@
+import { createTinfoilFetch, type TinfoilTransportOptions } from './analyst-tinfoil.ts';
 import { checkGoogleOwnAppAccess } from './google-own-app.ts';
 import { linuxOwnerConfigPath } from './owner-config-read.ts';
 import { readLinuxEngineReceipt, resolveLinuxEngineLayout, isLegacyLinuxSetting } from './linux-engine-layout.ts';
@@ -89,6 +90,7 @@ export type ConnectSource =
   | 'telegram'
   | 'whatsapp'
   | 'venice'
+  | 'tinfoil'
   | 'readwise'
   | 'gemini';
 
@@ -1206,8 +1208,9 @@ function formatDurationMs(value: number): string {
 /** Public v0.4 API-key path. Kept separate from repository-only providers so
  * the release bundler cannot retain their validation or credential code. */
 export async function connectPublicApiKeySource(options: {
-  source: 'venice' | 'readwise';
+  source: 'venice' | 'readwise' | 'tinfoil';
   apiKey: string;
+  tinfoil?: Omit<TinfoilTransportOptions, 'apiKey'>;
   accountRole?: string;
   registryPath?: string;
   secretStore?: SecretStore;
@@ -1223,6 +1226,11 @@ export async function connectPublicApiKeySource(options: {
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   const registryPath = options.registryPath ?? defaultHandleRegistryPath();
   const now = options.now ?? (() => new Date());
+  if (options.source === 'tinfoil') {
+    await createTinfoilFetch({ ...options.tinfoil, apiKey: key })('https://tinfoil.invalid/v1/models', { method: 'GET' });
+    await secretStore.set('tinfoil.api_key', key);
+    return { ok: true, source: 'tinfoil', handles: [], registryPath, secretRefs: ['store:tinfoil.api_key'], next: 'Choose Tinfoil explicitly for Private answers or privacy judging. Adding a key alone permits no content dispatch.' };
+  }
   if (options.source === 'venice') {
     await validatePublicApiKeySource({
       source: 'venice',
@@ -1346,7 +1354,7 @@ async function validateGeminiApiKey(options: {
 }
 
 async function validatePublicApiKeySource(options: {
-  source: 'venice' | 'readwise';
+  source: 'venice' | 'readwise' | 'tinfoil';
   apiKey: string;
   fetchImpl: OAuthFetch;
   readwiseAuthUrl?: string;
@@ -1408,7 +1416,7 @@ async function validateVeniceKey(options: { apiKey: string; fetchImpl: OAuthFetc
 
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
 export async function connectApiKeySource(options: {
-  source: 'venice' | 'readwise' | 'notion';
+  source: 'venice' | 'readwise' | 'notion' | 'tinfoil';
   apiKey: string;
   accountRole?: string;
   registryPath?: string;
@@ -1421,6 +1429,7 @@ export async function connectApiKeySource(options: {
   notionVersion?: string;
   validationTimeoutMs?: number;
 }): Promise<ConnectResult> {
+  if (options.source === 'tinfoil') return connectPublicApiKeySource({ ...options, source: 'tinfoil' });
   const accountRole = safeAccountRole(options.accountRole ?? 'personal');
   const key = options.apiKey.trim();
   if (!key) throw new Error('API key is required.');
@@ -1498,7 +1507,7 @@ export async function connectApiKeySource(options: {
 }
 
 async function validateApiKeySource(options: {
-  source: 'venice' | 'readwise' | 'notion';
+  source: 'venice' | 'readwise' | 'notion' | 'tinfoil';
   apiKey: string;
   fetchImpl: OAuthFetch;
   readwiseAuthUrl?: string;

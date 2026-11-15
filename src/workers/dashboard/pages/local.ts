@@ -1,7 +1,8 @@
+import type { TinfoilStatus } from '../../../core/analyst-tinfoil.ts';
 import { judgeMoney, judgeCount, judgeDuration, judgeHours } from '../judge-format.ts';
 export { judgeMoney, judgeCount, judgeDuration } from '../judge-format.ts';
 import { dashboardPeopleRow } from './people.ts';
-import { judgeArchiveEstimate, judgeChoiceUsesVenice, judgeDefaultCapDollars, JUDGE_PRICE_DATE, LOCAL_JUDGE_MEASUREMENT, VENICE_JUDGE_ESTIMATE, type JudgeChoice, type JudgeObserved, type JudgeSpendingStatus } from '../../classification/judge-spending.ts';
+import { judgeArchiveEstimate, judgeChoiceUsesCloud, judgeDefaultCapDollars, JUDGE_PRICE_DATE, LOCAL_JUDGE_MEASUREMENT, VENICE_JUDGE_ESTIMATE, type JudgeChoice, type JudgeObserved, type JudgeSpendingStatus } from '../../classification/judge-spending.ts';
 import { BACKUP_COPY, BACKUP_SECTION_CSS, DASHBOARD_SETTINGS_BACKUP_ID, renderBackupSection } from '../backup-section.ts';
 import type { BackupStatus } from '../../backup-service.ts';
 import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
@@ -76,7 +77,7 @@ import {
   dashboardSetupLead,
 } from '../vocabulary.ts';
 
-export interface DashboardJudgeSetup extends JudgeSpendingStatus { chosen?: boolean; cloudModel: string | null; cloudAvailable: boolean; observed?: JudgeObserved }
+export interface DashboardJudgeSetup extends JudgeSpendingStatus { chosen?: boolean; cloudModel: string | null; cloudAvailable: boolean; tinfoilAvailable?: boolean; tinfoilStatus?: TinfoilStatus | undefined; observed?: JudgeObserved }
 export interface DashboardPageOptions {
   judgeSetup?: DashboardJudgeSetup;
   /** Settings › Back up and restore (backup-section.ts); only for the unlocked local session. */
@@ -228,6 +229,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
       + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + '</section>',
     renderZkapiPrivacy(options, token),
     view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
+    view.model_setup?.cards.some(card => card.id === 'tinfoil') ? '' : '<section id="tinfoil-setup"><h3 class="sect">Tinfoil</h3><p class="pnote">Bring your own key. Choose Tinfoil in Privacy settings for answers or privacy checks; adding a key alone sends no items.</p><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="tinfoil"><input type="hidden" name="source" value="tinfoil"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" aria-label="Tinfoil API key" placeholder="Tinfoil API key"><button class="btn primary" type="submit">Connect Tinfoil</button><span data-action-message role="status"></span></form></section>',
     renderJudgeChoice(view, options),
   ].filter((block) => block !== '').join('\n');
   return localShell({
@@ -815,12 +817,17 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
   if (!status) return '';
   const items = view.sources.reduce((sum, source) => sum + (source.coverage.stored_items ?? source.coverage.indexed_items), 0);
   const estimate = judgeArchiveEstimate(items, status.cloudModel ?? '', status.observed ?? {});
+  const tinfoilEstimate = judgeArchiveEstimate(items, 'decision-medium', status.observed ?? {});
   const cloud = status.stop !== 'storage' && status.cloudAvailable && estimate.cloudDollars !== null;
-  const stopped = status.stop === 'storage'
+  const tinfoilChosen = status.choice === 'tinfoil';
+  const stopped = tinfoilChosen && status.stop === 'payment'
+    ? '<p role="alert">Tinfoil stopped at a payment or account usage limit (HTTP 402/403). <a href="https://tinfoil.sh" target="_blank" rel="noopener noreferrer">Check your Tinfoil account</a>, then save your choice to retry. Remaining items stay Private.</p>'
+    : tinfoilChosen && status.stop === 'cap' ? '<p role="status">Tinfoil reached your spending limit. Remaining items stay Private. Raise the total limit to continue with Tinfoil.</p>'
+    : status.stop === 'storage'
     ? '<p role="alert">The saved spending record cannot be read. Cloud judging is off; local judging can continue. Restore the spending record from a backup or repair its access, then restart Olympus. <a href="/dashboard?help">Open Help</a></p>'
     : status.stop === 'payment'
-    ? '<p role="alert">Venice stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>'
-    : status.stop === 'cap' ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with Venice.</p>' : '';
+    ? '<p role="alert">Cloud judging stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>'
+    : status.stop === 'cap' ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with your chosen provider.</p>' : '';
   const row = (term: string, value: string) => `<span class="judgeterm">${escapeHtml(term)}</span><span>${value}</span>`;
   const note = (text: string) => `<br><small class="judgenote">${escapeHtml(text)}</small>`;
   const measured = estimate.measuredHours !== undefined;
@@ -851,18 +858,19 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
     S.judgeVeniceFit, cloud);
   // The limit shows whenever a choice that uses Venice is selected (CSS). Until the
   // owner sets one, it starts at the selected choice's estimate plus 25% (#884).
-  const defaults = { 'local-then-venice': judgeDefaultCapDollars(second.dollars), venice: judgeDefaultCapDollars(estimate.cloudDollars) };
-  const ownCap = judgeChoiceUsesVenice(status.choice) && !status.uncapped && status.stop !== 'storage' ? status.capDollars : undefined;
-  const capValue = ownCap ?? (status.uncapped ? undefined : defaults[status.choice === 'venice' ? 'venice' : 'local-then-venice'] ?? undefined);
+  const tinfoil = option('tinfoil', 'Tinfoil Decision medium', "Experimental at Tinfoil. 89% agreement with the owner's labels in our tests, 15 Nov 2026.", row(S.judgeCost, `${judgeMoney(tinfoilEstimate.cloudDollars)}, on your own Tinfoil account`) + row(S.judgeWhen, 'Attested enclaves; encrypted requests') + row(S.judgeModel, 'decision-medium'), 'P(Private) ≥ 0.5 holds Private. Add your Tinfoil key in Keys.', status.tinfoilAvailable === true && status.stop !== 'storage');
+  const defaults = { tinfoil: judgeDefaultCapDollars(tinfoilEstimate.cloudDollars), 'local-then-venice': judgeDefaultCapDollars(second.dollars), venice: judgeDefaultCapDollars(estimate.cloudDollars) };
+  const ownCap = judgeChoiceUsesCloud(status.choice) && !status.uncapped && status.stop !== 'storage' ? status.capDollars : undefined;
+  const capValue = ownCap ?? (status.uncapped ? undefined : defaults[status.choice === 'tinfoil' ? 'tinfoil' : status.choice === 'venice' ? 'venice' : 'local-then-venice'] ?? undefined);
   const spent = status.uncapped
     ? 'No spending limit is set, so Olympus isn\'t tracking cloud spending yet. Your Venice account shows what you\'ve spent.'
     : ownCap !== undefined
       ? `Spent or reserved: ${judgeMoney(status.spentDollars, true)}. Remaining: ${judgeMoney(status.remainingDollars, true)}. ${S.judgeCapStops}`
       : status.stop === 'storage' ? `Spending amounts are unavailable. ${S.judgeCapStops}` : S.judgeCapDefault;
   const capAttrs = ownCap === undefined && !status.uncapped
-    ? ` data-cap-auto="true" data-cap-local-then-venice="${defaults['local-then-venice'] ?? ''}" data-cap-venice="${defaults.venice ?? ''}"` : '';
-  const capBox = `<div class="judgecapbox"><label class="judgecap">${escapeHtml(S.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${capValue ?? ''}"${capAttrs}></label>`
-    + `<p class="pnote">${escapeHtml(spent)}</p>${judgeChoiceUsesVenice(status.choice) ? `<button class="btn" type="submit">${escapeHtml(S.judgeSaveLimit)}</button>` : ''}</div>`;
+    ? ` data-cap-auto="true" data-cap-local-then-venice="${defaults['local-then-venice'] ?? ''}" data-cap-venice="${defaults.venice ?? ''}" data-cap-tinfoil="${defaults.tinfoil}"` : '';
+  const capBox = `<div class="judgecapbox"><label class="judgecap">${escapeHtml('Cloud judge spending limit (total) $')} <input type="number" name="cap_dollars" min="0" step="0.01" value="${capValue ?? ''}"${capAttrs}></label>`
+    + `<p class="pnote">${escapeHtml(spent)}</p>${judgeChoiceUsesCloud(status.choice) ? `<button class="btn" type="submit">${escapeHtml(S.judgeSaveLimit)}</button>` : ''}</div>`;
   // Box 3 of the approved mock (#922, "Go easy on this computer"): the idle-mode
   // checkbox, between the choices and the spending limit.
   const idleModeSlot = options?.goEasy === undefined ? '' : `<div class="judgeeasy"><label class="judgecap"><input type="checkbox" data-go-easy${options.goEasy ? ' checked' : ''}> <b>Go easy on this computer</b></label><p class="pnote">Sort at full speed only when you're away or it's plugged in overnight, and slowly while you work. Leave it plugged in and open overnight.</p><p class="pnote" data-go-easy-message role="status"></p></div>`;
@@ -870,13 +878,13 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
   const dialog = (pick: JudgeChoice, title: string, body: string, button: string) =>
     `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>`
     + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml(S.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml(button)}</button></div></dialog>`;
-  const limitLine = (pick: 'local-then-venice' | 'venice') => {
+  const limitLine = (pick: 'local-then-venice' | 'venice' | 'tinfoil') => {
     // The controller refills the echo from the limit field when this opens, so it states what will be sent.
     const cap = ownCap ?? defaults[pick];
     return `<p>Spending limit: <span data-judge-cap-echo>${judgeMoney(cap, true)}</span> in total. You can change it under the choices at any time.</p>`;
   };
   const found = `the ${items.toLocaleString('en-US')} items found so far`;
-  const dialogs = (status.choice === 'local' ? '' : dialog('local', S.judgeToLocal, `<p>${escapeHtml(S.judgeToLocalLine)}</p>`, S.judgeToLocalButton))
+  const dialogs = (status.choice === 'tinfoil' ? '' : dialog('tinfoil', 'Use Tinfoil Decision medium?', `<p>Tinfoil will read each item through verified attestation and encrypted requests. Experimental at Tinfoil. 89% agreement with the owner's labels in our tests, 15 Nov 2026.</p>${limitLine('tinfoil')}`, 'Use Tinfoil')) + (status.choice === 'local' ? '' : dialog('local', S.judgeToLocal, `<p>${escapeHtml(S.judgeToLocalLine)}</p>`, S.judgeToLocalButton))
     + (status.choice === 'local-then-venice' ? '' : dialog('local-then-venice', S.judgeToSecond,
       `<p>${escapeHtml(S.judgeToSecondLine)}</p><p>It charges your Venice account${second.dollars === null ? '' : `: ${judgeMoney(second.dollars).toLowerCase()} for ${found}, about ${judgeCount(second.items)} of them sent to Venice`}.</p>${limitLine('local-then-venice')}`, S.judgeToSecondButton))
     + (status.choice === 'venice' ? '' : dialog('venice', S.judgeToVenice,
@@ -889,7 +897,7 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
   return `<section id="privacy-judge"><h3 class="sect">${escapeHtml(S.judgeTitle)}</h3><p class="pnote">${escapeHtml(S.judgeIntro)}</p>
     <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? '' : ' disabled'}><legend class="judgelegend">${escapeHtml(S.judgeLegend)}</legend>
     ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ''}${stopped}
-    <div class="judgeopts">${local}${doubleCheck}${venice}</div>
+    <div class="judgeopts">${local}${doubleCheck}${venice}${tinfoil}</div>${status.tinfoilStatus ? `<p role="status">Tinfoil: ${escapeHtml(status.tinfoilStatus.reason)}${status.tinfoilStatus.retryAt ? ` Retry at ${escapeHtml(status.tinfoilStatus.retryAt)}.` : ''}</p>` : ''}
     ${cloud || status.stop === 'storage' ? '' : '<p class="pnote">To use Venice, connect your Venice key under How Private items are answered. Venice needs a model with a listed price.</p>'}
     ${idleModeSlot}${capBox}
     <p class="pnote judgeorder">${escapeHtml(S.judgeOrder)}</p>

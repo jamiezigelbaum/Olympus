@@ -59,8 +59,8 @@ export interface OpenAICompatibleAnalystModelOptions {
   extraBody?: Record<string, unknown>;
   // Injectable transport (tests / proxies). Defaults to global fetch.
   fetchImpl?: OpenAIAnalystFetch;
-  // Only the Venice adapter sets this: it enforces its own approved privacy
-  // category for local-only requests before delegating here. Every other use
+  // Approved private adapters (Venice, attested Tinfoil) set this after
+  // enforcing their provider boundary for local-only requests. Every other use
   // is a standard-cloud analyst and refuses a local-only request.
   admitsLocalOnly?: boolean;
 }
@@ -143,6 +143,7 @@ export function createOpenAICompatibleAnalystModel(
             signal: controller.signal,
           });
         } catch (error) {
+          if (error instanceof OperationError && error.code === 'source_index_policy_violation') throw error;
           if (request.signal?.aborted) throw callerAbortError(request.signal.reason);
           if (isModelEndpointRedirectError(error)) {
             throw new OperationError(

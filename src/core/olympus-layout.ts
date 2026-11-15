@@ -58,6 +58,8 @@ function olympusDataPath(env: LayoutEnv, ...segments: string[]): string {
  */
 export const SHARED_DATA_FILES = {
   registry: 'registry.json',
+  'tinfoil-cache-seed': 'tinfoil-cache-seed',
+  'tinfoil-status': 'tinfoil-status.json',
   'data-owner-lock': 'data-owner.lock',
   'remote-connections': 'remote-connections.sqlite',
   'source-dashboard': 'source-dashboard.sqlite',

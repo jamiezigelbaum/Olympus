@@ -332,7 +332,7 @@ export interface DashboardViewModelV1 {
       failedReason?: ModelInstallFailedReason;
     };
     answers?: {
-      kind: 'built_in' | 'venice' | 'local';
+      kind: 'built_in' | 'venice' | 'tinfoil' | 'local';
       label: string;
       ready: boolean;
       /** Built-in only, while it is not ready. A failed install's fix is a `model:answers` needsYou item. */
@@ -1132,7 +1132,7 @@ export interface DeleteSourceDataResult {
 }
 
 /**
- * `olympus_model_set {embedding?: 'built_in', answers?: 'local' | 'venice'}`:
+ * `olympus_model_set {embedding?: 'built_in', answers?: 'local' | 'venice' | 'tinfoil'}`:
  * switches between options already configured on the Mac; it never takes a
  * key. Embeddings: the built-in model only; moving an index that embeds with
  * another model is a re-embed and is refused (`embedding_change_needs_approval`).
@@ -1144,7 +1144,7 @@ export interface DeleteSourceDataResult {
 export interface ModelSetResult {
   status: 'applied' | 'unchanged';
   embedding: 'built_in' | 'custom';
-  answers?: 'local' | 'venice';
+  answers?: 'local' | 'venice' | 'tinfoil';
   /** The worker restarts to apply the change; the dashboard reads `restarting` while the search model reloads. */
   restarting: boolean;
 }
