@@ -44,7 +44,8 @@ import { startPacedStatusRecount } from '../src/workers/engine/status-recount.ts
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
 import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
 
-const VERSION = 5;
+// v6: each build keeps a pristine copy and each run starts from it, so every run has judging to do (plan, 16 Nov 2026).
+const VERSION = 6;
 // Sized from 10k-item seeds to match Telegram's store bytes per identity.
 const CHUNK_WORDS = 168;
 const LEDGER_PASSES = 4;
@@ -79,6 +80,19 @@ function environment(dir: string): Record<string, string> {
   return { HOME: home, XDG_DATA_HOME: join(home, 'd'), XDG_STATE_HOME: join(home, 's'), XDG_CONFIG_HOME: join(home, 'c'), NODE_ENV: 'test' };
 }
 const dataDir = (dir: string) => olympusDataRoot(environment(dir));
+const pristineDir = (dir: string) => join(dir, `pristine-v${VERSION}`);
+/** Copies a data tree (reflinked where the filesystem can). */
+function copyTree(from: string, to: string) {
+  rmSync(to, { recursive: true, force: true });
+  const result = spawnSync('cp', ['-a', '--reflink=auto', from, to], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`Cannot copy ${from} to ${to}: ${result.stderr}`);
+}
+/** Every run starts from the built fixture: judged verdicts are cached by content, so a reused fixture runs out of judging. */
+function restorePristine(dir: string) {
+  if (!existsSync(pristineDir(dir))) throw new Error(`No pristine copy at ${pristineDir(dir)}; build this fixture again (a v${VERSION} build keeps one).`);
+  copyTree(pristineDir(dir), dataDir(dir));
+  rmSync(join(dir, 'classification.jsonl'), { force: true });
+}
 const storePath = (dir: string, domain: string) => join(dataDir(dir), `${domain}.sqlite`);
 const ledgerPath = (dir: string) => join(dataDir(dir), 'set.tier-ledger.sqlite');
 const account = { sourceId: 'fixture.loop-stall' };
@@ -120,6 +134,7 @@ async function build(dir: string, items: number, chunks: number): Promise<void> 
     if (saved.shape.version === VERSION) {
       if (JSON.stringify(saved.shape) !== JSON.stringify(shape)) throw new Error('Shape differs; use a new synthetic folder. Existing fixtures are never silently replaced.');
       for (const path of saved.files as string[]) if (!existsSync(join(dir, path))) throw new Error(`Incomplete fixture: ${path}`);
+      if (!existsSync(pristineDir(dir))) throw new Error(`Incomplete fixture: no pristine copy at ${pristineDir(dir)}`);
       console.log(JSON.stringify({ phase: 'build', reused: true, ...saved })); return;
     }
     // Versioned homes rebuild automatically without deleting an older fixture.
@@ -209,6 +224,7 @@ async function build(dir: string, items: number, chunks: number): Promise<void> 
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite')).map(name => relative(dir, join(dataDir(dir), name)));
   const fileBytes = Object.fromEntries(files.map(path => [path, statSync(join(dir, path)).size]));
   const bytes = Object.values(fileBytes).reduce((n, size) => n + size, 0);
+  copyTree(dataDir(dir), pristineDir(dir));
   const receipt = { shape, files, file_bytes: fileBytes, bytes, build_ms: Date.now() - started };
   writeFileSync(marker, JSON.stringify(receipt));
   console.log(JSON.stringify({ phase: 'build', reused: false, ...receipt }));
@@ -544,6 +560,9 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const dashReads: Array<{ path: string; ms: number; status: number; error?: string }> = [];
   const errors: string[] = [];
   const requestErrors: string[] = [];
+  const restoreStarted = Date.now();
+  restorePristine(dir);
+  const restore_ms = Date.now() - restoreStarted;
   // Steady: every run starts with the WALs folded in, as on a box in use. Boot after upgrade: one large WAL left on the ledger.
   truncateWals(dir);
   if (options.runCase === 'boot-after-upgrade') leaveLargeWal(dir, options.walBytes);
@@ -672,7 +691,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000),
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -707,10 +726,12 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
   const peaks = Object.entries(guards.wal_peak).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, bytes]) => `${label} ${Math.round(bytes / 1048576)} MB`).join(', ') || 'no wal lines';
   console.log(`${options.runCase} WAL: peak ${peaks}; over 64 MB at any point ${guards.wal_peak_over.length}, at end ${guards.wal_over_limit.length}; ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
-  console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}, judge model calls ${modelCalls.judge}); ${workload_ok ? 'PASS' : 'FAIL'}${modelCalls.judge === 0 && workloads.judge_passes > 0 ? '. The judge ran but found nothing to judge: earlier runs judged this fixture out (verdicts are cached); build a new fixture folder.' : ''}`);
+  console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}, judge model calls ${modelCalls.judge}); ${workload_ok ? 'PASS' : 'FAIL'}`);
   console.log(`${options.runCase} release bar (front under ${frontLimitMs(options.runCase) / 1000} s, ack under 1 s, background under 30 s, work done, WAL at most 64 MB throughout): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
   console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));
   rmSync(runDir, { recursive: true, force: true });
+  // A run that judged nothing did not exercise the background's long holds (plan, 16 Nov 2026): it counts as not run, not as a pass.
+  if (modelCalls.judge === 0) { console.log(`${options.runCase}: NOT RUN: the judge made no model calls, so the background's judging was never measured.`); return 'not_run' as const; }
   return pass;
 }
 if (import.meta.main) {
@@ -725,8 +746,8 @@ if (import.meta.main) {
   if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
   else {
     const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick') });
-    // Exit 3 is "host busy": the run did not measure the engine.
-    process.exitCode = result === 'host_busy' ? 3 : result ? 0 : 1;
+    // Exit 3 is "host busy" and 4 "not run" (no judging): neither measured the engine.
+    process.exitCode = result === 'host_busy' ? 3 : result === 'not_run' ? 4 : result ? 0 : 1;
   }
   process.exit(process.exitCode ?? 0);
 }
