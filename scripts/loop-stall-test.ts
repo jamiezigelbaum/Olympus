@@ -599,15 +599,29 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   // last-run.json stays on the host and the next run replaces it; an engine that died puts its last words in the job log too.
   if (errors.length) for (const role of ['background', 'front']) console.error(`--- ${role} engine log tail ---\n${output[role]!.slice(-6_000)}`);
   console.log(JSON.stringify(receipt));
-  // One line per run (plan, 16 Nov 2026): worst stall and its site on each engine, then pass or fail.
-  const worstSite = (role: string) => {
-    const worst = cpuFreezes.filter(row => row.role === role).sort((a, b) => (b.freezes as { maxMs?: number }).maxMs! - (a.freezes as { maxMs?: number }).maxMs!)[0]?.freezes as { self?: [string, number][]; total?: [string, number][] } | undefined;
-    // The leaf ("run", "all") names only SQLite; the first product frame on the stack names the caller.
-    const product = worst?.total?.find(([frame]) => / \S+\.ts:\d+/.test(frame) && !frame.includes('main-thread-sql-trace') && !frame.includes('bun:'))?.[0];
-    return product ?? worst?.self?.[0]?.[0] ?? 'no sample';
+  // One line per engine per run (plan, 16 Nov 2026): worst stall and its site, then pass or fail; then a per-site table.
+  type Freezes = { count?: number; totalMs?: number; maxMs?: number; self?: [string, number][]; total?: [string, number][] };
+  // The leaf ("run", "all") names only SQLite; the first product frame on the stack names the caller.
+  const siteOf = (freezes: Freezes | undefined) => freezes?.total?.find(([frame]) => / \S+\.ts:\d+/.test(frame) && !frame.includes('main-thread-sql-trace') && !frame.includes('bun:'))?.[0]
+    ?? freezes?.self?.[0]?.[0] ?? 'no sample';
+  const sites = (role: string) => {
+    const table = new Map<string, { site: string; count: number; total_s: number; worst_ms: number }>();
+    for (const row of cpuFreezes.filter(entry => entry.role === role)) {
+      const freezes = row.freezes as Freezes;
+      const site = siteOf(freezes);
+      const entry = table.get(site) ?? { site, count: 0, total_s: 0, worst_ms: 0 };
+      entry.count += freezes.count ?? 0; entry.total_s += (freezes.totalMs ?? 0) / 1000; entry.worst_ms = Math.max(entry.worst_ms, freezes.maxMs ?? 0);
+      table.set(site, entry);
+    }
+    return [...table.values()].map(entry => ({ ...entry, total_s: Math.round(entry.total_s * 10) / 10 })).sort((a, b) => b.total_s - a.total_s);
   };
-  console.log(`${options.runCase}: background worst ${Math.round(background.max_ms)} ms at ${worstSite('background')}; front worst ${Math.round(front.max_ms)} ms at ${worstSite('front')}; ${pass ? 'PASS' : 'FAIL'}`
-    + ` (bar ${LOOP_STALL_LIMIT_MS} ms; over 250/100 ms: ${background.over_budget}/${front.over_budget}; slow SQL ${slow_sql.length}; workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}; WALs over 64 MB at end ${guards.wal_over_limit.length}; background reads over 2 s ${guards.background_reads_over_2s.length})`);
+  const siteTable = { background: sites('background'), front: sites('front') };
+  for (const [role, loop] of [['background', background], ['front', front]] as const) {
+    const worst = siteTable[role].slice().sort((a, b) => b.worst_ms - a.worst_ms)[0];
+    console.log(`${options.runCase} ${role}: worst ${Math.round(loop.max_ms)} ms at ${worst?.site ?? 'no sample'}; ${loop.max_ms < LOOP_STALL_LIMIT_MS ? 'PASS' : 'FAIL'}`);
+  }
+  console.log(`${options.runCase}: ${pass ? 'PASS' : 'FAIL'} (bar ${LOOP_STALL_LIMIT_MS} ms; over 250/100 ms: ${background.over_budget}/${front.over_budget}; slow SQL ${slow_sql.length}; workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}; WALs over 64 MB at end ${guards.wal_over_limit.length}; background reads over 2 s ${guards.background_reads_over_2s.length})`);
+  console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));
   rmSync(runDir, { recursive: true, force: true });
   return pass;
 }

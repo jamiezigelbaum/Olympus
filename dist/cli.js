@@ -35583,10 +35583,17 @@ function summarizeCpuSamples(traces, top = CPU_SAMPLE_TOP, sources = []) {
   const rank = (map) => [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, top);
   return { samples: traces.length, self: rank(self), total: rank(total) };
 }
+function freezeLogLine(at, role, freezes) {
+  const product = (frame) => / \S+\.ts:\d+/.test(frame) && !frame.includes("main-thread-sql-trace") && !frame.includes("bun:");
+  const site = freezes.total.find(([frame]) => product(frame))?.[0] ?? freezes.self[0]?.[0] ?? "no sample";
+  const frames = freezes.total.filter(([frame]) => product(frame)).slice(0, 8).map(([frame, n]) => `${frame} x${n}`).join(" | ");
+  return `${at} [olympus:control-path] freeze frames role=${role} count=${freezes.count} total_ms=${freezes.totalMs} max_ms=${freezes.maxMs} site=${JSON.stringify(site)} leaf=${JSON.stringify(freezes.self[0]?.[0] ?? "no sample")} frames=${JSON.stringify(frames)}`;
+}
 async function startCpuSampleLog(env = process.env) {
-  const path = env[CPU_SAMPLE_LOG_ENV]?.trim();
-  if (!path)
+  const configured = env[CPU_SAMPLE_LOG_ENV]?.trim();
+  if (configured === "off")
     return;
+  const path = configured || undefined;
   const role = env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() || "single";
   const jsc = await import("bun:jsc");
   if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces)
@@ -35627,8 +35634,11 @@ async function startCpuSampleLog(env = process.env) {
         maxMs: Math.round(window2.reduce((max, stall) => Math.max(max, stall.endMs - stall.startMs), 0)),
         ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? [])
       };
-      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
+      if (path)
+        appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
 `, { mode: 384 });
+      else if (freezes.count > 0)
+        console.error(freezeLogLine(new Date(now).toISOString(), role, freezes));
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : "error"}`);
     }
@@ -35636,7 +35646,8 @@ async function startCpuSampleLog(env = process.env) {
   };
   const timer = setInterval(flush, CPU_SAMPLE_FLUSH_MS);
   timer.unref?.();
-  console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
+  if (path)
+    console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
   return () => {
     clearInterval(timer);
     clearInterval(lag);
