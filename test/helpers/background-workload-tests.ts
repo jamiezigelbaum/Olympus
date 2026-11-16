@@ -13,4 +13,5 @@ export const BACKGROUND_WORKLOAD_TESTS = [
   'test/tier-sniffer-unread-not-missing.test.ts',
   'test/sniffer-new-arrivals.test.ts',
   'test/unreadable-files.test.ts',
+  'test/connector-store-status-off-thread.test.ts',
 ] as const;

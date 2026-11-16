@@ -10,7 +10,10 @@ import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { applyStoreTotalsCount, storeTotalsCountSql, type StoreTotalsCount } from '../src/workers/connector-store/store-totals.ts';
+import {
+  applyStoreTotalsCount, createStoreTotals, readStoreTotals, storeTotalsCountSql, storeTotalsReconcileDue, storeTotalsWalkSteps,
+  STORE_TOTALS_REWALK_AFTER_MS, type StoreTotalsCount,
+} from '../src/workers/connector-store/store-totals.ts';
 import { Database } from 'bun:sqlite';
 
 const CORPUS_ID = 'secure_local.dropbox.files';
@@ -86,6 +89,59 @@ describe('store totals', () => {
       await store.syncFromConnector(connector([file('a.txt', 'alpha'), file('b.txt', 'beta'), file('c.txt', 'gamma')]), { fetchContent: true });
       expect(applyStoreTotalsCount(db, count, new Date().toISOString())).toBe(0);
       expect(withoutStamp(store.totals())).toEqual(recount(store));
+    } finally { store.close(); }
+  });
+});
+
+// The walk (plan thread, 16 Nov): each table a range of keys at a time, each
+// page its own read, and only when owed.
+describe('the totals walk', () => {
+  test('adds up a key at a time to the one-pass count', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    try {
+      await store.syncFromConnector(connector([file('a.txt', 'alpha '.repeat(400)), file('b.txt', 'beta'), file('c.pdf')]), { fetchContent: true });
+      await store.embedChunks({ provider: fakeEmbeddings('fake-embed-v1') });
+      const db = (store as unknown as { db: Database }).db;
+      const steps = storeTotalsWalkSteps(NON_SYNC_SQL(db), 1);
+      let step = steps.next();
+      let reads = 0;
+      while (!step.done) {
+        reads += 1;
+        const statement = db.query(step.value.sql);
+        step = steps.next(step.value.mode === 'get' ? statement.get(...(step.value.params as never[])) : statement.all(...(step.value.params as never[])));
+      }
+      expect(reads).toBeGreaterThan(5);
+      expect(step.value.quiet).toBe(true);
+      const whole = db.query(storeTotalsCountSql(NON_SYNC_SQL(db))).get() as StoreTotalsCount;
+      const { kept_json: _a, vectors_json: walkedVectors, ...walked } = step.value.count;
+      const { kept_json: _b, vectors_json: wholeVectors, ...counted } = whole;
+      expect(walked).toEqual(counted);
+      expect(JSON.parse(walkedVectors!)).toEqual(JSON.parse(wholeVectors!));
+    } finally { store.close(); }
+  });
+
+  test('is owed only when the totals were never filled, a trigger was put back, or an hour after a walk that saw writes', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    try {
+      const db = (store as unknown as { db: Database }).db;
+      const now = Date.now();
+      expect(storeTotalsReconcileDue(store.totals(), now)).toBe(true);
+      await store.reconcileTotals();
+      // Filled and exact: no walk on a clock.
+      expect(storeTotalsReconcileDue(store.totals(), now + 10 * STORE_TOTALS_REWALK_AFTER_MS)).toBe(false);
+      // A trigger missing at open: owed now.
+      db.exec('DROP TRIGGER connector_store_totals_chunk_insert;');
+      createStoreTotals(db, NON_SYNC_SQL(db));
+      expect(readStoreTotals(db)!.walkOwed).toBe('now');
+      expect(storeTotalsReconcileDue(store.totals(), now)).toBe(true);
+      await store.reconcileTotals();
+      expect(store.totals()!.walkOwed).toBeUndefined();
+      // A walk that saw writes: owed again an hour later.
+      const count = db.query(storeTotalsCountSql(NON_SYNC_SQL(db))).get() as StoreTotalsCount;
+      applyStoreTotalsCount(db, count, new Date(now).toISOString(), { exact: false });
+      expect(store.totals()!.walkOwed).toBe('later');
+      expect(storeTotalsReconcileDue(store.totals(), now + 1_000)).toBe(false);
+      expect(storeTotalsReconcileDue(store.totals(), now + STORE_TOTALS_REWALK_AFTER_MS)).toBe(true);
     } finally { store.close(); }
   });
 });

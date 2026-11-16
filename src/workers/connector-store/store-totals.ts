@@ -6,11 +6,16 @@
 // total could be about 40 minutes old).
 //
 // The triggers live in the store file, so a build that does not know them
-// still moves the totals. What can leave them wrong (a REPLACE, which fires no
-// delete trigger; a table rebuild, which drops its triggers until the next
-// open) is put right by the reconcile: an exact count read on the read
-// thread at one snapshot, together with the totals at that snapshot, so the
-// writes since are carried over and the writer is never held for the count.
+// still moves the totals. What can leave them wrong is a trigger missing (an
+// older build's table rebuild drops them until the next open; nothing here
+// writes with REPLACE, which fires no delete trigger). So the totals are
+// walked again only when they were never filled or a trigger had to be put
+// back, not on a clock (plan thread, 16 Nov: a reconcile that must visit
+// everything walks by key ranges, paced, and only when needed). The walk
+// reads each table a range of keys at a time, each page its own read on the
+// read worker, and carries over what the triggers added since it began; a
+// walk that saw no write at all is exact, and one that did is walked again an
+// hour later.
 //
 // A new table and triggers, created on open with IF NOT EXISTS like the
 // visibility feed: no schema version change, so an older build still opens
@@ -29,7 +34,14 @@ export interface StoreTotals {
   vectorsByModel: Record<string, number>;
   /** When the totals were last checked against an exact count (ISO). */
   reconciledAt: string;
+  /** A walk is owed: now (a trigger was put back), or later (the last walk saw writes). */
+  walkOwed?: 'now' | 'later';
 }
+
+// store_totals_state.drift: the drift the last exact walk put right, or one
+// of these.
+const WALK_OWED_LATER = -1;
+const WALK_OWED_NOW = -2;
 
 export const STORE_TOTALS_TRIGGERS = [
   'connector_store_totals_item_insert',
@@ -64,6 +76,8 @@ const bump = (name: string, by: string): string => `
  * one status counts.
  */
 export function createStoreTotals(db: Database, nonSyncConnectorsSql: string): void {
+  // A trigger missing from filled totals means writes went uncounted: owe a walk.
+  const owed = !storeTotalsInstalled(db);
   const real = (row: 'NEW' | 'OLD') => `${row}.connector_id NOT IN ${nonSyncConnectorsSql}`;
   db.exec(`
     CREATE TABLE IF NOT EXISTS store_totals (
@@ -117,10 +131,12 @@ export function createStoreTotals(db: Database, nonSyncConnectorsSql: string): v
       END;`);
     }
   }
+  if (owed) db.query('UPDATE store_totals_state SET drift = ? WHERE id = 1').run(WALK_OWED_NOW);
 }
 
 /** True when the store has the table and every trigger (an older build's rebuild may have dropped one). */
 export function storeTotalsInstalled(db: Database): boolean {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_totals_state'").get()) return false;
   const row = db.query(`SELECT COUNT(*) AS n FROM sqlite_master
     WHERE (type = 'table' AND name IN ('store_totals', 'store_totals_state'))
       OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`)
@@ -130,10 +146,13 @@ export function storeTotalsInstalled(db: Database): boolean {
 
 /** The kept totals, or undefined until the first reconcile has filled them. One small read. */
 export function readStoreTotals(db: Database): StoreTotals | undefined {
-  const state = db.query('SELECT reconciled_at FROM store_totals_state WHERE id = 1').get() as { reconciled_at: string } | null;
+  const state = db.query('SELECT reconciled_at, drift FROM store_totals_state WHERE id = 1').get() as { reconciled_at: string; drift: number } | null;
   if (!state) return undefined;
   const rows = db.query('SELECT name, n FROM store_totals').all() as Array<{ name: string; n: number }>;
-  return storeTotalsFromRows(rows, state.reconciled_at);
+  const totals = storeTotalsFromRows(rows, state.reconciled_at);
+  if (state.drift === WALK_OWED_NOW) totals.walkOwed = 'now';
+  else if (state.drift === WALK_OWED_LATER) totals.walkOwed = 'later';
+  return totals;
 }
 
 /** The kept totals from `SELECT name, n FROM store_totals` rows (read in another snapshot, such as a status count's). */
@@ -150,10 +169,60 @@ export function storeTotalsFromRows(rows: Array<{ name: string; n: number }>, re
   return totals;
 }
 
+/** One read of the walk: SQL, parameters, and whether it returns a row or rows. */
+export interface StoreTotalsRead { sql: string; params: Array<string | number>; mode: 'get' | 'all' }
+
+/** Keys per page of the walk: each page is a seek on its table's key. */
+export const STORE_TOTALS_WALK_KEYS = 20_000;
+
 /**
- * The exact count and the kept totals, in ONE statement so both are from one
- * snapshot. Runs on the read thread; whole-store passes, but none of them
- * holds the writer.
+ * The walk's reads, one page of keys at a time. The first read takes the
+ * kept totals and each table's last key at one snapshot; the pages count up
+ * to those keys, so a row added after it is the triggers' alone. The last
+ * read takes the write sequence again: unchanged, nothing was written while
+ * the walk ran, and the count is exact.
+ */
+export function* storeTotalsWalkSteps(nonSyncConnectorsSql: string, pageKeys = STORE_TOTALS_WALK_KEYS): Generator<StoreTotalsRead, { count: StoreTotalsCount; quiet: boolean }, unknown> {
+  const start = (yield { sql: `SELECT
+      (SELECT MAX(item_pk) FROM items) AS items,
+      (SELECT MAX(chunk_pk) FROM chunks) AS chunks,
+      (SELECT MAX(rowid) FROM sync_runs) AS runs,
+      (SELECT n FROM store_totals WHERE name = '${STORE_TOTALS_WRITES}') AS writes,
+      (SELECT json_group_object(name, n) FROM store_totals) AS kept_json`, params: [], mode: 'get' }) as {
+    items: number | null; chunks: number | null; runs: number | null; writes: number | null; kept_json: string | null;
+  };
+  const count: StoreTotalsCount = { items: 0, tombstoned_items: 0, chunks: 0, sync_runs: 0, vectors_json: null, kept_json: start.kept_json };
+  const vectors = new Map<string, number>();
+  const pages = (last: number | null) => {
+    const out: Array<[number, number]> = [];
+    for (let lo = 0; lo < Number(last ?? 0); lo += pageKeys) out.push([lo, Math.min(lo + pageKeys, Number(last))]);
+    return out;
+  };
+  for (const [lo, hi] of pages(start.items)) {
+    const row = (yield { sql: `SELECT COALESCE(SUM(tombstoned = 0), 0) AS live, COALESCE(SUM(tombstoned <> 0), 0) AS gone
+      FROM items WHERE item_pk > ? AND item_pk <= ?`, params: [lo, hi], mode: 'get' }) as { live: number; gone: number };
+    count.items += Number(row.live);
+    count.tombstoned_items += Number(row.gone);
+  }
+  for (const [lo, hi] of pages(start.chunks)) {
+    count.chunks += Number(((yield { sql: 'SELECT COUNT(*) AS n FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ?', params: [lo, hi], mode: 'get' }) as { n: number }).n);
+    for (const row of (yield { sql: `SELECT model_id, COUNT(*) AS n FROM chunk_embeddings WHERE chunk_pk > ? AND chunk_pk <= ? GROUP BY model_id`,
+      params: [lo, hi], mode: 'all' }) as Array<{ model_id: string; n: number }>) {
+      vectors.set(row.model_id, (vectors.get(row.model_id) ?? 0) + Number(row.n));
+    }
+  }
+  for (const [lo, hi] of pages(start.runs)) {
+    count.sync_runs += Number(((yield { sql: `SELECT COUNT(*) AS n FROM sync_runs WHERE rowid > ? AND rowid <= ? AND connector_id NOT IN ${nonSyncConnectorsSql}`,
+      params: [lo, hi], mode: 'get' }) as { n: number }).n);
+  }
+  count.vectors_json = JSON.stringify(Object.fromEntries(vectors));
+  const end = (yield { sql: `SELECT n AS writes FROM store_totals WHERE name = '${STORE_TOTALS_WRITES}'`, params: [], mode: 'get' }) as { writes: number } | null;
+  return { count, quiet: Number(end?.writes ?? 0) === Number(start.writes ?? 0) };
+}
+
+/**
+ * The exact count and the kept totals in ONE statement, at one snapshot:
+ * whole-table passes, for tests that need a recount to compare with.
  */
 export function storeTotalsCountSql(nonSyncConnectorsSql: string): string {
   return `SELECT
@@ -180,7 +249,7 @@ export interface StoreTotalsCount {
  * ran over that interval; one short write on the writer. Returns the drift
  * it put right (the sum of each total's difference).
  */
-export function applyStoreTotalsCount(db: Database, count: StoreTotalsCount, nowIso: string): number {
+export function applyStoreTotalsCount(db: Database, count: StoreTotalsCount, nowIso: string, options: { exact?: boolean } = {}): number {
   const counted = new Map<string, number>([
     ['items', Number(count.items)],
     ['tombstoned_items', Number(count.tombstoned_items)],
@@ -205,19 +274,20 @@ export function applyStoreTotalsCount(db: Database, count: StoreTotalsCount, now
       else write.run(name, exact);
     }
     db.query(`INSERT INTO store_totals_state (id, reconciled_at, drift) VALUES (1, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, drift);
+      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, options.exact === false ? WALK_OWED_LATER : drift);
   })();
   return drift;
 }
 
-/** How often the background checks a store's kept totals against an exact count. */
-export const STORE_TOTALS_RECONCILE_EVERY_MS = 60 * 60_000;
+/** How long after a walk that saw writes the totals are walked again. */
+export const STORE_TOTALS_REWALK_AFTER_MS = 60 * 60_000;
 
-/** True when the totals were never filled or were last checked over STORE_TOTALS_RECONCILE_EVERY_MS ago. */
+/** True when the totals were never filled, a trigger was put back, or the last walk saw writes over an hour ago. */
 export function storeTotalsReconcileDue(totals: StoreTotals | undefined, nowMs: number): boolean {
-  if (!totals) return true;
+  if (!totals || totals.walkOwed === 'now') return true;
+  if (totals.walkOwed !== 'later') return false;
   const at = Date.parse(totals.reconciledAt);
-  return !Number.isFinite(at) || nowMs - at >= STORE_TOTALS_RECONCILE_EVERY_MS;
+  return !Number.isFinite(at) || nowMs - at >= STORE_TOTALS_REWALK_AFTER_MS;
 }
 
 /** The write sequence (STORE_TOTALS_WRITES), or undefined where the store has none. One small read. */

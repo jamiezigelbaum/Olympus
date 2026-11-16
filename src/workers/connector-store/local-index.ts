@@ -1,8 +1,8 @@
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
-  applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreWriteSequence, storeTotalsCountSql, storeTotalsFromRows, storeTotalsInstalled,
-  type StoreTotals, type StoreTotalsCount,
+  applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreWriteSequence, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
+  type StoreTotals,
 } from './store-totals.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
@@ -16216,18 +16216,30 @@ export class LocalConnectorStore {
   }
 
   /**
-   * Check the kept totals against an exact count, read on the read thread
-   * where the store allows it, and put right any drift. Returns the drift, or
-   * undefined for a read-only open.
+   * Walk the store's tables a page of keys at a time (store-totals.ts), each
+   * page its own read on the read worker where the store allows it, and put
+   * right any drift. A walk that saw writes leaves the totals owing another
+   * walk later. Returns the drift, or undefined for a read-only open.
    */
   async reconcileTotals(): Promise<number | undefined> {
     if (this.readOnly) return undefined;
     if (!storeTotalsInstalled(this.db)) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
-    const sql = storeTotalsCountSql(NON_SYNC_RUN_CONNECTORS_SQL);
-    const count = (offThreadReadsSupported(this.dbPath)
-      ? await readInBackground(this.dbPath, { sql, params: [], mode: 'get' })
-      : this.db.query(sql).get()) as StoreTotalsCount;
-    return applyStoreTotalsCount(this.db, count, new Date().toISOString());
+    const pool = offThreadReadsSupported(this.dbPath);
+    const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
+    let step = steps.next();
+    while (!step.done) {
+      const query = step.value;
+      let rows: unknown;
+      if (pool) rows = await readInBackground(this.dbPath, query);
+      else {
+        // Here, a page per turn: the loop's other work runs between pages.
+        await new Promise((resolve) => setImmediate(resolve));
+        const statement = this.db.query(query.sql);
+        rows = query.mode === 'get' ? statement.get(...(query.params as never[])) : statement.all(...(query.params as never[]));
+      }
+      step = steps.next(rows);
+    }
+    return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
   }
 
   private embeddingInputHashesChecked = false;
@@ -16368,21 +16380,29 @@ export class LocalConnectorStore {
       ${contentFilters.sql}
       ${hiddenNotIn}
       ${fileNamesOnlyNotIn}`;
-    const jsonList = (pks: readonly number[]): string[] => (pks.length > 0 ? [JSON.stringify(pks)] : []);
-    const itemParams = [...(accountScope ? [accountScope] : []), ...itemFilters.params, ...jsonList(tier.hidden)];
-    const contentParams = [
-      ...(accountScope ? [accountScope] : []),
-      ...contentFilters.params,
-      ...jsonList(tier.hidden),
-      ...jsonList(namesOnlyWithText),
-    ];
-    const parityParams = [...contentParams, ...jsonList(tier.held)];
-    const fileScopeParams = [
-      ...(accountScope ? [accountScope] : []),
-      ...contentFilters.params,
-      ...jsonList(tier.hidden),
-      ...jsonList(fileNamesOnlyPks),
-    ];
+    // Every count below walks the items a page of keys at a time, each page
+    // its own read (plan thread, 16 Nov: a finder never scans a table; each
+    // page is a seek). Counts add up across pages, and each list parameter
+    // carries only its page's keys, so no page pays for the whole list.
+    const pageKeys = (pks: readonly number[], lo: number, hi: number): number[] => pks.filter((pk) => pk > lo && pk <= hi);
+    const pageList = (pks: readonly number[], lo: number, hi: number): string[] => (pks.length > 0 ? [JSON.stringify(pageKeys(pks, lo, hi))] : []);
+    const pageParams = (lo: number, hi: number) => {
+      const itemParams = [...(accountScope ? [accountScope] : []), ...itemFilters.params, ...pageList(tier.hidden, lo, hi)];
+      const contentParams = [
+        ...(accountScope ? [accountScope] : []),
+        ...contentFilters.params,
+        ...pageList(tier.hidden, lo, hi),
+        ...pageList(namesOnlyWithText, lo, hi),
+      ];
+      const parityParams = [...contentParams, ...pageList(tier.held, lo, hi)];
+      const fileScopeParams = [
+        ...(accountScope ? [accountScope] : []),
+        ...contentFilters.params,
+        ...pageList(tier.hidden, lo, hi),
+        ...pageList(fileNamesOnlyPks, lo, hi),
+      ];
+      return { itemParams, contentParams, parityParams, fileScopeParams };
+    };
     // A scope that says only "older than this is names only" narrows no
     // population, so it must not switch on the file-scope counts below: those
     // belong to a store whose scope picks WHICH files to read.
@@ -16397,155 +16417,175 @@ export class LocalConnectorStore {
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))`
       : undefined;
     const outsideWindowParams = outsideWindowSql ? [new Date(contentNotBeforeMs).toISOString()] : [];
-    // Every per-item count in ONE pass over the items: each scope test (the
-    // locator path patterns above all) is worked out once per row instead of
-    // once per count. Seven separate passes were about 0.8 s on a 104k-item
-    // store with folder scopes (Sparta, 2026-11-04: 2.8 s every 2 minutes).
-    // MATERIALIZED keeps SQLite from copying each test back into every SUM.
-    const itemCounts = (yield { sql: `
-      WITH flags AS MATERIALIZED (
-        SELECT
-          i.tombstoned AS t,
-          LOWER(i.mime_type) = 'inode/directory' AS dir,
-          (1 ${itemWhere}) AS in_items,
-          (1 ${hiddenNotIn}) AS stored,
-          i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
-          (1 ${approvedContentWhere}) AS in_content_scope,
-          (1 ${fileScopeWhere}) AS in_file_scope
-        FROM items i
-      )
-      SELECT
-        COALESCE(SUM(t = 0 AND in_items), 0) AS items,
-        COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
-        COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
-        COALESCE(SUM(t = 0 AND in_items AND NOT dir AND elsewhere AND in_content_scope), 0) AS content_elsewhere_in_scope_files,
-        COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
-        COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
-        COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
-        COALESCE(SUM(t = 0 AND NOT dir AND in_file_scope), 0) AS full_ingestion_files
-      FROM flags
-    `, params: [
-      ...itemParams,
-      ...jsonList(tier.hidden),
-      JSON.stringify(keptNamesOnlyPks),
-      ...(accountScope ? [accountScope] : []),
-      ...contentFilters.params,
-      ...jsonList(tier.hidden),
-      ...fileScopeParams,
-    ], mode: 'get' }) as {
-      items: number;
-      stored_items: number;
-      content_elsewhere_items: number;
-      content_elsewhere_in_scope_files: number;
-      files: number;
-      folders: number;
-      tombstoned_items: number;
-      full_ingestion_files: number;
+    const counts = {
+      items: 0, stored_items: 0, content_elsewhere_items: 0, content_elsewhere_in_scope_files: 0, files: 0, folders: 0,
+      tombstoned_items: 0, full_ingestion_files: 0, chunks: 0, embedded_chunks: 0, sync_runs: 0, items_with_text: 0,
     };
-    const textCounts = (yield { sql: `
-      SELECT
-        -- CROSS JOIN keeps chunks and vectors as the outer loop: with items
-        -- outer, the scope tests ran on every item, chunk or not.
-        (SELECT COUNT(*) FROM chunks c CROSS JOIN items i ON i.item_pk = c.item_pk
-          WHERE i.tombstoned = 0 ${parityWhere}) AS chunks,
-        (SELECT COUNT(*)
-          FROM chunk_embeddings emb
-          CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
-          CROSS JOIN items i ON i.item_pk = emb.item_pk
-          WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
-            ${parityWhere}
-        ) AS embedded_chunks,
-        (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-        ) AS sync_runs,
-        -- Driven from the items that hold a chunk, so the scope tests run only
-        -- on those rows, not on every names-only item.
-        (SELECT COUNT(*) FROM (SELECT DISTINCT item_pk FROM chunks) ck
-          CROSS JOIN items i ON i.item_pk = ck.item_pk
-          WHERE i.tombstoned = 0
-            ${contentWhere}
-        ) AS items_with_text
-    `, params: [
-      ...parityParams,
-      ...parityParams,
-      ...contentParams,
-    ], mode: 'get' }) as { chunks: number; embedded_chunks: number; sync_runs: number; items_with_text: number };
-    const counts = { ...itemCounts, ...textCounts };
-    // Of the files the scope reads in full, the ones the window keeps as names
-    // only. Counted before the policy pass so a row is never both.
-    const outsideContentWindowItems = outsideWindowSql
-      ? ((yield { sql: `
+    let outsideContentWindowItems = 0;
+    let policyDeferredItems = 0;
+    const modelTotals = new Map<string, { embedded_chunks: number; items_embedded: number }>();
+    const lastItemPk = Number(((yield { sql: 'SELECT MAX(item_pk) AS n FROM items', params: [], mode: 'get' }) as { n: number | null } | null)?.n ?? 0);
+    for (let lo = 0; lo < lastItemPk; lo += statusPageKeys) {
+      const hi = Math.min(lo + statusPageKeys, lastItemPk);
+      const { itemParams, contentParams, parityParams, fileScopeParams } = pageParams(lo, hi);
+      // Every per-item count in ONE pass over the page's items: each scope
+      // test (the locator path patterns above all) is worked out once per row
+      // instead of once per count. Seven separate passes were about 0.8 s on
+      // a 104k-item store with folder scopes (Sparta, 2026-11-04: 2.8 s every
+      // 2 minutes). MATERIALIZED keeps SQLite from copying each test back
+      // into every SUM.
+      const itemCounts = (yield { sql: `
+        WITH flags AS MATERIALIZED (
+          SELECT
+            i.tombstoned AS t,
+            LOWER(i.mime_type) = 'inode/directory' AS dir,
+            (1 ${itemWhere}) AS in_items,
+            (1 ${hiddenNotIn}) AS stored,
+            i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
+            (1 ${approvedContentWhere}) AS in_content_scope,
+            (1 ${fileScopeWhere}) AS in_file_scope
+          FROM items i
+          WHERE i.item_pk > ? AND i.item_pk <= ?
+        )
+        SELECT
+          COALESCE(SUM(t = 0 AND in_items), 0) AS items,
+          COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
+          COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
+          COALESCE(SUM(t = 0 AND in_items AND NOT dir AND elsewhere AND in_content_scope), 0) AS content_elsewhere_in_scope_files,
+          COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
+          COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
+          COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
+          COALESCE(SUM(t = 0 AND NOT dir AND in_file_scope), 0) AS full_ingestion_files
+        FROM flags
+      `, params: [
+        ...itemParams,
+        ...pageList(tier.hidden, lo, hi),
+        JSON.stringify(pageKeys(keptNamesOnlyPks, lo, hi)),
+        ...(accountScope ? [accountScope] : []),
+        ...contentFilters.params,
+        ...pageList(tier.hidden, lo, hi),
+        ...fileScopeParams,
+        lo, hi,
+      ], mode: 'get' }) as Record<'items' | 'stored_items' | 'content_elsewhere_items' | 'content_elsewhere_in_scope_files'
+        | 'files' | 'folders' | 'tombstoned_items' | 'full_ingestion_files', number>;
+      // The page's items lead: chunks and vectors are reached by their
+      // item-keyed indexes, so a page reads only its own items' rows.
+      const textCounts = (yield { sql: `
+        SELECT
+          (SELECT COUNT(*) FROM items i CROSS JOIN chunks c ON c.item_pk = i.item_pk
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${parityWhere}) AS chunks,
+          (SELECT COUNT(*)
+            FROM items i
+            CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk
+            CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
+              ${parityWhere}
+          ) AS embedded_chunks,
+          (SELECT COUNT(*) FROM items i
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+              AND EXISTS (SELECT 1 FROM chunks ck WHERE ck.item_pk = i.item_pk)
+              ${contentWhere}
+          ) AS items_with_text
+      `, params: [
+        lo, hi, ...parityParams,
+        lo, hi, ...parityParams,
+        lo, hi, ...contentParams,
+      ], mode: 'get' }) as { chunks: number; embedded_chunks: number; items_with_text: number };
+      for (const [name, value] of Object.entries({ ...itemCounts, ...textCounts })) {
+        counts[name as keyof typeof counts] += Number(value ?? 0);
+      }
+      // Of the files the scope reads in full, the ones the window keeps as
+      // names only. Counted before the policy pass so a row is never both.
+      if (outsideWindowSql) {
+        outsideContentWindowItems += ((yield { sql: `
           SELECT COUNT(*) AS n FROM items i
-          WHERE i.tombstoned = 0
+          WHERE i.item_pk > ? AND i.item_pk <= ?
+            AND i.tombstoned = 0
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
             AND ${outsideWindowSql}
-        `, params: [...fileScopeParams, ...outsideWindowParams], mode: 'get' }) as { n: number }).n
-      : 0;
-    let policyDeferredItems = 0;
-    if (fileScoped && scope?.contentAllowed !== false && counts.full_ingestion_files > 0) {
-      const rows = (yield { sql: `
-        SELECT i.locator_uri, i.title, i.mime_type
-        FROM items i
-        WHERE i.tombstoned = 0
-          AND LOWER(i.mime_type) <> 'inode/directory'
-          ${fileScopeWhere}
-          ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ''}
-      `, params: [...fileScopeParams, ...outsideWindowParams], mode: 'all' }) as Array<{
-        locator_uri: string | null;
-        title: string | null;
-        mime_type: string | null;
-      }>;
-      for (const row of rows) {
-        const decision = this.exclusions.evaluateItem({
-          path: row.locator_uri,
-          name: row.title,
-          mimeType: row.mime_type,
-        });
-        if (decision.disposition !== 'admit' && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
-          policyDeferredItems += 1;
+        `, params: [lo, hi, ...fileScopeParams, ...outsideWindowParams], mode: 'get' }) as { n: number }).n;
+      }
+      if (fileScoped && scope?.contentAllowed !== false && itemCounts.full_ingestion_files > 0) {
+        const rows = (yield { sql: `
+          SELECT i.locator_uri, i.title, i.mime_type
+          FROM items i
+          WHERE i.item_pk > ? AND i.item_pk <= ?
+            AND i.tombstoned = 0
+            AND LOWER(i.mime_type) <> 'inode/directory'
+            ${fileScopeWhere}
+            ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ''}
+        `, params: [lo, hi, ...fileScopeParams, ...outsideWindowParams], mode: 'all' }) as Array<{
+          locator_uri: string | null;
+          title: string | null;
+          mime_type: string | null;
+        }>;
+        for (const row of rows) {
+          const decision = this.exclusions.evaluateItem({
+            path: row.locator_uri,
+            name: row.title,
+            mimeType: row.mime_type,
+          });
+          if (decision.disposition !== 'admit' && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
+            policyDeferredItems += 1;
+          }
         }
       }
+      // Parity per model. The inner probe is a primary-key lookup on
+      // (chunk_pk, model_id), so it stays an indexed point read per chunk.
+      const pageByModel = (yield { sql: `
+        SELECT
+          m.model_id AS model_id,
+          (SELECT COUNT(*)
+            FROM items i
+            CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk AND emb.model_id = m.model_id
+            CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
+              ${parityWhere}
+          ) AS embedded_chunks,
+          (SELECT COUNT(*) FROM items i
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+              AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+              ${parityWhere}
+              AND NOT EXISTS (
+                SELECT 1 FROM chunks c
+                WHERE c.item_pk = i.item_pk
+                  AND NOT EXISTS (
+                    SELECT 1 FROM chunk_embeddings emb
+                    WHERE emb.chunk_pk = c.chunk_pk
+                      AND emb.model_id = m.model_id
+                      AND emb.content_hash = c.embedding_input_hash
+                  )
+              )
+          ) AS items_embedded
+        FROM (
+          SELECT DISTINCT emb.model_id
+          FROM items i
+          CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk
+          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${contentWhere}
+        ) m
+      `, params: [
+        lo, hi, ...parityParams,
+        lo, hi, ...parityParams,
+        lo, hi, ...contentParams,
+      ], mode: 'all' }) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
+      for (const row of pageByModel) {
+        const total = modelTotals.get(row.model_id) ?? { embedded_chunks: 0, items_embedded: 0 };
+        total.embedded_chunks += Number(row.embedded_chunks);
+        total.items_embedded += Number(row.items_embedded);
+        modelTotals.set(row.model_id, total);
+      }
     }
-    // Parity per model. The inner probe is a primary-key lookup on
-    // (chunk_pk, model_id), so it stays an indexed point read per chunk.
-    const byModel = (yield { sql: `
-      SELECT
-        m.model_id AS model_id,
-        (SELECT COUNT(*)
-          FROM chunk_embeddings emb
-          JOIN chunks c ON c.chunk_pk = emb.chunk_pk
-          JOIN items i ON i.item_pk = emb.item_pk
-          WHERE i.tombstoned = 0 AND emb.model_id = m.model_id AND emb.content_hash = c.embedding_input_hash
-            ${parityWhere}
-        ) AS embedded_chunks,
-        (SELECT COUNT(*) FROM items i
-          WHERE i.tombstoned = 0
-            AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-            ${parityWhere}
-            AND NOT EXISTS (
-              SELECT 1 FROM chunks c
-              WHERE c.item_pk = i.item_pk
-                AND NOT EXISTS (
-                  SELECT 1 FROM chunk_embeddings emb
-                  WHERE emb.chunk_pk = c.chunk_pk
-                    AND emb.model_id = m.model_id
-                    AND emb.content_hash = c.embedding_input_hash
-                )
-            )
-        ) AS items_embedded
-      FROM (
-        SELECT DISTINCT emb.model_id
-        FROM chunk_embeddings emb
-        JOIN items i ON i.item_pk = emb.item_pk
-        WHERE i.tombstoned = 0 ${contentWhere}
-      ) m
-      ORDER BY m.model_id
-    `, params: [
-      ...parityParams,
-      ...parityParams,
-      ...contentParams,
-    ], mode: 'all' }) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
+    // Run rows: their own key walk, a page at a time.
+    const lastRunRowid = Number(((yield { sql: 'SELECT MAX(rowid) AS n FROM sync_runs', params: [], mode: 'get' }) as { n: number | null } | null)?.n ?? 0);
+    for (let lo = 0; lo < lastRunRowid; lo += statusPageKeys) {
+      counts.sync_runs += Number(((yield { sql: `
+        SELECT COUNT(*) AS n FROM sync_runs
+        WHERE rowid > ? AND rowid <= ? AND connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+      `, params: [lo, Math.min(lo + statusPageKeys, lastRunRowid)], mode: 'get' }) as { n: number }).n);
+    }
+    const byModel = [...modelTotals].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([model_id, total]) => ({ model_id, ...total }));
     // Fast-search readiness per model (#1444): the backfill cursor against the
     // table's last rowid, both point reads. Older or read-only stores have no
     // digest table and report nothing, which means the exact scan serves.
@@ -19018,6 +19058,15 @@ export function tierRowVisible(
 }
 
 /** Chunks held by names-only copies, as a status field present only when non-zero. */
+/** Item keys per page of a status count: each page is a seek on the items' key, its own read. */
+const STATUS_PAGE_KEYS = 20_000;
+let statusPageKeys = STATUS_PAGE_KEYS;
+
+/** Tests only: the keys per status page (left out, the default). */
+export function setStatusPageKeysForTests(keys?: number): void {
+  statusPageKeys = keys ?? STATUS_PAGE_KEYS;
+}
+
 const NAMES_ONLY_KEPT_SQL = 'SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))';
 
 function namesOnlyKeptCount(n: number): { namesOnlyKeptChunks?: number } {

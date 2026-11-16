@@ -19,7 +19,8 @@ if (out) {
   const plans = new Map<string, Array<{ table: string; plan: string }>>();
   const finders = new Map<string, PoolSqlFinder>();
   setReadPoolObserverForTests((dbPath, read, seen) => {
-    if (!seen) return;
+    // A test's own read (the snapshot opened from a test file) is not the engine's.
+    if (!seen || /^(?:<anonymous>|[\w.$]+)@[\w.-]+\.test\.ts/.test(seen.site)) return;
     const key = `${dbPath}\u0000${read.sql}`;
     let scans = plans.get(key);
     if (!scans) {

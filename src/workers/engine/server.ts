@@ -6708,8 +6708,9 @@ export async function main(): Promise<void> {
       ? startPacedStatusRecount({
           holds: () => standBack.holds('status'),
           recount: async () => {
-            // The kept totals first (one count on the read thread per store, an hour apart), so a fresh
-            // install shows live totals before its first recount ends.
+            // The kept totals first, walked by key ranges on the read thread only when owed (never
+            // filled, a trigger put back, or an hour after a walk that saw writes), so a fresh install
+            // shows live totals before its first recount ends.
             for (const store of connectorStores) {
               if (standBack.holds('status')) break;
               if (!storeTotalsReconcileDue(store.totals(), Date.now())) continue;

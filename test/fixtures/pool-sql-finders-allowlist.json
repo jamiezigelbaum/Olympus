@@ -9,6 +9,12 @@
     },
     {
       "lane": "background",
+      "site": "authorCoverageOffThread@local-index.ts<reusedStoreRead@status.ts",
+      "table": "items",
+      "reason": "to page by key (SCAN items USING INDEX sqlite_autoindex_items_1: SELECT provider, COUNT(*) AS items, SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '') THEN 1 ELSE )"
+    },
+    {
+      "lane": "background",
       "site": "embeddingBacklogEstimateOffThread@local-index.ts<<anonymous>@background-loop-named-calls.test.ts",
       "table": "chunks",
       "reason": "to page by key (SCAN c: SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars FROM chunks c JOIN items i ON i.item_pk = c.item_pk LEFT JOIN chunk_embeddings e O)"
@@ -24,30 +30,6 @@
       "site": "pdfExtractionBacklogOffThread@local-index.ts<<anonymous>@background-loop-named-calls.test.ts",
       "table": "items",
       "reason": "to page by key (SCAN i: SELECT SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted, COALESCE(SUM(chars), 0) AS chars )"
-    },
-    {
-      "lane": "background",
-      "site": "reconcileTotals@local-index.ts<<anonymous>@store-totals-drift.test.ts",
-      "table": "chunk_embeddings",
-      "reason": "to page by key (SCAN chunk_embeddings USING COVERING INDEX idx_connector_store_chunk_embeddings_model: SELECT (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items, (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items, (SELECT COUNT(*) FROM)"
-    },
-    {
-      "lane": "background",
-      "site": "reconcileTotals@local-index.ts<<anonymous>@store-totals-drift.test.ts",
-      "table": "chunks",
-      "reason": "to page by key (SCAN chunks USING COVERING INDEX sqlite_autoindex_chunks_1: SELECT (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items, (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items, (SELECT COUNT(*) FROM)"
-    },
-    {
-      "lane": "background",
-      "site": "reconcileTotals@local-index.ts<<anonymous>@store-totals-drift.test.ts",
-      "table": "items",
-      "reason": "to page by key (SCAN items: SELECT (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items, (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items, (SELECT COUNT(*) FROM)"
-    },
-    {
-      "lane": "background",
-      "site": "reconcileTotals@local-index.ts<<anonymous>@store-totals-drift.test.ts",
-      "table": "sync_runs",
-      "reason": "to page by key (SCAN sync_runs USING COVERING INDEX idx_sync_runs_connector_state: SELECT (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items, (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items, (SELECT COUNT(*) FROM)"
     },
     {
       "lane": "background",

@@ -15874,6 +15874,8 @@ function sizeHeldItemKey(ref) {
 }
 
 // src/workers/connector-store/store-totals.ts
+var WALK_OWED_LATER = -1;
+var WALK_OWED_NOW = -2;
 var STORE_TOTALS_TRIGGERS = [
   "connector_store_totals_item_insert",
   "connector_store_totals_item_delete",
@@ -15892,6 +15894,7 @@ var bump = (name, by) => `
   INSERT INTO store_totals (name, n) VALUES (${name}, ${by})
     ON CONFLICT(name) DO UPDATE SET n = n + excluded.n;`;
 function createStoreTotals(db, nonSyncConnectorsSql) {
+  const owed = !storeTotalsInstalled(db);
   const real = (row) => `${row}.connector_id NOT IN ${nonSyncConnectorsSql}`;
   db.exec(`
     CREATE TABLE IF NOT EXISTS store_totals (
@@ -15945,19 +15948,28 @@ function createStoreTotals(db, nonSyncConnectorsSql) {
       END;`);
     }
   }
+  if (owed)
+    db.query("UPDATE store_totals_state SET drift = ? WHERE id = 1").run(WALK_OWED_NOW);
 }
 function storeTotalsInstalled(db) {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_totals_state'").get())
+    return false;
   const row = db.query(`SELECT COUNT(*) AS n FROM sqlite_master
     WHERE (type = 'table' AND name IN ('store_totals', 'store_totals_state'))
       OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`).get(JSON.stringify(STORE_TOTALS_TRIGGERS));
   return row.n === 2 + STORE_TOTALS_TRIGGERS.length;
 }
 function readStoreTotals(db) {
-  const state = db.query("SELECT reconciled_at FROM store_totals_state WHERE id = 1").get();
+  const state = db.query("SELECT reconciled_at, drift FROM store_totals_state WHERE id = 1").get();
   if (!state)
     return;
   const rows = db.query("SELECT name, n FROM store_totals").all();
-  return storeTotalsFromRows(rows, state.reconciled_at);
+  const totals = storeTotalsFromRows(rows, state.reconciled_at);
+  if (state.drift === WALK_OWED_NOW)
+    totals.walkOwed = "now";
+  else if (state.drift === WALK_OWED_LATER)
+    totals.walkOwed = "later";
+  return totals;
 }
 function storeTotalsFromRows(rows, reconciledAt) {
   const totals = { items: 0, tombstonedItems: 0, chunks: 0, syncRuns: 0, vectorsByModel: {}, reconciledAt };
@@ -15976,16 +15988,50 @@ function storeTotalsFromRows(rows, reconciledAt) {
   }
   return totals;
 }
-function storeTotalsCountSql(nonSyncConnectorsSql) {
-  return `SELECT
-    (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items,
-    (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items,
-    (SELECT COUNT(*) FROM chunks) AS chunks,
-    (SELECT COUNT(*) FROM sync_runs WHERE connector_id NOT IN ${nonSyncConnectorsSql}) AS sync_runs,
-    (SELECT json_group_object(model_id, n) FROM (SELECT model_id, COUNT(*) AS n FROM chunk_embeddings GROUP BY model_id)) AS vectors_json,
-    (SELECT json_group_object(name, n) FROM store_totals) AS kept_json`;
+var STORE_TOTALS_WALK_KEYS = 20000;
+function* storeTotalsWalkSteps(nonSyncConnectorsSql, pageKeys = STORE_TOTALS_WALK_KEYS) {
+  const start = yield { sql: `SELECT
+      (SELECT MAX(item_pk) FROM items) AS items,
+      (SELECT MAX(chunk_pk) FROM chunks) AS chunks,
+      (SELECT MAX(rowid) FROM sync_runs) AS runs,
+      (SELECT n FROM store_totals WHERE name = '${STORE_TOTALS_WRITES}') AS writes,
+      (SELECT json_group_object(name, n) FROM store_totals) AS kept_json`, params: [], mode: "get" };
+  const count = { items: 0, tombstoned_items: 0, chunks: 0, sync_runs: 0, vectors_json: null, kept_json: start.kept_json };
+  const vectors = new Map;
+  const pages = (last) => {
+    const out = [];
+    for (let lo = 0;lo < Number(last ?? 0); lo += pageKeys)
+      out.push([lo, Math.min(lo + pageKeys, Number(last))]);
+    return out;
+  };
+  for (const [lo, hi] of pages(start.items)) {
+    const row = yield { sql: `SELECT COALESCE(SUM(tombstoned = 0), 0) AS live, COALESCE(SUM(tombstoned <> 0), 0) AS gone
+      FROM items WHERE item_pk > ? AND item_pk <= ?`, params: [lo, hi], mode: "get" };
+    count.items += Number(row.live);
+    count.tombstoned_items += Number(row.gone);
+  }
+  for (const [lo, hi] of pages(start.chunks)) {
+    count.chunks += Number((yield { sql: "SELECT COUNT(*) AS n FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ?", params: [lo, hi], mode: "get" }).n);
+    for (const row of yield {
+      sql: `SELECT model_id, COUNT(*) AS n FROM chunk_embeddings WHERE chunk_pk > ? AND chunk_pk <= ? GROUP BY model_id`,
+      params: [lo, hi],
+      mode: "all"
+    }) {
+      vectors.set(row.model_id, (vectors.get(row.model_id) ?? 0) + Number(row.n));
+    }
+  }
+  for (const [lo, hi] of pages(start.runs)) {
+    count.sync_runs += Number((yield {
+      sql: `SELECT COUNT(*) AS n FROM sync_runs WHERE rowid > ? AND rowid <= ? AND connector_id NOT IN ${nonSyncConnectorsSql}`,
+      params: [lo, hi],
+      mode: "get"
+    }).n);
+  }
+  count.vectors_json = JSON.stringify(Object.fromEntries(vectors));
+  const end = yield { sql: `SELECT n AS writes FROM store_totals WHERE name = '${STORE_TOTALS_WRITES}'`, params: [], mode: "get" };
+  return { count, quiet: Number(end?.writes ?? 0) === Number(start.writes ?? 0) };
 }
-function applyStoreTotalsCount(db, count, nowIso) {
+function applyStoreTotalsCount(db, count, nowIso, options = {}) {
   const counted = new Map([
     ["items", Number(count.items)],
     ["tombstoned_items", Number(count.tombstoned_items)],
@@ -16012,11 +16058,11 @@ function applyStoreTotalsCount(db, count, nowIso) {
         write.run(name, exact);
     }
     db.query(`INSERT INTO store_totals_state (id, reconciled_at, drift) VALUES (1, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, drift);
+      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, options.exact === false ? WALK_OWED_LATER : drift);
   })();
   return drift;
 }
-var STORE_TOTALS_RECONCILE_EVERY_MS = 60 * 60000;
+var STORE_TOTALS_REWALK_AFTER_MS = 60 * 60000;
 function readStoreWriteSequence(db) {
   const row = db.query("SELECT n FROM store_totals WHERE name = ?").get(STORE_TOTALS_WRITES);
   return row ? Number(row.n) : undefined;
@@ -30746,9 +30792,22 @@ ${parentKey(ref)}`, { ref, origin });
       return;
     if (!storeTotalsInstalled(this.db))
       createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
-    const sql = storeTotalsCountSql(NON_SYNC_RUN_CONNECTORS_SQL);
-    const count = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params: [], mode: "get" }) : this.db.query(sql).get();
-    return applyStoreTotalsCount(this.db, count, new Date().toISOString());
+    const pool = offThreadReadsSupported(this.dbPath);
+    const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
+    let step = steps.next();
+    while (!step.done) {
+      const query = step.value;
+      let rows;
+      if (pool)
+        rows = await readInBackground(this.dbPath, query);
+      else {
+        await new Promise((resolve) => setImmediate(resolve));
+        const statement = this.db.query(query.sql);
+        rows = query.mode === "get" ? statement.get(...query.params) : statement.all(...query.params);
+      }
+      step = steps.next(rows);
+    }
+    return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
   }
   embeddingInputHashesChecked = false;
   async repairEmbeddingInputHashes(pageSize = 2000) {
@@ -30837,151 +30896,203 @@ ${parentKey(ref)}`, { ref, origin });
       ${contentFilters.sql}
       ${hiddenNotIn}
       ${fileNamesOnlyNotIn}`;
-    const jsonList = (pks) => pks.length > 0 ? [JSON.stringify(pks)] : [];
-    const itemParams = [...accountScope ? [accountScope] : [], ...itemFilters.params, ...jsonList(tier.hidden)];
-    const contentParams = [
-      ...accountScope ? [accountScope] : [],
-      ...contentFilters.params,
-      ...jsonList(tier.hidden),
-      ...jsonList(namesOnlyWithText)
-    ];
-    const parityParams = [...contentParams, ...jsonList(tier.held)];
-    const fileScopeParams = [
-      ...accountScope ? [accountScope] : [],
-      ...contentFilters.params,
-      ...jsonList(tier.hidden),
-      ...jsonList(fileNamesOnlyPks)
-    ];
+    const pageKeys = (pks, lo, hi) => pks.filter((pk) => pk > lo && pk <= hi);
+    const pageList = (pks, lo, hi) => pks.length > 0 ? [JSON.stringify(pageKeys(pks, lo, hi))] : [];
+    const pageParams = (lo, hi) => {
+      const itemParams = [...accountScope ? [accountScope] : [], ...itemFilters.params, ...pageList(tier.hidden, lo, hi)];
+      const contentParams = [
+        ...accountScope ? [accountScope] : [],
+        ...contentFilters.params,
+        ...pageList(tier.hidden, lo, hi),
+        ...pageList(namesOnlyWithText, lo, hi)
+      ];
+      const parityParams = [...contentParams, ...pageList(tier.held, lo, hi)];
+      const fileScopeParams = [
+        ...accountScope ? [accountScope] : [],
+        ...contentFilters.params,
+        ...pageList(tier.hidden, lo, hi),
+        ...pageList(fileNamesOnlyPks, lo, hi)
+      ];
+      return { itemParams, contentParams, parityParams, fileScopeParams };
+    };
     const fileScoped = policyHolds.size > 0 || scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key, value]) => key === "contentNotBefore" || value === undefined));
     const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
     const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
     const outsideWindowParams = outsideWindowSql ? [new Date(contentNotBeforeMs).toISOString()] : [];
-    const itemCounts = yield { sql: `
-      WITH flags AS MATERIALIZED (
+    const counts = {
+      items: 0,
+      stored_items: 0,
+      content_elsewhere_items: 0,
+      content_elsewhere_in_scope_files: 0,
+      files: 0,
+      folders: 0,
+      tombstoned_items: 0,
+      full_ingestion_files: 0,
+      chunks: 0,
+      embedded_chunks: 0,
+      sync_runs: 0,
+      items_with_text: 0
+    };
+    let outsideContentWindowItems = 0;
+    let policyDeferredItems = 0;
+    const modelTotals = new Map;
+    const lastItemPk = Number((yield { sql: "SELECT MAX(item_pk) AS n FROM items", params: [], mode: "get" })?.n ?? 0);
+    for (let lo = 0;lo < lastItemPk; lo += statusPageKeys) {
+      const hi = Math.min(lo + statusPageKeys, lastItemPk);
+      const { itemParams, contentParams, parityParams, fileScopeParams } = pageParams(lo, hi);
+      const itemCounts = yield { sql: `
+        WITH flags AS MATERIALIZED (
+          SELECT
+            i.tombstoned AS t,
+            LOWER(i.mime_type) = 'inode/directory' AS dir,
+            (1 ${itemWhere}) AS in_items,
+            (1 ${hiddenNotIn}) AS stored,
+            i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
+            (1 ${approvedContentWhere}) AS in_content_scope,
+            (1 ${fileScopeWhere}) AS in_file_scope
+          FROM items i
+          WHERE i.item_pk > ? AND i.item_pk <= ?
+        )
         SELECT
-          i.tombstoned AS t,
-          LOWER(i.mime_type) = 'inode/directory' AS dir,
-          (1 ${itemWhere}) AS in_items,
-          (1 ${hiddenNotIn}) AS stored,
-          i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
-          (1 ${approvedContentWhere}) AS in_content_scope,
-          (1 ${fileScopeWhere}) AS in_file_scope
-        FROM items i
-      )
-      SELECT
-        COALESCE(SUM(t = 0 AND in_items), 0) AS items,
-        COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
-        COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
-        COALESCE(SUM(t = 0 AND in_items AND NOT dir AND elsewhere AND in_content_scope), 0) AS content_elsewhere_in_scope_files,
-        COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
-        COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
-        COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
-        COALESCE(SUM(t = 0 AND NOT dir AND in_file_scope), 0) AS full_ingestion_files
-      FROM flags
-    `, params: [
-      ...itemParams,
-      ...jsonList(tier.hidden),
-      JSON.stringify(keptNamesOnlyPks),
-      ...accountScope ? [accountScope] : [],
-      ...contentFilters.params,
-      ...jsonList(tier.hidden),
-      ...fileScopeParams
-    ], mode: "get" };
-    const textCounts = yield { sql: `
-      SELECT
-        -- CROSS JOIN keeps chunks and vectors as the outer loop: with items
-        -- outer, the scope tests ran on every item, chunk or not.
-        (SELECT COUNT(*) FROM chunks c CROSS JOIN items i ON i.item_pk = c.item_pk
-          WHERE i.tombstoned = 0 ${parityWhere}) AS chunks,
-        (SELECT COUNT(*)
-          FROM chunk_embeddings emb
-          CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
-          CROSS JOIN items i ON i.item_pk = emb.item_pk
-          WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
-            ${parityWhere}
-        ) AS embedded_chunks,
-        (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-        ) AS sync_runs,
-        -- Driven from the items that hold a chunk, so the scope tests run only
-        -- on those rows, not on every names-only item.
-        (SELECT COUNT(*) FROM (SELECT DISTINCT item_pk FROM chunks) ck
-          CROSS JOIN items i ON i.item_pk = ck.item_pk
-          WHERE i.tombstoned = 0
-            ${contentWhere}
-        ) AS items_with_text
-    `, params: [
-      ...parityParams,
-      ...parityParams,
-      ...contentParams
-    ], mode: "get" };
-    const counts = { ...itemCounts, ...textCounts };
-    const outsideContentWindowItems = outsideWindowSql ? (yield { sql: `
+          COALESCE(SUM(t = 0 AND in_items), 0) AS items,
+          COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
+          COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
+          COALESCE(SUM(t = 0 AND in_items AND NOT dir AND elsewhere AND in_content_scope), 0) AS content_elsewhere_in_scope_files,
+          COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
+          COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
+          COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
+          COALESCE(SUM(t = 0 AND NOT dir AND in_file_scope), 0) AS full_ingestion_files
+        FROM flags
+      `, params: [
+        ...itemParams,
+        ...pageList(tier.hidden, lo, hi),
+        JSON.stringify(pageKeys(keptNamesOnlyPks, lo, hi)),
+        ...accountScope ? [accountScope] : [],
+        ...contentFilters.params,
+        ...pageList(tier.hidden, lo, hi),
+        ...fileScopeParams,
+        lo,
+        hi
+      ], mode: "get" };
+      const textCounts = yield { sql: `
+        SELECT
+          (SELECT COUNT(*) FROM items i CROSS JOIN chunks c ON c.item_pk = i.item_pk
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${parityWhere}) AS chunks,
+          (SELECT COUNT(*)
+            FROM items i
+            CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk
+            CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
+              ${parityWhere}
+          ) AS embedded_chunks,
+          (SELECT COUNT(*) FROM items i
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+              AND EXISTS (SELECT 1 FROM chunks ck WHERE ck.item_pk = i.item_pk)
+              ${contentWhere}
+          ) AS items_with_text
+      `, params: [
+        lo,
+        hi,
+        ...parityParams,
+        lo,
+        hi,
+        ...parityParams,
+        lo,
+        hi,
+        ...contentParams
+      ], mode: "get" };
+      for (const [name, value] of Object.entries({ ...itemCounts, ...textCounts })) {
+        counts[name] += Number(value ?? 0);
+      }
+      if (outsideWindowSql) {
+        outsideContentWindowItems += (yield { sql: `
           SELECT COUNT(*) AS n FROM items i
-          WHERE i.tombstoned = 0
+          WHERE i.item_pk > ? AND i.item_pk <= ?
+            AND i.tombstoned = 0
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
             AND ${outsideWindowSql}
-        `, params: [...fileScopeParams, ...outsideWindowParams], mode: "get" }).n : 0;
-    let policyDeferredItems = 0;
-    if (fileScoped && scope?.contentAllowed !== false && counts.full_ingestion_files > 0) {
-      const rows = yield { sql: `
-        SELECT i.locator_uri, i.title, i.mime_type
-        FROM items i
-        WHERE i.tombstoned = 0
-          AND LOWER(i.mime_type) <> 'inode/directory'
-          ${fileScopeWhere}
-          ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ""}
-      `, params: [...fileScopeParams, ...outsideWindowParams], mode: "all" };
-      for (const row of rows) {
-        const decision = this.exclusions.evaluateItem({
-          path: row.locator_uri,
-          name: row.title,
-          mimeType: row.mime_type
-        });
-        if (decision.disposition !== "admit" && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
-          policyDeferredItems += 1;
+        `, params: [lo, hi, ...fileScopeParams, ...outsideWindowParams], mode: "get" }).n;
+      }
+      if (fileScoped && scope?.contentAllowed !== false && itemCounts.full_ingestion_files > 0) {
+        const rows = yield { sql: `
+          SELECT i.locator_uri, i.title, i.mime_type
+          FROM items i
+          WHERE i.item_pk > ? AND i.item_pk <= ?
+            AND i.tombstoned = 0
+            AND LOWER(i.mime_type) <> 'inode/directory'
+            ${fileScopeWhere}
+            ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ""}
+        `, params: [lo, hi, ...fileScopeParams, ...outsideWindowParams], mode: "all" };
+        for (const row of rows) {
+          const decision = this.exclusions.evaluateItem({
+            path: row.locator_uri,
+            name: row.title,
+            mimeType: row.mime_type
+          });
+          if (decision.disposition !== "admit" && !sourceExclusionOutcomeIsUnevaluable(decision.outcome)) {
+            policyDeferredItems += 1;
+          }
         }
       }
+      const pageByModel = yield { sql: `
+        SELECT
+          m.model_id AS model_id,
+          (SELECT COUNT(*)
+            FROM items i
+            CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk AND emb.model_id = m.model_id
+            CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
+              ${parityWhere}
+          ) AS embedded_chunks,
+          (SELECT COUNT(*) FROM items i
+            WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+              AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+              ${parityWhere}
+              AND NOT EXISTS (
+                SELECT 1 FROM chunks c
+                WHERE c.item_pk = i.item_pk
+                  AND NOT EXISTS (
+                    SELECT 1 FROM chunk_embeddings emb
+                    WHERE emb.chunk_pk = c.chunk_pk
+                      AND emb.model_id = m.model_id
+                      AND emb.content_hash = c.embedding_input_hash
+                  )
+              )
+          ) AS items_embedded
+        FROM (
+          SELECT DISTINCT emb.model_id
+          FROM items i
+          CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk
+          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${contentWhere}
+        ) m
+      `, params: [
+        lo,
+        hi,
+        ...parityParams,
+        lo,
+        hi,
+        ...parityParams,
+        lo,
+        hi,
+        ...contentParams
+      ], mode: "all" };
+      for (const row of pageByModel) {
+        const total = modelTotals.get(row.model_id) ?? { embedded_chunks: 0, items_embedded: 0 };
+        total.embedded_chunks += Number(row.embedded_chunks);
+        total.items_embedded += Number(row.items_embedded);
+        modelTotals.set(row.model_id, total);
+      }
     }
-    const byModel = yield { sql: `
-      SELECT
-        m.model_id AS model_id,
-        (SELECT COUNT(*)
-          FROM chunk_embeddings emb
-          JOIN chunks c ON c.chunk_pk = emb.chunk_pk
-          JOIN items i ON i.item_pk = emb.item_pk
-          WHERE i.tombstoned = 0 AND emb.model_id = m.model_id AND emb.content_hash = c.embedding_input_hash
-            ${parityWhere}
-        ) AS embedded_chunks,
-        (SELECT COUNT(*) FROM items i
-          WHERE i.tombstoned = 0
-            AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-            ${parityWhere}
-            AND NOT EXISTS (
-              SELECT 1 FROM chunks c
-              WHERE c.item_pk = i.item_pk
-                AND NOT EXISTS (
-                  SELECT 1 FROM chunk_embeddings emb
-                  WHERE emb.chunk_pk = c.chunk_pk
-                    AND emb.model_id = m.model_id
-                    AND emb.content_hash = c.embedding_input_hash
-                )
-            )
-        ) AS items_embedded
-      FROM (
-        SELECT DISTINCT emb.model_id
-        FROM chunk_embeddings emb
-        JOIN items i ON i.item_pk = emb.item_pk
-        WHERE i.tombstoned = 0 ${contentWhere}
-      ) m
-      ORDER BY m.model_id
-    `, params: [
-      ...parityParams,
-      ...parityParams,
-      ...contentParams
-    ], mode: "all" };
+    const lastRunRowid = Number((yield { sql: "SELECT MAX(rowid) AS n FROM sync_runs", params: [], mode: "get" })?.n ?? 0);
+    for (let lo = 0;lo < lastRunRowid; lo += statusPageKeys) {
+      counts.sync_runs += Number((yield { sql: `
+        SELECT COUNT(*) AS n FROM sync_runs
+        WHERE rowid > ? AND rowid <= ? AND connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+      `, params: [lo, Math.min(lo + statusPageKeys, lastRunRowid)], mode: "get" }).n);
+    }
+    const byModel = [...modelTotals].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([model_id, total]) => ({ model_id, ...total }));
     const digestPresent = Boolean(yield { sql: "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'chunk_vector_digest_meta'", params: [], mode: "get" });
     const digestRows = digestPresent ? yield { sql: `SELECT model_id, cursor_rowid, completed, (SELECT MAX(rowid) FROM chunk_embeddings) AS last_rowid
           FROM chunk_vector_digest_meta`, params: [], mode: "all" } : [];
@@ -31520,6 +31631,8 @@ function tierRowVisible(copies, corpusId, layer) {
   const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current" && !(copy.embedHold && copy.layers !== "metadata" && copy.trustDomain !== "secure_local"));
   return copyServingLayer(here, layer) !== undefined;
 }
+var STATUS_PAGE_KEYS = 20000;
+var statusPageKeys = STATUS_PAGE_KEYS;
 var NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))";
 function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};

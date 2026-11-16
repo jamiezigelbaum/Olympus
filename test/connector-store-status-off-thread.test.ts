@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { setStatusPageKeysForTests } from '../src/workers/connector-store/local-index.ts';
 
 const ACCOUNT = 'personal';
 const roots: string[] = [];
@@ -89,6 +90,25 @@ describe('connector store status off the worker thread', () => {
       const counts = (await store.statusOffThread()).counts;
       expect(counts.items).toBe(3);
       expect(counts.itemsWithText).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  // Status walks the items a page of keys at a time, each page its own read:
+  // the pages add up to the counts of one pass, here and on the read worker.
+  test('counts the same a key at a time as in one page', async () => {
+    const store = fileStore();
+    try {
+      await store.syncFromConnector(connector(MAIL), { fetchContent: true });
+      for (const scope of [undefined, { contentNotBefore: '2026-04-13T00:00:00Z' }]) {
+        const whole = store.status(scope);
+        setStatusPageKeysForTests(1);
+        try {
+          expect(store.status(scope)).toEqual(whole);
+          expect(await store.statusOffThread(scope)).toEqual(whole);
+        } finally { setStatusPageKeysForTests(); }
+      }
     } finally {
       store.close();
     }
