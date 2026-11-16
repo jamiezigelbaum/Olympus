@@ -3,8 +3,9 @@
 // budget bounds every read, reactions aggregate from a persistent index, and a
 // disconnected bridge reads as stopped. Every fixture is synthetic.
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import * as fs from 'node:fs';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { V0_4_PUBLIC_PACKAGE_FILES } from '../src/core/public-surface.ts';
 import { tmpdir } from 'node:os';
@@ -255,11 +256,20 @@ describe('review round 2', () => {
     await target.sync.pull();
     expect(readFileSync(target.file, 'utf8')).not.toContain(STRIPE_LIVE_KEY);
     // The bridge redelivers the Secret message, and the spool cannot be opened for writing for one pull.
+    // The open is refused directly rather than by chmod, which root ignores.
     appendFileSync(target.file, secret);
-    chmodSync(target.file, 0o400);
-    const failed = await target.sync.pull();
+    const openSync = fs.openSync;
+    const refuse = spyOn(fs, 'openSync').mockImplementation(((path: fs.PathLike, flags?: fs.OpenMode, mode?: fs.Mode | null) => {
+      if (path === target.file && flags === 'r+') throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES', name: 'Error' });
+      return openSync(path, flags, mode);
+    }) as typeof fs.openSync);
+    let failed;
+    try {
+      failed = await target.sync.pull();
+    } finally {
+      refuse.mockRestore();
+    }
     expect(failed.warnings).toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
-    chmodSync(target.file, 0o600);
     // Nothing new to read: the window the failed pull owes is cleared all the same.
     const idle = await target.sync.pull();
     expect(idle.warnings ?? []).not.toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
