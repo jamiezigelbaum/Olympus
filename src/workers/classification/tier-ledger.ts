@@ -801,7 +801,9 @@ export class TierLedger {
         this.db = db;
         return;
       }
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
+      // FULL stays: a decision is never lost to a power cut. The size limit
+      // truncates a WAL that grew while reads held it (6 GB, 16 Nov) once it resets.
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;');
       applySqliteMmap(db);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       // The owner's overridden items, for the cleared-override search

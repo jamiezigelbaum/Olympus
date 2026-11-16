@@ -176,7 +176,7 @@ const connection = (path) => {
   return db;
 };
 self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode } = event.data;
+  const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
   if (op === 'release') {
     const held = connections.get(path);
     connections.delete(path);
@@ -190,7 +190,10 @@ self.onmessage = (event) => {
   try {
     if (op === 'open') {
       const held = snapshotConnection(path);
-      try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; }
+      // perRead: no transaction is held between reads, so each read is its
+      // own short one and a checkpoint can pass it between reads.
+      if (!perRead) { try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; } }
+      held.perRead = perRead === true;
       snapshots.set(snapshot, held);
       postMessage({ id, ok: true, rows: null });
     } else if (op === 'close') {
@@ -198,7 +201,7 @@ self.onmessage = (event) => {
       snapshots.delete(snapshot);
       if (held) {
         let reusable = false;
-        try { held.db.exec('COMMIT'); reusable = true; } finally {
+        try { if (!held.perRead) held.db.exec('COMMIT'); reusable = true; } finally {
           const idle = idleSnapshots.get(held.path) ?? [];
           if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
         }
@@ -426,13 +429,20 @@ export async function withOffThreadSnapshot<T>(
   // The wait for the store's worker, counted once, on the snapshot's first
   // read: a lane's time behind other snapshots shows in its queue wait.
   let reserveWaitMs = clock.now() - askedAtMs;
+  // The background lane's readers are finders: what they find is written by
+  // key and checked again there, so they need no one snapshot across their
+  // reads. Each of their reads is its own read transaction. A snapshot held
+  // across a whole walk pinned the WAL: no checkpoint could reset it, and
+  // tier-ledger-1's WAL stood at 6 GB through a gate run (16 Nov).
+  const perRead = lane === 'background';
+  const site = callerSite();
   try {
-    await send(reader, { op: 'open', snapshot, path: dbPath });
-    const open = openSnapshots.get(dbPath) ?? new Map<number, { atMs: number; lane: ReadPoolLane }>();
-    openSnapshots.set(dbPath, open);
-    open.set(snapshot, { atMs: clock.now(), lane });
+    await send(reader, { op: 'open', snapshot, path: dbPath, perRead });
+    if (!perRead) markRead(dbPath, snapshot, { atMs: clock.now(), lane, site });
     try {
       return await work(async (query) => {
+        const readId = perRead ? -(nextId++) : 0;
+        if (perRead) markRead(dbPath, readId, { atMs: clock.now(), lane, site });
         if (observeSnapshots) observer?.(dbPath, query);
         // A snapshot read made by a traced Ask lane counts in its pool reads.
         const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
@@ -450,14 +460,14 @@ export async function withOffThreadSnapshot<T>(
           report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error', snapshot: true });
           throw error;
         } finally {
+          if (perRead) unmarkRead(dbPath, readId);
           // A search waiting for this thread takes its turn before the next read.
           dispatch();
         }
       });
     } finally {
       await send(reader, { op: 'close', snapshot }).catch(() => undefined);
-      open.delete(snapshot);
-      if (open.size === 0) openSnapshots.delete(dbPath);
+      unmarkRead(dbPath, snapshot);
     }
   } finally {
     reader.snapshots -= 1;
@@ -465,17 +475,37 @@ export async function withOffThreadSnapshot<T>(
   }
 }
 
-// Every snapshot open on a store's read workers: while one is open, no
-// checkpoint can move the WAL past the frames it may still read.
-const openSnapshots = new Map<string, Map<number, { atMs: number; lane: ReadPoolLane }>>();
+// Every read transaction open on a store's read workers: while one is open,
+// no checkpoint can move the WAL past the frames it may still read.
+interface OpenRead { atMs: number; lane: ReadPoolLane; site: string }
+const openSnapshots = new Map<string, Map<number, OpenRead>>();
+function markRead(dbPath: string, id: number, read: OpenRead): void {
+  const open = openSnapshots.get(dbPath) ?? new Map<number, OpenRead>();
+  open.set(id, read);
+  openSnapshots.set(dbPath, open);
+}
+function unmarkRead(dbPath: string, id: number): void {
+  const open = openSnapshots.get(dbPath);
+  if (!open) return;
+  open.delete(id);
+  if (open.size === 0) openSnapshots.delete(dbPath);
+}
 
-/** The longest-open read snapshot on this store's workers: its age and lane, or undefined. */
-export function oldestOffThreadSnapshot(dbPath: string): { ageMs: number; lane: ReadPoolLane } | undefined {
+// The function that asked for the snapshot (code names only, never data).
+function callerSite(): string {
+  const frames = (new Error().stack ?? '').split('\n').map((line) => line.trim()).filter((line) => line.startsWith('at '));
+  const frame = frames.find((line) => !/off-thread-reads|withOffThreadSnapshot|readInBackground|ledgerReadOffThread|readStepsInBackground|<anonymous>|processTicksAndRejections/.test(line));
+  const name = frame?.slice(3).split(' ')[0];
+  return name && /^[\w.$<>]+$/.test(name) ? name : 'unknown';
+}
+
+/** The longest-open read on this store's workers: its age, lane and the function that opened it, or undefined. */
+export function oldestOffThreadSnapshot(dbPath: string): { ageMs: number; lane: ReadPoolLane; site: string } | undefined {
   const open = openSnapshots.get(dbPath);
   if (!open || open.size === 0) return undefined;
-  let oldest: { atMs: number; lane: ReadPoolLane } | undefined;
+  let oldest: OpenRead | undefined;
   for (const entry of open.values()) if (!oldest || entry.atMs < oldest.atMs) oldest = entry;
-  return oldest ? { ageMs: clock.now() - oldest.atMs, lane: oldest.lane } : undefined;
+  return oldest ? { ageMs: clock.now() - oldest.atMs, lane: oldest.lane, site: oldest.site } : undefined;
 }
 
 // Snapshots waiting for a thread that no pool query is running on.

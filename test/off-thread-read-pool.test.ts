@@ -344,3 +344,22 @@ describe('read pool', () => {
     expect(((await withOffThreadSnapshot(path, async (read) => read(COUNT))) as { c: number }).c).toBe(3);
   });
 });
+
+describe('read transactions and checkpoints', () => {
+  // A snapshot held across a walk pinned the WAL: no checkpoint could reset
+  // it, and a ledger's WAL stood at 6 GB through a gate run (16 Nov).
+  test('a background walk holds no read between its reads, so a checkpoint completes; a shared snapshot still holds one', async () => {
+    const path = storeFile();
+    const writer = new Database(path);
+    const checkpointBetweenReads = async (lane: 'background' | 'shared') => withOffThreadSnapshot(path, async (read) => {
+      await read(COUNT);
+      writer.exec('INSERT INTO items VALUES (4)');
+      const result = writer.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number };
+      await read(COUNT);
+      return result.busy;
+    }, { lane });
+    expect(await checkpointBetweenReads('background')).toBe(0);
+    expect(await checkpointBetweenReads('shared')).toBe(1);
+    writer.close();
+  });
+});

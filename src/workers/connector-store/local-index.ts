@@ -3828,11 +3828,16 @@ export class LocalConnectorStore {
       : { create: true });
     this.openedFile = fileIdentity(this.dbPath);
     try {
+      // synchronous NORMAL under WAL: a commit no longer waits on fsync. A
+      // power cut can roll back this store's last commits (never corrupt it);
+      // what a copy serves is decided by the tier ledger, which stays FULL,
+      // and a rolled-back sync or move is redone. The size limit truncates a
+      // WAL that grew while reads held it, once it resets (16 Nov gate).
       this.db.exec(options.readOnly === true
         ? 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;'
         : creatingFile
-        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;'
-        : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;'
+        : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;');
       applySqliteMmap(this.db);
       // New stores need no conversion. Existing stores are converted only by
       // background reclaim, after the sweep, never by opening a request's store.

@@ -12330,7 +12330,7 @@ class TierLedger {
         this.db = db;
         return;
       }
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;");
       applySqliteMmap(db);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
@@ -17998,7 +17998,7 @@ class TierSnifferStore {
     let db;
     try {
       db = new Database4(this.dbPath, { create: true });
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;");
       runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk)
         restrictFiles(this.dbPath);
@@ -18683,7 +18683,7 @@ const connection = (path) => {
   return db;
 };
 self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode } = event.data;
+  const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
   if (op === 'release') {
     const held = connections.get(path);
     connections.delete(path);
@@ -18697,7 +18697,10 @@ self.onmessage = (event) => {
   try {
     if (op === 'open') {
       const held = snapshotConnection(path);
-      try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; }
+      // perRead: no transaction is held between reads, so each read is its
+      // own short one and a checkpoint can pass it between reads.
+      if (!perRead) { try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; } }
+      held.perRead = perRead === true;
       snapshots.set(snapshot, held);
       postMessage({ id, ok: true, rows: null });
     } else if (op === 'close') {
@@ -18705,7 +18708,7 @@ self.onmessage = (event) => {
       snapshots.delete(snapshot);
       if (held) {
         let reusable = false;
-        try { held.db.exec('COMMIT'); reusable = true; } finally {
+        try { if (!held.perRead) held.db.exec('COMMIT'); reusable = true; } finally {
           const idle = idleSnapshots.get(held.path) ?? [];
           if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
         }
@@ -18853,13 +18856,17 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
   }
   const snapshot = nextId++;
   let reserveWaitMs = clock2.now() - askedAtMs;
+  const perRead = lane === "background";
+  const site = callerSite();
   try {
-    await send(reader, { op: "open", snapshot, path: dbPath });
-    const open = openSnapshots.get(dbPath) ?? new Map;
-    openSnapshots.set(dbPath, open);
-    open.set(snapshot, { atMs: clock2.now(), lane });
+    await send(reader, { op: "open", snapshot, path: dbPath, perRead });
+    if (!perRead)
+      markRead(dbPath, snapshot, { atMs: clock2.now(), lane, site });
     try {
       return await work(async (query) => {
+        const readId = perRead ? -nextId++ : 0;
+        if (perRead)
+          markRead(dbPath, readId, { atMs: clock2.now(), lane, site });
         if (observeSnapshots)
           observer?.(dbPath, query);
         const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
@@ -18877,6 +18884,8 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
           report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
           throw error;
         } finally {
+          if (perRead)
+            unmarkRead(dbPath, readId);
           dispatch();
         }
       });
@@ -18884,9 +18893,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
       await send(reader, { op: "close", snapshot }).catch(() => {
         return;
       });
-      open.delete(snapshot);
-      if (open.size === 0)
-        openSnapshots.delete(dbPath);
+      unmarkRead(dbPath, snapshot);
     }
   } finally {
     reader.snapshots -= 1;
@@ -18894,6 +18901,26 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
   }
 }
 var openSnapshots = new Map;
+function markRead(dbPath, id, read) {
+  const open = openSnapshots.get(dbPath) ?? new Map;
+  open.set(id, read);
+  openSnapshots.set(dbPath, open);
+}
+function unmarkRead(dbPath, id) {
+  const open = openSnapshots.get(dbPath);
+  if (!open)
+    return;
+  open.delete(id);
+  if (open.size === 0)
+    openSnapshots.delete(dbPath);
+}
+function callerSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).map((line) => line.trim()).filter((line) => line.startsWith("at "));
+  const frame = frames.find((line) => !/off-thread-reads|withOffThreadSnapshot|readInBackground|ledgerReadOffThread|readStepsInBackground|<anonymous>|processTicksAndRejections/.test(line));
+  const name = frame?.slice(3).split(" ")[0];
+  return name && /^[\w.$<>]+$/.test(name) ? name : "unknown";
+}
 var snapshotWaiters = [];
 var releases = new Map;
 function snapshotThreadNow(store, lane) {
@@ -22569,7 +22596,7 @@ class LocalConnectorStore {
     this.db = new Database6(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
     this.openedFile = fileIdentity(this.dbPath);
     try {
-      this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : creatingFile ? "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+      this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : creatingFile ? "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;");
       applySqliteMmap(this.db);
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
       const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);

@@ -42,7 +42,7 @@ export function sampleSqliteFiles(
     try { walBytes = statSync(`${file.dbPath}-wal`).size; } catch { walBytes = 0; }
     const snapshot = oldestOffThreadSnapshot(file.dbPath);
     if (walBytes < SQLITE_WAL_NOTABLE_BYTES && (snapshot?.ageMs ?? 0) < SQLITE_SNAPSHOT_NOTABLE_MS) continue;
-    log(`[olympus] sqlite wal: ${file.label} wal_bytes=${walBytes} oldest_read_ms=${Math.round(snapshot?.ageMs ?? 0)}${snapshot ? ` oldest_read_lane=${snapshot.lane}` : ''}`);
+    log(`[olympus] sqlite wal: ${file.label} wal_bytes=${walBytes} oldest_read_ms=${Math.round(snapshot?.ageMs ?? 0)}${snapshot ? ` oldest_read_lane=${snapshot.lane} oldest_read_site=${snapshot.site}` : ''}`);
   }
 }
 

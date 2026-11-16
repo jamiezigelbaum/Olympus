@@ -125,7 +125,7 @@ export class TierSnifferStore {
     let db: Database | undefined;
     try {
       db = new Database(this.dbPath, { create: true });
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;');
       runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk) restrictFiles(this.dbPath);
     } catch (error) {
