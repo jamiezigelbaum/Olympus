@@ -15407,12 +15407,13 @@ var init_credential_health = __esm(() => {
   CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
 });
 // src/workers/connector-store/off-thread-reads.ts
-var startedStores, storeOpens, queues, releases;
+var startedStores, storeOpens, queues, openSnapshots, releases;
 var init_off_thread_reads = __esm(() => {
   init_answer_latency_trace();
   startedStores = new Set;
   storeOpens = new Map;
   queues = new Map;
+  openSnapshots = new Map;
   releases = new Map;
 });
 

@@ -293,6 +293,8 @@ import {
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
+import { startSqliteWalSampler } from './sqlite-wal-sampler.ts';
+import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { createPendingGovernance, createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { judgeBoosts } from '../classification/judge-boost.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
@@ -6735,7 +6737,19 @@ export async function main(): Promise<void> {
           log: (line) => console.warn(line),
         })
       : undefined;
-    engineBackground = { stop: () => { statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
+    // The background's SQLite files, sampled for the loop-stall receipt
+    // (sqlite-wal-sampler.ts): settings once, then WAL size and the
+    // longest-open read snapshot whenever either is large.
+    const walSampler = startSqliteWalSampler(() => [
+      ...connectorStores.map((store) => ({ label: store.corpusId, dbPath: store.dbPath, settings: () => store.sqliteJournalSettings() })),
+      ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
+        label: `tier-ledger-${index + 1}`, dbPath: ledger.dbPath, settings: () => ledger.sqliteJournalSettings(),
+      })),
+      ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
+        label: `judge-queue-${index + 1}`, dbPath: tierSnifferPathForLedger(ledger.dbPath),
+      })),
+    ]);
+    engineBackground = { stop: () => { walSampler.stop(); statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
   }
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)

@@ -43281,6 +43281,13 @@ class TierLedger {
     `).all(corpusId);
     return rows.map(identityFromRow);
   }
+  sqliteJournalSettings() {
+    return {
+      journal_mode: this.db.query("PRAGMA journal_mode").get().journal_mode,
+      synchronous: this.db.query("PRAGMA synchronous").get().synchronous,
+      wal_autocheckpoint: this.db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
+    };
+  }
   staleEmbedHoldsSettled() {
     return this.db.query("SELECT 1 FROM tier_ledger_meta WHERE key = ?").get(STALE_EMBED_HOLDS_SETTLED) !== null;
   }
@@ -50796,6 +50803,9 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
   let reserveWaitMs = clock2.now() - askedAtMs;
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
+    const open = openSnapshots.get(dbPath) ?? new Map;
+    openSnapshots.set(dbPath, open);
+    open.set(snapshot, { atMs: clock2.now(), lane });
     try {
       return await work(async (query) => {
         if (observeSnapshots)
@@ -50822,11 +50832,24 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
       await send(reader, { op: "close", snapshot }).catch(() => {
         return;
       });
+      open.delete(snapshot);
+      if (open.size === 0)
+        openSnapshots.delete(dbPath);
     }
   } finally {
     reader.snapshots -= 1;
     dispatch();
   }
+}
+function oldestOffThreadSnapshot(dbPath) {
+  const open = openSnapshots.get(dbPath);
+  if (!open || open.size === 0)
+    return;
+  let oldest;
+  for (const entry of open.values())
+    if (!oldest || entry.atMs < oldest.atMs)
+      oldest = entry;
+  return oldest ? { ageMs: clock2.now() - oldest.atMs, lane: oldest.lane } : undefined;
 }
 function snapshotThreadNow(store, lane) {
   return live().find((reader) => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job && (lane !== "rescore" || reader.snapshots === 0)) ?? startThread(store, lane);
@@ -51094,7 +51117,7 @@ self.onmessage = (event) => {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   }
 };
-`, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases;
+`, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, openSnapshots, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
   init_answer_latency_trace();
   BACKGROUND_READS = { lane: "background" };
@@ -51117,6 +51140,7 @@ var init_off_thread_reads = __esm(() => {
   storeOpens = new Map;
   queues = new Map;
   turns = [];
+  openSnapshots = new Map;
   snapshotWaiters = [];
   releases = new Map;
 });
@@ -60702,6 +60726,13 @@ function fileIdentity(path) {
     return;
   }
 }
+function sqliteJournalSettingsOf(db) {
+  return {
+    journal_mode: db.query("PRAGMA journal_mode").get().journal_mode,
+    synchronous: db.query("PRAGMA synchronous").get().synchronous,
+    wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
+  };
+}
 var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -69060,6 +69091,9 @@ ${parentKey(ref)}`, { ref, origin });
         });
       }
       return out;
+    }
+    sqliteJournalSettings() {
+      return sqliteJournalSettingsOf(this.db);
     }
     totals() {
       try {
@@ -235766,6 +235800,51 @@ var init_unreadable_locators = __esm(() => {
   init_parent_label2();
 });
 
+// src/workers/engine/sqlite-wal-sampler.ts
+import { statSync as statSync51 } from "node:fs";
+function sampleSqliteFiles(files, seen, log) {
+  for (const file of files) {
+    if (!seen.has(file.dbPath)) {
+      seen.add(file.dbPath);
+      let settings;
+      try {
+        settings = file.settings?.();
+      } catch {
+        settings = undefined;
+      }
+      if (settings) {
+        log(`[olympus] sqlite settings: ${file.label} journal_mode=${settings.journal_mode} synchronous=${settings.synchronous} wal_autocheckpoint=${settings.wal_autocheckpoint}`);
+      }
+    }
+    let walBytes = 0;
+    try {
+      walBytes = statSync51(`${file.dbPath}-wal`).size;
+    } catch {
+      walBytes = 0;
+    }
+    const snapshot = oldestOffThreadSnapshot(file.dbPath);
+    if (walBytes < SQLITE_WAL_NOTABLE_BYTES && (snapshot?.ageMs ?? 0) < SQLITE_SNAPSHOT_NOTABLE_MS)
+      continue;
+    log(`[olympus] sqlite wal: ${file.label} wal_bytes=${walBytes} oldest_read_ms=${Math.round(snapshot?.ageMs ?? 0)}${snapshot ? ` oldest_read_lane=${snapshot.lane}` : ""}`);
+  }
+}
+function startSqliteWalSampler(files, options = {}) {
+  const seen = new Set;
+  const log = options.log ?? ((line) => console.warn(line));
+  const timer = setInterval(() => {
+    try {
+      sampleSqliteFiles(files(), seen, log);
+    } catch {}
+  }, options.intervalMs ?? SQLITE_WAL_SAMPLE_MS);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
+}
+var SQLITE_WAL_NOTABLE_BYTES, SQLITE_SNAPSHOT_NOTABLE_MS = 2000, SQLITE_WAL_SAMPLE_MS = 5000;
+var init_sqlite_wal_sampler = __esm(() => {
+  init_off_thread_reads();
+  SQLITE_WAL_NOTABLE_BYTES = 32 * 1024 * 1024;
+});
+
 // src/workers/engine-split/commands.ts
 import { randomUUID as randomUUID39 } from "node:crypto";
 function newEngineCommandId() {
@@ -240805,7 +240884,7 @@ var init_remote_access_control = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync74, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync26, rmdirSync as rmdirSync8, statSync as statSync51, unlinkSync as unlinkSync7 } from "node:fs";
+import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync74, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync26, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
 import { basename as basename24, dirname as dirname117, isAbsolute as isAbsolute42, join as join153, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -240970,7 +241049,7 @@ function nearestExisting(path) {
   let near = resolve33(path);
   for (;; ) {
     try {
-      statSync51(near);
+      statSync52(near);
       return near;
     } catch {
       const up = dirname117(near);
@@ -241030,7 +241109,7 @@ function inspect(ctx, sourceId, slot, entry) {
   }
   let folderDevice;
   try {
-    folderDevice = statSync51(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
+    folderDevice = statSync52(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
   } catch {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
@@ -264770,7 +264849,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync43, lstatSync as lstatSync60, mkdirSync as mkdirSync75, statSync as statSync52 } from "node:fs";
+import { chmodSync as chmodSync43, lstatSync as lstatSync60, mkdirSync as mkdirSync75, statSync as statSync53 } from "node:fs";
 import { dirname as dirname118, isAbsolute as isAbsolute44 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -264856,7 +264935,7 @@ function ensureSettingsDirectory(directory) {
     if (error?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync52(dirname118(directory));
+      statSync53(dirname118(directory));
     } catch {
       return "home_missing";
     }
@@ -270977,7 +271056,20 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       },
       log: (line) => console.warn(line)
     }) : undefined;
+    const walSampler = startSqliteWalSampler(() => [
+      ...connectorStores.map((store) => ({ label: store.corpusId, dbPath: store.dbPath, settings: () => store.sqliteJournalSettings() })),
+      ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
+        label: `tier-ledger-${index + 1}`,
+        dbPath: ledger.dbPath,
+        settings: () => ledger.sqliteJournalSettings()
+      })),
+      ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
+        label: `judge-queue-${index + 1}`,
+        dbPath: tierSnifferPathForLedger(ledger.dbPath)
+      }))
+    ]);
     engineBackground = { stop: () => {
+      walSampler.stop();
       statusRecount?.stop();
       rssRestart.stop();
       status.stop();
@@ -271244,6 +271336,8 @@ var init_server5 = __esm(async () => {
   init_parent_label2();
   init_unreadable_locators();
   init_child_visibility();
+  init_sqlite_wal_sampler();
+  init_tier_ledger_path();
   init_tier_visibility();
   init_judge_boost();
   init_secret_locations();

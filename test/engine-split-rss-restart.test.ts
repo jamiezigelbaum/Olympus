@@ -166,6 +166,6 @@ describe('the background\'s wiring', () => {
     // as interrupted before the process goes, not left pending (#803).
     // It is the reload's own last step, which runs even when the drain fails.
     expect(server).toContain('beforeExit: () => { sourceScheduler?.settleInterruptedAttempts(); },');
-    expect(server).toMatch(/engineBackground = \{ stop: \(\) => \{ statusRecount\?\.stop\(\); rssRestart\.stop\(\); status\.stop\(\); commands\.stop\(\); \} \};/);
+    expect(server).toMatch(/engineBackground = \{ stop: \(\) => \{ (walSampler\.stop\(\); )?statusRecount\?\.stop\(\); rssRestart\.stop\(\); status\.stop\(\); commands\.stop\(\); \} \};/);
   });
 });

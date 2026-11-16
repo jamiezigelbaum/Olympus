@@ -428,6 +428,9 @@ export async function withOffThreadSnapshot<T>(
   let reserveWaitMs = clock.now() - askedAtMs;
   try {
     await send(reader, { op: 'open', snapshot, path: dbPath });
+    const open = openSnapshots.get(dbPath) ?? new Map<number, { atMs: number; lane: ReadPoolLane }>();
+    openSnapshots.set(dbPath, open);
+    open.set(snapshot, { atMs: clock.now(), lane });
     try {
       return await work(async (query) => {
         if (observeSnapshots) observer?.(dbPath, query);
@@ -453,11 +456,26 @@ export async function withOffThreadSnapshot<T>(
       });
     } finally {
       await send(reader, { op: 'close', snapshot }).catch(() => undefined);
+      open.delete(snapshot);
+      if (open.size === 0) openSnapshots.delete(dbPath);
     }
   } finally {
     reader.snapshots -= 1;
     dispatch();
   }
+}
+
+// Every snapshot open on a store's read workers: while one is open, no
+// checkpoint can move the WAL past the frames it may still read.
+const openSnapshots = new Map<string, Map<number, { atMs: number; lane: ReadPoolLane }>>();
+
+/** The longest-open read snapshot on this store's workers: its age and lane, or undefined. */
+export function oldestOffThreadSnapshot(dbPath: string): { ageMs: number; lane: ReadPoolLane } | undefined {
+  const open = openSnapshots.get(dbPath);
+  if (!open || open.size === 0) return undefined;
+  let oldest: { atMs: number; lane: ReadPoolLane } | undefined;
+  for (const entry of open.values()) if (!oldest || entry.atMs < oldest.atMs) oldest = entry;
+  return oldest ? { ageMs: clock.now() - oldest.atMs, lane: oldest.lane } : undefined;
 }
 
 // Snapshots waiting for a thread that no pool query is running on.

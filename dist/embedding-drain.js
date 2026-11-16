@@ -14544,6 +14544,13 @@ class TierLedger {
     `).all(corpusId);
     return rows.map(identityFromRow);
   }
+  sqliteJournalSettings() {
+    return {
+      journal_mode: this.db.query("PRAGMA journal_mode").get().journal_mode,
+      synchronous: this.db.query("PRAGMA synchronous").get().synchronous,
+      wal_autocheckpoint: this.db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
+    };
+  }
   staleEmbedHoldsSettled() {
     return this.db.query("SELECT 1 FROM tier_ledger_meta WHERE key = ?").get(STALE_EMBED_HOLDS_SETTLED) !== null;
   }
@@ -18824,6 +18831,9 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
   let reserveWaitMs = clock2.now() - askedAtMs;
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
+    const open = openSnapshots.get(dbPath) ?? new Map;
+    openSnapshots.set(dbPath, open);
+    open.set(snapshot, { atMs: clock2.now(), lane });
     try {
       return await work(async (query) => {
         if (observeSnapshots)
@@ -18850,12 +18860,16 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
       await send(reader, { op: "close", snapshot }).catch(() => {
         return;
       });
+      open.delete(snapshot);
+      if (open.size === 0)
+        openSnapshots.delete(dbPath);
     }
   } finally {
     reader.snapshots -= 1;
     dispatch();
   }
 }
+var openSnapshots = new Map;
 var snapshotWaiters = [];
 var releases = new Map;
 function snapshotThreadNow(store, lane) {
@@ -30616,6 +30630,9 @@ ${parentKey(ref)}`, { ref, origin });
     }
     return out;
   }
+  sqliteJournalSettings() {
+    return sqliteJournalSettingsOf(this.db);
+  }
   totals() {
     try {
       return readStoreTotals(this.db);
@@ -33259,6 +33276,13 @@ function fileIdentity(path) {
   } catch {
     return;
   }
+}
+function sqliteJournalSettingsOf(db) {
+  return {
+    journal_mode: db.query("PRAGMA journal_mode").get().journal_mode,
+    synchronous: db.query("PRAGMA synchronous").get().synchronous,
+    wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
+  };
 }
 
 // src/workers/embedding-ledger.ts

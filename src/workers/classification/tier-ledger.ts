@@ -4290,6 +4290,15 @@ export class TierLedger {
    * seen as of before or after the change, as with a copy changed after a
    * single read.
    */
+  /** This connection's journal settings, for the WAL sampler's receipt. */
+  sqliteJournalSettings(): { journal_mode: string; synchronous: number; wal_autocheckpoint: number } {
+    return {
+      journal_mode: (this.db.query('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode,
+      synchronous: (this.db.query('PRAGMA synchronous').get() as { synchronous: number }).synchronous,
+      wal_autocheckpoint: (this.db.query('PRAGMA wal_autocheckpoint').get() as { wal_autocheckpoint: number }).wal_autocheckpoint,
+    };
+  }
+
   /** True once this ledger's stale embedding holds were settled. One keyed read. */
   staleEmbedHoldsSettled(): boolean {
     return this.db.query('SELECT 1 FROM tier_ledger_meta WHERE key = ?').get(STALE_EMBED_HOLDS_SETTLED) !== null;

@@ -16148,6 +16148,11 @@ export class LocalConnectorStore {
    * small read, never a count. Undefined until the first reconcile, and on a
    * store no build with the totals has written.
    */
+  /** This connection's journal settings, for the WAL sampler's receipt. */
+  sqliteJournalSettings(): { journal_mode: string; synchronous: number; wal_autocheckpoint: number } {
+    return sqliteJournalSettingsOf(this.db);
+  }
+
   totals(): StoreTotals | undefined {
     try { return readStoreTotals(this.db); } catch { return undefined; }
   }
@@ -21431,4 +21436,12 @@ function fileIdentity(path: string): { dev: number; ino: number } | undefined {
   } catch {
     return undefined;
   }
+}
+
+export function sqliteJournalSettingsOf(db: Database): { journal_mode: string; synchronous: number; wal_autocheckpoint: number } {
+  return {
+    journal_mode: (db.query('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode,
+    synchronous: (db.query('PRAGMA synchronous').get() as { synchronous: number }).synchronous,
+    wal_autocheckpoint: (db.query('PRAGMA wal_autocheckpoint').get() as { wal_autocheckpoint: number }).wal_autocheckpoint,
+  };
 }
