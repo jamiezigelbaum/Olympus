@@ -63285,7 +63285,10 @@ ${parentKey(ref)}`, { ref, origin });
       const version = this.db.query("PRAGMA data_version").get();
       return `${version.data_version}:${row.changes}`;
     }
-    exportItemCopy(identity) {
+    exportItemNames(identity) {
+      return this.itemNamesRow(identity)?.names;
+    }
+    itemNamesRow(identity) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`).join(", ")}
       FROM items
@@ -63295,6 +63298,30 @@ ${parentKey(ref)}`, { ref, origin });
       if (!row)
         return;
       const columns = Object.fromEntries(CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => [column, row[column] ?? null]));
+      const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
+      const names = {
+        identity: {
+          family: String(columns.family),
+          provider: String(columns.provider),
+          accountScope: String(columns.account_scope),
+          providerItemId: String(columns.provider_item_id),
+          localItemId: String(columns.local_item_id),
+          ...optional("provider_thread_id") ? { providerThreadId: optional("provider_thread_id") } : {},
+          ...optional("provider_conversation_id") ? { providerConversationId: optional("provider_conversation_id") } : {},
+          ...optional("provider_file_id") ? { providerFileId: optional("provider_file_id") } : {},
+          ...optional("provider_event_id") ? { providerEventId: optional("provider_event_id") } : {},
+          ...optional("source_version") ? { sourceVersion: optional("source_version") } : {}
+        },
+        columns,
+        trustTier: trustTierFromRow(row.trust_tier)
+      };
+      return { itemPk: row.item_pk, names };
+    }
+    exportItemCopy(identity) {
+      const found = this.itemNamesRow(identity);
+      if (!found)
+        return;
+      const row = { item_pk: found.itemPk };
       const owners = this.db.query(`
       SELECT connector_id, ownership_kind, first_seen_at, last_seen_at
       FROM item_owners WHERE item_pk = ? ORDER BY connector_id
@@ -63336,22 +63363,8 @@ ${parentKey(ref)}`, { ref, origin });
         if (authority)
           vectorAuthorities.push(authority);
       }
-      const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
       return {
-        identity: {
-          family: String(columns.family),
-          provider: String(columns.provider),
-          accountScope: String(columns.account_scope),
-          providerItemId: String(columns.provider_item_id),
-          localItemId: String(columns.local_item_id),
-          ...optional("provider_thread_id") ? { providerThreadId: optional("provider_thread_id") } : {},
-          ...optional("provider_conversation_id") ? { providerConversationId: optional("provider_conversation_id") } : {},
-          ...optional("provider_file_id") ? { providerFileId: optional("provider_file_id") } : {},
-          ...optional("provider_event_id") ? { providerEventId: optional("provider_event_id") } : {},
-          ...optional("source_version") ? { sourceVersion: optional("source_version") } : {}
-        },
-        columns,
-        trustTier: trustTierFromRow(row.trust_tier),
+        ...found.names,
         owners,
         chunks,
         vectors,
@@ -92017,6 +92030,12 @@ var tierSets;
 
 // src/workers/connector-store/stored-names.ts
 function storedCopyOf(set, identity, copies) {
+  return firstStored(set, copies, (store) => store.exportItemNames(identity));
+}
+function storedItemCopyOf(set, identity, copies) {
+  return firstStored(set, copies, (store) => store.exportItemCopy(identity));
+}
+function firstStored(set, copies, read) {
   const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
   const ordered = [
     ...names ? [names] : [],
@@ -92024,9 +92043,10 @@ function storedCopyOf(set, identity, copies) {
   ];
   for (const copy of ordered) {
     const domain = set.domainForCorpus(copy.corpusId);
-    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-    if (exported)
-      return exported;
+    const store = domain ? set.store(domain) : undefined;
+    const found = store ? read(store) : undefined;
+    if (found)
+      return found;
   }
   return;
 }
@@ -97173,7 +97193,7 @@ async function applyFloor(set, record) {
   const current = copies.filter((copy) => copy.state === "current");
   const serving = copyServingLayer(current, "content");
   const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
-  const exported = (domain ? set.store(domain)?.exportItemCopy(identity) : undefined) ?? storedCopyOf(set, identity, copies);
+  const exported = (domain ? set.store(domain)?.exportItemCopy(identity) : undefined) ?? storedItemCopyOf(set, identity, copies);
   if (!exported)
     return "failed";
   const signals = storedSignals(exported);

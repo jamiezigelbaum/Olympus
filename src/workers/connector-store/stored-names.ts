@@ -4,18 +4,32 @@
 
 import type { SourceClassificationSignals } from '../../core/contracts.ts';
 import { copyServingLayer, type TierCopy, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
-import type { ConnectorStoreItemCopy } from './local-index.ts';
+import type { ConnectorStoreItemCopy, ConnectorStoreItemNames, LocalConnectorStore } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 /**
- * The item's stored copy for its names: the copy serving them, else any other
- * (a raise in flight hides its sources but leaves them in their stores).
+ * The item's stored names: from the copy serving them, else any other (a
+ * raise in flight hides its sources but leaves them in their stores). Only
+ * the item's row is read, never its chunks or vectors.
  */
 export function storedCopyOf(
   set: TieredStoreSet,
   identity: TierLedgerIdentity,
   copies: readonly TierCopy[],
+): ConnectorStoreItemNames | undefined {
+  return firstStored(set, copies, (store) => store.exportItemNames(identity));
+}
+
+/** The same copy, whole: its chunks and vectors too (a pass that reads the item's text). */
+export function storedItemCopyOf(
+  set: TieredStoreSet,
+  identity: TierLedgerIdentity,
+  copies: readonly TierCopy[],
 ): ConnectorStoreItemCopy | undefined {
+  return firstStored(set, copies, (store) => store.exportItemCopy(identity));
+}
+
+function firstStored<T>(set: TieredStoreSet, copies: readonly TierCopy[], read: (store: LocalConnectorStore) => T | undefined): T | undefined {
   const names = copyServingLayer(copies.filter((copy) => copy.state === 'current'), 'metadata');
   const ordered = [
     ...(names ? [names] : []),
@@ -23,14 +37,15 @@ export function storedCopyOf(
   ];
   for (const copy of ordered) {
     const domain = set.domainForCorpus(copy.corpusId);
-    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-    if (exported) return exported;
+    const store = domain ? set.store(domain) : undefined;
+    const found = store ? read(store) : undefined;
+    if (found) return found;
   }
   return undefined;
 }
 
 /** The classifier's input from a stored copy: what the store keeps of the item's names. */
-export function storedSignals(copy: ConnectorStoreItemCopy): SourceClassificationSignals {
+export function storedSignals(copy: ConnectorStoreItemNames): SourceClassificationSignals {
   const text = (value: string | number | null | undefined) => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
   const title = text(copy.columns['title']);
   const locator = text(copy.columns['locator_uri']);

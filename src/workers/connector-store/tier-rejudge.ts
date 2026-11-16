@@ -83,7 +83,7 @@ import {
 import type { RejudgePage } from '../classification/tier-ledger.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import { ledgerFinderAfterHold, type LoopFinder } from './loop-pass.ts';
-import type { LocalConnectorStore, ConnectorStoreItemCopy } from './local-index.ts';
+import type { LocalConnectorStore, ConnectorStoreItemNames } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
 import { secretFencedSniffer } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -615,7 +615,7 @@ export function settleRoutedSecrets(
   set: TieredStoreSet,
   identity: TierLedgerIdentity,
   decision: TierDecision,
-  exported: ConnectorStoreItemCopy,
+  exported: ConnectorStoreItemNames,
   finding: { text?: string; findingKinds: readonly string[] },
   placement: { guard?: TierOwnerOverrideGuard } = {},
 ): boolean {
@@ -642,7 +642,7 @@ export function settleRoutedSecrets(
 function recordSecretLocation(
   locations: SecretLocationsIndex,
   decision: TierDecision,
-  exported: ConnectorStoreItemCopy,
+  exported: ConnectorStoreItemNames,
   finding: { text?: string; findingKinds: readonly string[] },
 ): void {
   const locator = columnString(exported.columns['locator_uri']);

@@ -29,7 +29,7 @@ import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from
 import { ledgerReadOffThread } from './child-visibility.ts';
 import { BACKGROUND_READS } from './off-thread-reads.ts';
 import { noteRoundDone } from './loop-pass.ts';
-import { storedCopyOf, storedSignals } from './stored-names.ts';
+import { storedItemCopyOf, storedSignals } from './stored-names.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -147,7 +147,7 @@ async function applyFloor(set: TieredStoreSet, record: TierLedgerRecord): Promis
   const current = copies.filter((copy) => copy.state === 'current');
   const serving = copyServingLayer(current, 'content');
   const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
-  const exported = (domain ? set.store(domain)?.exportItemCopy(identity) : undefined) ?? storedCopyOf(set, identity, copies);
+  const exported = (domain ? set.store(domain)?.exportItemCopy(identity) : undefined) ?? storedItemCopyOf(set, identity, copies);
   if (!exported) return 'failed';
   // The names, exactly as the names pass screens what a store keeps of them
   // (title, path, sender, folder keys); a raw locator that is not a path is

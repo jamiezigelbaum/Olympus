@@ -24792,7 +24792,10 @@ ${parentKey(ref)}`, { ref, origin });
     const version = this.db.query("PRAGMA data_version").get();
     return `${version.data_version}:${row.changes}`;
   }
-  exportItemCopy(identity) {
+  exportItemNames(identity) {
+    return this.itemNamesRow(identity)?.names;
+  }
+  itemNamesRow(identity) {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`).join(", ")}
       FROM items
@@ -24802,6 +24805,30 @@ ${parentKey(ref)}`, { ref, origin });
     if (!row)
       return;
     const columns = Object.fromEntries(CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => [column, row[column] ?? null]));
+    const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
+    const names = {
+      identity: {
+        family: String(columns.family),
+        provider: String(columns.provider),
+        accountScope: String(columns.account_scope),
+        providerItemId: String(columns.provider_item_id),
+        localItemId: String(columns.local_item_id),
+        ...optional("provider_thread_id") ? { providerThreadId: optional("provider_thread_id") } : {},
+        ...optional("provider_conversation_id") ? { providerConversationId: optional("provider_conversation_id") } : {},
+        ...optional("provider_file_id") ? { providerFileId: optional("provider_file_id") } : {},
+        ...optional("provider_event_id") ? { providerEventId: optional("provider_event_id") } : {},
+        ...optional("source_version") ? { sourceVersion: optional("source_version") } : {}
+      },
+      columns,
+      trustTier: trustTierFromRow(row.trust_tier)
+    };
+    return { itemPk: row.item_pk, names };
+  }
+  exportItemCopy(identity) {
+    const found = this.itemNamesRow(identity);
+    if (!found)
+      return;
+    const row = { item_pk: found.itemPk };
     const owners = this.db.query(`
       SELECT connector_id, ownership_kind, first_seen_at, last_seen_at
       FROM item_owners WHERE item_pk = ? ORDER BY connector_id
@@ -24843,22 +24870,8 @@ ${parentKey(ref)}`, { ref, origin });
       if (authority)
         vectorAuthorities.push(authority);
     }
-    const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
     return {
-      identity: {
-        family: String(columns.family),
-        provider: String(columns.provider),
-        accountScope: String(columns.account_scope),
-        providerItemId: String(columns.provider_item_id),
-        localItemId: String(columns.local_item_id),
-        ...optional("provider_thread_id") ? { providerThreadId: optional("provider_thread_id") } : {},
-        ...optional("provider_conversation_id") ? { providerConversationId: optional("provider_conversation_id") } : {},
-        ...optional("provider_file_id") ? { providerFileId: optional("provider_file_id") } : {},
-        ...optional("provider_event_id") ? { providerEventId: optional("provider_event_id") } : {},
-        ...optional("source_version") ? { sourceVersion: optional("source_version") } : {}
-      },
-      columns,
-      trustTier: trustTierFromRow(row.trust_tier),
+      ...found.names,
       owners,
       chunks,
       vectors,
