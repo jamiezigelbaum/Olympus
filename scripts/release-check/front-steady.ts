@@ -27,7 +27,7 @@ import { FIXTURE_FOLDER } from './archive-fixtures.ts';
 import { ALL_SOURCES_PATH } from './archive-leg.ts';
 import { until, type ArchiveHost } from './archive-stages.ts';
 import { runJourney, type Journey, type JourneyTrace } from './journey.ts';
-import { OPEN_ALL_SOURCES } from './journeys.ts';
+import { OPEN_ALL_SOURCES, OPEN_SOURCES_TAB } from './journeys.ts';
 import type { CheckResult } from './report.ts';
 import { BROKEN_FRONT_LINE } from './upgrade-split.ts';
 
@@ -79,6 +79,15 @@ export function frontGmailMbox(token: string): string {
     }),
   ]);
 }
+
+/** The Sources tab while the approved import is still running: every row drawn within 10 s. */
+export const SOURCES_DURING_IMPORT: Journey = {
+  id: 'front-sources-during-import',
+  title: 'While an import runs, the Sources page draws at once',
+  source: 'front steadiness: the dashboard stays instant while the background works',
+  mutates: false,
+  steps: [{ ...OPEN_SOURCES_TAB, timeoutMs: 10_000 }],
+};
 
 /** The owner presses Import on the agent's waiting request for the file; the request is then no longer waiting. */
 export function approveFileJourney(fileName: string, openS = 120, startS = 180): Journey {
@@ -165,6 +174,9 @@ export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; s
       const trace = await runJourney(driver, approveFileJourney(FRONT_GMAIL_FILE));
       set.traces.push(trace);
       set.gmail.approved = trace.ok;
+      // With the import running, the Sources page draws within the dashboard's instant bound (rc.20 leg 43782949178: the
+      // front counted the stores itself while an import ran, and the page failed).
+      if (trace.ok) set.traces.push(await runJourney(driver, SOURCES_DURING_IMPORT));
     });
     const settled = await until(host, async () => {
       const status = archiveStatusOf(host.cli(['status']).json, FRONT_GMAIL_FILE);

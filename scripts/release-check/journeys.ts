@@ -70,7 +70,7 @@ export const OPEN_ALL_SOURCES: Journey['steps'][number] = {
   expect: [{ present: HOME_STATUS, frame: 'panel' }],
 };
 /** The Sources tab: every connected source's row. */
-const OPEN_SOURCES_TAB: Journey['steps'][number] = {
+export const OPEN_SOURCES_TAB: Journey['steps'][number] = {
   name: 'Open the Sources tab',
   do: { go: '/dashboard?connect' },
   expect: [{ present: { css: '.srcrows' }, frame: 'host' }],
