@@ -1484,7 +1484,7 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
   // queue appeared) instead of being killed with nothing to say: twice a stopped seed left front-steady only "did not report"
   // (mac-upgrade 43783902175 and 43790901220, 16 Nov 2026).
   const seedS = phaseBudgetMs('front-seed') / 1000;
-  const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed} --settle-s ${seedS - 360} --queue-s 120`, 30 * 60_000));
+  const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed} --settle-s ${seedS - 360} --queue-s 120 --telegram-later`, 30 * 60_000));
   const set = seeded.result as FrontStoreSet | undefined;
   run.log(`front-seed: ${set ? `Gmail ${set.gmail.settled ? 'settled' : `not settled (${set.gmail.status ?? 'not listed'})`}, job queue ${set.jobQueue ? 'present' : 'missing'}${set.detail ? `; ${set.detail}` : ''}` : agentDetail(seeded)}`);
   const on = await run.agent('engine-split-on', '', 60_000);
@@ -1538,6 +1538,12 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
 
 /** After the real update with the split on: the front stays up on the store set, and no store file went missing. */
 async function checkSplitUpdate(run: Run, prep: { set?: FrontStoreSet; storeFiles?: number }, back: { ok: boolean; ms: number; detail?: string }): Promise<void> {
+  // Telegram is seeded now, by the candidate's own pull: before the update it would write stores the earlier release cannot open.
+  const telegram = await run.agent('front-seed-telegram', '', 5 * 60_000);
+  if (prep.set && telegram.result?.ok === true) {
+    const after = telegram.result as unknown as Pick<FrontStoreSet, 'telegram' | 'lanes'>;
+    prep.set = { ...prep.set, telegram: after.telegram, lanes: after.lanes };
+  } else if (prep.set) prep.set = { ...prep.set, telegram: { ok: false, detail: `after the update: ${agentDetail(telegram)}` } };
   const watched = await run.phase('front-watch', () => run.agent('front-watch', `--watch-s ${FRONT_WATCH_S}`, (FRONT_WATCH_S + 120) * 1_000));
   const watch = watched.result?.ok === true ? watched.result as unknown as FrontWatch : undefined;
   const obs = prep.set && watch ? { ...prep.set, ...watch, restart: back } as FrontSteadyObservation : undefined;

@@ -315,6 +315,9 @@ if (verb === 'provision') {
   else if (sub === 'await-engine') say({ ok: true, readyMs: 2000 });
   else if (sub === 'front-seed') say({ ok: true, gmail: { started: 'needs_approval', approved: true, settled: true, status: 'imported' }, telegram: { ok: true, detail: 'seeded' },
     lanes: [{ source: 'gmail.email', tier: 'internal', exists: true, items: 2 }, { source: 'telegram.messages', tier: 'internal', exists: true, items: 2 }], archives: 1, traces: [] });
+  // Telegram is seeded after the update on an upgrade leg: the candidate's pull writes its own schema (mac-upgrade 43855656930).
+  else if (sub === 'front-seed-telegram') { mark('telegram-after-update'); say({ ok: true, telegram: { ok: true, detail: 'after the update: seeded' },
+    lanes: [{ source: 'gmail.email', tier: 'internal', exists: true, items: 2 }, { source: 'telegram.messages', tier: 'internal', exists: true, items: 2 }] }); }
   else if (sub === 'engine-split-on') { mark('split-on'); say({ ok: true }); }
   else if (sub === 'front-mark') { mark('front-mark'); say({ ok: true }); }
   else if (sub === 'front-watch') say({ ok: true, watchMs: 150000, logHits: { frontStoreWrite: process.env.FAKE_FRONT_CRASH === '1' ? 3 : 0, exitedUnexpectedly: 0, brokenFront: script.includes('--watch-s 0') && flag('broken-front-ran') ? 1 : 0 },

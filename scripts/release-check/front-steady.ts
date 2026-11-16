@@ -161,7 +161,7 @@ export type FrontWatch = Pick<FrontSteadyObservation, 'samples' | 'watchMs' | 'l
  * seeded through its own pull; then what each lane holds is read. Beside the archive leg's files, which its imports still
  * name: nothing there is removed.
  */
-export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; settleS?: number; queueS?: number }): Promise<FrontStoreSet> {
+export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; settleS?: number; queueS?: number; telegramLater?: boolean }): Promise<FrontStoreSet> {
   const set: FrontStoreSet = { ok: false, gmail: { approved: false, settled: false }, telegram: { ok: false }, lanes: [], archives: 0, traces: [] };
   try {
     const folder = join(host.home, FIXTURE_FOLDER);
@@ -185,7 +185,11 @@ export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; s
     }, (args.settleS ?? 900) * 1_000, 5_000);
     set.gmail.settled = settled !== undefined;
     host.say(`front: Gmail import ${set.gmail.settled ? 'settled' : `not settled (${set.gmail.status ?? 'not listed'})`}`);
-    if (host.seedLive) {
+    // On an upgrade leg the earlier release is running, and the seed's pull is the candidate's code: it writes Telegram stores at
+    // the candidate's schema, which the earlier release then cannot open (mac-upgrade 43855656930: 1.4.4 refused connector-store
+    // 16 after the put-back). There Telegram is seeded after the update (seedTelegramAfterUpdate).
+    if (args.telegramLater) set.telegram = { ok: true, detail: 'seeded after the update' };
+    else if (host.seedLive) {
       const seeded = await host.seedLive('telegram');
       set.telegram = { ok: seeded.ok, ...(seeded.detail !== undefined ? { detail: seeded.detail } : {}) };
     } else set.telegram = { ok: false, detail: 'this machine cannot run a live seed hook' };
@@ -201,6 +205,17 @@ export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; s
     set.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
   }
   return set;
+}
+
+/** An upgrade leg's Telegram seed, once the candidate runs: what the set's Telegram and lanes are then. */
+export async function seedTelegramAfterUpdate(host: FrontHost): Promise<Pick<FrontStoreSet, 'telegram' | 'lanes'>> {
+  let telegram: FrontStoreSet['telegram'] = { ok: false, detail: 'this machine cannot run a live seed hook' };
+  if (host.seedLive) {
+    const seeded = await host.seedLive('telegram');
+    telegram = { ok: seeded.ok, ...(seeded.detail !== undefined ? { detail: `after the update: ${seeded.detail}` } : {}) };
+  }
+  const lanes = [GMAIL_SOURCE, TELEGRAM_SOURCE].flatMap((source) => (['internal', 'secure_local'] as const).map((tier) => host.laneItems(source, tier)));
+  return { telegram, lanes };
 }
 
 /** Samples the engine's processes every few seconds for `watchMs`, then counts the crash lines the logs gained since `offsets`. */
