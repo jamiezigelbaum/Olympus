@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
-import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { closeSqliteStore, loopWalAutocheckpointPragma } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { HELD_UNTIL_JUDGED_PRIORITY, NEW_ARRIVAL_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
@@ -125,7 +125,7 @@ export class TierSnifferStore {
     let db: Database | undefined;
     try {
       db = new Database(this.dbPath, { create: true });
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;');
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma());
       runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk) restrictFiles(this.dbPath);
     } catch (error) {

@@ -27,7 +27,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
-import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { closeSqliteStore, loopWalAutocheckpointPragma } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import {
   PERSONAL_FIRST_REASON,
@@ -803,7 +803,7 @@ export class TierLedger {
       }
       // FULL stays: a decision is never lost to a power cut. The size limit
       // truncates a WAL that grew while reads held it (6 GB, 16 Nov) once it resets.
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;');
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma());
       applySqliteMmap(db);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       // The owner's overridden items, for the cleared-override search

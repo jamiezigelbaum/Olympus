@@ -35,3 +35,19 @@ export function closeSqliteStore(
   }
   db.close();
 }
+
+let checkpointsOffLoop = false;
+
+/**
+ * The engine's background turns SQLite's automatic checkpoint off on its
+ * loop's writable connections, before any store opens: a worker checkpoints
+ * instead (workers/engine/sqlite-checkpointer.ts).
+ */
+export function setSqliteCheckpointsOffLoop(on: boolean): void {
+  checkpointsOffLoop = on;
+}
+
+/** Appended to a loop store's open pragmas: the automatic checkpoint off when the worker does it. */
+export function loopWalAutocheckpointPragma(): string {
+  return checkpointsOffLoop ? ' PRAGMA wal_autocheckpoint = 0;' : '';
+}

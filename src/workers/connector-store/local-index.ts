@@ -228,7 +228,7 @@ import {
   type SourceTrustDomain,
   type SourceTrustTier,
 } from '../../core/source-index/types.ts';
-import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { closeSqliteStore, loopWalAutocheckpointPragma } from '../../core/sqlite-store.ts';
 import type { ConnectorStoreResultProjector } from './filter-capabilities.ts';
 
 // Exported because the extraction factory's store sink must compute a
@@ -3836,8 +3836,8 @@ export class LocalConnectorStore {
       this.db.exec(options.readOnly === true
         ? 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;'
         : creatingFile
-        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;'
-        : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;');
+        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma()
+        : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma());
       applySqliteMmap(this.db);
       // New stores need no conversion. Existing stores are converted only by
       // background reclaim, after the sweep, never by opening a request's store.

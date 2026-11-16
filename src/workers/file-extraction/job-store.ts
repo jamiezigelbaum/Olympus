@@ -43,7 +43,7 @@ import {
   runSqliteMigrations,
   type SqliteMigration,
 } from '../../core/sqlite-migrations.ts';
-import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { closeSqliteStore, loopWalAutocheckpointPragma } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import {
   SECRET_ITEM_REDACTION_CLAIMS_TABLE,
@@ -681,7 +681,7 @@ export class LocalFileExtractionJobStore {
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
     } else {
-      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;`);
+      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;${loopWalAutocheckpointPragma()}`);
       applySqliteMmap(this.db);
     }
 

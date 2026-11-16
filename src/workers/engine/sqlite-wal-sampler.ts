@@ -49,12 +49,16 @@ export function sampleSqliteFiles(
 /** Samples every `intervalMs` until stopped. */
 export function startSqliteWalSampler(
   files: () => readonly SampledSqliteFile[],
-  options: { intervalMs?: number; log?: (line: string) => void } = {},
+  options: { intervalMs?: number; log?: (line: string) => void; afterSample?: (files: readonly SampledSqliteFile[]) => void } = {},
 ): { stop(): void } {
   const seen = new Set<string>();
   const log = options.log ?? ((line: string) => console.warn(line));
   const timer = setInterval(() => {
-    try { sampleSqliteFiles(files(), seen, log); } catch { /* a sample never stops the engine */ }
+    try {
+      const current = files();
+      sampleSqliteFiles(current, seen, log);
+      options.afterSample?.(current);
+    } catch { /* a sample never stops the engine */ }
   }, options.intervalMs ?? SQLITE_WAL_SAMPLE_MS);
   timer.unref?.();
   return { stop: () => clearInterval(timer) };

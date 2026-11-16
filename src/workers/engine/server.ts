@@ -294,6 +294,8 @@ import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
 import { startSqliteWalSampler } from './sqlite-wal-sampler.ts';
+import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
+import { setSqliteCheckpointsOffLoop } from '../../core/sqlite-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { createPendingGovernance, createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { judgeBoosts } from '../classification/judge-boost.ts';
@@ -637,6 +639,10 @@ export async function main(): Promise<void> {
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  // The background's loop connections leave checkpoints to a worker of their
+  // own (sqlite-checkpointer.ts), from before the first store opens.
+  const checkpointer = engineRole === 'background' ? startSqliteCheckpointer() : undefined;
+  setSqliteCheckpointsOffLoop(checkpointer !== undefined);
   // Every statement that holds this process's loop past LOOP_SLOW_SQL_MS is
   // named in the log and counted in health, from before the first store opens
   // (loop-stall step-back, 15 Nov 2026): the next stall names itself.
@@ -6748,8 +6754,8 @@ export async function main(): Promise<void> {
       ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
         label: `judge-queue-${index + 1}`, dbPath: tierSnifferPathForLedger(ledger.dbPath),
       })),
-    ]);
-    engineBackground = { stop: () => { walSampler.stop(); statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
+    ], { afterSample: (files) => checkpointer?.tick(files) });
+    engineBackground = { stop: () => { walSampler.stop(); checkpointer?.stop(); statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
   }
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)

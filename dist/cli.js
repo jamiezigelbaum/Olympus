@@ -33097,6 +33097,13 @@ function closeSqliteStore(db, options = {}) {
   }
   db.close();
 }
+function setSqliteCheckpointsOffLoop(on) {
+  checkpointsOffLoop = on;
+}
+function loopWalAutocheckpointPragma() {
+  return checkpointsOffLoop ? " PRAGMA wal_autocheckpoint = 0;" : "";
+}
+var checkpointsOffLoop = false;
 
 // src/core/data-owner-lock.ts
 import { closeSync as closeSync9, constants as constants5, existsSync as existsSync13, mkdirSync as mkdirSync10, openSync as openSync9 } from "node:fs";
@@ -40268,7 +40275,7 @@ class TierSnifferStore {
     let db;
     try {
       db = new Database2(this.dbPath, { create: true });
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;");
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma());
       runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk)
         restrictFiles(this.dbPath);
@@ -41067,7 +41074,7 @@ class TierLedger {
         this.db = db;
         return;
       }
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;");
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma());
       applySqliteMmap(db);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
@@ -61057,7 +61064,7 @@ var init_local_index = __esm(() => {
       this.db = new Database9(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
       try {
-        this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : creatingFile ? "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;");
+        this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : creatingFile ? "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma() : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma());
         applySqliteMmap(this.db);
         assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
         const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
@@ -119329,7 +119336,7 @@ class LocalFileExtractionJobStore {
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
     } else {
-      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;`);
+      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;${loopWalAutocheckpointPragma()}`);
       applySqliteMmap(this.db);
     }
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
@@ -235936,7 +235943,9 @@ function startSqliteWalSampler(files, options = {}) {
   const log = options.log ?? ((line) => console.warn(line));
   const timer = setInterval(() => {
     try {
-      sampleSqliteFiles(files(), seen, log);
+      const current = files();
+      sampleSqliteFiles(current, seen, log);
+      options.afterSample?.(current);
     } catch {}
   }, options.intervalMs ?? SQLITE_WAL_SAMPLE_MS);
   timer.unref?.();
@@ -235946,6 +235955,119 @@ var SQLITE_WAL_NOTABLE_BYTES, SQLITE_SNAPSHOT_NOTABLE_MS = 2000, SQLITE_WAL_SAMP
 var init_sqlite_wal_sampler = __esm(() => {
   init_off_thread_reads();
   SQLITE_WAL_NOTABLE_BYTES = 32 * 1024 * 1024;
+});
+
+// src/workers/engine/sqlite-checkpointer.ts
+import { statSync as statSync52 } from "node:fs";
+function startSqliteCheckpointer(options = {}) {
+  if (typeof Worker === "undefined")
+    return;
+  let worker;
+  try {
+    worker = new Worker(URL.createObjectURL(new Blob([WORKER_SOURCE2], { type: "text/javascript" })));
+  } catch {
+    return;
+  }
+  worker.unref?.();
+  const log = options.log ?? ((line) => console.warn(line));
+  const atBytes = options.atBytes ?? SQLITE_CHECKPOINT_AT_BYTES;
+  const queue = [];
+  const queued = new Set;
+  const lastCheckpointed = new Map;
+  let running = false;
+  let nextId = 1;
+  let stopped = false;
+  const pending = new Map;
+  worker.onmessage = ({ data }) => {
+    const reply = data;
+    const done = pending.get(reply.id);
+    pending.delete(reply.id);
+    done?.(data);
+  };
+  const runNext = () => {
+    if (running || stopped)
+      return;
+    const file = queue.shift();
+    if (!file)
+      return;
+    running = true;
+    const id = nextId++;
+    pending.set(id, (reply) => {
+      running = false;
+      queued.delete(file.dbPath);
+      if (!reply.ok) {
+        log(`[olympus] sqlite checkpoint: ${file.label} failed (${reply.error ?? "Error"}); tried again at the next sample.`);
+      } else if ((reply.ms ?? 0) >= CHECKPOINT_NOTABLE_MS || file.walBytes >= CHECKPOINT_NOTABLE_BYTES && lastCheckpointed.get(file.dbPath) !== reply.checkpointed) {
+        log(`[olympus] sqlite checkpoint: ${file.label} wal_bytes=${file.walBytes} ms=${Math.round(reply.ms ?? 0)} busy=${reply.busy} frames=${reply.log} checkpointed=${reply.checkpointed}`);
+      }
+      if (reply.ok)
+        lastCheckpointed.set(file.dbPath, reply.checkpointed);
+      runNext();
+    });
+    worker.postMessage({ id, path: file.dbPath, walBytes: file.walBytes });
+  };
+  return {
+    tick(files) {
+      if (stopped)
+        return;
+      for (const file of files) {
+        if (queued.has(file.dbPath))
+          continue;
+        let walBytes = 0;
+        try {
+          walBytes = statSync52(`${file.dbPath}-wal`).size;
+        } catch {
+          continue;
+        }
+        if (walBytes < atBytes)
+          continue;
+        queued.add(file.dbPath);
+        queue.push({ ...file, walBytes });
+      }
+      runNext();
+    },
+    stop() {
+      stopped = true;
+      queue.length = 0;
+      try {
+        worker.terminate();
+      } catch {}
+    }
+  };
+}
+var SQLITE_CHECKPOINT_AT_BYTES, CHECKPOINT_NOTABLE_MS = 1000, CHECKPOINT_NOTABLE_BYTES, WORKER_SOURCE2 = `
+import { Database } from 'bun:sqlite';
+import { statSync } from 'node:fs';
+const connections = new Map();
+self.onmessage = ({ data }) => {
+  const { id, path } = data;
+  try {
+    const stat = statSync(path);
+    const file = stat.dev + ':' + stat.ino;
+    let held = connections.get(path);
+    if (held && held.file !== file) { try { held.db.close(); } catch {} held = undefined; }
+    if (!held) {
+      const db = new Database(path, { create: false });
+      db.exec('PRAGMA busy_timeout = 0; PRAGMA journal_size_limit = 67108864; PRAGMA wal_autocheckpoint = 0;');
+      held = { db, file };
+      connections.set(path, held);
+    }
+    const started = performance.now();
+    let row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
+    // All copied and nothing reading: a large file is cut back now, since an
+    // idle store's writer may not commit again for a long time. With no
+    // busy wait it gives up at once if a reader or writer is there.
+    if (row.busy === 0 && row.log === row.checkpointed && data.walBytes > 67108864) {
+      row = held.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    }
+    postMessage({ id, ok: true, ms: performance.now() - started, busy: row.busy, log: row.log, checkpointed: row.checkpointed });
+  } catch (error) {
+    postMessage({ id, ok: false, error: error && error.name ? error.name : 'Error' });
+  }
+};`;
+var init_sqlite_checkpointer = __esm(() => {
+  SQLITE_CHECKPOINT_AT_BYTES = 4 * 1024 * 1024;
+  CHECKPOINT_NOTABLE_BYTES = 32 * 1024 * 1024;
 });
 
 // src/workers/engine-split/commands.ts
@@ -240987,7 +241109,7 @@ var init_remote_access_control = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync74, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync26, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
+import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync74, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync26, rmdirSync as rmdirSync8, statSync as statSync53, unlinkSync as unlinkSync7 } from "node:fs";
 import { basename as basename24, dirname as dirname117, isAbsolute as isAbsolute42, join as join153, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -241152,7 +241274,7 @@ function nearestExisting(path) {
   let near = resolve33(path);
   for (;; ) {
     try {
-      statSync52(near);
+      statSync53(near);
       return near;
     } catch {
       const up = dirname117(near);
@@ -241212,7 +241334,7 @@ function inspect(ctx, sourceId, slot, entry) {
   }
   let folderDevice;
   try {
-    folderDevice = statSync52(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
+    folderDevice = statSync53(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
   } catch {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
@@ -264952,7 +265074,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync44, lstatSync as lstatSync60, mkdirSync as mkdirSync75, statSync as statSync53 } from "node:fs";
+import { chmodSync as chmodSync44, lstatSync as lstatSync60, mkdirSync as mkdirSync75, statSync as statSync54 } from "node:fs";
 import { dirname as dirname118, isAbsolute as isAbsolute44 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -265038,7 +265160,7 @@ function ensureSettingsDirectory(directory) {
     if (error?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync53(dirname118(directory));
+      statSync54(dirname118(directory));
     } catch {
       return "home_missing";
     }
@@ -266443,6 +266565,8 @@ async function mainRecordingFrontFailure() {
 async function main() {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  const checkpointer = engineRole === "background" ? startSqliteCheckpointer() : undefined;
+  setSqliteCheckpointsOffLoop(checkpointer !== undefined);
   const slowSqlFile = process.env.OLYMPUS_MAIN_THREAD_SQL_LOG;
   startSlowMainThreadSqlLog(LOOP_SLOW_SQL_MS, slowSqlFile ? (line, entry) => {
     console.warn(line);
@@ -271170,9 +271294,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         label: `judge-queue-${index + 1}`,
         dbPath: tierSnifferPathForLedger(ledger.dbPath)
       }))
-    ]);
+    ], { afterSample: (files) => checkpointer?.tick(files) });
     engineBackground = { stop: () => {
       walSampler.stop();
+      checkpointer?.stop();
       statusRecount?.stop();
       rssRestart.stop();
       status.stop();
@@ -271440,6 +271565,7 @@ var init_server5 = __esm(async () => {
   init_unreadable_locators();
   init_child_visibility();
   init_sqlite_wal_sampler();
+  init_sqlite_checkpointer();
   init_tier_ledger_path();
   init_tier_visibility();
   init_judge_boost();
