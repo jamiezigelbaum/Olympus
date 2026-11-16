@@ -13787,13 +13787,13 @@ var init_evidence_versions = __esm(() => {
 
 // src/core/analyst.ts
 import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, compactSystem = (notes = "off") => [
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`, compactSystem = (notes = "off") => [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence below.",
   "Each evidence item starts with its number and name, then its date and source, then its text in source_data.",
   "Rules:",
   "- First decide which items are about what the question asks (its subject, and any date or name it gives). Answer from those items only and cite each by its [number].",
   '- Find every part the question asks for (each value, name, date or item). Give each part the cited items hold; put each part they do not hold in "unanswered". Check every part before returning.',
-  ...notes === "first" ? [NOTES_FIRST_RULE] : notes === "pass" ? [NOTES_GIVEN_RULE] : [],
+  ...notes === "first" ? [NOTES_FIRST_RULE] : notes === "pass" ? [NOTES_GIVEN_RULE] : notes === "batched" ? [NOTES_BATCHED_RULE] : [],
   "- An item that only shares words with the question is not evidence: do not cite it.",
   '- If the evidence does not contain the answer, say so plainly and list what is missing in "unanswered". Never invent facts, names, dates, or values.',
   "- If no item is about what the question asks, the whole answer is one short sentence saying the evidence does not answer it, with no citations. Never describe an item about something else as if it answered the question.",
@@ -13809,7 +13809,7 @@ var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values
   `"parts" lists each thing the question asks for, in the question's words, before you write "answer"; "answer" then gives every part the cited items hold.`,
   '"sufficient" is true only when the evidence fully answers the question.'
 ].join(`
-`), ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, analystEvidenceFormats, packPromptBudgets, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+`), ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, analystEvidenceFormats, packPromptBudgets, packEvidenceBatches, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -13880,6 +13880,7 @@ var init_analyst = __esm(() => {
   DEFAULT_AUDIT_MAX_OUTPUT_CHARS = DEFAULT_ANALYST_MAX_OUTPUT_CHARS + AUDIT_OUTPUT_HEADROOM_CHARS;
   analystEvidenceFormats = new WeakMap;
   packPromptBudgets = new WeakMap;
+  packEvidenceBatches = new WeakMap;
   promptEncoder = new TextEncoder;
   STOP_WORDS = new Set([
     "a",

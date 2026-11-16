@@ -87,3 +87,64 @@ test('without notes the audit prompt is unchanged', async () => {
   const audit = (await calls(undefined, { audit: true })).at(-1)!;
   expect(audit.prompt).not.toContain('Reading notes');
 });
+
+// Batches (lane 2's "read every match"): a pack too large for one call is
+// read batch by batch for notes; one draft and one audit answer from the
+// item lines and the merged notes.
+const wide: EvidencePack = { ...pack, candidates: [1, 2, 3, 4, 5].map((n) => ({ ...pack.candidates[0]!,
+  provenance: { ...pack.candidates[0]!.provenance, sourceItem: { ...pack.candidates[0]!.provenance.sourceItem, providerItemId: `w${n}`, localItemId: `w${n}` }, citation: { title: `File ${n}` } },
+  chunks: [`Text of file ${n}: fee ${n}00 EUR.`] })) };
+
+async function batchedCalls(batches: number[][], noteCount = 1): Promise<{ seen: AnalystModelRequest[]; result: Awaited<ReturnType<ReturnType<typeof createAnalyst>['analyze']>> }> {
+  const { withEvidenceBatches, withPromptBudget } = await import('../src/core/analyst.ts');
+  const seen: AnalystModelRequest[] = [];
+  const analyst = createAnalyst({
+    complete: async (request) => {
+      seen.push(request);
+      if (!request.system.startsWith('You are reading evidence')) return { text: JSON.stringify({ ...reply, citations: [{ evidence: 4, claim: 'fee' }] }), modelId: 'fixture' };
+      const shown = [...request.prompt.matchAll(/^\[(\d+)\] File/gm)].map((match) => Number(match[1]));
+      return { text: JSON.stringify({ notes: [...shown.flatMap((n) => Array.from({ length: noteCount }, (_, k) => ({ evidence: n, fact: `fee ${n}00 EUR (${k})` }))), { evidence: 1, fact: 'from another batch' }] }), modelId: 'fixture' };
+    },
+  }, { evidenceFormat: 'compact', auditSuspiciousDrafts: true });
+  // The budget recorded after the batches must not drop them.
+  const result = await analyst.analyze(withPromptBudget(withEvidenceBatches(wide, batches), 27_000), { localOnly: true });
+  return { seen, result };
+}
+
+test('batches: one notes call per batch, each showing only its items under their whole-pack numbers', async () => {
+  const { seen } = await batchedCalls([[0, 1], [2, 3], [4]]);
+  expect(seen.map((request) => request.system.slice(0, 24))).toEqual(['You are reading evidence', 'You are reading evidence', 'You are reading evidence', 'You are an evidence anal', 'You are auditing an evid']);
+  expect(seen[1]!.prompt).toContain('[3] File 3');
+  expect(seen[1]!.prompt).toContain('Text of file 4');
+  expect(seen[1]!.prompt).not.toContain('File 1');
+  expect(seen[1]!.prompt).not.toContain('File 5');
+});
+
+test('batches: the draft and the audit get every item line and the merged notes, not the text', async () => {
+  const { seen, result } = await batchedCalls([[0, 1], [2, 3], [4]]);
+  for (const request of seen.slice(3)) {
+    for (const n of [1, 2, 3, 4, 5]) expect(request.prompt).toContain(`[${n}] File ${n}`);
+    expect(request.prompt).not.toContain('Text of file');
+    expect(request.prompt).toContain("Reading notes (facts copied from each item's text, which is not shown here):\n- [1] fee 100 EUR (0)\n- [2] fee 200 EUR (0)\n- [1] from another batch\n- [3] fee 300 EUR (0)\n- [4] fee 400 EUR (0)\n- [5] fee 500 EUR (0)\n");
+  }
+  expect(seen[3]!.system).toContain('- The items are too many to show their text at once.');
+  // A note about an item its batch did not show is dropped: only the first batch, which showed [1], keeps its note.
+  expect(seen[3]!.prompt.match(/from another batch/g)?.length).toBe(1);
+  expect(seen[4]!.prompt).toContain("The candidates' text is not shown");
+  expect(result.citations.map((citation) => citation.provenance.sourceItem.providerItemId)).toEqual(['w4']);
+  expect(result.unanswered.join(' ')).not.toContain('batches held more');
+});
+
+test('batches: the note limit is per batch, and a batch that held more says so in the answer\'s gaps', async () => {
+  const { seen, result } = await batchedCalls([[0, 1, 2, 3], [4]], 4);
+  expect(seen[2]!.prompt.match(/^- \[/gm)?.length).toBe(12 + 4);
+  expect(result.unanswered).toContain('Olympus carried 12 facts from each batch of items into this answer; 1 of 2 batches held more, so some facts may be missing.');
+});
+
+test('batches must place every candidate exactly once; one batch answers the pack whole', async () => {
+  const { withEvidenceBatches } = await import('../src/core/analyst.ts');
+  for (const bad of [[[0, 1], [1, 2, 3, 4]], [[0, 1, 2, 3]], [[0, 1, 2, 3, 4], []], [[0, 1, 2, 3, 5], [4]]]) expect(() => withEvidenceBatches(wide, bad)).toThrow('Evidence batches must place every candidate in exactly one batch.');
+  const { seen } = await batchedCalls([[0, 1, 2, 3, 4]]);
+  expect(seen).toHaveLength(2);
+  expect(seen[0]!.prompt).toContain('Text of file 5');
+});
