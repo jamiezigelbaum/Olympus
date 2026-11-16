@@ -2,7 +2,7 @@
 // item, for the rows a passage receipt marks fitted_no_passage (or --ids).
 // Read-only on an offline data-root copy; prints ids, indexes and numbers
 // only, never item or question text.
-//   bun eval/paragraph-pick.ts --data-root <copy> --receipt <passage receipt.json> [--ids p026,p133] [--max-chars 3000] [dataset.json]
+//   bun eval/paragraph-pick.ts --data-root <copy> --receipt <passage receipt.json> [--ids p026,p133 | --all] [--max-chars 3000] [--rerank] [dataset.json]
 // Per expected item (alternates included):
 //   chunks, chunkChars: the item's stored chunks and each one's length
 //   quoteChunks: indexes of the chunks holding the expected quote (word rule);
@@ -14,15 +14,34 @@
 //     --max-chars (no anchor, as a vector or keyword anchor varies by lane),
 //     in priority order, with the characters read from each
 //   pickedQuote: whether the pick's text holds the quote.
+//   quoteLexicalRank: the quote chunk's rank among the item's chunks by the
+//     picker's word score (null when it holds none of the question's words;
+//     the item's name terms are not removed here, unlike the picker)
+//   ruleHoldsQuoteChunk: whether three chunks chosen by other no-model rules
+//     include the quote chunk: cosine2 (the two most similar, then the best
+//     by words), cosine3 (the three most similar), fused (best by the sum of
+//     reciprocal cosine and word ranks).
+// With --rerank (OLYMPUS_SOURCE_RERANKER=built-in and its model directory
+// set), a reranker-led pick is sized before one is built: the item's 16 most
+// similar chunks are cut into 800-character windows (600 apart), each scored
+// by the reranker against the question.
+//   rerankWindows, rerankMs: windows scored and the time it took
+//   rerankPick: for a shortlist of the 4, 8 and 16 most similar chunks,
+//     quoteChunkRank (the quote chunk's rank among the shortlist by its best
+//     window; null when it is not in the shortlist) and pickedQuote (whether
+//     the best windows, kept up to --max-chars, hold the quote).
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/core/config.ts';
 import { withExpandedSourceIndexKeywords } from '../src/core/source-index/keyword-expansion.ts';
+import { sourceIndexChunkQueryTerms, sourceIndexChunkTermScore } from '../src/core/source-index/chunk-selection.ts';
 import { cosineSimilarity, decodeEmbedding } from '../src/workers/source-index/embeddings.ts';
 import { openEvalDataRoot } from './data-root.ts';
 import { parseDataRootArgs } from './data-root-args.ts';
 import { passageContainsQuote } from './passage-match.ts';
 import { configuredEvalEmbedding, prepareEvalEmbedding } from './retrieval.ts';
 import { validatePassageDataset } from './types.ts';
+import { prepareCaptureReranker } from './capture-pool.ts';
+import { sizeRerankPick } from './paragraph-pick-rerank.ts';
 
 function option(args: string[], name: string): string | undefined {
   const at = args.indexOf(name);
@@ -34,7 +53,9 @@ async function main(): Promise<void> {
   if (!isolation) throw new Error('--data-root is required.');
   const receiptPath = option(rest, '--receipt');
   const ids = option(rest, '--ids')?.split(',').filter(Boolean);
-  if (!receiptPath && !ids) throw new Error('--receipt or --ids is required.');
+  const all = rest.includes('--all');
+  const withRerank = rest.includes('--rerank');
+  if (!receiptPath && !ids && !all) throw new Error('--receipt, --ids or --all is required.');
   const maxChars = Number(option(rest, '--max-chars') ?? 3000);
   const valued = new Set(['--receipt', '--ids', '--max-chars'].flatMap(name => { const at = rest.indexOf(name); return at >= 0 ? [at + 1] : []; }));
   const datasetPath = rest.filter((arg, index) => !arg.startsWith('--') && !valued.has(index))[0] ?? 'eval/private/passage-questions.json';
@@ -45,6 +66,9 @@ async function main(): Promise<void> {
   }
   const dataset: unknown = JSON.parse(readFileSync(datasetPath, 'utf8'));
   validatePassageDataset(dataset);
+  if (all) for (const question of dataset.questions) wanted.add(question.id);
+  const reranker = withRerank ? await prepareCaptureReranker(process.env) : undefined;
+  if (withRerank && !reranker) throw new Error('--rerank needs OLYMPUS_SOURCE_RERANKER=built-in.');
   const opened = openEvalDataRoot(isolation);
   const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(loadConfig(), process.env) });
   try {
@@ -79,6 +103,37 @@ async function main(): Promise<void> {
           const ranks = targets.map(index => order.findIndex(entry => entry.index === index) + 1).filter(rank => rank > 0);
           const quoteCosineRank = ranks.length ? Math.min(...ranks) : null;
           const quoteBest = quoteCosineRank ? order[quoteCosineRank - 1]!.score! : null;
+          const rerank = reranker && quote && order.length
+            ? await sizeRerankPick({
+                reranker, question: question.question, quote, maxChars, targets,
+                chunks: chunks.map(chunk => ({ index: chunk.chunk_index, text: chunk.bounded_text })),
+                shortlist: order.slice(0, 16).map(entry => entry.index),
+              })
+            : {};
+          const lexicalOrder = await withExpandedSourceIndexKeywords(question.question, () => store.keywordLanguages(), async () => {
+            const groups = sourceIndexChunkQueryTerms(question.question);
+            return chunks.map(chunk => ({ index: chunk.chunk_index, score: sourceIndexChunkTermScore(chunk.bounded_text, groups) }))
+              .filter(entry => entry.score > 0)
+              .sort((a, b) => b.score - a.score
+                || order.findIndex(entry => entry.index === a.index) - order.findIndex(entry => entry.index === b.index)
+                || a.index - b.index)
+              .map(entry => entry.index);
+          }, store);
+          const cosineOrder = order.map(entry => entry.index);
+          const lexicalRanks = targets.map(index => lexicalOrder.indexOf(index) + 1).filter(rank => rank > 0);
+          const reciprocal = (list: readonly number[], index: number) => { const at = list.indexOf(index); return at < 0 ? 0 : 1 / (60 + at + 1); };
+          const fused = chunks.map(chunk => chunk.chunk_index)
+            .map(index => ({ index, score: reciprocal(cosineOrder, index) + reciprocal(lexicalOrder, index) }))
+            .sort((a, b) => b.score - a.score || a.index - b.index).map(entry => entry.index);
+          const holds = (picks: readonly number[]) => targets.some(index => picks.includes(index));
+          const rules = {
+            quoteLexicalRank: lexicalRanks.length ? Math.min(...lexicalRanks) : null,
+            ruleHoldsQuoteChunk: {
+              cosine2: holds([...new Set([...cosineOrder.slice(0, 2), ...lexicalOrder])].slice(0, 3)),
+              cosine3: holds(cosineOrder.slice(0, 3)),
+              fused: holds(fused.slice(0, 3)),
+            },
+          };
           const content = await withExpandedSourceIndexKeywords(question.question, () => store.keywordLanguages(), () => store.localContent(item.local_item_id, maxChars, {
             query: question.question,
             ...(vector && provider ? { queryVector: vector, queryVectorModelId: provider.modelId } : {}),
@@ -91,7 +146,7 @@ async function main(): Promise<void> {
           console.log(JSON.stringify({ ...base, chunks: chunks.length, chunkChars: chunks.map(chunk => chunk.bounded_text.length),
             quoteWords: quote.split(/\s+/).filter(Boolean).length, quoteChunks, ...(quoteSpans.length ? { quoteSpans } : {}),
             quoteCosineRank, topCosineGap: quoteBest !== null && order.length ? Number((order[0]!.score! - quoteBest).toFixed(4)) : null,
-            picked, pickedQuote: Boolean(quote && passageContainsQuote((content?.chunks ?? []).join('\n'), quote)) }));
+            picked, pickedQuote: Boolean(quote && passageContainsQuote((content?.chunks ?? []).join('\n'), quote)), ...rules, ...rerank }));
         }
       }
     }

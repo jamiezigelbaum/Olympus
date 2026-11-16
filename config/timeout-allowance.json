@@ -38,7 +38,7 @@
     "src/core/engine-service.ts#MAC_SERVER_MODE_HANDOFF_MS": "c",
     "src/core/engine-store-copies.ts#ENGINE_STORES_OWNER_WAIT_MS": "c",
     "src/core/evidence-pack.ts#MIN_EXPANSION_BUDGET_MS": "d",
-    "src/core/evidence-reranker.ts#DEFAULT_RERANK_TIMEOUT_MS": "a/L2",
+    "src/core/evidence-reranker.ts#DEFAULT_RERANK_STALL_MS": "c",
     "src/core/lifecycle.ts#DEFAULT_ACTION_SETTLE_TIMEOUT_MS": "c",
     "src/core/lifecycle.ts#DEFAULT_READINESS_TIMEOUT_MS": "c",
     "src/core/lifecycle.ts#MAX_READINESS_TIMEOUT_MS": "n",
