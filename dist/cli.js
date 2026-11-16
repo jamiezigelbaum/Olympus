@@ -105633,6 +105633,24 @@ function withLegPromptBudgets(route, localLeg, cloudLeg, veniceLeg) {
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
+function clipChunksInProportion(chunks, maxBytes) {
+  const budget = Math.max(0, Math.floor(maxBytes));
+  const sizes = chunks.map(utf8ByteLength);
+  let count = chunks.length;
+  let total = sizes.reduce((sum, size) => sum + size, 0);
+  if (total <= budget)
+    return [...chunks];
+  while (count > 1 && sizes.slice(0, count).some((size) => Math.min(size, Math.floor(budget * size / total)) < Math.min(size, MIN_PROPORTIONAL_PICK_BYTES))) {
+    count -= 1;
+    total -= sizes[count];
+  }
+  if (total <= budget)
+    return chunks.slice(0, count);
+  return chunks.slice(0, count).flatMap((chunk, index) => clipChunksToUtf8Bytes([chunk], Math.floor(budget * sizes[index] / total)));
+}
+function fitChunks(chunks, maxBytes) {
+  return process.env.OLYMPUS_FIT_PROPORTIONAL === "1" ? clipChunksInProportion(chunks, maxBytes) : clipChunksToUtf8Bytes(chunks, maxBytes);
+}
 function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySeats, lane, seatOf, evidenceFormat, candidateGaps, budgetForOutputChars) {
   return {
     analyze: (pack, analyzeOptions) => {
@@ -105698,7 +105716,7 @@ function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, ana
       for (let attempt = 0;attempt < 6; attempt += 1) {
         if (!minimumPack && share < (wide ? READ_WIDE_MIN_PASSAGE_BYTES : MIN_FITTED_BYTES_PER_CANDIDATE) && keep > 1)
           break;
-        const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share * shares(candidate))) })), candidateCorpus);
+        const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: fitChunks(candidate.chunks, Math.max(0, share * shares(candidate))) })), candidateCorpus);
         const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
         if (bytes <= maxPromptBytes)
           return fitted;
@@ -107255,7 +107273,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 60000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 60000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 60000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 60000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 60000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 60000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_PROPORTIONAL_PICK_BYTES = 200, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_model_stream();
   init_read_wide();

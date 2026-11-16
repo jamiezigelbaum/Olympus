@@ -1214,6 +1214,28 @@ function withLegPromptBudgets(
   };
 }
 
+// Under OLYMPUS_FIT_PROPORTIONAL=1 a seat too small for all of a file's picked
+// passages trims each one in proportion, so the second and third picks stay
+// in the prompt instead of being dropped whole behind the first.
+const MIN_PROPORTIONAL_PICK_BYTES = 200;
+export function clipChunksInProportion(chunks: readonly string[], maxBytes: number): string[] {
+  const budget = Math.max(0, Math.floor(maxBytes));
+  const sizes = chunks.map(utf8ByteLength);
+  let count = chunks.length;
+  let total = sizes.reduce((sum, size) => sum + size, 0);
+  if (total <= budget) return [...chunks];
+  // Later picks go first when a share would be too small to say anything.
+  while (count > 1 && sizes.slice(0, count).some(size => Math.min(size, Math.floor(budget * size / total)) < Math.min(size, MIN_PROPORTIONAL_PICK_BYTES))) {
+    count -= 1;
+    total -= sizes[count]!;
+  }
+  if (total <= budget) return chunks.slice(0, count);
+  return chunks.slice(0, count).flatMap((chunk, index) => clipChunksToUtf8Bytes([chunk], Math.floor(budget * sizes[index]! / total)));
+}
+function fitChunks(chunks: readonly string[], maxBytes: number): string[] {
+  return process.env.OLYMPUS_FIT_PROPORTIONAL === '1' ? clipChunksInProportion(chunks, maxBytes) : clipChunksToUtf8Bytes(chunks, maxBytes);
+}
+
 function promptBudgetedAnalyst(
   analyst: Analyst,
   promptBytes: number,
@@ -1350,7 +1372,7 @@ function fitPackPassagesToPromptBytes(
         if (!minimumPack && share < (wide ? READ_WIDE_MIN_PASSAGE_BYTES : MIN_FITTED_BYTES_PER_CANDIDATE) && keep > 1) break;
         const fitted = restatePack(
           pack,
-          base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share * shares(candidate))) })),
+          base.map((candidate) => ({ ...candidate, chunks: fitChunks(candidate.chunks, Math.max(0, share * shares(candidate))) })),
           candidateCorpus,
         );
         const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
