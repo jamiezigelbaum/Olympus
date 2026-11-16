@@ -90,6 +90,8 @@
     "eval:real": "bun eval/run-real.ts",
     "eval:passages": "bun eval/run-passages.ts",
     "eval:draft-passages": "bun eval/draft-passage-questions.ts",
+    "eval:draft-deep-read": "bun eval/draft-deep-read-questions.ts",
+    "eval:deep-read": "bun eval/run-deep-read.ts",
     "eval:classification": "bun eval/classification/cli.ts",
     "eval:inspect-pack": "bun scripts/source-eval-pack-inspect.ts",
     "tools-json": "bun src/cli.ts --tools-json"

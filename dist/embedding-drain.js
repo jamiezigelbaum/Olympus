@@ -6598,6 +6598,10 @@ function isFetchRedirectRefusal(error) {
   return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
 }
 
+// src/core/read-wide.ts
+var matchingProvenances = new WeakSet;
+var wideProvenances = new WeakSet;
+
 // src/core/analyst.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 

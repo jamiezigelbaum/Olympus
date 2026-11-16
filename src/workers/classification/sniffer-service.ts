@@ -699,6 +699,7 @@ export class TierSnifferService {
         queued += (opened.db.query(`SELECT COUNT(*) AS n FROM (
           SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
         ) AS tier_items WHERE 1 ${tierMovingDirectionClause('lower')}`).get(MOVES_SCAN_BOUND) as { n: number }).n;
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, 'its queued privacy moves');
       } finally { opened.db.close(); }
@@ -802,9 +803,6 @@ export class TierSnifferService {
       const path = tierSnifferPathForLedger(ledgerPath);
       const hasQueue = existsSync(path);
       if (hasQueue) db.query('ATTACH DATABASE ? AS queue').run(path);
-      // Opening is lazy: read one row so a file that is not a ledger is said here, once.
-      db.query('SELECT 1 FROM tier_items LIMIT 1').get();
-      this.noteReadable(ledgerPath);
       return { db, hasQueue };
     } catch {
       db?.close();
@@ -822,6 +820,7 @@ export class TierSnifferService {
       try {
         rows += (opened.db.query('SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items').get() as { n: number }).n;
         if (opened.hasQueue) rows += (opened.db.query('SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, 'its privacy ledger');
       } finally { opened.db.close(); }
@@ -839,6 +838,7 @@ export class TierSnifferService {
       try {
         pendingItems += (opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get() as { n: number }).n;
         if (opened.hasQueue) remainingQuestions += (opened.db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+        this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
         this.noteUnreadable(ledgerPath, 'its privacy ledger');
@@ -855,6 +855,7 @@ export class TierSnifferService {
       try {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue) this.addQuestionSlice(counts, opened.db, undefined);
+        this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
         this.noteUnreadable(ledgerPath, 'its privacy ledger');
@@ -932,6 +933,7 @@ export class TierSnifferService {
             if (this.stopped) return undefined;
           }
         }
+        this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
         this.noteUnreadable(ledgerPath, 'its privacy ledger');

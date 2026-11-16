@@ -8197,6 +8197,13 @@ function isExecutableFile(path) {
   }
 }
 var init_openclaw_executable = () => {};
+
+// src/core/read-wide.ts
+var matchingProvenances, wideProvenances;
+var init_read_wide = __esm(() => {
+  matchingProvenances = new WeakSet;
+  wideProvenances = new WeakSet;
+});
 // src/core/source-index/partial-search.ts
 function recentItemsTimeoutGap(corpusId) {
   return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
@@ -8473,6 +8480,7 @@ function normalizeRouterResultKey(key) {
 }
 var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
+  init_read_wide();
   init_partial_search();
   init_keyword_context();
   init_types();
@@ -13847,6 +13855,7 @@ var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values
 ].join(`
 `), ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, analystEvidenceFormats, packPromptBudgets, packEvidenceBatches, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
+  init_read_wide();
   init_opsec();
   init_chunk_selection();
   init_source_model_policy();
@@ -17377,6 +17386,7 @@ var init_evidence_reranker = () => {};
 // src/core/evidence-pack.ts
 var utf82, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
+  init_read_wide();
   init_keyword_context();
   init_release_manifest();
   init_partial_search();
@@ -17397,6 +17407,7 @@ var init_evidence_pack = __esm(() => {
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
+  init_read_wide();
   init_analyst_built_in();
   init_local_analyst_window();
   init_analyst_delphi();
