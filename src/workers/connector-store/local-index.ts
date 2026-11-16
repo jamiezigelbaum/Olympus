@@ -131,6 +131,7 @@ import {
   visibilityHere,
   visibilityAwaited,
   judgedAwaited,
+  VisibilityChangedError,
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
   hiddenChildKeysSteps,
@@ -1128,6 +1129,70 @@ const HIDDEN_CHILD_PARENT_SLICE = 500;
 type HiddenStep = void | { find: LoopFinder<unknown> };
 type IdentityRow = { idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null };
 type VisibilityUpdate = { identity: TierLedgerIdentity; pks: number[]; flags: TierCorpusVisibility | undefined };
+type VisibilityChanges = { cursor: number; identities?: TierLedgerIdentity[] };
+
+/** Same retention rules as the two feeds, with bounded seq seeks instead of DISTINCT. */
+function* hiddenVisibilityFeedReads(
+  table: 'tier_visibility_changes' | 'main.item_visibility_feed', after?: number, startCursor?: number,
+): Generator<StoreRead, VisibilityChanges, unknown> {
+  const store = table === 'main.item_visibility_feed';
+  const bounds = (yield { sql: `SELECT (SELECT MIN(seq) FROM ${table}) AS first,
+    (SELECT MAX(seq) FROM ${table}) AS last${store
+      ? ", (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued" : ''}`,
+    params: [], mode: 'get' }) as { first: number | null; last: number | null; issued?: number | null };
+  const latest = bounds.last ?? bounds.issued ?? 0;
+  // The calling connection took this cursor before yielding. A worker that
+  // cannot see it (an uncommitted hold, for example) cannot certify this set.
+  if (startCursor !== undefined && latest < startCursor) throw new VisibilityChangedError();
+  const cursor = startCursor ?? latest;
+  if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)
+    || (store && bounds.first === null && after < latest)) return { cursor };
+  const identities = new Map<string, TierLedgerIdentity>();
+  for (let seq = after; seq < cursor;) {
+    const rows = (yield { sql: `SELECT seq, provider, account_scope, conversation_key, provider_item_id
+      FROM ${table} WHERE seq > ? AND seq <= ? ORDER BY seq LIMIT 500`, params: [seq, cursor], mode: 'all' }) as Array<{
+        seq: number; provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+      }>;
+    for (const row of rows) {
+      const identity: TierLedgerIdentity = { provider: row.provider, accountScope: row.account_scope,
+        providerItemId: row.provider_item_id, ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}) };
+      identities.set(tierLedgerIdentityKey(identity), identity);
+    }
+    if (rows.length < 500) break;
+    seq = rows.at(-1)!.seq;
+  }
+  return { cursor, identities: [...identities.values()] };
+}
+
+/**
+ * Specialize the ledger's canonical visibility finder to changed keys. Keep
+ * its flag SQL AND its conversion/filtering, so privacy rules have one owner.
+ * Each batch has at most 200 copies in this corpus, below its 500-row page.
+ * A changed finder shape cannot be certified: the runner retries, then uses here().
+ */
+function* incrementalVisibilityReads(
+  ledger: TierLedger, corpusId: string, identities: readonly TierLedgerIdentity[],
+): Generator<StoreRead, TierCorpusVisibility[], unknown> {
+  const flags: TierCorpusVisibility[] = [];
+  for (let offset = 0; offset < identities.length; offset += 200) {
+    const walk = ledger.corpusVisibilityFlaggedSteps(corpusId);
+    const first = walk.next();
+    const seek = 'AND c.rowid > ? ORDER BY c.rowid LIMIT 500';
+    if (first.done || first.value.mode !== 'all' || !first.value.sql.endsWith(seek)) throw new VisibilityChangedError();
+    const sql = first.value.sql.replace(seek, `AND c.rowid IN (
+      SELECT keyed.rowid FROM json_each(?) j CROSS JOIN tier_copies keyed
+      WHERE keyed.provider = json_extract(j.value, '$[0]') AND keyed.account_scope = json_extract(j.value, '$[1]')
+        AND keyed.conversation_key = json_extract(j.value, '$[2]') AND keyed.provider_item_id = json_extract(j.value, '$[3]')
+        AND keyed.corpus_id = ?) ORDER BY c.rowid LIMIT 500`);
+    const keys = identities.slice(offset, offset + 200).map(identity => [identity.provider, identity.accountScope,
+      normalizeConversationId(identity.providerConversationId), identity.providerItemId]);
+    const rows = yield { sql, params: [corpusId, JSON.stringify(keys), corpusId], mode: 'all' };
+    const converted = walk.next(rows);
+    if (!converted.done) throw new VisibilityChangedError();
+    flags.push(...converted.value);
+  }
+  return flags;
+}
 
 /**
  * How long the bootstrap finder waits for a write hold on the loop's
@@ -3795,7 +3860,11 @@ export class LocalConnectorStore {
   /** Set while the last embedding attempt on this store was deferred; cleared by a sweep pass that answers. */
   private embeddingDeferral: string | undefined;
 
+  /** Opt in once per connection; the default retains the original incremental reads. */
+  private readonly hiddenSetIncrementalOffLoop: boolean;
+
   constructor(options: LocalConnectorStoreOptions) {
+    this.hiddenSetIncrementalOffLoop = process.env.OLYMPUS_HIDDEN_SET_INCREMENTAL_OFF_LOOP?.trim() === '1';
     // The Ask trace names slow synchronous statements on the request thread
     // (#1305). Installed here, not at module load, so the Node plugin bundle
     // can still drop this module (test/plugin-bundle-no-bun-sqlite.test.ts).
@@ -4877,6 +4946,49 @@ export class LocalConnectorStore {
     };
   }
 
+  /** A changed pooled read is taken again, then here; a hold is only visible here. */
+  private incrementalHiddenFinder<T>(ledger: TierLedger, here: () => T, pooled: () => Promise<T>): LoopFinder<T> {
+    return { here, offThread: () => judgedAwaited(async () => {
+      if (ledger.writesHeld() || this.db.inTransaction
+        || !offThreadReadsSupported(ledger.dbPath) || !offThreadReadsSupported(this.dbPath)) return here();
+      const before = `${ledger.changeMarker()}:${this.changeMarker()}`;
+      const result = await pooled();
+      if (ledger.writesHeld() || this.db.inTransaction
+        || before !== `${ledger.changeMarker()}:${this.changeMarker()}`) throw new VisibilityChangedError();
+      return result;
+    }, here) };
+  }
+
+  /** Capture both cursors before yielding either feed, as the original build does. */
+  private hiddenChangeFinders(ledger: TierLedger, ledgerAfter?: number, storeAfter?: number): {
+    ledger: LoopFinder<VisibilityChanges>; store: LoopFinder<VisibilityChanges>;
+  } {
+    const ledgerCursor = ledger.readSteps(hiddenVisibilityFeedReads('tier_visibility_changes')).cursor;
+    const storeCursor = this.visibilityFeedPresent
+      ? this.readHere(hiddenVisibilityFeedReads('main.item_visibility_feed')).cursor : 0;
+    return {
+      ledger: this.incrementalHiddenFinder(ledger, () => ledger.visibilityChangesSince(ledgerAfter),
+        () => ledgerReadOffThread(ledger, hiddenVisibilityFeedReads('tier_visibility_changes', ledgerAfter, ledgerCursor), BACKGROUND_READS)),
+      store: this.incrementalHiddenFinder(ledger, () => this.itemVisibilityChangesSince(storeAfter),
+        () => this.visibilityFeedPresent
+          ? withOffThreadSnapshot(this.dbPath, async read => {
+            const steps = hiddenVisibilityFeedReads('main.item_visibility_feed', storeAfter, storeCursor);
+            let next = steps.next();
+            while (!next.done) next = steps.next(await read(next.value));
+            return next.value;
+          }, BACKGROUND_READS) : Promise.resolve({ cursor: 0, identities: [] })),
+    };
+  }
+
+  private *hiddenChangesSteps(ledger: TierLedger, ledgerAfter?: number, storeAfter?: number): Generator<HiddenStep, {
+    ledgerChanges: VisibilityChanges; storeChanges: VisibilityChanges;
+  }, unknown> {
+    const finders = this.hiddenChangeFinders(ledger, ledgerAfter, storeAfter);
+    const ledgerChanges = (yield { find: finders.ledger }) as VisibilityChanges;
+    const storeChanges = (yield { find: finders.store }) as VisibilityChanges;
+    return { ledgerChanges, storeChanges };
+  }
+
   private *tierLedgerHiddenSteps(): Generator<HiddenStep, TierLedgerHiddenItemPks, unknown> {
     const ledger = this.visibilityLedger(); // binding verification must precede every cache use
     this.registerVisibilityWriter(ledger);
@@ -4893,8 +5005,19 @@ export class LocalConnectorStore {
       : (this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
     const prior = this.tierLedgerHiddenMemo;
     const same = prior?.ledger === ledger && prior.dataVersion === version;
-    let ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
-    let storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+    const priorLedgerCursor = prior?.ledgerCursor;
+    const priorStoreCursor = prior?.storeCursor;
+    let ledgerChanges: VisibilityChanges;
+    let storeChanges: VisibilityChanges;
+    if (this.hiddenSetIncrementalOffLoop) {
+      ({ ledgerChanges, storeChanges } = yield* this.hiddenChangesSteps(ledger,
+        same ? priorLedgerCursor : undefined, same ? priorStoreCursor : undefined));
+      if (this.tierLedgerHiddenMemo !== prior || prior?.ledgerCursor !== priorLedgerCursor
+        || prior?.storeCursor !== priorStoreCursor) return yield* this.tierLedgerHiddenSteps();
+    } else {
+      ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+      storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+    }
     let base: TierVisibilityMemo | undefined = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined
       ? prior : undefined;
     if (!base && this.visibilityFeedPresent) {
@@ -4914,7 +5037,12 @@ export class LocalConnectorStore {
     // yields cannot see a half-applied removal or a half-built held set.
     const updates: Array<{ identity: TierLedgerIdentity; pks: number[]; flags: TierCorpusVisibility | undefined }> = [];
     const prepare = function* (store: LocalConnectorStore, identities: readonly TierLedgerIdentity[], flags: TierCorpusVisibility[]) {
-      const rows = yield* store.itemRowsForIdentitiesSteps(identities, identity => normalizeConversationId(identity.providerConversationId));
+      const conversationOf = (identity: TierLedgerIdentity) => normalizeConversationId(identity.providerConversationId);
+      const rows = store.hiddenSetIncrementalOffLoop
+        ? (yield { find: store.incrementalHiddenFinder(ledger,
+          () => runSteps(store.itemRowsForIdentitiesSteps(identities, conversationOf)),
+          () => store.itemRowsForIdentitiesOffThread(identities, conversationOf)) }) as IdentityRow[]
+        : yield* store.itemRowsForIdentitiesSteps(identities, conversationOf);
       const pks = new Map<number, number[]>();
       for (const row of rows) {
         const list = pks.get(row.idx);
@@ -4924,8 +5052,15 @@ export class LocalConnectorStore {
       return identities.map((identity, idx) => ({ identity, pks: pks.get(idx) ?? [], flags: byKey.get(tierLedgerIdentityKey(identity)) }));
     };
     if (changed) {
-      const flags: TierCorpusVisibility[] = [];
-      for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) { flags.push(...page); yield; }
+      let flags: TierCorpusVisibility[];
+      if (this.hiddenSetIncrementalOffLoop) {
+        flags = (yield { find: this.incrementalHiddenFinder(ledger,
+          () => [...ledger.corpusVisibilityPages(this.corpusId, changed)].flat(),
+          () => ledgerReadOffThread(ledger, incrementalVisibilityReads(ledger, this.corpusId, changed), BACKGROUND_READS)) }) as TierCorpusVisibility[];
+      } else {
+        flags = [];
+        for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) { flags.push(...page); yield; }
+      }
       updates.push(...(yield* prepare(this, changed, flags)));
     } else {
       // The bootstrap walks the whole corpus: a finder (loop-stall step-back,
@@ -4990,11 +5125,11 @@ export class LocalConnectorStore {
    * give the current set. A new generation switched in during the read means
    * the rows read may have been cleared, and the read starts again.
    */
-  private *savedVisibilitySteps(ledger: TierLedger): Generator<void, {
+  private *savedVisibilitySteps(ledger: TierLedger): Generator<HiddenStep, {
     memo: TierVisibilityMemo;
     ledgerChanges: { cursor: number; identities?: TierLedgerIdentity[] };
     storeChanges: { cursor: number; identities?: TierLedgerIdentity[] };
-  } | undefined> {
+  } | undefined, unknown> {
     const ledgerId = this.ledgerIdOf(ledger);
     if (ledgerId === undefined) return undefined;
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -5002,7 +5137,10 @@ export class LocalConnectorStore {
       if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId) return undefined;
       // A stamp already outside either feed can't be served: give up before
       // reading every saved row (Sparta's largest store holds about 645k).
-      if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined
+      if (this.hiddenSetIncrementalOffLoop) {
+        const changes = yield* this.hiddenChangesSteps(ledger, state.ledger_cursor, state.store_cursor);
+        if (changes.ledgerChanges.identities === undefined || changes.storeChanges.identities === undefined) return undefined;
+      } else if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined
         || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined) return undefined;
       const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
         FROM main.tier_visibility_members
@@ -5039,8 +5177,9 @@ export class LocalConnectorStore {
       }
       if (this.readVisibilityState()?.generation !== state.generation) continue;
       // Read after the rows, so every entry past the stamp is included.
-      const ledgerChanges = ledger.visibilityChangesSince(state.ledger_cursor);
-      const storeChanges = this.itemVisibilityChangesSince(state.store_cursor);
+      const { ledgerChanges, storeChanges } = this.hiddenSetIncrementalOffLoop
+        ? yield* this.hiddenChangesSteps(ledger, state.ledger_cursor, state.store_cursor)
+        : { ledgerChanges: ledger.visibilityChangesSince(state.ledger_cursor), storeChanges: this.itemVisibilityChangesSince(state.store_cursor) };
       if (ledgerChanges.identities === undefined || storeChanges.identities === undefined) return undefined;
       return { memo, ledgerChanges, storeChanges };
     }
@@ -6009,8 +6148,19 @@ export class LocalConnectorStore {
       stores = members as LocalConnectorStore[];
       const same = prior?.ledger === ledger && prior.storeCursors.size === stores.length
         && stores.every(store => prior.storeCursors.has(store));
-      ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
-      for (const store of stores) storeChanges.set(store, store.itemVisibilityChangesSince(same ? prior.storeCursors.get(store) : undefined));
+      if (this.hiddenSetIncrementalOffLoop) {
+        // All lane cursors precede every awaited feed read, including those
+        // of other stores (a parent can live on any leg).
+        const finders = stores.map(store => [store, store.hiddenChangeFinders(ledger!,
+          same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined)] as const);
+        const ledgerFinder = finders[0]![1].ledger;
+        ledgerChanges = (yield ledgerFinder) as VisibilityChanges;
+        for (const [store, finder] of finders) storeChanges.set(store, (yield finder.store) as VisibilityChanges);
+        if (this.hiddenChildMemo !== prior) return yield* this.hiddenChildReadSteps();
+      } else {
+        ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+        for (const store of stores) storeChanges.set(store, store.itemVisibilityChangesSince(same ? prior.storeCursors.get(store) : undefined));
+      }
     } catch {
       this.hiddenChildMemo = undefined;
       return yield* this.hiddenChildFullReadSteps();

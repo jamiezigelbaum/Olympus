@@ -24283,6 +24283,66 @@ var EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000;
 var MISSING_EMBEDDING_CHUNK_WINDOW = 20000;
 var SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 var HIDDEN_CHILD_PARENT_SLICE = 500;
+function* hiddenVisibilityFeedReads(table, after, startCursor) {
+  const store = table === "main.item_visibility_feed";
+  const bounds = yield {
+    sql: `SELECT (SELECT MIN(seq) FROM ${table}) AS first,
+    (SELECT MAX(seq) FROM ${table}) AS last${store ? ", (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued" : ""}`,
+    params: [],
+    mode: "get"
+  };
+  const latest = bounds.last ?? bounds.issued ?? 0;
+  if (startCursor !== undefined && latest < startCursor)
+    throw new VisibilityChangedError;
+  const cursor = startCursor ?? latest;
+  if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1 || store && bounds.first === null && after < latest)
+    return { cursor };
+  const identities = new Map;
+  for (let seq = after;seq < cursor; ) {
+    const rows = yield { sql: `SELECT seq, provider, account_scope, conversation_key, provider_item_id
+      FROM ${table} WHERE seq > ? AND seq <= ? ORDER BY seq LIMIT 500`, params: [seq, cursor], mode: "all" };
+    for (const row of rows) {
+      const identity = {
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+      };
+      identities.set(tierLedgerIdentityKey(identity), identity);
+    }
+    if (rows.length < 500)
+      break;
+    seq = rows.at(-1).seq;
+  }
+  return { cursor, identities: [...identities.values()] };
+}
+function* incrementalVisibilityReads(ledger, corpusId, identities) {
+  const flags = [];
+  for (let offset = 0;offset < identities.length; offset += 200) {
+    const walk = ledger.corpusVisibilityFlaggedSteps(corpusId);
+    const first = walk.next();
+    const seek = "AND c.rowid > ? ORDER BY c.rowid LIMIT 500";
+    if (first.done || first.value.mode !== "all" || !first.value.sql.endsWith(seek))
+      throw new VisibilityChangedError;
+    const sql = first.value.sql.replace(seek, `AND c.rowid IN (
+      SELECT keyed.rowid FROM json_each(?) j CROSS JOIN tier_copies keyed
+      WHERE keyed.provider = json_extract(j.value, '$[0]') AND keyed.account_scope = json_extract(j.value, '$[1]')
+        AND keyed.conversation_key = json_extract(j.value, '$[2]') AND keyed.provider_item_id = json_extract(j.value, '$[3]')
+        AND keyed.corpus_id = ?) ORDER BY c.rowid LIMIT 500`);
+    const keys = identities.slice(offset, offset + 200).map((identity) => [
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId
+    ]);
+    const rows = yield { sql, params: [corpusId, JSON.stringify(keys), corpusId], mode: "all" };
+    const converted = walk.next(rows);
+    if (!converted.done)
+      throw new VisibilityChangedError;
+    flags.push(...converted.value);
+  }
+  return flags;
+}
 var EMBEDDING_WORK_PAGE_ROWS = 5000;
 var VISIBILITY_HOLD_WAITS = 100;
 var VISIBILITY_HOLD_WAIT_MS = 10;
@@ -24873,7 +24933,9 @@ class LocalConnectorStore {
   embeddingQueueState;
   embeddingFailureState;
   embeddingDeferral;
+  hiddenSetIncrementalOffLoop;
   constructor(options) {
+    this.hiddenSetIncrementalOffLoop = process.env.OLYMPUS_HIDDEN_SET_INCREMENTAL_OFF_LOOP?.trim() === "1";
     installMainThreadSqlTrace();
     this.visibilityOwner = randomUUID8();
     this.visibilityNow = () => Date.now();
@@ -25638,6 +25700,37 @@ class LocalConnectorStore {
       }
     };
   }
+  incrementalHiddenFinder(ledger, here, pooled) {
+    return { here, offThread: () => judgedAwaited(async () => {
+      if (ledger.writesHeld() || this.db.inTransaction || !offThreadReadsSupported(ledger.dbPath) || !offThreadReadsSupported(this.dbPath))
+        return here();
+      const before = `${ledger.changeMarker()}:${this.changeMarker()}`;
+      const result = await pooled();
+      if (ledger.writesHeld() || this.db.inTransaction || before !== `${ledger.changeMarker()}:${this.changeMarker()}`)
+        throw new VisibilityChangedError;
+      return result;
+    }, here) };
+  }
+  hiddenChangeFinders(ledger, ledgerAfter, storeAfter) {
+    const ledgerCursor = ledger.readSteps(hiddenVisibilityFeedReads("tier_visibility_changes")).cursor;
+    const storeCursor = this.visibilityFeedPresent ? this.readHere(hiddenVisibilityFeedReads("main.item_visibility_feed")).cursor : 0;
+    return {
+      ledger: this.incrementalHiddenFinder(ledger, () => ledger.visibilityChangesSince(ledgerAfter), () => ledgerReadOffThread(ledger, hiddenVisibilityFeedReads("tier_visibility_changes", ledgerAfter, ledgerCursor), BACKGROUND_READS)),
+      store: this.incrementalHiddenFinder(ledger, () => this.itemVisibilityChangesSince(storeAfter), () => this.visibilityFeedPresent ? withOffThreadSnapshot(this.dbPath, async (read) => {
+        const steps = hiddenVisibilityFeedReads("main.item_visibility_feed", storeAfter, storeCursor);
+        let next = steps.next();
+        while (!next.done)
+          next = steps.next(await read(next.value));
+        return next.value;
+      }, BACKGROUND_READS) : Promise.resolve({ cursor: 0, identities: [] }))
+    };
+  }
+  *hiddenChangesSteps(ledger, ledgerAfter, storeAfter) {
+    const finders = this.hiddenChangeFinders(ledger, ledgerAfter, storeAfter);
+    const ledgerChanges = yield { find: finders.ledger };
+    const storeChanges = yield { find: finders.store };
+    return { ledgerChanges, storeChanges };
+  }
   *tierLedgerHiddenSteps() {
     const ledger = this.visibilityLedger();
     this.registerVisibilityWriter(ledger);
@@ -25651,8 +25744,18 @@ class LocalConnectorStore {
     const version = this.visibilityFeedPresent ? 0 : this.db.query("PRAGMA data_version").get().data_version;
     const prior = this.tierLedgerHiddenMemo;
     const same = prior?.ledger === ledger && prior.dataVersion === version;
-    let ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
-    let storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+    const priorLedgerCursor = prior?.ledgerCursor;
+    const priorStoreCursor = prior?.storeCursor;
+    let ledgerChanges;
+    let storeChanges;
+    if (this.hiddenSetIncrementalOffLoop) {
+      ({ ledgerChanges, storeChanges } = yield* this.hiddenChangesSteps(ledger, same ? priorLedgerCursor : undefined, same ? priorStoreCursor : undefined));
+      if (this.tierLedgerHiddenMemo !== prior || prior?.ledgerCursor !== priorLedgerCursor || prior?.storeCursor !== priorStoreCursor)
+        return yield* this.tierLedgerHiddenSteps();
+    } else {
+      ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+      storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+    }
     let base = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined ? prior : undefined;
     if (!base && this.visibilityFeedPresent) {
       const saved = yield* this.savedVisibilitySteps(ledger);
@@ -25670,7 +25773,8 @@ class LocalConnectorStore {
     const changed = incremental ? [...new Map([...ledgerChanges.identities, ...storeChanges.identities].map((identity) => [tierLedgerIdentityKey(identity), identity])).values()] : undefined;
     const updates = [];
     const prepare = function* (store, identities, flags) {
-      const rows = yield* store.itemRowsForIdentitiesSteps(identities, (identity) => normalizeConversationId(identity.providerConversationId));
+      const conversationOf = (identity) => normalizeConversationId(identity.providerConversationId);
+      const rows = store.hiddenSetIncrementalOffLoop ? yield { find: store.incrementalHiddenFinder(ledger, () => runSteps(store.itemRowsForIdentitiesSteps(identities, conversationOf)), () => store.itemRowsForIdentitiesOffThread(identities, conversationOf)) } : yield* store.itemRowsForIdentitiesSteps(identities, conversationOf);
       const pks = new Map;
       for (const row of rows) {
         const list = pks.get(row.idx);
@@ -25683,10 +25787,15 @@ class LocalConnectorStore {
       return identities.map((identity, idx) => ({ identity, pks: pks.get(idx) ?? [], flags: byKey.get(tierLedgerIdentityKey(identity)) }));
     };
     if (changed) {
-      const flags = [];
-      for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) {
-        flags.push(...page);
-        yield;
+      let flags;
+      if (this.hiddenSetIncrementalOffLoop) {
+        flags = yield { find: this.incrementalHiddenFinder(ledger, () => [...ledger.corpusVisibilityPages(this.corpusId, changed)].flat(), () => ledgerReadOffThread(ledger, incrementalVisibilityReads(ledger, this.corpusId, changed), BACKGROUND_READS)) };
+      } else {
+        flags = [];
+        for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) {
+          flags.push(...page);
+          yield;
+        }
       }
       updates.push(...yield* prepare(this, changed, flags));
     } else {
@@ -25746,7 +25855,11 @@ class LocalConnectorStore {
       const state = this.readVisibilityState();
       if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId)
         return;
-      if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined)
+      if (this.hiddenSetIncrementalOffLoop) {
+        const changes = yield* this.hiddenChangesSteps(ledger, state.ledger_cursor, state.store_cursor);
+        if (changes.ledgerChanges.identities === undefined || changes.storeChanges.identities === undefined)
+          return;
+      } else if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined)
         return;
       const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
         FROM main.tier_visibility_members
@@ -25789,8 +25902,7 @@ class LocalConnectorStore {
       }
       if (this.readVisibilityState()?.generation !== state.generation)
         continue;
-      const ledgerChanges = ledger.visibilityChangesSince(state.ledger_cursor);
-      const storeChanges = this.itemVisibilityChangesSince(state.store_cursor);
+      const { ledgerChanges, storeChanges } = this.hiddenSetIncrementalOffLoop ? yield* this.hiddenChangesSteps(ledger, state.ledger_cursor, state.store_cursor) : { ledgerChanges: ledger.visibilityChangesSince(state.ledger_cursor), storeChanges: this.itemVisibilityChangesSince(state.store_cursor) };
       if (ledgerChanges.identities === undefined || storeChanges.identities === undefined)
         return;
       return { memo, ledgerChanges, storeChanges };
@@ -26525,9 +26637,19 @@ class LocalConnectorStore {
       }
       stores = members;
       const same = prior?.ledger === ledger && prior.storeCursors.size === stores.length && stores.every((store) => prior.storeCursors.has(store));
-      ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
-      for (const store of stores)
-        storeChanges.set(store, store.itemVisibilityChangesSince(same ? prior.storeCursors.get(store) : undefined));
+      if (this.hiddenSetIncrementalOffLoop) {
+        const finders = stores.map((store) => [store, store.hiddenChangeFinders(ledger, same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined)]);
+        const ledgerFinder = finders[0][1].ledger;
+        ledgerChanges = yield ledgerFinder;
+        for (const [store, finder] of finders)
+          storeChanges.set(store, yield finder.store);
+        if (this.hiddenChildMemo !== prior)
+          return yield* this.hiddenChildReadSteps();
+      } else {
+        ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+        for (const store of stores)
+          storeChanges.set(store, store.itemVisibilityChangesSince(same ? prior.storeCursors.get(store) : undefined));
+      }
     } catch {
       this.hiddenChildMemo = undefined;
       return yield* this.hiddenChildFullReadSteps();
