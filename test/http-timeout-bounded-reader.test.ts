@@ -12,6 +12,7 @@ import {
   BoundedResponseTooLargeError,
   fetchBoundedText,
   fetchWithBodyDeadline,
+  fetchWithIdleDeadline,
 } from '../src/core/http-timeout.ts';
 
 const URL_UNDER_TEST = 'https://token-endpoint.test/token';
@@ -141,5 +142,49 @@ describe('a stalled body whose cancel never settles still fails at the deadline 
   test('fetchBoundedText', async () => {
     await expect(fetchBoundedText(async () => hungCancelBody(), URL_UNDER_TEST, {}, { timeoutMs: 30 }))
       .rejects.toThrow(/deadline/);
+  });
+});
+
+/** Ten chunks, one every 25 ms: a slow download that keeps arriving. */
+function tricklingBody(): Response {
+  let sent = 0;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      timer = setInterval(() => {
+        controller.enqueue(new TextEncoder().encode('x'));
+        sent += 1;
+        if (sent === 10) {
+          clearInterval(timer);
+          controller.close();
+        }
+      }, 25);
+    },
+    cancel() {
+      clearInterval(timer);
+    },
+  });
+  return new Response(stream, { status: 200 });
+}
+
+describe('fetchWithIdleDeadline: only a stall stops a download', () => {
+  test('a body that keeps arriving past the window downloads whole', async () => {
+    const relayed = await fetchWithIdleDeadline(async () => tricklingBody(), URL_UNDER_TEST, {}, 120);
+    expect(await relayed.text()).toBe('x'.repeat(10));
+  });
+
+  test('the same trickle under a total deadline of that length is cut', async () => {
+    const relayed = await fetchWithBodyDeadline(async () => tricklingBody(), URL_UNDER_TEST, {}, 120);
+    const failure = await relayed.text().then(() => undefined, (error: unknown) => error);
+    expect((failure as Error).name).toBe('AbortError');
+  });
+
+  test('a body that stops arriving fails one window after its last byte, and says it made no progress', async () => {
+    const { response, cancels } = stalledBody();
+    const relayed = await fetchWithIdleDeadline(async () => response, URL_UNDER_TEST, {}, 30);
+    const failure = await relayed.text().then(() => undefined, (error: unknown) => error);
+    expect((failure as Error).name).toBe('AbortError');
+    expect((failure as Error).message).toContain('made no progress');
+    expect(cancels()).toBe(1);
   });
 });

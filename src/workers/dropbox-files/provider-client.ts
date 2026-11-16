@@ -4,7 +4,7 @@
 // crawl frontier, extraction queue, and answer runtime. Normal product startup
 // can therefore use the provider without loading either legacy monolith.
 
-import { fetchWithBodyDeadline } from '../../core/http-timeout.ts';
+import { fetchWithBodyDeadline, fetchWithIdleDeadline } from '../../core/http-timeout.ts';
 import type { CredentialBrokerFetch } from '../credential-broker/index.ts';
 
 /** Bounded retries for the statuses Dropbox uses to say "slow down". */
@@ -17,8 +17,12 @@ const MAX_DROPBOX_RETRY_DELAY_MS = 30_000;
  * task behind it (PR #267 review, Astra).
  */
 export const DROPBOX_METADATA_REQUEST_TIMEOUT_MS = 60_000;
-/** One content download, body included, for the same reason. */
-export const DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+/**
+ * A content download's stall window: it stops only when Dropbox sends no
+ * response, or no further bytes, for this long. A large file that keeps
+ * arriving downloads to the end (owner rule, 16 Nov 2026).
+ */
+export const DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 2 * 60_000;
 
 export interface DropboxMetadataPage {
   entries: DropboxMetadataEntry[];
@@ -387,7 +391,7 @@ export class DropboxApiContentDownloadClient implements DropboxContentDownloadCl
   }
 
   async download(request: DropboxContentDownloadRequest): Promise<DropboxContentDownloadResult> {
-    const response = await fetchWithBodyDeadline(this.fetchImpl, `${this.contentBaseUrl}/files/download`, {
+    const response = await fetchWithIdleDeadline(this.fetchImpl, `${this.contentBaseUrl}/files/download`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.token}`,
