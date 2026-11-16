@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import { fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -136,4 +137,41 @@ test('a store whose schema moved under a matching stamp (an older build dropped 
   cleanups.push(() => check.close());
   expect(check.query("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'connector_store_totals_chunk_insert'").get()).not.toBeNull();
   expect((check.query('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(stamp);
+});
+
+test('a tier ledger settles stale embedding holds once, not at every open', () => {
+  const { dir, cleanup } = tempDir('olympus-ledger-open-');
+  cleanups.push(cleanup);
+  const dbPath = join(dir, 'ledger.sqlite');
+  const settles = (sql: string) => /UPDATE tier_copies SET embed_hold = 0/.test(sql);
+  expect(statementsDuring(() => { new TierLedger({ dbPath }).close(); }).some(settles)).toBe(true);
+  expect(statementsDuring(() => { new TierLedger({ dbPath }).close(); }).some(settles)).toBe(false);
+});
+
+test('chunks with no embedding input hash are set by key, a page at a time, and the search stops once none are left', async () => {
+  const { dir, cleanup } = tempDir('olympus-store-input-hash-');
+  cleanups.push(cleanup);
+  const dbPath = join(dir, 'internal.sqlite');
+  const store = new LocalConnectorStore({ dbPath, corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, family: 'file', trustDomain: 'internal', tierLedger: null });
+  cleanups.push(() => store.close());
+  await store.syncFromConnector(fixtureConnector(() => [
+    { id: 'k1', name: 'one.txt', text: 'A synthetic note.' },
+    { id: 'k2', name: 'two.txt', text: 'Another synthetic note.' },
+    { id: 'k3', name: 'three.txt', text: 'A third synthetic note.' },
+  ]), { fetchContent: true });
+  const raw = new Database(dbPath);
+  cleanups.push(() => raw.close());
+  raw.exec('UPDATE chunks SET embedding_input_hash = NULL');
+  const missing = () => (raw.query('SELECT COUNT(*) AS n FROM chunks WHERE embedding_input_hash IS NULL').get() as { n: number }).n;
+  const total = missing();
+  expect(total).toBeGreaterThanOrEqual(3);
+  expect(await store.repairEmbeddingInputHashes(2)).toBe(2);
+  let set = 2;
+  while (missing() > 0) set += await store.repairEmbeddingInputHashes(2);
+  expect(set).toBe(total);
+  expect((raw.query('SELECT COUNT(*) AS n FROM chunks WHERE embedding_input_hash <> content_hash').get() as { n: number }).n).toBe(0);
+  expect(await store.repairEmbeddingInputHashes(2)).toBe(0);
+  // A later NULL is not looked for again in this process.
+  raw.exec('UPDATE chunks SET embedding_input_hash = NULL');
+  expect(await store.repairEmbeddingInputHashes(2)).toBe(0);
 });

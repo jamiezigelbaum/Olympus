@@ -5336,18 +5336,41 @@ function rowOf(record: TierLedgerRecord): EffectiveRow {
  * open: idempotent, and it touches only decided items' current copies (the
  * hold is cleared where the decision already placed the copy).
  */
+// Settled once per ledger: completeMove applies the placement's hold, so no
+// build since makes such a copy, and the walk is not repeated at every open
+// (49 s on lane 6's fixture, 16 Nov, on the loop at each TierLedger open).
+const STALE_EMBED_HOLDS_SETTLED = 'settled:stale_embed_holds:v1';
+
 function settleStaleEmbedHolds(db: Database, now: string): number {
-  db.query(`
+  if (db.query('SELECT 1 FROM tier_ledger_meta WHERE key = ?').get(STALE_EMBED_HOLDS_SETTLED)) return 0;
+  // One corpus at a time, so each update seeks tier_copies_corpus
+  // (corpus_id, copy_state, embed_hold) to the held current copies instead
+  // of walking every copy; the corpus ids are found by skipping through the
+  // same index.
+  const corpora = (db.query(`
+    WITH RECURSIVE corpus(id) AS (
+      SELECT MIN(corpus_id) FROM tier_copies
+      UNION ALL
+      SELECT (SELECT MIN(corpus_id) FROM tier_copies WHERE corpus_id > corpus.id) FROM corpus WHERE corpus.id IS NOT NULL
+    )
+    SELECT id FROM corpus WHERE id IS NOT NULL
+  `).all() as Array<{ id: string }>).map((row) => row.id);
+  const settle = db.query(`
     UPDATE tier_copies SET embed_hold = 0, updated_at = ?
-    WHERE embed_hold = 1 AND copy_state = 'current'
+    WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1
       AND EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
           AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
       )
-  `).run(now);
-  return (db.query('SELECT changes() AS n').get() as { n: number }).n;
+  `);
+  let settled = 0;
+  db.transaction(() => {
+    for (const corpusId of corpora) settled += settle.run(now, corpusId).changes;
+    db.query('INSERT OR REPLACE INTO tier_ledger_meta (key, value) VALUES (?, ?)').run(STALE_EMBED_HOLDS_SETTLED, now);
+  })();
+  return settled;
 }
 
 /** One chat (`conversationKey`) or one source (`provider`, optionally one account) the owner asked to re-check. */

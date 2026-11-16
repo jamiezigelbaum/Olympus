@@ -6355,8 +6355,14 @@ export class LocalConnectorStore {
    * sync, to leave the per-item work out of a store that has none.
    */
   private keepsSecretLocations(): boolean {
-    // Any tombstone may be a Secret's location, or one retired and now listed again.
-    return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 LIMIT 1`).get() !== null;
+    // Any tombstone may be a Secret's location, or one retired and now listed
+    // again. The kept totals answer without a read of items (no index leads
+    // on tombstoned, so the old probe walked every item of a store with no
+    // tombstone: 13 s cold on lane 6's fixture, then 100 ms each sync batch).
+    // Before the first reconcile the per-item work is simply done.
+    const kept = this.totals();
+    if (!kept) return true;
+    return kept.tombstonedItems > 0;
   }
 
   /**
@@ -16022,6 +16028,29 @@ export class LocalConnectorStore {
     return applyStoreTotalsCount(this.db, count, new Date().toISOString());
   }
 
+  private embeddingInputHashesChecked = false;
+
+  /**
+   * Chunks with no embedding input hash (written before the column, by a
+   * backfill cut short, or copied from such a store) get their content hash,
+   * as migrate's backfill did at every open until it cost 46 s there. Found
+   * on the read thread a page at a time and set by key here; once a pass
+   * finds none, this process stops looking. Returns the chunks set.
+   */
+  async repairEmbeddingInputHashes(pageSize = 2_000): Promise<number> {
+    if (this.readOnly || this.embeddingInputHashesChecked) return 0;
+    const sql = 'SELECT chunk_pk FROM chunks WHERE embedding_input_hash IS NULL LIMIT ?';
+    const rows = (offThreadReadsSupported(this.dbPath)
+      ? await readInBackground(this.dbPath, { sql, params: [pageSize], mode: 'all' })
+      : this.db.query(sql).all(pageSize)) as Array<{ chunk_pk: number }>;
+    if (rows.length < pageSize) this.embeddingInputHashesChecked = true;
+    if (rows.length === 0) return 0;
+    const set = this.db.query('UPDATE chunks SET embedding_input_hash = content_hash WHERE chunk_pk = ? AND embedding_input_hash IS NULL');
+    let changed = 0;
+    this.db.transaction(() => { for (const row of rows) changed += set.run(row.chunk_pk).changes; })();
+    return changed;
+  }
+
   status(scope?: ConnectorStoreStatusScope, options: { countsMaxAgeMs?: number } = {}): ConnectorStoreStatus {
     const steps = this.statusSteps(scope, options);
     let step = steps.next();
@@ -20714,7 +20743,7 @@ export function connectorStoreOpenShape(): number {
     (db as { run: unknown }).run = (sql: string, ...rest: unknown[]) => { seen.push(sql); return (run as (...a: unknown[]) => unknown)(sql, ...rest); };
     applyConnectorStoreOpenSchema(db);
   } finally {
-    db.close();
+    closeSqliteStore(db, { checkpoint: false });
   }
   let hash = 0x811c9dc5;
   const text = `${CONNECTOR_STORE_SQLITE_SCHEMA_VERSION}\n${seen.map((sql) => sql.replace(/\s+/g, ' ').trim()).join('\n')}`;

@@ -462,6 +462,10 @@ describe('embedding holds follow the decision through a move', () => {
       first.recordRoutedPlacement(pending, decision({ state: 'pending', contentPending: true }), { copies: split, embedHold: true });
       expect(first.corpusCopyCounts(INTERNAL.corpusId).held).toBe(2);
       first.close();
+      // Such a ledger came from a build before the fix, which never marked it settled.
+      const raw = new Database(dbPath);
+      raw.query("DELETE FROM tier_ledger_meta WHERE key = 'settled:stale_embed_holds:v1'").run();
+      raw.close();
 
       const reopened = new TierLedger({ dbPath });
       expect(reopened.copies(ITEM).find((copy) => copy.state === 'current')?.embedHold).toBe(false);

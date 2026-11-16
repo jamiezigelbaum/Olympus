@@ -15328,18 +15328,35 @@ function rowOf(record) {
     metadataFlagged: record.metadataFlagged
   };
 }
+var STALE_EMBED_HOLDS_SETTLED = "settled:stale_embed_holds:v1";
 function settleStaleEmbedHolds(db, now) {
-  db.query(`
+  if (db.query("SELECT 1 FROM tier_ledger_meta WHERE key = ?").get(STALE_EMBED_HOLDS_SETTLED))
+    return 0;
+  const corpora = db.query(`
+    WITH RECURSIVE corpus(id) AS (
+      SELECT MIN(corpus_id) FROM tier_copies
+      UNION ALL
+      SELECT (SELECT MIN(corpus_id) FROM tier_copies WHERE corpus_id > corpus.id) FROM corpus WHERE corpus.id IS NOT NULL
+    )
+    SELECT id FROM corpus WHERE id IS NOT NULL
+  `).all().map((row) => row.id);
+  const settle = db.query(`
     UPDATE tier_copies SET embed_hold = 0, updated_at = ?
-    WHERE embed_hold = 1 AND copy_state = 'current'
+    WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1
       AND EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
           AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
       )
-  `).run(now);
-  return db.query("SELECT changes() AS n").get().n;
+  `);
+  let settled = 0;
+  db.transaction(() => {
+    for (const corpusId of corpora)
+      settled += settle.run(now, corpusId).changes;
+    db.query("INSERT OR REPLACE INTO tier_ledger_meta (key, value) VALUES (?, ?)").run(STALE_EMBED_HOLDS_SETTLED, now);
+  })();
+  return settled;
 }
 var TIER_RECHECK_META_PREFIX = "recheck:";
 function recheckRequestKey(scope) {
@@ -24544,7 +24561,10 @@ ${parentKey(ref)}`, { ref, origin });
     `).run(conservativeTierForDomain(this.trustDomain), now, now, syncRunId, itemPk);
   }
   keepsSecretLocations() {
-    return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 LIMIT 1`).get() !== null;
+    const kept = this.totals();
+    if (!kept)
+      return true;
+    return kept.tombstonedItems > 0;
   }
   reobserveSecretLocation(item, connectorId, ownershipKind, syncRunId) {
     const row = this.db.query(`
@@ -30617,6 +30637,24 @@ ${parentKey(ref)}`, { ref, origin });
     const count = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params: [], mode: "get" }) : this.db.query(sql).get();
     return applyStoreTotalsCount(this.db, count, new Date().toISOString());
   }
+  embeddingInputHashesChecked = false;
+  async repairEmbeddingInputHashes(pageSize = 2000) {
+    if (this.readOnly || this.embeddingInputHashesChecked)
+      return 0;
+    const sql = "SELECT chunk_pk FROM chunks WHERE embedding_input_hash IS NULL LIMIT ?";
+    const rows = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params: [pageSize], mode: "all" }) : this.db.query(sql).all(pageSize);
+    if (rows.length < pageSize)
+      this.embeddingInputHashesChecked = true;
+    if (rows.length === 0)
+      return 0;
+    const set = this.db.query("UPDATE chunks SET embedding_input_hash = content_hash WHERE chunk_pk = ? AND embedding_input_hash IS NULL");
+    let changed = 0;
+    this.db.transaction(() => {
+      for (const row of rows)
+        changed += set.run(row.chunk_pk).changes;
+    })();
+    return changed;
+  }
   status(scope, options = {}) {
     const steps = this.statusSteps(scope, options);
     let step = steps.next();
@@ -32765,7 +32803,7 @@ function connectorStoreOpenShape() {
     };
     applyConnectorStoreOpenSchema(db);
   } finally {
-    db.close();
+    closeSqliteStore(db, { checkpoint: false });
   }
   let hash = 2166136261;
   const text = `${CONNECTOR_STORE_SQLITE_SCHEMA_VERSION}

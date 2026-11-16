@@ -6710,6 +6710,15 @@ export async function main(): Promise<void> {
                 console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
               }
             }
+            for (const store of connectorStores) {
+              if (standBack.holds('status')) break;
+              try {
+                const set = await store.repairEmbeddingInputHashes();
+                if (set) console.warn(`[olympus] ${store.corpusId}: set the embedding input hash on ${set} chunks that had none.`);
+              } catch (error) {
+                console.warn(`[olympus] ${store.corpusId}: embedding input hash repair failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+              }
+            }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
               await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
             }

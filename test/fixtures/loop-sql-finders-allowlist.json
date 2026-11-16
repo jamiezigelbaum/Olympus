@@ -137,11 +137,6 @@
       "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
     },
     {
-      "site": "keepsSecretLocations local-index.ts < syncFromConnectorHeld local-index.ts",
-      "table": "items",
-      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
-    },
-    {
       "site": "lastCompletedSyncRun local-index.ts < pull provider-store-sync.ts",
       "table": "sync_runs",
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
@@ -220,11 +215,6 @@
       "site": "relabelUnreadFailSafe tier-ledger.ts",
       "table": "tier_items",
       "reason": "a test's direct call to the ledger; the engine finds these on the read worker (family 3)"
-    },
-    {
-      "site": "settleStaleEmbedHolds tier-ledger.ts < new TierLedger tier-ledger.ts",
-      "table": "tier_copies",
-      "reason": "boot or migration (step-back: boot work, later)"
     },
     {
       "site": "status local-index.ts < statusFor status.ts",
