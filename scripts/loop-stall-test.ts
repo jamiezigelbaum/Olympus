@@ -303,9 +303,13 @@ interface Loop { max_ms: number; over_budget: number; beats: number }
  * budgets, slow statements and long reads are reported as numbers and no longer fail a run; a WAL over the limit still does.
  */
 export const LOOP_STALL_LIMIT_MS = 1_000;
-export function gate(input: { background: Loop; front: Loop; workload_ok: boolean; wal_ok: boolean }) {
-  return input.workload_ok && input.wal_ok && input.background.beats > 0 && input.front.beats > 0
-    && input.background.max_ms < LOOP_STALL_LIMIT_MS && input.front.max_ms < LOOP_STALL_LIMIT_MS;
+// The release bar (owner, 16 Nov 2026, "Finish the boundary in 1.5"): the front never holds its loop 1 s; commands are
+// acknowledged under 1 s; the background gates on progress (no beat over 30 s, the work done, no WAL over 64 MB at any point).
+// Background beats over 1 s are reported by site and do not gate.
+const BACKGROUND_PROGRESS_LIMIT_MS = 30_000;
+export function gate(input: { background: Loop; front: Loop; workload_ok: boolean; wal_ok: boolean; ack_ok: boolean }) {
+  return input.workload_ok && input.wal_ok && input.ack_ok && input.background.beats > 0 && input.front.beats > 0
+    && input.background.max_ms < BACKGROUND_PROGRESS_LIMIT_MS && input.front.max_ms < LOOP_STALL_LIMIT_MS;
 }
 export function memoryMaxBytes(value: string): number {
   const match = /^(\d+)([KMGT]?)$/i.exec(value);
@@ -436,7 +440,14 @@ export function sqliteGuards(walAtEnd: Record<string, number>, walLines: readonl
   }, new Map<string, typeof reads[number]>()).values()].sort((a, b) => b.ms - a.ms);
   const background_reads_over_2s = longest(lane => lane === 'background');
   const other_reads_over_2s = longest(lane => lane !== 'background');
-  return { wal_ok: wal_over_limit.length === 0, wal_over_limit, background_reads_over_2s, other_reads_over_2s };
+  // The peak, not only the end: closing an engine truncates its WALs, so the end alone can pass a run whose WAL ran away.
+  const wal_peak: Record<string, number> = {};
+  for (const line of walLines) {
+    const match = /sqlite (?:wal held|wal|checkpoint): (\S+) .*?wal_bytes=(\d+)/.exec(line);
+    if (match) wal_peak[match[1]!] = Math.max(wal_peak[match[1]!] ?? 0, Number(match[2]));
+  }
+  const wal_peak_over = Object.entries(wal_peak).filter(([, bytes]) => bytes > WAL_END_LIMIT_BYTES).map(([label, bytes]) => ({ label, bytes }));
+  return { wal_ok: wal_over_limit.length === 0 && wal_peak_over.length === 0, wal_over_limit, wal_peak, wal_peak_over, background_reads_over_2s, other_reads_over_2s };
 }
 function coldFiles(dir: string) {
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite'));
@@ -621,12 +632,13 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const ack_ok = ackOk.length > 0 && ackSummary.over_1s.length === 0 && ackSummary.status_max_age_ms <= 10_000 && !ackSummary.no_control_thread;
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
-  const guards = sqliteGuards(walAtEnd, walLines.map(entry => entry.line));
-  // --quick (CI's small cold fixture, plan 16 Nov 2026): fails fast on a loop beat over 1 s only; the 600k gate stays the bar.
-  const pass = options.quick ? background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS
-    : gate({ background, front, workload_ok, wal_ok: guards.wal_ok });
+  const guards = sqliteGuards(walAtEnd, sqliteLines.map(entry => entry.line));
+  // One bar for the 600k gate and the quick cold test (plan, 16 Nov 2026).
+  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok });
+  // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
+  const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, pass_b: front.beats > 0 && front.max_ms < LOOP_STALL_LIMIT_MS && background.beats > 0 && background.max_ms < 30_000 && workload_ok && guards.wal_ok, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000),
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -651,16 +663,16 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     return [...table.values()].map(entry => ({ ...entry, total_s: Math.round(entry.total_s * 10) / 10 })).sort((a, b) => b.total_s - a.total_s);
   };
   const siteTable = { background: sites('background'), front: sites('front') };
-  for (const [role, loop] of [['background', background], ['front', front]] as const) {
+  for (const [role, loop] of [['front', front], ['background', background]] as const) {
     const worst = siteTable[role].slice().sort((a, b) => b.worst_ms - a.worst_ms)[0];
-    console.log(`${options.runCase} ${role}: worst ${Math.round(loop.max_ms)} ms at ${worst?.site ?? 'no sample'}; ${loop.max_ms < LOOP_STALL_LIMIT_MS ? 'PASS' : 'FAIL'}`);
+    const limit = role === 'front' ? LOOP_STALL_LIMIT_MS : BACKGROUND_PROGRESS_LIMIT_MS;
+    console.log(`${options.runCase} ${role}: worst ${Math.round(loop.max_ms)} ms at ${worst?.site ?? 'no sample'}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s${role === 'background' ? `; beats over 1 s, reported not gated: ${siteTable.background.reduce((sum, entry) => sum + entry.count, 0)}` : ''})`);
   }
-  console.log(`${options.runCase}: ${pass ? 'PASS' : 'FAIL'} (bar ${LOOP_STALL_LIMIT_MS} ms; over 250/100 ms: ${background.over_budget}/${front.over_budget}; slow SQL ${slow_sql.length}; workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}; WALs over 64 MB at end ${guards.wal_over_limit.length}; background reads over 2 s ${guards.background_reads_over_2s.length})`);
-  // Proposed scoring (b), printed beside today's (a) until the owner picks: the front at 1 s; the background on progress (no beat
-  // over 30 s, the work completes, the WAL limit), its beats over 1 s reported by site above.
-  const passB = front.beats > 0 && front.max_ms < LOOP_STALL_LIMIT_MS && background.beats > 0 && background.max_ms < 30_000 && workload_ok && guards.wal_ok;
-  console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ack_ok ? 'PASS' : 'FAIL'}`);
-  console.log(`${options.runCase} scoring: (a) nothing over 1 s on either engine ${pass ? 'PASS' : 'FAIL'}; (b) front under 1 s, background under 30 s with the work done ${passB ? 'PASS' : 'FAIL'}`);
+  console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s)`);
+  const peaks = Object.entries(guards.wal_peak).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, bytes]) => `${label} ${Math.round(bytes / 1048576)} MB`).join(', ') || 'no wal lines';
+  console.log(`${options.runCase} WAL: peak ${peaks}; over 64 MB at any point ${guards.wal_peak_over.length}, at end ${guards.wal_over_limit.length}; ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
+  console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}); ${workload_ok ? 'PASS' : 'FAIL'}`);
+  console.log(`${options.runCase} release bar (front under 1 s, ack under 1 s, background under 30 s, work done, WAL at most 64 MB throughout): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
   console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));
   rmSync(runDir, { recursive: true, force: true });
   return pass;

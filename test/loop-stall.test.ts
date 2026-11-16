@@ -87,9 +87,10 @@ test('fixture rebuilds an old shape with substantial embedded Personal and Priva
 
 // A red engine may never become green by losing a sampler or a workload.
 test('loop-stall gate passes on worst stalls under 1 s with the workload complete and no WAL over the limit', () => {
-  const healthy = { background: { max_ms: 999, over_budget: 40, beats: 1 }, front: { max_ms: 999, over_budget: 40, beats: 1 }, workload_ok: true, wal_ok: true };
+  const healthy = { background: { max_ms: 29_999, over_budget: 40, beats: 1 }, front: { max_ms: 999, over_budget: 40, beats: 1 }, workload_ok: true, wal_ok: true, ack_ok: true };
   expect(gate(healthy)).toBe(true);
-  expect(gate({ ...healthy, background: { ...healthy.background, max_ms: 1000 } })).toBe(false);
+  expect(gate({ ...healthy, background: { ...healthy.background, max_ms: 30_000 } })).toBe(false);
+  expect(gate({ ...healthy, ack_ok: false })).toBe(false);
   expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 1000 } })).toBe(false);
   expect(gate({ ...healthy, background: { ...healthy.background, beats: 0 } })).toBe(false);
   expect(gate({ ...healthy, workload_ok: false })).toBe(false);
@@ -100,6 +101,7 @@ test('loop-stall gate fails on a WAL over 64 MB at the end and lists reads held 
   const line = (label: string, ms: number, lane: string) => `[olympus] sqlite wal: ${label} wal_bytes=1 oldest_read_ms=${ms} oldest_read_lane=${lane} oldest_read_site=async`;
   expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 }, [line('a', 2000, 'background'), line('a', 9000, 'shared')])).toMatchObject({ wal_ok: true, other_reads_over_2s: [{ ms: 9000, lane: 'shared' }] });
   expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 + 1 }, []).wal_ok).toBe(false);
+  expect(sqliteGuards({}, ['[olympus] sqlite checkpoint: ledger wal_bytes=67108865 ms=1 busy=0 frames=1 checkpointed=1'])).toMatchObject({ wal_ok: false, wal_peak_over: [{ label: 'ledger', bytes: 67108865 }] });
   expect(sqliteGuards({}, [line('internal', 2001, 'background'), line('internal', 4000, 'background')])).toMatchObject({ wal_ok: true, background_reads_over_2s: [{ label: 'internal', ms: 4000 }] });
 });
 
