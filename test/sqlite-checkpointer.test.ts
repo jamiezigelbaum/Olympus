@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test } from 'bun:test';
 import { loopWalAutocheckpointPragma, setSqliteCheckpointsOffLoop } from '../src/core/sqlite-store.ts';
+import { ControlPathHeadroom } from '../src/workers/control-path-headroom.ts';
 import { startSqliteCheckpointer } from '../src/workers/engine/sqlite-checkpointer.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -49,7 +50,10 @@ test('a large WAL is checkpointed by the worker without the writer lock, and the
 // level with it and SQLite never rewinds the WAL (gate on ced5a461: 134 to
 // 379 MB against the 64 MB limit, every pass busy=0). About 100 MB of commits with a
 // turn between them, as the engine's bulk lanes write.
-async function writeSteadily(path: string, room: () => Promise<void> | undefined): Promise<{ peak: number; end: number }> {
+async function writeSteadily(path: string, room: (() => Promise<void> | undefined) | undefined): Promise<{ peak: number; end: number }> {
+  // The engine's own turn (a timer; Bun delivers no worker message between chained immediates), joined by the room wait as in the background.
+  const headroom = new ControlPathHeadroom({ sliceMs: 0 });
+  headroom.setRoomGate(room);
   const writer = new Database(path);
   writer.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0; PRAGMA journal_size_limit = 67108864; CREATE TABLE IF NOT EXISTS t (v BLOB)');
   const insert = writer.query('INSERT INTO t VALUES (randomblob(4000))');
@@ -58,34 +62,37 @@ async function writeSteadily(path: string, room: () => Promise<void> | undefined
   for (let round = 0; round < 1500; round += 1) {
     commit();
     if (round % 8 === 0) peak = Math.max(peak, statSync(`${path}-wal`).size);
-    await (room() ?? new Promise<void>((resolve) => { setImmediate(resolve); }));
+    await headroom.ingestionTurn();
   }
   const end = statSync(`${path}-wal`).size;
+  headroom.stop();
   writer.close();
   return { peak, end };
 }
 
-test('a writer that never pauses: its WAL stays bounded once bulk work waits for room, and grows without it', async () => {
+// The engine's files are open and have had a pass long before bulk writing
+// starts; this test's writer would otherwise finish before a worker has started.
+async function seedAndFirstPass(checkpointer: NonNullable<ReturnType<typeof startSqliteCheckpointer>>, label: string, path: string): Promise<void> {
+  const seed = new Database(path);
+  seed.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE t (v BLOB); INSERT INTO t VALUES (randomblob(400000))');
+  checkpointer.tick([{ label, dbPath: path }]);
+  await waitFor(() => checkpointer.roomStats().passes > 0, { description: `${label} had its first pass` });
+  seed.close();
+}
+
+test('a writer that never pauses: its WAL stays under the limit because its turns wait for room', async () => {
   const root = mkdtempSync(join(tmpdir(), 'olympus-checkpointer-'));
   roots.push(root);
-  const options = { log: () => {}, atBytes: 256 * 1024, roomBytes: 2 * 1024 * 1024, hotMs: 5, idleMs: 5 };
-  // Passes alone: each one ends behind the writer.
-  const free = startSqliteCheckpointer(options)!;
-  const freePath = join(root, 'free.sqlite');
-  new Database(freePath).close();
-  free.tick([{ label: 'free', dbPath: freePath }]);
-  const unbounded = await writeSteadily(freePath, () => undefined);
-  free.stop();
-  // The same writing, with its turns waiting for room.
-  const gated = startSqliteCheckpointer(options)!;
+  // Without the wait this writing leaves a WAL of about 115 MB on a quiet
+  // machine (measured; on a loaded one a pass sometimes lands in a gap, so
+  // that side is not asserted here).
+  const gated = startSqliteCheckpointer({ log: () => {}, atBytes: 256 * 1024, roomBytes: 2 * 1024 * 1024, hotMs: 5, idleMs: 5 })!;
   const gatedPath = join(root, 'gated.sqlite');
-  new Database(gatedPath).close();
-  gated.tick([{ label: 'gated', dbPath: gatedPath }]);
+  await seedAndFirstPass(gated, 'gated', gatedPath);
   const bounded = await writeSteadily(gatedPath, () => gated.room());
   const stats = gated.roomStats();
   gated.stop();
-  // This writer is some twenty times faster than the engine's, so the file overshoots the test's 2 MB mark; the limit is what counts.
-  expect(unbounded.end).toBeGreaterThan(96 * 1024 * 1024);
+  // This writer is many times faster than the engine's, so the file overshoots the test's 2 MB mark; the limit is what counts.
   expect(bounded.peak).toBeLessThan(64 * 1024 * 1024);
   expect(stats.waits).toBeGreaterThan(2);
   expect(stats.rewinds).toBeGreaterThan(2);

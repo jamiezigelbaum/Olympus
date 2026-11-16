@@ -39298,9 +39298,10 @@ function startEngineHeartbeat(env, role) {
   if (beat || typeof Worker === "undefined")
     return;
   try {
-    const sab = new SharedArrayBuffer(32 + STEP_BYTES);
+    const sab = new SharedArrayBuffer(32 + STEP_BYTES + 4 * (LOOP_LAG_BUCKETS_MS.length + 1));
     const ints = new Int32Array(sab, 0, 8);
-    const bytes = new Uint8Array(sab, 32);
+    const bytes = new Uint8Array(sab, 32, STEP_BYTES);
+    const buckets = new Int32Array(sab, 32 + STEP_BYTES, LOOP_LAG_BUCKETS_MS.length + 1);
     const worker = new Worker(URL.createObjectURL(new Blob([HEARTBEAT_WORKER_SOURCE], { type: "text/javascript" })));
     worker.unref?.();
     const metrics = env.OLYMPUS_ENGINE_LOOP_METRICS_DIR;
@@ -39319,6 +39320,8 @@ function startEngineHeartbeat(env, role) {
         if (lag >= (role === "front" ? 100 : 250))
           Atomics.add(ints, 4, 1);
         Atomics.add(ints, 5, 1);
+        const bucket = LOOP_LAG_BUCKETS_MS.findIndex((edge) => lag < edge);
+        Atomics.add(buckets, bucket < 0 ? LOOP_LAG_BUCKETS_MS.length : bucket, 1);
       }
     }, interval);
     tick.unref?.();
@@ -39413,17 +39416,19 @@ function processAlive2(pid) {
     return error.code === "EPERM";
   }
 }
-var ENGINE_HEARTBEAT_SCHEMA = "olympus.engine-heartbeat.v1", HEARTBEAT_WRITE_MS = 1000, LOOP_TICK_MS = 250, HEARTBEAT_STALE_MS = 15000, STEP_BYTES = 200, beat, HEARTBEAT_WORKER_SOURCE, STARTUP_CAP_BASE_MS, STARTUP_CAP_PER_GB_MS = 60000;
+var ENGINE_HEARTBEAT_SCHEMA = "olympus.engine-heartbeat.v1", HEARTBEAT_WRITE_MS = 1000, LOOP_TICK_MS = 250, HEARTBEAT_STALE_MS = 15000, STEP_BYTES = 200, LOOP_LAG_BUCKETS_MS, beat, HEARTBEAT_WORKER_SOURCE, STARTUP_CAP_BASE_MS, STARTUP_CAP_PER_GB_MS = 60000;
 var init_engine_heartbeat = __esm(() => {
   init_boot_progress();
   init_olympus_layout();
+  LOOP_LAG_BUCKETS_MS = [10, 25, 50, 100, 200, 300, 500, 1000, 2000, 5000, 1e4];
   HEARTBEAT_WORKER_SOURCE = `
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 self.onmessage = ({ data }) => {
   const { sab, path, pid, role, writeMs, startedAt, metrics, tickMs, budgetMs } = data;
   const ints = new Int32Array(sab, 0, 8);
-  const bytes = new Uint8Array(sab, 32);
+  const bytes = new Uint8Array(sab, 32, ${STEP_BYTES});
+  const buckets = new Int32Array(sab, 32 + ${STEP_BYTES}, ${LOOP_LAG_BUCKETS_MS.length + 1});
   const decoder = new TextDecoder();
   let lastTick = -1, lastTickAt = Date.now(), lastChange = -1, stepSince = Date.now();
   let maxLag = 0;
@@ -39450,7 +39455,7 @@ self.onmessage = ({ data }) => {
     const openLag = metrics ? Math.max(0, ((now - Atomics.load(ints, 6)) >>> 0) - tickMs) : 0;
     maxLag = Math.max(maxLag, openLag, Atomics.load(ints, 3) / 1000);
     const body = { schema: '${ENGINE_HEARTBEAT_SCHEMA}', pid, role, startedAt, writtenAt: new Date(now).toISOString(),
-      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5) } } : {}),
+      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5), buckets: Array.from(buckets, (_, i) => Atomics.load(buckets, i)) } } : {}),
       blockedMs: Math.max(0, now - lastTickAt - ${LOOP_TICK_MS}),
       ...(step ? { step, stepSince: new Date(stepSince).toISOString() } : {}) };
     sayHeld(now, body.blockedMs, step);
@@ -51888,6 +51893,26 @@ var init_built_in_sniffer = __esm(() => {
 });
 
 // src/core/source-index/keyword-expansion.ts
+function registerOwnerKeywordModel(resolve) {
+  ownerKeywordModel = resolve;
+}
+function ownerKeywordExpansionEnabled() {
+  return process.env.OLYMPUS_KEYWORD_EXPANSION_MODEL === "owner";
+}
+function keywordPrepareWaitMs() {
+  const set = Number(process.env.OLYMPUS_KEYWORD_PREPARE_WAIT_MS);
+  return Number.isFinite(set) && set > 0 ? set : KEYWORD_PREPARE_WAIT_MS;
+}
+async function expansionModel() {
+  if (ownerKeywordExpansionEnabled() && ownerKeywordModel) {
+    const chosen = await ownerKeywordModel().catch(() => "unavailable");
+    if (chosen === "unavailable")
+      return { available: () => false, down: true };
+    if (chosen)
+      return { model: chosen, available: () => true, owner: true };
+  }
+  return registeredBuiltInPrivateModel();
+}
 async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   if (keywordExpansionDisabled())
     return EMPTY2;
@@ -51904,8 +51929,8 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   const once = typeof profile === "function" ? () => read ??= Promise.resolve(profile()).then((value) => languages = value) : profile;
   const full = expandCachedSourceIndexKeywords(query, once, cachedKeywordExpansion());
   full.catch(() => {});
-  const builtIn = registeredBuiltInPrivateModel();
-  const lastMs = builtIn ? lastTranslationMs.get(builtIn.model) : undefined;
+  const builtIn = await expansionModel();
+  const lastMs = builtIn?.model ? lastTranslationMs.get(builtIn.model) : undefined;
   if (lastMs !== undefined && lastMs > (options.waitMs ?? 0)) {
     if (languages === undefined && read) {
       await Promise.race([read.catch(() => {}), new Promise((resolve) => {
@@ -51936,7 +51961,7 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   return alternatives;
 }
 async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
-  const builtIn = registeredBuiltInPrivateModel();
+  const builtIn = await expansionModel();
   if (!query.trim() || query.length > 8000)
     return EMPTY2;
   const sources = sourceIndexFtsTermGroups(query).map((group) => group[0]).filter((term) => !/\p{N}/u.test(term));
@@ -51944,7 +51969,7 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
   const keyOf = (word) => stemmer(word.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase());
   const concepts = sources.map((source) => Object.values(vocabulary).find((row) => Object.values(row).some((words) => words.some((word) => !word.includes(" ") && keyOf(word) === keyOf(source)))));
   if (!builtIn?.available() && !concepts.some(Boolean))
-    return EMPTY2;
+    return builtIn?.down ? failedCopy(EMPTY2) : EMPTY2;
   const detectedLanguage = sourceIndexQueryLanguage(query);
   const knownLanguages = concepts.every(Boolean) && concepts.length > 0 ? Object.keys(concepts[0]).filter((language) => concepts.every((row, index) => row?.[language]?.some((word) => !word.includes(" ") && keyOf(word) === keyOf(sources[index])))) : [];
   const sourceLanguages = detectedLanguage === "und" ? knownLanguages : [detectedLanguage];
@@ -51961,12 +51986,18 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
     return [[source, row[language] ?? []]];
   }))]));
   const fallback = parseKeywordExpansion(JSON.stringify(seeded), sources, languages);
-  if (!builtIn?.available() || concepts.every(Boolean))
+  if (concepts.every(Boolean))
     return fallback;
-  let cache = caches2.get(builtIn.model);
+  if (builtIn?.down)
+    return failedCopy(fallback);
+  const expander = builtIn?.available() ? builtIn.model : undefined;
+  if (!expander)
+    return fallback;
+  const waitsItsTurn = builtIn.owner === true;
+  let cache = caches2.get(expander);
   if (!cache) {
     cache = new Map;
-    caches2.set(builtIn.model, cache);
+    caches2.set(expander, cache);
   }
   const key = JSON.stringify([query, languages]);
   const existing = cache.get(key);
@@ -51980,7 +52011,7 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
     return existing.pending;
   const startedAt = Date.now();
   const pending = translate();
-  const model = builtIn.model;
+  const model = expander;
   pending.finally(() => {
     lastTranslationMs.set(model, Date.now() - startedAt);
   }).catch(() => {});
@@ -51994,13 +52025,13 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
   return pending;
   async function translate() {
     try {
-      const completion = await builtIn.model.complete({
+      const completion = await expander.complete({
         system: SYSTEM + `
 Target languages: ` + languages.map((code) => code + " = " + new Intl.DisplayNames(["en"], { type: "language" }).of(code)).join("; "),
         prompt: JSON.stringify({ context: query, concepts: sources.map((term, index) => ({ id: String(index), term })), languages, languageNames: Object.fromEntries(languages.map((code) => [code, new Intl.DisplayNames(["en"], { type: "language" }).of(code) ?? code])) }),
         localOnly: true,
         maxOutputChars: 6000,
-        signal: AbortSignal.timeout(20000),
+        ...waitsItsTurn ? {} : { signal: AbortSignal.timeout(20000) },
         responseSchema: {
           type: "object",
           properties: Object.fromEntries(languages.map((language) => [language, {
@@ -52018,7 +52049,7 @@ Target languages: ` + languages.map((code) => code + " = " + new Intl.DisplayNam
       });
       let generated;
       try {
-        generated = JSON.parse(completion.text);
+        generated = JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, ""));
       } catch {
         return failedCopy(fallback);
       }
@@ -52102,7 +52133,7 @@ async function withExpandedSourceIndexKeywords(query, languages, run, owner) {
   const alternatives = await expandSourceIndexKeywords(query, languages, owner);
   return await withKeywordAlternatives(query, alternatives, run);
 }
-var caches2, EMPTY2, failedTranslations, failedCopy = (fallback) => {
+var caches2, ownerKeywordModel, EMPTY2, failedTranslations, failedCopy = (fallback) => {
   const copy = new Map(fallback);
   failedTranslations.add(copy);
   return copy;
@@ -65269,7 +65300,7 @@ function createConnectorStoreCorpusAdapter(options) {
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
-    await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: KEYWORD_PREPARE_WAIT_MS, status });
+    await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: keywordPrepareWaitMs(), status });
     return status;
   };
   expanded.hybridAvailability = adapter.hybridAvailability;
@@ -240140,7 +240171,7 @@ function startSqliteCheckpointer(options = {}) {
   let stopped = false;
   let needRoom;
   let gate;
-  const stats = { waits: 0, totalMs: 0, worstMs: 0, rewinds: 0, rewindsMissed: 0 };
+  const stats = { passes: 0, waits: 0, totalMs: 0, worstMs: 0, rewinds: 0, rewindsMissed: 0 };
   let summarized = { ...stats };
   let summarizedAt = now();
   const finish = (entry, reply) => {
@@ -240244,11 +240275,13 @@ function startSqliteCheckpointer(options = {}) {
   function record(state, reply, madeRoom) {
     state.lastPassAt = now();
     if (!reply.ok) {
-      log(`[olympus] sqlite checkpoint: ${state.label} failed (${reply.error ?? "Error"}); tried again at the next pass.`);
+      if (!stopped)
+        log(`[olympus] sqlite checkpoint: ${state.label} failed (${reply.error ?? "Error"}); tried again at the next pass.`);
       return;
     }
     if (reply.lost)
       return;
+    stats.passes += 1;
     const expectedRewind = state.awaitRewind;
     state.awaitRewind = madeRoom;
     state.firstDone = true;
@@ -270657,6 +270690,12 @@ async function main() {
   } : undefined);
   const answerBuiltInModel = workerBuiltInModel ? localModelActivity.track("built_in", workerBuiltInModel.model) : undefined;
   let localPrivateRoute;
+  registerOwnerKeywordModel(async () => {
+    const route = await localPrivateRoute?.();
+    if (!route)
+      return;
+    return "unavailable" in route ? "unavailable" : route.model;
+  });
   registerBuiltInPrivateModel(workerBuiltInModel ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle } : undefined);
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
   let localWorkPending = () => false;
@@ -275715,6 +275754,7 @@ var init_server5 = __esm(async () => {
   init_source_scope_browser();
   init_chunk_release();
   init_installed_tier_classification();
+  init_keyword_expansion();
   init_built_in_sniffer();
   init_answer_activity();
   init_privacy_profile();

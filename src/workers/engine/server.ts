@@ -461,6 +461,7 @@ import {
 import { frontJudgeNow, judgeNow } from '../classification/chunk-release.ts';
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
+import { registerOwnerKeywordModel } from '../../core/source-index/keyword-expansion.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudgeChoiceRuntime } from '../classification/built-in-sniffer.ts';
 import {
   createAnswerActivity,
@@ -811,6 +812,12 @@ export async function main(): Promise<void> {
   // The owner's Private answer route as the ChatGPT private panel uses it:
   // set where the answer analysts are built, below.
   let localPrivateRoute: ReturnType<typeof createLocalPrivateRoute> | undefined;
+  // Keyword expansion asks the same chooser when OLYMPUS_KEYWORD_EXPANSION_MODEL=owner.
+  registerOwnerKeywordModel(async () => {
+    const route = await localPrivateRoute?.();
+    if (!route) return undefined;
+    return 'unavailable' in route ? 'unavailable' : route.model;
+  });
   registerBuiltInPrivateModel(workerBuiltInModel
     ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
     : undefined);

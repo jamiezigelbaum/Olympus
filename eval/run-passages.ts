@@ -11,6 +11,10 @@ import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts'
 import { createAnalyst, withPromptBudget, type AnalystReadingNotes } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import { DelphiClient } from '../src/core/delphi.ts';
+import { createBuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
+import type { AnalystModel } from '../src/core/analyst.ts';
+import { registerBuiltInPrivateModel } from '../src/workers/classification/built-in-sniffer.ts';
+import { registerOwnerKeywordModel } from '../src/core/source-index/keyword-expansion.ts';
 import { fitPackToPromptBytes, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_MAX_CHARS_PER_CANDIDATE } from '../src/workers/source-index/analyst-answer.ts';
 import { prepareBuiltInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import { createSourceAnswerTrace, observeSourceAnswerRetrievalAttempt, runWithSourceAnswerTrace, snapshotSourceAnswerTrace, type SourceAnswerTraceSnapshot } from '../src/workers/source-index/answer-latency-trace.ts';
@@ -745,7 +749,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
       if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer' || key === '--judge-answers') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
-      if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes', '--answer-arms', '--answer-repeats', '--only', '--answers', '--narrow'].includes(key!)) throw new Error('Unsupported passage eval option.');
+      if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes', '--answer-arms', '--answer-repeats', '--only', '--answers', '--narrow', '--keyword-expansion'].includes(key!)) throw new Error('Unsupported passage eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Passage eval option requires a value.');
       values.set(key!, value);
@@ -834,6 +838,35 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       answer = answerBy('off');
       if (armNames) answerArms = armNames.map(name => ({ name, answer: answerBy(name) }));
     }
+    // --keyword-expansion owner|built-in: which model translates a question's search words
+    // (default: none registered, the static word list only). The search waits for the
+    // translation so its effect and its added time are both measured.
+    const expansionMode = values.get('--keyword-expansion');
+    const expansionCalls = { calls: 0, failed: 0, wallMs: 0 };
+    if (expansionMode !== undefined) {
+      if (expansionMode !== 'owner' && expansionMode !== 'built-in') throw new Error('--keyword-expansion takes owner or built-in.');
+      enter('load_keyword_expansion');
+      process.env.OLYMPUS_KEYWORD_PREPARE_WAIT_MS ??= '600000';
+      const timed = (model: AnalystModel): AnalystModel => ({ ...model, complete: async request => {
+        const started = performance.now(); expansionCalls.calls++;
+        try { return await model.complete(request); }
+        catch (error) { expansionCalls.failed++; throw error; }
+        finally { expansionCalls.wallMs += Math.round(performance.now() - started); }
+      } });
+      if (expansionMode === 'owner') {
+        const lane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE?.trim() ? parseLane(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE) : undefined;
+        const profile = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PROFILE?.trim() ? parseModelProfile(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PROFILE) : 'source_answer';
+        const owner = timed(createDelphiAnalystModel(new DelphiClient(config), lane ? { lane } : { profile }));
+        process.env.OLYMPUS_KEYWORD_EXPANSION_MODEL = 'owner';
+        registerOwnerKeywordModel(async () => owner);
+        cleanups.push(() => registerOwnerKeywordModel(undefined));
+      } else {
+        const builtIn = createBuiltInAnalystModel({ env: { ...process.env, OLYMPUS_BUILT_IN_ANALYST: 'on' }, waitForInstall: true });
+        await builtIn.prepare();
+        registerBuiltInPrivateModel({ model: timed(builtIn), available: () => true });
+        cleanups.push(() => { registerBuiltInPrivateModel(undefined); void builtIn.stop(); });
+      }
+    }
     enter('load_embedding');
     const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(config, process.env) });
     enter('load_reranker');
@@ -900,6 +933,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const multiItemEvidence = receipt.questions?.flatMap(row => row.neededEvidence ? [{ questionId: row.questionId, ...row.neededEvidence }] : []);
     if (multiItemEvidence?.length) console.log(JSON.stringify({ multiItemEvidence }));
     if (probe && receipt.questions) console.log(JSON.stringify({ recallGroups: recallGroups(receipt.questions) }));
+    if (expansionMode) console.log(JSON.stringify({ keywordExpansion: { mode: expansionMode, ...expansionCalls } }));
     if (storeTimes) console.log(JSON.stringify({ storeTimes: storeTimes.summary() }));
     if (values.has('--compare')) enter('compare');
     if (values.has('--compare')) console.log(JSON.stringify(comparePassageReceipts(receipt, JSON.parse(readFileSync(values.get('--compare')!, 'utf8')) as PassageReceipt)));

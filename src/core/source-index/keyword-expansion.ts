@@ -1,7 +1,9 @@
 import { stemmer } from 'stemmer';
 import equivalents from './keyword-equivalents.json';
-// Only the registered built-in model can expand questions. No corpus text is
-// passed to it, and no configured/cloud analyst is consulted, even on failure.
+// The built-in model expands questions unless OLYMPUS_KEYWORD_EXPANSION_MODEL=owner
+// and the owner's own local Private model is set up: then that model does, and
+// the built-in never stands in for it. No corpus text is passed to either, and
+// no cloud analyst is consulted, even on failure.
 import { registeredBuiltInPrivateModel } from '../../workers/classification/built-in-sniffer.ts';
 import type { AnalystModel } from '../analyst.ts';
 import { sourceIndexFtsTermGroups, sourceIndexQueryLanguage } from './fts.ts';
@@ -10,6 +12,26 @@ import { withKeywordAlternatives, requestKeywordAlternatives, pinKeywordAlternat
 // `value` is set once the translation has finished, so a caller that must not wait can use it.
 interface CachedExpansion { pending: Promise<KeywordExpansionMap>; expires: number; value?: KeywordExpansionMap }
 const caches = new WeakMap<AnalystModel, Map<string, CachedExpansion>>();
+
+/** The owner's local Private model from the shared chooser: a model, 'unavailable' when it is set up but down, undefined when there is none. */
+export type OwnerKeywordModel = () => Promise<AnalystModel | 'unavailable' | undefined>;
+let ownerKeywordModel: OwnerKeywordModel | undefined;
+export function registerOwnerKeywordModel(resolve: OwnerKeywordModel | undefined): void { ownerKeywordModel = resolve; }
+export function ownerKeywordExpansionEnabled(): boolean { return process.env.OLYMPUS_KEYWORD_EXPANSION_MODEL === 'owner'; }
+/** How long a search's preparation waits for a translation (an eval sets OLYMPUS_KEYWORD_PREPARE_WAIT_MS to measure the translation itself). */
+export function keywordPrepareWaitMs(): number {
+  const set = Number(process.env.OLYMPUS_KEYWORD_PREPARE_WAIT_MS);
+  return Number.isFinite(set) && set > 0 ? set : KEYWORD_PREPARE_WAIT_MS;
+}
+interface Expander { model?: AnalystModel; available(): boolean; owner?: true; down?: true }
+async function expansionModel(): Promise<Expander | undefined> {
+  if (ownerKeywordExpansionEnabled() && ownerKeywordModel) {
+    const chosen = await ownerKeywordModel().catch((): 'unavailable' => 'unavailable');
+    if (chosen === 'unavailable') return { available: () => false, down: true };
+    if (chosen) return { model: chosen, available: () => true, owner: true };
+  }
+  return registeredBuiltInPrivateModel();
+}
 const EMPTY: KeywordExpansionMap = new Map();
 // Word lists returned because the model's translation failed or gave up: the
 // search used the static equivalents only, and its coverage says so.
@@ -67,8 +89,8 @@ export async function expandSourceIndexKeywords(
     : profile;
   const full = expandCachedSourceIndexKeywords(query, once, cachedKeywordExpansion());
   full.catch(() => {});
-  const builtIn = registeredBuiltInPrivateModel();
-  const lastMs = builtIn ? lastTranslationMs.get(builtIn.model) : undefined;
+  const builtIn = await expansionModel();
+  const lastMs = builtIn?.model ? lastTranslationMs.get(builtIn.model) : undefined;
   if (lastMs !== undefined && lastMs > (options.waitMs ?? 0)) {
     // A finished translation of this question is still used; otherwise the static equivalents.
     // A profile the store already holds settles within a turn; a slow read is not waited for.
@@ -98,13 +120,13 @@ export async function expandSourceIndexKeywords(
 }
 
 async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLanguageProfile, cachedOnly?: CachedKeywordExpansion): Promise<KeywordExpansionMap> {
-  const builtIn = registeredBuiltInPrivateModel();
+  const builtIn = await expansionModel();
   if (!query.trim() || query.length > 8000) return EMPTY;
   const sources = sourceIndexFtsTermGroups(query).map(group => group[0]!).filter(term => !/\p{N}/u.test(term));
   const vocabulary = equivalents as Record<string, Record<string, string[]>>;
   const keyOf = (word: string) => stemmer(word.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase());
   const concepts = sources.map(source => Object.values(vocabulary).find(row => Object.values(row).some(words => words.some(word => !word.includes(' ') && keyOf(word) === keyOf(source)))));
-  if (!builtIn?.available() && !concepts.some(Boolean)) return EMPTY;
+  if (!builtIn?.available() && !concepts.some(Boolean)) return builtIn?.down ? failedCopy(EMPTY) : EMPTY;
   const detectedLanguage = sourceIndexQueryLanguage(query);
   const knownLanguages = concepts.every(Boolean) && concepts.length > 0
     ? Object.keys(concepts[0]!).filter(language => concepts.every((row,index) => row?.[language]?.some(word => !word.includes(' ') && keyOf(word) === keyOf(sources[index]!))))
@@ -120,9 +142,14 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
     return [[source,row[language] ?? []]];
   }))]));
   const fallback = parseKeywordExpansion(JSON.stringify(seeded),sources,languages);
-  if (!builtIn?.available() || concepts.every(Boolean)) return fallback;
-  let cache = caches.get(builtIn.model);
-  if (!cache) { cache = new Map(); caches.set(builtIn.model, cache); }
+  if (concepts.every(Boolean)) return fallback;
+  // The owner's model is set up but down: the static word list is used, and the search says so.
+  if (builtIn?.down) return failedCopy(fallback);
+  const expander = builtIn?.available() ? builtIn.model : undefined;
+  if (!expander) return fallback;
+  const waitsItsTurn = builtIn!.owner === true;
+  let cache = caches.get(expander);
+  if (!cache) { cache = new Map(); caches.set(expander, cache); }
   const key = JSON.stringify([query, languages]);
   const existing = cache.get(key);
   if (cachedOnly) {
@@ -134,7 +161,7 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
   if (existing && existing.expires > Date.now()) return existing.pending;
   const startedAt = Date.now();
   const pending = translate();
-  const model = builtIn.model;
+  const model = expander;
   pending.finally(() => { lastTranslationMs.set(model, Date.now() - startedAt); }).catch(() => {});
   const entry: CachedExpansion = {pending, expires: Date.now() + 5 * 60_000};
   cache.set(key, entry);
@@ -144,9 +171,11 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
 
   async function translate(): Promise<KeywordExpansionMap> {
     try {
-      const completion = await builtIn!.model.complete({
+      const completion = await expander!.complete({
         system: SYSTEM + '\nTarget languages: ' + languages.map(code => code + ' = ' + new Intl.DisplayNames(['en'], {type:'language'}).of(code)).join('; '), prompt: JSON.stringify({ context: query, concepts: sources.map((term,index)=>({id:String(index),term})), languages, languageNames: Object.fromEntries(languages.map(code => [code, new Intl.DisplayNames(['en'], {type:'language'}).of(code) ?? code])) }),
-        localOnly: true, maxOutputChars: 6000, signal: AbortSignal.timeout(20_000),
+        localOnly: true, maxOutputChars: 6000,
+        // The built-in model keeps its give-up; the owner's model waits its turn like any other call.
+        ...(waitsItsTurn ? {} : { signal: AbortSignal.timeout(20_000) }),
         responseSchema: {
           type: 'object', properties: Object.fromEntries(languages.map(language => [language, {
             type: 'object', properties: Object.fromEntries(sources.map((_,index) => [String(index), {
@@ -156,7 +185,7 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
         },
       });
       let generated: unknown;
-      try { generated=JSON.parse(completion.text); } catch { return failedCopy(fallback); }
+      try { generated=JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')); } catch { return failedCopy(fallback); }
       const merged: Record<string, Record<string, unknown>> = {};
       for (const language of languages) {
         const decoded: Record<string,unknown> = {...seeded[language]};

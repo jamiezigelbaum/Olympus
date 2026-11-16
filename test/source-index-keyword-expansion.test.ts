@@ -398,3 +398,37 @@ test('a translation that fails is reported as an incomplete keyword preparation,
   await expandSourceIndexKeywords('comet solicitor', ['spa'], {}, { waitMs: 5_000, status: fine });
   expect(fine.incomplete).toBe(false);
 });
+
+// Plan ruling, 2026-11-16 14:33Z: the owner's model can do the translating,
+// behind a switch, so the exception is measured and not argued.
+test("with the switch on, the owner's model translates, waits its turn, and the built-in model never stands in for it", async () => {
+  const { registerOwnerKeywordModel } = await import('../src/core/source-index/keyword-expansion.ts');
+  let builtInCalls = 0;
+  registerBuiltInPrivateModel({ available: () => true, model: { async complete() { builtInCalls++; return { text: '{"spa":{"0":["pequeno"]}}', modelId: 'small' }; } } });
+  let ownerSignal: unknown = 'unset';
+  const owner = { async complete(request: { signal?: AbortSignal }) { ownerSignal = request.signal; return { text: '```json\n{"spa":{"0":["meteorito"],"1":["escribano"]}}\n```', modelId: 'big' }; } };
+  let chosen: typeof owner | 'unavailable' | undefined = owner;
+  registerOwnerKeywordModel(async () => chosen as never);
+  process.env.OLYMPUS_KEYWORD_EXPANSION_MODEL = 'owner';
+  try {
+    const status = { incomplete: false };
+    const words = await expandSourceIndexKeywords('meteorite scrivener', ['spa'], {}, { waitMs: 5_000, status });
+    expect(JSON.stringify([...words])).toContain('meteorito');
+    expect(status.incomplete).toBe(false);
+    expect(ownerSignal).toBeUndefined(); // no give-up clock on the owner's model
+    expect(builtInCalls).toBe(0);
+    // Set up but down: the static list is used and the search says so; the built-in is not asked.
+    chosen = 'unavailable';
+    const down = { incomplete: false };
+    await expandSourceIndexKeywords('pulsar bailiff', ['spa'], {}, { waitMs: 5_000, status: down });
+    expect(down.incomplete).toBe(true);
+    expect(builtInCalls).toBe(0);
+    // No owner model at all: the built-in model does it, as before.
+    chosen = undefined;
+    await expandSourceIndexKeywords('quasar magistrate', ['spa'], {}, { waitMs: 5_000 });
+    expect(builtInCalls).toBe(1);
+  } finally {
+    delete process.env.OLYMPUS_KEYWORD_EXPANSION_MODEL;
+    registerOwnerKeywordModel(undefined);
+  }
+});

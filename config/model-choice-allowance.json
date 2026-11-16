@@ -5,7 +5,7 @@
     "src/core/analyst-built-in.ts"
   ],
   "files": {
-    "src/core/source-index/keyword-expansion.ts": 2,
+    "src/core/source-index/keyword-expansion.ts": 1,
     "src/workers/chatgpt/private-answer-model.ts": 3,
     "src/workers/classification/built-in-sniffer.ts": 1,
     "src/workers/classification/installed-sniffer-runtime.ts": 1,

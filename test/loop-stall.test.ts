@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { gate, memoryMaxBytes, sqliteGuards } from '../scripts/loop-stall-test.ts';
+import { beatP95, gate, memoryMaxBytes, sqliteGuards } from '../scripts/loop-stall-test.ts';
 import { join } from 'node:path';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -91,6 +91,10 @@ test('loop-stall gate passes on worst stalls under 1 s with the workload complet
   expect(gate(healthy)).toBe(true);
   expect(gate({ ...healthy, background: { ...healthy.background, max_ms: 30_000 } })).toBe(false);
   expect(gate({ ...healthy, ack_ok: false })).toBe(false);
+  expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 3_700 }, runCase: 'boot-after-upgrade' })).toBe(true);
+  expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 3_700 }, runCase: 'steady' })).toBe(false);
+  expect(beatP95({ max_ms: 1, over_budget: 0, beats: 100, buckets: [90, 4, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0] })).toBe(50);
+  expect(beatP95({ max_ms: 1, over_budget: 0, beats: 0 })).toBeUndefined();
   expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 1000 } })).toBe(false);
   expect(gate({ ...healthy, background: { ...healthy.background, beats: 0 } })).toBe(false);
   expect(gate({ ...healthy, workload_ok: false })).toBe(false);

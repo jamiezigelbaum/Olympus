@@ -10413,6 +10413,7 @@ var STORELESS_FOLDERS = new Set(["models", "backup-staging"]);
 var ENGINE_HEARTBEAT_SCHEMA = "olympus.engine-heartbeat.v1";
 var LOOP_TICK_MS = 250;
 var STEP_BYTES = 200;
+var LOOP_LAG_BUCKETS_MS = [10, 25, 50, 100, 200, 300, 500, 1000, 2000, 5000, 1e4];
 var beat;
 var HEARTBEAT_WORKER_SOURCE = `
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
@@ -10420,7 +10421,8 @@ import { dirname } from 'node:path';
 self.onmessage = ({ data }) => {
   const { sab, path, pid, role, writeMs, startedAt, metrics, tickMs, budgetMs } = data;
   const ints = new Int32Array(sab, 0, 8);
-  const bytes = new Uint8Array(sab, 32);
+  const bytes = new Uint8Array(sab, 32, ${STEP_BYTES});
+  const buckets = new Int32Array(sab, 32 + ${STEP_BYTES}, ${LOOP_LAG_BUCKETS_MS.length + 1});
   const decoder = new TextDecoder();
   let lastTick = -1, lastTickAt = Date.now(), lastChange = -1, stepSince = Date.now();
   let maxLag = 0;
@@ -10447,7 +10449,7 @@ self.onmessage = ({ data }) => {
     const openLag = metrics ? Math.max(0, ((now - Atomics.load(ints, 6)) >>> 0) - tickMs) : 0;
     maxLag = Math.max(maxLag, openLag, Atomics.load(ints, 3) / 1000);
     const body = { schema: '${ENGINE_HEARTBEAT_SCHEMA}', pid, role, startedAt, writtenAt: new Date(now).toISOString(),
-      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5) } } : {}),
+      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5), buckets: Array.from(buckets, (_, i) => Atomics.load(buckets, i)) } } : {}),
       blockedMs: Math.max(0, now - lastTickAt - ${LOOP_TICK_MS}),
       ...(step ? { step, stepSince: new Date(stepSince).toISOString() } : {}) };
     sayHeld(now, body.blockedMs, step);

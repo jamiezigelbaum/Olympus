@@ -23,6 +23,8 @@ const LOOP_TICK_MS = 250;
 /** A heartbeat older than this has stopped: its process is gone or frozen. */
 export const HEARTBEAT_STALE_MS = 15_000;
 const STEP_BYTES = 200;
+/** Upper edges (ms) of the profiling harness's loop-lag histogram; the last bucket is everything above. */
+export const LOOP_LAG_BUCKETS_MS = [10, 25, 50, 100, 200, 300, 500, 1000, 2000, 5000, 10000] as const;
 
 export interface EngineHeartbeat {
   schema: typeof ENGINE_HEARTBEAT_SCHEMA;
@@ -33,7 +35,7 @@ export interface EngineHeartbeat {
   /** How long the engine's loop has gone without a turn. */
   blockedMs: number;
   /** Fine-grained loop measurement, enabled only by the profiling harness. */
-  loop_lag?: { max_ms: number; over_budget: number; beats: number };
+  loop_lag?: { max_ms: number; over_budget: number; beats: number; buckets?: number[] };
   /** What the engine says it is doing ("backing up tier-ledger"), and since when. */
   step?: string;
   stepSince?: string;
@@ -48,7 +50,8 @@ import { dirname } from 'node:path';
 self.onmessage = ({ data }) => {
   const { sab, path, pid, role, writeMs, startedAt, metrics, tickMs, budgetMs } = data;
   const ints = new Int32Array(sab, 0, 8);
-  const bytes = new Uint8Array(sab, 32);
+  const bytes = new Uint8Array(sab, 32, ${STEP_BYTES});
+  const buckets = new Int32Array(sab, 32 + ${STEP_BYTES}, ${LOOP_LAG_BUCKETS_MS.length + 1});
   const decoder = new TextDecoder();
   let lastTick = -1, lastTickAt = Date.now(), lastChange = -1, stepSince = Date.now();
   let maxLag = 0;
@@ -75,7 +78,7 @@ self.onmessage = ({ data }) => {
     const openLag = metrics ? Math.max(0, ((now - Atomics.load(ints, 6)) >>> 0) - tickMs) : 0;
     maxLag = Math.max(maxLag, openLag, Atomics.load(ints, 3) / 1000);
     const body = { schema: '${ENGINE_HEARTBEAT_SCHEMA}', pid, role, startedAt, writtenAt: new Date(now).toISOString(),
-      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5) } } : {}),
+      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5), buckets: Array.from(buckets, (_, i) => Atomics.load(buckets, i)) } } : {}),
       blockedMs: Math.max(0, now - lastTickAt - ${LOOP_TICK_MS}),
       ...(step ? { step, stepSince: new Date(stepSince).toISOString() } : {}) };
     sayHeld(now, body.blockedMs, step);
@@ -95,9 +98,10 @@ self.onmessage = ({ data }) => {
 export function startEngineHeartbeat(env: LayoutEnv, role: string): void {
   if (beat || typeof Worker === 'undefined') return;
   try {
-    const sab = new SharedArrayBuffer(32 + STEP_BYTES);
+    const sab = new SharedArrayBuffer(32 + STEP_BYTES + 4 * (LOOP_LAG_BUCKETS_MS.length + 1));
     const ints = new Int32Array(sab, 0, 8);
-    const bytes = new Uint8Array(sab, 32);
+    const bytes = new Uint8Array(sab, 32, STEP_BYTES);
+    const buckets = new Int32Array(sab, 32 + STEP_BYTES, LOOP_LAG_BUCKETS_MS.length + 1);
     const worker = new Worker(URL.createObjectURL(new Blob([HEARTBEAT_WORKER_SOURCE], { type: 'text/javascript' })));
     // It must never hold the process open: it goes when the process goes.
     (worker as Worker & { unref?: () => void }).unref?.();
@@ -116,6 +120,8 @@ export function startEngineHeartbeat(env: LayoutEnv, role: string): void {
         Atomics.store(ints, 3, Math.max(Atomics.load(ints, 3), Math.round(lag * 1000)));
         if (lag >= (role === 'front' ? 100 : 250)) Atomics.add(ints, 4, 1);
         Atomics.add(ints, 5, 1);
+        const bucket = LOOP_LAG_BUCKETS_MS.findIndex(edge => lag < edge);
+        Atomics.add(buckets, bucket < 0 ? LOOP_LAG_BUCKETS_MS.length : bucket, 1);
       }
     }, interval);
     tick.unref?.();
