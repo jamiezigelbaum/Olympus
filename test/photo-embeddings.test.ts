@@ -1018,7 +1018,6 @@ describe('a prepared picture through runner, sink and store', () => {
       DROP TABLE image_media_reads;
       DROP INDEX idx_connector_store_chunks_media;
       ALTER TABLE chunk_media_failures DROP COLUMN attempts;
-      PRAGMA user_version = 0;
     `);
     db.close();
     const reopened = new LocalConnectorStore({ dbPath, corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });

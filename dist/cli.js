@@ -60594,6 +60594,19 @@ ${seen.map((sql) => sql.replace(/\s+/g, " ").trim()).join(`
   openShape = hash & 2147483647 || 1;
   return openShape;
 }
+function connectorStoreOpenStamp(db) {
+  const rows = db.query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+  let hash = connectorStoreOpenShape() >>> 0;
+  for (const row of rows) {
+    const text = `${row.type}\x00${row.name}\x00${row.tbl_name}\x00${row.sql ?? ""}
+`;
+    for (let index = 0;index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+  }
+  return hash & 2147483647 || 1;
+}
 function addColumnIfMissing(db, table, column, definition) {
   const rows = db.query(`PRAGMA table_info(${table})`).all();
   if (rows.some((row) => row.name === column))
@@ -61268,12 +61281,11 @@ var init_local_index = __esm(() => {
             throw new Error("Connector store read-only mode requires the v7 filter schema or newer.");
           }
         } else {
-          const shape = connectorStoreOpenShape();
-          const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === shape;
+          const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === connectorStoreOpenStamp(this.db);
           if (!current) {
             applyConnectorStoreOpenSchema(this.db);
             if (this.dbPath !== ":memory:")
-              this.db.exec(`PRAGMA user_version = ${shape}`);
+              this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
           }
           if (migrating) {
             setEngineStep(`checking ${SQLITE_STORE_ID} rows`);

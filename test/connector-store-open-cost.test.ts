@@ -115,3 +115,25 @@ test('the embedding-input backfill runs only when its column is added', () => {
   raw.close();
   expect(statementsDuring(() => { new LocalConnectorStore(options).close(); }).some(backfills)).toBe(false);
 });
+
+test('a store whose schema moved under a matching stamp (an older build dropped a trigger) gets the step again', async () => {
+  const { dir, cleanup } = tempDir('olympus-store-open-moved-');
+  cleanups.push(cleanup);
+  const dbPath = join(dir, 'internal.sqlite');
+  const options = { dbPath, corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, family: 'file' as const, trustDomain: 'internal' as const, tierLedger: null };
+  const writer = new LocalConnectorStore(options);
+  await writer.syncFromConnector(fixtureConnector(() => [{ id: 'k1', name: 'note.txt', text: 'A synthetic note.' }]), { fetchContent: true });
+  writer.close();
+  // Synced and reopened: still the fast path.
+  expect(statementsDuring(() => { new LocalConnectorStore(options).close(); }).filter(writesSchema)).toEqual([]);
+  const raw = new Database(dbPath);
+  const stamp = (raw.query('PRAGMA user_version').get() as { user_version: number }).user_version;
+  raw.exec('DROP TRIGGER connector_store_totals_chunk_insert');
+  expect((raw.query('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(stamp);
+  raw.close();
+  new LocalConnectorStore(options).close();
+  const check = new Database(dbPath, { readonly: true });
+  cleanups.push(() => check.close());
+  expect(check.query("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'connector_store_totals_chunk_insert'").get()).not.toBeNull();
+  expect((check.query('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(stamp);
+});

@@ -3841,17 +3841,20 @@ export class LocalConnectorStore {
         }
       } else {
         // Fast path: a store this build's schema code already brought fully
-        // up to date (its user_version holds that code's fingerprint) runs no
-        // DDL, no backfill and no shape walk at open. Any change to the
-        // schema code changes the fingerprint, and the next open runs it all
-        // once (store-open step-back, 16 Nov: open-time DDL waited 11 to 20 s
-        // on locks, and a backfill read 600k chunks at every open).
-        const shape = connectorStoreOpenShape();
+        // up to date runs no DDL and no backfill at open. Its user_version
+        // holds a hash of that code's fingerprint and of the file's own
+        // schema (every table, index and trigger in sqlite_master), taken
+        // after the step finished. A code change, or a store whose schema
+        // moved since (an older build rebuilt a trigger, an object went
+        // missing in a copy or a restore), hashes differently and runs the
+        // step once. A step killed part way never wrote the hash and reruns.
+        // (Store-open step-back, 16 Nov: open-time DDL waited 11 to 20 s on
+        // locks, and a backfill read 600k chunks at every open.)
         const current = !migrating && !creatingFile
-          && (this.db.query('PRAGMA user_version').get() as { user_version: number }).user_version === shape;
+          && (this.db.query('PRAGMA user_version').get() as { user_version: number }).user_version === connectorStoreOpenStamp(this.db);
         if (!current) {
           applyConnectorStoreOpenSchema(this.db);
-          if (this.dbPath !== ':memory:') this.db.exec(`PRAGMA user_version = ${shape}`);
+          if (this.dbPath !== ':memory:') this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
         }
         if (migrating) {
           setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
@@ -20722,6 +20725,21 @@ export function connectorStoreOpenShape(): number {
   // Never 0: a store no open of this code has finished reads 0.
   openShape = (hash & 0x7fffffff) || 1;
   return openShape;
+}
+
+/** This build's schema fingerprint folded with the store's own schema, as a positive 31-bit number. One read of sqlite_master. */
+export function connectorStoreOpenStamp(db: Database): number {
+  const rows = db.query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
+    .all() as Array<{ type: string; name: string; tbl_name: string; sql: string | null }>;
+  let hash = connectorStoreOpenShape() >>> 0;
+  for (const row of rows) {
+    const text = `${row.type}\u0000${row.name}\u0000${row.tbl_name}\u0000${row.sql ?? ''}\n`;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+  }
+  return (hash & 0x7fffffff) || 1;
 }
 
 function addColumnIfMissing(db: Database, table: string, column: string, definition: string): boolean {
