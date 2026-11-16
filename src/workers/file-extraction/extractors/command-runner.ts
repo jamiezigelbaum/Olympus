@@ -13,8 +13,9 @@
  *   - A non-zero exit rejects with a structured error carrying the command,
  *     the exit code and both streams, because the deterministic-rejection
  *     classifier reads all four.
- *   - A timeout SIGKILLs the child and rejects; it never resolves with
- *     whatever partial output had arrived.
+ *   - A stall (no output and no CPU use for the request's window) SIGKILLs
+ *     the child and rejects; it never resolves with whatever partial output
+ *     had arrived. Work that keeps progressing is never cut.
  *
  * One property was added after the 2026-09-08 sparta incident: the child is
  * spawned DETACHED, as the leader of its own process group, and a timeout
@@ -29,7 +30,9 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { readFile, readdir } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { descendantGroupsRecorder, descendantGroupsSupported } from '../../../core/descendant-groups.ts';
@@ -38,6 +41,13 @@ import { DESCENDANT_GROUPS_ENV } from '../../../core/native-process-service.ts';
 export interface ExtractionCommandRunRequest {
   command: string;
   args: string[];
+  /**
+   * The stall window, not a total clock (owner rule, 16 Nov 2026: work that is
+   * still progressing is never cancelled). The command is killed only after it
+   * has made no progress for this long: no new output on either stream and no
+   * CPU time used by any process in its group. A big scan or a long recording
+   * that keeps working runs to the end.
+   */
   timeoutMs: number;
   /**
    * Extra environment for the child, laid over the process environment.
@@ -102,8 +112,8 @@ export class ExtractionCommandTimeoutError extends Error {
 
   constructor(input: { command: string; timeoutMs: number; terminationFailed?: string }) {
     super(input.terminationFailed
-      ? `${input.command} timed out and could not be terminated (${input.terminationFailed}); it may still be running.`
-      : `${input.command} timed out.`);
+      ? `${input.command} timed out (no progress for ${Math.round(input.timeoutMs / 1000)} s) and could not be terminated (${input.terminationFailed}); it may still be running.`
+      : `${input.command} timed out: no output and no CPU use for ${Math.round(input.timeoutMs / 1000)} s.`);
     this.name = 'ExtractionCommandTimeoutError';
     this.command = input.command;
     this.timeoutMs = input.timeoutMs;
@@ -176,6 +186,74 @@ export function killExtractionProcessGroup(
 
 export interface ExtractionCommandRunInternals {
   kill?: ExtractionKillFn;
+  /**
+   * CPU time used so far by a process group, in ms; undefined where it cannot
+   * be read. Tests stub it.
+   */
+  groupCpuMs?: (pgid: number) => Promise<number | undefined> | number | undefined;
+}
+
+/**
+ * How often a running command's progress is checked: often enough to notice a
+ * stall near its window, never more than every 15 s.
+ */
+export function stallCheckIntervalMs(windowMs: number): number {
+  return Math.max(10, Math.min(15_000, Math.floor(windowMs / 4)));
+}
+
+const execFileAsync = promisify(execFile);
+
+async function linuxGroupCpuMs(pgid: number): Promise<number | undefined> {
+  let entries: string[];
+  try { entries = await readdir('/proc'); } catch { return undefined; }
+  const ticksPerSecond = 100;
+  let ticks = 0;
+  let found = false;
+  for (const entry of entries) {
+    if (!entry || [...entry].some((char) => char < '0' || char > '9')) continue;
+    let stat: string;
+    try { stat = await readFile(`/proc/${entry}/stat`, 'utf8'); } catch { continue; }
+    // Fields after the command name, which is in parentheses and may contain spaces.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    if (Number(fields[2]) !== pgid) continue;
+    found = true;
+    ticks += Number(fields[11]) + Number(fields[12]);
+  }
+  return found ? (ticks * 1000) / ticksPerSecond : undefined;
+}
+
+function cpuTimeMs(text: string): number {
+  const [days, clock] = text.includes('-') ? text.split('-') as [string, string] : ['0', text];
+  const parts = clock.split(':').map(Number);
+  let seconds = 0;
+  for (const part of parts) seconds = seconds * 60 + part;
+  return (Number(days) * 86_400 + seconds) * 1000;
+}
+
+async function psGroupCpuMs(pgid: number): Promise<number | undefined> {
+  try {
+    const { stdout: out } = await execFileAsync('ps', ['-A', '-o', 'pgid=,time='], { encoding: 'utf8', timeout: 5_000 });
+    let total = 0;
+    let found = false;
+    for (const line of out.split('\n')) {
+      const [group, time] = line.trim().split(' ').filter(Boolean);
+      if (Number(group) !== pgid || !time) continue;
+      found = true;
+      total += cpuTimeMs(time);
+    }
+    return found ? total : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * CPU time used by every process in a group, in ms: Linux reads /proc, macOS
+ * asks ps.
+ */
+export async function processGroupCpuMs(pgid: number): Promise<number | undefined> {
+  if (process.platform === 'win32') return undefined;
+  return process.platform === 'linux' ? linuxGroupCpuMs(pgid) : psGroupCpuMs(pgid);
 }
 
 /**
@@ -271,32 +349,46 @@ export async function runExtractionCommand(
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let settled = false;
+    // A stall clock: any output, or any CPU time used by the group, counts as progress and restarts it.
     const useTimeout = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0;
+    const groupCpuMs = internals.groupCpuMs ?? processGroupCpuMs;
+    const groupId = process.platform !== 'win32' ? child.pid : undefined;
+    let lastProgress = Date.now();
+    let lastCpu: number | undefined;
+    let sampling = false;
     const timer = useTimeout
-      ? setTimeout(() => {
+      ? setInterval(async () => {
+          if (settled || sampling) return;
+          sampling = true;
+          let cpu: number | undefined;
+          try { cpu = groupId ? await groupCpuMs(groupId) : undefined; } catch { cpu = undefined; } finally { sampling = false; }
           if (settled) return;
+          if (cpu !== undefined && (lastCpu === undefined ? cpu > 0 : cpu > lastCpu)) lastProgress = Date.now();
+          if (cpu !== undefined) lastCpu = cpu;
+          if (Date.now() - lastProgress < request.timeoutMs) return;
           settled = true;
+          clearInterval(timer);
           const outcome = killExtractionProcessGroup(child, 'SIGKILL', kill);
           reject(new ExtractionCommandTimeoutError({
             command: request.command,
             timeoutMs: request.timeoutMs,
             ...(outcome.ok ? {} : { terminationFailed: outcome.code }),
           }));
-        }, request.timeoutMs)
+        }, stallCheckIntervalMs(request.timeoutMs))
       : undefined;
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); lastProgress = Date.now(); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); lastProgress = Date.now(); });
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      if (timer) clearInterval(timer);
       killExtractionProcessGroup(child, 'SIGKILL', kill);
       reject(error);
     });
     child.on('close', (code) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      if (timer) clearInterval(timer);
       const result = {
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),

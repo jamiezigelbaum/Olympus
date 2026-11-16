@@ -140,7 +140,7 @@ export function frontModelReload<R>(options: {
     if (!options.managed) return false;
     if (pending) return true;
     options.closeGate?.();
-    pending = options.client.send({ kind: 'reload', target: 'models', frontPid: options.pid ?? process.pid }, { timeoutMs: 30_000 }).then((receipt) => {
+    pending = options.client.send({ kind: 'reload', target: 'models', frontPid: options.pid ?? process.pid }, { timeoutMs: OWNER_ACTION_WAIT_MS }).then((receipt) => {
       if (receipt.state !== 'done' || (receipt.result as { restarting?: unknown } | undefined)?.restarting !== true) {
         log('[engine-split] the background did not confirm it is restarting for the model change; restart Olympus if the new model does not take effect.');
       }

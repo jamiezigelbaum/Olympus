@@ -3300,7 +3300,7 @@ async function downloadPinnedFile(options) {
     if (existsSync6(partial)) {
       const size = statSync4(partial).size;
       if (size > 0 && size < expectedBytes) {
-        await hashPartial(partial, hash, options.verifyTimeoutMs);
+        await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
         options.onProgress(size);
       } else
@@ -3438,12 +3438,19 @@ function writeDownloadChunk(fd, bytes) {
     offset += written;
   }
 }
-async function hashPartial(path, hash, timeoutMs) {
+async function hashPartial(path, hash, stallMs) {
   const stream = createReadStream(path);
-  const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
+  let timer;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} stopped reading for ${Math.round(stallMs / 1000)} s.`)), stallMs);
+  };
+  arm();
   try {
-    for await (const bytes of stream)
+    for await (const bytes of stream) {
+      arm();
       hash.update(bytes);
+    }
   } finally {
     clearTimeout(timer);
     stream.destroy();
@@ -4043,7 +4050,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     encoding: expected.kind === "sha256" ? "hex" : "base64",
     noun: "built-in search model",
     stallMs,
-    verifyTimeoutMs: 10 * 60000,
+    verifyStallMs: 2 * 60000,
     keepPartial: false,
     error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
     onStart: () => reporter.set("downloading", label),
@@ -35635,6 +35642,9 @@ function optionalEnvironmentString(value) {
 // src/workers/dropbox-files/dropbox-content-hash.ts
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
 // src/workers/file-extraction/extractors/command-runner.ts
+import { execFile, spawn as spawn2 } from "node:child_process";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
 var resolvedCommands = new Map;
 // src/workers/connector-store/filter-capabilities.ts
 var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
@@ -35684,8 +35694,8 @@ var STALE_LOCK_MS2 = 60 * 60000;
 var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
 var SPACE_BACKOFF_MS = 15 * 60000;
 var DOWNLOAD_STALL_MS2 = 2 * 60000;
-var VERIFY_TIMEOUT_MS = 15 * 60000;
-var EXTRACT_TIMEOUT_MS = 5 * 60000;
+var VERIFY_STALL_MS = 2 * 60000;
+var EXTRACT_STALL_MS = 2 * 60000;
 
 // src/core/analyst-built-in.ts
 var GAP_GENERIC_WORDS = new Set([
@@ -36169,7 +36179,7 @@ var WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsap
 var WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
 var CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
-var DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
+var DEFAULT_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
 var DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
 var DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
 var DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
@@ -36509,6 +36519,9 @@ var CODE_PAGE_LABELS = new Map([
   [65001, "utf-8"]
 ]);
 
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+var DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
+
 // src/workers/file-extraction/extractors/ocr-probe-fixture.ts
 var OCR_PROBE_IMAGE_BASE64 = [
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYn",
@@ -36586,10 +36599,6 @@ var OCR_READY_TTL_MS = 10 * 60000;
 // src/workers/file-extraction/extractors/input-limits.ts
 var DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
 var IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
-
-// src/workers/file-extraction/extractors/ocr.ts
-var OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
-var OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
 
 // src/workers/file-extraction/extractors/text.ts
 var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([

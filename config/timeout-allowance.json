@@ -43,7 +43,7 @@
     "src/core/lifecycle.ts#DEFAULT_READINESS_TIMEOUT_MS": "c",
     "src/core/lifecycle.ts#MAX_READINESS_TIMEOUT_MS": "n",
     "src/core/linux-desktop-opener.ts#COMMAND_TIMEOUT_MS": "c",
-    "src/core/managed-tools.ts#DOWNLOAD_TIMEOUT_MS": "a/L7",
+    "src/core/managed-tools.ts#DOWNLOAD_STALL_MS": "c",
     "src/core/managed-tools.ts#VERSION_CHECK_TIMEOUT_MS": "c",
     "src/core/mcp-source/session.ts#MCP_SOURCE_DEFAULT_CALL_TIMEOUT_MS": "a/L2",
     "src/core/model-setup.ts#LOCAL_REQUEST_TIMEOUT_MS": "c",
@@ -63,10 +63,10 @@
     "src/core/remote-private-part.ts#DEFAULT_HANDOFF_TTL_MS": "n",
     "src/core/remote-private-part.ts#DEFAULT_PROBE_TIMEOUT_MS": "c",
     "src/core/remote-private-part.ts#DEFAULT_RETRY_PROBE_TIMEOUT_MS": "c",
-    "src/core/self-update.ts#SELF_UPDATE_DOWNLOAD_TIMEOUT_MS": "a/L7",
+    "src/core/self-update.ts#SELF_UPDATE_DOWNLOAD_STALL_MS": "c",
     "src/core/source-account-migration.ts#LOCK_WAIT_CAP_MS": "c",
-    "src/core/source-account-migration.ts#MIGRATION_BUDGET_MS": "a/L7",
-    "src/core/source-account-migration.ts#QUICK_CHECK_BUDGET_MS": "a/L7",
+    "src/core/source-account-migration.ts#MIGRATION_BUDGET_MS": "d",
+    "src/core/source-account-migration.ts#QUICK_CHECK_BUDGET_MS": "d",
     "src/core/source-answer-jobs.ts#SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS": "b",
     "src/core/source-answer-jobs.ts#SOURCE_ANSWER_HANDOFF_DEFAULT_MS": "b",
     "src/core/source-answer-jobs.ts#SOURCE_ANSWER_HANDOFF_MAX_MS": "b",
@@ -101,9 +101,10 @@
     "src/workers/classification/secret-scan-off-thread.ts#OFF_THREAD_SCAN_TIMEOUT_MS": "c",
     "src/workers/classification/sniffer-resolver.ts#DEFAULT_SNIFFER_PASS_TIME_MS": "d",
     "src/workers/classification/sniffer-service.ts#BACKLOG_COUNT_WORKER_TIMEOUT_MS": "c",
-    "src/workers/classification/sniffer-service.ts#DEFAULT_TIER_SNIFFER_ABANDON_MS": "a/L3",
-    "src/workers/classification/sniffer-service.ts#DEFAULT_TIER_SNIFFER_MAX_PASS_MS": "a/L3",
+    "src/workers/classification/sniffer-service.ts#DEFAULT_TIER_SNIFFER_ABANDON_MS": "c",
+    "src/workers/classification/sniffer-service.ts#DEFAULT_TIER_SNIFFER_STALL_MS": "c",
     "src/workers/classification/sniffer-service.ts#EXTRACTION_ENQUEUE_GRACE_MS": "n",
+    "src/workers/classification/sniffer-service.ts#ROUTED_ROWS_GRACE_MS": "n",
     "src/workers/connector-store/capture-freshness.ts#CAPTURE_STOPPED_GRACE_SECONDS": "n",
     "src/workers/connector-store/local-index.ts#CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS": "a/L1",
     "src/workers/connector-store/local-index.ts#VECTOR_SCAN_BACKSTOP_GRACE_MS": "c",
@@ -121,30 +122,27 @@
     "src/workers/dropbox-files/provider-client.ts#DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS": "a/L5",
     "src/workers/dropbox-files/provider-client.ts#DROPBOX_METADATA_REQUEST_TIMEOUT_MS": "c",
     "src/workers/email-source/gogcli.ts#COMMAND_TIMEOUT_KILL_GRACE_MS": "c",
-    "src/workers/engine-split/client.ts#REQUEST_GRACE_MS": "a/L1",
-    "src/workers/engine-split/client.ts#RESULT_WAIT_MS": "a/L1",
+    "src/workers/engine-split/client.ts#REQUEST_GRACE_MS": "c",
+    "src/workers/engine-split/client.ts#RESULT_WAIT_MS": "d",
     "src/workers/engine-split/rss-restart.ts#ENGINE_RSS_RESTART_MAX_WAIT_MS": "c",
-    "src/workers/engine-split/runtime.ts#DATA_EXPORT_WAIT_MS": "a/L1",
-    "src/workers/engine-split/runtime.ts#OWNER_ACTION_WAIT_MS": "a/L1",
-    "src/workers/engine-split/runtime.ts#SOURCE_SYNC_WAIT_MS": "a/L1",
+    "src/workers/engine-split/runtime.ts#DATA_EXPORT_WAIT_MS": "c",
+    "src/workers/engine-split/runtime.ts#OWNER_ACTION_WAIT_MS": "c",
+    "src/workers/engine-split/runtime.ts#SOURCE_SYNC_WAIT_MS": "c",
     "src/workers/engine/server.ts#FRONT_VISIBILITY_READY_BOUND_MS": "a/L1",
-    "src/workers/file-extraction/extractors/apple-vision-ocr.ts#DEFAULT_APPLE_VISION_FILE_DEADLINE_MS": "a/L5",
     "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_CHUNK_TIMEOUT_MS": "a/L5",
-    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_CONVERT_TIMEOUT_MS": "a/L5",
-    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_FILE_DEADLINE_MS": "a/L5",
+    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_CONVERT_TIMEOUT_MS": "c",
     "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_INSTALL_RETRY_CEILING_MS": "d",
     "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_INSTALL_RETRY_MS": "d",
     "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
     "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_VERIFY_WAIT_MS": "c",
-    "src/workers/file-extraction/extractors/image-prepare.ts#DEFAULT_IMAGE_PREPARE_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/image-prepare.ts#DEFAULT_IMAGE_PREPARE_TIMEOUT_MS": "c",
     "src/workers/file-extraction/extractors/ocr-capability.ts#PROBE_OCRMYPDF_TIMEOUT_MS": "c",
     "src/workers/file-extraction/extractors/ocr-capability.ts#PROBE_PDFTOPPM_TIMEOUT_MS": "c",
     "src/workers/file-extraction/extractors/ocr-capability.ts#PROBE_TESSERACT_TIMEOUT_MS": "c",
-    "src/workers/file-extraction/extractors/ocr.ts#DEFAULT_OCR_TIMEOUT_MS": "a/L5",
-    "src/workers/file-extraction/extractors/ocr.ts#OCR_PDF_MAX_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/ocr.ts#DEFAULT_OCR_TIMEOUT_MS": "c",
     "src/workers/file-extraction/extractors/openai-compatible-client.ts#DEFAULT_LOCAL_VLM_TIMEOUT_MS": "a/L5",
-    "src/workers/file-extraction/extractors/pdf-render.ts#DEFAULT_PDF_RENDER_TIMEOUT_MS": "a/L5",
-    "src/workers/file-extraction/extractors/text.ts#DEFAULT_PDF_TEXT_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/pdf-render.ts#DEFAULT_PDF_RENDER_TIMEOUT_MS": "c",
+    "src/workers/file-extraction/extractors/text.ts#DEFAULT_PDF_TEXT_TIMEOUT_MS": "c",
     "src/workers/file-extraction/extractors/transcription.ts#DEFAULT_TRANSCRIBE_TIMEOUT_MS": "a/L5",
     "src/workers/file-extraction/extractors/venice-client.ts#DEFAULT_VENICE_EXTRACTION_TIMEOUT_MS": "a/L5",
     "src/workers/file-extraction/extractors/vlm.ts#DEFAULT_VLM_PDF_HEALTHCHECK_TIMEOUT_MS": "c",
@@ -164,8 +162,8 @@
     "src/workers/source-index/built-in-embedding/assets.ts#DOWNLOAD_STALL_MS": "c",
     "src/workers/source-index/built-in-embedding/litert-runtime.ts#REQUEST_TIMEOUT_MS": "a/L5",
     "src/workers/source-index/built-in-reasoning/install.ts#DOWNLOAD_STALL_MS": "c",
-    "src/workers/source-index/built-in-reasoning/install.ts#EXTRACT_TIMEOUT_MS": "a/L7",
-    "src/workers/source-index/built-in-reasoning/install.ts#VERIFY_TIMEOUT_MS": "a/L7",
+    "src/workers/source-index/built-in-reasoning/install.ts#EXTRACT_STALL_MS": "c",
+    "src/workers/source-index/built-in-reasoning/install.ts#VERIFY_STALL_MS": "c",
     "src/workers/source-index/built-in-reasoning/server.ts#DEFAULT_KILL_WAIT_MS": "c",
     "src/workers/source-index/built-in-reasoning/server.ts#DEFAULT_STOP_GRACE_MS": "c",
     "src/workers/source-index/embeddings.ts#DEFAULT_MEDIA_FETCH_TIMEOUT_MS": "c",
@@ -298,8 +296,7 @@
       "c": 4
     },
     "src/workers/classification/sniffer-decision.ts": {
-      "a/L3": 1,
-      "c": 1
+      "c": 2
     },
     "src/workers/dashboard/chatgpt/private-answer.ts": {
       "c": 1
@@ -311,11 +308,10 @@
       "c": 1
     },
     "src/workers/engine-split/client.ts": {
-      "a/L1": 1
+      "c": 1
     },
     "src/workers/engine-split/front-state.ts": {
-      "c": 1,
-      "a/L1": 1
+      "c": 1
     },
     "src/workers/engine/dashboard/dashboard-messaging-service.ts": {
       "c": 1
@@ -328,8 +324,10 @@
       "c": 2
     },
     "src/workers/engine/server.ts": {
-      "c": 5,
-      "a/L1": 1
+      "c": 5
+    },
+    "src/workers/file-extraction/extractors/command-runner.ts": {
+      "c": 1
     },
     "src/workers/first-run-privacy-gate.ts": {
       "c": 1
@@ -347,9 +345,6 @@
       "c": 1
     },
     "src/workers/remote-access-control.ts": {
-      "c": 1
-    },
-    "src/workers/source-index/built-in-embedding/assets.ts": {
       "c": 1
     },
     "src/workers/source-index/built-in-embedding/litert-runtime.ts": {

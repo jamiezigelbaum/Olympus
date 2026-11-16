@@ -31,7 +31,14 @@ export interface EngineCommandClientOptions {
 }
 
 export interface EngineSendOptions {
-  /** Give up after this long; the command may still be applied later under its id. */
+  /**
+   * Give up after the background has not answered for this long; the command
+   * may still be applied later under its id. For `send`, every answer that
+   * says the background still holds the command (its heartbeat while the
+   * command runs) starts this again: a command in progress is waited out
+   * however long it runs (Jamie, 16 Nov: "as long as the answer is in
+   * progress, it shouldn't cancel for no reason").
+   */
   timeoutMs?: number;
   /** Reuse an id (the caller's own retry). */
   id?: string;
@@ -81,14 +88,17 @@ export class EngineCommandClient {
   /** Deliver the command and wait for the background to apply it. */
   async send(command: EngineCommand, options: EngineSendOptions = {}): Promise<EngineCommandReceipt> {
     const id = options.id ?? this.newId();
-    const deadline = this.now() + (options.timeoutMs ?? 60_000);
+    const silenceMs = options.timeoutMs ?? 60_000;
+    let deadline = this.now() + silenceMs;
     let receipt = await this.postUntil(id, command, deadline);
+    deadline = this.now() + silenceMs;
     let attempt = 0;
     while (receipt.state === 'received') {
-      if (this.now() >= deadline) throw new EngineCommandUnavailableError('The background engine has not finished this command yet.');
+      if (this.now() >= deadline) throw new EngineCommandUnavailableError(`The background engine stopped answering for ${Math.round(silenceMs / 1000)} s while it ran this command (${command.kind}); it may still finish.`);
       const wait = Math.max(0, Math.min(RESULT_WAIT_MS, deadline - this.now()));
       const answer = await this.request(`${ENGINE_COMMANDS_PATH}/${encodeURIComponent(id)}?wait=${wait}`, { method: 'GET' }, deadline, wait);
-      if (answer?.status === 200) { receipt = answer.body as EngineCommandReceipt; attempt = 0; continue; }
+      // The background answered and still holds the command: it is in progress.
+      if (answer?.status === 200) { receipt = answer.body as EngineCommandReceipt; attempt = 0; deadline = this.now() + silenceMs; continue; }
       // 404: the background restarted and lost the record; post it again under the same id.
       if (answer?.status === 404) { receipt = await this.postUntil(id, command, deadline); continue; }
       await this.sleep(RETRY_DELAYS_MS[Math.min(attempt++, RETRY_DELAYS_MS.length - 1)]!);

@@ -233,6 +233,14 @@ export async function attachEngineFixture(stores: LocalConnectorStore[], role: s
   const timers: ReturnType<typeof setInterval>[] = [];
   let service: TierSnifferService | undefined;
   let jobs: LocalFileExtractionJobStore | undefined;
+  // A failure keeps its code and first product frames, so a lock error names the connection that gave up.
+  const describe = (error: unknown) => {
+    if (!(error instanceof Error)) return String(error);
+    const code = (error as { code?: unknown }).code;
+    const frames = (error.stack ?? '').split('\n').slice(1).map(line => line.trim().replace(/^at /, ''))
+      .filter(line => /\/(src|scripts)\//.test(line)).slice(0, 2).map(line => line.replace(/.*\/(src|scripts)\//, '$1/'));
+    return `${error.message}${code !== undefined ? ` [${String(code)}]` : ''}${frames.length ? ` @ ${frames.join(' < ')}` : ''}`;
+  };
   const counts = { sync_items: 0, embed_chunks: 0, embed_passes_started: 0, judge_passes: 0, recounts: 0, recounts_started: 0, failures: [] as string[] };
   const report = () => writeFileSync(join(dir, 'workloads.json'), JSON.stringify(counts));
   const guarded = (label: string, work: () => Promise<void>) => {
@@ -240,7 +248,7 @@ export async function attachEngineFixture(stores: LocalConnectorStore[], role: s
     const tick = async () => {
       if (busy || stopped) return;
       busy = true;
-      try { await work(); } catch (error) { counts.failures.push(`${label}: ${error instanceof Error ? error.message : String(error)}`); }
+      try { await work(); } catch (error) { counts.failures.push(`${label}: ${describe(error)}`); }
       finally { busy = false; report(); }
     };
     void tick();
@@ -274,7 +282,7 @@ export async function attachEngineFixture(stores: LocalConnectorStore[], role: s
         try {
           for (const store of mounted) { await store.prepareStatusCounts(); await store.statusOffThread(); }
           counts.recounts++;
-        } catch (error) { counts.failures.push(`recount: ${error instanceof Error ? error.message : String(error)}`); }
+        } catch (error) { counts.failures.push(`recount: ${describe(error)}`); }
         report();
       } });
       stopRecount = () => recount.stop();

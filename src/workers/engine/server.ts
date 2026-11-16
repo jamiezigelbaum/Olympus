@@ -483,6 +483,7 @@ import {
   createEngineFrontRoutes,
   createFrontGate,
   OwnerBusyMarks,
+  OWNER_ACTION_WAIT_MS,
   engineBackgroundSocketFromEnv,
   engineStatusSnapshotPath,
   startEngineBackgroundServer,
@@ -4785,7 +4786,7 @@ export async function main(): Promise<void> {
       // re-invalidating would cancel the jobs its first delivery just queued.
       if (engineFront && approval.replayed !== true) {
         // The background owns the queue: it invalidates these corpora's unsettled jobs.
-        await engineFront.client.send({ kind: 'reload', target: 'scope', corpora: [...definition.corpusIdsToInvalidate] }, { timeoutMs: 30_000 });
+        await engineFront.client.send({ kind: 'reload', target: 'scope', corpora: [...definition.corpusIdsToInvalidate] }, { timeoutMs: OWNER_ACTION_WAIT_MS });
       } else if (fileExtractionRuntime && approval.replayed !== true) {
         invalidatedJobs = definition.corpusIdsToInvalidate.reduce(
           (total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId),

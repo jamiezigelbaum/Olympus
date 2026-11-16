@@ -34520,7 +34520,7 @@ async function downloadPinnedFile(options) {
     if (existsSync16(partial)) {
       const size = statSync9(partial).size;
       if (size > 0 && size < expectedBytes) {
-        await hashPartial(partial, hash, options.verifyTimeoutMs);
+        await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
         options.onProgress(size);
       } else
@@ -34658,12 +34658,19 @@ function writeDownloadChunk(fd, bytes) {
     offset += written;
   }
 }
-async function hashPartial(path, hash, timeoutMs) {
+async function hashPartial(path, hash, stallMs) {
   const stream = createReadStream(path);
-  const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
+  let timer;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} stopped reading for ${Math.round(stallMs / 1000)} s.`)), stallMs);
+  };
+  arm();
   try {
-    for await (const bytes of stream)
+    for await (const bytes of stream) {
+      arm();
       hash.update(bytes);
+    }
   } finally {
     clearTimeout(timer);
     stream.destroy();
@@ -35311,7 +35318,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     encoding: expected.kind === "sha256" ? "hex" : "base64",
     noun: "built-in search model",
     stallMs,
-    verifyTimeoutMs: 10 * 60000,
+    verifyStallMs: 2 * 60000,
     keepPartial: false,
     error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
     onStart: () => reporter.set("downloading", label),
@@ -100170,7 +100177,7 @@ async function installPinnedModel(options) {
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS2,
-    verifyTimeoutMs: options.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS
+    verifyStallMs: options.verifyStallMs ?? VERIFY_STALL_MS
   };
   const lockWaitMs = options.lockWaitMs ?? STALE_LOCK_MS2;
   const lockRefreshMs = options.lockRefreshMs ?? LOCK_REFRESH_MS;
@@ -100189,7 +100196,7 @@ async function installPinnedModel(options) {
   };
   const verifyAll = async () => {
     for (const { file, path } of files)
-      await verifyPinnedFile(path, file, noun, reporter, timing.verifyTimeoutMs);
+      await verifyPinnedFile(path, file, noun, reporter, timing.verifyStallMs);
   };
   const finished = () => reporter.set("ready", `${capitalize(noun)} ready`, 100);
   try {
@@ -100380,22 +100387,41 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
 }
 function extractWithTar(archivePath, targetDir) {
   return new Promise((resolve, reject) => {
-    const child = spawn4("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn4("tar", ["-xzf", "-", "-C", targetDir], { stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
     child.stderr?.on("data", (chunk) => {
       if (stderr.length < 4000)
         stderr += chunk.toString();
     });
-    const timer = setTimeout(() => {
+    let timer;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`tar took no data for ${Math.round(EXTRACT_STALL_MS / 60000)} min`));
+      }, EXTRACT_STALL_MS);
+    };
+    arm();
+    const archive = createReadStream3(archivePath);
+    archive.on("data", arm);
+    archive.on("error", (error) => {
+      clearTimeout(timer);
       child.kill("SIGKILL");
-      reject(new Error(`tar did not finish within ${Math.round(EXTRACT_TIMEOUT_MS / 60000)} min`));
-    }, EXTRACT_TIMEOUT_MS);
+      reject(error);
+    });
+    child.stdin?.on("error", () => {
+      return;
+    });
+    if (child.stdin)
+      archive.pipe(child.stdin);
     child.on("error", (error) => {
       clearTimeout(timer);
+      archive.destroy();
       reject(error);
     });
     child.on("close", (status, signal) => {
       clearTimeout(timer);
+      archive.destroy();
       if (status === 0)
         resolve();
       else
@@ -100445,7 +100471,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     encoding: "hex",
     noun: space.noun,
     stallMs,
-    verifyTimeoutMs: VERIFY_TIMEOUT_MS,
+    verifyStallMs: VERIFY_STALL_MS,
     keepPartial: true,
     error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
     diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname66(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
@@ -100454,7 +100480,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     onProgress: (bytes) => reporter.advance(bytes, label)
   });
 }
-function hashInto(path, hash, timeoutMs, onProgress) {
+function hashInto(path, hash, stallMs, onProgress) {
   return new Promise((resolve, reject) => {
     let done = 0;
     let settled = false;
@@ -100471,17 +100497,23 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         resolve();
       }
     };
-    const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
+    let timer;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} read nothing for ${Math.round(stallMs / 1000)} s.`)), stallMs);
+    };
+    arm();
     stream.on("data", (chunk) => {
+      arm();
       hash.update(chunk);
       done += chunk.length;
       onProgress?.(done);
     }).on("error", (error) => finish(error)).on("end", () => finish()).on("close", () => finish(new Error(`Reading ${path} stopped before the end.`)));
   });
 }
-async function sha256File2(path, timeoutMs, onProgress) {
+async function sha256File2(path, stallMs, onProgress) {
   const hash = createHash53("sha256");
-  await hashInto(path, hash, timeoutMs, onProgress);
+  await hashInto(path, hash, stallMs, onProgress);
   return hash.digest("hex");
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
@@ -100635,7 +100667,7 @@ class ProgressReporter2 {
     } catch {}
   }
 }
-var BUILT_IN_REASONING_DIR_ENV = "OLYMPUS_BUILT_IN_REASONING_DIR", REASONING_NOUN = "built-in private model", STALE_LOCK_MS2, LOCK_REFRESH_MS = 30000, LOCK_POLL_MS2 = 1000, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, RUNTIME_UNPACK_FACTOR = 4, SPACE_BACKOFF_MS, PROGRESS_WRITE_INTERVAL_MS2 = 500, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS, LOG_PREFIX = "[built-in-model]", RUNTIME_MARKER2 = "olympus-runtime.json", SERVER_BINARY = "llama-server", BuiltInReasoningInstallError, verifiedThisProcess2;
+var BUILT_IN_REASONING_DIR_ENV = "OLYMPUS_BUILT_IN_REASONING_DIR", REASONING_NOUN = "built-in private model", STALE_LOCK_MS2, LOCK_REFRESH_MS = 30000, LOCK_POLL_MS2 = 1000, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, RUNTIME_UNPACK_FACTOR = 4, SPACE_BACKOFF_MS, PROGRESS_WRITE_INTERVAL_MS2 = 500, DOWNLOAD_STALL_MS2, VERIFY_STALL_MS, EXTRACT_STALL_MS, LOG_PREFIX = "[built-in-model]", RUNTIME_MARKER2 = "olympus-runtime.json", SERVER_BINARY = "llama-server", BuiltInReasoningInstallError, verifiedThisProcess2;
 var init_install = __esm(() => {
   init_pinned_download();
   init_olympus_layout();
@@ -100645,8 +100677,8 @@ var init_install = __esm(() => {
   BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   SPACE_BACKOFF_MS = 15 * 60000;
   DOWNLOAD_STALL_MS2 = 2 * 60000;
-  VERIFY_TIMEOUT_MS = 15 * 60000;
-  EXTRACT_TIMEOUT_MS = 5 * 60000;
+  VERIFY_STALL_MS = 2 * 60000;
+  EXTRACT_STALL_MS = 2 * 60000;
   BuiltInReasoningInstallError = class BuiltInReasoningInstallError extends Error {
     reason;
     shortfall;
@@ -111598,7 +111630,9 @@ var init_dropbox = __esm(() => {
 
 // src/workers/file-extraction/extractors/command-runner.ts
 import { Buffer as Buffer4 } from "node:buffer";
-import { spawn as spawn6 } from "node:child_process";
+import { execFile as execFile2, spawn as spawn6 } from "node:child_process";
+import { readFile as readFile4, readdir } from "node:fs/promises";
+import { promisify } from "node:util";
 import { accessSync as accessSync7, constants as fsConstants5, statSync as statSync27 } from "node:fs";
 import { delimiter as delimiter5, join as join76 } from "node:path";
 function errnoCode(error) {
@@ -111631,6 +111665,67 @@ function killExtractionProcessGroup(child, signal = "SIGKILL", kill = process.ki
     }
     return { ok: false, code: groupFailure ?? code };
   }
+}
+function stallCheckIntervalMs(windowMs) {
+  return Math.max(10, Math.min(15000, Math.floor(windowMs / 4)));
+}
+async function linuxGroupCpuMs(pgid) {
+  let entries;
+  try {
+    entries = await readdir("/proc");
+  } catch {
+    return;
+  }
+  const ticksPerSecond = 100;
+  let ticks = 0;
+  let found = false;
+  for (const entry of entries) {
+    if (!entry || [...entry].some((char) => char < "0" || char > "9"))
+      continue;
+    let stat;
+    try {
+      stat = await readFile4(`/proc/${entry}/stat`, "utf8");
+    } catch {
+      continue;
+    }
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    if (Number(fields[2]) !== pgid)
+      continue;
+    found = true;
+    ticks += Number(fields[11]) + Number(fields[12]);
+  }
+  return found ? ticks * 1000 / ticksPerSecond : undefined;
+}
+function cpuTimeMs(text) {
+  const [days, clock] = text.includes("-") ? text.split("-") : ["0", text];
+  const parts = clock.split(":").map(Number);
+  let seconds = 0;
+  for (const part of parts)
+    seconds = seconds * 60 + part;
+  return (Number(days) * 86400 + seconds) * 1000;
+}
+async function psGroupCpuMs(pgid) {
+  try {
+    const { stdout: out } = await execFileAsync("ps", ["-A", "-o", "pgid=,time="], { encoding: "utf8", timeout: 5000 });
+    let total = 0;
+    let found = false;
+    for (const line of out.split(`
+`)) {
+      const [group, time] = line.trim().split(" ").filter(Boolean);
+      if (Number(group) !== pgid || !time)
+        continue;
+      found = true;
+      total += cpuTimeMs(time);
+    }
+    return found ? total : undefined;
+  } catch {
+    return;
+  }
+}
+async function processGroupCpuMs(pgid) {
+  if (process.platform === "win32")
+    return;
+  return process.platform === "linux" ? linuxGroupCpuMs(pgid) : psGroupCpuMs(pgid);
 }
 function resolveExtractionCommand(command, options = {}) {
   if (!command || command.includes("/") || command.includes("\\"))
@@ -111699,25 +111794,54 @@ async function runExtractionCommand(request, internals = {}) {
     const stderr = [];
     let settled = false;
     const useTimeout = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0;
-    const timer = useTimeout ? setTimeout(() => {
+    const groupCpuMs = internals.groupCpuMs ?? processGroupCpuMs;
+    const groupId = process.platform !== "win32" ? child.pid : undefined;
+    let lastProgress = Date.now();
+    let lastCpu;
+    let sampling = false;
+    const timer = useTimeout ? setInterval(async () => {
+      if (settled || sampling)
+        return;
+      sampling = true;
+      let cpu;
+      try {
+        cpu = groupId ? await groupCpuMs(groupId) : undefined;
+      } catch {
+        cpu = undefined;
+      } finally {
+        sampling = false;
+      }
       if (settled)
         return;
+      if (cpu !== undefined && (lastCpu === undefined ? cpu > 0 : cpu > lastCpu))
+        lastProgress = Date.now();
+      if (cpu !== undefined)
+        lastCpu = cpu;
+      if (Date.now() - lastProgress < request.timeoutMs)
+        return;
       settled = true;
+      clearInterval(timer);
       const outcome = killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(new ExtractionCommandTimeoutError({
         command: request.command,
         timeoutMs: request.timeoutMs,
         ...outcome.ok ? {} : { terminationFailed: outcome.code }
       }));
-    }, request.timeoutMs) : undefined;
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    }, stallCheckIntervalMs(request.timeoutMs)) : undefined;
+    child.stdout.on("data", (chunk) => {
+      stdout.push(chunk);
+      lastProgress = Date.now();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr.push(chunk);
+      lastProgress = Date.now();
+    });
     child.on("error", (error) => {
       if (settled)
         return;
       settled = true;
       if (timer)
-        clearTimeout(timer);
+        clearInterval(timer);
       killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(error);
     });
@@ -111726,7 +111850,7 @@ async function runExtractionCommand(request, internals = {}) {
         return;
       settled = true;
       if (timer)
-        clearTimeout(timer);
+        clearInterval(timer);
       const result = {
         stdout: Buffer4.concat(stdout).toString("utf8"),
         stderr: Buffer4.concat(stderr).toString("utf8")
@@ -111744,7 +111868,7 @@ async function runExtractionCommand(request, internals = {}) {
     });
   });
 }
-var ExtractionCommandError, ExtractionCommandTimeoutError, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
+var ExtractionCommandError, ExtractionCommandTimeoutError, execFileAsync, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
 var init_command_runner = __esm(() => {
   init_descendant_groups();
   init_native_process_service();
@@ -111767,19 +111891,20 @@ var init_command_runner = __esm(() => {
     timeoutMs;
     terminationFailed;
     constructor(input) {
-      super(input.terminationFailed ? `${input.command} timed out and could not be terminated (${input.terminationFailed}); it may still be running.` : `${input.command} timed out.`);
+      super(input.terminationFailed ? `${input.command} timed out (no progress for ${Math.round(input.timeoutMs / 1000)} s) and could not be terminated (${input.terminationFailed}); it may still be running.` : `${input.command} timed out: no output and no CPU use for ${Math.round(input.timeoutMs / 1000)} s.`);
       this.name = "ExtractionCommandTimeoutError";
       this.command = input.command;
       this.timeoutMs = input.timeoutMs;
       this.terminationFailed = input.terminationFailed;
     }
   };
+  execFileAsync = promisify(execFile2);
   EXTRACTION_COMMAND_FALLBACK_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
   resolvedCommands = new Map;
 });
 
 // src/workers/file-extraction/extractors/pdf-render.ts
-import { mkdtemp, readFile as readFile4, readdir, rm as rm2, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile as readFile5, readdir as readdir2, rm as rm2, writeFile } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
 import { join as join77 } from "node:path";
 function parsePdfInfoPageCount(stdout) {
@@ -111834,7 +111959,7 @@ async function renderPdfPages(input) {
       ],
       timeoutMs
     });
-    const entries = (await readdir(tempDir)).map((name) => {
+    const entries = (await readdir2(tempDir)).map((name) => {
       const pageNumber = matchRenderedPageNumber(name, outputFormat);
       if (pageNumber === undefined)
         return;
@@ -111846,7 +111971,7 @@ async function renderPdfPages(input) {
         return {
           pages: [{
             pageNumber: 1,
-            bytes: new Uint8Array(await readFile4(singleFilePath)),
+            bytes: new Uint8Array(await readFile5(singleFilePath)),
             mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
             dpi: DEFAULT_PDF_RENDER_DPI
           }],
@@ -111859,7 +111984,7 @@ async function renderPdfPages(input) {
     return {
       pages: await Promise.all(entries.map(async (entry) => ({
         pageNumber: entry.pageNumber,
-        bytes: new Uint8Array(await readFile4(join77(tempDir, entry.name))),
+        bytes: new Uint8Array(await readFile5(join77(tempDir, entry.name))),
         mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
         dpi: DEFAULT_PDF_RENDER_DPI
       }))),
@@ -111896,7 +112021,7 @@ async function renderSinglePdfPageForVision(input) {
     });
     return {
       pageNumber: input.pageNumber,
-      bytes: new Uint8Array(await readFile4(outputPath)),
+      bytes: new Uint8Array(await readFile5(outputPath)),
       mimeType: "image/jpeg",
       dpi: input.dpi
     };
@@ -111928,7 +112053,7 @@ async function renderPdfFirstPageForVision(input) {
       timeoutMs: input.timeoutMs
     });
     return {
-      bytes: new Uint8Array(await readFile4(outputPath)),
+      bytes: new Uint8Array(await readFile5(outputPath)),
       mimeType: "image/png"
     };
   } finally {
@@ -116088,7 +116213,7 @@ var init_types4 = __esm(() => {
 });
 
 // src/workers/dropbox-files/extraction-source.ts
-import { readFile as readFile5, realpath, stat as stat3 } from "node:fs/promises";
+import { readFile as readFile6, realpath, stat as stat3 } from "node:fs/promises";
 import { relative as relative12, resolve as resolve20, sep as sep17 } from "node:path";
 
 class DropboxExtractionSource {
@@ -116359,7 +116484,7 @@ async function readVerifiedCandidate(input) {
   if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
     return;
   }
-  const bytes = new Uint8Array(await readFile5(input.candidatePath));
+  const bytes = new Uint8Array(await readFile6(input.candidatePath));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
     throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
   }
@@ -117041,7 +117166,7 @@ var init_child_media = __esm(() => {
 });
 
 // src/workers/whatsapp/extraction-source.ts
-import { readFile as readFile6, realpath as realpath2, stat as stat4 } from "node:fs/promises";
+import { readFile as readFile7, realpath as realpath2, stat as stat4 } from "node:fs/promises";
 import { closeSync as closeSync25, constants as constants11, openSync as openSync25, readSync as readSync8, rmSync as rmSync27 } from "node:fs";
 import { basename as basename14, join as join85, relative as relative14, resolve as resolve23, sep as sep19 } from "node:path";
 
@@ -117106,7 +117231,7 @@ class WhatsAppExtractionSource {
         throw new FileExtractionSourceError("source_too_large");
       }
       return {
-        bytes: await readFile6(path),
+        bytes: await readFile7(path),
         ...ref.mimeType ? { mimeType: ref.mimeType } : {},
         sizeBytes: file.size
       };
@@ -120466,6 +120591,14 @@ class LocalFileExtractionJobStore {
   }
   onDemandJob(jobId) {
     return this.db.query("SELECT 1 FROM on_demand_reads WHERE job_id = ?").get(jobId) !== null;
+  }
+  renewLease(jobId, leaseToken, leaseSeconds = DEFAULT_EXTRACTION_LEASE_SECONDS) {
+    this.assertWritable("lease renew");
+    const seconds = clampInteger(leaseSeconds, 1, MAX_EXTRACTION_LEASE_SECONDS);
+    const until = new Date(Date.now() + seconds * 1000).toISOString();
+    const changed = this.db.query(`UPDATE extraction_jobs SET leased_until = ?
+      WHERE job_id = ? AND lease_token = ? AND status = 'leased'`).run(until, jobId, leaseToken).changes;
+    return changed > 0 ? until : undefined;
   }
   recordSizeRefusal(jobId, leaseToken, amounts) {
     this.assertWritable("size_refusal");
@@ -125437,10 +125570,11 @@ function weightedConfidence(pages) {
   }
   return weight > 0 ? Math.round(weighted / weight * 1000) / 1000 : 0;
 }
-var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js", APPLE_VISION_OSASCRIPT = "/usr/bin/osascript", APPLE_VISION_ENGINE_WARNING = "ocr_engine_apple_vision", DEFAULT_APPLE_VISION_MAX_PAGES = 100, DEFAULT_APPLE_VISION_PAGES_PER_RUN = 8, DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE = 3000, DEFAULT_APPLE_VISION_IMAGE_MAX_PIXEL_EDGE = 4096, DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = 600000, APPLE_VISION_EXIT_INPUT_UNREADABLE = 65, APPLE_VISION_EXIT_PDF_LOCKED = 66, APPLE_VISION_EXIT_ENGINE_UNAVAILABLE = 69, OCR_ENGINE_PREFERENCES, AppleVisionOcrUnavailableError;
+var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js", APPLE_VISION_OSASCRIPT = "/usr/bin/osascript", APPLE_VISION_ENGINE_WARNING = "ocr_engine_apple_vision", DEFAULT_APPLE_VISION_MAX_PAGES = 100, DEFAULT_APPLE_VISION_PAGES_PER_RUN = 8, DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE = 3000, DEFAULT_APPLE_VISION_IMAGE_MAX_PIXEL_EDGE = 4096, DEFAULT_APPLE_VISION_FILE_DEADLINE_MS, APPLE_VISION_EXIT_INPUT_UNREADABLE = 65, APPLE_VISION_EXIT_PDF_LOCKED = 66, APPLE_VISION_EXIT_ENGINE_UNAVAILABLE = 69, OCR_ENGINE_PREFERENCES, AppleVisionOcrUnavailableError;
 var init_apple_vision_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
+  DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
   OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
   AppleVisionOcrUnavailableError = class AppleVisionOcrUnavailableError extends Error {
     constructor(reason) {
@@ -125528,7 +125662,7 @@ var init_ocr_probe_fixture = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr-capability.ts
-import { mkdtemp as mkdtemp4, readFile as readFile7, readdir as readdir2, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
+import { mkdtemp as mkdtemp4, readFile as readFile8, readdir as readdir3, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir7 } from "node:os";
 import { join as join95 } from "node:path";
 function ocrmypdfArguments(input) {
@@ -125641,7 +125775,7 @@ async function probePdftoppm(input) {
   } catch (error) {
     return commandMissing(error) ? "missing" : "failed";
   }
-  const rendered = (await readdir2(input.directory)).filter((name) => name.startsWith("render") && name.endsWith(".png"));
+  const rendered = (await readdir3(input.directory)).filter((name) => name.startsWith("render") && name.endsWith(".png"));
   const first = rendered[0];
   if (!first)
     return "failed";
@@ -125668,7 +125802,7 @@ async function probeOcrmypdf(input) {
     return commandMissing(error) ? "missing" : "failed";
   }
   try {
-    return probeWordRead(await readFile7(sidecarPath, "utf8")) ? "ok" : "failed";
+    return probeWordRead(await readFile8(sidecarPath, "utf8")) ? "ok" : "failed";
   } catch {
     return "failed";
   }
@@ -125772,7 +125906,7 @@ var init_ocr_capability = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/pdf-raster-ocr.ts
-import { mkdtemp as mkdtemp5, readdir as readdir3, rm as rm6 } from "node:fs/promises";
+import { mkdtemp as mkdtemp5, readdir as readdir4, rm as rm6 } from "node:fs/promises";
 import { tmpdir as tmpdir8 } from "node:os";
 import { join as join96 } from "node:path";
 function parseSizePoints(text) {
@@ -125917,7 +126051,7 @@ async function rasterPdfOcr(input, options) {
             break;
           throw error;
         }
-        const files = (await readdir3(tempDir)).map((name) => ({ name, page: renderedPageNumber(name) })).filter((entry) => entry.page !== undefined).sort((left, right) => left.page - right.page);
+        const files = (await readdir4(tempDir)).map((name) => ({ name, page: renderedPageNumber(name) })).filter((entry) => entry.page !== undefined).sort((left, right) => left.page - right.page);
         if (files.length === 0) {
           if (stopReason === "time")
             break;
@@ -126048,12 +126182,11 @@ var init_pdf_raster_ocr = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr.ts
-import { mkdtemp as mkdtemp6, readFile as readFile8, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
+import { mkdtemp as mkdtemp6, readFile as readFile9, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
 import { tmpdir as tmpdir9 } from "node:os";
 import { join as join97 } from "node:path";
-function pdfOcrTimeoutMs(baseMs, sizeBytes) {
-  const steps = Math.max(1, Math.ceil((Number.isFinite(sizeBytes) ? Math.max(0, sizeBytes) : 0) / OCR_PDF_TIMEOUT_BYTES_PER_STEP));
-  return Math.max(baseMs, Math.min(baseMs * steps, OCR_PDF_MAX_TIMEOUT_MS));
+function pdfOcrTimeoutMs(baseMs, _sizeBytes) {
+  return baseMs;
 }
 function createOcrEngine(input) {
   const options = input.options ?? {};
@@ -126237,7 +126370,7 @@ function createImageOcr(options = {}) {
         const vision = await withVision2(engine, (reader) => visionImage(laneInput, reader));
         if (vision)
           return vision;
-        const decoded = preparedImage ? await readFile8(preparedImage.path) : undefined;
+        const decoded = preparedImage ? await readFile9(preparedImage.path) : undefined;
         return commandImageOcr(engine, decoded ? { ...laneInput, bytes: decoded, mimeType: "image/jpeg", sizeBytes: decoded.byteLength } : laneInput);
       });
     } catch (error) {
@@ -126347,7 +126480,7 @@ async function extractPdfOcr(input) {
         throw error;
       return { status: "failed_terminal", errorKind: rejectionKind };
     }
-    const bounded = boundText(normalizeExtractedText(await readFile8(sidecarPath, "utf8")), input.maxBoundedTextChars);
+    const bounded = boundText(normalizeExtractedText(await readFile9(sidecarPath, "utf8")), input.maxBoundedTextChars);
     if (!bounded.text) {
       return mediaDescriptorOutput({
         mimeType: input.mimeType,
@@ -126454,7 +126587,7 @@ function imageExtensionForMimeType(mimeType) {
     return ".heif";
   return ".img";
 }
-var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_TIMEOUT_BYTES_PER_STEP, OCR_PDF_MAX_TIMEOUT_MS, OCR_PDF_COMMAND, OCR_IMAGE_COMMAND, TEMP_DIR_PREFIX4 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
+var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND, OCR_IMAGE_COMMAND, TEMP_DIR_PREFIX4 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -126463,8 +126596,6 @@ var init_ocr = __esm(() => {
   init_ocr_capability();
   init_pdf_raster_ocr();
   init_input_limits();
-  OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
-  OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
   OCR_PDF_COMMAND = OCRMYPDF_COMMAND;
   OCR_IMAGE_COMMAND = TESSERACT_COMMAND;
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS = [
@@ -126962,7 +127093,7 @@ var init_audio_wav = __esm(() => {
 
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
 import { existsSync as existsSync68 } from "node:fs";
-import { mkdtemp as mkdtemp7, readFile as readFile9, rm as rm8 } from "node:fs/promises";
+import { mkdtemp as mkdtemp7, readFile as readFile10, rm as rm8 } from "node:fs/promises";
 import { tmpdir as tmpdir10, totalmem as totalmem2 } from "node:os";
 import { join as join99 } from "node:path";
 function defaultAudioConverter(platform, runner = runExtractionCommand, timeoutMs = DEFAULT_CONVERT_TIMEOUT_MS) {
@@ -127160,7 +127291,7 @@ function createBuiltInTranscriber(options = {}) {
         }
         let audio;
         try {
-          audio = parseWav16Mono(new Uint8Array(await readFile9(wavPath)));
+          audio = parseWav16Mono(new Uint8Array(await readFile10(wavPath)));
         } catch (error) {
           if (error instanceof WavFormatError)
             throw new AudioUndecodableError(error.message);
@@ -127256,17 +127387,13 @@ function wireBuiltInTranscriptionAtBoot(input) {
     input.engine.onReady?.(input.wake);
   return input.engine;
 }
-function transcriptionDeadlineFromLease(leaseExpiresAt) {
-  const at = leaseExpiresAt ? Date.parse(leaseExpiresAt) : Number.NaN;
-  return Number.isFinite(at) ? at - LEASE_MARGIN_MS : undefined;
-}
 function sharedBuiltInTranscriber(env = process.env) {
   if (!builtInTranscriptionEnabled(env))
     return;
   sharedTranscriber ??= createBuiltInTranscriber({ env });
   return sharedTranscriber;
 }
-var TRANSCRIPT_TIME_BUDGET_WARNING = "transcript_time_budget_reached", DEFAULT_IDLE_SHUTDOWN_SECONDS2 = 180, DEFAULT_STARTUP_TIMEOUT_MS2 = 120000, DEFAULT_CHUNK_TIMEOUT_MS = 180000, DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS, LEASE_MARGIN_MS = 60000, DEFAULT_CHUNK_SECONDS = 30, MAX_TOKENS_PER_CHUNK = 512, SILENCE_LEVEL = 24, ASR_TEXT_MARKER = "<asr_text>", LANGUAGE_PREFIX = "language ", TARGET_SAMPLE_RATE = 16000, TEMP_DIR_PREFIX5 = "olympus-asr-", MACOS_AUDIO_CONVERTER = "/usr/bin/afconvert", TranscriberPendingError, TranscriberUnavailableError, AudioUndecodableError, sharedTranscriber;
+var TRANSCRIPT_TIME_BUDGET_WARNING = "transcript_time_budget_reached", DEFAULT_IDLE_SHUTDOWN_SECONDS2 = 180, DEFAULT_STARTUP_TIMEOUT_MS2 = 120000, DEFAULT_CHUNK_TIMEOUT_MS = 180000, DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS, DEFAULT_CHUNK_SECONDS = 30, MAX_TOKENS_PER_CHUNK = 512, SILENCE_LEVEL = 24, ASR_TEXT_MARKER = "<asr_text>", LANGUAGE_PREFIX = "language ", TARGET_SAMPLE_RATE = 16000, TEMP_DIR_PREFIX5 = "olympus-asr-", MACOS_AUDIO_CONVERTER = "/usr/bin/afconvert", TranscriberPendingError, TranscriberUnavailableError, AudioUndecodableError, sharedTranscriber;
 var init_built_in_transcriber = __esm(() => {
   init_model_transport();
   init_install();
@@ -127275,7 +127402,7 @@ var init_built_in_transcriber = __esm(() => {
   init_transcription_model();
   init_audio_wav();
   init_command_runner();
-  DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
+  DEFAULT_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
   DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
   DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
   DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
@@ -127301,7 +127428,7 @@ var init_built_in_transcriber = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/transcription.ts
-import { mkdtemp as mkdtemp8, readFile as readFile10, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
+import { mkdtemp as mkdtemp8, readFile as readFile11, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir11 } from "node:os";
 import { extname as extname3, join as join100 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
@@ -127386,10 +127513,8 @@ function createTranscriptionExtractor(options = {}) {
           inputPath = join100(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile6(inputPath, bytes);
         }
-        const deadlineAt = transcriptionDeadlineFromLease(input.job.leaseExpiresAt);
         const transcribed = await engine.transcribe({
           inputPath,
-          ...deadlineAt !== undefined ? { deadlineAt } : {},
           ...mimeType ? { mimeType } : {}
         });
         const text = transcribed.text.trim();
@@ -127514,7 +127639,7 @@ function sidecarPathForInput(inputPath) {
 async function readFirstExisting(paths) {
   for (const path of [...new Set(paths)]) {
     try {
-      return await readFile10(path, "utf8");
+      return await readFile11(path, "utf8");
     } catch {}
   }
   return;
@@ -128706,6 +128831,8 @@ function createFileExtractionRunner(options) {
           },
           ...spoolDir !== undefined ? { spoolDir } : {},
           ...spoolAnchor !== undefined ? { spoolAnchor } : {},
+          leaseRenewMs: options.leaseRenewMs ?? EXTRACTION_LEASE_RENEW_MS,
+          ...request.leaseSeconds !== undefined ? { leaseSeconds: request.leaseSeconds } : {},
           now
         });
         if (outcome.sourceParked !== undefined) {
@@ -128776,11 +128903,15 @@ function boundedByReader(requested, extractor) {
 async function settleOneJob(input) {
   const staged = {};
   let outcome;
+  const renewal = setInterval(() => renewJobLease(input), input.leaseRenewMs ?? EXTRACTION_LEASE_RENEW_MS);
+  renewal.unref?.();
   try {
     outcome = await settleOneJobHeld(input, staged);
   } catch (error) {
     console.error(`[olympus:file-extraction] job_internal_error job_id=${input.job.jobId} extractor_kind=${input.job.extractorKind} ` + `reason=${boundedLogErrorMessage(error)}`);
     outcome = retryable(EXTRACTION_ERROR_KIND_INTERNAL_ERROR, error);
+  } finally {
+    clearInterval(renewal);
   }
   try {
     await staged.file?.dispose();
@@ -128795,6 +128926,15 @@ async function settleOneJob(input) {
     console.error(`[olympus:file-extraction] media_release_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error)}`);
   }
   return outcome;
+}
+function renewJobLease(input) {
+  try {
+    const until = input.jobs.renewLease(input.job.jobId, input.job.leaseToken, input.leaseSeconds);
+    if (until)
+      input.job.leaseExpiresAt = until;
+  } catch (error) {
+    console.error(`[olympus:file-extraction] lease_renew_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error)}`);
+  }
 }
 async function settleOneJobHeld(input, staged) {
   const { job, extractor, corpus } = input;
@@ -129349,7 +129489,7 @@ function withMediaTypeFromName(ref) {
   const named = fileMimeTypeFromName(ref.name);
   return isGenericMimeType(named) ? ref : { ...ref, mimeType: named };
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", PLAN_REFUSED_UNROUTABLE_RECORD = "unroutable_record_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, EXTRACTION_LEASE_RENEW_MS = 60000, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", PLAN_REFUSED_UNROUTABLE_RECORD = "unroutable_record_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_source_size_limits();
   init_control_path_headroom();
@@ -142416,7 +142556,7 @@ var init_update_check = __esm(() => {
 });
 
 // src/core/managed-tools.ts
-import { execFile as execFile2 } from "node:child_process";
+import { execFile as execFile3 } from "node:child_process";
 import { createHash as createHash81, randomUUID as randomUUID28 } from "node:crypto";
 import {
   accessSync as accessSync9,
@@ -142675,7 +142815,7 @@ ${inspect.stdout}`)) {
 }
 async function defaultClearQuarantine(dir) {
   await new Promise((resolve) => {
-    execFile2("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve());
+    execFile3("/usr/bin/xattr", ["-r", "-d", "com.apple.quarantine", dir], { timeout: 30000 }, () => resolve());
   });
 }
 function ensureOwnedDirectory(path, uid, label, options = {}) {
@@ -142897,8 +143037,21 @@ function verifyPinnedFiles(staging, asset, uid, label, tool) {
 }
 async function downloadTo(path, asset, options, onBytes, tool, label) {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  const stall = new AbortController;
+  let stallTimer;
+  const stillArriving = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => stall.abort(), DOWNLOAD_STALL_MS3);
+  };
+  stillArriving();
+  const signal = options.signal ? AbortSignal.any([options.signal, stall.signal]) : stall.signal;
+  try {
+    return await downloadStream(path, asset, fetchImpl, signal, stillArriving, onBytes, tool, label);
+  } finally {
+    clearTimeout(stallTimer);
+  }
+}
+async function downloadStream(path, asset, fetchImpl, signal, stillArriving, onBytes, tool, label) {
   let response;
   try {
     response = await fetchImpl(asset.url, { signal, redirect: "follow" });
@@ -142927,6 +143080,7 @@ async function downloadTo(path, asset, options, onBytes, tool, label) {
       });
       if (chunk.done)
         break;
+      stillArriving();
       received += chunk.value.byteLength;
       if (received > asset.bytes) {
         await reader.cancel().catch(() => {
@@ -143187,8 +143341,8 @@ function createManagedToolsJob(options = {}) {
     settled: () => current
   };
 }
-var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve) => {
-  execFile2(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
+var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_STALL_MS3, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve) => {
+  execFile3(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
     if (!error) {
       resolve({ code: 0, stdout, stderr });
       return;
@@ -143200,7 +143354,7 @@ var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef
       resolve({ code: typeof failure.code === "number" ? failure.code : 1, stdout: stdout ?? "", stderr: stderr ?? "" });
   });
 }), CODESIGN = "/usr/bin/codesign", defaultVersionCheck = (executable, options) => new Promise((resolve) => {
-  execFile2(executable, ["--version"], { cwd: options.cwd, env: options.env, timeout: VERSION_CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024, encoding: "utf8" }, (error, stdout) => {
+  execFile3(executable, ["--version"], { cwd: options.cwd, env: options.env, timeout: VERSION_CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024, encoding: "utf8" }, (error, stdout) => {
     if (error) {
       const failure = error;
       const detail = failure.signal ? `stopped by ${failure.signal}` : failure.code !== undefined ? `exit ${String(failure.code)}` : failure.message;
@@ -143278,7 +143432,7 @@ var init_managed_tools = __esm(() => {
   };
   MANAGED_TOOL_ORDER = ["tor", "zkapi-clientd"];
   MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
-  DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+  DOWNLOAD_STALL_MS3 = 2 * 60 * 1000;
   ManagedToolsError = class ManagedToolsError extends Error {
     code;
     tool;
@@ -144646,9 +144800,9 @@ main().catch(() => process.exit(1));
 });
 
 // src/core/zkapi-confinement-linux.ts
-import { execFile as execFile3 } from "node:child_process";
-import { promisify } from "node:util";
-import { readFile as readFile11, stat as fileStat } from "node:fs/promises";
+import { execFile as execFile4 } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
+import { readFile as readFile12, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash82 } from "node:crypto";
 import { lstatSync as lstatSync43, readFileSync as readFileSync72, readlinkSync as readlinkSync4, readdirSync as readdirSync25, realpathSync as realpathSync21 } from "node:fs";
 import { dirname as dirname89, join as join114 } from "node:path";
@@ -144826,7 +144980,7 @@ async function launcherPath(env) {
           break;
         current = dirname89(current);
       }
-      if (!lstatSync43(path).isFile() || createHash82("sha256").update(await readFile11(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+      if (!lstatSync43(path).isFile() || createHash82("sha256").update(await readFile12(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
@@ -144837,7 +144991,7 @@ async function launcherIdentity(path) {
   const info = await fileStat(path);
   if (!info.isFile())
     throw new Error("not a launcher");
-  const hash = createHash82("sha256").update(await readFile11(path)).digest("hex");
+  const hash = createHash82("sha256").update(await readFile12(path)).digest("hex");
   return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
 }
 function linuxZkapiConfinement(deps = {}) {
@@ -144871,13 +145025,13 @@ function linuxZkapiConfinement(deps = {}) {
               return linuxConfinementCheck(await deps.check(selected));
             const args = { env, encoding: "utf8", timeout: 5000, maxBuffer: 64 * 1024 };
             try {
-              const version = await execFileAsync(selected, ["--version"], args);
+              const version = await execFileAsync2(selected, ["--version"], args);
               if (version.stdout.trim() !== `zkapi-confine ${MANAGED_TOOL_PINS["zkapi-clientd"].version}`)
                 return { ok: false, code: "launcher_missing_or_untrusted" };
             } catch {
               return { ok: false, code: "launcher_missing_or_untrusted" };
             }
-            return linuxConfinementCheck(JSON.parse((await execFileAsync(selected, ["check"], args)).stdout));
+            return linuxConfinementCheck(JSON.parse((await execFileAsync2(selected, ["check"], args)).stdout));
           } catch (e) {
             try {
               return linuxConfinementCheck(JSON.parse(String(e.stdout)));
@@ -144985,13 +145139,13 @@ function linuxZkapiConfinement(deps = {}) {
     }
   };
 }
-var realProc, shellQuote2 = (s) => "'" + s.replace(/'/g, "'\\''") + "'", execFileAsync, CHECK_TTL_MS = 30000, hostChecks, injectedChecks;
+var realProc, shellQuote2 = (s) => "'" + s.replace(/'/g, "'\\''") + "'", execFileAsync2, CHECK_TTL_MS = 30000, hostChecks, injectedChecks;
 var init_zkapi_confinement_linux = __esm(() => {
   init_managed_tools();
   init_zkapi_confine_fetch();
   init_zkapi_confine_selftest();
   realProc = { read: (p) => readFileSync72(p, "utf8"), link: readlinkSync4, list: (p) => readdirSync25(p) };
-  execFileAsync = promisify(execFile3);
+  execFileAsync2 = promisify2(execFile4);
   hostChecks = new Map;
   injectedChecks = new WeakMap;
 });
@@ -185670,7 +185824,12 @@ function defaultLaunch(platform, homeDir) {
 }
 async function download(fetchImpl, url, maxBytes) {
   const controller = new AbortController;
-  const timeout = setTimeout(() => controller.abort(), SELF_UPDATE_DOWNLOAD_TIMEOUT_MS);
+  let timeout;
+  const stalled = () => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => controller.abort(), SELF_UPDATE_DOWNLOAD_STALL_MS);
+  };
+  stalled();
   let reader;
   try {
     const response = await fetchImpl(url, { method: "GET", headers: { "User-Agent": "Olympus" }, credentials: "omit", redirect: "error", signal: controller.signal });
@@ -185683,6 +185842,7 @@ async function download(fetchImpl, url, maxBytes) {
       const { done, value } = await reader.read();
       if (done)
         break;
+      stalled();
       size += value.byteLength;
       if (size > maxBytes)
         throw new Error("oversized");
@@ -185835,7 +185995,7 @@ function createSelfUpdater(options) {
     }
   };
 }
-var SELF_UPDATE_DOWNLOAD_TIMEOUT_MS = 30000, SELF_UPDATE_STALE_MS, SELF_UPDATE_SHOWN_MS, RUNNER = `#!/bin/sh
+var SELF_UPDATE_DOWNLOAD_STALL_MS = 30000, SELF_UPDATE_STALE_MS, SELF_UPDATE_SHOWN_MS, RUNNER = `#!/bin/sh
 dir=$1
 /bin/sh "$dir/install.sh" > "$dir/install.log" 2>&1 < /dev/null
 code=$?
@@ -220563,7 +220723,7 @@ var init_whatsapp = __esm(() => {
 });
 
 // src/workers/local-pacing.ts
-import { execFile as execFile4, spawn as spawn15 } from "node:child_process";
+import { execFile as execFile5, spawn as spawn15 } from "node:child_process";
 import { existsSync as existsSync115, readdirSync as readdirSync37, readFileSync as readFileSync109 } from "node:fs";
 import { join as join151 } from "node:path";
 function embedsOnThisComputer(provider) {
@@ -220846,7 +221006,7 @@ function spawnCaffeinate() {
 }
 var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_REFRESH_MS = 30000, GO_EASY_NIGHT, GO_EASY_LOCAL_WORK_RECENT_MS, GO_EASY_TRICKLE_GAP_MS = 20000, GO_EASY_TRICKLE_EMBED_ITEMS = 4, defaultExec3 = (command, args) => new Promise((resolve) => {
   try {
-    execFile4(command, [...args], { timeout: 3000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout) => {
+    execFile5(command, [...args], { timeout: 3000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout) => {
       resolve(error ? undefined : stdout);
     });
   } catch {
@@ -240527,17 +240687,20 @@ class EngineCommandClient {
   }
   async send(command, options = {}) {
     const id = options.id ?? this.newId();
-    const deadline = this.now() + (options.timeoutMs ?? 60000);
+    const silenceMs = options.timeoutMs ?? 60000;
+    let deadline = this.now() + silenceMs;
     let receipt = await this.postUntil(id, command, deadline);
+    deadline = this.now() + silenceMs;
     let attempt = 0;
     while (receipt.state === "received") {
       if (this.now() >= deadline)
-        throw new EngineCommandUnavailableError("The background engine has not finished this command yet.");
+        throw new EngineCommandUnavailableError(`The background engine stopped answering for ${Math.round(silenceMs / 1000)} s while it ran this command (${command.kind}); it may still finish.`);
       const wait = Math.max(0, Math.min(RESULT_WAIT_MS, deadline - this.now()));
       const answer = await this.request(`${ENGINE_COMMANDS_PATH}/${encodeURIComponent(id)}?wait=${wait}`, { method: "GET" }, deadline, wait);
       if (answer?.status === 200) {
         receipt = answer.body;
         attempt = 0;
+        deadline = this.now() + silenceMs;
         continue;
       }
       if (answer?.status === 404) {
@@ -240934,7 +241097,7 @@ function createEngineFrontRoutes(input) {
     const forwarded = await requestToForwarded(request);
     let receipt;
     try {
-      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
+      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : OWNER_ACTION_WAIT_MS) });
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : "The background engine is not answering." };
     }
@@ -241164,7 +241327,7 @@ function frontModelReload(options) {
     if (pending)
       return true;
     options.closeGate?.();
-    pending = options.client.send({ kind: "reload", target: "models", frontPid: options.pid ?? process.pid }, { timeoutMs: 30000 }).then((receipt) => {
+    pending = options.client.send({ kind: "reload", target: "models", frontPid: options.pid ?? process.pid }, { timeoutMs: OWNER_ACTION_WAIT_MS }).then((receipt) => {
       if (receipt.state !== "done" || receipt.result?.restarting !== true) {
         log("[engine-split] the background did not confirm it is restarting for the model change; restart Olympus if the new model does not take effect.");
       }
@@ -267031,7 +267194,7 @@ __export(exports_server, {
   startWorkerWithLaunch: () => startWorkerWithLaunch
 });
 import { release as release2, totalmem as totalmem8 } from "node:os";
-import { execFile as execFile5 } from "node:child_process";
+import { execFile as execFile6 } from "node:child_process";
 import { appendFileSync, existsSync as existsSync126, readFileSync as readFileSync114 } from "node:fs";
 import { dirname as dirname120, join as join154 } from "node:path";
 async function startWorkerWithLaunch(launch) {
@@ -268092,7 +268255,7 @@ ${key}`;
         reject(new Error("open refused"));
         return;
       }
-      execFile5("/usr/bin/open", args, { timeout: 1e4 }, (error) => error ? reject(error) : resolve());
+      execFile6("/usr/bin/open", args, { timeout: 1e4 }, (error) => error ? reject(error) : resolve());
     });
   };
   const whatsappConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: WHATSAPP_PERSONAL_SOURCE_ID });
@@ -270085,7 +270248,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
       let invalidatedJobs = 0;
       if (engineFront && approval.replayed !== true) {
-        await engineFront.client.send({ kind: "reload", target: "scope", corpora: [...definition.corpusIdsToInvalidate] }, { timeoutMs: 30000 });
+        await engineFront.client.send({ kind: "reload", target: "scope", corpora: [...definition.corpusIdsToInvalidate] }, { timeoutMs: OWNER_ACTION_WAIT_MS });
       } else if (fileExtractionRuntime && approval.replayed !== true) {
         invalidatedJobs = definition.corpusIdsToInvalidate.reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0);
       }
@@ -270768,7 +270931,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         openUrl: async (url, eligible) => {
           if (!await eligible())
             throw new Error("open refused");
-          await new Promise((resolve, reject) => execFile5("/usr/bin/open", [url], { timeout: 1e4 }, (error) => error ? reject(error) : resolve()));
+          await new Promise((resolve, reject) => execFile6("/usr/bin/open", [url], { timeout: 1e4 }, (error) => error ? reject(error) : resolve()));
         }
       } : {}
     });

@@ -213,15 +213,16 @@ export function createEngineFront(input: {
   return { client, ownerBusy: relay, status, completeModel, backgroundReady, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
-/** A forwarded sync answers when its pass ends, as the route did in one process: up to a long pass. */
+// How long the front waits on a background that has stopped answering. A
+// command the background still holds is never cut: each answer that says so
+// starts the wait again (EngineCommandClient.send). These bound only a
+// background that is gone or stalled; it can stall for over a minute under
+// embedding and judging load (78 s in a release check), so none is shorter.
+/** A forwarded sync answers when its pass ends, however long that is. */
 export const SOURCE_SYNC_WAIT_MS = 35 * 60_000;
-/** How long the front waits for the background to write an export: a large install's copies take a while. */
+/** An export runs as long as a large install's copies take. */
 export const DATA_EXPORT_WAIT_MS = 3 * 60 * 60_000;
-// How long the front waits for the background to confirm an owner's action
-// (Unpair's capture stop, Make Private). In one process these waited without
-// a limit; the background can stall for over a minute under embedding and
-// judging load (78 s in a release check), and a 30 s wait then told the owner
-// the stop was unconfirmed while the background went on to apply it.
+/** An owner's action (Unpair's capture stop, Make Private) and a forwarded reload. */
 export const OWNER_ACTION_WAIT_MS = 5 * 60_000;
 
 function restartingResponse(request: Request): Response {
@@ -339,7 +340,7 @@ export function createEngineFrontRoutes(input: {
       receipt = await input.client.send(
         { kind, request: forwarded, ...(kind === 'delete_source_data' ? { frontPid: pid } : {}) },
         // Extraction and embedding batches can run for minutes, as they did in the one process.
-        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : 120_000) },
+        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : OWNER_ACTION_WAIT_MS) },
       );
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : 'The background engine is not answering.' };
