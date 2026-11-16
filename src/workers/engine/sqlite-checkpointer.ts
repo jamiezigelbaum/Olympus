@@ -4,9 +4,9 @@
 // disk). In the engine's background the loop's writable connections turn the
 // automatic checkpoint off (core/sqlite-store.ts, loopWalAutocheckpointPragma) and this worker
 // checkpoints each file PASSIVE once its WAL passes a size: PASSIVE never
-// waits on a reader or the writer, and copies what no reader still needs. The
-// WAL then rewinds at the writer's next commit, and journal_size_limit cuts a
-// grown file back. A WAL already large at an upgrade is caught up here, a
+// waits on a reader or the writer, never takes the writer lock, and copies
+// what no reader still needs. The WAL then rewinds at the writer's next
+// commit, and journal_size_limit cuts a grown file back. A WAL already large at an upgrade is caught up here, a
 // pass at a time, never on the first loop commit.
 
 import { statSync } from 'node:fs';
@@ -38,13 +38,12 @@ self.onmessage = ({ data }) => {
       connections.set(path, held);
     }
     const started = performance.now();
-    let row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
-    // All copied and nothing reading: a large file is cut back now, since an
-    // idle store's writer may not commit again for a long time. With no
-    // busy wait it gives up at once if a reader or writer is there.
-    if (row.busy === 0 && row.log === row.checkpointed && data.walBytes > 67108864) {
-      row = held.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
-    }
+    // PASSIVE only. TRUNCATE takes the writer lock and holds it through its
+    // fsync and truncate, which on a busy disk outlasted a loop writer's 10 s
+    // busy wait: syncs failed with "database is locked" on the lane 6 gate
+    // (16 Nov). After a complete PASSIVE pass the writer's next commit
+    // rewinds the WAL, and journal_size_limit cuts the file back to 64 MB.
+    const row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
     postMessage({ id, ok: true, ms: performance.now() - started, busy: row.busy, log: row.log, checkpointed: row.checkpointed });
   } catch (error) {
     postMessage({ id, ok: false, error: error && error.name ? error.name : 'Error' });

@@ -19358,6 +19358,7 @@ function hasImmutableAccountLabel(id) {
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID7 } from "node:crypto";
 import { closeSync as closeSync10, existsSync as existsSync20, fsyncSync as fsyncSync3, lstatSync as lstatSync10, mkdirSync as mkdirSync13, openSync as openSync10, statSync as statSync12, statfsSync } from "node:fs";
+import { open as openFile } from "node:fs/promises";
 import { dirname as dirname21 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
@@ -30952,6 +30953,20 @@ ${parentKey(ref)}`, { ref, origin });
         closeSync10(fd);
     }
   }
+  async durabilityBarrierOffLoop() {
+    if (this.dbPath === ":memory:" || this.readOnly)
+      return;
+    let handle;
+    try {
+      handle = await openFile(`${this.dbPath}-wal`, "r");
+      await handle.sync();
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+    } finally {
+      await handle?.close();
+    }
+  }
   sqliteJournalSettings() {
     return sqliteJournalSettingsOf(this.db);
   }
@@ -35386,7 +35401,9 @@ class SourceStorageUnavailableError extends Error {
   }
 }
 var adoptionEnabled = false;
+var storeOpens2 = 0;
 function frontReadOnly(options) {
+  storeOpens2 += 1;
   return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
 }
 function openConnectorStore(account, requested, env = process.env) {
@@ -37102,6 +37119,7 @@ var SCHEDULER_SOURCE_IDS = {
   archiveImports: "archive.imports",
   evernote: "evernote.notes"
 };
+var SOURCE_ARRIVAL_TARGET_MS = 10 * 60000;
 var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60000;
 var EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60000;
 var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;

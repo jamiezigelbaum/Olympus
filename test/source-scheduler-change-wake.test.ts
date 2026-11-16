@@ -265,9 +265,55 @@ describe('scheduler push wake', () => {
     };
     const ok = watchedSource({ sourceId: 'files.ok', run: async () => ({ status: 'idle' }) });
     const h = harness([broken, ok.source]);
-    h.scheduler.start();
-    expect(ok.subscriptions()).toBe(1);
-    h.scheduler.stop();
+    const warn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (line: string) => { warnings.push(line); };
+    try {
+      h.scheduler.start();
+      expect(ok.subscriptions()).toBe(1);
+      // The broken source is polled, and its status says so and why.
+      const byId = new Map(h.scheduler.status().sources.map((source) => [source.source_id, source]));
+      expect(byId.get('files.broken')?.change_watch).toEqual({
+        state: 'polling',
+        reason: 'no watcher',
+        poll_interval_seconds: 1_800,
+        meets_arrival_target: false,
+      });
+      expect(byId.get('files.ok')?.change_watch).toEqual({
+        state: 'watching',
+        poll_interval_seconds: 1_800,
+        meets_arrival_target: true,
+      });
+      expect(warnings.filter((line) => line.includes('change_watch_unavailable source_id=files.broken'))).toHaveLength(1);
+      h.scheduler.updateSources([broken, ok.source]);
+      expect(warnings.filter((line) => line.includes('change_watch_unavailable'))).toHaveLength(1);
+    } finally {
+      console.warn = warn;
+      h.scheduler.stop();
+    }
+  });
+
+  test('a source polled within ten minutes meets the arrival target without a watch', () => {
+    const broken: SourceSchedulerSource = {
+      ...watchedSource({ sourceId: 'files.broken', run: async () => ({ status: 'idle' }) }).source,
+      intervalMs: 5 * 60_000,
+      subscribeChanges() { throw new Error('no watcher'); },
+    };
+    const h = harness([broken]);
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      h.scheduler.start();
+      expect(h.scheduler.status().sources[0]?.change_watch).toEqual({
+        state: 'polling',
+        reason: 'no watcher',
+        poll_interval_seconds: 300,
+        meets_arrival_target: true,
+      });
+    } finally {
+      console.warn = warn;
+      h.scheduler.stop();
+    }
   });
 
   test('a wake signalled during a subscribe that then throws leaves no live timer', () => {

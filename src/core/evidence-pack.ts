@@ -6,6 +6,7 @@ import {
   rerankPassage,
   rerankPoolSize,
   RERANK_POOL_STORE_DEPTH,
+  rerankPoolSemanticSeats,
   type EvidenceRerankAudit,
   type EvidenceRerankOutcome,
   type EvidenceReranker,
@@ -244,7 +245,7 @@ export interface BuildEvidencePackInput {
   onSeatingLanes?: (lanes: readonly SeatingLane[], ordinal: number) => void;
   onRerankScores?: (entries: readonly { candidateId: SourceIndexCandidateId; score: number }[], outcome: EvidenceRerankOutcome) => void;
   // Optional experimental store allocation; ordinary builds use the shared default.
-  poolAllocation?: { storeDepth: number };
+  poolAllocation?: { storeDepth: number; semanticSeats?: number };
   // Eval capture's adapter depth, independent of pool/pack seats.
   storeSearchDepth?: number;
   now?: () => Date;
@@ -373,7 +374,7 @@ async function buildPreparedEvidencePackDetailed(
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
-    : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined));
+    : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
   // A build can fan out more than once (the literal query plus planner
   // expansions), and each routed run judged its hits against its own ledger
   // snapshot. One more pass over the merged hits puts the whole pack on ONE
@@ -805,7 +806,7 @@ type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
   | 'encounteredSecureLocal' | 'secureLaneAudits'
-> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats'>>;
+> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats' | 'semanticSeats'>>;
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
   const hits: SourceIndexRoutedSearchHit[] = [];
@@ -897,7 +898,7 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
 async function runRoutedSearches(
   input: BuildEvidencePackInput,
   retrievalLimit: number = input.maxResults,
-  poolAllocation?: { storeDepth: number },
+  poolAllocation?: { storeDepth: number; semanticSeats?: number },
 ): Promise<RoutedSearchSlice> {
   const literalQuery = literalSearchQuery(input);
   // Kicked off BEFORE the literal search so the two overlap rather than queue.
@@ -935,7 +936,10 @@ async function runRoutedSearches(
   if (runs.length === 1) return literalRun;
 
   const recency = seatRoutedQueryRuns(runs.map(run => run.hits), retrievalLimit, questionHasTemporalIntent(input));
-  const { hits: fused, degradations: budgetDegradations } = recency;
+  const { degradations: budgetDegradations } = recency;
+  // The runs' semantic seats sit past the fused cut, so they are seated again
+  // after it, best margin first, as each run seated them.
+  const fused = withRunSemanticSeats(recency.hits, runs, poolAllocation?.semanticSeats ?? 0);
 
   return {
     hits: fused,
@@ -957,6 +961,25 @@ async function runRoutedSearches(
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
     ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
   };
+}
+
+function withRunSemanticSeats(
+  hits: SourceIndexRoutedSearchHit[],
+  runs: readonly RoutedSearchSlice[],
+  seats: number,
+): SourceIndexRoutedSearchHit[] {
+  if (seats <= 0) return hits;
+  const seated = new Set(hits.map(routedHitCandidateId));
+  const offered = runs.flatMap((run) => run.semanticSeats ?? []).sort((left, right) => right.margin - left.margin);
+  const added: SourceIndexRoutedSearchHit[] = [];
+  for (const { hit } of offered) {
+    if (added.length >= seats) break;
+    const id = routedHitCandidateId(hit);
+    if (seated.has(id)) continue;
+    seated.add(id);
+    added.push(hit);
+  }
+  return added.length ? [...hits, ...added] : hits;
 }
 
 // Shared final fusion of multiple routed runs, also used by offline eval replay.
@@ -1042,7 +1065,7 @@ function runRoutedSearch(
   maxResults: number,
   laneTimeoutMs: number,
   searchDeadlineAtMs?: number,
-  poolAllocation?: { storeDepth: number },
+  poolAllocation?: { storeDepth: number; semanticSeats?: number },
 ): Promise<SourceIndexRoutedSearchResponse> {
   return observeSourceAnswerRoutedQuery(ordinal, () =>
     routeSourceIndexSearch({

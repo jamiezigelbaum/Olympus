@@ -53,6 +53,7 @@ import { BACKGROUND_READS, OffThreadReadBusyError, offThreadReadsSupported, open
 import { compareProviderAccounts } from '../../core/provider-account-identity.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, statSync, statfsSync } from 'node:fs';
+import { open as openFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
@@ -268,6 +269,9 @@ const EMBEDDING_BATCH_SIZE = 32;
 const MAX_SELECTED_EMBED_ITEM_IDS = 25_000;
 const MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 const MIN_VECTOR_SCORE = 0.18;
+// How many of its nearest vector rows a store offers a reranked pool's
+// semantic seats (router withSemanticPoolSeats), whatever the bar.
+const CONNECTOR_STORE_SEMANTIC_ROWS = 3;
 // The most query concepts a keyword match must contain (see searchItemsDetailed).
 const MAX_REQUIRED_CONCEPTS = 3;
 // Or the share of the query's concept weight (IDF) a keyword match must carry.
@@ -16306,6 +16310,25 @@ export class LocalConnectorStore {
     }
   }
 
+  /**
+   * durabilityBarrier with the fsync on libuv's thread pool, for a caller
+   * that can await it outside a transaction: the loop never waits on the disk
+   * (an fsync held the loop for seconds on a busy disk, lane 6 gate, 16 Nov).
+   * It covers every write committed before the call.
+   */
+  async durabilityBarrierOffLoop(): Promise<void> {
+    if (this.dbPath === ':memory:' || this.readOnly) return;
+    let handle: Awaited<ReturnType<typeof openFile>> | undefined;
+    try {
+      handle = await openFile(`${this.dbPath}-wal`, 'r');
+      await handle.sync();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    } finally {
+      await handle?.close();
+    }
+  }
+
   /** This connection's journal settings, for the WAL sampler's receipt. */
   sqliteJournalSettings(): { journal_mode: string; synchronous: number; wal_autocheckpoint: number } {
     return sqliteJournalSettingsOf(this.db);
@@ -17601,10 +17624,18 @@ async function hybridConnectorStoreSearch(
   const semanticNeighbourHits = scoredVectorRows
     .filter((row) => !vettedRows.has(row.sourceItem.localItemId))
     .map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope));
+  // The nearest rows, over the bar or not, for a reranked pool's semantic
+  // seats.
+  const semanticRows = contentBar === undefined || scoredVectorRows.length === 0 ? undefined : {
+    hits: [...scoredVectorRows].sort((left, right) => right.bestCosine - left.bestCosine).slice(0, CONNECTOR_STORE_SEMANTIC_ROWS)
+      .map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
+    bar: contentBar,
+  };
   return {
     hits,
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     ...(semanticNeighbourHits.length > 0 ? { semanticNeighbourHits } : {}),
+    ...(semanticRows ? { semanticRows } : {}),
     latencyMs: Date.now() - startedAt,
     // Per-lane candidate counts: keyword, vector, and the fused cut — the
     // same audit fields the Dropbox retrieval audit records

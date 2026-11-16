@@ -46,6 +46,8 @@ export interface EngineStatusSnapshot {
   loop_slow_sql?: import('../connector-store/main-thread-sql-trace.ts').SlowMainThreadSqlHealth;
   /** The background's largest WALs and longest-held reads at its last sample. */
   sqlite_files?: ReturnType<typeof import('../engine/sqlite-wal-sampler.ts').sqliteFilesHealth>;
+  /** How many stores and sidecars the background has opened (source-storage.ts): the front looks for new ones when it changes. */
+  stores_opened?: number;
   /** The background's paced status recount (status-recount.ts). */
   status_recount?: { runs: number; failures: number; last_ms?: number; age_ms?: number; counting: boolean };
 }
