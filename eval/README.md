@@ -698,6 +698,17 @@ row and holds ids, numbers and timings only. `--only d001,d004` runs some
 rows; `--no-baseline` runs the deep read alone. No clock cuts a deep read; a
 set that cannot be listed is a failed row with a `DEEP_READ_*` code.
 
+**Day-picker recall.** For every conversation row the eval also runs the
+relevant-days pick the engine offers for long chats: `searchSetHits` (each
+store's ordinary keyword and vector search, scoped to the conversation, 200
+hits a store) and `pickRelevantDays` (every message on a hit day and the day
+either side). `deep.dayPicker.kept` says whether the answer-bearing message
+survived the pick; `summary.*.dayPicker` gives `kept` of `rows`, and the days
+and messages kept against the totals. `--day-picker-only` scores this alone,
+with no model call (minutes, not hours). `--read relevant_days` runs the deep
+arm on the picked days instead of the whole set, so its three numbers can be
+set beside the full read's.
+
 Run length is about the sum of sections times seconds per section, plus one
 baseline Ask per row. Run a couple of rows first (`--only`) to measure seconds
 per section. `test/eval-deep-read.test.ts` runs both scripts end to end on

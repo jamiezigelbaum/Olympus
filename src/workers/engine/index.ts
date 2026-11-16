@@ -3542,6 +3542,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               whole,
               ...(typeof set.after === 'string' ? { after: set.after } : {}),
               ...(typeof set.before === 'string' ? { before: set.before } : {}),
+              ...(set.read === 'all' || set.read === 'relevant_days' ? { read: set.read } : {}),
             });
             return json({ job });
           } catch (error) {

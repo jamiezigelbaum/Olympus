@@ -224,7 +224,7 @@ var init_linux_desktop_entry = __esm(() => {
 
 // src/core/file-lease.ts
 import { execFileSync } from "node:child_process";
-import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2 } from "node:fs";
+import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { createRequire as createRequire2 } from "node:module";
 import { dirname as dirname3 } from "node:path";
 function withFileLeaseSync(targetPath, callback, options = {}) {
@@ -475,11 +475,24 @@ function normalizeOptions(options) {
   return {
     mode: options.mode ?? "exclusive",
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
-    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
+    ...options.heartbeat ? { heartbeat: {
+      stallMs: positiveInteger(options.heartbeat.stallMs, DEFAULT_OPTIONS.acquireTimeoutMs),
+      intervalMs: positiveInteger(options.heartbeat.intervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    } } : {},
+    timers: options.timers ?? {
+      now: () => Date.now(),
+      sleep,
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (timer) => clearInterval(timer)
+    }
   };
 }
 function positiveInteger(value, fallback) {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.floor(value);
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -3316,7 +3329,7 @@ import {
   renameSync as renameSync2,
   rmSync as rmSync2,
   statSync as statSync5,
-  writeFileSync as writeFileSync2,
+  writeFileSync as writeFileSync3,
   writeSync
 } from "node:fs";
 import { basename as basename2, dirname as dirname11, isAbsolute as isAbsolute7, join as join13 } from "node:path";
@@ -3363,7 +3376,7 @@ var init_assets = __esm(() => {
 
 // src/core/still-image-readiness.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { mkdtempSync, readFileSync as readFileSync9, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdtempSync, readFileSync as readFileSync9, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join14 } from "node:path";
 function spawnRun(command, args, timeoutMs) {
@@ -3411,7 +3424,7 @@ function probeStillImageReadiness(options = {}) {
       const inputPath = join14(directory, `probe-${format}${stillImageFileExtension(format)}`);
       const outputPath = join14(directory, `probe-${format}.jpg`);
       try {
-        writeFileSync3(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
+        writeFileSync4(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
         const result = run(preparer.command, preparer.decodeArgs(inputPath, outputPath), timeoutMs);
         decoded[format] = result.ok && looksLikeDecodedFixture(new Uint8Array(readFileSync9(outputPath)), format);
       } catch {
@@ -5861,7 +5874,7 @@ var init_remote_access = __esm(() => {
 });
 
 // src/core/descendant-groups.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname14, join as join18 } from "node:path";
 function descendantGroupsSupported(platform = process.platform) {
   return platform === "linux";
@@ -5909,7 +5922,7 @@ function writeRecord(path, owner, groups) {
     }
     mkdirSync8(dirname14(path), { recursive: true, mode: 448 });
     const temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync4(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}
+    writeFileSync5(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}
 `, { mode: 384 });
     renameSync3(temporary, path);
   } catch {}
@@ -8753,7 +8766,7 @@ var init_parent_label = __esm(() => {
 var init_secret_location_note = () => {};
 
 // src/core/remote-result.ts
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, REMOTE_PENDING_MESSAGE, REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, DEEP_READ_STATES, DEEP_READ_JOB_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, REMOTE_PENDING_MESSAGE, REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, DEEP_READ_STATES, DEEP_READ_CHOICE_SCHEMA, DEEP_READ_JOB_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_source_item_read();
   init_app_release_capture();
@@ -8912,6 +8925,7 @@ var init_remote_result = __esm(() => {
       "Read ALL of one document, or one whole group, channel or chat, with the owner's private model on their computer, then answer the question from it.",
       "For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.",
       'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+      'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in an hour, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
       "It runs in the background; the answer lands in Olympus Private answers on the owner's computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status."
     ].join(" "),
     source_deep_read_status: "Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner's computer.",
@@ -9138,6 +9152,18 @@ var init_remote_result = __esm(() => {
     }
   };
   DEEP_READ_STATES = ["reading", "answering", "done", "failed", "cancelled"];
+  DEEP_READ_CHOICE_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["sections", "messageCount"],
+    properties: {
+      sections: { type: "integer", minimum: 0 },
+      messageCount: { type: "integer", minimum: 0 },
+      seconds: { type: "integer", minimum: 0 },
+      days: { type: "integer", minimum: 0 },
+      totalDays: { type: "integer", minimum: 0 }
+    }
+  };
   DEEP_READ_JOB_SCHEMA = {
     type: "object",
     additionalProperties: false,
@@ -9148,7 +9174,14 @@ var init_remote_result = __esm(() => {
       sectionsTotal: { type: "integer", minimum: 0 },
       sectionsDone: { type: "integer", minimum: 0 },
       estimateSecondsLeft: { type: "integer", minimum: 0 },
-      waitingOn: { type: "string", enum: ["privacy checks"] },
+      waitingOn: { type: "string", enum: ["privacy checks", "your questions"] },
+      read: { type: "string", enum: ["all", "relevant_days"] },
+      choices: {
+        type: "object",
+        additionalProperties: false,
+        required: ["all"],
+        properties: { all: DEEP_READ_CHOICE_SCHEMA, relevantDays: DEEP_READ_CHOICE_SCHEMA }
+      },
       failure: { type: "string" }
     }
   };
@@ -10318,7 +10351,7 @@ import {
   rmSync as rmSync8,
   statSync as statSync15,
   symlinkSync,
-  writeFileSync as writeFileSync5,
+  writeFileSync as writeFileSync6,
   chmodSync as chmodSync5
 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
@@ -11137,7 +11170,7 @@ var init_zkapi_confine_fetch = __esm(() => {
 
 // src/core/zkapi-confine-selftest.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { chmodSync as chmodSync6, readFileSync as readFileSync31, readlinkSync, readdirSync as readdirSync5, rmSync as rmSync9, writeFileSync as writeFileSync6 } from "node:fs";
+import { chmodSync as chmodSync6, readFileSync as readFileSync31, readlinkSync, readdirSync as readdirSync5, rmSync as rmSync9, writeFileSync as writeFileSync7 } from "node:fs";
 import { createServer, createConnection as createConnection2 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
@@ -11807,12 +11840,12 @@ main().catch(() => process.exit(1));
       const probePath = join35(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes4(4).toString("hex")}.cjs`);
       const watchdogPath = join35(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes4(4).toString("hex")}.cjs`);
       try {
-        writeFileSync6(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
+        writeFileSync7(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
         chmodSync6(probePath, 448);
         const transport = await Promise.resolve().then(() => (init_consult_transport_zkapi(), {}));
         const linux = await Promise.resolve().then(() => (init_zkapi_confinement_linux(), {}));
         const bridge = await Promise.resolve().then(() => (init_zkapi_confine_fetch(), {}));
-        writeFileSync6(watchdogPath, WATCHDOG_SCRIPT, { mode: 448 });
+        writeFileSync7(watchdogPath, WATCHDOG_SCRIPT, { mode: 448 });
         chmodSync6(watchdogPath, 448);
         let fixture;
         let control;
@@ -12293,7 +12326,7 @@ var init_zkapi_confinement_linux = __esm(() => {
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash3, randomUUID as randomUUID9 } from "node:crypto";
-import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync5, constants as constants5, existsSync as existsSync14, mkdirSync as mkdirSync16, mkdtempSync as mkdtempSync2, readdirSync as readdirSync7, readFileSync as readFileSync33, readlinkSync as readlinkSync3, realpathSync as realpathSync7, rmSync as rmSync10, statSync as statSync16, writeFileSync as writeFileSync7 } from "node:fs";
+import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync5, constants as constants5, existsSync as existsSync14, mkdirSync as mkdirSync16, mkdtempSync as mkdtempSync2, readdirSync as readdirSync7, readFileSync as readFileSync33, readlinkSync as readlinkSync3, realpathSync as realpathSync7, rmSync as rmSync10, statSync as statSync16, writeFileSync as writeFileSync8 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
 import { homedir as homedir14, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter5, dirname as dirname28, isAbsolute as isAbsolute20, join as join37, resolve as resolvePath } from "node:path";
@@ -12464,7 +12497,7 @@ function defaultZkapiConfinement(host = {}) {
           servers.push(other);
           const targets = JSON.stringify({ allowed, other: other.address().port });
           const script = join37(workDir, "confinement-self-test.cjs");
-          writeFileSync7(script, SELF_TEST_SCRIPT, { mode: 384 });
+          writeFileSync8(script, SELF_TEST_SCRIPT, { mode: 384 });
           const outside = runSelfTestProbe([process.execPath, script, targets], env);
           const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script, targets], env);
           const matches = (out, confined) => Boolean(out && confined) && allowed.every((port) => out["allowed" + port] === "connected" && confined["allowed" + port] === "connected") && ["other", "ipv6", "mapped", "resolver"].every((key) => out[key] === "connected" && confined[key] === "failed_fast") && ["udp", "loopbackUdp"].every((key) => out[key] === "sent" && confined[key] === "failed") && (out.tcp === "timeout" || out.tcp === "failed_slow") && confined.tcp === "failed_fast";
@@ -12711,7 +12744,7 @@ async function stopGroup2(pgid, stillOurs = () => true) {
   } catch {}
   const deadline = Date.now() + STOP_GRACE_MS;
   while (groupAlive(pgid) && Date.now() < deadline)
-    await sleep(POLL_MS2);
+    await sleep2(POLL_MS2);
   if (!groupAlive(pgid))
     return true;
   if (!stillOurs())
@@ -12721,7 +12754,7 @@ async function stopGroup2(pgid, stillOurs = () => true) {
   } catch {}
   const killDeadline = Date.now() + KILL_GRACE_MS;
   while (groupAlive(pgid) && Date.now() < killDeadline)
-    await sleep(POLL_MS2);
+    await sleep2(POLL_MS2);
   return !groupAlive(pgid);
 }
 function currentBootId() {
@@ -12868,7 +12901,7 @@ function resolveExecutable(name, explicit, env, platform = process.platform, tru
   }
   return;
 }
-function sleep(ms) {
+function sleep2(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function portAnswers(port) {
@@ -20810,7 +20843,7 @@ var init_source_delete_holds = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync21, mkdirSync as mkdirSync20, readFileSync as readFileSync39, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync21, mkdirSync as mkdirSync20, readFileSync as readFileSync39, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname35 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
@@ -20841,7 +20874,7 @@ function readIngestionHealthState(path) {
 }
 function writeIngestionHealthState(path, state) {
   mkdirSync20(dirname35(path), { recursive: true, mode: 448 });
-  writeFileSync10(path, `${JSON.stringify(state, null, 2)}
+  writeFileSync11(path, `${JSON.stringify(state, null, 2)}
 `);
 }
 function asRecord14(value) {
@@ -23933,7 +23966,8 @@ class EmailClient {
       selected_item: sourceItemReadSelectedItem(options.selectedItem),
       whole: options.whole ?? "item",
       ...options.after ? { after: options.after } : {},
-      ...options.before ? { before: options.before } : {}
+      ...options.before ? { before: options.before } : {},
+      ...options.read ? { read: options.read } : {}
     } } : { ...options.id ? { id: options.id } : {} };
     const response = asRecord8(await this.transport.requestJson(`${this.config.email.baseUrl}/source/deep-read${path}`, {
       method: "POST",
@@ -26670,7 +26704,7 @@ init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { chmodSync as chmodSync8, closeSync as closeSync6, constants as constants6, copyFileSync, existsSync as existsSync16, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync16, linkSync as linkSync2, mkdirSync as mkdirSync17, openSync as openSync5, readFileSync as readFileSync35, readlinkSync as readlinkSync4, readdirSync as readdirSync9, realpathSync as realpathSync8, renameSync as renameSync6, rmSync as rmSync12, rmdirSync, statSync as statSync18, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
+import { chmodSync as chmodSync8, closeSync as closeSync6, constants as constants6, copyFileSync, existsSync as existsSync16, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync16, linkSync as linkSync2, mkdirSync as mkdirSync17, openSync as openSync5, readFileSync as readFileSync35, readlinkSync as readlinkSync4, readdirSync as readdirSync9, realpathSync as realpathSync8, renameSync as renameSync6, rmSync as rmSync12, rmdirSync, statSync as statSync18, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename7, dirname as dirname30, join as join39, relative as relative6, resolve as resolve10, sep as sep7 } from "node:path";
 init_linux_engine_layout();
@@ -27324,7 +27358,7 @@ init_linux_engine_layout();
 init_google_handle_compatibility();
 init_model_transport();
 init_zkapi_consult_settings();
-import { mkdirSync as mkdirSync19, readFileSync as readFileSync38, rmSync as rmSync13, writeFileSync as writeFileSync9 } from "node:fs";
+import { mkdirSync as mkdirSync19, readFileSync as readFileSync38, rmSync as rmSync13, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { dirname as dirname33, join as join42 } from "node:path";
 init_secret_store();
@@ -31467,6 +31501,7 @@ var operations = [
       "Read ALL of one document, or one whole group, channel or chat, with the owner's private model, then answer the question from what it read.",
       "For questions a search alone answers poorly: a topic discussed over many messages, days or years, or facts spread through a long file.",
       'Pass the selected_item of a search hit from source_index_search, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+      `A long chat is priced two ways before it starts: every message, or only the days that mention the question (a day either side). The full read runs when it fits in an hour, else the relevant-days read; read="all" or read="relevant_days" picks one. Show the owner the job's choiceSummary as is.`,
       "Runs in the background on the owner's computer and lands in Private answers; this returns the job with its progress. Check it with source_deep_read_status."
     ].join(" "),
     params: {
@@ -31474,11 +31509,15 @@ var operations = [
       selected_item: { type: "object", required: true, description: "The selected_item of a source_index_search hit; identifiers only." },
       whole: { type: "string", description: `"conversation" (the hit's whole chat, group or channel) or "item" (that document; default).` },
       after: { type: "string", description: "For a conversation: only messages authored on or after this ISO date." },
-      before: { type: "string", description: "For a conversation: only messages authored before this ISO date." }
+      before: { type: "string", description: "For a conversation: only messages authored before this ISO date." },
+      read: { type: "string", description: 'For a conversation: "all" (every message) or "relevant_days" (the days that mention the question). Left out, the full read runs when it fits in an hour.' }
     },
     mutating: false,
     nativeExposure: "sourceIndexEnabledOnly",
     handler: async (ctx, params) => {
+      const read = params.read === undefined ? undefined : params.read;
+      if (read !== undefined && read !== "all" && read !== "relevant_days")
+        throw new OperationError("invalid_params", 'read must be "all" or "relevant_days".');
       const whole = params.whole === undefined ? "item" : params.whole;
       if (whole !== "item" && whole !== "conversation")
         throw new OperationError("invalid_params", 'whole must be "item" or "conversation".');
@@ -31490,7 +31529,8 @@ var operations = [
         selectedItem: sourceItemReadSelectedItem(params.selected_item),
         whole,
         ...after ? { after } : {},
-        ...before ? { before } : {}
+        ...before ? { before } : {},
+        ...read ? { read } : {}
       });
     }
   },

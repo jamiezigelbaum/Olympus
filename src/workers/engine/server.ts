@@ -639,6 +639,8 @@ const FRONT_MOUNT_LOOK_QUIET_MS = 60_000;
  * background's start. A rebuild from the ledger took about 59 s on Sparta
  * (gate 1, ops#151); from a saved set the background keeps current, a start
  * applies a delta of at most a refresh period.
+ * Kind d (startup pace): this only ends the wait before listening. The
+ * visibility build keeps running in turns; no work is cancelled or dropped.
  */
 const FRONT_VISIBILITY_READY_BOUND_MS = 15_000;
 
@@ -5541,7 +5543,7 @@ export async function main(): Promise<void> {
     // Deep read: the owner's private model from the shared chooser reads a
     // whole document or conversation; never the built-in model (it refuses
     // instead), and the answer lands in Private answers.
-    const { createDeepReadJobs } = await import('./runtime/deep-read-jobs.ts');
+    const { createDeepReadJobs, searchSetHits } = await import('./runtime/deep-read-jobs.ts');
     const { localAnalystPromptBudget, localAnalystWindow } = await import('../source-index/local-analyst-window.ts');
     const { maxTokensForChars } = await import('../../core/analyst-delphi.ts');
     const { DEFAULT_ANALYST_MAX_OUTPUT_CHARS } = await import('../../core/analyst.ts');
@@ -5562,6 +5564,19 @@ export async function main(): Promise<void> {
       },
       inbox: waitingQuestionStore,
       judgeBusy: () => classificationBusy(),
+      interactiveBusy: () => answerActivity.interactiveInFlight > 0,
+      paceFile: join(dirname(resolveClassificationLedgerPath(process.env)), 'deep-read-pace.json'),
+      // The set's own hits: the ordinary private search, scoped to the set's
+      // conversation and span, every lane at its widest cut.
+      relevantItems: async (question, set, corpusIds) => {
+        const conversationId = set.selected_item.provider_conversation_id;
+        if (!conversationId) return new Set<string>();
+        return searchSetHits(deepReadLanes({
+          question, retrieval_mode: 'hybrid', include_internal: true, include_secure_local: true, include_secure_local_content: true,
+          conversation_id: conversationId, corpus_ids: [...corpusIds],
+          ...(set.after ? { authored_after: set.after } : {}), ...(set.before ? { authored_before: set.before } : {}),
+        } as SourceIndexAnswerRequest, 'private_search'), question, corpusIds);
+      },
       log: (message) => console.warn(message),
     });
   }
@@ -6393,8 +6408,8 @@ export async function main(): Promise<void> {
         return response;
       } }))
     : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
-  // Bounded: a set that has to be rebuilt from the ledger (a retention gap)
-  // finishes after the front listens, in turns, rather than hold readiness.
+  // Only the wait is bounded: Promise.race does not cancel `warming`. A set
+  // rebuilt from the ledger keeps building after the front listens, in turns.
   if (engineFront) {
     const warming = keepVisibilityCurrent('before ready');
     let bound: ReturnType<typeof setTimeout> | undefined;

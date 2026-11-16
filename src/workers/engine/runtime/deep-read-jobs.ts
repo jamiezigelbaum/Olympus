@@ -15,8 +15,18 @@
  * model down it fails and says so. The answer lands in the Private answers
  * inbox as an answered local question. No clock cuts a job in progress; the
  * owner's cancel is the only stop besides the model transport's own stall rule.
+ *
+ * A long conversation can take hours on the owner's model. Before it starts,
+ * the job prices two reads at the pace measured on that model: the whole set,
+ * and the days that mention the question (the set's own keyword and vector
+ * hits, a day either side; pickRelevantDays). The full read is the default
+ * when it fits in an hour, the relevant-days read when it does not, and the
+ * owner can pick either. A relevant-days answer says how much it left unread
+ * and offers the full read; nothing is skipped silently.
  */
 import { randomBytes } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { Analyst, EvidenceCandidate } from '../../../core/contracts.ts';
 import { runDeepRead, planDeepReadSections, type DeepReadProgress } from '../../../core/deep-read.ts';
 import { providerSourceLabel } from '../../../core/remote-result.ts';
@@ -45,6 +55,20 @@ export interface DeepReadSet {
   /** For a conversation: only messages authored at or after / before these ISO times. */
   after?: string;
   before?: string;
+  /** Which read: every message, or the days that mention the question. Left out, the one-hour rule picks. */
+  read?: DeepReadMode;
+}
+
+export type DeepReadMode = 'all' | 'relevant_days';
+
+/** One priced read the owner can pick. `seconds` is left out until the model's pace has been measured. */
+export interface DeepReadChoice {
+  sections: number;
+  messageCount: number;
+  seconds?: number;
+  /** relevant_days only: days read, and days the set spans. */
+  days?: number;
+  totalDays?: number;
 }
 
 export type DeepReadModel =
@@ -72,7 +96,13 @@ export interface DeepReadJobView {
   /** The inbox question id the answer landed in. */
   inboxId?: string;
   /** What the read is waiting on right now, when it is waiting. */
-  waitingOn?: 'privacy checks';
+  waitingOn?: 'privacy checks' | 'your questions';
+  /** The read this job runs. */
+  read: DeepReadMode;
+  /** Both reads, priced, for the owner to choose (relevantDays is absent for a document or when nothing in the set matched). */
+  choices: { all: DeepReadChoice; relevantDays?: DeepReadChoice };
+  /** One line stating the two estimates and which read runs, to show the owner as is. */
+  choiceSummary: string;
 }
 
 export class DeepReadRefused extends Error {
@@ -87,6 +117,146 @@ const JUDGE_LOOK_MS = 2_000;
 /** The least a read steps aside for judging before its first call has a measured length. */
 const JUDGE_STEP_ASIDE_MIN_MS = 5_000;
 const MAX_JOBS_KEPT = 50;
+/** The full read is the default while its estimate is under this; past it, the relevant-days read is. */
+const FULL_READ_DEFAULT_SECONDS = 3_600;
+
+/** Hits a relevant-days read takes from each store of the set: each one adds its day and the day either side. */
+export const DEEP_READ_DAY_HITS = 200;
+
+/**
+ * The set's own search hits for the question: each store's ordinary keyword
+ * and vector search, through lanes already scoped to the set (its
+ * conversation and span), at a wide cut. Provider item ids only.
+ */
+export async function searchSetHits(lanes: AnalystAnswerLanes, question: string, corpusIds: readonly string[], maxResults = DEEP_READ_DAY_HITS): Promise<Set<string>> {
+  const hits = new Set<string>();
+  for (const corpusId of corpusIds) {
+    const adapter = lanes.adapters[corpusId];
+    const corpus = lanes.registry.get(corpusId);
+    if (!adapter || !corpus) continue;
+    const response = await adapter({ query: question, maxResults, corpus, context: { allowedTrustDomains: [corpus.trustDomain], allowCloudQueries: false } });
+    for (const hit of response.hits) hits.add(hit.sourceItem.providerItemId);
+  }
+  return hits;
+}
+
+/** A day (UTC, YYYY-MM-DD) moved by `delta` days. */
+function shiftDay(day: string, delta: number): string {
+  const time = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(time) ? new Date(time + delta * 86_400_000).toISOString().slice(0, 10) : day;
+}
+
+function candidateDay(candidate: EvidenceCandidate): string | undefined {
+  const authoredAt = candidate.provenance.citation?.authoredAt;
+  return authoredAt && /^\d{4}-\d{2}-\d{2}/.test(authoredAt) ? authoredAt.slice(0, 10) : undefined;
+}
+
+function messageKey(candidate: EvidenceCandidate): string {
+  const item = candidate.provenance.sourceItem;
+  return JSON.stringify([item.providerConversationId ?? '', item.providerItemId]);
+}
+
+/**
+ * The relevant-days read: every message on a day that holds one of the set's
+ * search hits, and on the day either side, in authored order. Generic: the
+ * hits come from the ordinary keyword and vector search scoped to the set,
+ * and days are calendar days. A message with no date is kept.
+ */
+export function pickRelevantDays(
+  candidates: readonly EvidenceCandidate[],
+  hitProviderItemIds: ReadonlySet<string>,
+  spread = 1,
+): { candidates: EvidenceCandidate[]; days: number; totalDays: number; hitDays: number; messages: number; totalMessages: number } {
+  const allDays = new Set<string>();
+  const hitDays = new Set<string>();
+  let anyHit = false;
+  for (const candidate of candidates) {
+    const hit = hitProviderItemIds.has(candidate.provenance.sourceItem.providerItemId);
+    anyHit ||= hit;
+    const day = candidateDay(candidate);
+    if (!day) continue;
+    allDays.add(day);
+    if (hit) hitDays.add(day);
+  }
+  const keep = new Set<string>();
+  for (const day of hitDays) for (let delta = -spread; delta <= spread; delta += 1) keep.add(shiftDay(day, delta));
+  const picked = !anyHit ? [] : candidates.filter(candidate => {
+    const day = candidateDay(candidate);
+    return day === undefined || keep.has(day);
+  });
+  return {
+    candidates: picked,
+    days: [...allDays].filter(day => keep.has(day)).length,
+    totalDays: allDays.size,
+    hitDays: hitDays.size,
+    messages: new Set(picked.map(messageKey)).size,
+    totalMessages: new Set(candidates.map(messageKey)).size,
+  };
+}
+
+function aboutDuration(seconds: number): string {
+  if (seconds < 90) return 'about a minute';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `about ${minutes} minutes`;
+  const hours = Math.round(seconds / 360) / 10;
+  return `about ${hours} hours`;
+}
+
+/**
+ * Which read runs: the one asked for, else the full read when it fits in an
+ * hour at the measured pace, else the relevant-days read. Before the model's
+ * pace has been measured the smaller read goes first, and the summary says
+ * the estimates come after its first section.
+ */
+export function chooseDeepRead(choices: DeepReadJobView['choices'], requested?: DeepReadMode): DeepReadMode {
+  const relevant = choices.relevantDays;
+  if (!relevant || relevant.messageCount >= choices.all.messageCount) return 'all';
+  if (requested) return requested;
+  if (choices.all.seconds === undefined) return relevant.sections < choices.all.sections ? 'relevant_days' : 'all';
+  return choices.all.seconds < FULL_READ_DEFAULT_SECONDS ? 'all' : 'relevant_days';
+}
+
+export function deepReadChoiceSummary(choices: DeepReadJobView['choices'], read: DeepReadMode, requested?: DeepReadMode): string {
+  const n = (value: number) => value.toLocaleString('en-US');
+  const time = (choice: DeepReadChoice) => choice.seconds === undefined ? '' : `, ${aboutDuration(choice.seconds)}`;
+  const all = `All ${n(choices.all.messageCount)} messages${time(choices.all)}`;
+  const relevant = choices.relevantDays;
+  if (!relevant) return `${all}. Reading all of it.`;
+  const days = `The days that mention this${time(relevant)}: ${n(relevant.days ?? 0)} days of ${n(relevant.totalDays ?? 0)}, ${n(relevant.messageCount)} messages`;
+  const reason = requested
+    ? 'as asked'
+    : choices.all.seconds === undefined
+      ? 'the smaller read first; estimates follow once your model\'s pace is measured'
+      : read === 'all' ? 'the full read fits in an hour' : 'the full read would take over an hour';
+  const next = read === 'relevant_days' ? ' Ask for read: all to read every message.' : '';
+  return `${all}. ${days}. Reading ${read === 'all' ? 'all of it' : 'the days that mention this'} (${reason}).${next}`;
+}
+
+/** Measured seconds per section on each model, kept across restarts when a file is given. */
+function paceBook(file?: string) {
+  let paces: Record<string, number> = {};
+  if (file) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      if (parsed && typeof parsed === 'object') {
+        for (const [model, value] of Object.entries(parsed)) if (typeof value === 'number' && value > 0) paces[model] = value;
+      }
+    } catch {
+      paces = {}; // No pace measured yet: the first read measures it.
+    }
+  }
+  return {
+    get: (model: string): number | undefined => paces[model],
+    set(model: string, secondsPerSection: number): void {
+      if (!(secondsPerSection > 0)) return;
+      paces[model] = secondsPerSection;
+      if (!file) return;
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(`${file}.tmp`, JSON.stringify(paces));
+      renameSync(`${file}.tmp`, file);
+    },
+  };
+}
 
 /**
  * Lists a set and reads its text the way a deep read job does: every store of
@@ -178,6 +348,16 @@ export function createDeepReadJobs(options: {
    * model and the read still moves. The job says what it is waiting on.
    */
   judgeBusy?: () => boolean;
+  /** Whether the owner's own questions are being answered: a read waits for them to finish before its next call. */
+  interactiveBusy?: () => boolean;
+  /**
+   * The set's own search hits for the question (provider item ids): the
+   * ordinary keyword and vector search scoped to the set's conversation and
+   * span. Without it, only the full read is offered.
+   */
+  relevantItems?: (question: string, set: DeepReadSet, corpusIds: readonly string[]) => Promise<ReadonlySet<string>>;
+  /** Where measured pace per model is kept across restarts. */
+  paceFile?: string;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   log?: (message: string) => void;
@@ -185,6 +365,7 @@ export function createDeepReadJobs(options: {
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
   const jobs = new Map<string, Job>();
+  const paces = paceBook(options.paceFile);
 
   const readSet = (set: DeepReadSet) => readDeepReadSet(set, options.stores, options.lanes);
 
@@ -200,7 +381,7 @@ export function createDeepReadJobs(options: {
     const corpusOf = (candidate: EvidenceCandidate) => corpusIds.find(id => options.lanes()?.registry.get(id)?.trustDomain === candidate.trustDomain) ?? corpusIds[0] ?? '';
     const stored: StoredPrivateAnswer = {
       status: result.citations.length ? 'answered' : 'not_found',
-      ...(result.citations.length ? { answer: `${result.answer}\n\nRead all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${result.sectionsTotal} sections, ${view.items} items${view.unreadable ? ` (${view.unreadable} not readable here)` : ''}.` } : {}),
+      ...(result.citations.length ? { answer: `${result.answer}\n\n${readFooter(view, result)}` } : {}),
       citations: [...cited.values()].map(candidate => ({
         ...(candidate.provenance.citation?.title ? { title: candidate.provenance.citation.title } : {}),
         ...(providerSourceLabel(candidate.provenance.sourceItem.provider) ? { source: providerSourceLabel(candidate.provenance.sourceItem.provider)! } : {}),
@@ -212,9 +393,19 @@ export function createDeepReadJobs(options: {
     };
     const ticket = store.ticket(INBOX_CONNECTION);
     // Recorded and answered in one step, so the inbox's own background answerer never picks it up.
-    const ref = store.record(ticket, { retainEachAsk: true, question: `Read all of ${view.setLabel}: ${view.question}`, surface: 'remote', state: 'waiting' });
+    const ref = store.record(ticket, { retainEachAsk: true, question: `${view.read === 'all' ? 'Read all of' : 'Read the days that mention this in'} ${view.setLabel}: ${view.question}`, surface: 'remote', state: 'waiting' });
     if (!ref) return undefined;
     return store.saveAnswer(ref, stored) ? ref.id : undefined;
+  }
+
+  function readFooter(view: DeepReadJobView, result: { sectionsRead: number; sectionsTotal: number }): string {
+    const unreadable = view.unreadable ? ` (${view.unreadable} not readable here)` : '';
+    const relevant = view.choices.relevantDays;
+    if (view.read === 'relevant_days' && relevant) {
+      const left = view.choices.all.messageCount - relevant.messageCount;
+      return `Read the days that mention this in ${view.setLabel} with ${view.model}: ${relevant.days} of ${relevant.totalDays} days, ${relevant.messageCount} of ${view.choices.all.messageCount} messages, ${result.sectionsRead} of ${result.sectionsTotal} sections${unreadable}. ${left} messages on other days were not read; ask for the full read (read: all) to read every message.`;
+    }
+    return `Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${result.sectionsTotal} sections, ${view.items} items${unreadable}.`;
   }
 
   return {
@@ -226,43 +417,77 @@ export function createDeepReadJobs(options: {
       if ('unavailable' in model) throw new DeepReadRefused('model_unavailable', `Your private model ${model.modelId} is not reachable right now.`);
       const { candidates, corpusIds, unreadable, items, label } = await readSet(set);
       if (candidates.length === 0) throw new DeepReadRefused('nothing_readable', `Nothing in ${label} is readable here (${items} items found).`);
-      const sectionsTotal = planDeepReadSections(question, candidates, corpusIds, model.promptBytes, 'compact').length;
+      if (set.read !== undefined && set.read !== 'all' && set.read !== 'relevant_days') throw new DeepReadRefused('invalid_set', 'read must be all or relevant_days.');
+      const sectionsOf = (pieces: readonly EvidenceCandidate[]) => planDeepReadSections(question, pieces, corpusIds, model.promptBytes, 'compact').length;
+      const pace = paces.get(model.modelId);
+      const priced = (sections: number) => (pace === undefined ? {} : { seconds: Math.round(sections * pace) });
+      const fullSections = sectionsOf(candidates);
+      const allMessages = new Set(candidates.map(messageKey)).size;
+      const choices: DeepReadJobView['choices'] = { all: { sections: fullSections, messageCount: allMessages, ...priced(fullSections) } };
+      let relevantCandidates: EvidenceCandidate[] | undefined;
+      if (set.whole === 'conversation' && options.relevantItems) {
+        const pick = pickRelevantDays(candidates, await options.relevantItems(question, set, corpusIds));
+        if (pick.candidates.length > 0) {
+          relevantCandidates = pick.candidates;
+          const sections = sectionsOf(pick.candidates);
+          choices.relevantDays = { sections, messageCount: pick.messages, days: pick.days, totalDays: pick.totalDays, ...priced(sections) };
+        }
+      }
+      if (set.read === 'relevant_days' && !relevantCandidates) {
+        throw new DeepReadRefused('nothing_readable', `No day in ${label} mentions this, so there is no relevant-days read; ask for read: all.`);
+      }
+      const read = chooseDeepRead(choices, set.read);
+      const reading = read === 'relevant_days' && relevantCandidates ? relevantCandidates : candidates;
+      const sectionsTotal = read === 'relevant_days' ? choices.relevantDays!.sections : fullSections;
       const id = `dr_${randomBytes(9).toString('base64url')}`;
       const view: DeepReadJobView = {
         id, state: 'reading', question, setLabel: label, items, unreadable, sectionsTotal, sectionsDone: 0, notes: 0,
-        model: model.modelId, startedAt: now().toISOString(),
+        model: model.modelId, startedAt: now().toISOString(), read, choices,
+        choiceSummary: deepReadChoiceSummary(choices, read, set.read),
       };
+      const coverageNotes = read === 'relevant_days' && choices.relevantDays
+        ? [`Only the days that mention this were read: ${choices.relevantDays.days} of ${choices.relevantDays.totalDays} days, ${choices.relevantDays.messageCount} of ${allMessages} messages. ${allMessages - choices.relevantDays.messageCount} messages on other days were not read.`]
+        : [];
       const controller = new AbortController();
       jobs.set(id, { view, controller });
       while (jobs.size > MAX_JOBS_KEPT) jobs.delete(jobs.keys().next().value!);
       const started = now().getTime();
       let lastCallMs = 0;
       let callStarted: number | undefined;
+      let waitedMs = 0;
       const stepAside = async () => {
         if (callStarted !== undefined) lastCallMs = now().getTime() - callStarted;
-        const until = now().getTime() + Math.max(JUDGE_STEP_ASIDE_MIN_MS, lastCallMs);
-        while (options.judgeBusy?.() && now().getTime() < until && !controller.signal.aborted) {
-          view.waitingOn = 'privacy checks';
+        const waitStarted = now().getTime();
+        const until = waitStarted + Math.max(JUDGE_STEP_ASIDE_MIN_MS, lastCallMs);
+        for (;;) {
+          if (controller.signal.aborted) break;
+          // The owner's own questions go first for as long as they run; judging gets at most one call's length.
+          if (options.interactiveBusy?.()) view.waitingOn = 'your questions';
+          else if (options.judgeBusy?.() && now().getTime() < until) view.waitingOn = 'privacy checks';
+          else break;
           await sleep(JUDGE_LOOK_MS);
         }
         delete view.waitingOn;
         callStarted = now().getTime();
+        waitedMs += callStarted - waitStarted;
       };
       // Background priority on the shared model: the owner's own asks go first.
       void runBackgroundInference(() => runDeepRead({
-        question, candidates, corpusIds, analyst: model.analyst, promptBytes: model.promptBytes, evidenceFormat: 'compact',
-        signal: controller.signal,
+        question, candidates: reading, corpusIds, analyst: model.analyst, promptBytes: model.promptBytes, evidenceFormat: 'compact',
+        signal: controller.signal, coverageNotes,
         beforeModelCall: stepAside,
         onProgress: (progress: DeepReadProgress) => {
           view.state = progress.phase === 'done' ? 'answering' : progress.phase;
           view.sectionsDone = progress.sectionsDone; view.notes = progress.notes;
-          if (progress.sectionsDone > 0) {
-            const perSection = (now().getTime() - started) / 1000 / progress.sectionsDone;
+          if (progress.sectionsDone > 0 && progress.phase === 'reading') {
+            // Model time only: waiting for the owner's questions or judging is not the model's pace.
+            const perSection = Math.max(0, now().getTime() - started - waitedMs) / 1000 / progress.sectionsDone;
+            if (perSection > 0) paces.set(model.modelId, perSection);
             view.estimateSecondsLeft = Math.round(perSection * (progress.sectionsTotal - progress.sectionsDone + 1));
           }
         },
       })).then(result => {
-        const inboxId = land(view, result, candidates, corpusIds);
+        const inboxId = land(view, result, reading, corpusIds);
         if (inboxId) view.inboxId = inboxId;
         view.state = 'done'; view.finishedAt = now().toISOString(); delete view.estimateSecondsLeft;
         if (!inboxId) view.failure = 'The answer could not be saved to Private answers.';

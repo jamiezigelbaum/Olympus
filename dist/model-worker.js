@@ -783,7 +783,7 @@ import { dirname as dirname6, isAbsolute as isAbsolute4, join as join5, relative
 
 // src/core/file-lease.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { closeSync as closeSync3, existsSync as existsSync4, mkdirSync as mkdirSync2, openSync as openSync3, readFileSync as readFileSync3 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync4, mkdirSync as mkdirSync2, openSync as openSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname as dirname5 } from "node:path";
 var DEFAULT_OPTIONS = {
@@ -932,11 +932,24 @@ function normalizeOptions(options) {
   return {
     mode: options.mode ?? "exclusive",
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
-    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
+    ...options.heartbeat ? { heartbeat: {
+      stallMs: positiveInteger(options.heartbeat.stallMs, DEFAULT_OPTIONS.acquireTimeoutMs),
+      intervalMs: positiveInteger(options.heartbeat.intervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    } } : {},
+    timers: options.timers ?? {
+      now: () => Date.now(),
+      sleep,
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (timer) => clearInterval(timer)
+    }
   };
 }
 function positiveInteger(value, fallback) {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.floor(value);
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -1624,7 +1637,7 @@ import {
   renameSync as renameSync3,
   rmSync as rmSync3,
   statSync as statSync3,
-  writeFileSync as writeFileSync2,
+  writeFileSync as writeFileSync3,
   writeSync as writeSync2
 } from "node:fs";
 import { basename as basename2, dirname as dirname8, isAbsolute as isAbsolute6, join as join7 } from "node:path";
@@ -1916,7 +1929,7 @@ function reportBuiltInEmbeddingVision(vision, options = {}) {
     mkdirSync4(root, { recursive: true, mode: 448 });
     const path = join7(root, "vision.json");
     temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync2(temporary, `${JSON.stringify({
+    writeFileSync3(temporary, `${JSON.stringify({
       modelId: model.modelId,
       vision,
       checkedAt: (options.now?.() ?? new Date).toISOString()
@@ -2114,14 +2127,14 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
     const library = readZipEntry(readFileSync5(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
-    writeFileSync2(join7(staging, basename2(wheel.library)), library, { mode: 493 });
+    writeFileSync3(join7(staging, basename2(wheel.library)), library, { mode: 493 });
     rmSync3(archivePath, { force: true });
     const marker = {
       wheel: wheel.name,
       sha256: wheel.sha256,
       librarySha256: createHash2("sha256").update(library).digest("hex")
     };
-    writeFileSync2(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync3(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -2194,14 +2207,14 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
       for (const file of files) {
         const target = join7(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
         ensureDirectory(dirname8(target));
-        writeFileSync2(target, file.data, { mode: file.mode & 493 || 420 });
+        writeFileSync3(target, file.data, { mode: file.mode & 493 || 420 });
       }
       rmSync3(archivePath, { force: true });
     }
     const marker = {
       packages: packages.map((pack) => ({ name: pack.name, integrity: pack.integrity }))
     };
-    writeFileSync2(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync3(join7(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -2395,7 +2408,7 @@ class ProgressReporter {
     try {
       mkdirSync4(dirname8(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync2(temporary, `${JSON.stringify(this.status)}
+      writeFileSync3(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
       renameSync3(temporary, this.statusPath);
     } catch {}
@@ -2574,7 +2587,7 @@ import {
   rmSync as rmSync4,
   rmdirSync,
   statSync as statSync4,
-  writeFileSync as writeFileSync3
+  writeFileSync as writeFileSync4
 } from "node:fs";
 import { basename as basename3, dirname as dirname9, isAbsolute as isAbsolute7, join as join8, resolve as resolve4 } from "node:path";
 
@@ -7093,7 +7106,7 @@ import {
   rmSync as rmSync5,
   statSync as statSync7,
   statfsSync,
-  writeFileSync as writeFileSync4,
+  writeFileSync as writeFileSync5,
   writeSync as writeSync3
 } from "node:fs";
 import { dirname as dirname12, isAbsolute as isAbsolute9, join as join13 } from "node:path";
@@ -7469,7 +7482,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync4(join13(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync5(join13(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync5(runtimeDir, { recursive: true, force: true });
     renameSync5(staging, runtimeDir);
@@ -7642,7 +7655,7 @@ function refreshLock(lockPath, token) {
     return;
   try {
     const temporary = `${lockPath}.${process.pid}.tmp`;
-    writeFileSync4(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
+    writeFileSync5(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
     renameSync5(temporary, lockPath);
   } catch {}
 }
@@ -7754,7 +7767,7 @@ class ProgressReporter2 {
     try {
       mkdirSync6(dirname12(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync4(temporary, `${JSON.stringify(this.status)}
+      writeFileSync5(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
       renameSync5(temporary, this.statusPath);
     } catch {}
@@ -7765,7 +7778,7 @@ class ProgressReporter2 {
 import { isMainThread as isMainThread7 } from "node:worker_threads";
 import { spawn as spawn3 } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync as rmSync6, writeFileSync as writeFileSync5 } from "node:fs";
+import { mkdtempSync, rmSync as rmSync6, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer } from "node:net";
 import { availableParallelism as availableParallelism3, setPriority, tmpdir } from "node:os";
 import { join as join14 } from "node:path";
@@ -7986,7 +7999,7 @@ function createLlamaServerHandle(launch, options = {}) {
     const tokenFile = join14(tokenDir, "token");
     let spawnedProcess;
     try {
-      writeFileSync5(tokenFile, `${token}
+      writeFileSync6(tokenFile, `${token}
 `, { mode: 384 });
       spawnedProcess = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
         stdio: ["ignore", "ignore", "pipe"],
