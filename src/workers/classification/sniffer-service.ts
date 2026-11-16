@@ -19,6 +19,7 @@ import {
 } from '../classification-ledger.ts';
 import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
 import { moveTieredItem, TierMoveContentChangedError, TierMoveRefusedError } from '../connector-store/tier-move.ts';
+import { setEngineStep } from '../../core/engine-heartbeat.ts';
 import type { LocalConnectorStore } from '../connector-store/local-index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { AUTO_MOVE_WHY, automaticTierMoveOptions, automaticTierMovesAllowed, setEmbedsWithBuiltInOnly } from '../connector-store/tier-auto-move.ts';
@@ -1544,6 +1545,8 @@ export class TierSnifferService {
       phaseAt = now;
       this.progress();
       this.passStep = `in the step after "${name}"`;
+      // Read by the heartbeat thread if the loop is then held (engine-heartbeat.ts).
+      setEngineStep(`judge pass, after "${name}"`);
     };
     // Owner rules that raise, and names-only folders, apply to stored items
     // whatever the model's state: no model is asked.
