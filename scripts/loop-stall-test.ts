@@ -565,7 +565,9 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
   let enginesStartedAt: number | undefined;
   const dashReads: Array<{ path: string; ms: number; status: number; error?: string }> = [];
-  let frontLoopSql: { mode?: string; statements?: number; sites?: number; unlisted?: string[]; unlisted_sites?: Array<{ site: string; statements: number }> } | null = null;
+  type FrontLoopSql = { mode?: string; statements?: number; sites?: number; unlisted?: string[]; unlisted_sites?: Array<{ site: string; statements: number }> };
+  // A holder, so the value set inside the run's try block is not narrowed away at its use below.
+  const seen: { frontLoopSql: FrontLoopSql | null } = { frontLoopSql: null };
   const errors: string[] = [];
   const requestErrors: string[] = [];
   // The copy runs outside the run's memory cap when the caller restored first (`restore`): copying a multi-GB tree inside a
@@ -654,7 +656,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     // on config/front-loop-sql-allowance.json. Read from health, since the logs keep only their tail.
     try {
       const response = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}` }, signal: AbortSignal.timeout(30_000) });
-      frontLoopSql = ((await response.json()) as { front_loop_sql?: typeof frontLoopSql }).front_loop_sql ?? null;
+      seen.frontLoopSql = ((await response.json()) as { front_loop_sql?: FrontLoopSql }).front_loop_sql ?? null;
     } catch (error) { requestErrors.push(`front health: ${error instanceof Error ? error.message : String(error)}`); }
     finished = true;
     await Promise.all(requests);
@@ -715,7 +717,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, front_loop_sql: frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000),
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -750,6 +752,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
   // Report only for 1.5 (plan, 16 Nov 2026): the allowance list is incomplete, so an unlisted site is usually one no run had reached.
   // A site matters to the gate only as the named frame of a front beat over 1 s (the per-site table above).
+  const frontLoopSql = seen.frontLoopSql;
   const unlistedSites = frontLoopSql?.unlisted_sites ?? frontLoopSql?.unlisted?.map(site => ({ site, statements: NaN })) ?? [];
   console.log(`${options.runCase} front loop SQL (reported, not gated): ${frontLoopSql ? `${frontLoopSql.statements ?? '?'} statements at ${frontLoopSql.sites ?? '?'} sites, ${unlistedSites.length} not on the allowance list${unlistedSites.length ? `:\n${unlistedSites.map(entry => `  ${Number.isNaN(entry.statements) ? '?' : entry.statements} statements  ${entry.site}`).join('\n')}` : ''}` : 'not reported by this build'}`);
   const peaks = Object.entries(guards.wal_peak).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, bytes]) => `${label} ${Math.round(bytes / 1048576)} MB`).join(', ') || 'no wal lines';
