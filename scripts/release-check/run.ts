@@ -424,6 +424,9 @@ export class Run {
     try { this.add(check); } finally { this.stage = keep; }
   }
 
+  /** First archive stall/removal failure; later archive phases preserve it and report skips. */
+  archiveBlocked?: string;
+
   async agent(sub: string, args = '', timeoutMs = 120_000): Promise<AgentCall> {
     const phaseBound = Math.max(1, this.phaseDeadline - this.clock.now());
     const allowed = Math.min(agentTimeoutMs(timeoutMs, this.deadline, this.clock.now()), phaseBound, this.phaseOwnBudget ? phaseBound : phaseBudgetMs(sub));
@@ -1294,7 +1297,7 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
  * imported, so the search is cited; then the private model is switched off, an archive is imported with it off, and it is switched back
  * on (always, in the end, whatever failed) so the held messages drain; Remove takes the archives away; the changed-file stage uses
  * its own large archive. Each format besides the stress one (mail) is imported by the agent path right after the mail archive, judged
- * and searched the same way, and removed with the others. Whatever happened, the machine's archives and fixtures are cleaned up last.
+ * and searched the same way, and removed with the others. A blocked leg leaves cleanup to VM teardown, preserving failure evidence.
  */
 async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promise<void> {
   if (run.options.skipArchive) return;
@@ -1322,19 +1325,33 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
     await fetchMachineLogs(run, outDir, '~/rc/logs-archive-failure', 'logs/archive-first-failure', 'the engine logs at the first failing archive check');
   };
   /** One in-machine verb; its result, or undefined (the checks then say there was none) with the machine's last words in the log. */
+  let pendingBlock: string | undefined;
   const call = async <T extends object>(sub: string, args: string, timeoutS: number): Promise<T | undefined> => {
+    const restoring = sub === 'archive-model' && args === '--mode on';
+    if (run.archiveBlocked && !restoring) return undefined;
     await keepStateAtFailure();
-    const done = await run.phase(sub, () => run.agent(sub, args, timeoutS * 1_000));
+    // The in-machine settle owns the idle window. A progressing import gets the remaining leg budget.
+    const importing = sub === 'archive-import' || sub === 'archive-beside-live';
+    const budgetMs = importing ? Math.max(1, deadline - Date.now()) : undefined;
+    const done = await run.phase(sub, () => run.agent(sub, args, budgetMs ?? timeoutS * 1_000), budgetMs);
     if (!done.result) run.log(`${sub}: ${agentDetail(done)}`);
     const result = done.result as T | undefined;
+    const blocked = (result as { blocked?: string } | undefined)?.blocked;
+    if (!restoring && (blocked || (!result && (importing || sub === 'archive-remove' || sub === 'archive-changed')))) pendingBlock = blocked ?? agentDetail(done);
     const own = (result as { traces?: JourneyTrace[] } | undefined)?.traces;
     if (Array.isArray(own)) traces.push(...own);
     return result;
   };
-  const addAll = (checks: CheckResult[]): void => {
-    for (const check of checks) {
+  const addAll = (checks: CheckResult[], restoring = false): void => {
+    for (const original of checks) {
+      const check = run.archiveBlocked && !restoring ? { ...original, status: 'skip' as const, detail: 'Skipped: see archive.blocked' } : original;
       run.add(check);
       if (check.status === 'fail') firstFailure ??= check.id;
+    }
+    if (pendingBlock && !run.archiveBlocked) {
+      run.archiveBlocked = `${checks.find(check => check.status === 'fail')?.id ?? firstFailure}: ${pendingBlock}`;
+      run.add({ id: 'archive.blocked', title: 'Remaining archive imports and dependent phases skipped', status: 'skip', detail: run.archiveBlocked });
+      pendingBlock = undefined;
     }
   };
   const flags = (fx: { role: string; format: string }): string => `--role ${fx.role} --format ${fx.format} --seed ${sh(seed)}`;
@@ -1374,7 +1391,7 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
     for (const format of BESIDE_LIVE_FORMATS) {
       const besideFx = legFixture('beside', seed, format);
       if (!seeded.has(format)) {
-        run.add({ id: `archive.beside.${format}.ran`, title: `The ${format} export was imported beside its source's live input`, status: 'fail', detail: 'not run: the source\'s live input could not be set up' });
+        addAll([{ id: `archive.beside.${format}.ran`, title: `The ${format} export was imported beside its source's live input`, status: 'fail', detail: 'not run: the source\'s live input could not be set up' }]);
         continue;
       }
       if (outOfTime(`the ${format} import beside its live input`)) break;
@@ -1384,27 +1401,27 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
 
     // 3. The private model off: the archive stays held Private and nothing leaves the machine.
     if (!outOfTime('the private-model-off archive import')) {
-      modelTouched = true;
+      modelTouched = !run.archiveBlocked;
       const off = await call<ModelObservation>('archive-model', '--mode off', ARCHIVE_BOUNDS.engineS + 240);
       addAll(modelChecks(off, 'off'));
       if (off?.ok === true) {
         const held = await call<ImportObservation>('archive-import', `${flags(heldFx)} --via request --search --watch-egress`, stepS);
         addAll(heldOffChecks(held, heldFx));
       } else {
-        run.add({ id: `archive.${heldFx.role}.${heldFx.format}.ran`, title: 'The archive was imported with the private model off', status: 'fail', detail: 'not run: the private model could not be turned off' });
+        addAll([{ id: `archive.${heldFx.role}.${heldFx.format}.ran`, title: 'The archive was imported with the private model off', status: 'fail', detail: 'not run: the private model could not be turned off' }]);
       }
     }
   } finally {
     // 4. The private model back on, whatever happened above.
     if (modelTouched) {
       modelOn = await call<ModelObservation>('archive-model', '--mode on', ARCHIVE_BOUNDS.engineS + 240);
-      addAll(modelChecks(modelOn, 'on'));
+      addAll(modelChecks(modelOn, 'on'), true);
     }
   }
 
   try {
     // 5. What was held drains to zero within the leg's own bound, and becomes searchable.
-    if (modelTouched && modelOn?.ok === true && !outOfTime('the held archive drain')) {
+    if ((run.archiveBlocked || (modelTouched && modelOn?.ok === true)) && !outOfTime('the held archive drain')) {
       const drained = await call<ImportObservation>('archive-drain', `${flags(heldFx)} --search --bound-s ${drainS}`, drainS + 300);
       const prefix = `archive.${heldFx.role}.${heldFx.format}.restored`;
       addAll(drainChecks(`${prefix}.drain`, drained?.drain, heldFx, os, 'restored'));
@@ -1427,14 +1444,14 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
       addAll(changedChecks(changed));
     }
   } finally {
-    // 8. Nothing is left on the machine: every archive off the Archives line, the fixtures folder gone.
+    // 8. Clean a completed leg. A blocked leg preserves its state for evidence, then VM teardown removes it.
     const cleaned = await call<{ ok?: boolean; removed?: string[]; detail?: string }>('archive-cleanup', '', ARCHIVE_BOUNDS.removeS + 300);
-    run.add({
+    addAll([{
       id: 'archive.cleanup',
       title: 'The test archives were removed from the machine at the end of the leg',
       status: cleaned?.ok === true ? 'pass' : 'fail',
       detail: cleaned?.ok === true ? `${cleaned.removed?.length ? `${cleaned.removed.length} left over archive(s) removed; ` : ''}fixtures folder deleted` : String(cleaned?.detail ?? 'no result from the machine'),
-    });
+    }]);
   }
 
   await keepStateAtFailure();
@@ -1466,6 +1483,7 @@ async function collectArchiveTraces(run: Run, outDir: string): Promise<void> {
 
 /** The split front after a restart on a store set with Gmail attachments, Telegram and archives (front-steady.ts). */
 async function runFrontSteady(run: Run): Promise<void> {
+  if (run.archiveBlocked) { run.add({ id: 'front.steady', title: 'Front restart on the archive store set', status: 'skip', detail: 'Skipped: see archive.blocked' }); return; }
   const seed = randomBytes(6).toString('hex');
   const done = await run.phase('front-steady', () => run.agent('front-steady', `--seed ${seed} --watch-s ${FRONT_WATCH_S}`, (FRONT_WATCH_S + 30 * 60) * 1_000));
   if (!done.result) run.log(`front-steady: ${agentDetail(done)}`);
@@ -1556,6 +1574,7 @@ async function checkSplitUpdate(run: Run, prep: { set?: FrontStoreSet; storeFile
 
 async function runArchiveScaleLeg(run: Run, outDir: string, deadline: number): Promise<void> {
   if (!run.options.archiveScale) return;
+  if (run.archiveBlocked) { run.add({ id: 'archive.scale', title: 'Archive scale imports', status: 'skip', detail: 'Skipped: see archive.blocked' }); return; }
   const seed = randomBytes(6).toString('hex');
   try {
     for (const format of run.options.archiveScaleFormats ?? SCALE_FORMATS) {

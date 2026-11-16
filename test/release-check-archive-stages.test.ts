@@ -19,13 +19,15 @@ import {
 import { archivesOpenTarget, createArchiveImportAgent } from '../src/workers/archive-import/agent.ts';
 import { FIXTURE_FOLDER, legFixture, writeFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, changedChecks, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, shownPath,
+  ARCHIVE_BOUNDS, agentImportJourney, pickerImportJourney, besideLiveJourney, changedChecks, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, shownPath,
   type StoreView,
 } from '../scripts/release-check/archive-leg.ts';
 import {
-  SNIFFER_ENABLED_KEY, changedStage, drainStage, envWith, importStage, modelStage, removeAllStage, removeStage,
+  SNIFFER_ENABLED_KEY, importProgress, changedStage, drainStage, envWith, importStage, modelStage, removeAllStage, removeStage,
   type ArchiveBrowserSession, type ArchiveHost,
 } from '../scripts/release-check/archive-stages.ts';
+import { runJourney, type JourneyDriver } from '../scripts/release-check/journey.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import type { CheckResult } from '../scripts/release-check/report.ts';
 import { PanelDriver, closeWindows, dashboardAnswer, entryFor, mountPanel, settle, uploadTools } from './helpers/release-check-panel.ts';
 
@@ -322,6 +324,39 @@ describe('the private model, off and back on', () => {
   });
 });
 
+describe('archive settle progress on a scripted machine', () => {
+  for (const journeyOf of [agentImportJourney, pickerImportJourney, besideLiveJourney]) {
+    for (const finishes of [true, false]) {
+      test(`${journeyOf.name}: status, items and percent each renew the stall window (${finishes ? 'finishes' : 'stalls'})`, async () => {
+        const clock = createTestClock(0);
+        const fx = legFixture('agent', SEED);
+        const host = {
+          cli: () => ({ code: 0, stderr: '', json: { ok: true, archives: [{
+            archive_id: 'scripted', name: fx.fileName,
+            status: finishes && clock.now() >= 3_200 ? 'imported' : clock.now() >= 800 ? 'importing' : 'queued',
+            items: clock.now() >= 1_600 ? 11 : 10,
+            progress_percent: clock.now() >= 2_400 ? 6 : 5,
+          }] } }),
+        };
+        const driver = {
+          hasPanel: async () => true,
+          probe: async (_frame: string, call: string) => call.startsWith('__rc.count(')
+            ? (finishes && clock.now() >= 3_200 ? 1 : 0)
+            : { bad: [], emptyButtons: [], overflowX: 0, textLength: 1 },
+          pages: async () => 1, where: async () => '/dashboard', screenshot: async () => false,
+          drainEvents: () => ({ console: [], requests: [] }),
+        } as unknown as JourneyDriver;
+        const journey = journeyOf(fx, '/tmp/scripted.mbox', { settleS: 1, progress: importProgress(host, fx, 1) });
+        journey.steps = journey.steps.filter(step => step.name.startsWith('The import settles'));
+        const trace = await runJourney(driver, journey, { now: clock.now, sleep: ms => clock.advance(ms) });
+        expect(trace.ok).toBe(finishes);
+        expect(trace.ms).toBe(finishes ? 3_200 : 3_600);
+        if (!finishes) expect(trace.steps[0]!.actual).toContain('stopped moving for 1 s at importing, 11 items');
+      });
+    }
+  }
+});
+
 describe('importing an archive', () => {
   test('the agent path: a request, the owner\'s press, the row settles, the held messages drain, a search is cited', async () => {
     const { machine: fake, fx } = machine('agent');
@@ -408,13 +443,15 @@ describe('importing an archive', () => {
     expect(failing(importChecks(observation, legFixture('picker', SEED), 'linux'))).toEqual(['archive.picker.mbox.ran']);
   });
 
-  test('an import that never settles is reported by the journey and the imported check, not hidden', async () => {
+  test('an import that never settles reports one failure with its last status and count', async () => {
     const { machine: fake, fx } = machine('agent');
     fake.world.settle = 'never';
     const observation = await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, settleS: 1, startS: 3 });
     expect(observation.ok).toBe(true);
     expect(observation.settled).toBe(false);
-    expect(failing(importChecks(observation, fx.agent!, 'linux'))).toEqual(expect.arrayContaining(['journey.archive-agent-mbox-import', 'archive.agent.mbox.imported']));
+    expect(failing(importChecks(observation, fx.agent!, 'linux'))).toEqual(['archive.agent.mbox.ran']);
+    expect(observation.blocked).toContain('stopped moving for 1 s at importing, 10 items');
+    expect(fake.searches).toBe(0);
   });
 
   test('a start the product refuses stops the request check, with the code it answered', async () => {
@@ -615,7 +652,7 @@ describe('Remove', () => {
     const cleaned = await removeAllStage(fake, { removeS: 2, openS: 2, verifyS: 6 });
     expect(cleaned.ok).toBe(false);
     expect(cleaned.removed).toEqual([]);
-    expect(cleaned.failed).toHaveLength(3);
+    expect(cleaned.failed).toHaveLength(1);
     expect(cleaned.remaining).toHaveLength(3);
     expect(cleaned.detail).toContain('Remove did not take');
     expect(cleaned.detail).toContain('still listed');

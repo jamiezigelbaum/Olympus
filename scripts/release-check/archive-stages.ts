@@ -135,6 +135,27 @@ const stepMs = (trace: JourneyTrace, startsWith: string): { ok: boolean; ms: num
   return { ok: step?.ok === true, ms: step?.ms ?? 0 };
 };
 
+/** Unreadable status polls retain the last observation: losing the CLI is not import progress. */
+export function importProgress(host: Pick<ArchiveHost, 'cli'>, fx: LegFixture, stallS: number) {
+  let last: StatusView['archives'][number] | undefined;
+  return async () => {
+    const answer = host.cli(['status']);
+    const view = statusViewOf(answer.json, fx.token);
+    if (answer.code === 0 && view.ok) last = view.archives.find(archive => archive.name === fx.fileName) ?? last;
+    return {
+      mark: JSON.stringify([last?.status, last?.messages, last?.progressPercent]),
+      detail: `stopped moving for ${stallS} s at ${last?.status || 'not listed'}, ${last?.messages ?? 'unknown'} items`,
+    };
+  };
+}
+
+class ArchiveBlocked extends Error {}
+
+/** Only a settle timeout blocks later imports; a refused request still has its own ordinary checks. */
+function stalledImport(trace: JourneyTrace): string | undefined {
+  return trace.steps.find(step => step.name.startsWith('The import settles') && !step.ok && step.actual.includes('stopped moving for'))?.actual;
+}
+
 // ---------------------------------------------------------------------------
 // Import
 
@@ -181,16 +202,20 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
           obs.waiting = statusViewOf(waiting.json, fx.token);
         }
         const bounds = {
+          progress: importProgress(host, fx, args.settleS ?? ARCHIVE_BOUNDS.settleS),
           ...(args.startS !== undefined ? { startS: args.startS } : {}),
           ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
           ...(args.openS !== undefined ? { openS: args.openS } : {}),
         };
         const journey = args.via === 'request' ? agentImportJourney(fx, shownPath(host.home, path), bounds) : pickerImportJourney(fx, path, bounds);
-        const trace = await runJourney(driver, journey);
+        const trace = await runJourney(driver, journey, { now: host.now, sleep: host.sleep });
         obs.traces.push(trace);
         const settle = stepMs(trace, 'The import settles');
         obs.settled = settle.ok;
         obs.settleMs = settle.ms;
+        const blocked = stalledImport(trace);
+        if (blocked) obs.blocked = blocked;
+        if (obs.blocked) { obs.detail = obs.blocked; host.say(obs.blocked); return; }
         host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
         // The row as the journey left it (See what was not read open, when the fixture has gaps).
         obs.row = await rowNow(host, driver, fx.fileName);
@@ -213,6 +238,7 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
     });
     obs.ok = true;
   } catch (error) {
+    if (error instanceof ArchiveBlocked) obs.blocked = error.message;
     obs.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
   }
   return obs;
@@ -257,15 +283,18 @@ export async function besideLiveStage(host: ArchiveHost, args: { format: string;
       obs.start = startViewOf(started.json, fx.token);
       host.say(`start: ${obs.start.code || `exit ${started.code}`}`);
       const journey = besideLiveJourney(fx, shownPath(host.home, path), {
+        progress: importProgress(host, fx, args.settleS ?? ARCHIVE_BOUNDS.settleS),
         ...(args.startS !== undefined ? { startS: args.startS } : {}),
         ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
         ...(args.openS !== undefined ? { openS: args.openS } : {}),
       });
-      const trace = await runJourney(driver, journey);
+      const trace = await runJourney(driver, journey, { now: host.now, sleep: host.sleep });
       obs.traces.push(trace);
       const settle = stepMs(trace, 'The import settles');
       obs.settled = settle.ok;
       obs.settleMs = settle.ms;
+      const blocked = stalledImport(trace);
+      if (blocked) { obs.blocked = blocked; obs.detail = blocked; host.say(blocked); return; }
       host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
       obs.row = await rowNow(host, driver, fx.fileName);
       // An imported record is held Private until the private model has judged it, so the search waits for that, within
@@ -336,7 +365,7 @@ export async function afterSourceDelete(host: ArchiveHost, hook: string, token: 
 /** Archives an earlier attempt left on the machine, removed from their rows, so a stage starts from an empty Archives line. */
 async function removeLeftovers(host: ArchiveHost, driver: JourneyDriver, token: string, bounds: ClearBounds = {}): Promise<void> {
   const cleared = await clearArchives(host, driver, token, 'leftover', bounds);
-  if (!clearedOk(cleared)) throw new Error(`archives an earlier attempt left could not be removed: ${clearedProblem(cleared)}`);
+  if (!clearedOk(cleared)) throw new ArchiveBlocked(`archives an earlier attempt left could not be removed: ${clearedProblem(cleared)}`);
 }
 
 async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView> {
@@ -513,6 +542,10 @@ export async function removeStage(host: ArchiveHost, args: { targets: readonly R
           stores: host.readStores(formatSpec(target.format), archiveId, target.token),
           others,
         });
+        if (!gone.ok || after?.archives.some(archive => archive.name === target.fileName)) {
+          obs.blocked = `Remove did not take ${target.fileName} off the page or out of status`;
+          break;
+        }
       }
     });
     obs.ok = true;
@@ -572,6 +605,7 @@ async function clearArchives(host: ArchiveHost, driver: JourneyDriver, token: st
     const trace = await runJourney(driver, removeJourney(label, name, bounds.removeS, bounds.openS));
     host.say(`${label} ${name}: ${trace.ok ? 'removed' : 'FAILED'}`);
     (trace.ok ? cleared.removed : cleared.failed).push(name);
+    if (!trace.ok) { cleared.remaining = first.names.filter(candidate => !cleared.removed.includes(candidate)); return cleared; }
   }
   // Nothing may be left: the page can redraw a row a journey saw go, and the engine is the one that knows what it holds.
   const stop = host.now() + (bounds.verifyS ?? 60) * 1_000;
@@ -641,7 +675,9 @@ export async function changedStage(host: ArchiveHost, args: { seed: string; size
           detail: caught.state === 'imported' ? 'the import finished before the file could be changed' : `the archive read "${caught.state}"`,
         });
         // A finished archive is removed before the next, larger one.
-        await runJourney(driver, removeJourney('bulk', fx.fileName, args.removeS));
+        const removal = await runJourney(driver, removeJourney('bulk', fx.fileName, args.removeS));
+        obs.traces.push(removal);
+        if (!removal.ok) { obs.blocked = `Remove did not take ${fx.fileName} off the page`; break; }
         if (caught.state !== 'imported') break;
       }
       const last = obs.attempts[obs.attempts.length - 1];
@@ -656,6 +692,7 @@ export async function changedStage(host: ArchiveHost, args: { seed: string; size
         const archiveId = status?.archives.find((archive) => archive.name === fx.fileName)?.id;
         const removal = await runJourney(driver, removeJourney('bulk', fx.fileName, args.removeS));
         obs.traces.push(removal);
+        if (!removal.ok) obs.blocked = `Remove did not take ${fx.fileName} off the page`;
         const after = await statusNow(host, fx.token, 30_000);
         obs.removed = {
           gone: stepMs(removal, 'Confirm').ok,

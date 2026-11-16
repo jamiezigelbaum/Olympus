@@ -108,6 +108,8 @@ export interface JourneyStep {
   expect: Expectation[];
   /** How long the outcomes may take to appear (the page loads, the engine answers). Default 20 s; opening a page 90 s. */
   timeoutMs?: number;
+  /** When present, timeoutMs is an idle window, renewed only when this mark changes. */
+  progress?: () => Promise<{ mark: string; detail: string }>;
   /** Read before the action, for an outcome that compares with it. */
   remember?: Record<string, Remember>;
   /** Console messages and failed requests this step declares expected. */
@@ -522,16 +524,27 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
     // The outcomes: polled until they all hold, or until the step's time is up.
     const timeoutMs = step.timeoutMs ?? ('open' in step.do ? OPEN_STEP_TIMEOUT_MS : DEFAULT_STEP_TIMEOUT_MS);
     // Time spent waiting for a disabled control to enable is not taken from the outcomes' own budget (Codex on #718).
-    const until = stepStarted + (actionResult.waitedMs ?? 0) + timeoutMs;
+    let until = stepStarted + (actionResult.waitedMs ?? 0) + timeoutMs;
+    let lastMark: string | undefined;
+    let progressDetail: string | undefined;
     let outcomes: Outcome[] = [];
     try {
       if (actionResult.ok) {
         for (;;) {
+          if (step.progress) {
+            const progress = await step.progress();
+            if (progress.mark !== lastMark) { lastMark = progress.mark; until = now() + timeoutMs; }
+            progressDetail = progress.detail;
+          }
           outcomes = [];
           for (const expectation of step.expect) {
             try { outcomes.push(await evaluate(expectation, context, state)); } catch (caught) { outcomes.push({ ok: false, expected: 'the outcome can be read', actual: caught instanceof Error ? caught.message.slice(0, 160) : String(caught) }); }
           }
-          if (outcomes.every((outcome) => outcome.ok) || now() >= until) break;
+          if (outcomes.every((outcome) => outcome.ok)) break;
+          if (now() >= until) {
+            if (progressDetail) for (const outcome of outcomes) if (!outcome.ok) outcome.actual += `; ${progressDetail}`;
+            break;
+          }
           await sleep(POLL_MS);
         }
       }

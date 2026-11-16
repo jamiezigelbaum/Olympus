@@ -36,7 +36,7 @@ import type { CheckResult } from './report.ts';
 
 /** How long each wait may take on a machine. The Linux machine's private model is the smaller one, so its drain is the longer. */
 export const ARCHIVE_BOUNDS = {
-  /** A small archive reaches Imported after it is approved. */
+  /** Stop an import only after this long without status, item-count or percent movement. */
   settleS: 900,
   /** A removal finishes. */
   removeS: 900,
@@ -238,6 +238,7 @@ export interface AgentArchiveView {
   format: string;
   status: string;
   messages?: number;
+  progressPercent?: number;
   judged?: number;
   waiting?: number;
   earliest?: string;
@@ -287,6 +288,7 @@ export function statusViewOf(json: unknown, token: string): StatusView {
       status: optText(archive.status) ?? '',
       // `messages` is the count for mail and chat; any family also gives `items`, the same number.
       ...((optNumber(archive.messages) ?? optNumber(archive.items)) !== undefined ? { messages: (optNumber(archive.messages) ?? optNumber(archive.items))! } : {}),
+      ...(optNumber(archive.progress_percent) !== undefined ? { progressPercent: optNumber(archive.progress_percent)! } : {}),
       ...(optNumber(archive.judged) !== undefined ? { judged: optNumber(archive.judged)! } : {}),
       ...(optNumber(archive.waiting_for_private_model) !== undefined ? { waiting: optNumber(archive.waiting_for_private_model)! } : {}),
       ...(optText(archive.earliest) ? { earliest: optText(archive.earliest)! } : {}),
@@ -343,6 +345,8 @@ export interface DrainView {
 // Observations, one per in-machine verb
 
 export interface ImportObservation {
+  /** First archive stall or failed removal; dependent archive work must stop. */
+  blocked?: string;
   /** The verb ran to its end (a failed step in a journey is in `traces`, not here). */
   ok: boolean;
   detail?: string;
@@ -369,6 +373,8 @@ export interface ImportObservation {
 }
 
 export interface RemoveObservation {
+  /** First archive stall or failed removal; dependent archive work must stop. */
+  blocked?: string;
   ok: boolean;
   detail?: string;
   removals: Array<{
@@ -390,6 +396,8 @@ export interface RemoveObservation {
 }
 
 export interface ChangedObservation {
+  /** First archive stall or failed removal; dependent archive work must stop. */
+  blocked?: string;
   ok: boolean;
   detail?: string;
   attempts: Array<{ messages: number; outcome: 'changed' | 'finished-first' | 'never-started' | 'refused'; detail: string }>;
@@ -410,6 +418,8 @@ export interface SeedLiveObservation {
 
 /** An import of a source's own account beside its live input, and the source's Delete after it. */
 export interface BesideLiveObservation {
+  /** First archive stall or failed removal; dependent archive work must stop. */
+  blocked?: string;
   ok: boolean;
   detail?: string;
   format: string;
@@ -515,11 +525,14 @@ function accountQuestionSteps(fx: LegFixture, startS: number): Journey['steps'] 
   ];
 }
 
-const settleStep = (fx: LegFixture, settleS: number): Journey['steps'][number] => ({
+type ImportBounds = { startS?: number; settleS?: number; openS?: number; progress?: Journey['steps'][number]['progress'] };
+
+const settleStep = (fx: LegFixture, settleS: number, progress?: ImportBounds['progress']): Journey['steps'][number] => ({
   name: 'The import settles: the row says Imported',
   do: { observe: true },
   expect: [{ present: { css: 'li.archive[data-archive="imported"]', text: fx.fileName, contains: true }, frame: 'panel' }],
   timeoutMs: settleS * 1_000,
+  ...(progress ? { progress } : {}),
 });
 
 /** The See button, opened with a real press, and the two lists' headings and every line the fixture must leave there. */
@@ -533,7 +546,7 @@ export const gapsStep = (fx: LegFixture): Journey['steps'][number] => ({
   ],
 });
 
-export function agentImportJourney(fx: LegFixture, fullPath: string, bounds: { startS?: number; settleS?: number; openS?: number } = {}): Journey {
+export function agentImportJourney(fx: LegFixture, fullPath: string, bounds: ImportBounds = {}): Journey {
   const hasGaps = expectedGapLines(fx.expect).length > 0;
   return {
     id: `archive-${fx.role}-${fx.format}-import`,
@@ -542,7 +555,7 @@ export function agentImportJourney(fx: LegFixture, fullPath: string, bounds: { s
     mutates: true,
     steps: [
       ...approveRequestSteps(fx, fullPath, bounds.startS ?? ARCHIVE_BOUNDS.startS, bounds.openS ?? OPEN_S),
-      settleStep(fx, bounds.settleS ?? ARCHIVE_BOUNDS.settleS),
+      settleStep(fx, bounds.settleS ?? ARCHIVE_BOUNDS.settleS, bounds.progress),
       ...(hasGaps ? [gapsStep(fx)] : []),
     ],
   };
@@ -551,7 +564,7 @@ export function agentImportJourney(fx: LegFixture, fullPath: string, bounds: { s
 /** The drop zone's own file input: the system's file dialog cannot be driven, so the journey hands the file to the input the dialog would fill. */
 export const DROP_FILE_INPUT = { css: 'input[data-key="picker:drop:file-input"]' } as const;
 
-export function pickerImportJourney(fx: LegFixture, path: string, bounds: { startS?: number; settleS?: number; openS?: number } = {}): Journey {
+export function pickerImportJourney(fx: LegFixture, path: string, bounds: ImportBounds = {}): Journey {
   const hasGaps = expectedGapLines(fx.expect).length > 0;
   return {
     id: `archive-${fx.role}-${fx.format}-import`,
@@ -573,7 +586,7 @@ export function pickerImportJourney(fx: LegFixture, path: string, bounds: { star
         expect: [{ text: fill(A.started, { name: fx.fileName }), frame: 'panel' }, { present: rowTarget(fx.fileName), frame: 'panel' }],
         timeoutMs: (bounds.startS ?? ARCHIVE_BOUNDS.startS) * 1_000,
       },
-      settleStep(fx, bounds.settleS ?? ARCHIVE_BOUNDS.settleS),
+      settleStep(fx, bounds.settleS ?? ARCHIVE_BOUNDS.settleS, bounds.progress),
       ...(hasGaps ? [gapsStep(fx)] : []),
     ],
   };
@@ -660,7 +673,7 @@ export function besideLiveLine(expect: BesideLiveExpectation, family: string): s
 
 
 /** An agent asks to import the export, the owner presses Import, and the import settles inside its source's card. */
-export function besideLiveJourney(fx: LegFixture, fullPath: string, bounds: { startS?: number; settleS?: number; openS?: number } = {}): Journey {
+export function besideLiveJourney(fx: LegFixture, fullPath: string, bounds: ImportBounds = {}): Journey {
   return {
     id: `archive-beside-${fx.format}-import`,
     title: `An export of a source's own account is imported beside its live input and joins the source (${fx.format})`,
@@ -673,6 +686,7 @@ export function besideLiveJourney(fx: LegFixture, fullPath: string, bounds: { st
         do: { observe: true },
         expect: [{ present: { css: 'li.archive[data-source-import="true"][data-archive="imported"]', text: fx.fileName, contains: true }, frame: 'panel' }],
         timeoutMs: (bounds.settleS ?? ARCHIVE_BOUNDS.settleS) * 1_000,
+        ...(bounds.progress ? { progress: bounds.progress } : {}),
       },
     ],
   };
@@ -833,6 +847,7 @@ const notRun = (prefix: string, title: string, obs: { ok: boolean; detail?: stri
 
 /** Checks for one archive imported on the agent path or the picker, with the private model on. */
 export function importChecks(obs: ImportObservation | undefined, fx: LegFixture, os: string): CheckResult[] {
+  if (obs?.blocked) return [check(`${prefixOf(fx)}.ran`, `The ${fx.format} archive was imported (${fx.role})`, false, obs.blocked)];
   const prefix = prefixOf(fx);
   const title = `The ${fx.format} archive was imported (${fx.role})`;
   const missing = notRun(prefix, title, obs);
@@ -871,6 +886,7 @@ export function drainChecks(id: string, drain: DrainView | undefined, fx: LegFix
 
 /** The private model is off: the messages are held, say so, and none of their content is anywhere a search or a lower tier could reach. */
 export function heldOffChecks(obs: ImportObservation | undefined, fx: LegFixture): CheckResult[] {
+  if (obs?.blocked) return [check(`${prefixOf(fx)}.ran`, 'The archive was imported with the private model off', false, obs.blocked)];
   const prefix = prefixOf(fx);
   const title = 'The archive was imported with the private model off';
   const missing = notRun(prefix, title, obs);
@@ -919,6 +935,7 @@ function heldOffOnly(obs: ImportObservation, fx: LegFixture): CheckResult[] {
 }
 
 export function removeChecks(obs: RemoveObservation | undefined, fixtures: ReadonlyArray<Pick<LegFixture, 'role' | 'format' | 'fileName' | 'token'>>): CheckResult[] {
+  if (obs?.blocked) return [check('archive.remove.ran', 'Archives were removed from their rows', false, obs.blocked)];
   const out: CheckResult[] = [];
   if (!obs || (!obs.ok && (obs.removals ?? []).length === 0)) {
     return [check('archive.remove.ran', 'Archives were removed from their rows', false, obs?.detail ?? 'no result from the machine')];
@@ -952,6 +969,7 @@ export function removeChecks(obs: RemoveObservation | undefined, fixtures: Reado
 }
 
 export function changedChecks(obs: ChangedObservation | undefined): CheckResult[] {
+  if (obs?.blocked) return [check('archive.changed.stops', 'A file changed while it was being imported stops the import', false, obs.blocked)];
   const title = 'A file changed while it was being imported stops the import, and the dashboard says so';
   if (!obs || (!obs.ok && (obs.attempts ?? []).length === 0)) return [check('archive.changed.stops', title, false, obs?.detail ?? 'no result from the machine')];
   const out: CheckResult[] = [];
@@ -996,6 +1014,7 @@ export function seedLiveChecks(obs: SeedLiveObservation | undefined, format: str
  * source already had, no Remove (its records are the source's), found by a search, and gone with the source's Delete.
  */
 export function besideLiveChecks(obs: BesideLiveObservation | undefined, fx: LegFixture): CheckResult[] {
+  if (obs?.blocked) return [check(`archive.beside.${fx.format}.ran`, `The ${fx.format} export was imported beside its source's live input`, false, obs.blocked)];
   const prefix = `archive.beside.${fx.format}`;
   const title = `The ${fx.format} export was imported beside its source's live input`;
   const missing = notRun(prefix, title, obs);

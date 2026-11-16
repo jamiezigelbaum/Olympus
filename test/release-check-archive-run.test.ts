@@ -29,6 +29,7 @@ if (verb === 'provision') {
   const call = /agent\.js (.*)/.exec(script)?.[1] ?? '';
   const sub = call.split(' ')[0];
   appendFileSync(state + '/agent.log', call + '\n');
+  appendFileSync(state + '/bounds.log', sub + ' ' + arg('--timeout-s') + '\n');
   const life = JSON.parse(readFileSync(state + '/life.json', 'utf8'));
   const counts = { seen: life.seen, indexed: life.stored, contentReady: life.stored, embedded: life.stored, secretsLocated: life.secrets, pending: 0, queueWaiting: 0, queueActive: 0, personal: life.personal, privateItems: life.privateItems };
   const mode = process.env.FAKE_ARCHIVE ?? 'silent';
@@ -41,6 +42,10 @@ if (verb === 'provision') {
   else if (sub === 'collect-logs') say({ ok: true, files: [] });
   else if (sub === 'archive-cleanup') say(mode === 'cleanup-fails' ? { ok: false, detail: 'an archive would not go' } : { ok: true, removed: ['left-over.mbox'] });
   else if (sub === 'archive-collect') say(mode === 'collect-fails' ? { ok: false, detail: 'tar failed' } : { ok: true, archive: '/home/test/rc/archive.tgz' });
+  else if (sub === 'archive-import' && ['stalled', 'unremovable'].includes(mode)) {
+    const blocked = mode === 'stalled' ? 'stopped moving for 900 s at importing, 10 items' : 'Remove did not take rc-front-gmail.mbox off the page';
+    say({ ok: false, blocked, detail: blocked, traces: [] });
+  }
   else if (sub.startsWith('archive-')) say({ ok: false, detail: 'scripted: ' + sub + ' did nothing' });
   else say({ ok: false, detail: 'scripted machine: unknown ' + sub });
 } else if (verb === 'destroy') {
@@ -141,6 +146,38 @@ describe('the archive-import leg in a run', () => {
     expect(verbs().slice(-2)).toEqual(['archive-cleanup', 'archive-collect']);
     expect(existsSync(join(dir, 'destroyed'))).toBe(true);
   }, 120_000);
+
+  for (const mode of ['stalled', 'unremovable']) {
+    test(`${mode}: one archive failure skips dependent work and the leg continues through limits and scans`, async () => {
+      process.env.FAKE_ARCHIVE = mode;
+      const pack = join(dir, 'pack');
+      mkdirSync(pack);
+      expect(spawnSync('tar', ['-czf', join(dir, 'archive.tgz'), '-C', pack, '.']).status).toBe(0);
+      let limitsRuns = 0;
+      const report = await runReleaseCheck({ ...options({ engineSplit: true, archiveScale: true, skipRestore: true }), limitsStage: async () => {
+        limitsRuns++;
+        return { rows: [], checks: [{ id: 'limits.scripted', title: 'limits ran', status: 'fail', detail: 'independent limit failure' }] };
+      } });
+      expect(limitsRuns).toBe(1);
+      expect(verbs()).toEqual(['archive-import', 'archive-collect']);
+      const importBound = Number(readFileSync(join(dir, 'bounds.log'), 'utf8').split('\n').find(line => line.startsWith('archive-import '))!.split(' ')[1]);
+      expect(importBound).toBeGreaterThan(720); // Progress can outlive the old fixed phase limit.
+      expect(importBound).toBeLessThanOrEqual(180 * 60);
+      expect(failedIds(report).filter(id => id.startsWith('archive.'))).toEqual(['archive.picker.mbox.ran']);
+      const checks = checksOf(report);
+      const skipped = checks.filter(check => check.status === 'skip');
+      expect(skipped.find(check => check.id === 'archive.blocked')?.detail).toContain('archive.picker.mbox.ran:');
+      expect(skipped.find(check => check.id === 'archive.blocked')?.detail).toContain(mode === 'stalled' ? 'stopped moving for 900 s at importing, 10 items' : 'rc-front-gmail.mbox');
+      for (const id of ['archive.agent.mbox.ran', 'archive.agent.telegram_json.ran', 'archive.held.mbox.ran', 'archive.held.mbox.restored.drain', 'archive.remove.ran', 'archive.changed.stops', 'archive.cleanup', 'archive.scale', 'front.steady']) {
+        expect(skipped.some(check => check.id === id)).toBe(true);
+      }
+      expect(failedIds(report)).toContain('limits.scripted');
+      expect(checks.find(check => check.id === 'scan.the dashboard payload')?.status).toBe('pass');
+      expect(checks.find(check => check.id === 'scan.report')?.status).toBe('pass');
+      expect(agentLog()).not.toContain('front-steady');
+      expect(existsSync(join(dir, 'destroyed'))).toBe(true);
+    }, 120_000);
+  }
 
   test('a cleanup that leaves an archive behind fails the run', async () => {
     process.env.FAKE_ARCHIVE = 'cleanup-fails';
