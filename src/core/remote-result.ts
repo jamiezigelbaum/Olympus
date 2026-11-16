@@ -40,6 +40,7 @@ import { citationTitleWithParent, PARENT_LABEL_MAX_CHARS } from './parent-label.
 import { checkReleaseChunks, passagesWithheldAtReleasableTiers, privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
+import { parseFollowUp } from './follow-up.ts';
 
 /** The operations the remote surface serves (core/public-surface.ts V0_4_PUBLIC_REMOTE_MCP_TOOLS). */
 export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously' | 'source_item_read'
@@ -63,6 +64,8 @@ export interface RemoteOutputOptions {
 const MAX_ANSWER = 64 * 1024;
 const MAX_SENT = 16 * 1024;
 const MAX_TITLE = 400;
+/** The follow-up question: up to four option labels and two fixed sentences. */
+const MAX_FOLLOW_UP_QUESTION = 2_000;
 const MAX_ROUTE = 300;
 const MAX_MESSAGE = 2_000;
 const MAX_CITATIONS = 50;
@@ -451,12 +454,31 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
   noteReleasedItems(released);
   const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
   const coverageSuffix = privacyCoverage ? `\n\nCoverage notes:\n- ${privacyCoverage}` : '';
+  const followUp = followUpOutput(record.follow_up);
   return {
     kind: 'source_answer',
     status: 'answered',
     answer: (answer.text ?? '').slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
     citations,
+    ...(followUp ? { follow_up: followUp } : {}),
   };
+}
+
+/**
+ * A weak answer's follow-up question (core/follow-up.ts): metadata-only text
+ * the engine built, scanned again here like every free-text field, and
+ * opaque narrow handles. An option whose label is secret-like is left out.
+ */
+function followUpOutput(value: unknown): Record<string, unknown> | undefined {
+  const followUp = parseFollowUp(value);
+  if (!followUp) return undefined;
+  const question = scannedText(followUp.question, MAX_FOLLOW_UP_QUESTION, 'line');
+  if (question.secret || !question.text) return undefined;
+  const options = followUp.options.flatMap((option) => {
+    const label = scannedText(option.label, MAX_TITLE, 'line');
+    return label.secret || !label.text ? [] : [{ label: label.text, narrow: option.narrow }];
+  });
+  return options.length > 0 ? { question: question.text, options } : undefined;
 }
 
 /**

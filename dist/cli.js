@@ -53802,6 +53802,197 @@ Coverage notes:
 - ${note}`;
 }
 
+// src/core/follow-up.ts
+import { randomBytes as randomBytes12 } from "node:crypto";
+function weakSearch(input) {
+  if (input.cutShort)
+    return { weak: false };
+  if (input.citations === 0)
+    return { weak: true, reason: "no_citations" };
+  const bars = input.bars ?? FOLLOW_UP_WEAK_BARS;
+  const strength = input.strength;
+  if (strength?.rerankBest === undefined || strength.conceptShareBest === undefined)
+    return { weak: false };
+  const below = strength.rerankBest < bars.rerankScore && strength.conceptShareBest < bars.conceptShare && (strength.vectorMarginBest === undefined || strength.vectorMarginBest < bars.vectorMargin);
+  return below ? { weak: true, reason: "low_relevance" } : { weak: false };
+}
+function searchCutShort(input) {
+  return input.skippedReasons.some((reason) => reason === "lane_timeout") || input.degradationReasons.some((reason) => CUT_SHORT_REASONS.has(reason));
+}
+function followUpScopeOptions(candidates) {
+  const groups = new Map;
+  const add = (kind, key, index, init) => {
+    const id = `${kind}\x00${key}`;
+    const group = groups.get(id) ?? { kind, key, corpora: new Set, members: [], ...init };
+    group.corpora.add(candidates[index].corpusId);
+    group.members.push(index);
+    groups.set(id, group);
+  };
+  candidates.forEach((candidate, index) => {
+    if (!candidate.namesReleasable)
+      return;
+    const source = labelName(candidate.source) ?? "Other source";
+    add("source", source, index, { name: source, source, scope: (corpora) => ({ corpus_ids: corpora }) });
+    const conversation = labelName(candidate.conversationLabel);
+    const conversationId = candidate.conversationId?.trim();
+    if (conversation && conversationId) {
+      add("conversation", `${candidate.corpusId}\x00${conversationId}`, index, {
+        name: conversation,
+        source,
+        scope: (corpora) => ({ corpus_ids: corpora, conversation_id: conversationId })
+      });
+    }
+    const author = labelName(candidate.authorLabel);
+    if (author) {
+      add("author", `${source}\x00${author.toLowerCase()}`, index, {
+        name: author,
+        source,
+        scope: (corpora) => ({ corpus_ids: corpora, sender_label: author })
+      });
+    }
+    const year = yearOf(candidate.authoredAt);
+    if (year !== undefined) {
+      add("year", String(year), index, {
+        name: String(year),
+        source,
+        scope: () => ({ authored_after: `${year}-01-01T00:00:00.000Z`, authored_before: `${year}-12-31T23:59:59.999Z` })
+      });
+    }
+  });
+  const ranked = [...groups.values()].sort((left, right) => right.members.length - left.members.length || KIND_ORDER[left.kind] - KIND_ORDER[right.kind] || left.key.localeCompare(right.key));
+  const chosen = [];
+  const seen = new Set;
+  for (const group of ranked) {
+    if (chosen.length >= FOLLOW_UP_MAX_OPTIONS)
+      break;
+    const memberKey = group.members.join(",");
+    if (seen.has(memberKey))
+      continue;
+    const years = group.members.flatMap((index) => {
+      const year = yearOf(candidates[index].authoredAt);
+      return year === undefined ? [] : [year];
+    });
+    const label = optionLabel(group.kind, group.name, group.source, group.members.length, years);
+    if (!label)
+      continue;
+    seen.add(memberKey);
+    chosen.push({ kind: group.kind, label, scope: group.scope([...group.corpora].sort()), members: [...group.members] });
+  }
+  return chosen;
+}
+function followUpQuestion(options) {
+  if (options.length === 0)
+    return;
+  const question = `I didn't find a clear answer. Possible places: ${options.map((option) => option.label).join("; ")}. ` + "Which should I look in, or which person or period?";
+  return secretLabelsInText(question).length > 0 ? undefined : question;
+}
+function buildFollowUp(candidates) {
+  const options = followUpScopeOptions(candidates);
+  const question = followUpQuestion(options);
+  if (!question)
+    return;
+  return {
+    followUp: { question, options: options.map((option) => ({ label: option.label, narrow: issueNarrowHandle(option.scope) })) },
+    contributors: [...new Set(options.flatMap((option) => option.members))].sort((a, b) => a - b)
+  };
+}
+function optionLabel(kind, name, source, count, years) {
+  const items = `${count} ${count === 1 ? "item" : "items"}`;
+  const span = yearSpan(years);
+  const detail = span ? `${items}, ${span}` : items;
+  const label = kind === "conversation" ? `${name} in ${source} (${detail})` : kind === "author" ? `${source} from ${name} (${detail})` : kind === "source" ? `${source} (${detail})` : `${name} (${items})`;
+  return secretLabelsInText(label).length > 0 ? undefined : label;
+}
+function yearSpan(years) {
+  if (years.length === 0)
+    return;
+  const first = Math.min(...years);
+  const last = Math.max(...years);
+  return first === last ? String(first) : `${first} to ${last}`;
+}
+function yearOf(value) {
+  if (!value)
+    return;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time))
+    return;
+  const year = new Date(time).getUTCFullYear();
+  return year >= 1970 && year <= 9999 ? year : undefined;
+}
+function labelName(value) {
+  if (typeof value !== "string")
+    return;
+  const line = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/\s+/g, " ").trim();
+  if (!line || secretLabelsInText(value).length > 0)
+    return;
+  const bounded = line.length > LABEL_NAME_MAX_CHARS ? `${line.slice(0, LABEL_NAME_MAX_CHARS - 1).trimEnd()}…` : line;
+  return secretLabelsInText(bounded).length > 0 ? undefined : bounded;
+}
+function isNarrowHandle(value) {
+  return typeof value === "string" && NARROW_HANDLE_PATTERN.test(value);
+}
+function issueNarrowHandle(scope) {
+  const now = clock3();
+  for (const [handle, entry] of narrowHandles) {
+    if (entry.expiresAt <= now)
+      narrowHandles.delete(handle);
+  }
+  while (narrowHandles.size >= NARROW_HANDLE_CAPACITY)
+    narrowHandles.delete(narrowHandles.keys().next().value);
+  const handle = `fu_${randomBytes12(18).toString("base64url")}`;
+  narrowHandles.set(handle, { scope: copyScope(scope), expiresAt: now + NARROW_HANDLE_LIFETIME });
+  return handle;
+}
+function resolveNarrowHandle(handle) {
+  if (!isNarrowHandle(handle))
+    return;
+  const entry = narrowHandles.get(handle);
+  if (!entry)
+    return;
+  if (entry.expiresAt <= clock3()) {
+    narrowHandles.delete(handle);
+    return;
+  }
+  return copyScope(entry.scope);
+}
+function copyScope(scope) {
+  return {
+    ...scope.corpus_ids?.length ? { corpus_ids: [...scope.corpus_ids] } : {},
+    ...scope.conversation_id ? { conversation_id: scope.conversation_id } : {},
+    ...scope.sender_label ? { sender_label: scope.sender_label } : {},
+    ...scope.authored_after ? { authored_after: scope.authored_after } : {},
+    ...scope.authored_before ? { authored_before: scope.authored_before } : {}
+  };
+}
+function parseFollowUp(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return;
+  const record = value;
+  if (typeof record.question !== "string" || !record.question.trim() || !Array.isArray(record.options))
+    return;
+  const options = record.options.flatMap((option) => {
+    if (!option || typeof option !== "object")
+      return [];
+    const { label, narrow } = option;
+    return typeof label === "string" && label.trim() && isNarrowHandle(narrow) ? [{ label, narrow }] : [];
+  });
+  return options.length > 0 ? { question: record.question, options: options.slice(0, FOLLOW_UP_MAX_OPTIONS) } : undefined;
+}
+var FOLLOW_UP_WEAK_BARS, CUT_SHORT_REASONS, FOLLOW_UP_MAX_OPTIONS = 4, LABEL_NAME_MAX_CHARS = 60, KIND_ORDER, NARROW_HANDLE_PATTERN, NARROW_HANDLE_LIFETIME, NARROW_HANDLE_CAPACITY = 5000, narrowHandles, clock3 = () => Date.now();
+var init_follow_up = __esm(() => {
+  init_opsec();
+  FOLLOW_UP_WEAK_BARS = Object.freeze({
+    rerankScore: -3,
+    conceptShare: 0.34,
+    vectorMargin: 0.02
+  });
+  CUT_SHORT_REASONS = new Set(["lane_timeout", "semantic_lane_skipped"]);
+  KIND_ORDER = { conversation: 0, author: 1, source: 2, year: 3 };
+  NARROW_HANDLE_PATTERN = /^fu_[A-Za-z0-9_-]{24}$/;
+  NARROW_HANDLE_LIFETIME = 60 * 60 * 1000;
+  narrowHandles = new Map;
+});
+
 // src/core/remote-result.ts
 function providerSourceLabel(provider) {
   return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
@@ -53993,12 +54184,27 @@ function sourceAnswerOutput(raw, options) {
 
 Coverage notes:
 - ${privacyCoverage}` : "";
+  const followUp = followUpOutput(record.follow_up);
   return {
     kind: "source_answer",
     status: "answered",
     answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
-    citations
+    citations,
+    ...followUp ? { follow_up: followUp } : {}
   };
+}
+function followUpOutput(value) {
+  const followUp = parseFollowUp(value);
+  if (!followUp)
+    return;
+  const question = scannedText(followUp.question, MAX_FOLLOW_UP_QUESTION, "line");
+  if (question.secret || !question.text)
+    return;
+  const options = followUp.options.flatMap((option) => {
+    const label = scannedText(option.label, MAX_TITLE, "line");
+    return label.secret || !label.text ? [] : [{ label: label.text, narrow: option.narrow }];
+  });
+  return options.length > 0 ? { question: question.text, options } : undefined;
 }
 function withRemotePrivateNote(output, answerId, secretMatch = false) {
   return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: remotePrivateNote(answerId, secretMatch) } : output;
@@ -54288,7 +54494,7 @@ function dateOnly(value) {
 function asRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, DEEP_READ_STATES, DEEP_READ_JOB_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_FOLLOW_UP_QUESTION = 2000, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, DEEP_READ_STATES, DEEP_READ_JOB_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_source_item_read();
   init_app_release_capture();
@@ -54297,6 +54503,7 @@ var init_remote_result = __esm(() => {
   init_parent_label();
   init_release_manifest();
   init_secret_location_note();
+  init_follow_up();
   MAX_ANSWER = 64 * 1024;
   MAX_SENT = 16 * 1024;
   JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
@@ -55542,7 +55749,7 @@ var init_operation_caller = __esm(() => {
 });
 
 // connect-relay/shared/tokens.ts
-import { createHash as createHash26, randomBytes as randomBytes12 } from "node:crypto";
+import { createHash as createHash26, randomBytes as randomBytes13 } from "node:crypto";
 function credentialSurface(value) {
   return value === "chatgpt" || value === "claude-app" ? value : "remote";
 }
@@ -55550,7 +55757,7 @@ function surfaceFingerprint(digest) {
   return createHash26("sha256").update(SURFACE_FINGERPRINT_DOMAIN, "utf8").update(digest).digest("base64url");
 }
 function mintCredential(kind, installId) {
-  return `${PREFIX2[kind]}.${installId}.${randomBytes12(32).toString("base64url")}`;
+  return `${PREFIX2[kind]}.${installId}.${randomBytes13(32).toString("base64url")}`;
 }
 function credentialInstallId(kind, value) {
   if (typeof value !== "string" || value.length > 128)
@@ -55630,7 +55837,7 @@ var init_pinned_clients = __esm(() => {
 });
 
 // src/core/remote-oauth-store.ts
-import { createHash as createHash27, randomBytes as randomBytes13, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHash as createHash27, randomBytes as randomBytes14, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 function isRemoteConnectionProvider(value) {
   return typeof value === "string" && OPERATION_CALLER_PROVIDERS.includes(value);
 }
@@ -55664,7 +55871,7 @@ function randomPairingSymbols(length) {
   const limit = 256 - 256 % PAIRING_ALPHABET.length;
   let out = "";
   while (out.length < length) {
-    for (const byte of randomBytes13(length * 2)) {
+    for (const byte of randomBytes14(length * 2)) {
       if (byte >= limit)
         continue;
       out += PAIRING_ALPHABET[byte % PAIRING_ALPHABET.length];
@@ -55689,8 +55896,8 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
     provider: remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name, chosen: row.provider })
   });
   const issueTokens = (connectionId, clientId, resource, at, installId) => {
-    const accessToken = installId ? mintCredential("access", installId) : `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes13(32).toString("base64url")}`;
-    const refreshToken = installId ? mintCredential("refresh", installId) : `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes13(32).toString("base64url")}`;
+    const accessToken = installId ? mintCredential("access", installId) : `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes14(32).toString("base64url")}`;
+    const refreshToken = installId ? mintCredential("refresh", installId) : `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes14(32).toString("base64url")}`;
     const insert = db.query(`
       INSERT INTO remote_oauth_tokens (token_hash, connection_id, kind, resource, client_id, created_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -55773,7 +55980,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
           if (after >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS)
             return "capacity";
         }
-        const clientId = `olympus_client_${randomBytes13(12).toString("hex")}`;
+        const clientId = `olympus_client_${randomBytes14(12).toString("hex")}`;
         const createdAt = at.toISOString();
         db.query("INSERT INTO remote_oauth_clients (client_id, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?)").run(clientId, input.clientName, JSON.stringify(input.redirectUris), createdAt);
         return { clientId, clientName: input.clientName, redirectUris: [...input.redirectUris], createdAt };
@@ -55788,7 +55995,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
     createGrant(input) {
       const at = now();
       return db.transaction(() => {
-        const id = randomBytes13(9).toString("hex");
+        const id = randomBytes14(9).toString("hex");
         const provider = remoteConnectionProvider({ clientId: input.clientId, displayName: input.displayName, chosen: input.provider ?? null });
         db.query(`
           INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at, provider)
@@ -55964,7 +56171,7 @@ var init_remote_oauth_store = __esm(() => {
 
 // src/core/waiting-private-questions.ts
 import { Database as Database6 } from "bun:sqlite";
-import { createHash as createHash28, randomBytes as randomBytes14 } from "node:crypto";
+import { createHash as createHash28, randomBytes as randomBytes15 } from "node:crypto";
 import { chmodSync as chmodSync10, existsSync as existsSync31, lstatSync as lstatSync19, mkdirSync as mkdirSync20 } from "node:fs";
 import { homedir as homedir20 } from "node:os";
 import { dirname as dirname38, isAbsolute as isAbsolute17, join as join43 } from "node:path";
@@ -56101,7 +56308,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       if (utf8Length(selectors) > WAITING_QUESTION_LIMITS.selectorBytes)
         return;
       const detail = input.detail === "full" ? "full" : "summary";
-      const dedupeKey = createHash28("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes14(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
+      const dedupeKey = createHash28("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes15(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
       const at = now();
       let active = false;
       try {
@@ -56132,7 +56339,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
           `).run(question, existing.detail === "full" || detail === "full" ? "full" : "summary", existing.state === "waiting" || input.state === "waiting" ? "waiting" : "unchecked", generation, at, existing.id);
           ref = { id: existing.id, generation, connectionId: ticket.connectionId };
         } else {
-          const id = randomBytes14(16).toString("base64url");
+          const id = randomBytes15(16).toString("base64url");
           db.query(`
             INSERT INTO waiting_questions
               (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path, destination)
@@ -56512,7 +56719,7 @@ var init_waiting_private_questions = __esm(() => {
 
 // src/core/remote-connections.ts
 import { Database as Database7 } from "bun:sqlite";
-import { createHash as createHash29, randomBytes as randomBytes15, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
+import { createHash as createHash29, randomBytes as randomBytes16, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 import { chmodSync as chmodSync11, existsSync as existsSync32, lstatSync as lstatSync20, mkdirSync as mkdirSync21 } from "node:fs";
 import { homedir as homedir21 } from "node:os";
 import { dirname as dirname39, isAbsolute as isAbsolute18 } from "node:path";
@@ -56594,8 +56801,8 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
         throw new OperationError("invalid_params", "Choose a supported connection route.");
       }
       const provider = remoteConnectionProvider({ displayName: name, chosen: options.provider ?? null });
-      const id = randomBytes15(CONNECTION_ID_BYTES).toString("hex");
-      const secret = randomBytes15(CONNECTION_SECRET_BYTES).toString("base64url");
+      const id = randomBytes16(CONNECTION_ID_BYTES).toString("hex");
+      const secret = randomBytes16(CONNECTION_SECRET_BYTES).toString("base64url");
       const token = options.installId ? mintCredential("access", options.installId) : `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret}`;
       const createdAt = now().toISOString();
       db.query(`
@@ -56786,7 +56993,7 @@ var init_remote_connections = __esm(() => {
 
 // src/core/app-release-log.ts
 import { Database as Database8 } from "bun:sqlite";
-import { randomBytes as randomBytes16 } from "node:crypto";
+import { randomBytes as randomBytes17 } from "node:crypto";
 import { chmodSync as chmodSync12, existsSync as existsSync33, lstatSync as lstatSync21, mkdirSync as mkdirSync22 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
 import { dirname as dirname40, isAbsolute as isAbsolute19, join as join44 } from "node:path";
@@ -56841,7 +57048,7 @@ function openAppReleaseLog(dbPath, options = {}) {
     record(record) {
       if (retentionDays() === 0)
         return;
-      const id = `apr_${randomBytes16(12).toString("base64url")}`;
+      const id = `apr_${randomBytes17(12).toString("base64url")}`;
       db.transaction(() => {
         db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
@@ -71643,7 +71850,7 @@ var init_messaging_chat_kinds = __esm(() => {
 import { Database as Database11 } from "bun:sqlite";
 import { chmodSync as chmodSync13, existsSync as existsSync38, linkSync as linkSync3, lstatSync as lstatSync24, mkdirSync as mkdirSync25, renameSync as renameSync5, rmSync as rmSync12, rmdirSync as rmdirSync4, statSync as statSync18 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
-import { randomBytes as randomBytes17 } from "node:crypto";
+import { randomBytes as randomBytes18 } from "node:crypto";
 import { homedir as homedir23 } from "node:os";
 import { dirname as dirname42, join as join47, resolve as resolve15 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
@@ -72099,7 +72306,7 @@ function prepareLoginAside(base) {
     if (left.pid !== process.pid && !processAlive3(left.pid))
       rmSync12(left.path, { force: true });
   }
-  const aside = telegramStagedSessionBase(base, { pid: process.pid, tag: randomBytes17(4).toString("hex") });
+  const aside = telegramStagedSessionBase(base, { pid: process.pid, tag: randomBytes18(4).toString("hex") });
   const admitted = loginIdentity(`${base}.session`);
   if (admitted !== undefined)
     copyLogin(`${base}.session`, `${aside}.session`);
@@ -73376,7 +73583,7 @@ var init_upgrade_store_copies = __esm(() => {
 });
 
 // src/core/linux-owner-bridge-host.ts
-import { randomBytes as randomBytes18 } from "node:crypto";
+import { randomBytes as randomBytes19 } from "node:crypto";
 import { lstatSync as lstatSync25, unlinkSync as unlinkSync3 } from "node:fs";
 import { dirname as dirname45, join as join50 } from "node:path";
 function startLinuxOwnerBridgeHost(options) {
@@ -73427,7 +73634,7 @@ function startLinuxOwnerBridgeHost(options) {
   };
   if (validateWorkerSocketDirectory(options.transport) !== options.socketPath)
     throw new Error("Owner runtime changed.");
-  const controlPath = join50(dirname45(options.socketPath), `owner-host-${process.pid}-${randomBytes18(6).toString("hex")}.sock`);
+  const controlPath = join50(dirname45(options.socketPath), `owner-host-${process.pid}-${randomBytes19(6).toString("hex")}.sock`);
   const control = bindWorkerSocket(controlPath, () => Bun.serve(workerSocketServe({ unix: controlPath, async fetch(request) {
     if (closed)
       return new Response(null, { status: 503 });
@@ -101062,7 +101269,7 @@ var init_install = __esm(() => {
 // src/workers/source-index/built-in-reasoning/server.ts
 import { isMainThread as isMainThread7 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
-import { randomBytes as randomBytes19 } from "node:crypto";
+import { randomBytes as randomBytes20 } from "node:crypto";
 import { mkdtempSync as mkdtempSync3, rmSync as rmSync20, writeFileSync as writeFileSync14 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
 import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir3 } from "node:os";
@@ -101256,8 +101463,8 @@ function createLlamaServerHandle(launch, options = {}) {
     superseded();
     const port = await freeLoopbackPort2();
     superseded();
-    const token = randomBytes19(24).toString("base64url");
-    const alias = `olympus-${randomBytes19(12).toString("hex")}`;
+    const token = randomBytes20(24).toString("base64url");
+    const alias = `olympus-${randomBytes20(12).toString("hex")}`;
     const tokenDir = mkdtempSync3(join73(tmpdir3(), "olympus-built-in-model-"));
     const tokenFile = join73(tokenDir, "token");
     let spawnedProcess;
@@ -103502,7 +103709,23 @@ async function buildPreparedEvidencePackDetailed(input) {
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
   const readWide = readWideEnabled() && !input.selectedItems?.length;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
-  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
+  const strength = {};
+  const observed = {
+    ...input,
+    onSeatingLanes: (lanes, ordinal) => {
+      for (const lane of lanes) {
+        const relevance = lane.relevance;
+        if (!relevance)
+          continue;
+        strength.conceptShareBest = Math.max(strength.conceptShareBest ?? 0, relevance.conceptShare);
+        if (relevance.vectorMargin !== undefined) {
+          strength.vectorMarginBest = Math.max(strength.vectorMarginBest ?? Number.NEGATIVE_INFINITY, relevance.vectorMargin);
+        }
+      }
+      input.onSeatingLanes?.(lanes, ordinal);
+    }
+  };
+  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(observed, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
   const storeScores = new Map;
   for (const hit of visibleHits) {
@@ -103600,6 +103823,8 @@ async function buildPreparedEvidencePackDetailed(input) {
       keep: readWide ? scorable.length : input.maxResults,
       ...input.rerankTimers ? { timers: input.rerankTimers } : {},
       onScores: (entries, outcome) => {
+        for (const { score } of entries)
+          strength.rerankBest = Math.max(strength.rerankBest ?? Number.NEGATIVE_INFINITY, score);
         if (readWide && outcome === "applied")
           wide = scoresHaveNoLeader(entries.map((entry) => entry.score));
         input.onRerankScores?.(entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome);
@@ -103705,6 +103930,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     unreadCandidates,
     encounteredSecureLocal,
     ...rerank ? { rerank } : {},
+    ...Object.keys(strength).length > 0 ? { strength } : {},
     ...labelled.dependencies.length > 0 ? { parentLabelDependencies: labelled.dependencies } : {},
     ...secretLocations.length > 0 ? { secretLocations } : {},
     ...limitStopGaps.length > 0 ? { limitStopGaps } : {},
@@ -104673,10 +104899,12 @@ function createAnalystSourceIndexAnswerHandler(options) {
       total_ms: totalLatencyMs
     };
     recordSourceAnswerPhaseTimings(phaseTimings);
+    const followUp = released && stillReading === 0 && !policyDeniedEmptyPack && !requestNarrowed(request) ? weakSearchFollowUp(detail, analystResult.citations.length) : undefined;
     recordReleaseManifest({ inputs: [
       ...analyzedInputs,
       ...unreadableMatchedReleaseInputs(detail, releaseSecureContent),
-      ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])
+      ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? []),
+      ...followUp?.names ?? []
     ], constraints: releaseConstraints });
     return {
       answer,
@@ -104690,6 +104918,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
           finding_kinds: [...location.findingKinds]
         }))
       } : {},
+      ...followUp ? { follow_up: followUp.followUp } : {},
       audit: {
         searched_corpora: [...pack.coverage.searchedCorpora],
         skipped_corpora: detail.skippedCorpora.map((skip) => ({
@@ -104742,6 +104971,46 @@ function createAnalystSourceIndexAnswerHandler(options) {
     };
   };
   return { answer: (request, local) => answerOnce(request, local, false) };
+}
+function requestNarrowed(request) {
+  return Boolean(request.corpus_id?.trim() || request.corpus_ids?.length || request.conversation_id?.trim() || request.sender_id?.trim() || request.sender_label?.trim() || request.authored_after?.trim() || request.authored_before?.trim() || request.chat_scope?.trim() || request.approved_scope_key?.trim() || request.selected_items?.length);
+}
+function weakSearchFollowUp(detail, citations) {
+  const verdict = weakSearch({
+    citations,
+    ...detail.strength ? { strength: detail.strength } : {},
+    cutShort: searchCutShort({
+      skippedReasons: detail.skippedCorpora.map((skip) => skip.reason),
+      degradationReasons: detail.degradations.map((degradation) => degradation.reason)
+    })
+  });
+  if (!verdict.weak)
+    return;
+  const candidates = followUpCandidates(detail);
+  const built = buildFollowUp(candidates);
+  if (!built)
+    return;
+  const names = built.contributors.map((index) => {
+    const candidate = detail.pack.candidates[index];
+    const { chunkHashes: _hashes, ...input } = candidateReleaseInput(candidate, detail.candidateCorpusIds[index] ?? "");
+    return { ...input, layer: "names" };
+  });
+  return { followUp: built.followUp, names };
+}
+function followUpCandidates(detail) {
+  return detail.pack.candidates.map((candidate, index) => {
+    const item = candidate.provenance.sourceItem;
+    const cite = candidate.provenance.citation;
+    return {
+      corpusId: detail.candidateCorpusIds[index] ?? "",
+      source: sourceLabel(item.provider, item.family),
+      ...item.providerConversationId ? { conversationId: item.providerConversationId } : {},
+      ...cite?.conversationLabel ? { conversationLabel: cite.conversationLabel } : {},
+      ...cite?.authorLabel ? { authorLabel: cite.authorLabel } : {},
+      ...cite?.authoredAt ? { authoredAt: cite.authoredAt } : {},
+      namesReleasable: !isSecureSensitivity(candidate) && (candidate.trustDomain === "public_safe" || candidate.trustDomain === "internal") && Boolean(detail.candidateCorpusIds[index])
+    };
+  });
 }
 function releaseInputs(detail) {
   const items = detail.pack.candidates.map((candidate, index) => candidateReleaseInput(candidate, detail.candidateCorpusIds[index] ?? ""));
@@ -106492,6 +106761,8 @@ var init_analyst_answer = __esm(() => {
   init_parent_label();
   init_release_manifest();
   init_secret_location_note();
+  init_follow_up();
+  init_remote_result();
   init_source_corpus_registry();
   init_keyword_context();
   init_router();
@@ -118103,7 +118374,7 @@ var init_reaction_index = __esm(() => {
 
 // src/workers/whatsapp/spool-index.ts
 import { Database as Database19 } from "bun:sqlite";
-import { randomBytes as randomBytes20 } from "node:crypto";
+import { randomBytes as randomBytes21 } from "node:crypto";
 import { chmodSync as chmodSync24, existsSync as existsSync65 } from "node:fs";
 import { join as join86 } from "node:path";
 function comparePlaces(a, b) {
@@ -118233,7 +118504,7 @@ class WhatsAppSpoolIndex {
     const row = this.db.query("SELECT value FROM meta WHERE key = 'generation'").get();
     if (row)
       return row.value;
-    const generation = randomBytes20(8).toString("hex");
+    const generation = randomBytes21(8).toString("hex");
     this.writeMeta("generation", generation);
     return generation;
   }
@@ -141642,6 +141913,7 @@ class EmailClient {
         ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
         ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
         ...options.selectedItems ? { selected_items: options.selectedItems } : {},
+        ...options.narrow ? { narrow: options.narrow } : {},
         ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
         ...options.analystProvider ? { analyst_provider: options.analystProvider } : {},
         ...options.analystModel ? { analyst_model: options.analystModel } : {},
@@ -142201,7 +142473,8 @@ function parseSourceIndexAnswerResult(value) {
     },
     ...value.internal_context !== undefined ? { internal_context: value.internal_context } : {},
     ...value.opsec !== undefined ? { opsec: parseSourceAnswerOpsec(value.opsec) } : {},
-    ...parseSecretLocations(value.secret_locations) ? { secret_locations: parseSecretLocations(value.secret_locations) } : {}
+    ...parseSecretLocations(value.secret_locations) ? { secret_locations: parseSecretLocations(value.secret_locations) } : {},
+    ...parseFollowUp(value.follow_up) ? { follow_up: parseFollowUp(value.follow_up) } : {}
   };
 }
 function parseSecretLocations(value) {
@@ -142632,6 +142905,7 @@ var init_email = __esm(() => {
   init_source_item_read();
   init_selected_items();
   init_release_manifest();
+  init_follow_up();
   init_worker_transport();
   init_config2();
   init_email_policy();
@@ -144139,7 +144413,7 @@ var init_managed_tools = __esm(() => {
 });
 
 // src/core/zkapi-confine-fetch.ts
-import { createHmac as createHmac4, randomBytes as randomBytes21, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHmac as createHmac4, randomBytes as randomBytes22, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 import { createConnection as createConnection2 } from "node:net";
 function abortError() {
   return new DOMException("This operation was aborted", "AbortError");
@@ -144157,7 +144431,7 @@ function bridgeMac(token, role, name, ...parts) {
 function authenticate(socketPath, token, name, signal) {
   return new Promise((resolve, reject) => {
     const socket = createConnection2({ path: socketPath });
-    const clientNonce = randomBytes21(16);
+    const clientNonce = randomBytes22(16);
     let buffered = Buffer.alloc(0);
     let settled = false;
     const cleanup = () => {
@@ -144690,7 +144964,7 @@ var init_zkapi_confine_fetch = __esm(() => {
 });
 
 // src/core/zkapi-confine-selftest.ts
-import { randomBytes as randomBytes22 } from "node:crypto";
+import { randomBytes as randomBytes23 } from "node:crypto";
 import { chmodSync as chmodSync34, readFileSync as readFileSync71, readlinkSync as readlinkSync3, readdirSync as readdirSync24, rmSync as rmSync34, writeFileSync as writeFileSync19 } from "node:fs";
 import { createServer as createServer3, createConnection as createConnection3 } from "node:net";
 import { createSocket } from "node:dgram";
@@ -144994,7 +145268,7 @@ async function createFixture(script, workDir, launcher, ports, env, watchdogPath
     await listenPath(controlUnixServer(), controlUnix);
     await listenPath(confinedUnixServer(), confinedUnix);
     await listenPath(track(createServer3(keepUnixSocket)), inheritedUnix);
-    const suffix = `${process.pid}-${randomBytes22(5).toString("hex")}`;
+    const suffix = `${process.pid}-${randomBytes23(5).toString("hex")}`;
     const controlAbstract = `olympus-zkc-control-${suffix}`;
     const confinedAbstract = `olympus-zkc-confined-${suffix}`;
     await listenPath(controlUnixServer(), `\x00${controlAbstract}`);
@@ -145358,8 +145632,8 @@ main().catch(() => process.exit(1));
       if (process.getuid?.() === 0)
         throw new Error("the unconfined syscall control must not run as root");
       const ports = partialPorts;
-      const probePath = join113(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes22(4).toString("hex")}.cjs`);
-      const watchdogPath = join113(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes22(4).toString("hex")}.cjs`);
+      const probePath = join113(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes23(4).toString("hex")}.cjs`);
+      const watchdogPath = join113(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes23(4).toString("hex")}.cjs`);
       try {
         writeFileSync19(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
         chmodSync34(probePath, 448);
@@ -148125,7 +148399,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 
 // src/core/engine-service.ts
 import { spawn as spawn8, spawnSync as spawnSync14 } from "node:child_process";
-import { createHash as createHash84, randomBytes as randomBytes23 } from "node:crypto";
+import { createHash as createHash84, randomBytes as randomBytes24 } from "node:crypto";
 import { existsSync as existsSync82, lstatSync as lstatSync44, readdirSync as readdirSync27, readFileSync as readFileSync74, renameSync as renameSync16, rmSync as rmSync36, statSync as statSync38 } from "node:fs";
 import { homedir as homedir33, platform as osPlatform3 } from "node:os";
 import { basename as basename17, dirname as dirname91, isAbsolute as isAbsolute34, join as join116, resolve as resolvePath2 } from "node:path";
@@ -148499,7 +148773,7 @@ function installEngineUnderFence(options = {}) {
     envPath: paths.workerEnvPath,
     bunBin: program.runtimePath,
     schedulerEnabled: true,
-    authToken: workerAuthTokenFromSetupEnv({ homeDir }) ?? randomBytes23(32).toString("base64url")
+    authToken: workerAuthTokenFromSetupEnv({ homeDir }) ?? randomBytes24(32).toString("base64url")
   });
   const wrotePlist = paths.engineManager === "daemon" ? false : writeIfChanged(paths.plistPath, plist);
   const exec = options.exec ?? defaultExec2;
@@ -149127,7 +149401,7 @@ function assertServerModeCanRunPrevious(previousAppDir) {
   throw new OperationError("config_error", `The previous Olympus (${version ?? "an unknown version"}) is older than ${SERVER_MODE_MIN_ROLLBACK_VERSION} and cannot run in server mode, so nothing was changed. Turn server mode off in Keys, then roll back again.`, "Turn off “Keep Olympus running when no one is logged in” in Keys, then run olympus engine rollback.");
 }
 function swapAppDirectories(paths) {
-  const parking = `${paths.appDir}.rollback-${process.pid}-${randomBytes23(4).toString("hex")}`;
+  const parking = `${paths.appDir}.rollback-${process.pid}-${randomBytes24(4).toString("hex")}`;
   renameSync16(paths.appDir, parking);
   try {
     renameSync16(paths.previousAppDir, paths.appDir);
@@ -149713,7 +149987,7 @@ import { chmodSync as chmodSync36, closeSync as closeSync31, constants as consta
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename18, dirname as dirname92, join as join117, relative as relative19, resolve as resolve25, sep as sep23 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
-import { randomBytes as randomBytes24, createHash as createHash85, randomUUID as randomUUID30 } from "node:crypto";
+import { randomBytes as randomBytes25, createHash as createHash85, randomUUID as randomUUID30 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync15(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -150941,7 +151215,7 @@ function installLinuxEngine(options) {
       const config = reconcileEngineConfig(l.configPath), seeded = existingWithoutPolicy ? undefined : seedEngineSovereignty(l.sovereigntyPath);
       let wroteEnv = false;
       if (!existsSync83(l.workerEnvPath)) {
-        writePrivateFileAtomicSync(l.workerEnvPath, `OLYMPUS_WORKER_AUTH_TOKEN='${randomBytes24(32).toString("base64url")}'
+        writePrivateFileAtomicSync(l.workerEnvPath, `OLYMPUS_WORKER_AUTH_TOKEN='${randomBytes25(32).toString("base64url")}'
 OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
 `);
         wroteEnv = true;
@@ -157439,6 +157713,14 @@ function asStringList(value, name) {
 function optionalString10(value) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
+function optionalNarrowHandle(value) {
+  if (value === undefined || value === null || value === "")
+    return;
+  if (!isNarrowHandle(value)) {
+    throw new OperationError("invalid_params", "narrow must be a follow_up option's narrow, passed back unchanged.");
+  }
+  return value;
+}
 function optionalNarrowingString(value, name) {
   if (value === undefined)
     return;
@@ -157545,6 +157827,7 @@ var init_operations = __esm(() => {
   init_selected_items();
   init_source_corpus_registry();
   init_venice_models();
+  init_follow_up();
   init_public_surface();
   init_setup_status();
   init_remote_open_tool();
@@ -157596,6 +157879,7 @@ var init_operations = __esm(() => {
     authored_after: { type: "string", description: "Optional inclusive ISO lower bound on authored time." },
     authored_before: { type: "string", description: "Optional inclusive ISO upper bound on authored time." },
     selected_items: { type: "array", description: "Optional selected evidence from a prior source_index_search; prefer hit.selected_item. Never source text." },
+    narrow: { type: "string", description: "Optional follow_up option from a prior answer: when a result carries follow_up {question, options}, ask the user that question, then call again with the same question and the chosen option's narrow, unchanged, to search only there. It sets the scope, so pass no other scope filter with it." },
     retrieval_mode: { type: "string", enum: ["keyword", "hybrid"], description: "Optional retrieval override. Omit for the shared hybrid path; set keyword only for an explicit lexical-only request." },
     analyst_provider: { type: "string", enum: ["default", "local", "venice", "tinfoil", "cloud"], description: "Optional analyst constraint. Leave default; set local or venice only when {{ownerName}} explicitly asks. Presets: local-first = local then Venice; private-cloud-only = Venice only." },
     analyst_model: { type: "string", description: "Optional Venice model id for an explicit Venice request. e2ee-* ids are refused; defaults kimi-k3 (strong), inkling (normal)." },
@@ -157758,6 +158042,7 @@ var init_operations = __esm(() => {
         const authoredAfter = optionalString10(params.authored_after);
         const authoredBefore = optionalString10(params.authored_before);
         const selectedItems = optionalSourceAnswerSelectedItems(params.selected_items, corpusId);
+        const narrow = optionalNarrowHandle(params.narrow);
         const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
         const analystProvider = optionalSourceAnswerAnalystProvider(params.analyst_provider);
         const analystModel = optionalAnalystModel(params.analyst_model, "analyst_model", analystProvider);
@@ -157782,6 +158067,7 @@ var init_operations = __esm(() => {
           ...authoredAfter !== undefined ? { authoredAfter } : {},
           ...authoredBefore !== undefined ? { authoredBefore } : {},
           ...selectedItems !== undefined ? { selectedItems } : {},
+          ...narrow !== undefined ? { narrow } : {},
           ...retrievalMode !== undefined ? { retrievalMode } : {},
           ...analystProvider !== undefined ? { analystProvider } : {},
           ...analystModel !== undefined ? { analystModel } : {},
@@ -162929,7 +163215,7 @@ var init_data_restore = __esm(() => {
 });
 
 // src/data-backup.ts
-import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash93, createHmac as createHmac5, randomBytes as randomBytes25, randomUUID as randomUUID34, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash93, createHmac as createHmac5, randomBytes as randomBytes26, randomUUID as randomUUID34, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 import { closeSync as closeSync35, existsSync as existsSync97, lstatSync as lstatSync49, mkdirSync as mkdirSync62, openSync as openSync34, readdirSync as readdirSync30, readSync as readSync12, renameSync as renameSync21, rmSync as rmSync40, statSync as statSync43, unlinkSync as unlinkSync6, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync11 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename21, dirname as dirname100, join as join127, resolve as resolve27, sep as sep24 } from "node:path";
@@ -162953,7 +163239,7 @@ function deriveBackupKey(passphrase, kdf) {
     N: kdf?.N ?? DEFAULT_SCRYPT.N,
     r: kdf?.r ?? DEFAULT_SCRYPT.r,
     p: kdf?.p ?? DEFAULT_SCRYPT.p,
-    salt: kdf?.salt ?? randomBytes25(16).toString("base64")
+    salt: kdf?.salt ?? randomBytes26(16).toString("base64")
   };
   checkKdf(full);
   const key = scryptSync2(normalizePassphrase(passphrase), Buffer.from(full.salt, "base64"), 32, {
@@ -163081,7 +163367,7 @@ async function writeBackupFile(options) {
     name = backupFileName(now).replace(BACKUP_FILE_EXTENSION, `-${n}${BACKUP_FILE_EXTENSION}`);
   const target = join127(folder, name);
   const staging = join127(folder, `.${name}.${randomUUID34()}.partial`);
-  const nonce = options.key ? randomBytes25(12) : undefined;
+  const nonce = options.key ? randomBytes26(12) : undefined;
   const header = encodeHeader({
     kind: "olympus_backup",
     format: BACKUP_FORMAT_VERSION,
@@ -180018,7 +180304,7 @@ var init_engine_host = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash94, createPublicKey, randomBytes as randomBytes27, sign, verify } from "node:crypto";
+import { createHash as createHash94, createPublicKey, randomBytes as randomBytes28, sign, verify } from "node:crypto";
 function parseSurfacesMessage(message) {
   if (message.type !== "surfaces" || message.v !== 1 || !Array.isArray(message.entries))
     return;
@@ -180805,7 +181091,7 @@ var init_relay_client = __esm(() => {
 });
 
 // src/core/remote-relay-runtime.ts
-import { randomBytes as randomBytes28 } from "node:crypto";
+import { randomBytes as randomBytes29 } from "node:crypto";
 async function readSurfaceEntries(target, relaySecret, workerFetch) {
   try {
     const response = await workerFetch(`${target}${RELAY_SURFACES_PATH}`, {
@@ -180861,7 +181147,7 @@ async function startRelayRuntime(options) {
       status.last_connected_at = new Date(next.connectedAt).toISOString();
     write();
   };
-  const relaySecret = randomBytes28(32).toString("base64url");
+  const relaySecret = randomBytes29(32).toString("base64url");
   writeRelaySecret(dir, relaySecret);
   const workerFetch = options.fetch ?? createWorkerFetch({ env: options.env });
   const requestLogs = [];
@@ -185913,7 +186199,7 @@ var init_local_answer = __esm(() => {
 
 // src/workers/engine/runtime/local-private-answers.ts
 import { lstatSync as lstatSync52 } from "node:fs";
-import { randomBytes as randomBytes29 } from "node:crypto";
+import { randomBytes as randomBytes30 } from "node:crypto";
 function storedLeftOut(result) {
   return result.busy?.length ? [...new Set([...result.leftOut, ...result.busy])].sort() : result.leftOut;
 }
@@ -186096,7 +186382,7 @@ function createLocalPrivateAnswers(options) {
       const path = citation.localPath && options.openFile ? citation.localPath : undefined;
       const url = !path && citation.url?.startsWith("https://") && options.openUrl ? citation.url : undefined;
       if (path || url) {
-        const id = randomBytes29(24).toString("base64url");
+        const id = randomBytes30(24).toString("base64url");
         opens.set(id, { session, ...path ? { path } : { url }, read: result.read.map(inboxEvidenceIdentity), expiresAt: now() + TOKEN_TTL_MS, ...q ? { ref: refOf(q) } : {} });
         view.open = id;
       }
@@ -186576,7 +186862,7 @@ var init_release_signing = __esm(() => {
 
 // src/core/self-update.ts
 import { spawn as spawn11 } from "node:child_process";
-import { randomBytes as randomBytes30 } from "node:crypto";
+import { randomBytes as randomBytes31 } from "node:crypto";
 import { chmodSync as chmodSync42, existsSync as existsSync106, mkdirSync as mkdirSync67, readdirSync as readdirSync31, readFileSync as readFileSync96, rmSync as rmSync43 } from "node:fs";
 import { join as join136 } from "node:path";
 function linuxSelfUpdateRunArgs(runner, runDir, layoutEnv) {
@@ -186782,7 +187068,7 @@ function createSelfUpdater(options) {
             rmSync43(join136(options.stateDir, name), { recursive: true, force: true });
         }
       } catch {}
-      const record = { id: randomBytes30(8).toString("hex"), from: options.runningVersion, to: target.version, step: 1, started_at: now(), engine_pid: pid };
+      const record = { id: randomBytes31(8).toString("hex"), from: options.runningVersion, to: target.version, step: 1, started_at: now(), engine_pid: pid };
       write(record);
       busy = true;
       run(record).catch(() => fail(record, "launch_failed")).finally(() => {
@@ -187979,14 +188265,14 @@ var init_model_setup = __esm(() => {
 });
 
 // src/core/dashboard-session-secret.ts
-import { randomBytes as randomBytes31 } from "node:crypto";
+import { randomBytes as randomBytes32 } from "node:crypto";
 import { chmodSync as chmodSync43, lstatSync as lstatSync53, mkdirSync as mkdirSync68, readFileSync as readFileSync98 } from "node:fs";
 import { dirname as dirname106, join as join138 } from "node:path";
 function dashboardSessionSecretPath(options = {}) {
   return join138(dirname106(workerSetupEnvPath(options)), DASHBOARD_SESSION_SECRET_FILE);
 }
 function newDashboardSessionSecret() {
-  return randomBytes31(32).toString("base64url");
+  return randomBytes32(32).toString("base64url");
 }
 function loadOrCreateDashboardSessionSecret(options = {}) {
   let path = options.path ?? "";
@@ -188952,7 +189238,7 @@ var init_deep_read = __esm(() => {
 });
 
 // src/workers/engine/runtime/deep-read-jobs.ts
-import { randomBytes as randomBytes32 } from "node:crypto";
+import { randomBytes as randomBytes33 } from "node:crypto";
 async function readDeepReadSet(set, storesOf, lanesOf) {
   const selected = set.selected_item;
   const provider = selected.provider;
@@ -189082,7 +189368,7 @@ Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${res
       if (candidates.length === 0)
         throw new DeepReadRefused("nothing_readable", `Nothing in ${label} is readable here (${items} items found).`);
       const sectionsTotal = planDeepReadSections(question, candidates, corpusIds, model.promptBytes, "compact").length;
-      const id = `dr_${randomBytes32(9).toString("base64url")}`;
+      const id = `dr_${randomBytes33(9).toString("base64url")}`;
       const view = {
         id,
         state: "reading",
@@ -192628,7 +192914,7 @@ var init_backup_paths = __esm(() => {
 });
 
 // src/workers/http.ts
-import { createHmac as createHmac6, randomBytes as randomBytes33, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createHmac as createHmac6, randomBytes as randomBytes34, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 function resolveWorkerBindHost(env, legacyEnvNames = []) {
   return firstNonEmptyEnv3(env, ["OLYMPUS_WORKER_BIND_HOST", ...legacyEnvNames]) ?? DEFAULT_WORKER_BIND_HOST;
 }
@@ -192648,7 +192934,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const basePath = normalizeBasePath2(options.basePath ?? "/v1");
   const now = options.now ?? Date.now;
   const launchTickets = options.launchTickets ?? new DashboardLaunchTickets({ now });
-  const sessionSecret = dashboardControlSigningKey(options.sessionSecret?.trim() || randomBytes33(32).toString("base64url"), authToken ?? "");
+  const sessionSecret = dashboardControlSigningKey(options.sessionSecret?.trim() || randomBytes34(32).toString("base64url"), authToken ?? "");
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
@@ -193128,7 +193414,7 @@ function dashboardControlExpiresAtMs(parts) {
 function mintDashboardControlSession(sessionSecret, origin, nowMs, grade = "bearer") {
   const nowSeconds = Math.floor(nowMs / 1000);
   const unsigned = {
-    nonce: randomBytes33(24).toString("base64url"),
+    nonce: randomBytes34(24).toString("base64url"),
     issuedSeconds: nowSeconds,
     originTag: dashboardControlOriginTag(sessionSecret, origin),
     grade
@@ -202207,7 +202493,7 @@ var init_top_nav = __esm(() => {
 });
 
 // src/workers/archive-import/staging.ts
-import { randomBytes as randomBytes34 } from "node:crypto";
+import { randomBytes as randomBytes35 } from "node:crypto";
 import { existsSync as existsSync108, mkdirSync as mkdirSync70, readdirSync as readdirSync32, realpathSync as realpathSync24, renameSync as renameSync25, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
 import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep25, join as join140, resolve as resolve30 } from "node:path";
@@ -202446,7 +202732,7 @@ function createArchiveUploads(options) {
       if (closed)
         throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
       const root = stagingRoot();
-      const uploadId = randomBytes34(16).toString("hex");
+      const uploadId = randomBytes35(16).toString("hex");
       const dir = join140(root, uploadId);
       mkdirSync70(join140(dir, "files"), { recursive: true, mode: 448 });
       sessions.set(uploadId, {
@@ -202570,7 +202856,7 @@ function createArchiveUploads(options) {
         if (found)
           found.cancelled = true;
         sessions.delete(name);
-        const aside = join140(root, `${REMOVING_PREFIX}${name}-${randomBytes34(4).toString("hex")}`);
+        const aside = join140(root, `${REMOVING_PREFIX}${name}-${randomBytes35(4).toString("hex")}`);
         try {
           renameSync25(dir, aside);
         } catch {
@@ -210482,6 +210768,23 @@ async function parseSourceIndexAnswerRequest(request) {
   if (typeof record.question !== "string" || record.question.trim().length === 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "question must be a non-empty string.");
   }
+  return parseSourceIndexAnswerRecord(narrowedAnswerRecord(record), request);
+}
+function narrowedAnswerRecord(record) {
+  if (record.narrow === undefined || record.narrow === null || record.narrow === "")
+    return record;
+  const scope = resolveNarrowHandle(record.narrow);
+  if (!scope) {
+    throw new EmailSourceWorkerError(400, "invalid_request", "narrow is unknown or has expired; ask the question again without it.");
+  }
+  const clash = NARROW_EXCLUSIVE_FIELDS.find((field) => record[field] !== undefined && record[field] !== null && record[field] !== "");
+  if (clash) {
+    throw new EmailSourceWorkerError(400, "invalid_request", `narrow already sets the search scope; remove ${clash}.`);
+  }
+  const { narrow: _narrow, ...rest } = record;
+  return { ...rest, ...scope };
+}
+function parseSourceIndexAnswerRecord(record, request) {
   const query = asOptionalString(record.query);
   const account = asOptionalString(record.account);
   const corpusId = asOptionalString(record.corpus_id);
@@ -210530,7 +210833,7 @@ async function parseSourceIndexAnswerRequest(request) {
   }
   const caller = parseRequestCaller(record, request);
   return {
-    question: record.question,
+    question: String(record.question),
     ...query !== undefined ? { query } : {},
     ...account !== undefined ? { account } : {},
     ...corpusId !== undefined ? { corpus_id: corpusId } : {},
@@ -210769,9 +211072,11 @@ function mostPrivateTrustDomain(domains) {
     return "internal";
   return "public_safe";
 }
+var NARROW_EXCLUSIVE_FIELDS;
 var init_source_index_requests = __esm(() => {
   init_selected_item_safety();
   init_venice_models();
+  init_follow_up();
   init_readwise();
   init_x_bookmarks();
   init_dropbox_files();
@@ -210779,6 +211084,20 @@ var init_source_index_requests = __esm(() => {
   init_connector_store();
   init_request_fields();
   init_worker_responses();
+  NARROW_EXCLUSIVE_FIELDS = [
+    "corpus_id",
+    "corpus_ids",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before",
+    "chat_scope",
+    "chat_title",
+    "chat_title_hint",
+    "approved_scope_key",
+    "selected_items"
+  ];
 });
 
 // src/workers/engine/http/connector-store-search-request.ts
@@ -214687,7 +215006,7 @@ var init_live_sync3 = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-oauth-attempts.ts
-import { randomBytes as randomBytes35, timingSafeEqual as timingSafeEqual9, createHash as createHash105 } from "node:crypto";
+import { randomBytes as randomBytes36, timingSafeEqual as timingSafeEqual9, createHash as createHash105 } from "node:crypto";
 function createDashboardOAuthCallbackRateLimiter() {
   const buckets = new Map;
   return (key, now) => {
@@ -214711,7 +215030,7 @@ function dashboardOAuthCallbackRateLimitKey(source, headers) {
   return `${source}:${peer || "unknown"}`;
 }
 async function startDashboardEvernoteSignIn(input) {
-  const state = randomBytes35(24).toString("base64url");
+  const state = randomBytes36(24).toString("base64url");
   await Promise.resolve().then(() => init_live_sync3());
   const signIn = await startEvernoteSignIn({ ...input, state });
   const startedAt = new Date;
@@ -216052,7 +216371,7 @@ var init_dashboard_source_requests = __esm(() => {
 });
 
 // src/workers/remote-oauth/consent-page.ts
-import { randomBytes as randomBytes36 } from "node:crypto";
+import { randomBytes as randomBytes37 } from "node:crypto";
 function hostnameOf(host) {
   try {
     return new URL(`https://${host}`).hostname;
@@ -216082,7 +216401,7 @@ function consentSecurityHeaders(nonce, redirectOrigin, referrerPolicy = "no-refe
   };
 }
 function renderConsentPage(input) {
-  const nonce = randomBytes36(16).toString("base64");
+  const nonce = randomBytes37(16).toString("base64");
   const name = escapeHtml3(input.clientName);
   const provenance = input.verifiedHost ? `<div class="host">${escapeHtml3(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
@@ -216128,7 +216447,7 @@ ${TERMS_ASSENT}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderLoopbackConsentPage(input) {
-  const nonce = randomBytes36(16).toString("base64");
+  const nonce = randomBytes37(16).toString("base64");
   const name = escapeHtml3(input.clientName);
   const computer = (input.platform ?? process.platform) === "linux" ? "computer" : "Mac";
   const ownerNeeded = input.ownerNeeded ? `<p class="err" role="alert">Open the Olympus dashboard in this browser first, then click Connect again.</p>
@@ -216173,7 +216492,7 @@ ${ownerNeeded}${TERMS_ASSENT}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin) };
 }
 function renderDemoSignInPage(input) {
-  const nonce = randomBytes36(16).toString("base64");
+  const nonce = randomBytes37(16).toString("base64");
   const name = escapeHtml3(input.clientName);
   const error = input.error ? `<p class="err" role="alert">${escapeHtml3(input.error)}</p>` : "";
   const body = `<!doctype html>
@@ -216212,7 +216531,7 @@ ${error}
   return { body, headers: consentSecurityHeaders(nonce, input.redirectOrigin, DEMO_REFERRER_POLICY) };
 }
 function renderConsentErrorPage(message) {
-  const nonce = randomBytes36(16).toString("base64");
+  const nonce = randomBytes37(16).toString("base64");
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -216233,7 +216552,7 @@ function renderConsentErrorPage(message) {
   return { body, headers: consentSecurityHeaders(nonce) };
 }
 function renderConsentSuccessPage(connected) {
-  const nonce = randomBytes36(16).toString("base64");
+  const nonce = randomBytes37(16).toString("base64");
   const heading = connected ? "Connected" : "Approved";
   const message = connected ? "You already approved this connection. You can close this page and return to the app." : "You approved this connection. Return to the app to finish. If it doesn't show Olympus as connected, start connecting again from the app.";
   return {
@@ -217135,7 +217454,7 @@ var init_x_bookmarks_admin = __esm(() => {
 });
 
 // src/workers/engine/index.ts
-import { randomBytes as randomBytes37 } from "node:crypto";
+import { randomBytes as randomBytes38 } from "node:crypto";
 import { basename as basename23, dirname as dirname113 } from "node:path";
 function createEmailSourceWorker(options = {}) {
   const deepReadJobsOrFail = () => {
@@ -217384,7 +217703,7 @@ function createEmailSourceWorker(options = {}) {
               let releaseTicket;
               if (caller?.surface !== "remote") {
                 pruneReleaseTickets();
-                releaseTicket = randomBytes37(32).toString("base64url");
+                releaseTicket = randomBytes38(32).toString("base64url");
                 releaseTickets.set(releaseTicket, { expires: Date.now() + 15 * 60000, manifests: manifests.manifests, ...receipt ? { receipt } : {} });
                 while (releaseTickets.size > 256)
                   releaseTickets.delete(releaseTickets.keys().next().value);
@@ -218546,7 +218865,7 @@ function createEmailSourceWorker(options = {}) {
               }));
             }).catch((error) => {
               const failureKind = manualSyncFailureKind(error);
-              const failureRef = failureKind === "unknown" ? randomBytes37(8).toString("hex") : undefined;
+              const failureRef = failureKind === "unknown" ? randomBytes38(8).toString("hex") : undefined;
               if (failureRef || !(error instanceof EmailSourceWorkerError) && !(error instanceof OperationError)) {
                 logSourceWorkerInternalError(request, error, failureRef);
               }
@@ -246525,7 +246844,7 @@ var init_ingestion_dispositions = __esm(() => {
 });
 
 // src/core/remote-read-handles.ts
-import { randomBytes as randomBytes38 } from "node:crypto";
+import { randomBytes as randomBytes39 } from "node:crypto";
 
 class RemoteReadHandleStore {
   entries = new Map;
@@ -246563,7 +246882,7 @@ class RemoteReadHandleStore {
         }
         while (this.entries.size >= this.maxEntries)
           this.entries.delete(this.entries.keys().next().value);
-        const handle = `rh_${randomBytes38(24).toString("base64url")}`;
+        const handle = `rh_${randomBytes39(24).toString("base64url")}`;
         this.entries.set(handle, { ...selected, connectionId, expiresAt: now + TTL_MS });
         return handle;
       },
@@ -251061,11 +251380,16 @@ function answerToolResult(raw, options = {}) {
   }
   if (notes.length > 0)
     textParts.push("", ...notes);
+  const followUp = usedPrivate ? undefined : followUpForApp(record.follow_up);
+  if (followUp) {
+    textParts.push("", `Follow-up: ${followUp.question}`, ...followUp.options.map((option) => `- ${option.label} (narrow: ${option.narrow})`));
+  }
   const structuredContent = {
     status: "answered",
     answer,
     citations: shownCitations,
-    ...notes.length > 0 ? { notes } : {}
+    ...notes.length > 0 ? { notes } : {},
+    ...followUp ? { follow_up: followUp } : {}
   };
   return withPrivateAnswerMeta({ content: [{ type: "text", text: textParts.join(`
 `) }], structuredContent }, options.privateMatch);
@@ -251215,6 +251539,23 @@ function copyPrivateMatch(match) {
   if (state === "model_downloading" && finite2(match.percent))
     out.percent = Math.max(0, Math.min(100, Math.round(match.percent)));
   return out;
+}
+function followUpForApp(value) {
+  const followUp = parseFollowUp(value);
+  if (!followUp)
+    return;
+  const line = (raw, max) => {
+    const cleaned = raw.replace(UNSAFE_CHARS2, " ").replace(/\s+/g, " ").trim().slice(0, max);
+    return cleaned && secretLabelsInText(raw).length === 0 && secretLabelsInText(cleaned).length === 0 ? cleaned : undefined;
+  };
+  const question = line(followUp.question, 2000);
+  if (!question)
+    return;
+  const options = followUp.options.flatMap((option) => {
+    const label = line(option.label, 400);
+    return label ? [{ label, narrow: option.narrow }] : [];
+  });
+  return options.length > 0 ? { question, options } : undefined;
 }
 function citationFrom(evidence) {
   const source = sourceLabel4(evidence.provider, evidence.family);
@@ -251692,6 +252033,8 @@ var init_response_builder = __esm(() => {
   init_source_failure();
   init_privacy_language();
   init_remote_result();
+  init_opsec();
+  init_follow_up();
   init_app_release_capture();
   init_remote_open();
   init_operation_error();
@@ -252809,6 +253152,7 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         const [raw, probed] = await Promise.all([
           runOperation(SOURCE_ANSWER_TOOL.name, ctx, {
             question,
+            ...typeof args.narrow === "string" && args.narrow ? { narrow: args.narrow } : {},
             include_secure_local: false,
             include_secure_local_content: false,
             timeoutMs: SOURCE_ANSWER_TIMEOUT_MS
@@ -253174,7 +253518,7 @@ function createChatGptMcpServer(makeOperationContext, options, makeDetachedConte
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri, options.appClient));
   return server;
 }
-var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, READ_ONLY_GRANT_EXCEPTIONS, LIMITS_TOOL, CHATGPT_TOOLS, PANEL_TOOL_NAMES2, CLAUDE_NO_DASHBOARD_PANEL = "If no dashboard panel appears (Claude's phone apps don't show panels yet), give the user this status in words; the full dashboard opens in Claude on the web or desktop, and in Olympus on their computer.", CLAUDE_NO_QUESTION_PANEL = "If no panel appears (Claude's phone apps don't show panels yet), tell the user to open this chat in Claude on the web or desktop and type the question in the panel there.", PROBE_WAIT_CHATGPT_MS = 52000, PROBE_WAIT_CLAUDE_MS = 225000, defaultProbeLog = (line) => {
+var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, NARROW_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, READ_ONLY_GRANT_EXCEPTIONS, LIMITS_TOOL, CHATGPT_TOOLS, PANEL_TOOL_NAMES2, CLAUDE_NO_DASHBOARD_PANEL = "If no dashboard panel appears (Claude's phone apps don't show panels yet), give the user this status in words; the full dashboard opens in Claude on the web or desktop, and in Olympus on their computer.", CLAUDE_NO_QUESTION_PANEL = "If no panel appears (Claude's phone apps don't show panels yet), tell the user to open this chat in Claude on the web or desktop and type the question in the panel there.", PROBE_WAIT_CHATGPT_MS = 52000, PROBE_WAIT_CLAUDE_MS = 225000, defaultProbeLog = (line) => {
   console.warn(line);
 }, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
@@ -253233,6 +253577,13 @@ var init_mcp_surface = __esm(() => {
       'replace "it", "that" or "the same" with what they refer to.'
     ].join(" ")
   };
+  NARROW_PROPERTY = {
+    type: "string",
+    description: [
+      "Only after an answer that carried follow_up: ask the user its question, then call again with the same question",
+      "and the narrow of the option they chose, unchanged, to look only there."
+    ].join(" ")
+  };
   SOURCE_ANSWER_TOOL = {
     name: "source_answer",
     title: "Ask Olympus",
@@ -253251,7 +253602,8 @@ var init_mcp_surface = __esm(() => {
       type: "object",
       properties: {
         question: QUESTION_PROPERTY,
-        detail: DETAIL_PROPERTY
+        detail: DETAIL_PROPERTY,
+        narrow: NARROW_PROPERTY
       },
       required: ["question"],
       additionalProperties: false
@@ -263513,7 +263865,7 @@ var init_redirect_uris = __esm(() => {
 });
 
 // src/workers/remote-oauth/handler.ts
-import { createHash as createHash118, randomBytes as randomBytes39, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
+import { createHash as createHash118, randomBytes as randomBytes40, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -263653,8 +264005,8 @@ function createRemoteOAuthHandler(options) {
       }
     }
     admitPending();
-    const requestId = randomBytes39(16).toString("hex");
-    const csrf = randomBytes39(32).toString("base64url");
+    const requestId = randomBytes40(16).toString("hex");
+    const csrf = randomBytes40(32).toString("base64url");
     const entry = {
       transaction,
       client,
@@ -263686,7 +264038,7 @@ function createRemoteOAuthHandler(options) {
   const issueCode = (requestId, entry, u) => {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = u.installId ? mintCredential("code", u.installId) : randomBytes39(32).toString("base64url");
+    const code = u.installId ? mintCredential("code", u.installId) : randomBytes40(32).toString("base64url");
     codes.set(sha25615(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
@@ -264608,7 +264960,7 @@ var init_private_answer_payload = __esm(() => {
 });
 
 // src/workers/chatgpt/private-answer-jobs.ts
-import { randomBytes as randomBytes40, timingSafeEqual as timingSafeEqual12 } from "node:crypto";
+import { randomBytes as randomBytes41, timingSafeEqual as timingSafeEqual12 } from "node:crypto";
 import { lstatSync as lstatSync59 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
@@ -264768,7 +265120,7 @@ class PrivateAnswerJobs {
         break;
       this.drop(oldest);
     }
-    const id = `oly2p.${installId}.${randomBytes40(32).toString("base64url")}`;
+    const id = `oly2p.${installId}.${randomBytes41(32).toString("base64url")}`;
     const at = this.now();
     const job = {
       id,
@@ -264959,7 +265311,7 @@ class PrivateAnswerJobs {
       return { remote };
     if (!job.waiting)
       return {};
-    job.inboxHandle ??= randomBytes40(16).toString("base64url");
+    job.inboxHandle ??= randomBytes41(16).toString("base64url");
     return { handle: job.inboxHandle };
   }
   sweep(at = this.now()) {
@@ -265311,7 +265663,7 @@ class PrivateAnswerJobs {
           settle({ kind: "failed" }, "no_evidence");
           return;
         }
-        const ack = randomBytes40(32).toString("base64url");
+        const ack = randomBytes41(32).toString("base64url");
         const plaintext = { v: 1, answer: REMOTE_SECRET_NOTE, citations: [], ack, secretInbox: this.secretInbox(job) };
         const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
         if (settled)
@@ -265375,7 +265727,7 @@ class PrivateAnswerJobs {
         if (result && (!precomputed || stillEligible(result.usedKeys, current)) && await stillReadable()) {
           if (settled)
             return;
-          const ack = randomBytes40(32).toString("base64url");
+          const ack = randomBytes41(32).toString("base64url");
           const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
           if (job.preserveWaiting) {
             plaintext.answer = `${REMOTE_SECRET_NOTE}
@@ -265490,7 +265842,7 @@ ${plaintext.answer}`;
       const path = localPaths[index];
       if (!path)
         return citation;
-      const token = randomBytes40(32).toString("base64url");
+      const token = randomBytes41(32).toString("base64url");
       opens.set(token, path);
       return { ...citation, open: { kind: "mac", token } };
     });
@@ -265712,7 +266064,7 @@ var init_private_answer_jobs = __esm(() => {
 });
 
 // src/workers/chatgpt/private-question-jobs.ts
-import { randomBytes as randomBytes41 } from "node:crypto";
+import { randomBytes as randomBytes42 } from "node:crypto";
 function gone2() {
   return { status: 410, body: { status: "gone" } };
 }
@@ -265751,7 +266103,7 @@ class PrivateQuestionJobs {
     const engine = await generateEngineKeyPair();
     const at = this.now();
     const job = {
-      id: `oly2p.${installId}.${randomBytes41(32).toString("base64url")}`,
+      id: `oly2p.${installId}.${randomBytes42(32).toString("base64url")}`,
       createdAt: at,
       expiresAt: at + this.ttlMs,
       enginePrivateKey: engine.privateKey,
@@ -274183,7 +274535,7 @@ init_package_root();
 init_messaging_pairing();
 init_messaging_capture();
 init_config2();
-import { randomBytes as randomBytes42 } from "node:crypto";
+import { randomBytes as randomBytes43 } from "node:crypto";
 import { spawnSync as spawnSync23 } from "node:child_process";
 import { existsSync as existsSync127, readFileSync as readFileSync115, openSync as openSync36, closeSync as closeSync37, writeSync as writeSync10 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
@@ -276172,7 +276524,7 @@ init_first_run_privacy();
 init_privacy_language();
 init_messaging_runtime();
 import { existsSync as existsSync98, readFileSync as readFileSync87 } from "node:fs";
-import { randomBytes as randomBytes26 } from "node:crypto";
+import { randomBytes as randomBytes27 } from "node:crypto";
 import { spawnSync as spawnSync19 } from "node:child_process";
 import { homedir as homedir37 } from "node:os";
 init_operation_error();
@@ -276454,7 +276806,7 @@ function repairHint(platform, dependency) {
   return platform === "darwin" ? "Install Go from https://go.dev/doc/install or with brew install go." : "Install Go from https://go.dev/doc/install or your OS package manager.";
 }
 function generateWorkerToken() {
-  return randomBytes26(32).toString("base64url");
+  return randomBytes27(32).toString("base64url");
 }
 function shellQuote4(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -279007,7 +279359,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes42(32).toString("base64url");
+  return randomBytes43(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};

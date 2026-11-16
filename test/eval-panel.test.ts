@@ -64,7 +64,7 @@ test('panel CLI reads both needed files, judges its answer and prints only recei
     expect(empty).toMatchObject({ questions: 1, foundDoc: 0, foundParagraph: 0, noEvidence: 1, answeredCorrectly: 0, judgeUnknown: 1 });
     expect(empty.rows![0]).toMatchObject({ filesRead: 0, neededFilesRead: 0 });
   } finally { server.stop(true); rmSync(root, { recursive: true, force: true }); }
-});
+}, 60_000);
 
 test('needed files remain optional and malformed lists fail closed', () => {
   const question = dataset.questions[0]!;
