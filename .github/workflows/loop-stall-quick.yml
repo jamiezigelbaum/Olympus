@@ -10,7 +10,8 @@ permissions:
 
 concurrency:
   group: loop-stall-quick-${{ github.ref }}
-  cancel-in-progress: true
+  # A run is never cancelled by the next push: it needs three passes in a row on main to rejoin verify.
+  cancel-in-progress: false
 
 jobs:
   loop-stall-quick:
