@@ -1218,7 +1218,7 @@ function withLegPromptBudgets(
 // passages trims each one in proportion, so the second and third picks stay
 // in the prompt instead of being dropped whole behind the first.
 const MIN_PROPORTIONAL_PICK_BYTES = 200;
-export function clipChunksInProportion(chunks: readonly string[], maxBytes: number): string[] {
+export function clipChunksInProportion(chunks: readonly string[], maxBytes: number, centre = false): string[] {
   const budget = Math.max(0, Math.floor(maxBytes));
   const sizes = chunks.map(utf8ByteLength);
   let count = chunks.length;
@@ -1230,10 +1230,37 @@ export function clipChunksInProportion(chunks: readonly string[], maxBytes: numb
     total -= sizes[count]!;
   }
   if (total <= budget) return chunks.slice(0, count);
-  return chunks.slice(0, count).flatMap((chunk, index) => clipChunksToUtf8Bytes([chunk], Math.floor(budget * sizes[index]! / total)));
+  return chunks.slice(0, count).flatMap((chunk, index) => {
+    const share = Math.floor(budget * sizes[index]! / total);
+    if (!centre) return clipChunksToUtf8Bytes([chunk], share);
+    const kept = clipTextAroundCentre(chunk, share);
+    return kept ? [kept] : [];
+  });
+}
+// Under OLYMPUS_FIT_CENTRE=1 a passage that must be cut keeps its middle, not
+// its start: the store centres a picked passage on the words that matched.
+export function clipTextAroundCentre(text: string, maxBytes: number): string {
+  const budget = Math.max(0, Math.floor(maxBytes));
+  const points = [...text];
+  const sizes = points.map(utf8ByteLength);
+  let total = sizes.reduce((sum, size) => sum + size, 0);
+  let start = 0;
+  let end = points.length;
+  // Drop from whichever side is further from the middle, one character at a time.
+  while (total > budget && start < end) {
+    if (end - points.length / 2 >= points.length / 2 - start) { end -= 1; total -= sizes[end]!; }
+    else { total -= sizes[start]!; start += 1; }
+  }
+  return points.slice(start, end).join('');
 }
 function fitChunks(chunks: readonly string[], maxBytes: number): string[] {
-  return process.env.OLYMPUS_FIT_PROPORTIONAL === '1' ? clipChunksInProportion(chunks, maxBytes) : clipChunksToUtf8Bytes(chunks, maxBytes);
+  const centre = process.env.OLYMPUS_FIT_CENTRE === '1';
+  const fitted = process.env.OLYMPUS_FIT_PROPORTIONAL === '1' ? clipChunksInProportion(chunks, maxBytes, centre) : clipChunksToUtf8Bytes(chunks, maxBytes);
+  if (!centre || process.env.OLYMPUS_FIT_PROPORTIONAL === '1' || fitted.length === 0) return fitted;
+  // Today's order, but the one passage that was cut keeps its middle.
+  const last = fitted.length - 1;
+  if (fitted[last] === chunks[last]) return fitted;
+  return [...fitted.slice(0, last), clipTextAroundCentre(chunks[last]!, utf8ByteLength(fitted[last]!))];
 }
 
 function promptBudgetedAnalyst(

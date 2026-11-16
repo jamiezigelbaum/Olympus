@@ -487,7 +487,11 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
       try { if (readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('workers/engine/server.ts')) { process.kill(pid, 'SIGKILL'); console.error(`Killed engine ${pid} a stopped run left.`); } } catch { /* gone */ }
     }
   } catch { /* no earlier run */ }
-  const killChildren = (signal: NodeJS.Signals) => { for (const child of children) child.kill('SIGKILL'); process.exit(128 + (signal === 'SIGINT' ? 2 : signal === 'SIGHUP' ? 1 : 15)); };
+  const killChildren = (signal: NodeJS.Signals) => {
+    // Say it was killed and by what (systemd stops a capped scope with SIGTERM when the kernel kills a process in it for memory).
+    console.log(`KILLED: the run got ${signal} before it could report${signal === 'SIGTERM' ? ' (under systemd-run, often the scope stopping after an out-of-memory kill)' : ''}. Engine exits: ${children.map(child => child.exitCode ?? child.signalCode ?? 'running').join(', ') || 'none started'}.`);
+    for (const role of ['background', 'front']) if (output[role]) console.log(`--- ${role} log tail ---\n${output[role]!.slice(-3000)}`);
+    for (const child of children) child.kill('SIGKILL'); process.exit(128 + (signal === 'SIGINT' ? 2 : signal === 'SIGHUP' ? 1 : 15)); };
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.once(signal, () => killChildren(signal));
   const output: Record<string, string> = { background: '', front: '' };
   // The engine's SQLite settings and WAL lines, kept whole (output keeps only its tail), each with when it arrived.
