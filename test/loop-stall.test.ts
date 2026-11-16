@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { gate, memoryMaxBytes } from '../scripts/loop-stall-test.ts';
+import { gate, memoryMaxBytes, sqliteGuards } from '../scripts/loop-stall-test.ts';
 import { join } from 'node:path';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -32,8 +32,13 @@ test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-th
   const onDisk = { ...process.env, TMPDIR: diskTmp, SQLITE_TMPDIR: diskTmp };
   expect(invoke(['bun', script, 'build', '--dir', dir], 180 * 60_000, onDisk)).toBe(0);
   // More RAM must not hide repeated scans through SQLite's small connection caches.
-  expect(invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G'], 10 * 60_000, onDisk)).toBe(0);
-}, 195 * 60_000);
+  // Two cases, each scored on its own line: a box in use, and the first boot after an upgrade left a large WAL.
+  // Exit 3 is "host busy" (the IO floor was never reached): not a product result.
+  const results = Object.fromEntries((['steady', 'boot-after-upgrade'] as const).map(runCase => [runCase,
+    invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase], 25 * 60_000, onDisk)]));
+  console.log(JSON.stringify({ phase: 'cases', results }));
+  expect(results).toEqual({ steady: 0, 'boot-after-upgrade': 0 });
+}, 235 * 60_000);
 
 test('memory cap accepts the default and warm-cache sizes and rejects invalid caps', () => {
   expect(memoryMaxBytes('2G')).toBe(2 * 1024 ** 3);
@@ -92,6 +97,13 @@ test('loop-stall gate enforces both strict budgets and fails closed', () => {
   expect(gate({ ...healthy, background: { ...healthy.background, beats: 0 } }, allowed)).toBe(false);
   expect(gate({ ...healthy, workload_ok: false }, allowed)).toBe(false);
   expect(gate({ ...healthy, slow_sql: [{ sql_id: 'unexpected' }] }, allowed)).toBe(false);
+});
+
+test('loop-stall gate fails on a WAL over 64 MB at the end or a background read held over 2 s, and only lists shared reads', () => {
+  const line = (label: string, ms: number, lane: string) => `[olympus] sqlite wal: ${label} wal_bytes=1 oldest_read_ms=${ms} oldest_read_lane=${lane} oldest_read_site=async`;
+  expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 }, [line('a', 2000, 'background'), line('a', 9000, 'shared')])).toMatchObject({ ok: true, other_reads_over_2s: [{ ms: 9000, lane: 'shared' }] });
+  expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 + 1 }, []).ok).toBe(false);
+  expect(sqliteGuards({}, [line('internal', 2001, 'background'), line('internal', 4000, 'background')])).toMatchObject({ ok: false, background_reads_over_2s: [{ label: 'internal', ms: 4000 }] });
 });
 
 // A completed tick alone misses a freeze still in progress at shutdown.
