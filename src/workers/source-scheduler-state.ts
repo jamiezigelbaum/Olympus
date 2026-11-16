@@ -251,8 +251,17 @@ export class LocalSourceSchedulerStateStore {
   readonly dbPath: string;
   private readonly db: Database;
   private closed = false;
+  private readonly visiting: boolean;
 
-  constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
+  /**
+   * `visiting` is a short open by a process that does not run the
+   * scheduler (a limit stop reported or cleared from the front's loop): it
+   * leaves the backfill and the closing checkpoint to the store's owner, so
+   * the owner's click neither waits on the owner's write lock for them nor
+   * fails on one.
+   */
+  constructor(dbPath = defaultSourceSchedulerStateDbPath(), options: { visiting?: boolean } = {}) {
+    this.visiting = options.visiting === true;
     this.dbPath = dbPath;
     if (dbPath !== ':memory:') {
       mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
@@ -271,7 +280,7 @@ export class LocalSourceSchedulerStateStore {
       sourceSchedulerStateMigrations(),
     );
     initializeLimitStops(this.db);
-    this.backfillLimitStops();
+    if (!this.visiting) this.backfillLimitStops();
   }
 
   /**
@@ -280,6 +289,9 @@ export class LocalSourceSchedulerStateStore {
    * state write. Idempotent: an open stop keeps its own `since`.
    */
   private backfillLimitStops(): void {
+    // Immediate: a read-then-write transaction that starts as a reader fails
+    // at once with "database is locked" when another process commits between
+    // its read and its write; taking the write lock first waits its turn.
     this.db.transaction(() => {
       const keys = this.db.query(`
         SELECT source_id, corpus_id, task_id FROM source_scheduler_task_state
@@ -289,7 +301,7 @@ export class LocalSourceSchedulerStateStore {
         const state = this.get({ sourceId: key.source_id, corpusId: key.corpus_id, taskId: key.task_id });
         if (state) syncSchedulerLimitStop(this.db, undefined, state);
       }
-    })();
+    }).immediate();
   }
 
   /**
@@ -307,7 +319,7 @@ export class LocalSourceSchedulerStateStore {
 
   close(): void {
     this.closed = true;
-    closeSqliteStore(this.db);
+    closeSqliteStore(this.db, this.visiting ? { checkpoint: false } : {});
   }
 
   get(key: SourceSchedulerTaskStateKey): PersistedSourceSchedulerTaskState | undefined {
