@@ -184128,13 +184128,29 @@ var init_private_answer_contract = __esm(() => {
 });
 
 // src/workers/chatgpt/private-answer-model.ts
+function panelLimitsForWindow(base, windowTokens) {
+  const bytes = localAnalystPromptBytesForWindow(windowTokens, PANEL_ROUTE_OUTPUT_TOKENS);
+  const scale = Math.max(1, bytes / base.maxPromptBytes);
+  const grow = (value, by = scale) => Math.round(value * by);
+  return {
+    ...base,
+    maxItems: Math.max(base.maxItems, Math.floor(base.maxItems * scale)),
+    maxPromptBytes: Math.max(base.maxPromptBytes, bytes),
+    maxAnswerChars: grow(base.maxAnswerChars, Math.sqrt(scale)),
+    leadingEvidenceChars: grow(base.leadingEvidenceChars),
+    summaryEvidenceChars: grow(base.summaryEvidenceChars),
+    deepEvidenceChars: grow(base.deepEvidenceChars),
+    deepPromptBytes: Math.max(base.deepPromptBytes, bytes),
+    deepAnswerChars: grow(base.deepAnswerChars, Math.sqrt(scale))
+  };
+}
 function createBuiltInPrivateAnswerModel(options) {
   const { model } = options;
-  const limits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
+  const baseLimits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
   return {
     status() {
       if (!model)
-        return { state: "no_model" };
+        return options.route ? { state: "ready" } : { state: "no_model" };
       if (options.available())
         return { state: "ready" };
       let status;
@@ -184150,8 +184166,12 @@ function createBuiltInPrivateAnswerModel(options) {
     },
     async answerPrivately(question, evidence, signal, observe, request) {
       const full = request?.detail === "full";
-      if (!model)
+      const route = await options.route?.().catch(() => {
+        return;
+      });
+      if (!model && !route)
         throw new Error("no private answer model");
+      const limits = route ? panelLimitsForWindow(baseLimits, route.windowTokens) : baseLimits;
       const read = privateEvidence(evidence, limits.maxPassageChars);
       let unreadable = read.unreadable;
       const readableHits = new Set(read.sources);
@@ -184238,12 +184258,13 @@ function createBuiltInPrivateAnswerModel(options) {
       }
       const prompted = picked.map(hitOf);
       let revoked = false;
+      const answering = route?.model ?? model;
       const guarded = {
-        name: model.name,
-        spec: model.spec,
-        prepare: () => model.prepare(),
-        status: () => model.status(),
-        stop: () => model.stop(),
+        name: BUILT_IN_ANALYST_NAME,
+        spec: route ? { ...model?.spec ?? {}, modelId: route.modelId } : model.spec,
+        prepare: () => model?.prepare() ?? Promise.resolve(),
+        status: () => model?.status() ?? { state: "ready" },
+        stop: () => model?.stop() ?? Promise.resolve(),
         async complete(modelRequest) {
           const guard = async () => {
             const ok = await checkPrivateEvidence(options.eligible, prompted);
@@ -184255,7 +184276,7 @@ function createBuiltInPrivateAnswerModel(options) {
           return runWithLocalInferenceGuard(guard, async () => {
             await guard();
             observe?.modelStarting?.();
-            return model.complete(modelRequest);
+            return answering.complete(modelRequest);
           });
         }
       };
@@ -184671,9 +184692,11 @@ function record5(value) {
 function string4(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
-var PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MIN_REPEAT_WORDS = 3, MAX_PASSAGE_CHARS = 6000;
+var PANEL_ANSWER_LIMITS, PANEL_ROUTE_OUTPUT_TOKENS = 2048, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MIN_REPEAT_WORDS = 3, MAX_PASSAGE_CHARS = 6000;
 var init_private_answer_model = __esm(() => {
   init_answer_activity();
+  init_analyst_built_in();
+  init_local_analyst_window();
   init_source_model_policy();
   init_evidence_versions();
   init_private_answer_contract();
@@ -244230,9 +244253,9 @@ function builtInBacksPrivateAnalyst(id, state, members, _availableIds) {
     return false;
   return members.some((member) => member.id === id && member.profile.provider === "local-openai-compatible");
 }
-async function probeLocalAnalystService(olympusConfig) {
+async function probeLocalAnalystService(olympusConfig, client = new DelphiClient(olympusConfig)) {
   try {
-    await new DelphiClient(olympusConfig).listModelsForProfile("source_answer", AbortSignal.timeout(3000));
+    await client.listModelsForProfile("source_answer", AbortSignal.timeout(3000));
     return true;
   } catch {
     return false;
@@ -244343,6 +244366,15 @@ function createAnalystForSovereigntyProfile(input) {
   const { profile } = input;
   const profileId = input.profileId ?? profile.model ?? profile.provider;
   if (profile.provider === "local-openai-compatible") {
+    const model = createLocalSovereigntyAnalystModel(input);
+    return model ? createAnalyst(model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" }) : undefined;
+  }
+  return createRemoteAnalystForSovereigntyProfile(input, profileId);
+}
+function createLocalSovereigntyAnalystModel(input) {
+  const { profile } = input;
+  const profileId = input.profileId ?? profile.model ?? profile.provider;
+  {
     if (!profile.baseUrl?.trim()) {
       throw new Error("Local sovereignty analyst profiles require baseUrl.");
     }
@@ -244360,8 +244392,11 @@ function createAnalystForSovereigntyProfile(input) {
     const model = createDelphiAnalystModel(new DelphiClient(config, undefined, {
       resolveSecretRef: () => apiKey
     }), { profile: "source_answer", preflightTimeoutMs: 0 });
-    return createAnalyst(input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" });
+    return input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model;
   }
+}
+function createRemoteAnalystForSovereigntyProfile(input, profileId) {
+  const { profile } = input;
   if (profile.provider === "openclaw-infer") {
     return createAnalyst(createOpenClawInferAnalystModel({
       model: profile.model,
@@ -244427,6 +244462,58 @@ function analystRouteTrustDomain(pack, localOnly) {
   }
   return "internal";
 }
+function createLocalPrivateRoute(input) {
+  const now = input.now ?? Date.now;
+  const models = new Map;
+  let checked;
+  return async () => {
+    let member;
+    try {
+      member = input.firstMember();
+    } catch {
+      return;
+    }
+    if (!member || member.profile.provider !== "local-openai-compatible")
+      return;
+    if (!models.has(member.id)) {
+      try {
+        models.set(member.id, input.model(member));
+      } catch {
+        models.set(member.id, undefined);
+      }
+    }
+    const entry = models.get(member.id);
+    if (!entry)
+      return;
+    if (!checked || checked.id !== member.id || now() - checked.atMs >= PRIVATE_ROUTE_REACHABLE_TTL_MS) {
+      let up = false;
+      try {
+        up = await input.reachable(member);
+      } catch {
+        up = false;
+      }
+      checked = { id: member.id, atMs: now(), up };
+    }
+    if (!checked.up)
+      return;
+    const window2 = await input.window(entry.modelId, entry.baseUrl).catch(() => {
+      return;
+    });
+    return { model: entry.model, modelId: entry.modelId, windowTokens: window2?.windowTokens ?? 0 };
+  };
+}
+async function probeLocalSovereigntyProfile(olympusConfig, profile, apiKey) {
+  const config = structuredClone(olympusConfig);
+  config.argus.modelProfiles.source_answer = {
+    ...config.argus.modelProfiles.source_answer,
+    baseUrl: profile.baseUrl,
+    model: profile.model,
+    ...profile.secretRef ? { secretRef: profile.secretRef } : {},
+    purpose: "text_reasoning"
+  };
+  return probeLocalAnalystService(config, new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }));
+}
+var PRIVATE_ROUTE_REACHABLE_TTL_MS = 30000;
 var init_private_analysts = __esm(() => {
   init_analyst_tinfoil();
   init_local_analyst_window();
@@ -267120,6 +267207,7 @@ async function main() {
     }
   } : undefined);
   const answerBuiltInModel = workerBuiltInModel ? localModelActivity.track("built_in", workerBuiltInModel.model) : undefined;
+  let localPrivateRoute;
   registerBuiltInPrivateModel(workerBuiltInModel ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle } : undefined);
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
   let localWorkPending = () => false;
@@ -269119,6 +269207,18 @@ ${key}`;
       });
     }
     const defaultLocalAnalyst = sovereigntyAnalysts.get("local-source-answer")?.analyst ?? defaultLocal;
+    localPrivateRoute = createLocalPrivateRoute({
+      firstMember: () => {
+        const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" });
+        return (pool.explicitOrder ?? pool.members)[0];
+      },
+      model: (member) => sovereigntyEngine.source === "env_bridge" && member.id === "local-source-answer" ? { model: localSourceAnswerModel, modelId: localEndpoint.model, ...!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {} } : (() => {
+        const model = createLocalSovereigntyAnalystModel({ profile: member.profile, profileId: member.id, localModelActivity, olympusConfig, env: process.env, bootSecretResolver });
+        return model ? { model, modelId: member.profile.model ?? member.id, ...!member.profile.secretRef && member.profile.baseUrl ? { baseUrl: member.profile.baseUrl } : {} } : undefined;
+      })(),
+      reachable: (member) => sovereigntyEngine.source === "env_bridge" && member.id === "local-source-answer" ? probeLocalAnalystService(olympusConfig) : probeLocalSovereigntyProfile(olympusConfig, member.profile),
+      window: (model, baseUrl) => resolveLocalAnalystWindow({ model, ...baseUrl ? { baseUrl } : {} })
+    });
     const sourceReranker = createBuiltInRerankerResolver();
     sourceReranker();
     return createAnalystSourceIndexAnswerHandler({
@@ -270605,6 +270705,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const openCitedFile = process.platform === "darwin" || process.platform === "linux" ? (path, eligible) => openLocalFile(path, eligible, [...localDropboxRoots(), ...localFilesOpenableRoots()]) : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: answerBuiltInModel,
+    route: () => localPrivateRoute?.() ?? Promise.resolve(undefined),
     eligible: privateEvidenceEligible,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,

@@ -32,7 +32,9 @@ import type {
   PrivateEvidenceItem as BuiltInEvidenceItem,
 } from '../../core/analyst-built-in.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
-import type { AnalystModelRequest } from '../../core/analyst.ts';
+import type { AnalystModel, AnalystModelRequest } from '../../core/analyst.ts';
+import { BUILT_IN_ANALYST_NAME } from '../../core/analyst-built-in.ts';
+import { localAnalystPromptBytesForWindow } from '../source-index/local-analyst-window.ts';
 import { SourceModelPolicyDeniedError } from '../../core/source-model-policy.ts';
 import { EVIDENCE_COPY_SIMILARITY, evidenceDateValue, evidenceVersionGroups, evidenceVersions } from '../../core/evidence-versions.ts';
 import type { SourceFamily } from '../../core/source-index/types.ts';
@@ -87,6 +89,22 @@ export interface BuiltInPrivateAnswerModelOptions {
    * when the item has neither.
    */
   sourceLinks?: (item: PrivateEvidenceItem) => PrivateSourceLinks | undefined;
+  /**
+   * The owner's own Private answer route when it is a local model larger than
+   * the built-in one (the model Ask's Private answers use), asked once per
+   * answer: undefined when there is none or it is not reachable now, and the
+   * built-in model answers as before. The panel then reads within that
+   * model's served window (panelLimitsForWindow). Never a cloud model.
+   */
+  route?: () => Promise<PanelAnswerRoute | undefined>;
+}
+
+export interface PanelAnswerRoute {
+  model: AnalystModel;
+  /** The served model's id, for the answer's model label. */
+  modelId: string;
+  /** The model's served context window, in tokens. */
+  windowTokens: number;
 }
 
 export type PanelItemReader = (
@@ -204,12 +222,41 @@ export const PANEL_ANSWER_LIMITS: Readonly<PanelAnswerLimits> = {
   deepAnswerChars: 2_700,
 };
 
+// The answer budget grows more slowly than the evidence: a longer read lists
+// more values, not longer prose about each.
+const PANEL_ROUTE_OUTPUT_TOKENS = 2_048;
+
+/**
+ * The panel's limits for a served model's window: items, evidence characters
+ * and prompt bytes grow together by the share of the window the local
+ * Analyst's prompt may use (localAnalystPromptBytesForWindow), never below
+ * `base`. A question whose answer needs several items (a value across a few
+ * years of reports) is read from as many as the window holds, instead of the
+ * four sized for the small built-in model.
+ */
+export function panelLimitsForWindow(base: PanelAnswerLimits, windowTokens: number): PanelAnswerLimits {
+  const bytes = localAnalystPromptBytesForWindow(windowTokens, PANEL_ROUTE_OUTPUT_TOKENS);
+  const scale = Math.max(1, bytes / base.maxPromptBytes);
+  const grow = (value: number, by = scale) => Math.round(value * by);
+  return {
+    ...base,
+    maxItems: Math.max(base.maxItems, Math.floor(base.maxItems * scale)),
+    maxPromptBytes: Math.max(base.maxPromptBytes, bytes),
+    maxAnswerChars: grow(base.maxAnswerChars, Math.sqrt(scale)),
+    leadingEvidenceChars: grow(base.leadingEvidenceChars),
+    summaryEvidenceChars: grow(base.summaryEvidenceChars),
+    deepEvidenceChars: grow(base.deepEvidenceChars),
+    deepPromptBytes: Math.max(base.deepPromptBytes, bytes),
+    deepAnswerChars: grow(base.deepAnswerChars, Math.sqrt(scale)),
+  };
+}
+
 export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerModelOptions): PrivateAnswerModel {
   const { model } = options;
-  const limits: PanelAnswerLimits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
+  const baseLimits: PanelAnswerLimits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
   return {
     status() {
-      if (!model) return { state: 'no_model' };
+      if (!model) return options.route ? { state: 'ready' } : { state: 'no_model' };
       if (options.available()) return { state: 'ready' };
       let status;
       try {
@@ -224,7 +271,9 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
     },
     async answerPrivately(question, evidence, signal, observe, request) {
       const full = request?.detail === 'full';
-      if (!model) throw new Error('no private answer model');
+      const route = await options.route?.().catch(() => undefined);
+      if (!model && !route) throw new Error('no private answer model');
+      const limits = route ? panelLimitsForWindow(baseLimits, route.windowTokens) : baseLimits;
       const read = privateEvidence(evidence, limits.maxPassageChars);
       let unreadable = read.unreadable;
       const readableHits = new Set(read.sources);
@@ -348,12 +397,13 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
       // eligible stops the answer, and nothing it produced is used.
       const prompted = picked.map(hitOf);
       let revoked = false;
+      const answering: AnalystModel = route?.model ?? model!;
       const guarded: BuiltInAnalystModel = {
-        name: model.name,
-        spec: model.spec,
-        prepare: () => model.prepare(),
-        status: () => model.status(),
-        stop: () => model.stop(),
+        name: BUILT_IN_ANALYST_NAME,
+        spec: route ? { ...(model?.spec ?? ({} as BuiltInAnalystModel['spec'])), modelId: route.modelId } : model!.spec,
+        prepare: () => model?.prepare() ?? Promise.resolve(),
+        status: () => model?.status() ?? ({ state: 'ready' } as ReturnType<BuiltInAnalystModel['status']>),
+        stop: () => model?.stop() ?? Promise.resolve(),
         async complete(modelRequest: AnalystModelRequest) {
           const guard = async () => {
             const ok = await checkPrivateEvidence(options.eligible, prompted);
@@ -365,7 +415,7 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           return runWithLocalInferenceGuard(guard, async () => {
             await guard();
             observe?.modelStarting?.();
-            return model.complete(modelRequest);
+            return answering.complete(modelRequest);
           });
         },
       };

@@ -577,6 +577,10 @@ import {
 import {
   builtInBacksPrivateAnalyst,
   probeLocalAnalystService,
+  createLocalPrivateRoute,
+  createLocalSovereigntyAnalystModel,
+  probeLocalSovereigntyProfile,
+  type LocalPrivateRoute,
   trustedAnalystAssistTimeoutMs,
   createSovereigntyAnalystMap,
   analystRouteTrustDomain,
@@ -779,6 +783,9 @@ export async function main(): Promise<void> {
   } : undefined);
   const answerBuiltInModel = workerBuiltInModel
     ? localModelActivity.track('built_in', workerBuiltInModel.model) : undefined;
+  // The owner's Private answer route as the ChatGPT private panel uses it:
+  // set where the answer analysts are built, below.
+  let localPrivateRoute: (() => Promise<LocalPrivateRoute | undefined>) | undefined;
   registerBuiltInPrivateModel(workerBuiltInModel
     ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
     : undefined);
@@ -3472,6 +3479,25 @@ export async function main(): Promise<void> {
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? defaultLocal;
+      // The private panel answers on the same local model as Ask's Private
+      // answers (the first member of the secure_local pool, when local),
+      // within that model's window; otherwise on the built-in model.
+      localPrivateRoute = createLocalPrivateRoute({
+        firstMember: () => {
+          const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' });
+          return (pool.explicitOrder ?? pool.members)[0];
+        },
+        model: (member) => sovereigntyEngine.source === 'env_bridge' && member.id === 'local-source-answer'
+          ? { model: localSourceAnswerModel, modelId: localEndpoint.model, ...(!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {}) }
+          : (() => {
+            const model = createLocalSovereigntyAnalystModel({ profile: member.profile, profileId: member.id, localModelActivity, olympusConfig, env: process.env, bootSecretResolver });
+            return model ? { model, modelId: member.profile.model ?? member.id, ...(!member.profile.secretRef && member.profile.baseUrl ? { baseUrl: member.profile.baseUrl } : {}) } : undefined;
+          })(),
+        reachable: (member) => sovereigntyEngine.source === 'env_bridge' && member.id === 'local-source-answer'
+          ? probeLocalAnalystService(olympusConfig)
+          : probeLocalSovereigntyProfile(olympusConfig, member.profile),
+        window: (model, baseUrl) => resolveLocalAnalystWindow({ model, ...(baseUrl ? { baseUrl } : {}) }),
+      });
       // Uses the installed default at 16 GiB RAM and above; the owner can opt
       // out. Asked per question, so the download finishing after boot turns it
       // on without a restart.
@@ -5416,6 +5442,7 @@ export async function main(): Promise<void> {
     : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: answerBuiltInModel,
+    route: () => localPrivateRoute?.() ?? Promise.resolve(undefined),
     eligible: privateEvidenceEligible,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,
