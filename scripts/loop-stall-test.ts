@@ -383,6 +383,14 @@ async function run(dir: string, seconds: number, memoryMax: string) {
   };
   const children: ReturnType<typeof Bun.spawn>[] = [];
   const output: Record<string, string> = { background: '', front: '' };
+  // The engine's SQLite settings and WAL lines, kept whole (output keeps only its tail), each with when it arrived.
+  const sqliteLines: Array<{ at: string; role: string; line: string }> = [];
+  const partial: Record<string, string> = { background: '', front: '' };
+  const keepSqliteLines = (role: string, text: string) => {
+    const lines = (partial[role] + text).split('\n');
+    partial[role] = lines.pop() ?? '';
+    for (const line of lines) if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
+  };
   const pumps: Promise<void>[] = [];
   const requests: Promise<void>[] = [];
   const forwarded: Array<{ ms: number; status: number; error?: unknown }> = [];
@@ -397,7 +405,7 @@ async function run(dir: string, seconds: number, memoryMax: string) {
     for (const role of ['background', 'front']) {
       const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], { env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_MAIN_THREAD_SQL_LOG: join(metrics, `${role}.sql.jsonl`) }, stdout: 'pipe', stderr: 'pipe' });
       children.push(child);
-      for (const stream of [child.stdout, child.stderr]) pumps.push((async () => { for await (const chunk of stream as ReadableStream<Uint8Array>) { output[role] = (output[role]! + new TextDecoder().decode(chunk)).slice(-100_000); } })());
+      for (const stream of [child.stdout, child.stderr]) pumps.push((async () => { for await (const chunk of stream as ReadableStream<Uint8Array>) { const text = new TextDecoder().decode(chunk); keepSqliteLines(role, text); output[role] = (output[role]! + text).slice(-100_000); } })());
     }
     const deadline = Date.now() + seconds * 1000;
     while (!output.background!.includes('engine background ready') || !output.front!.includes('worker listening')) {
@@ -455,7 +463,8 @@ async function run(dir: string, seconds: number, memoryMax: string) {
   const allowed = JSON.parse(readFileSync(join(import.meta.dir, 'loop-stall-allowlist.json'), 'utf8')) as string[];
   const pass = gate({ background, front, slow_sql, workload_ok }, allowed);
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', sha, pass, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, pressure: pressureSummary(pressureSampler.samples) };
+  const receipt = { phase: 'run', sha, pass, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, pressure: pressureSummary(pressureSampler.samples),
+    sqlite: { settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200), wal: sqliteLines.filter(entry => entry.line.includes('sqlite wal:')).slice(0, 2000) } };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
   console.log(JSON.stringify(receipt));
   console.log(`${pass ? 'PASS' : 'FAIL'}: background ${background.max_ms} ms (<250), front ${front.max_ms} ms (<100), ${slow_sql.length} slow SQL statements, workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}`);
