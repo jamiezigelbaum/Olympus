@@ -39,7 +39,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystOutputAnswer, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
+import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystOutputAnswer, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, ANALYST_NOTES_SYSTEM_START, type AnalystEvidenceFormat, type AnalystModel, type AnalystReadingNotes } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
   DEFAULT_VENICE_ANALYST_MODEL,
@@ -209,15 +209,22 @@ async function main(): Promise<void> {
   // as booleans, whether the first draft held each value. Never written out.
   const traceDraftAudit = process.env.OLYMPUS_EVAL_TRACE_DRAFT_AUDIT?.trim().toLowerCase() === 'on';
   const analystCompletions: string[] = [];
+  // The Analyst's reading-notes arm for the whole run (#1590): off, first or pass.
+  const readingNotes = (process.env.OLYMPUS_EVAL_ANALYST_READING_NOTES?.trim() || 'off') as AnalystReadingNotes;
+  if (!['off', 'first', 'pass'].includes(readingNotes)) throw new Error('OLYMPUS_EVAL_ANALYST_READING_NOTES must be off, first or pass.');
+  console.error(`eval reading notes: ${readingNotes}`);
   const analyst = createAnalyst({
     async complete(request) {
-      analystPrompts.push(request.prompt);
       const completion = await model.complete(request);
+      // The notes pass is a call before the draft: the draft and audit trace
+      // below reads the first prompt as the draft's, so it is left out.
+      if (request.system.startsWith(ANALYST_NOTES_SYSTEM_START)) return completion;
+      analystPrompts.push(request.prompt);
       analystModelIds.push(completion.modelId);
       if (traceDraftAudit) analystCompletions.push(completion.text);
       return completion;
     },
-  }, { auditSuspiciousDrafts: true, evidenceFormat: analystProvider === 'local' ? 'compact' : 'full' });
+  }, { auditSuspiciousDrafts: true, evidenceFormat: analystProvider === 'local' ? 'compact' : 'full', readingNotes });
   // Optional multi-query retrieval expansion over the same local Delphi lane:
   // useful for recall experiments, but disabled by default because it adds a
   // model call before every question and made the real eval too slow as a gate.

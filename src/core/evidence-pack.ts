@@ -65,6 +65,7 @@ import {
   type SourceIndexRoutedSearchHit,
   type SourceIndexRoutedSearchResponse,
   type SourceIndexRouterAdapterMap,
+  type SourceIndexSearchHit,
   type SourceIndexSearchContext,
   type SourceIndexSkippedCorpus,
   applySourceIndexVisibilityGate,
@@ -144,6 +145,11 @@ export interface LocalContentProvider {
   // matched or not. Optional: a provider that cannot answer it without walking
   // every document must omit it rather than pay that per query.
   corpusReadability?(): Promise<CorpusReadabilityCounts | undefined>;
+  // The items either side of this one in its conversation (the messages
+  // before and after a chat message, the neighbouring mails of a thread),
+  // nearest first, as identity-only hits the pack hydrates like any other.
+  // Absent when the provider has no conversations.
+  conversationNeighbours?(request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain; perSide: number }): readonly SourceIndexSearchHit[];
 }
 
 // Counts only — no paths, no titles, no identifiers beyond the corpus id the
@@ -529,6 +535,10 @@ async function buildPreparedEvidencePackDetailed(
       promoted: reranked.audit.outcome === 'applied'
         ? hydrated.filter(entry => !entry.policyDenied && scorable.indexOf(entry) >= hydrated.length - denied.length).length : 0,
     } : reranked.audit;
+  }
+  const windowSide = conversationWindowPerSide();
+  if (windowSide > 0 && !input.selectedItems?.length) {
+    hydrated = await withConversationWindows(hydrated, input, windowSide, maxCharsPerCandidate);
   }
 
   if (wide) maxBytesPerCandidate = evidenceBytesPerCandidate(hydrated.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
@@ -1012,6 +1022,76 @@ function withRunSemanticSeats(
     added.push(hit);
   }
   return added.length ? [...hits, ...added] : hits;
+}
+
+// Messages either side of a conversation hit: a chat answer often spans
+// several messages, and one found message without its neighbours reads out of
+// context. OLYMPUS_CONVERSATION_WINDOW sets how many each side (0 is off, the
+// default until the eval proves it).
+export const CONVERSATION_WINDOW_ENV = 'OLYMPUS_CONVERSATION_WINDOW';
+// The first this many conversation hits in pack order get a window.
+export const CONVERSATION_WINDOW_HITS = 3;
+export function conversationWindowPerSide(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env[CONVERSATION_WINDOW_ENV]?.trim();
+  if (!raw) return 0;
+  const side = Number(raw);
+  return Number.isInteger(side) && side >= 0 && side <= 10 ? side : 0;
+}
+
+/**
+ * After the cut, each of the first CONVERSATION_WINDOW_HITS kept items that
+ * belongs to a conversation brings the items either side of it, nearest first,
+ * placed right after it. Each neighbour is its own candidate: visibility-gated,
+ * read through the same provider under its own tier and model policy, and kept
+ * only when it is readable text no more restricted than the hit it came with
+ * (same trust domain, tier at most the hit's), so a window never turns an
+ * answer Private. The neighbours of one hit share one candidate's byte share.
+ */
+async function withConversationWindows<T extends { hit: SourceIndexRoutedSearchHit; provenance: SourceIndexProvenance; provider: LocalContentProvider | undefined; content: LocalContentBlock | undefined; policyDenied: boolean }>(
+  entries: readonly T[],
+  input: BuildEvidencePackInput,
+  perSide: number,
+  maxChars: number | undefined,
+): Promise<Array<T | { hit: SourceIndexRoutedSearchHit; provenance: SourceIndexProvenance; provider: LocalContentProvider | undefined; content: LocalContentBlock | undefined; policyDenied: boolean }>> {
+  const taken = new Set(entries.map((entry) => routedHitCandidateId(entry.hit)));
+  const out: Array<T | { hit: SourceIndexRoutedSearchHit; provenance: SourceIndexProvenance; provider: LocalContentProvider | undefined; content: LocalContentBlock | undefined; policyDenied: boolean }> = [];
+  let windows = 0;
+  for (const entry of entries) {
+    out.push(entry);
+    const anchor = entry.content?.sensitivity;
+    if (windows >= CONVERSATION_WINDOW_HITS || entry.policyDenied || !anchor || !entry.content?.chunks.length
+      || !entry.hit.sourceItem.providerConversationId || !entry.provider?.conversationNeighbours) continue;
+    const found: readonly SourceIndexSearchHit[] = entry.provider.conversationNeighbours({ provenance: entry.provenance, trustDomain: entry.hit.trustDomain, perSide });
+    let neighbours: SourceIndexRoutedSearchHit[] = found
+      .map((hit) => ({ ...hit, corpusId: entry.hit.corpusId, trustDomain: entry.hit.trustDomain }))
+      .filter((hit) => !taken.has(routedHitCandidateId(hit)));
+    if (neighbours.length === 0) continue;
+    windows += 1;
+    if (input.visibilityGate) neighbours = [...await applySourceIndexVisibilityGate(input.visibilityGate, neighbours)];
+    const share = maxChars === undefined ? undefined : Math.max(200, Math.floor(maxChars / Math.max(1, neighbours.length)));
+    const anchorRank = SOURCE_TRUST_TIERS.indexOf(anchor.trustTier);
+    for (const hit of neighbours) {
+      const provenance = hitProvenance(hit);
+      let content: LocalContentBlock | undefined;
+      try {
+        content = await entry.provider.fetchLocalContent({
+          provenance,
+          trustDomain: hit.trustDomain,
+          ...(share !== undefined ? { maxChars: share } : {}),
+          query: input.searchQuery ?? input.question,
+        });
+      } catch (error) {
+        if (error instanceof SourceModelPolicyDeniedError) continue;
+        throw error;
+      }
+      if (!content?.chunks.length || content.namesOnly || content.contentPrivate || content.sizeHeld) continue;
+      if (content.sensitivity.trustDomain !== anchor.trustDomain
+        || SOURCE_TRUST_TIERS.indexOf(content.sensitivity.trustTier) > anchorRank) continue;
+      taken.add(routedHitCandidateId(hit));
+      out.push({ hit, provenance, provider: entry.provider, content, policyDenied: false });
+    }
+  }
+  return out;
 }
 
 // Shared final fusion of multiple routed runs, also used by offline eval replay.

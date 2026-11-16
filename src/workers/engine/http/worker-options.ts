@@ -163,6 +163,8 @@ export interface EmailSourceWorkerOptions {
    */
   fileExtraction?: FileExtractionRunner;
   requestOnDemandRead?: RequestOnDemandRead;
+  /** Deep read jobs (runtime/deep-read-jobs.ts), once the engine has built them. */
+  deepRead?: () => import('../runtime/deep-read-jobs.ts').DeepReadJobs | undefined;
   readOwnerItem?: (itemId: string) => Promise<OnDemandReadResult>;
   /** Apply current lane policy before any extraction route reads jobs or items. */
   authorizeFileExtractionLane?: (lane: ExtractionLaneKey) => void;

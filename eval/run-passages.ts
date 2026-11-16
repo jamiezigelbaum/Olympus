@@ -5,9 +5,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
+import { conversationWindowPerSide } from '../src/core/evidence-pack.ts';
 import { RERANK_POOL_STORE_DEPTH, rerankPoolSemanticSeats, type EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
-import { createAnalyst, withPromptBudget } from '../src/core/analyst.ts';
+import { createAnalyst, withPromptBudget, type AnalystReadingNotes } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import { DelphiClient } from '../src/core/delphi.ts';
 import { fitPackToPromptBytes, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_MAX_CHARS_PER_CANDIDATE } from '../src/workers/source-index/analyst-answer.ts';
@@ -81,6 +82,8 @@ export interface PassageSummary {
   funnel: Partial<Record<FunnelStage, number>>;
   /** The question judge's counts, when it ran. */
   judged?: { answers: number; notAnswers: number; specific: number; generic: number; unclear: number };
+  /** Each answer arm on the same packs (answerArms); the first is the baseline the others are paired against. */
+  arms?: Record<string, ArmSummary>;
   /** All answer attempts; median and nearest-rank p90 use successful calls only (zero when none succeeded). */
   answer?: { asked: number; right: number; cited: number; failed: number; medianMs: number; p90Ms: number; correctByMeaning?: number };
   timings: { buildPackMs: number; fitMs: number; totalMs: number; storeSearchMs: number };
@@ -95,6 +98,8 @@ export interface PassageRow {
   funnel?: FunnelRow; judge?: QuestionJudgement;
   neededEvidence?: { needed: number; packed: number; seated: number; cited?: number; packedIds: number[]; seatedIds: number[]; citedIds?: number[] };
   answer?: PassageAnswer;
+  /** Each answer arm's runs on this row's fitted pack (answerArms), in run order. */
+  arms?: Record<string, PassageAnswer[]>;
   rerank?: { outcome: EvidenceRerankOutcome; scored: number; promoted: number; elapsedMs: number };
   /** Present when a store's search was cut short: which store and lane, and why (codes only). Left out of the metrics. */
   degraded?: Degradation[];
@@ -111,6 +116,8 @@ export interface PassageReceipt {
   rerankPoolStoreDepth?: number;
   /** Semantic seats added to the reranked pool (OLYMPUS_SEMANTIC_POOL_SEATS); absent with the reranker off. */
   semanticPoolSeats?: number;
+  /** Messages each side of a conversation hit (OLYMPUS_CONVERSATION_WINDOW); absent when 0. */
+  conversationWindow?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
   summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
     /** By the expected item's stored chunks (1_chunk, 2-3_chunks, 4+_chunks), when counted. */
@@ -118,6 +125,54 @@ export interface PassageReceipt {
   questions?: PassageRow[];
   /** Ids of the questions left out as degraded; sealed receipts carry these but no rows. */
   degradedIds: string[];
+}
+/** One answer arm over the rows: a question counts for the arm when more than half of its runs do. */
+export interface ArmSummary {
+  asked: number; runs: number; failedRuns: number; right: number; rightRuns: number; cited: number;
+  correctByMeaning?: number; correctByMeaningRuns?: number; medianMs: number; p90Ms: number;
+  /** Against the first arm, question by question: wins, losses and the exact two-sided sign test's p. */
+  paired?: { wins: number; losses: number; p: number; meaning?: { wins: number; losses: number; p: number } };
+}
+type AnswerFn = (question: EvalQuestion, pack: EvidencePack) => Promise<AnalystResult>;
+const mostOf = (runs: readonly PassageAnswer[], holds: (run: PassageAnswer) => boolean): boolean => runs.filter(holds).length * 2 > runs.length;
+/** Exact two-sided sign test on paired wins and losses (ties left out). */
+export function signTestP(wins: number, losses: number): number {
+  const n = wins + losses; if (n === 0) return 1;
+  let tail = 0; let choose = 1;
+  for (let i = 0; i <= Math.min(wins, losses); i++) { tail += choose; choose = choose * (n - i) / (i + 1); }
+  return Math.min(1, 2 * tail / 2 ** n);
+}
+function summarizeArms(rows: readonly PassageRow[]): Record<string, ArmSummary> | undefined {
+  const armed = rows.filter(row => row.arms);
+  const names = [...new Set(armed.flatMap(row => Object.keys(row.arms!)))];
+  if (!names.length) return undefined;
+  const judged = armed.some(row => Object.values(row.arms!).some(runs => runs.some(run => run.meaning !== undefined)));
+  const isRight = (run: PassageAnswer) => run.right === true; const means = (run: PassageAnswer) => run.meaning === 'correct';
+  const pair = (name: string, holds: (run: PassageAnswer) => boolean) => {
+    let wins = 0; let losses = 0;
+    for (const row of armed) {
+      const base = row.arms![names[0]!]; const runs = row.arms![name];
+      if (!base || !runs) continue;
+      const before = mostOf(base, holds); const now = mostOf(runs, holds);
+      if (now && !before) wins++; else if (before && !now) losses++;
+    }
+    return { wins, losses, p: signTestP(wins, losses) };
+  };
+  return Object.fromEntries(names.map((name, index) => {
+    const perRow = armed.flatMap(row => row.arms![name] ? [row.arms![name]!] : []);
+    const runs = perRow.flat();
+    const times = runs.flatMap(run => run.outcome === 'answered' && run.answerMs !== undefined ? [run.answerMs] : []).sort((a, b) => a - b);
+    const middle = Math.floor(times.length / 2);
+    return [name, {
+      asked: perRow.length, runs: runs.length, failedRuns: runs.filter(run => run.outcome === 'failed').length,
+      right: perRow.filter(row => mostOf(row, isRight)).length, rightRuns: runs.filter(isRight).length,
+      cited: perRow.filter(row => mostOf(row, run => run.cited === true)).length,
+      ...(judged ? { correctByMeaning: perRow.filter(row => mostOf(row, means)).length, correctByMeaningRuns: runs.filter(means).length } : {}),
+      medianMs: times.length ? (times[middle]! + times[times.length % 2 ? middle : middle - 1]!) / 2 : 0,
+      p90Ms: times[Math.ceil(times.length * 0.9) - 1] ?? 0,
+      ...(index > 0 ? { paired: { ...pair(name, isRight), ...(judged ? { meaning: pair(name, means) } : {}) } } : {}),
+    } satisfies ArmSummary];
+  }));
 }
 function score(rank: number | null, ks: readonly number[]): HitScore {
   return { firstHitRank: rank, reciprocalRank: rank === null ? 0 : 1 / rank, hitsAtK: Object.fromEntries(ks.map(k => [k, rank !== null && rank <= k ? 1 : 0])) };
@@ -135,6 +190,7 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
   const reached = (stages: readonly FunnelStage[]) => positives.filter(row => row.funnel && stages.includes(row.funnel.stage)).length;
   const reranked = rows.filter(row => row.rerank);
   const answers = all.flatMap(row => row.answer ? [row.answer] : []);
+  const arms = summarizeArms(all);
   const answerTimes = answers.flatMap(answer => answer.outcome === 'answered' && answer.answerMs !== undefined ? [answer.answerMs] : []).sort((a, b) => a - b);
   const middle = Math.floor(answerTimes.length / 2);
   return {
@@ -163,6 +219,7 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
       // Nearest-rank p90; failed calls have no latency sample.
       p90Ms: answerTimes[Math.ceil(answerTimes.length * 0.9) - 1] ?? 0,
     } } : {}),
+    ...(arms ? { arms } : {}),
     ...(reranked.length ? { rerank: {
       applied: reranked.filter(row => row.rerank!.outcome === 'applied').length,
       timedOut: reranked.filter(row => row.rerank!.outcome === 'timed_out').length,
@@ -215,7 +272,14 @@ export async function runPassageEval(input: {
   /** Whether a question's pinned quote answers it, and whether it is specific enough to pick its item out. */
   judgeQuestion?: (question: string, quote: string) => Promise<QuestionJudgement>;
   /** Answer the exact fitted pack; only deterministic scores enter the receipt. */
-  answer?: (question: EvalQuestion, pack: EvidencePack) => Promise<AnalystResult>;
+  answer?: AnswerFn;
+  /**
+   * Answer the same fitted pack with each arm, `answerRepeats` times each
+   * (default 1), so arms are compared on identical evidence. The first arm is
+   * the baseline and also fills the row's `answer`.
+   */
+  answerArms?: ReadonlyArray<{ name: string; answer: AnswerFn }>;
+  answerRepeats?: number;
   /** Judge an answer's meaning against the expected passage (answer-judge.ts); the verdict only enters the receipt. */
   judgeAnswer?: (question: string, expected: string, answer: string) => Promise<'correct' | 'partial' | 'wrong' | null>;
   /** How many chunks an item has in its store (undefined when unknown). */
@@ -284,24 +348,43 @@ export async function runPassageEval(input: {
     };
     const packedIds = needed.flatMap((_, index) => original.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
     const seatedIds = needed.flatMap((_, index) => pack.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
-    let citedIds: number[] | undefined;
-    let answer: PassageAnswer | undefined;
-    if (input.answer) {
-      step('answer');
+    const citedByAnswer = new WeakMap<PassageAnswer, number[]>();
+    const answerWith = async (ask: AnswerFn): Promise<PassageAnswer> => {
       const answerStarted = performance.now();
       try {
-        const result = await input.answer(question, pack);
-        citedIds = needed.flatMap((_, index) => result.citations.some(citation =>
+        const result = await ask(question, pack);
+        const citedIds = needed.flatMap((_, index) => result.citations.some(citation =>
           pack.candidates.some(candidate => candidate.provenance.sourceItem.providerItemId === citation.provenance.sourceItem.providerItemId
             && resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds)
               === resolveCitationCorpusId(candidate.provenance, detail.pack.candidates, detail.candidateCorpusIds)
             && matchingExpected(candidate, index))) ? [index + 1] : []);
         const answerMs = performance.now() - answerStarted;
-        answer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs, answerChars: result.answer.length, citations: result.citations.length, ...(seated ? { seat: seated } : {}) };
+        const graded: PassageAnswer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs, answerChars: result.answer.length, citations: result.citations.length, ...(seated ? { seat: seated } : {}) };
         const expectedText = (question.expectedEvidence ?? []).map(item => item.quote).filter(Boolean).join('\n') || (question.expectedAnswerContains ?? []).join('; ');
-        if (input.judgeAnswer && expectedText) answer.meaning = await input.judgeAnswer(question.question, expectedText, result.answer);
-      } catch (error) { answer = { outcome: 'failed', code: failureCode(error) ?? 'UNKNOWN' }; }
+        if (input.judgeAnswer && expectedText) graded.meaning = await input.judgeAnswer(question.question, expectedText, result.answer);
+        citedByAnswer.set(graded, citedIds);
+        return graded;
+      } catch (error) { return { outcome: 'failed', code: failureCode(error) ?? 'UNKNOWN' }; }
+    };
+    let answer: PassageAnswer | undefined;
+    let arms: Record<string, PassageAnswer[]> | undefined;
+    if (input.answerArms?.length) {
+      step('answer');
+      arms = Object.fromEntries(input.answerArms.map(arm => [arm.name, []]));
+      // The arm that goes first rotates by question and repeat, so no arm
+      // always answers on a warm or a cold model.
+      for (let repeat = 0; repeat < (input.answerRepeats ?? 1); repeat++) {
+        for (let turn = 0; turn < input.answerArms.length; turn++) {
+          const arm = input.answerArms[(turn + position + repeat) % input.answerArms.length]!;
+          arms[arm.name]!.push(await answerWith(arm.answer));
+        }
+      }
+      answer = arms[input.answerArms[0]!.name]![0];
+    } else if (input.answer) {
+      step('answer');
+      answer = await answerWith(input.answer);
     }
+    const citedIds = answer ? citedByAnswer.get(answer) : undefined;
     const expectedStores = (question.expectedEvidence ?? []).map(e => stores.get(e.corpusId));
     const answerable = question.shape !== 'coverage_negative';
     const identities = (question.expectedEvidence ?? []).flatMap(expected => [expected, ...(expected.alternates ?? [])]);
@@ -328,7 +411,7 @@ export async function runPassageEval(input: {
       tiers: expectedStores.length ? [...new Set(expectedStores.map((store, i) => store?.tier ?? question.expectedEvidence![i]!.corpusId.split('.')[0]!))] : ['unknown'],
       seatsFilled: pack.candidates.length, answerable, object: score(objectRank, ks), passage: score(passageRank, ks),
       ...(funnel ? { funnel } : {}), ...(judge ? { judge } : {}),
-      ...(answer ? { answer } : {}),
+      ...(answer ? { answer } : {}), ...(arms ? { arms } : {}),
       ...(needed.length > 1 ? { neededEvidence: { needed: needed.length, packed: packedIds.length, seated: seatedIds.length, packedIds, seatedIds,
         ...(citedIds ? { cited: citedIds.length, citedIds } : {}) } } : {}),
       ...(detail.rerank ? { rerank: { outcome: detail.rerank.outcome, scored: detail.rerank.scored, promoted: detail.rerank.promoted, elapsedMs: detail.rerank.elapsedMs } } : {}),
@@ -342,6 +425,7 @@ export async function runPassageEval(input: {
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
     maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off',
     ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth, semanticPoolSeats: rerankPoolSemanticSeats() } : {}),
+    ...(conversationWindowPerSide() > 0 ? { conversationWindow: conversationWindowPerSide() } : {}),
     storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
     summary: summaries(rows, ks),
     ...(split === 'open' ? { questions: rows } : {}),
@@ -539,7 +623,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
       if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer' || key === '--judge-answers') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
-      if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes'].includes(key!)) throw new Error('Unsupported passage eval option.');
+      if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes', '--answer-arms', '--answer-repeats'].includes(key!)) throw new Error('Unsupported passage eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Passage eval option requires a value.');
       values.set(key!, value);
@@ -549,6 +633,12 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   if (split !== 'open' && split !== 'sealed') throw new Error('Split must be open or sealed.');
   const provider = values.get('--analyst-provider') ?? process.env.OLYMPUS_EVAL_ANALYST_PROVIDER ?? 'local';
   if (provider !== 'local' && provider !== 'venice') throw new Error('Analyst provider must be local or venice.');
+  // --answer-arms off,first,pass: the Analyst's reading-notes arms (#1590), each answering the same fitted pack.
+  const armNames = values.get('--answer-arms')?.split(',').map(name => name.trim()).filter(Boolean) as AnalystReadingNotes[] | undefined;
+  if (armNames && (!armNames.length || new Set(armNames).size !== armNames.length || armNames.some(name => !['off', 'first', 'pass'].includes(name)))) throw new Error('Answer arms are a list of off, first and pass, each once.');
+  if (armNames) values.set('--answer', 'yes');
+  if (values.has('--answer-repeats') && !armNames) throw new Error('--answer-repeats needs --answer-arms.');
+  const answerRepeats = positiveInteger(values.get('--answer-repeats'), 1);
   if (values.has('--answer') && provider !== 'local') throw Object.assign(new Error('--answer requires a local Analyst.'), { code: 'LOCAL_MODEL_REQUIRED' });
   const dataset: unknown = JSON.parse(readFileSync(datasetPath ?? 'eval/private/passage-questions.json', 'utf8'));
   validatePassageDataset(dataset);
@@ -560,7 +650,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   const cleanups: Array<() => void> = [];
   try {
     const config = loadConfig();
-    let answer: ((question: EvalQuestion, pack: EvidencePack) => Promise<AnalystResult>) | undefined;
+    let answer: AnswerFn | undefined;
+    let answerArms: Array<{ name: string; answer: AnswerFn }> | undefined;
     if (values.has('--answer')) {
       enter('load_analyst');
       // Same local profile/lane selection as eval:real; no separate model override.
@@ -576,8 +667,12 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       } catch (error) {
         throw Object.assign(new Error('Local Analyst is unavailable.'), { code: failureCode(error) ?? 'LOCAL_MODEL_UNAVAILABLE' });
       }
-      const analyst = createAnalyst(createDelphiAnalystModel(delphi, lane ? { lane } : { profile }), { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
-      answer = (_question, pack) => analyst.analyze(withPromptBudget(pack, promptBytes!), { localOnly: true });
+      const answerBy = (readingNotes: AnalystReadingNotes): AnswerFn => {
+        const analyst = createAnalyst(createDelphiAnalystModel(delphi, lane ? { lane } : { profile }), { auditSuspiciousDrafts: true, evidenceFormat: 'compact', readingNotes });
+        return (_question, pack) => analyst.analyze(withPromptBudget(pack, promptBytes!), { localOnly: true });
+      };
+      answer = answerBy('off');
+      if (armNames) answerArms = armNames.map(name => ({ name, answer: answerBy(name) }));
     }
     enter('load_embedding');
     const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(config, process.env) });
@@ -610,7 +705,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       ...(probe ? { probeLanes: probe } : {}),
       ...(judge ? { judgeQuestion: judge } : {}),
       ...(judgeAnswer ? { judgeAnswer } : {}),
-      ...(answer ? { answer } : {}),
+      ...(answerArms ? { answerArms, answerRepeats } : answer ? { answer } : {}),
       itemChunks: itemChunks.count,
       onProgress: (index, total, step) => enter(`question ${index}/${total}: ${step}`),
     });

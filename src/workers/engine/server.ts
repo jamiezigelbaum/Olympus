@@ -4905,6 +4905,8 @@ export async function main(): Promise<void> {
   // does: in the split's front that is through the forwarding layer, so a
   // write the background owns (a privacy item raise, a watch) goes there.
   // Bound to the front's routes once they exist, below.
+  // Deep read (runtime/deep-read-jobs.ts), built below once the answer lanes and the inbox exist.
+  let deepReadJobs: import('./runtime/deep-read-jobs.ts').DeepReadJobs | undefined;
   let inProcessFetch: (request: Request) => Promise<Response> = (request) => worker.fetch(request);
   const workerFetchInProcess = (request: Request): Promise<Response> => inProcessFetch(request);
   const worker = createEmailSourceWorker({
@@ -4922,6 +4924,7 @@ export async function main(): Promise<void> {
     },
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
+    deepRead: () => deepReadJobs,
     sourceAnswerReleaseCheck: createReleaseTierCheck(
       tierScopes,
       () => secureDerivativeDefault ?? 'allow',
@@ -5534,6 +5537,34 @@ export async function main(): Promise<void> {
   // retrieval through the same scoped adapters with only the built-in
   // embedding model, synthesis by the built-in model; no connector query, no
   // cloud route, and never zkAPI.
+  if (sourceAnswerLanes) {
+    // Deep read: the owner's private model from the shared chooser reads a
+    // whole document or conversation; never the built-in model (it refuses
+    // instead), and the answer lands in Private answers.
+    const { createDeepReadJobs } = await import('./runtime/deep-read-jobs.ts');
+    const { localAnalystPromptBudget, localAnalystWindow } = await import('../source-index/local-analyst-window.ts');
+    const { maxTokensForChars } = await import('../../core/analyst-delphi.ts');
+    const { DEFAULT_ANALYST_MAX_OUTPUT_CHARS } = await import('../../core/analyst.ts');
+    const deepReadLanes = sourceAnswerLanes;
+    deepReadJobs = createDeepReadJobs({
+      stores: () => connectorStores,
+      lanes: () => deepReadLanes({
+        question: '', retrieval_mode: 'hybrid', include_internal: true, include_secure_local: true, include_secure_local_content: true,
+      }, 'private_search'),
+      model: async () => {
+        const route = await localPrivateRoute?.();
+        if (!route) return undefined;
+        if ('unavailable' in route) return route;
+        const analyst = setLocalAnalystWindow(createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }),
+          route.windowTokens > 0 ? { windowTokens: route.windowTokens, source: 'server' } : undefined);
+        const budget = localAnalystPromptBudget(undefined, localAnalystWindow(analyst), maxTokensForChars(DEFAULT_ANALYST_MAX_OUTPUT_CHARS));
+        return { analyst, modelId: route.modelId, promptBytes: budget.bytes };
+      },
+      inbox: waitingQuestionStore,
+      judgeBusy: () => classificationBusy(),
+      log: (message) => console.warn(message),
+    });
+  }
   if (sourceAnswerLanes) {
     const { createLocalAnswerPath, createLocalPrivateAnswers } = await import('./runtime/local-private-answers.ts');
     const { privateVeniceMembers, createVeniceInboxAnswer } = await import('./runtime/venice-inbox-answer.ts');
