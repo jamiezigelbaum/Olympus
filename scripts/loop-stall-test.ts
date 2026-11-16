@@ -462,6 +462,16 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify(DOMAINS.map(domain => ({ dbPath: storePath(dir, domain), corpusId: corpus(domain), family: 'file', trustDomain: domain }))),
   };
   const children: ReturnType<typeof Bun.spawn>[] = [];
+  // A stopped job leaves its engines orphaned and still writing the fixture (43847681247, 16 Nov 2026). Kill any a previous
+  // run left, and kill ours when this run is signalled.
+  const pidFile = join(dir, 'engine-pids.json');
+  try {
+    for (const pid of JSON.parse(readFileSync(pidFile, 'utf8')) as number[]) {
+      try { if (readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('workers/engine/server.ts')) { process.kill(pid, 'SIGKILL'); console.error(`Killed engine ${pid} a stopped run left.`); } } catch { /* gone */ }
+    }
+  } catch { /* no earlier run */ }
+  const killChildren = (signal: NodeJS.Signals) => { for (const child of children) child.kill('SIGKILL'); process.exit(128 + (signal === 'SIGINT' ? 2 : signal === 'SIGHUP' ? 1 : 15)); };
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.once(signal, () => killChildren(signal));
   const output: Record<string, string> = { background: '', front: '' };
   // The engine's SQLite settings and WAL lines, kept whole (output keeps only its tail), each with when it arrived.
   const sqliteLines: Array<{ at: string; role: string; line: string }> = [];
@@ -498,6 +508,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     for (const role of ['background', 'front']) {
       const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], { env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_MAIN_THREAD_SQL_LOG: join(metrics, `${role}.sql.jsonl`), OLYMPUS_CPU_SAMPLE_LOG: join(metrics, `${role}.cpu.jsonl`) }, stdout: 'pipe', stderr: 'pipe' });
       children.push(child);
+      writeFileSync(pidFile, JSON.stringify(children.map(entry => entry.pid)));
       for (const stream of [child.stdout, child.stderr]) pumps.push((async () => { for await (const chunk of stream as ReadableStream<Uint8Array>) { const text = new TextDecoder().decode(chunk); keepSqliteLines(role, text); output[role] = (output[role]! + text).slice(-100_000); } })());
     }
     const deadline = Date.now() + seconds * 1000;
