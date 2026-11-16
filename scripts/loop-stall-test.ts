@@ -344,6 +344,14 @@ function pressureSummary(samples: Array<{ at: string } & Record<string, number |
   const stalled = samples.filter(sample => keys.some(key => Number(sample[key] ?? 0) >= 100));
   return { readable: keys.length > 0, worst_ms_per_second: worst, seconds_sampled: samples.length, seconds_with_stall_100ms: stalled.length, stalled_seconds: stalled.slice(0, 300) };
 }
+/** Each fixture file's WAL size in bytes (0 when it has none), so a WAL the fixture carries in shows apart from one a run builds. */
+function walSizes(dir: string): Record<string, number> {
+  const sizes: Record<string, number> = {};
+  for (const name of readdirSync(dataDir(dir)).filter(entry => entry.endsWith('.sqlite'))) {
+    try { sizes[name] = statSync(join(dataDir(dir), `${name}-wal`)).size; } catch { sizes[name] = 0; }
+  }
+  return sizes;
+}
 function coldFiles(dir: string) {
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite'));
   for (const path of files) for (const suffix of ['', '-wal']) {
@@ -400,7 +408,9 @@ async function run(dir: string, seconds: number, memoryMax: string) {
   const started = Date.now();
   let finished = false;
   const pressureSampler = samplePressure();
+  let walAtOpen: Record<string, number> = {};
   try {
+    walAtOpen = walSizes(dir);
     coldFiles(dir);
     for (const role of ['background', 'front']) {
       const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], { env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_MAIN_THREAD_SQL_LOG: join(metrics, `${role}.sql.jsonl`) }, stdout: 'pipe', stderr: 'pipe' });
@@ -464,7 +474,7 @@ async function run(dir: string, seconds: number, memoryMax: string) {
   const pass = gate({ background, front, slow_sql, workload_ok }, allowed);
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', sha, pass, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, pressure: pressureSummary(pressureSampler.samples),
-    sqlite: { settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200), wal: sqliteLines.filter(entry => entry.line.includes('sqlite wal:')).slice(0, 2000) } };
+    sqlite: { wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walSizes(dir), settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200), wal: sqliteLines.filter(entry => entry.line.includes('sqlite wal:')).slice(0, 2000) } };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
   console.log(JSON.stringify(receipt));
   console.log(`${pass ? 'PASS' : 'FAIL'}: background ${background.max_ms} ms (<250), front ${front.max_ms} ms (<100), ${slow_sql.length} slow SQL statements, workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}`);
