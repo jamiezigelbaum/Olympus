@@ -243218,7 +243218,8 @@ function readEngineStatusSnapshot(path, now = () => Date.now()) {
 }
 function startEngineStatusPublisher(options) {
   const now = options.now ?? (() => new Date);
-  let warned = false;
+  let failures = 0;
+  let saidAtMs = 0;
   const publish = () => {
     try {
       writeEngineStatusSnapshot(options.path, {
@@ -243227,11 +243228,18 @@ function startEngineStatusPublisher(options) {
         written_at: now().toISOString(),
         ...options.collect()
       });
-      warned = false;
+      if (failures > 0)
+        options.log?.(`[engine-split] status snapshot written again after ${failures} failed attempt(s)`);
+      failures = 0;
     } catch (error) {
-      if (!warned)
-        options.log?.(`[engine-split] status snapshot not written: ${error instanceof Error ? error.message : "unknown error"}`);
-      warned = true;
+      failures += 1;
+      const atMs = now().getTime();
+      if (failures === 1 || atMs - saidAtMs >= 60000) {
+        saidAtMs = atMs;
+        const code = error?.code;
+        const runtime = error instanceof TypeError || error instanceof RangeError;
+        options.log?.(`[engine-split] status snapshot not written (${failures} attempt(s) in a row): ${error instanceof Error ? error.name : "unknown error"}${typeof code === "string" ? ` ${code}` : ""}${runtime ? `: ${error.message.slice(0, 120)}` : ""}`);
+      }
     }
   };
   publish();
