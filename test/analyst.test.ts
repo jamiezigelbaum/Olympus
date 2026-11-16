@@ -1197,7 +1197,7 @@ describe('Analyst capability', () => {
     const result = await analyst.analyze(
       pack('Where is the lake house?', [], {
         searchedCorpora: ['internal.drive.docs', 'internal.email'],
-        // A lane that timed out on one formulation but was searched on another counts as searched.
+        // A store still being read is named even when a usable part of it reached the search.
         skippedCorpora: [
           { corpusId: 'internal.email', reason: 'lane_timeout' },
           { corpusId: 'internal.whatsapp.messages', reason: 'lane_timeout' },
@@ -1207,7 +1207,7 @@ describe('Analyst capability', () => {
     );
 
     expect(result.answer).toContain('no matching evidence for this question in the sources searched');
-    expect(result.answer).toContain('ran out of time searching 1 source, so the answer may still be there');
+    expect(result.answer).toContain('ran out of time searching 2 sources, so the answer may still be there');
     expect(result.unanswered).toContain(laneTimeoutGap('internal.whatsapp.messages'));
     expect(result.unanswered.some((u) => u.includes('No matching evidence'))).toBe(true);
   });

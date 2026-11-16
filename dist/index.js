@@ -694,6 +694,17 @@ function resolveLinuxEngineLayout(env = process.env) {
     throw new Error(`${present[0]} belongs to another home.`);
   return receipt?.layout ?? rawLayout(env);
 }
+function linuxEngineEnvironment(layout) {
+  return {
+    HOME: layout.home,
+    XDG_CONFIG_HOME: layout.configHome,
+    XDG_DATA_HOME: layout.dataHome,
+    XDG_STATE_HOME: layout.stateHome,
+    XDG_CACHE_HOME: layout.cacheHome,
+    XDG_RUNTIME_DIR: layout.runtimeHome,
+    OLYMPUS_SOVEREIGNTY_CONFIG: layout.sovereigntyPath
+  };
+}
 function legacyLinuxManifestTemporaryPid(name) {
   const match = name.match(/^consult\/vocabulary\/manifest[.]json[.]([1-9][0-9]*)[.]tmp$/);
   if (!match)
@@ -26867,7 +26878,7 @@ function engineServicePaths(options = {}) {
   }
   const l = resolveLinuxEngineLayout(env);
   return {
-    dataEnv: { HOME: l.home, XDG_DATA_HOME: l.dataHome, XDG_CONFIG_HOME: l.configHome, OLYMPUS_ENGINE_HOST: "1" },
+    dataEnv: { ...linuxEngineEnvironment(l), OLYMPUS_ENGINE_HOST: "1" },
     linux: l,
     label: "olympus-engine.service",
     plistPath: l.unitPath,

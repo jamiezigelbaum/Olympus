@@ -15980,6 +15980,9 @@ function noteSourceIndexReadProgress() {
     return;
   report();
 }
+function currentSourceIndexReadProgress() {
+  return progress2.getStore();
+}
 
 // src/core/source-size-limits.ts
 import { createHash as createHash6 } from "node:crypto";
@@ -19279,7 +19282,7 @@ function readOnPool(dbPath, read, options = {}) {
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve, reject) => {
-    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, enqueuedAtMs: clock2.now(), report };
+    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, started: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
     if (Number.isFinite(deadlineAtMs))
       job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
@@ -19388,6 +19391,7 @@ function dispatch() {
       queues.delete(store);
     job.thread = reader;
     job.sentAtMs = clock2.now();
+    job.started?.();
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
