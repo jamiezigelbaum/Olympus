@@ -261,7 +261,7 @@ describe('review round 2', () => {
     const openSync = fs.openSync;
     const refuse = spyOn(fs, 'openSync').mockImplementation(((path: fs.PathLike, flags?: fs.OpenMode, mode?: fs.Mode | null) => {
       if (path === target.file && flags === 'r+') throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES', name: 'Error' });
-      return openSync(path, flags, mode);
+      return openSync(path, flags ?? 'r', mode);
     }) as typeof fs.openSync);
     let failed;
     try {

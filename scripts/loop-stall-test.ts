@@ -42,6 +42,7 @@ import { defaultFileExtractionJobsDbPath } from '../src/workers/file-extraction/
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { startPacedStatusRecount } from '../src/workers/engine/status-recount.ts';
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
+import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
 
 const VERSION = 5;
 // Sized from 10k-item seeds to match Telegram's store bytes per identity.
@@ -506,6 +507,8 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const requests: Promise<void>[] = [];
   const forwarded: Array<{ ms: number; status: number; error?: unknown }> = [];
   const asks: Array<{ ms: number; status: number; evidence_ms: unknown }> = [];
+  const acks: Array<{ at: string; ms: number; status: number; loop_held_ms?: number; error?: string }> = [];
+  const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
   const errors: string[] = [];
   const requestErrors: string[] = [];
   // Steady: every run starts with the WALs folded in, as on a box in use. Boot after upgrade: one large WAL left on the ledger.
@@ -545,9 +548,20 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
       const json = await response.json() as Record<string, unknown>;
       return { ms: performance.now() - start, status: response.status, json };
     };
-    let nextAsk = Date.now(), nextRead = Date.now(), askSequence = 0;
+    let nextAsk = Date.now(), nextRead = Date.now(), nextAck = Date.now(), askSequence = 0, ackSequence = 0;
+    const statusPath = engineStatusSnapshotPath(env);
     while (Date.now() < deadline) {
       if (children.some(child => child.exitCode !== null)) throw new Error('Engine exited during measurement');
+      if (Date.now() >= nextAck) {
+        // Command acknowledgement on the background socket, timed to the 202, and the status snapshot's age, once a second.
+        nextAck += 1000;
+        const start = performance.now();
+        requests.push(fetch('http://localhost/engine/commands', { unix: env.OLYMPUS_ENGINE_BACKGROUND_SOCKET, method: 'POST', headers: { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: `loopstall-ack-${ackSequence++}`, command: { kind: 'dashboard_samples', samples: [] } }), signal: AbortSignal.timeout(60_000) } as RequestInit)
+          .then(async response => { const json = await response.json().catch(() => ({})) as Record<string, unknown>; acks.push({ at: new Date().toISOString(), ms: Math.round(performance.now() - start), status: response.status, ...(typeof json.loop_held_ms === 'number' ? { loop_held_ms: json.loop_held_ms } : {}) }); })
+          .catch(error => { acks.push({ at: new Date().toISOString(), ms: Math.round(performance.now() - start), status: 0, error: error.message }); }));
+        try { const status = JSON.parse(readFileSync(statusPath, 'utf8')) as { written_at?: string; loop_held_ms?: number }; if (status.written_at) statusAges.push({ age_ms: Date.now() - Date.parse(status.written_at), ...(typeof status.loop_held_ms === 'number' ? { loop_held_ms: status.loop_held_ms } : {}) }); } catch { /* not written yet */ }
+      }
       if (Date.now() >= nextRead) {
         nextRead += 1000;
         requests.push(post('/v1/source/item/read', { selected_item: { corpus_id: corpus('internal'), family: 'file', provider: 'fixture', account_scope: 'synthetic', provider_item_id: '4', local_item_id: identity(4).localItemId } }).then(result => { forwarded.push({ ms: result.ms, status: result.status, ...(result.status === 200 ? {} : { error: result.json.error }) }); }).catch(error => { requestErrors.push(`forward: ${error.message}`); }));
@@ -594,6 +608,13 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
       try { const row = JSON.parse(line) as { at: string; freezes?: { count: number } }; return row.freezes?.count ? [{ role, at: row.at, freezes: row.freezes }] : []; } catch { return []; }
     });
   });
+  // Command acknowledgement (control thread, 540d012): every ack under 1 s, and the status snapshot never over 10 s old once written.
+  const ackOk = acks.filter(ack => ack.status === 202 || ack.status === 200);
+  const ackSummary = { count: acks.length, ok: ackOk.length, max_ms: Math.max(0, ...acks.map(ack => ack.ms)), over_1s: acks.filter(ack => ack.ms >= LOOP_STALL_LIMIT_MS || !(ack.status === 202 || ack.status === 200)).slice(0, 50),
+    max_loop_held_ms: Math.max(0, ...acks.map(ack => ack.loop_held_ms ?? 0)), status_max_age_ms: Math.max(0, ...statusAges.map(row => row.age_ms)), status_reads: statusAges.length,
+    status_max_loop_held_ms: Math.max(0, ...statusAges.map(row => row.loop_held_ms ?? 0)),
+    no_control_thread: /no control thread here|the control thread ended/.test(output.background ?? '') };
+  const ack_ok = ackOk.length > 0 && ackSummary.over_1s.length === 0 && ackSummary.status_max_age_ms <= 10_000 && !ackSummary.no_control_thread;
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
   const guards = sqliteGuards(walAtEnd, walLines.map(entry => entry.line));
@@ -601,7 +622,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const pass = options.quick ? background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS
     : gate({ background, front, workload_ok, wal_ok: guards.wal_ok });
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, pass_b: front.beats > 0 && front.max_ms < LOOP_STALL_LIMIT_MS && background.beats > 0 && background.max_ms < 30_000 && workload_ok && guards.wal_ok, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, pass_b: front.beats > 0 && front.max_ms < LOOP_STALL_LIMIT_MS && background.beats > 0 && background.max_ms < 30_000 && workload_ok && guards.wal_ok, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
@@ -633,6 +654,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   // Proposed scoring (b), printed beside today's (a) until the owner picks: the front at 1 s; the background on progress (no beat
   // over 30 s, the work completes, the WAL limit), its beats over 1 s reported by site above.
   const passB = front.beats > 0 && front.max_ms < LOOP_STALL_LIMIT_MS && background.beats > 0 && background.max_ms < 30_000 && workload_ok && guards.wal_ok;
+  console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ack_ok ? 'PASS' : 'FAIL'}`);
   console.log(`${options.runCase} scoring: (a) nothing over 1 s on either engine ${pass ? 'PASS' : 'FAIL'}; (b) front under 1 s, background under 30 s with the work done ${passB ? 'PASS' : 'FAIL'}`);
   console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));
   rmSync(runDir, { recursive: true, force: true });
