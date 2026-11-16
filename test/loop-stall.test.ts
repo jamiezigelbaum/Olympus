@@ -85,25 +85,22 @@ test('fixture rebuilds an old shape with substantial embedded Personal and Priva
   } finally { rmSync(fixture, { recursive: true, force: true }); }
 }, 60_000);
 
-// A red engine may never become green by adding an allowance or losing a
-// sampler/workload. The allowance was introduced empty and can only shrink.
-test('loop-stall gate enforces both strict budgets and fails closed', () => {
-  const allowed = JSON.parse(readFileSync(join(import.meta.dir, '../scripts/loop-stall-allowlist.json'), 'utf8'));
-  expect(allowed).toEqual([]);
-  const healthy = { background: { max_ms: 249, over_budget: 0, beats: 1 }, front: { max_ms: 99, over_budget: 0, beats: 1 }, slow_sql: [], workload_ok: true };
-  expect(gate(healthy, allowed)).toBe(true);
-  expect(gate({ ...healthy, background: { ...healthy.background, max_ms: 250 } }, allowed)).toBe(false);
-  expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 100 } }, allowed)).toBe(false);
-  expect(gate({ ...healthy, background: { ...healthy.background, beats: 0 } }, allowed)).toBe(false);
-  expect(gate({ ...healthy, workload_ok: false }, allowed)).toBe(false);
-  expect(gate({ ...healthy, slow_sql: [{ sql_id: 'unexpected' }] }, allowed)).toBe(false);
+// A red engine may never become green by losing a sampler or a workload.
+test('loop-stall gate passes on worst stalls under 1 s with the workload complete and no WAL over the limit', () => {
+  const healthy = { background: { max_ms: 999, over_budget: 40, beats: 1 }, front: { max_ms: 999, over_budget: 40, beats: 1 }, workload_ok: true, wal_ok: true };
+  expect(gate(healthy)).toBe(true);
+  expect(gate({ ...healthy, background: { ...healthy.background, max_ms: 1000 } })).toBe(false);
+  expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 1000 } })).toBe(false);
+  expect(gate({ ...healthy, background: { ...healthy.background, beats: 0 } })).toBe(false);
+  expect(gate({ ...healthy, workload_ok: false })).toBe(false);
+  expect(gate({ ...healthy, wal_ok: false })).toBe(false);
 });
 
-test('loop-stall gate fails on a WAL over 64 MB at the end or a background read held over 2 s, and only lists shared reads', () => {
+test('loop-stall gate fails on a WAL over 64 MB at the end and lists reads held over 2 s', () => {
   const line = (label: string, ms: number, lane: string) => `[olympus] sqlite wal: ${label} wal_bytes=1 oldest_read_ms=${ms} oldest_read_lane=${lane} oldest_read_site=async`;
-  expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 }, [line('a', 2000, 'background'), line('a', 9000, 'shared')])).toMatchObject({ ok: true, other_reads_over_2s: [{ ms: 9000, lane: 'shared' }] });
-  expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 + 1 }, []).ok).toBe(false);
-  expect(sqliteGuards({}, [line('internal', 2001, 'background'), line('internal', 4000, 'background')])).toMatchObject({ ok: false, background_reads_over_2s: [{ label: 'internal', ms: 4000 }] });
+  expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 }, [line('a', 2000, 'background'), line('a', 9000, 'shared')])).toMatchObject({ wal_ok: true, other_reads_over_2s: [{ ms: 9000, lane: 'shared' }] });
+  expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 + 1 }, []).wal_ok).toBe(false);
+  expect(sqliteGuards({}, [line('internal', 2001, 'background'), line('internal', 4000, 'background')])).toMatchObject({ wal_ok: true, background_reads_over_2s: [{ label: 'internal', ms: 4000 }] });
 });
 
 // A completed tick alone misses a freeze still in progress at shutdown.

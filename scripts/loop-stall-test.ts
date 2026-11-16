@@ -288,9 +288,15 @@ export async function attachEngineFixture(stores: LocalConnectorStore[], role: s
 }
 
 interface Loop { max_ms: number; over_budget: number; beats: number }
-export function gate(input: { background: Loop; front: Loop; slow_sql: Array<{ sql_id: string }>; workload_ok: boolean }, allowed: readonly string[]) {
-  return input.workload_ok && input.background.beats > 0 && input.front.beats > 0 && input.background.max_ms < 250 && input.front.max_ms < 100
-    && input.slow_sql.every(row => allowed.includes(row.sql_id));
+/**
+ * The pass bar (owner, 16 Nov 2026: "If the dashboard freezes are extremely short, like less than a second or something,
+ * it's not much of a priority"): the worst loop stall under 1 s on both engines, with the workload complete. The 250/100 ms
+ * budgets, slow statements and long reads are reported as numbers and no longer fail a run; a WAL over the limit still does.
+ */
+export const LOOP_STALL_LIMIT_MS = 1_000;
+export function gate(input: { background: Loop; front: Loop; workload_ok: boolean; wal_ok: boolean }) {
+  return input.workload_ok && input.wal_ok && input.background.beats > 0 && input.front.beats > 0
+    && input.background.max_ms < LOOP_STALL_LIMIT_MS && input.front.max_ms < LOOP_STALL_LIMIT_MS;
 }
 export function memoryMaxBytes(value: string): number {
   const match = /^(\d+)([KMGT]?)$/i.exec(value);
@@ -421,7 +427,7 @@ export function sqliteGuards(walAtEnd: Record<string, number>, walLines: readonl
   }, new Map<string, typeof reads[number]>()).values()].sort((a, b) => b.ms - a.ms);
   const background_reads_over_2s = longest(lane => lane === 'background');
   const other_reads_over_2s = longest(lane => lane !== 'background');
-  return { ok: wal_over_limit.length === 0 && background_reads_over_2s.length === 0, wal_over_limit, background_reads_over_2s, other_reads_over_2s };
+  return { wal_ok: wal_over_limit.length === 0, wal_over_limit, background_reads_over_2s, other_reads_over_2s };
 }
 function coldFiles(dir: string) {
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite'));
@@ -564,7 +570,6 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   if (existsSync(join(dir, 'workloads.json'))) workloads = JSON.parse(readFileSync(join(dir, 'workloads.json'), 'utf8'));
   const workload_ok = finished && errors.length === 0 && workloads.failures.length === 0 && workloads.sync_items > 0 && workloads.embed_passes_started > 0 && workloads.judge_passes > 0 && workloads.recounts_started > 0
     && modelCalls.judge > 0 && asks.some(ask => ask.status === 200 && typeof ask.evidence_ms === 'number') && forwarded.some(read => read.status === 200);
-  const allowed = JSON.parse(readFileSync(join(import.meta.dir, 'loop-stall-allowlist.json'), 'utf8')) as string[];
   // The engine's own CPU sampler (every 30 s): each loop beat over 1 s, with the frames sampled inside it.
   const cpuFreezes = ['background', 'front'].flatMap(role => {
     const path = join(metrics, `${role}.cpu.jsonl`);
@@ -577,7 +582,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
   const guards = sqliteGuards(walAtEnd, walLines.map(entry => entry.line));
-  const pass = gate({ background, front, slow_sql, workload_ok }, allowed) && guards.ok;
+  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok });
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
@@ -586,7 +591,13 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   // last-run.json stays on the host and the next run replaces it; an engine that died puts its last words in the job log too.
   if (errors.length) for (const role of ['background', 'front']) console.error(`--- ${role} engine log tail ---\n${output[role]!.slice(-6_000)}`);
   console.log(JSON.stringify(receipt));
-  console.log(`${pass ? 'PASS' : 'FAIL'} (${options.runCase}): background ${background.max_ms} ms (<250), front ${front.max_ms} ms (<100), ${slow_sql.length} slow SQL statements, workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}, WALs over 64 MB at end ${guards.wal_over_limit.length}, background reads over 2 s ${guards.background_reads_over_2s.length}`);
+  // One line per run (plan, 16 Nov 2026): worst stall and its site on each engine, then pass or fail.
+  const worstSite = (role: string) => {
+    const worst = cpuFreezes.filter(row => row.role === role).sort((a, b) => (b.freezes as { maxMs?: number }).maxMs! - (a.freezes as { maxMs?: number }).maxMs!)[0]?.freezes as { self?: [string, number][]; total?: [string, number][] } | undefined;
+    return worst?.self?.[0]?.[0] ?? worst?.total?.[0]?.[0] ?? 'no sample';
+  };
+  console.log(`${options.runCase}: background worst ${Math.round(background.max_ms)} ms at ${worstSite('background')}; front worst ${Math.round(front.max_ms)} ms at ${worstSite('front')}; ${pass ? 'PASS' : 'FAIL'}`
+    + ` (bar ${LOOP_STALL_LIMIT_MS} ms; over 250/100 ms: ${background.over_budget}/${front.over_budget}; slow SQL ${slow_sql.length}; workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}; WALs over 64 MB at end ${guards.wal_over_limit.length}; background reads over 2 s ${guards.background_reads_over_2s.length})`);
   rmSync(runDir, { recursive: true, force: true });
   return pass;
 }
