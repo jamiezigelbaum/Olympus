@@ -30,6 +30,7 @@ import type {
   VlmDescribeResult,
 } from '../types.ts';
 import { IMAGE_MIME_TYPES, normalizeExtractedText } from './bounded-text.ts';
+import { idleClock, readChatCompletion } from './model-stream.ts';
 import {
   classifyRemoteVlmEndpointError,
   requireApprovedRemoteExtractionBaseUrl,
@@ -37,6 +38,10 @@ import {
 } from './remote-vlm.ts';
 
 export const DEFAULT_VENICE_EXTRACTION_MODEL = 'kimi-k3';
+/**
+ * The vision call's stall window: it stops only after Venice sends nothing
+ * (no headers, no streamed token) for this long (model-stream.ts).
+ */
 export const DEFAULT_VENICE_EXTRACTION_TIMEOUT_MS = 180_000;
 
 export interface VeniceVlmClientOptions {
@@ -91,7 +96,7 @@ export class VeniceVlmClient implements VlmClient {
       throw new Error('Venice extraction requires an image MIME type.');
     }
 
-    const timeout = requestTimeout(this.timeoutMs);
+    const timeout = idleClock(this.timeoutMs);
     try {
       assertSecureAnalystPoolModelIdAllowed('file-extraction-remote', this.model);
       const privacyCategory = await this.resolvePrivacyCategory(this.model, timeout.signal);
@@ -107,6 +112,7 @@ export class VeniceVlmClient implements VlmClient {
       }
 
       await request.assertRemoteEgressAllowed?.();
+      timeout.touch();
       const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -114,10 +120,12 @@ export class VeniceVlmClient implements VlmClient {
           Connection: 'close',
           Authorization: `Bearer ${this.apiKey}`,
         },
-        ...(timeout.signal ? { signal: timeout.signal } : {}),
+        signal: timeout.signal,
         body: JSON.stringify({
           model: this.model,
           temperature: 0,
+          // Streamed so the clock counts only silence, never a long answer still arriving.
+          stream: true,
           max_completion_tokens: request.maxTokens ?? 900,
           venice_parameters: {
             enable_web_search: 'off',
@@ -154,7 +162,7 @@ export class VeniceVlmClient implements VlmClient {
       }
 
       const text = normalizeExtractedText(
-        parseOpenAICompatibleResponseText(await response.json()),
+        parseOpenAICompatibleResponseText(await readChatCompletion(response, timeout)),
       ).slice(0, request.maxOutputChars);
       return {
         text,
@@ -182,16 +190,6 @@ function extractionWarning(category: VenicePrivacyCategory): string {
   if (category === 'tee') return 'venice_tee_extraction';
   if (category === 'e2ee') return 'venice_e2ee_extraction';
   return 'venice_unapproved_extraction';
-}
-
-function requestTimeout(timeoutMs: number): { signal?: AbortSignal; clear: () => void } {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return { clear: () => undefined };
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  return {
-    signal: controller.signal,
-    clear: () => clearTimeout(timeout),
-  };
 }
 
 function parseOpenAICompatibleResponseText(value: unknown): string {

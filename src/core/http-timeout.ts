@@ -78,6 +78,7 @@ export async function fetchWithBodyDeadline(
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  mode: { idle?: boolean } = {},
 ): Promise<Response> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return fetchImpl(url, init);
   const controller = new AbortController();
@@ -103,14 +104,20 @@ export async function fetchWithBodyDeadline(
   // receives the caller's reason, while an uncooperative peer still gets the
   // same deadline error as before.
   const deadline = new AbortController();
-  timer = setTimeout(() => {
-    timer = undefined;
-    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
-    error.name = 'AbortError';
-    controller.abort(error);
-    deadline.abort(error);
-  }, timeoutMs);
-  (timer as { unref?: () => void }).unref?.();
+  const arm = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = undefined;
+      const error = new Error(mode.idle
+        ? `Request made no progress for ${timeoutMs}ms.`
+        : `Request exceeded its ${timeoutMs}ms deadline.`);
+      error.name = 'AbortError';
+      controller.abort(error);
+      deadline.abort(error);
+    }, timeoutMs);
+    (timer as { unref?: () => void }).unref?.();
+  };
+  arm();
 
   let response: Response;
   try {
@@ -134,6 +141,8 @@ export async function fetchWithBodyDeadline(
           return;
         }
         if (value) stream.enqueue(value);
+        // An idle clock restarts on every chunk: a slow download that keeps arriving is never cut.
+        if (mode.idle && timer !== undefined) arm();
       } catch (error) {
         settle();
         // Fail the reader first: an upstream whose cancel never settles must
@@ -153,6 +162,20 @@ export async function fetchWithBodyDeadline(
     statusText: response.statusText,
     headers: response.headers,
   });
+}
+
+/**
+ * `fetch` that gives up only on a stall: no response for `idleMs`, or no new
+ * body bytes for `idleMs` (owner rule, 16 Nov 2026: a download that is still
+ * arriving is never cancelled). Otherwise the same as `fetchWithBodyDeadline`.
+ */
+export function fetchWithIdleDeadline(
+  fetchImpl: TimeoutFetch,
+  url: string,
+  init: RequestInit,
+  idleMs: number,
+): Promise<Response> {
+  return fetchWithBodyDeadline(fetchImpl, url, init, idleMs, { idle: true });
 }
 
 export function isAbortError(error: unknown): boolean {

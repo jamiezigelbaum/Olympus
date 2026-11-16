@@ -52,7 +52,12 @@ import { missingBytesFailure } from './text.ts';
 
 export const TRANSCRIPTION_EXTRACTOR_KIND = 'whisper_transcription';
 export const TRANSCRIPTION_EXTRACTOR_VERSION = '2026-06-12';
-export const DEFAULT_TRANSCRIBE_TIMEOUT_MS = 1_800_000;
+/**
+ * The transcription command's stall window, not a total clock: whisper is
+ * stopped only after five minutes with no output and no CPU use
+ * (command-runner.ts). A long recording that keeps being read runs to the end.
+ */
+export const DEFAULT_TRANSCRIBE_TIMEOUT_MS = 5 * 60_000;
 export const MAX_TRANSCRIPT_CHARS = 200_000;
 /**
  * Artifact warning on audio left unread because no transcriber is configured;
