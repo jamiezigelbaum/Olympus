@@ -6900,7 +6900,7 @@ export async function main(): Promise<void> {
           log: (line) => console.warn(line),
         })
       : undefined;
-    engineBackground = { stop: () => { walSampler?.stop(); controlPathHeadroom.setRoomGate(undefined); checkpointer?.stop(); statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
+    engineBackground = { stop: () => { walSampler?.stop(); checkpointer?.stop(); statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
   }
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
