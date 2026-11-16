@@ -236,6 +236,8 @@ export function buildEvalPack(input: {
   reranker?: EvidenceReranker;
   maxResults: number;
   maxCharsPerCandidate: number;
+  /** Search only these corpora (an oracle narrowing, run-passages.ts --narrow). */
+  corpusIds?: readonly string[];
 } & Pick<BuildEvidencePackInput, 'onSeatingLanes' | 'onRerankScores' | 'poolAllocation' | 'storeSearchDepth'>): Promise<EvidencePackBuildDetail> {
   const lanes = input.lanes(input.question);
   return buildEvidencePackDetailed({
@@ -248,8 +250,10 @@ export function buildEvalPack(input: {
     ...(input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {}),
     maxResults: input.maxResults,
     maxCharsPerCandidate: input.maxCharsPerCandidate,
+    ...(input.corpusIds ? { corpusIds: input.corpusIds } : {}),
     searchContext: {
       allowedTrustDomains: ['public_safe', 'internal', 'secure_local'],
+      ...(input.corpusIds ? { allowedCorpusIds: input.corpusIds } : {}),
     },
     registry: lanes.registry,
     adapters: lanes.adapters,

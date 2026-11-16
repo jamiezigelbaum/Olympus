@@ -37,6 +37,7 @@ import type {
 import { registeredLimits, limitStopSubjects, type LimitStop } from './limit-stops.ts';
 import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
 import type { StructuredEvidenceFact } from './opsec.ts';
+import type { SearchStrength } from './follow-up.ts';
 import {
   applyParentLabels,
   type ParentLabelDependency,
@@ -362,6 +363,10 @@ export interface EvidencePackBuildDetail {
   // Counts only: whether the reranker ran and what it changed. Absent when no
   // reranker was configured or it did not apply to this build.
   rerank?: EvidenceRerankAudit;
+  // Counts only: the best reranker score over the pool and the best store
+  // relevance across this build's routed runs (core/follow-up.ts weakSearch).
+  // A signal no stage measured is absent.
+  strength?: SearchStrength;
 }
 
 export async function buildEvidencePack(input: BuildEvidencePackInput): Promise<EvidencePack> {
@@ -380,9 +385,24 @@ async function buildPreparedEvidencePackDetailed(
     : undefined;
   const readWide = readWideEnabled() && !input.selectedItems?.length;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
+  const strength: SearchStrength = {};
+  const observed: BuildEvidencePackInput = {
+    ...input,
+    onSeatingLanes: (lanes, ordinal) => {
+      for (const lane of lanes) {
+        const relevance = lane.relevance;
+        if (!relevance) continue;
+        strength.conceptShareBest = Math.max(strength.conceptShareBest ?? 0, relevance.conceptShare);
+        if (relevance.vectorMargin !== undefined) {
+          strength.vectorMarginBest = Math.max(strength.vectorMarginBest ?? Number.NEGATIVE_INFINITY, relevance.vectorMargin);
+        }
+      }
+      input.onSeatingLanes?.(lanes, ordinal);
+    },
+  };
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
-    : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
+    : await runRoutedSearches(observed, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
   // A build can fan out more than once (the literal query plus planner
   // expansions), and each routed run judged its hits against its own ledger
   // snapshot. One more pass over the merged hits puts the whole pack on ONE
@@ -522,6 +542,7 @@ async function buildPreparedEvidencePackDetailed(
       keep: readWide ? scorable.length : input.maxResults,
       ...(input.rerankTimers ? { timers: input.rerankTimers } : {}),
       onScores: (entries, outcome) => {
+        for (const { score } of entries) strength.rerankBest = Math.max(strength.rerankBest ?? Number.NEGATIVE_INFINITY, score);
         if (readWide && outcome === 'applied') wide = scoresHaveNoLeader(entries.map(entry => entry.score));
         input.onRerankScores?.(entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome);
       },
@@ -677,6 +698,7 @@ async function buildPreparedEvidencePackDetailed(
     unreadCandidates,
     encounteredSecureLocal,
     ...(rerank ? { rerank } : {}),
+    ...(Object.keys(strength).length > 0 ? { strength } : {}),
     ...(labelled.dependencies.length > 0 ? { parentLabelDependencies: labelled.dependencies } : {}),
     ...(secretLocations.length > 0 ? { secretLocations } : {}),
     ...(limitStopGaps.length > 0 ? { limitStopGaps } : {}),

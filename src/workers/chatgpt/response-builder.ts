@@ -4,6 +4,8 @@ import { sourceSupportDetails } from '../dashboard/source-failure.ts';
 import { totalmem } from 'node:os';
 import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS, privateAnswerOptions } from '../../core/privacy-language.ts';
 import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
+import { secretLabelsInText } from '../../core/opsec.ts';
+import { parseFollowUp, type SourceAnswerFollowUp } from '../../core/follow-up.ts';
 import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from '../../core/app-release-capture.ts';
 /**
  * The allowlisted response builder: the ONLY way a ChatGPT-bound response
@@ -861,11 +863,18 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
     textParts.push('', 'Sources:', ...shownCitations.map((citation, index) => `[${index + 1}] ${citationLine(citation)}`));
   }
   if (notes.length > 0) textParts.push('', ...notes);
+  // A weak answer's follow-up (core/follow-up.ts): metadata-only labels and
+  // opaque handles. Never beside an answer that drew on Private items.
+  const followUp = usedPrivate ? undefined : followUpForApp(record.follow_up);
+  if (followUp) {
+    textParts.push('', `Follow-up: ${followUp.question}`, ...followUp.options.map((option) => `- ${option.label} (narrow: ${option.narrow})`));
+  }
   const structuredContent: Record<string, unknown> = {
     status: 'answered',
     answer,
     citations: shownCitations,
     ...(notes.length > 0 ? { notes } : {}),
+    ...(followUp ? { follow_up: followUp } : {}),
   };
   return withPrivateAnswerMeta({ content: [{ type: 'text', text: textParts.join('\n') }], structuredContent }, options.privateMatch);
 }
@@ -1063,6 +1072,23 @@ export function copyPrivateMatch(match: (PrivateMatchSummary & { jobId?: string 
 
 /** Proposed vocabulary: the whole answer when only Private items could answer. */
 export const PRIVATE_ANSWER_WITHHELD = 'Olympus can answer this only from private items, which stay on your computer.';
+
+/** The follow-up as ChatGPT may show it: each line cleaned, a secret-like one left out. */
+function followUpForApp(value: unknown): SourceAnswerFollowUp | undefined {
+  const followUp = parseFollowUp(value);
+  if (!followUp) return undefined;
+  const line = (raw: string, max: number) => {
+    const cleaned = raw.replace(UNSAFE_CHARS, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+    return cleaned && secretLabelsInText(raw).length === 0 && secretLabelsInText(cleaned).length === 0 ? cleaned : undefined;
+  };
+  const question = line(followUp.question, 2_000);
+  if (!question) return undefined;
+  const options = followUp.options.flatMap((option) => {
+    const label = line(option.label, 400);
+    return label ? [{ label, narrow: option.narrow }] : [];
+  });
+  return options.length > 0 ? { question, options } : undefined;
+}
 
 /** Public or Personal evidence only; the caller has already dropped the rest. */
 function citationFrom(evidence: Record<string, unknown>): ChatGptCitation | undefined {
