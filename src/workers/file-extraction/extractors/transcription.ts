@@ -40,7 +40,6 @@ import {
   AudioUndecodableError,
   TranscriberPendingError,
   TranscriberUnavailableError,
-  transcriptionDeadlineFromLease,
 } from './built-in-transcriber.ts';
 import { boundText, buildDerivation, normalizeMimeType } from './bounded-text.ts';
 import {
@@ -358,10 +357,9 @@ export function createTranscriptionExtractor(
           inputPath = join(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile(inputPath, bytes!);
         }
-        const deadlineAt = transcriptionDeadlineFromLease(input.job.leaseExpiresAt);
+        // No deadline from the lease: the runner renews the lease while the recording is still being read.
         const transcribed = await engine.transcribe({
           inputPath,
-          ...(deadlineAt !== undefined ? { deadlineAt } : {}),
           ...(mimeType ? { mimeType } : {}),
         });
         // The cap is applied by `boundText` and nowhere else. Slicing first
