@@ -33,9 +33,9 @@ import noSensitivePreset from '../../config/sovereignty/presets/no-sensitive.jso
 import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import type { SourceFamily } from '../../src/core/source-index/types.ts';
 import { archiveConnectorStoreDbPath } from '../../src/workers/archive-import/store.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
@@ -2260,6 +2260,80 @@ function archiveCollectCommand(): never {
 // ---------------------------------------------------------------------------
 // Logs
 
+/**
+ * The data root as the put-back sees it, for a failed rollback's report: every file with its size, mtime and (for a SQLite
+ * file) the schema version of each store in it, the upgrade mark, the record of copies, and the Olympus processes with the
+ * locks each holds. Synthetic test machines only; names and numbers, no content.
+ */
+function dataRootSample(): Record<string, unknown> {
+  const root = platform().dataDir;
+  const files: Array<{ path: string; bytes: number; mtime: string; schema?: Record<string, number> | string }> = [];
+  const walk = (dir: string): void => {
+    let entries: import('node:fs').Dirent[];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== 'models') walk(path); continue; }
+      if (!entry.isFile()) continue;
+      let st; try { st = statSync(path); } catch { continue; }
+      const row: (typeof files)[number] = { path: relative(root, path), bytes: st.size, mtime: new Date(st.mtimeMs).toISOString() };
+      if (/\.sqlite(\.pre-schema-[^/]*\.bak)?$|\.upgrade-copy$/.test(entry.name) || /\.sqlite\./.test(entry.name) && !/-(wal|shm|journal)$/.test(entry.name)) {
+        try {
+          const db = new Database(path, { readonly: true });
+          try {
+            const rows = db.query("SELECT store_id, version FROM schema_version").all() as Array<{ store_id: string; version: number }>;
+            row.schema = Object.fromEntries(rows.map((r) => [r.store_id, r.version]));
+          } finally { db.close(); }
+        } catch (error) { row.schema = `unread: ${(error instanceof Error ? error.message : String(error)).slice(0, 80)}`; }
+      }
+      files.push(row);
+    }
+  };
+  walk(root);
+  const read = (name: string): string | null => { try { return readFileSync(join(root, name), 'utf8').slice(0, 200_000); } catch { return null; } };
+  const ps = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).stdout ?? '';
+  const lockHolders = (name: string): string => {
+    const lsof = spawnSync('lsof', ['-F', 'p', join(root, name)], { encoding: 'utf8' });
+    return lsof.error ? `lsof unavailable: ${lsof.error.message}` : (lsof.stdout ?? '').trim();
+  };
+  return {
+    at: new Date().toISOString(),
+    files,
+    mark: read('upgrade-in-flight.json'),
+    copies: read('schema-backups.jsonl'),
+    processes: ps.split('\n').filter((line) => /olympus/i.test(line) && !/data-root-(watch|snapshot)/.test(line)).map((line) => line.trim()).slice(0, 80),
+    engineProcessLock: lockHolders('engine-process.lock'),
+    dataOwnerLock: lockHolders('data-owner.lock'),
+  };
+}
+
+const DATA_ROOT_WATCH_STOP = join(WORKDIR, 'data-root-watch.stop');
+
+/** One sample of the data root, saved beside the logs as `data-root-<label>.json`; also ends a running watch. */
+function dataRootSnapshotCommand(label: string): never {
+  mkdirSync(WORKDIR, { recursive: true });
+  writeFileSync(join(WORKDIR, `data-root-${label}.json`), JSON.stringify(dataRootSample(), null, 1), { mode: 0o600 });
+  writeFileSync(DATA_ROOT_WATCH_STOP, '');
+  emit({ ok: true });
+}
+
+/** Samples the data root every 2 s into `data-root-watch.jsonl` while the forced update runs (the mark, the copy and the put-back). */
+async function dataRootWatchCommand(seconds: number): Promise<never> {
+  mkdirSync(WORKDIR, { recursive: true });
+  rmSync(DATA_ROOT_WATCH_STOP, { force: true });
+  const out = join(WORKDIR, 'data-root-watch.jsonl');
+  writeFileSync(out, '', { mode: 0o600 });
+  const end = Date.now() + seconds * 1000;
+  let last = '';
+  while (Date.now() < end && !existsSync(DATA_ROOT_WATCH_STOP)) {
+    const sample = dataRootSample();
+    const key = JSON.stringify({ ...sample, at: undefined });
+    if (key !== last) { appendFileSync(out, `${JSON.stringify(sample)}\n`); last = key; }
+    await sleep(2_000);
+  }
+  emit({ ok: true });
+}
+
 function collectLogs(outDir: string): never {
   const p = platform();
   mkdirSync(outDir, { recursive: true });
@@ -2289,6 +2363,10 @@ function collectLogs(outDir: string): never {
     if (!existsSync(path)) continue;
     const name = path.split('/').pop()!;
     writeFileSync(join(outDir, name), readFileSync(path));
+    written.push(name);
+  }
+  for (const name of readdirSync(WORKDIR).filter((n) => /^data-root-.*\.jsonl?$/.test(n))) {
+    writeFileSync(join(outDir, name), readFileSync(join(WORKDIR, name)));
     written.push(name);
   }
   const fakeLog = join(WORKDIR, 'fake-readwise.log');
@@ -2670,6 +2748,8 @@ async function main(): Promise<void> {
     case 'archive-cleanup': return await archiveCleanupCommand();
     case 'archive-collect': return archiveCollectCommand();
     case 'collect-logs': return collectLogs(flag('--out'));
+    case 'data-root-snapshot': return dataRootSnapshotCommand(flag('--label'));
+    case 'data-root-watch': return await dataRootWatchCommand(Number(flag('--seconds', '900')));
     case 'engine-build': return await engineBuild();
     case 'snapshot-state': return await snapshotState();
     case 'set-policy-setting': return await setPolicySetting();

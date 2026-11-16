@@ -1500,6 +1500,10 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
     return { ...(set ? { set } : {}), ...(storeFiles !== undefined ? { storeFiles } : {}) };
   }
   await run.agent('front-mark', '', 60_000);
+  // What the put-back worked from, for a rollback that fails: the data root before the update, every change to it (the mark,
+  // the copies, the put-back) while the update runs, and after (mac-upgrade 43798749074 left one store at the new schema).
+  await run.agent('data-root-snapshot', '--label before-forced-update', 60_000);
+  await run.machine!.exec(`${BUN_LOCATE}\nnohup "$BUN" --no-env-file ~/rc/agent.js data-root-watch --seconds 1800 >/dev/null 2>&1 &\n`, { timeoutMs: 30_000 });
   try {
     await run.phase('upgrade-forced-failure', () => run.machine!.upgrade(broken));
   } catch (error) {
@@ -1507,6 +1511,7 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
     // The receipt is read from the whole message: the Fix: line names log paths first and can run past the shown detail.
     obs.installer = { failed: true, detail: message.slice(0, 300), storesPutBack: message.includes(STORES_PUT_BACK) };
   }
+  await run.agent('data-root-snapshot', '--label after-put-back', 60_000);
   const ran = await run.agent('front-watch', '--watch-s 0', 60_000);
   obs.frontRan = Number((ran.result as Partial<FrontWatch> | undefined)?.logHits?.brokenFront ?? 0);
   const back = await run.phase('forced-failure-engine', () => run.agent('await-engine', '--timeout-s 300', 330_000));
