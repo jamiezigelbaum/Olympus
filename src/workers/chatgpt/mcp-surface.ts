@@ -82,7 +82,7 @@ export interface ChatGptSurfaceOptions {
    * evidence to answer from).
    */
   privateMatchProbe?: (question: string, ctx: OperationContext, originalMatches?: readonly PrivateEvidenceItem[]) => Promise<boolean | number | PrivateMatchProbeResult>;
-  /** How long a private match probe may take (default PROBE_TIMEOUT_MS). */
+  /** How long a tool result waits for the private match probe (default: just under the client's own tool-call limit, probeWaitMs). */
   privateMatchProbeTimeoutMs?: number;
   /** Where a probe that timed out or failed is noted (default: stderr). One counts-only line, no question. */
   privateMatchProbeLog?: (line: string) => void;
@@ -578,8 +578,8 @@ async function runChatGptTool(
         if (!options.evidenceSearch) throw new ChatGptSurfaceError('unavailable');
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const ticket = waitingTicket(ctx, options);
-        // A match found after the deadline still waits on the computer (no panel: the result is out).
-        const late: { onMatch: () => void; timedOut?: boolean } = { onMatch: () => { recordWaiting(ticket, question, detail, options); } };
+        // A search still running when the result goes out keeps going: its match waits on the computer and in a checking panel.
+        const late = lateProbe(() => recordWaiting(ticket, question, detail, options));
         const [raw, probed] = await Promise.all([
           options.evidenceSearch({ question, ...(limit ? { limit } : {}) }, signal),
           probeWithinDeadline(probe, question, ctx, options, 'search', late),
@@ -592,7 +592,7 @@ async function runChatGptTool(
         const waiting = match.count > 0 ? recordWaiting(ticket, question, detail, options) : undefined;
         const privateMatch = match.count > 0
           ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting }, options)
-          : undefined;
+          : late.timedOut ? beginCheckingPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, late }, options) : undefined;
         const resultOptions = { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {}) };
         const result = searchToolResult(raw, resultOptions);
         // A new install's first question: say nothing is connected rather
@@ -613,8 +613,8 @@ async function runChatGptTool(
         const detail = detailArgument(args.detail);
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const ticket = waitingTicket(ctx, options);
-        // A match found after the deadline still waits on the computer (no panel: the result is out).
-        const late: { onMatch: () => void; timedOut?: boolean } = { onMatch: () => { recordWaiting(ticket, question, detail, options); } };
+        // A search still running when the result goes out keeps going: its match waits on the computer and in a checking panel.
+        const late = lateProbe(() => recordWaiting(ticket, question, detail, options));
         const [raw, probed] = await Promise.all([
           // Public and Personal evidence only: nothing Private, not even a
           // bounded derivative, is answered from on this surface.
@@ -632,7 +632,7 @@ async function runChatGptTool(
         const waiting = match.count > 0 ? recordWaiting(ticket, question, detail, options) : undefined;
         const pending: PendingPrivateMatch | undefined = match.count > 0
           ? { question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting }
-          : undefined;
+          : late.timedOut ? { question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, late } : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
           // Handed off: the private job is created only when the answered
@@ -641,7 +641,7 @@ async function runChatGptTool(
           rememberPrivateMatch(privateCaller(ctx), jobId, pending, late.timedOut === true);
           return answerToolResult(raw);
         }
-        const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
+        const privateMatch = pending ? startPrivateAnswer(pending, options) : undefined;
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {}) });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
@@ -659,7 +659,7 @@ async function runChatGptTool(
         // The waiting question made at the match follows the collected answer's row (what each AI
         // app received), so the row is marked once that private answer completes.
         if (done && isAnswered(raw)) notePrivateQuestion(pending?.match?.waiting);
-        const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
+        const privateMatch = done && isAnswered(raw) && pending?.match ? startPrivateAnswer(pending.match, options) : undefined;
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {}) });
       }
       case ASK_ANONYMOUSLY_TOOL.name: {
@@ -709,36 +709,27 @@ function normalizeProbe(value: boolean | number | PrivateMatchProbeResult): Priv
 }
 
 /**
- * Any probe, bounded: one that fails or outlasts PROBE_TIMEOUT_MS counts as
- * no match, so a slow Private search never holds up the tool result. Either
- * leaves one counts-only line (no question, no evidence), so a missing panel
- * can be told apart from a question that matched nothing Private. A probe
- * that times out keeps running: `late.onMatch` runs when it finds a match
- * after all, so the question still waits on the computer, and
- * `late.timedOut` tells the caller to say so.
+ * Any probe, with the tool result's wait: a probe still running when the
+ * result must go out (probeWaitMs, just under the client's own tool-call
+ * limit) is not cancelled. It keeps running in `late.result`; `late.onMatch`
+ * runs when it matches, so the question waits on the computer, and
+ * `late.timedOut` tells the caller to hand it to a checking panel or say the
+ * check is still running. A failed probe counts as no match. Either leaves
+ * one counts-only line (no question, no evidence), so a missing panel can be
+ * told apart from a question that matched nothing Private. A claim's refresh
+ * has no wait of its own: the claim's deadline bounds it.
  */
 function probeWithinDeadline(
   probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
   question: string,
   ctx: OperationContext,
-  options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog'> = {},
+  options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog' | 'appClient'> = {},
   stage: 'search' | 'refresh' = 'search',
-  late?: { onMatch: () => void; timedOut?: boolean },
+  late?: LateProbe,
 ): Promise<boolean | number | PrivateMatchProbeResult> {
-  const timeoutMs = options.privateMatchProbeTimeoutMs ?? PROBE_TIMEOUT_MS;
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
-  let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
-  const timeout = new Promise<false>((resolve) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      if (late) late.timedOut = true;
-      log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
-      resolve(false);
-    }, timeoutMs);
-    (timer as { unref?: () => void }).unref?.();
-  });
   const probed = probe(question, ctx).then((value) => {
     if (timedOut && late && normalizeProbe(value).count > 0) {
       log(`[chatgpt] private match probe matched_late stage=${stage} elapsed_ms=${Date.now() - startedAt}`);
@@ -752,7 +743,33 @@ function probeWithinDeadline(
       return false as const;
     },
   );
-  return Promise.race([probed, timeout]).finally(() => clearTimeout(timer));
+  if (late) late.result = probed;
+  if (stage === 'refresh') return probed;
+  const waitMs = probeWaitMs(options);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = new Promise<false>((resolve) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      if (late) late.timedOut = true;
+      log(`[chatgpt] private match probe still_running stage=${stage} waited_ms=${waitMs}`);
+      resolve(false);
+    }, waitMs);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([probed, waited]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * How long a tool result waits for the Private search: just under the
+ * client's own per-call limit, leaving room for the relay and the result.
+ * ChatGPT ends any tool call at 60 s (OpenAI, developer forum, 2026);
+ * Claude's apps at 240 s (claude.com/docs/connectors/building). Past it the
+ * search keeps running and a checking panel shows its answer.
+ */
+const PROBE_WAIT_CHATGPT_MS = 52_000;
+const PROBE_WAIT_CLAUDE_MS = 225_000;
+function probeWaitMs(options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'appClient'>): number {
+  return options.privateMatchProbeTimeoutMs ?? (options.appClient?.host === 'claude' ? PROBE_WAIT_CLAUDE_MS : PROBE_WAIT_CHATGPT_MS);
 }
 
 const defaultProbeLog = (line: string) => {
@@ -768,6 +785,62 @@ interface PendingPrivateMatch {
   detail: PrivateAnswerDetail;
   /** The waiting record made at the match (source_answer_result's job acknowledges this one). */
   waiting?: PrivateAnswerWaitingRef | undefined;
+  /** The search was still running when the result went out (beginCheckingPrivateAnswer). */
+  late?: LateProbe | undefined;
+}
+
+/** A private match probe the tool result stopped waiting for: it keeps running. */
+interface LateProbe {
+  onMatch: () => void;
+  timedOut?: boolean;
+  /** The probe itself, still running; a failure reads as no match. */
+  result?: Promise<boolean | number | PrivateMatchProbeResult>;
+  /** The waiting record its late match made. */
+  waiting?: PrivateAnswerWaitingRef | undefined;
+}
+
+function lateProbe(record: () => PrivateAnswerWaitingRef | undefined): LateProbe {
+  const late: LateProbe = { onMatch: () => { late.waiting = record(); } };
+  return late;
+}
+
+function startPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfaceOptions): (PrivateMatchSummary & { jobId?: string }) | undefined {
+  return pending.late && pending.match.count === 0 ? beginCheckingPrivateAnswer(pending, options) : beginPrivateAnswer(pending, options);
+}
+
+/**
+ * A panel for a question whose Private search outlasted the tool result's
+ * wait: the job's claim waits for that same search (no new one, no deadline
+ * of its own beyond the claim's), so its answer reaches the panel whenever
+ * the search finishes. Undefined when no panel can be made; the caller then
+ * says the check is still running.
+ */
+function beginCheckingPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfaceOptions): (PrivateMatchSummary & { jobId?: string }) | undefined {
+  const { question, caller, detail, late, refresh } = pending;
+  if (!options.privateAnswers || !late?.result) return undefined;
+  const result = late.result;
+  let first = true;
+  try {
+    const summary = options.privateAnswers.begin({
+      question,
+      count: 0,
+      evidence: [],
+      // The first read is the running search; a later one (a re-claim) searches afresh.
+      refresh: async (signal, originalMatches) => {
+        if (!first) return refresh(signal, originalMatches);
+        first = false;
+        const found = normalizeProbe(await result);
+        return Object.assign([...found.evidence], found.secretMatch ? { secretMatch: true as const } : {});
+      },
+      checking: { waiting: () => late.waiting },
+      detail,
+      ...(caller ? { caller } : {}),
+      ...(options.privateAnswerSeenOnDelivery ? { seenOnDelivery: true } : {}),
+    });
+    return summary.jobId ? { ...summary, checking: true } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The asking connection's revocation ticket, read before the probe so a revocation during it is caught. */
@@ -823,7 +896,7 @@ function privateRefresh(
   question: string,
   probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
   context: () => OperationContext,
-  options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog'>,
+  options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog' | 'appClient'>,
 ): PrivateEvidenceRefresh {
   return async (_signal, originalMatches) => {
     const current = normalizeProbe(await probeWithinDeadline(
@@ -882,22 +955,14 @@ export async function defaultPrivateMatchProbe(question: string, ctx: OperationC
         .filter((hit): hit is PrivateEvidenceItem => typeof hit === 'object' && hit !== null && !Array.isArray(hit)),
       () => [] as PrivateEvidenceItem[],
     ));
-  const timeout = new Promise<PrivateMatchProbeResult>((resolve) => {
-    const timer = setTimeout(() => resolve(none), PROBE_TIMEOUT_MS);
-    (timer as { unref?: () => void }).unref?.();
-  });
-  return Promise.race([
-    Promise.all(searches).then((perCorpus) => {
-      const evidence = perCorpus.flat();
-      return { count: evidence.length, evidence };
-    }),
-    timeout,
-  ]);
+  // No deadline here: the caller's wait decides when the result goes out, and the search finishes.
+  const perCorpus = await Promise.all(searches);
+  const evidence = perCorpus.flat();
+  return { count: evidence.length, evidence };
 }
 
 const PROBE_HITS_PER_CORPUS = 10;
 const PROBE_QUERY_MAX_CHARS = 500;
-const PROBE_TIMEOUT_MS = 20_000;
 
 /** A handed-off answer's probe result, until its source_answer_result collects it; keyed by caller and job id. */
 const privateMatchByJob = new Map<string, { match: PendingPrivateMatch | undefined; timedOut: boolean; expiresAt: number }>();

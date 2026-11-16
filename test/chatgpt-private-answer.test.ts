@@ -1033,14 +1033,15 @@ describe('a handed-off answer starts its private panel job only for its own conn
       release();
       await Bun.sleep(50);
       const answered = await owner.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
-      expect(JSON.stringify(answered)).toContain('waiting in Olympus on their computer');
+      const checking = 'still checking this question against the user';
+      expect(JSON.stringify(answered)).toContain(checking);
       const other = await connect('Other');
       try {
         const stolen = await other.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } });
-        expect(JSON.stringify(stolen)).not.toContain('waiting in Olympus on their computer');
+        expect(JSON.stringify(stolen)).not.toContain(checking);
       } finally { await other.close(); }
       const again = await owner.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } });
-      expect(JSON.stringify(again)).toContain('waiting in Olympus on their computer');
+      expect(JSON.stringify(again)).toContain(checking);
     } finally {
       await owner.close();
     }
