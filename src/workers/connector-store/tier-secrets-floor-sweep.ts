@@ -28,6 +28,7 @@ import { UNDECIDED_TIER_SNIFFER, type TierDecision } from '../classification/tie
 import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { ledgerReadOffThread } from './child-visibility.ts';
 import { BACKGROUND_READS } from './off-thread-reads.ts';
+import { noteRoundDone } from './loop-pass.ts';
 import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -107,7 +108,9 @@ export async function sweepSecretsFloor(options: {
   }
   const limit = Math.max(1, options.limit ?? DEFAULT_SECRETS_FLOOR_SWEEP_ROWS);
   // Found on the ledger's read worker: the loop only applies the floor to each row.
+  const pageStarted = performance.now();
   const rows = await ledgerReadOffThread(ledger, ledger.listRoutedSteps({ ...(progress?.after ? { after: progress.after } : {}), limit }), BACKGROUND_READS);
+  noteRoundDone('secrets-floor', 1, rows.length, performance.now() - pageStarted);
   for (const found of rows) {
     // Found on an older snapshot: scanned from the row as it is now, by key.
     const record = ledger.getCurrent(identityOf(found));

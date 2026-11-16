@@ -49,7 +49,7 @@ export function applyMediaJudgments(options: ApplyMediaJudgmentsOptions): MediaJ
 
 /** The sweep on the engine's loop: a turn between the items it re-judges. Its page is read by key. */
 export function applyMediaJudgmentsOffThread(options: ApplyMediaJudgmentsOptions & { turn?: () => Promise<void> | undefined }): Promise<MediaJudgmentSweepReport> {
-  return runPassOffThread(mediaJudgmentsPass(options), options.turn ? { turn: options.turn } : {});
+  return runPassOffThread(mediaJudgmentsPass(options), { family: 'media-judgments', ...(options.turn ? { turn: options.turn } : {}) });
 }
 
 function* mediaJudgmentsPass(options: ApplyMediaJudgmentsOptions): LoopPass<MediaJudgmentSweepReport> {

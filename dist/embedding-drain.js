@@ -20722,6 +20722,10 @@ function* hiddenChildKeysSteps(lane, probes) {
   return yield* childrenWithHiddenParentsSteps(lane, links);
 }
 
+// src/workers/connector-store/loop-pass.ts
+var FINDER_IDLE_ROUND_LOG_MS = 10 * 60000;
+var lastRoundLogged = new Map;
+
 // src/workers/connector-store/secrets-disposition.ts
 import { existsSync as existsSync20 } from "node:fs";
 

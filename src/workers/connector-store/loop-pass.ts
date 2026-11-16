@@ -78,8 +78,12 @@ export function runPassHere<T>(pass: LoopPass<T>, options: { wrap?: LoopPassWrap
 }
 
 /** Runs a pass on the loop: finders on the read worker, a turn wherever the pass asks for one. */
-export async function runPassOffThread<T>(pass: LoopPass<T>, options: { turn?: () => Promise<void> | undefined; wrap?: LoopPassWrap } = {}): Promise<T> {
+export async function runPassOffThread<T>(pass: LoopPass<T>, options: { turn?: () => Promise<void> | undefined; wrap?: LoopPassWrap; family?: string } = {}): Promise<T> {
   const wrap = options.wrap ?? unwrapped;
+  const started = performance.now();
+  let finds = 0;
+  let rows = 0;
+  const done = (): void => { if (options.family) noteRoundDone(options.family, finds, rows, performance.now() - started); };
   let next = wrap(() => pass.next());
   while (!next.done) {
     const step = next.value;
@@ -91,13 +95,29 @@ export async function runPassOffThread<T>(pass: LoopPass<T>, options: { turn?: (
     let value: unknown;
     try {
       value = await step.find.offThread();
+      finds += 1;
+      if (Array.isArray(value)) rows += value.length;
     } catch (error) {
       next = wrap(() => pass.throw(error));
       continue;
     }
     next = wrap(() => pass.next(value));
   }
+  done();
   return next.value;
+}
+
+/** A round with no rows is logged at most this often per family, so a quiet engine still shows each family ran. */
+export const FINDER_IDLE_ROUND_LOG_MS = 10 * 60_000;
+const lastRoundLogged = new Map<string, number>();
+
+// One line per finder round that found rows, and an idle round now and then:
+// a copy compare can prove each family completed rounds (rc.20 gate, 16 Nov).
+export function noteRoundDone(family: string, finds: number, rows: number, ms: number): void {
+  const now = Date.now();
+  if (rows === 0 && now - (lastRoundLogged.get(family) ?? 0) < FINDER_IDLE_ROUND_LOG_MS) return;
+  lastRoundLogged.set(family, now);
+  console.log(`[olympus] finder ${family} round done (${rows} rows, ${finds} reads, ${Math.round(ms)} ms)`);
 }
 
 /** Waits of LEDGER_HOLD_WAIT_MS a finder after a hold makes before it reads on the loop's connection instead. */

@@ -151,7 +151,7 @@ export async function sweepAutomaticSupersededCopiesInTurns(set: TieredStoreSet,
   sweeping.add(set);
   try {
     const timing = newTiming();
-    return await runPassOffThread(sweepPass(set, options, timing), { wrap: sweepWrap(set, timing, options.now ?? (() => performance.now())), turn: options.turn ?? ingestionTurn });
+    return await runPassOffThread(sweepPass(set, options, timing), { wrap: sweepWrap(set, timing, options.now ?? (() => performance.now())), turn: options.turn ?? ingestionTurn, family: 'superseded-prune' });
   } finally { sweeping.delete(set); }
 }
 

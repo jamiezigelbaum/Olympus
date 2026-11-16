@@ -45,7 +45,7 @@ export function sweepImageContentToPrivate(options: { set: TieredStoreSet; limit
 
 /** The sweep on the engine's loop: rows are found on the read workers, a turn between the rows it writes. */
 export function sweepImageContentToPrivateOffThread(options: { set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined }): Promise<ImageContentSweepReport> {
-  return runPassOffThread(imageContentSweepPass(options), options.turn ? { turn: options.turn } : {});
+  return runPassOffThread(imageContentSweepPass(options), { family: 'image-content-sweep', ...(options.turn ? { turn: options.turn } : {}) });
 }
 
 function* imageContentSweepPass(options: { set: TieredStoreSet; limit?: number }): LoopPass<ImageContentSweepReport> {

@@ -263,7 +263,7 @@ export function retrySecretSideStoreDebts(ledger: TierLedger, limit = 100): numb
 
 /** `retrySecretSideStoreDebts` on the engine's loop: the unsettled Secrets are found on the ledger's read worker. */
 export function retrySecretSideStoreDebtsOffThread(ledger: TierLedger, options: { limit?: number; turn?: () => Promise<void> | undefined } = {}): Promise<number> {
-  return runPassOffThread(retrySecretSideStoreDebtsPass(ledger, options.limit), options.turn ? { turn: options.turn } : {});
+  return runPassOffThread(retrySecretSideStoreDebtsPass(ledger, options.limit), { family: 'secret-side-store-retry', ...(options.turn ? { turn: options.turn } : {}) });
 }
 
 /** `retrySecretSideStoreDebts` as a loop pass: the unsettled Secrets are found on the ledger's read worker. */

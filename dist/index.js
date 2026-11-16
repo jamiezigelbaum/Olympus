@@ -16259,9 +16259,12 @@ var init_child_visibility = __esm(() => {
 });
 
 // src/workers/connector-store/loop-pass.ts
+var FINDER_IDLE_ROUND_LOG_MS, lastRoundLogged;
 var init_loop_pass = __esm(() => {
   init_child_visibility();
   init_off_thread_reads();
+  FINDER_IDLE_ROUND_LOG_MS = 10 * 60000;
+  lastRoundLogged = new Map;
 });
 
 // connect-relay/shared/tokens.ts
@@ -16922,6 +16925,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
   init_tier_ledger();
   init_child_visibility();
   init_off_thread_reads();
+  init_loop_pass();
   init_stored_names();
   init_tier_rejudge();
 });
@@ -26175,6 +26179,9 @@ init_boot_progress();
 init_data_owner_lock();
 init_operation_error();
 init_upgrade_store_copies();
+
+// src/core/put-back-manifest.ts
+init_olympus_layout();
 
 // src/core/linux-engine-service.ts
 init_file_lease();

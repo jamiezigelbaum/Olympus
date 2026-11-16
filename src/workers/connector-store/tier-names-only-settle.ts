@@ -41,7 +41,7 @@ export function settleNamesOnlyItems(options: { set: TieredStoreSet; limit?: num
 
 /** The settle on the engine's loop: its window is read on the ledger's read worker, a turn between rows. */
 export function settleNamesOnlyItemsOffThread(options: { set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined }): Promise<TierNamesOnlySettleReport> {
-  return runPassOffThread(namesOnlySettlePass(options), options.turn ? { turn: options.turn } : {});
+  return runPassOffThread(namesOnlySettlePass(options), { family: 'names-only-settle', ...(options.turn ? { turn: options.turn } : {}) });
 }
 
 function* namesOnlySettlePass(options: { set: TieredStoreSet; limit?: number }): LoopPass<TierNamesOnlySettleReport> {

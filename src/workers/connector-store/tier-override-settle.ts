@@ -98,7 +98,7 @@ export function applyOwnerOverridesOffThread(
   // judge's tick) runs after the first, as it did when the pass held the loop.
   const ledger = options.set.ledger;
   const before = running.get(ledger) ?? Promise.resolve();
-  const run = before.then(() => runPassOffThread(applyOwnerOverridesPass(options), options.turn ? { turn: options.turn } : {}));
+  const run = before.then(() => runPassOffThread(applyOwnerOverridesPass(options), { family: 'owner-overrides', ...(options.turn ? { turn: options.turn } : {}) }));
   const settled = run.then(() => undefined, () => undefined);
   running.set(ledger, settled);
   void settled.then(() => { if (running.get(ledger) === settled) running.delete(ledger); });

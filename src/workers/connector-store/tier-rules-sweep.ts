@@ -94,7 +94,7 @@ export function sweepOwnerRuleRaises(options: { set: TieredStoreSet; limit?: num
 
 /** The sweep on the engine's loop: its page is read on the ledger's read worker, a turn between rows. */
 export function sweepOwnerRuleRaisesOffThread(options: { set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined }): Promise<TierRulesSweepReport> {
-  return runPassOffThread(ownerRuleRaisesPass(options), options.turn ? { turn: options.turn } : {});
+  return runPassOffThread(ownerRuleRaisesPass(options), { family: 'owner-rule-raises', ...(options.turn ? { turn: options.turn } : {}) });
 }
 
 function* ownerRuleRaisesPass(options: { set: TieredStoreSet; limit?: number }): LoopPass<TierRulesSweepReport> {

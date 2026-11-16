@@ -41,7 +41,7 @@ export function settlePersonalFirstItems(options: { set: TieredStoreSet; limit?:
 
 /** The settle on the engine's loop: its window is read on the ledger's read worker, a turn between rows. */
 export function settlePersonalFirstItemsOffThread(options: { set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined }): Promise<TierHeldSettleReport> {
-  return runPassOffThread(personalFirstSettlePass(options), options.turn ? { turn: options.turn } : {});
+  return runPassOffThread(personalFirstSettlePass(options), { family: 'personal-first-settle', ...(options.turn ? { turn: options.turn } : {}) });
 }
 
 function* personalFirstSettlePass(options: { set: TieredStoreSet; limit?: number }): LoopPass<TierHeldSettleReport> {
