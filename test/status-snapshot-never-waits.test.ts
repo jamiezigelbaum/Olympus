@@ -169,8 +169,8 @@ describe('live totals beside kept counts', () => {
       expect((shown.corpora[0] as typeof before).totals).toMatchObject({ items: 2, sync_runs: 2 });
       // The counts an import moves are brought forward by the totals at once;
       // the snapshot keeps its age for what only a recount can say.
-      expect((shown.corpora[0] as typeof before).counts.indexed_items).toBe(before.counts.indexed_items + 1);
-      expect((shown.corpora[0] as typeof before).counts.chunks).toBe(before.counts.chunks + 1);
+      expect((shown.corpora[0] as typeof before).counts.indexed_items).toBe(before.counts.indexed_items! + 1);
+      expect((shown.corpora[0] as typeof before).counts.chunks).toBe(before.counts.chunks! + 1);
       expect((shown.corpora[0] as { counts_brought_forward?: unknown }).counts_brought_forward).toEqual({ items: 1, chunks: 1, embedded_chunks: 0 });
       expect(shown.snapshot_age_ms).toBe(2_000);
     } finally {
