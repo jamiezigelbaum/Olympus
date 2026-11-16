@@ -145,3 +145,18 @@ test('a model-thread freeze is identified separately from the serving process', 
   expect(controlPathFreezeSubject('single', false)).toBe('a background thread was blocked');
   expect(controlPathFreezeSubject('front', false)).toBe('a background thread was blocked');
 });
+
+describe('a freeze on a real install names its site in the log', () => {
+  test('the line carries the count, the time and the first product frame, never the runtime leaf alone', async () => {
+    const { freezeLogLine } = await import('../src/workers/control-path-headroom.ts');
+    const line = freezeLogLine('2026-11-16T12:00:00.000Z', 'background', {
+      count: 2, totalMs: 6200, maxMs: 5160,
+      self: [['run', 40]],
+      total: [['run', 40], ['traced main-thread-sql-trace.ts:12', 40], ['syncFromConnectorHeld connector-store/local-index.ts:11149', 38], ['runTask workers/source-scheduler.ts:300', 38]],
+    });
+    expect(line).toContain('freeze frames role=background count=2 total_ms=6200 max_ms=5160');
+    expect(line).toContain('site="syncFromConnectorHeld connector-store/local-index.ts:11149"');
+    expect(line).toContain('leaf="run"');
+    expect(line).not.toContain('main-thread-sql-trace');
+  });
+});
