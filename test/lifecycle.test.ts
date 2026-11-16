@@ -13,11 +13,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { describe, expect, setSystemTime, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { readSqliteSchemaVersion, runSqliteMigrations } from '../src/core/sqlite-migrations.ts';
 import { retiredStateBackupPath, retireStatePath } from '../src/core/boot-progress.ts';
+import { snapshotPathOf } from '../src/core/data-root-snapshot.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import {
   installManagedWorkerFiles,
@@ -991,7 +992,7 @@ describe('versioned Olympus worker lifecycle', () => {
         error = caught;
       }
       expect(String(error)).toContain('did not answer its loopback readiness probe');
-      expect((error as { suggestion?: string }).suggestion).toContain('Stores put back as they were before the update: ledger.sqlite.');
+      expect((error as { suggestion?: string }).suggestion).toContain('The Olympus data was put back as it was before the update.');
       expect(atPreviousStart).toEqual({ version: 1, wal: false });
       expect(existsSync(`${dbPath}.pre-schema-1.bak`)).toBe(false);
     } finally {
@@ -1035,7 +1036,7 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
-  test('retired state a new worker moves aside is removed only once it has answered healthy, and put back when it does not (#1563)', () => {
+  test('retired state a new worker removes stays in the copy of the data until it has answered healthy, and is put back when it does not (#1563)', () => {
     for (const answers of [true, false]) {
       const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-retired-state-'));
       const manager = linuxManager('active');
@@ -1046,9 +1047,6 @@ describe('versioned Olympus worker lifecycle', () => {
         const seed = new Database(retired, { create: true });
         seed.exec("CREATE TABLE kept (body TEXT); INSERT INTO kept VALUES ('retired ledger')");
         seed.close();
-        // A store for the upgrade to copy: retired state is moved aside only while an upgrade is in flight.
-        mkdirSync(olympusDataRoot(env), { recursive: true });
-        new Database(join(olympusDataRoot(env), 'store.sqlite'), { create: true }).close();
         const artifact = createUpgradeArtifact(home, '0.4.3');
         installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
         const seenWhileWaiting: boolean[] = [];
@@ -1065,15 +1063,16 @@ describe('versioned Olympus worker lifecycle', () => {
             readinessProbe: () => {
               // The new worker retires the file on its first pass, as the sniffer does.
               if (++probes === 1) retireStatePath(env, 'olympus_tier_ledger', retired);
-              seenWhileWaiting.push(existsSync(retiredStateBackupPath(retired)));
+              seenWhileWaiting.push(existsSync(join(snapshotPathOf(olympusDataRoot(env)), basename(retired))));
               return answers && probes >= 3;
             },
           });
         } catch (caught) { error = caught; }
-        // Until the new version answers, the copy is there to put back.
+        // Until the new version answers, the copy of the data is there to put back.
         expect(seenWhileWaiting.length).toBeGreaterThanOrEqual(3);
         expect(seenWhileWaiting.every(Boolean)).toBe(true);
         expect(existsSync(retiredStateBackupPath(retired))).toBe(false);
+        expect(existsSync(snapshotPathOf(olympusDataRoot(env)))).toBe(false);
         if (answers) {
           expect(error).toBeUndefined();
           expect(existsSync(retired)).toBe(false);

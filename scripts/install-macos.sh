@@ -578,8 +578,8 @@ main() {
   if [ -f "$LOG" ]; then LOG_MARK=$(wc -l < "$LOG" | tr -d ' '); fi
   if ! start_engine; then
     if [ "$UPGRADE" = 1 ] && [ -d "$APP.previous" ]; then
-      # The new version's own engine install put back the stores it copied, and says which (the same words as Linux's).
-      PUT_BACK=$(tail -n "+$((LOG_MARK + 1))" "$LOG" 2>/dev/null | grep -o 'Stores put back as they were before the update: [^"]*' | head -1)
+      # The new version's own engine install put the data back, and says where the failed update's data is kept (the same words as Linux's).
+      PUT_BACK=$(tail -n "+$((LOG_MARK + 1))" "$LOG" 2>/dev/null | grep -o 'The Olympus data was put back as it was before the update[^"]*' | head -1)
       if [ -n "$PUT_BACK" ]; then printf '%s\n' "$PUT_BACK" >&2; fi
       step "The new version did not start; restoring the previous one..."
       rm -rf "$APP.failed"

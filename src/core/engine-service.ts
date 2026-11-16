@@ -858,13 +858,13 @@ export async function installEngineVerified(options: EngineInstallOptions & { he
     ...(result.action === 'unchanged' ? {} : { since }),
   }, { ...options.health, exec: options.exec ?? options.health?.exec });
   if (health.ok) {
-    if (copied) commitEngineStores(copied.env);
+    if (copied) for (const line of commitEngineStores(copied.env)) process.stderr.write(`${line}\n`);
     return { ...result, ok: true, health };
   }
   // The new version is stopped before the stores go back, so the previous
   // one the installer puts back next opens them as they were (#1639).
   const restored = copied ? putMacStoresBack(copied) : [];
-  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` It was stopped. Stores put back as they were before the update: ${[...new Set(restored)].join(', ')}.` : ''}` };
+  return { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.${restored.length > 0 ? ` It was stopped. ${restored.join(' ')}` : ''}` };
 }
 
 interface MacStoreCopies { env: Record<string, string>; exec: EngineExec; target: string }
@@ -894,7 +894,7 @@ function copyMacStoresBeforeReplacing(options: EngineInstallOptions): MacStoreCo
   // The data root the engine's workers resolve: their worker.env can move it (XDG_DATA_HOME), so the copies, the put-back
   // and the locks they hold read it too, never only the default under HOME (Codex, 15 Nov 2026).
   const env = definedValues(environmentWithWorkerSetupEnv({ env: { HOME: homeDir, OLYMPUS_ENGINE_HOST: '1' }, workerEnvPath: paths.workerEnvPath }));
-  copyEngineStores(env, { bunBin: program.runtimePath, log: (line) => process.stderr.write(`${line}\n`) });
+  copyEngineStores(env, { log: (line) => process.stderr.write(`${line}\n`) });
   return { env, exec, target };
 }
 

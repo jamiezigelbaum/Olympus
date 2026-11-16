@@ -42,6 +42,7 @@ import { runDoctor, type DoctorDeps, type DoctorHostFacts } from '../src/core/do
 import { emptyRemoteAccessStatus, remoteAccessDir, writeRemoteAccessStatus } from '../src/core/remote-access.ts';
 import { workerServicePaths } from '../src/core/worker-service.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
+import { updateInFlightSince } from '../src/core/data-root-snapshot.ts';
 import { Database } from 'bun:sqlite';
 import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { defaultConfig } from '../src/core/config.ts';
@@ -956,7 +957,7 @@ describe('install and rollback succeed only on proof the new build is healthy', 
   // #1639: an upgrade across a schema change that is not additive must not
   // leave the previous build to start on stores it refuses.
   for (const healthy of [false, true]) {
-    test(`replacing a running build copies its stores first, and ${healthy ? 'removes the copies once the new one proves healthy' : 'puts them back when it does not'}`, async () => {
+    test(`replacing a running build sets its data aside first, and ${healthy ? 'removes the copy once the new one proves healthy' : 'puts it back when it does not'}`, async () => {
       const { root, home, checkout } = fixture();
       let bad = false;
       const launchctl = launchingLaunchctl(home, () => bad);
@@ -970,7 +971,7 @@ describe('install and rollback succeed only on proof the new build is healthy', 
         }
         return result;
       };
-      const marked = () => existsSync(join(olympusDataRoot(dataEnv), 'upgrade-in-flight.json'));
+      const marked = () => updateInFlightSince(dataEnv) !== undefined;
       installEngine({ platform: 'darwin', homeDir: home, uid: 501, exec, fromCheckout: checkout, bunBin: process.execPath });
       mkdirSync(dirname(store), { recursive: true });
       const seed = new Database(store, { create: true }); seed.exec("CREATE TABLE kept (body TEXT); INSERT INTO kept VALUES ('old')"); seed.close();
@@ -984,8 +985,8 @@ describe('install and rollback succeed only on proof the new build is healthy', 
       const db = new Database(store, { readonly: true });
       expect(db.query('SELECT body FROM kept').get()).toEqual({ body: healthy ? 'new' : 'old' });
       db.close();
-      if (!healthy) expect(result.reason).toMatch(/It was stopped\. Stores put back as they were before the update: \S+\./);
-      expect(existsSync(`${store}.pre-schema-upgrade.bak`)).toBe(false);
+      if (!healthy) expect(result.reason).toMatch(/It was stopped\. The Olympus data was put back as it was before the update\. The data as the failed update left it is kept at \S+/);
+      expect(existsSync(`${olympusDataRoot(dataEnv)}.before-update`)).toBe(false);
       expect(marked()).toBe(false);
     }, 30_000);
   }

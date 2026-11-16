@@ -35,7 +35,7 @@ import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
-import { join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import type { SourceFamily } from '../../src/core/source-index/types.ts';
 import { archiveConnectorStoreDbPath } from '../../src/workers/archive-import/store.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
@@ -2299,8 +2299,9 @@ function dataRootSample(): Record<string, unknown> {
   return {
     at: new Date().toISOString(),
     files,
-    mark: read('upgrade-in-flight.json'),
-    copies: read('schema-backups.jsonl'),
+    // The update's record and its copies sit beside the root (src/core/data-root-snapshot.ts).
+    update: (() => { try { return readFileSync(`${root}.update.json`, 'utf8').slice(0, 200_000); } catch { return null; } })(),
+    beside: (() => { try { return readdirSync(dirname(root)).filter((name) => name.startsWith(`${basename(root)}.`)); } catch { return []; } })(),
     processes: ps.split('\n').filter((line) => /olympus/i.test(line) && !/data-root-(watch|snapshot)/.test(line)).map((line) => line.trim()).slice(0, 80),
     engineProcessLock: lockHolders('engine-process.lock'),
     dataOwnerLock: lockHolders('data-owner.lock'),

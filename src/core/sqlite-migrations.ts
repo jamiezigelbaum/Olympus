@@ -1,9 +1,6 @@
 import type { Database } from 'bun:sqlite';
-import { chmodSync, closeSync, existsSync, openSync, renameSync, rmSync, statfsSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { preSchemaBackupPath, recordSchemaBackup, removeAbandonedBackupCopies, reportBootStep, workerUpgradeInFlight, type BootStepEvent } from './boot-progress.ts';
+import { reportBootStep, type BootStepEvent } from './boot-progress.ts';
 import { setEngineStep } from './engine-heartbeat.ts';
-import { upgradeCopyExists } from './upgrade-store-copies.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
 
@@ -93,15 +90,8 @@ export interface SqliteMigrationOptions {
   env?: LayoutEnv;
   /** One line per store update; store id only, never a path. */
   log?: (line: string) => void;
-  /** Tests: free bytes in the store's folder. */
-  freeBytes?: (directory: string) => number;
   /** Tests: where progress goes; defaults to the boot progress file. */
   report?: (event: BootStepEvent) => void;
-}
-
-/** Room an update needs beside the store: its backup, its rewrite, and headroom. */
-export function schemaUpdateSpaceNeeded(fileBytes: number): number {
-  return Math.ceil(fileBytes * 1.2) + 512 * 1024 * 1024;
 }
 
 export function currentStoreMigrations(): SqliteMigration[] {
@@ -181,30 +171,7 @@ export function runSqliteMigrations(
     // A new store's first schema is not an update: only existing stores are logged.
     const logged = currentVersion > 0;
     if (logged) log(`${label}: updating`);
-    // A store on disk with data is copied first, so a failed upgrade can put
-    // it back for the previous version (#1494). A new store has nothing to keep.
-    // A new store whose tables join a file that already holds another
-    // store's (limit-stops in source-scheduler.sqlite) changes that file
-    // too: it is copied as well, so a rollback takes the new tables out
-    // (gate7 forced leg on c013270b, 13 Nov).
-    // The upgrade already copied the whole file after the previous version
-    // stopped (upgrade-store-copies.ts): no second copy, and none on this loop.
-    const upgradeCopied = storeOnDisk(db) && upgradeCopyExists(db.filename);
-    // Only additions, to a store a build that knows compatible versions last
-    // wrote: the version a rollback restores still opens it, so no copy.
-    // A store from before compatible versions keeps its copy, since the build
-    // a rollback restores then refuses any version newer than its own.
-    const compatibleWithPrevious = currentVersion > 0
-      && storedCompatibleVersion(db, storeId) !== undefined
-      && ordered.filter((migration) => migration.version > currentVersion).every(isAdditiveMigration);
-    // With no worker upgrade in flight nothing would ever put a copy back or
-    // remove it, so none is taken (workerUpgradeInFlight). Within one, only a
-    // store the upgrade did not copy is copied here, and the step says so.
-    const backupMs = storeOnDisk(db) && !upgradeCopied && !compatibleWithPrevious
-      && workerUpgradeInFlight(env)
-      && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId))
-      ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes)
-      : undefined;
+    // A failed update puts the whole data root back (core/data-root-snapshot.ts): no store is copied here.
     report({ phase: 'migrating', storeId });
     setEngineStep(`updating ${storeId}`);
     const migrateStarted = performance.now();
@@ -237,7 +204,7 @@ export function runSqliteMigrations(
     setEngineStep(undefined);
     report({ phase: 'starting', storeId, completedStore: true });
     if (logged && applied.length > 0) {
-      log(`${label}: ${backupMs !== undefined ? `backed up in ${backupMs} ms` : upgradeCopied ? 'copied by the upgrade' : 'in memory, no backup'}, migrated in ${migrateMs} ms`);
+      log(`${label}: migrated in ${migrateMs} ms`);
     }
   }
 
@@ -249,109 +216,6 @@ export function runSqliteMigrations(
     applied,
     pending: applied,
   };
-}
-
-/**
- * The file already holds another versioned store: a store joining it at
- * version 0 changes a file a rollback must put back as it was. A file whose
- * tables predate versioning, or a new file, needs no copy.
- */
-function holdsOtherVersionedStore(db: Database, storeId: string): boolean {
-  if (!schemaVersionTableExists(db)) return false;
-  return (db.query(`SELECT COUNT(*) AS n FROM ${SQLITE_SCHEMA_VERSION_TABLE}
-    WHERE store_id != ? AND version > 0`).get(storeId) as { n: number }).n > 0;
-}
-
-function storeOnDisk(db: Database): boolean {
-  const file = db.filename;
-  return typeof file === 'string' && file !== '' && file !== ':memory:' && !file.startsWith('file::memory:') && existsSync(file);
-}
-
-/**
- * Checks for room, then writes `<db>.pre-schema-<from>.bak` with VACUUM INTO,
- * outside any transaction and owner-only. A backup left by an earlier attempt
- * is replaced: the store may have taken writes at the same version since, and
- * restoring the old copy would lose them. Returns how long it took.
- */
-function backUpBeforeUpdate(
-  db: Database,
-  storeId: string,
-  fromVersion: number,
-  env: LayoutEnv,
-  report: (event: BootStepEvent) => void,
-  freeBytes: (directory: string) => number = defaultFreeBytes,
-): number {
-  const file = db.filename;
-  const backup = preSchemaBackupPath(file, fromVersion);
-  const started = performance.now();
-  // An earlier attempt's copy stays until the new one replaces it: no credit for its space.
-  // It is never removed first, since another opener may have just written it.
-  // A killed backup's part-way copy is, before the space is measured.
-  removeAbandonedBackupCopies(backup);
-  const needed = schemaUpdateSpaceNeeded(statSync(file).size);
-  const free = freeBytes(dirname(file));
-  if (free < needed) {
-    throw new OperationError(
-      'config_error',
-      `Updating the "${storeId}" store needs ${formatBytes(needed)} free on its disk, and ${formatBytes(free)} is free.`,
-      'Free up space on that disk, then start Olympus again. Nothing was changed.',
-    );
-  }
-  report({ phase: 'backing_up', storeId });
-  setEngineStep(`backing up ${storeId}`);
-  // Written beside the backup and renamed into place: a backup that exists is whole.
-  const partial = `${backup}.${process.pid}.partial`;
-  rmSync(partial, { force: true });
-  // Recorded before the copy starts, so a delete or forget finds a copy a crash left part way.
-  recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
-  try {
-    // Created empty and owner-only first: SQLite would create it with the umask's mode.
-    closeSync(openSync(partial, 'wx', 0o600));
-    // Copied through a second, read-only handle: a store may run its update inside
-    // its own transaction, where VACUUM is refused. That handle sees the last
-    // committed state, which is the version being replaced.
-    const source = openReadonly(db, file);
-    try {
-      source.query('VACUUM INTO ?').run(partial);
-    } finally {
-      source.close();
-    }
-    chmodSync(partial, 0o600);
-    // Another opener may have finished the update first: its backup stands,
-    // and a copy of the updated store must not replace it.
-    if (copyVersion(db, partial, storeId) !== fromVersion) {
-      rmSync(partial, { force: true });
-      return Math.round(performance.now() - started);
-    }
-    renameSync(partial, backup);
-  } catch (error) {
-    rmSync(partial, { force: true });
-    throw error;
-  }
-  return Math.round(performance.now() - started);
-}
-
-/** Opens `path` read-only with the open handle's own class: this module never loads bun:sqlite itself. */
-function openReadonly(db: Database, path: string): Database {
-  return new (db.constructor as new (path: string, options: { readonly: boolean }) => Database)(path, { readonly: true });
-}
-
-function copyVersion(db: Database, path: string, storeId: string): number {
-  const copy = openReadonly(db, path);
-  try {
-    return readSqliteSchemaVersion(copy, storeId);
-  } finally {
-    copy.close();
-  }
-}
-
-function defaultFreeBytes(directory: string): number {
-  const stats = statfsSync(directory);
-  return Number(stats.bavail) * Number(stats.bsize);
-}
-
-function formatBytes(bytes: number): string {
-  return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.ceil(bytes / 1024 ** 2)} MB`;
 }
 
 export function readSqliteSchemaVersion(db: Database, storeId: string): number {

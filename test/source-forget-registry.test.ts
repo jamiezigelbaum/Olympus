@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { recordSchemaBackup } from '../src/core/boot-progress.ts';
+import { sharedDataPath } from '../src/core/olympus-layout.ts';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -207,11 +207,13 @@ describe('runForgetSteps', () => {
     const context = contextOf(layout);
     const backup = join(root, 'shared.sqlite.pre-schema-3.bak');
     writeFileSync(backup, 'rows of every account');
-    recordSchemaBackup(context.env, { storeId: 'shared', dbPath: join(root, 'shared.sqlite'), backupPath: backup });
+    // A line of the record of store copies, as a build from before the whole-root copy wrote one.
+    mkdirSync(dirname(sharedDataPath('schema-backups', context.env)), { recursive: true });
+    writeFileSync(sharedDataPath('schema-backups', context.env), `${JSON.stringify({ storeId: 'shared', dbPath: join(root, 'shared.sqlite'), backupPath: backup })}\n`);
 
-    expect(runForgetSteps(accountOf(MINE), context, { dryRun: true })).toContain('Would remove 1 store copy taken before a schema update.');
+    expect(runForgetSteps(accountOf(MINE), context, { dryRun: true })).toContain('Would remove 1 copy of Olympus data taken before an update.');
     expect(existsSync(backup)).toBe(true);
-    expect(runForgetSteps(accountOf(MINE), context, { dryRun: false })).toContain('Removed 1 store copy taken before a schema update.');
+    expect(runForgetSteps(accountOf(MINE), context, { dryRun: false })).toContain('Removed 1 copy of Olympus data taken before an update.');
     expect(existsSync(backup)).toBe(false);
   });
 

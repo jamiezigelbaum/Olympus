@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn as spawnProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -16,18 +16,15 @@ import {
   readBootProgress,
   reportBootStep,
   preSchemaBackupsOf,
-  recordSchemaBackup,
   removeAllSchemaBackups,
   removeRecordedSchemaBackups,
-  removeSchemaBackupsSince,
   removeAbandonedBackupCopies,
-  restoreSchemaBackupsSince,
   retiredStateBackupPath,
   retireStatePath,
   type BootProgress,
   type BootStepEvent,
 } from '../src/core/boot-progress.ts';
-import { upgradeInFlight } from './helpers/upgrade-in-flight.ts';
+import { sharedDataPath } from '../src/core/olympus-layout.ts';
 import { createNativeProcessService } from '../src/core/native-process-service.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../src/core/sqlite-migrations.ts';
 
@@ -37,19 +34,13 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-/**
- * A home with a worker upgrade in flight unless `upgrade: false`: the boot
- * copies a store, and moves retired state aside, only then. The upgrade's own
- * copy is of a file outside the tests' view, made an hour ago.
- */
-function home(options: { upgrade?: boolean } = {}): Record<string, string> {
+function home(): Record<string, string> {
   // HOME is the data root itself, where the store copies live (boot-progress.ts ownedBackup).
   const base = mkdtempSync(join(tmpdir(), 'olympus-boot-progress-'));
   roots.push(base);
   const root = join(base, 'openclaw', 'olympus');
   mkdirSync(root, { recursive: true });
   const env = { HOME: root, XDG_DATA_HOME: base, XDG_CONFIG_HOME: join(base, 'config'), XDG_STATE_HOME: join(base, 'state'), XDG_CACHE_HOME: join(base, 'cache') };
-  if (options.upgrade !== false) upgradeInFlight(env);
   return env;
 }
 
@@ -74,161 +65,14 @@ function storeAtVersion1(env: Record<string, string>): { path: string; db: Datab
   return { path, db };
 }
 
-describe('schema updates back up the store first', () => {
-  test('a backup holding the old version is written before a pending update', () => {
-    const env = home();
-    const { path, db } = storeAtVersion1(env);
-    const events: BootStepEvent[] = [];
-    const lines: string[] = [];
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: (line) => lines.push(line), report: (event) => events.push(event) });
-    db.close();
-    const backup = `${path}.pre-schema-1.bak`;
-    expect(existsSync(backup)).toBe(true);
-    expect(statSync(backup).mode & 0o777).toBe(0o600);
-    const copy = new Database(backup, { readonly: true });
-    expect(readSqliteSchemaVersion(copy, 'fixture')).toBe(1);
-    expect(copy.query('SELECT body FROM items').get()).toEqual({ body: 'kept' });
-    copy.close();
-    expect(events.map((event) => event.phase)).toEqual(['starting', 'backing_up', 'migrating', 'starting']);
-    expect(events.at(-1)).toMatchObject({ storeId: 'fixture', completedStore: true });
-    expect(lines[0]).toBe('[storage] fixture schema 1 to 2: updating');
-    expect(lines[1]).toMatch(/^\[storage\] fixture schema 1 to 2: backed up in \d+ ms, migrated in \d+ ms$/);
-    expect(lines.join('\n')).not.toContain(env.HOME!);
-  });
+/** A line of the record of store copies, as a build from before the whole-root copy wrote one. */
+function recordSchemaBackup(env: Record<string, string>, entry: { storeId: string; dbPath: string; backupPath: string }): void {
+  appendFileSync(sharedDataPath('schema-backups', env), `${JSON.stringify(entry)}\n`);
+}
 
-  test('a store that updates inside its own transaction is still backed up', () => {
-    const env = home();
-    const { path, db } = storeAtVersion1(env);
-    db.transaction(() => {
-      runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
-    }).immediate();
-    expect(readSqliteSchemaVersion(db, 'fixture')).toBe(2);
-    db.close();
-    const copy = new Database(`${path}.pre-schema-1.bak`, { readonly: true });
-    expect(readSqliteSchemaVersion(copy, 'fixture')).toBe(1);
-    expect(copy.query('SELECT body FROM items').get()).toEqual({ body: 'kept' });
-    copy.close();
-  });
-
-  test('a new store has nothing to back up', () => {
-    const env = home();
-    const path = join(env.HOME!, 'new.sqlite');
-    const db = new Database(path, { create: true });
-    const events: BootStepEvent[] = [];
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, report: (event) => events.push(event) });
-    db.close();
-    expect(existsSync(`${path}.pre-schema-0.bak`)).toBe(false);
-    expect(events.map((event) => event.phase)).toEqual(['starting', 'migrating', 'starting']);
-  });
-
-  test('without room for the update, nothing is migrated', () => {
-    const env = home();
-    const { path, db } = storeAtVersion1(env);
-    expect(() => runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, freeBytes: () => 100 * 1024 * 1024 }))
-      .toThrow(/Updating the "fixture" store needs \d+ MB free on its disk/);
-    expect(readSqliteSchemaVersion(db, 'fixture')).toBe(1);
-    expect(existsSync(`${path}.pre-schema-1.bak`)).toBe(false);
-    db.close();
-  });
-
-  test('a killed backup\'s part-way copy is gone before the free space is measured', () => {
-    const env = home();
-    const { path, db } = storeAtVersion1(env);
-    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
-    const abandoned = `${path}.pre-schema-1.bak.${gone}.partial`;
-    writeFileSync(abandoned, 'part of a copy');
-    let seenAtMeasure: boolean | undefined;
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, freeBytes: () => {
-      seenAtMeasure = existsSync(abandoned);
-      return Number.MAX_SAFE_INTEGER;
-    } });
-    db.close();
-    expect(seenAtMeasure).toBe(false);
-  }, 30_000);
-
-  test('a backup left by an earlier attempt is replaced, since the store may have changed since', () => {
-    const env = home();
-    const { path, db } = storeAtVersion1(env);
-    const backup = `${path}.pre-schema-1.bak`;
-    writeFileSync(backup, 'earlier attempt');
-    const events: BootStepEvent[] = [];
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, report: (event) => events.push(event) });
-    db.close();
-    expect(events.map((event) => event.phase)).toContain('backing_up');
-    const copy = new Database(backup, { readonly: true });
-    expect(readSqliteSchemaVersion(copy, 'fixture')).toBe(1);
-    expect(copy.query('SELECT body FROM items').get()).toEqual({ body: 'kept' });
-    copy.close();
-  });
-
-  test('a delete finds every copy of a store, and a forget removes the recorded copies', () => {
-    const env = home();
-    const { path, db } = storeAtVersion1(env);
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
-    db.close();
-    writeFileSync(join(env.HOME!, 'store.sqlite.pre-schema-x.bak'), 'not a copy');
-    expect(preSchemaBackupsOf(path)).toEqual([`${path}.pre-schema-1.bak`]);
-    expect(removeSchemaBackupsSince(env, 0)).toBe(1);
-    expect(preSchemaBackupsOf(path)).toEqual([]);
-  });
-
-  test('a second opener that copies after the first finished the update keeps the first backup', () => {
-    const env = home();
-    const { path, db } = storeAtVersion1(env);
-    // The second opener read version 1; before its copy, the first opener updates the store.
-    const freeBytes = () => {
-      const first = new Database(path);
-      runSqliteMigrations(first, 'fixture', MIGRATIONS, { env, log: () => {} });
-      first.close();
-      return Number.MAX_SAFE_INTEGER;
-    };
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, freeBytes });
-    db.close();
-    const copy = new Database(`${path}.pre-schema-1.bak`, { readonly: true });
-    expect(readSqliteSchemaVersion(copy, 'fixture')).toBe(1);
-    copy.close();
-  });
-
-  test('a copy a crash left part way is found by a delete and removed by a forget', () => {
-    const env = home({ upgrade: false });
-    const path = join(env.HOME!, 'shared.sqlite');
-    writeFileSync(path, '');
-    const partial = `${path}.pre-schema-4.bak.12345.partial`;
-    writeFileSync(partial, 'rows');
-    recordSchemaBackup(env, { storeId: 'shared', dbPath: path, backupPath: `${path}.pre-schema-4.bak` });
-    expect(preSchemaBackupsOf(path)).toEqual([partial]);
-    expect(removeAllSchemaBackups(env, true)).toBe(1);
-    expect(existsSync(partial)).toBe(true);
-    expect(removeAllSchemaBackups(env, false)).toBe(1);
-    expect(existsSync(partial)).toBe(false);
-  });
-
-  test('a restore puts the copy back and removes the -wal and -shm', () => {
-    const env = home();
-    const { path, db } = storeAtVersion1(env);
-    const since = Date.now() - 1;
-    db.exec('PRAGMA journal_mode = WAL');
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
-    db.close();
-    writeFileSync(`${path}-wal`, 'x');
-    writeFileSync(`${path}-shm`, 'x');
-    expect(restoreSchemaBackupsSince(env, since)).toEqual(['fixture']);
-    expect(existsSync(`${path}-wal`)).toBe(false);
-    expect(existsSync(`${path}-shm`)).toBe(false);
-    expect(existsSync(`${path}.pre-schema-1.bak`)).toBe(false);
-    const restored = new Database(path, { readonly: true });
-    expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
-    restored.close();
-  });
-});
-
-// rc.13's success leg (14 Nov): stores the new engine first opened after the
-// upgrade committed (the sniffers, the retired pre-filter) each left a copy
-// that nothing would ever restore or remove. Whatever store it is, the boot
-// copies only while a worker upgrade is in flight.
-describe('with no worker upgrade in flight the boot leaves no copy', () => {
+describe('the boot copies no store: a failed update puts the whole data root back', () => {
   test('a pending schema update takes no copy', () => {
-    const env = home({ upgrade: false });
+    const env = home();
     const { path, db } = storeAtVersion1(env);
     runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
     expect(readSqliteSchemaVersion(db, 'fixture')).toBe(2);
@@ -237,32 +81,31 @@ describe('with no worker upgrade in flight the boot leaves no copy', () => {
   });
 
   test('retired state is removed, not moved aside', () => {
-    const env = home({ upgrade: false });
+    const env = home();
     const ledger = join(env.HOME!, 'retired.sqlite');
     writeFileSync(ledger, 'old');
     expect(retireStatePath(env, 'retired', ledger)).toBe(true);
     expect(existsSync(ledger)).toBe(false);
     expect(existsSync(retiredStateBackupPath(ledger))).toBe(false);
   });
+});
 
-  test('a commit removes every recorded copy, one an earlier version left included', () => {
+describe('store copies an earlier build left', () => {
+  test('a commit removes every recorded copy, and a forget every copy on disk', () => {
     const env = home();
-    const { path, db } = storeAtVersion1(env);
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
-    db.close();
     const left = join(env.HOME!, 'left.sqlite');
     writeFileSync(left, '');
     writeFileSync(`${left}.pre-schema-6.bak`, 'old');
-    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    utimesSync(`${left}.pre-schema-6.bak`, weekAgo, weekAgo);
     recordSchemaBackup(env, { storeId: 'left', dbPath: left, backupPath: `${left}.pre-schema-6.bak` });
-    expect(removeRecordedSchemaBackups(env)).toBe(2);
-    expect(preSchemaBackupsOf(path)).toEqual([]);
+    expect(removeRecordedSchemaBackups(env)).toBe(1);
+    expect(preSchemaBackupsOf(left)).toEqual([]);
+    writeFileSync(`${left}.pre-schema-upgrade.bak`, 'old');
+    recordSchemaBackup(env, { storeId: 'left', dbPath: left, backupPath: `${left}.pre-schema-upgrade.bak` });
+    expect(removeAllSchemaBackups(env, true)).toBe(1);
+    expect(removeAllSchemaBackups(env, false)).toBe(1);
     expect(preSchemaBackupsOf(left)).toEqual([]);
   });
-});
 
-describe('a commit and a restore touch only the product\'s own copies', () => {
   test('a recorded line reached through a link, or naming a file not named as a copy, is left alone', () => {
     const env = home();
     // A whole-root backup an owner keeps beside the root, reached from inside it through a link.
@@ -280,90 +123,12 @@ describe('a commit and a restore touch only the product\'s own copies', () => {
     writeFileSync(join(env.HOME!, 'notes.sqlite'), 'live');
     recordSchemaBackup(env, { storeId: 'odd', dbPath: join(env.HOME!, 'notes'), backupPath: join(env.HOME!, 'notes.sqlite') });
     expect(removeRecordedSchemaBackups(env)).toBe(0);
-    expect(restoreSchemaBackupsSince(env, 0)).toEqual([]);
     expect(readFileSync(join(kept, 'store.sqlite.pre-schema-7.bak'), 'utf8')).toBe('kept copy');
     expect(readFileSync(join(kept, 'store.sqlite'), 'utf8')).toBe('kept');
     expect(readFileSync(join(env.HOME!, 'a.sqlite'), 'utf8')).toBe('live');
     expect(readFileSync(join(env.HOME!, 'notes.sqlite'), 'utf8')).toBe('live');
   });
 
-  test('a store outside the data root is a copy like any other', () => {
-    const env = home();
-    const outside = join(env.XDG_DATA_HOME!, 'whatsapp-live');
-    mkdirSync(outside, { recursive: true });
-    writeFileSync(join(outside, 'connector-store.db'), 'new');
-    writeFileSync(join(outside, 'connector-store.db.pre-schema-3.bak'), 'old');
-    recordSchemaBackup(env, { storeId: 'whatsapp', dbPath: join(outside, 'connector-store.db'), backupPath: join(outside, 'connector-store.db.pre-schema-3.bak') });
-    expect(restoreSchemaBackupsSince(env, 0)).toEqual(['whatsapp']);
-    expect(readFileSync(join(outside, 'connector-store.db'), 'utf8')).toBe('old');
-  });
-});
-
-describe('a rollback or a commit leaves no copy behind (the gate7 forced leg, 2026-11-13)', () => {
-  function migratedWithLeftovers(env: Record<string, string>): { path: string; since: number; gone: number } {
-    const { path, db } = storeAtVersion1(env);
-    const since = Date.now() - 1;
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
-    db.close();
-    // A process stopped inside a transaction leaves its hot journal, and one
-    // stopped inside a backup leaves its part-way copy.
-    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
-    writeFileSync(`${path}-journal`, 'a hot journal of the updated file');
-    for (const suffix of ['partial', 'partial-journal']) writeFileSync(`${path}.pre-schema-1.bak.${gone}.${suffix}`, 'x');
-    return { path, since, gone };
-  }
-
-  test('a restore removes the -journal written for the file it replaces, and every part-way copy', () => {
-    const env = home();
-    const { path, since, gone } = migratedWithLeftovers(env);
-    expect(restoreSchemaBackupsSince(env, since)).toEqual(['fixture']);
-    expect(existsSync(`${path}-journal`)).toBe(false);
-    expect(existsSync(`${path}.pre-schema-1.bak.${gone}.partial`)).toBe(false);
-    expect(existsSync(`${path}.pre-schema-1.bak.${gone}.partial-journal`)).toBe(false);
-    expect(preSchemaBackupsOf(path)).toEqual([]);
-    const restored = new Database(path, { readonly: true });
-    expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
-    restored.close();
-  }, 30_000);
-
-  test('a commit removes the part-way copies with the backups', () => {
-    const env = home();
-    const { path, since, gone } = migratedWithLeftovers(env);
-    expect(removeSchemaBackupsSince(env, since)).toBe(1);
-    expect(existsSync(`${path}.pre-schema-1.bak.${gone}.partial`)).toBe(false);
-    expect(preSchemaBackupsOf(path)).toEqual([]);
-  }, 30_000);
-});
-
-describe('a new store inside an existing file is put back too (gate7 forced leg on c013270b, 13 Nov)', () => {
-  test('a rollback takes out the new store\'s tables and puts the file back as it was before both updates', () => {
-    const env = home();
-    const { path, db } = storeAtVersion1(env);
-    const since = Date.now() - 1;
-    // A store new in this version joins the file (limit-stops in source-scheduler.sqlite), then the file's own store updates.
-    runSqliteMigrations(db, 'joined', [{ version: 1, name: 'create', up: (d) => d.exec('CREATE TABLE joined_rows (id INTEGER)') }], { env, log: () => {} });
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
-    db.close();
-    expect(restoreSchemaBackupsSince(env, since).sort()).toEqual(['fixture', 'joined']);
-    expect(preSchemaBackupsOf(path)).toEqual([]);
-    const restored = new Database(path, { readonly: true });
-    expect(restored.query("SELECT name FROM sqlite_master WHERE name = 'joined_rows'").get()).toBeNull();
-    expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
-    expect(restored.query('SELECT body FROM items').get()).toEqual({ body: 'kept' });
-    restored.close();
-  });
-
-  test('a brand-new file gets no copy', () => {
-    const env = home();
-    const path = join(env.HOME!, 'fresh.sqlite');
-    const db = new Database(path, { create: true });
-    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
-    db.close();
-    expect(preSchemaBackupsOf(path)).toEqual([]);
-  });
-});
-
-describe('a killed backup leaves nothing behind once a backup runs again', () => {
   test('part-way copies of gone processes are removed; a live process\'s copy is kept', () => {
     const env = home();
     const backup = join(env.HOME!, 'store.sqlite.pre-schema-15.bak');
@@ -376,37 +141,6 @@ describe('a killed backup leaves nothing behind once a backup runs again', () =>
     expect(existsSync(`${backup}.${live}.partial`)).toBe(true);
     expect(existsSync(backup)).toBe(true);
   }, 30_000);
-});
-
-describe('retired state is moved aside for the upgrade that retires it (#1563 review)', () => {
-  test('state last written long ago is still put back by a failed upgrade', () => {
-    const env = home();
-    const path = join(env.HOME!, 'retired.sqlite');
-    writeFileSync(path, 'old rows');
-    const longAgo = new Date(Date.now() - 30 * 24 * HOUR);
-    utimesSync(path, longAgo, longAgo);
-    const since = Date.now() - 1;
-    expect(retireStatePath(env, 'retired', path)).toBe(true);
-    // The move keeps the time it was given just before, so the copy counts as this upgrade's.
-    expect(statSync(retiredStateBackupPath(path)).mtimeMs).toBeGreaterThanOrEqual(since);
-    expect(restoreSchemaBackupsSince(env, since)).toEqual(['retired']);
-    expect(readFileSync(path, 'utf8')).toBe('old rows');
-  });
-
-  test('a copy an earlier start left gives way to the newer state, which a failed upgrade puts back', () => {
-    const env = home();
-    const path = join(env.HOME!, 'retired.sqlite');
-    const backup = retiredStateBackupPath(path);
-    writeFileSync(backup, 'older copy');
-    const longAgo = new Date(Date.now() - 30 * 24 * HOUR);
-    utimesSync(backup, longAgo, longAgo);
-    writeFileSync(path, 'newer rows');
-    const since = Date.now() - 1;
-    expect(retireStatePath(env, 'retired', path)).toBe(true);
-    expect(readFileSync(backup, 'utf8')).toBe('newer rows');
-    expect(restoreSchemaBackupsSince(env, since)).toEqual(['retired']);
-    expect(readFileSync(path, 'utf8')).toBe('newer rows');
-  });
 });
 
 describe('the supervisor waits on boot progress', () => {
