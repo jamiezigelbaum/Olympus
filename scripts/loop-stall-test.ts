@@ -447,7 +447,7 @@ function coldFiles(dir: string) {
   }
 }
 type RunCase = 'steady' | 'boot-after-upgrade';
-async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number }) {
+async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean }) {
   const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
   const isCapped = capped(memoryMaxBytes(memoryMax));
@@ -592,7 +592,9 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
   const guards = sqliteGuards(walAtEnd, walLines.map(entry => entry.line));
-  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok });
+  // --quick (CI's small cold fixture, plan 16 Nov 2026): fails fast on a loop beat over 1 s only; the 600k gate stays the bar.
+  const pass = options.quick ? background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS
+    : gate({ background, front, workload_ok, wal_ok: guards.wal_ok });
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, pass_b: front.beats > 0 && front.max_ms < LOOP_STALL_LIMIT_MS && background.beats > 0 && background.max_ms < 30_000 && workload_ok && guards.wal_ok, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
@@ -642,7 +644,7 @@ if (import.meta.main) {
   if (!['steady', 'boot-after-upgrade'].includes(runCase)) throw new Error('Invalid --case; use steady or boot-after-upgrade');
   if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
   else {
-    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600') });
+    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick') });
     // Exit 3 is "host busy": the run did not measure the engine.
     process.exitCode = result === 'host_busy' ? 3 : result ? 0 : 1;
   }
