@@ -189579,7 +189579,7 @@ var init_deep_read = __esm(() => {
 
 // src/workers/engine/runtime/deep-read-jobs.ts
 import { randomBytes as randomBytes33 } from "node:crypto";
-import { mkdirSync as mkdirSync70, readFileSync as readFileSync100, renameSync as renameSync25, writeFileSync as writeFileSync27 } from "node:fs";
+import { mkdirSync as mkdirSync70, readFileSync as readFileSync100, renameSync as renameSync25, writeFileSync as writeFileSync28 } from "node:fs";
 import { dirname as dirname108 } from "node:path";
 async function searchSetHits(lanes, question, corpusIds, maxResults = DEEP_READ_DAY_HITS) {
   const hits = new Set;
@@ -189691,7 +189691,7 @@ function paceBook(file) {
       if (!file)
         return;
       mkdirSync70(dirname108(file), { recursive: true });
-      writeFileSync27(`${file}.tmp`, JSON.stringify(paces));
+      writeFileSync28(`${file}.tmp`, JSON.stringify(paces));
       renameSync25(`${file}.tmp`, file);
     }
   };
