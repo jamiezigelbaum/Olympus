@@ -44,11 +44,11 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    non-zero if any lane fails. `--lanes=` picks lanes and `--dry-run` prints
    the plan. Never run the whole tree as one `bun test`: files then share a
    process, which CI never does, and leaked state fails or hangs the run.
-4. **Commit straight to `main` and push.** Stage only task files. Pull in
-   `main` first, then run `bun run prepush` (guards plus the fast-lane tests
-   the change reaches, about three minutes) and push only when it passes.
-   Retry a rejected push, never force-push. No pull request,
-   auto-merge or review wait. Olympus owns no local Git hook; user-installed
+4. **Commit straight to `main` and push with `bun run ship`.** Stage only
+   task files and commit. `bun run ship` merges `main`, runs
+   `bun run prepush` (type check, dist, guards and the fast-lane tests the
+   change reaches, about three minutes) on the exact commit, and pushes only
+   when it passes. Never force-push. No pull request, auto-merge or review wait. Olympus owns no local Git hook; user-installed
    hooks remain user-owned and must not be rewritten by repo automation.
 5. **Keep `main` green.** CI runs every substantive lane on each push:
    `static checks`, all three `fast tests` shards, `exchange tests`, all four

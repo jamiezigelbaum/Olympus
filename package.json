@@ -85,6 +85,7 @@
     "typecheck:connect-relay": "tsc --noEmit -p connect-relay/tsconfig.json",
     "guards": "bun scripts/guards.ts",
     "prepush": "bun scripts/prepush.ts",
+    "ship": "bun scripts/ship.ts",
     "verify": "bun run typecheck && bun run test:fast && bun run dist:check",
     "verify:full": "bun run typecheck && bun run test && bun run dist:check",
     "eval": "bun eval/run.ts",

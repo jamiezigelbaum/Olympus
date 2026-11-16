@@ -2,7 +2,8 @@
 /**
  * `bun run prepush`: run after merging main and before pushing to main.
  * It fails on what CI's fast lane would fail on for this change: the
- * mechanical guards (`bun run guards`) plus the fast-lane tests the change
+ * type check and dist check of CI's static job, the mechanical guards
+ * (`bun run guards`), and the fast-lane tests the change
  * reaches through imports. The whole fast lane is about 22 minutes of test
  * time, so it runs every test that imports a changed file directly, then
  * adds tests further away in the import graph, nearest first, until about
@@ -121,14 +122,15 @@ function selectTests(changed: string[], fast: string[]): Selection {
   return { tests, whole: false, reached: reached.length };
 }
 
-async function runGuards(): Promise<boolean> {
-  const child = Bun.spawn(['bun', 'scripts/guards.ts'], { cwd: ROOT, stdout: 'inherit', stderr: 'inherit' });
+async function run(command: string[], env: Record<string, string> = {}): Promise<boolean> {
+  const child = Bun.spawn(command, { cwd: ROOT, stdout: 'inherit', stderr: 'inherit', env: { ...process.env, ...env } });
   return (await child.exited) === 0;
 }
 
-async function runConnectRelay(): Promise<boolean> {
-  const child = Bun.spawn(['bun', 'run', 'test:connect-relay'], { cwd: ROOT, stdout: 'inherit', stderr: 'inherit' });
-  return (await child.exited) === 0;
+/** CI's static job: the type check over src, test, scripts and eval (plus exchange and the relay), then dist up to date. */
+async function runStatic(): Promise<boolean> {
+  const heap = { NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=6144`.trim() };
+  return (await run(['bun', 'run', 'typecheck'], heap)) && run(['bun', 'run', 'dist:check']);
 }
 
 const started = Date.now();
@@ -140,7 +142,7 @@ const left = reached - tests.length;
 console.log(
   `prepush: ${changed.length} changed files since ${base}; ` +
     (whole ? `the whole fast lane (${fast.length} files)` : `${tests.length} fast-lane test files on ${workers} workers`) +
-    (relay ? ', the connect-relay tests' : '') + ' and the guards.' +
+    (relay ? ', the connect-relay tests' : '') + ', the type check, dist and the guards.' +
     (left > 0 ? ` ${left} more tests further down the import graph are left to CI (--all runs them).` : ''),
 );
 if (listOnly) {
@@ -148,12 +150,13 @@ if (listOnly) {
   process.exit(0);
 }
 
-const [guardsOk, testsOk, relayOk] = await Promise.all([
-  runGuards(),
+const [staticOk, guardsOk, testsOk, relayOk] = await Promise.all([
+  runStatic(),
+  run(['bun', 'scripts/guards.ts']),
   tests.length === 0 ? Promise.resolve(true) : runFilePool(tests, workers, ROOT).then(code => code === 0),
-  relay ? runConnectRelay() : Promise.resolve(true),
+  relay ? run(['bun', 'run', 'test:connect-relay']) : Promise.resolve(true),
 ]);
 const seconds = Math.round((Date.now() - started) / 1000);
-const failed = [!guardsOk && 'guards', !testsOk && 'fast-lane tests', !relayOk && 'connect-relay tests'].filter(Boolean);
+const failed = [!staticOk && 'type check or dist', !guardsOk && 'guards', !testsOk && 'fast-lane tests', !relayOk && 'connect-relay tests'].filter(Boolean);
 console.log(failed.length === 0 ? `prepush: passed in ${seconds} s.` : `prepush: FAILED (${failed.join(', ')}) in ${seconds} s. Fix it before pushing.`);
 process.exit(failed.length === 0 ? 0 : 1);
