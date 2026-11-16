@@ -250576,7 +250576,8 @@ function chatgptPrivateAnswerProgram(config) {
     canRetry = false;
     focusAfter = byUser ? "status" : "";
     render();
-    const deadline = Date.now() + (info.full ? config.fullPollCapMs : config.pollCapMs);
+    const silenceMs = info.full ? config.fullPollCapMs : config.pollCapMs;
+    let deadline = Date.now() + silenceMs;
     const isTimeout = (error) => error instanceof Error && error.message === "timeout";
     try {
       let keys;
@@ -250675,6 +250676,8 @@ function chatgptPrivateAnswerProgram(config) {
           return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get("retry-after") : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
+        if (code === 202)
+          deadline = Date.now() + silenceMs;
         if (Date.now() + seconds * config.secondMs > deadline)
           return slow(byUser);
         await wait(seconds * config.secondMs);

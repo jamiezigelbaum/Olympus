@@ -92,6 +92,7 @@ export interface ChatGptPrivateAnswerPageOptions {
   keyStore?: Partial<ChatGptPrivateAnswerConfig['keyStore']>;
 }
 
+/** How long the panel waits with no word from the computer; each "still working" starts the wait again. */
 export const CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS = 2 * 60_000;
 /** A full-detail answer reads selected parts more closely: the engine allows it 240 s, the panel waits a little longer. */
 export const CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS = 250_000;
@@ -573,10 +574,14 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     canRetry = false;
     focusAfter = byUser ? 'status' : '';
     render();
-    // One collection deadline over everything (the key, every request, the
+    // One silence limit over everything (the key, every request, the
     // decryption): whatever stalls, the panel stops waiting here, and a step
-    // that finishes later is ignored.
-    const deadline = Date.now() + (info.full ? config.fullPollCapMs : config.pollCapMs);
+    // that finishes later is ignored. Each "still working" (202) comes from
+    // the computer's own answer job, which ends itself when its model goes
+    // quiet, so it starts the wait again: an answer in progress is never
+    // given up on.
+    const silenceMs = info.full ? config.fullPollCapMs : config.pollCapMs;
+    let deadline = Date.now() + silenceMs;
     const isTimeout = (error: unknown) => error instanceof Error && error.message === 'timeout';
     try {
       let keys: Awaited<ReturnType<typeof keyPair>>;
@@ -661,6 +666,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         if (!keepWaiting) return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get('retry-after') : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
+        if (code === 202) deadline = Date.now() + silenceMs;
         if (Date.now() + seconds * config.secondMs > deadline) return slow(byUser);
         await wait(seconds * config.secondMs);
       }

@@ -677,24 +677,24 @@ describe('collecting the private answer', () => {
     expect(privateAnswerPageHtml({ relayOrigin: RELAY })).toContain('"fullPollCapMs":250000');
   });
 
-  test('a summary answer keeps the usual copy and cap', async () => {
-    const host = mount({ pollCapMs: 30, fullPollCapMs: 5_000, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
+  // Jamie, 2026-11-16: "as long as the answer is in progress, it shouldn't cancel for no reason."
+  test('while the computer keeps saying "still working", the panel keeps waiting past its silence limit, then shows the answer', async () => {
+    const host = mount({ pollCapMs: 60, fullPollCapMs: 5_000, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
     host.push(ready());
     expect(host.text()).toContain(W.preparing);
-    await host.until(() => host.text().includes(W.slow), 'the slow notice');
+    await sleep(400); // several silence limits of steady 202s
+    expect(host.text()).not.toContain(W.slow);
+    expect(host.fetched.length).toBeGreaterThan(3);
+    host.replies.splice(0, host.replies.length, 'ready');
+    await host.until(() => host.text().includes('31 March'), 'the answer');
+    expect(new Set(host.fetched.map((call) => call.body.publicKey)).size).toBe(1);
   });
 
-  test('polling stops at the cap and offers Try again', async () => {
-    // The deadline covers the key, every request AND the decryption, so the
-    // Try again round below must fit inside it: 30 ms lost that race to real
-    // WebCrypto on a loaded machine. 1 s still ends the pending polls (every
-    // 2 ms) in the slow notice, inside host.until's >= 2 s of waiting.
-    const host = mount({ pollCapMs: 1_000, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
+  test('a busy computer with no "still working" does not restart the wait: the panel offers Try again, and the retry collects the answer', async () => {
+    const host = mount({ pollCapMs: 1_000, replies: [{ status: 503, body: { status: 'busy' }, retryAfter: '1' }] });
     host.push(ready());
     await host.until(() => host.text().includes(W.slow), 'the slow notice');
     expect(host.buttons().map((b) => b.textContent)).toEqual([W.tryAgain]);
-    const before = host.fetched.length;
-    expect(before).toBeGreaterThan(1);
     host.replies.splice(0, host.replies.length, 'ready');
     host.button(W.tryAgain).click();
     await host.until(() => host.text().includes('31 March'), 'the answer');
