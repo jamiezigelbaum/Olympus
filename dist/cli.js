@@ -148837,7 +148837,7 @@ function engineServicePaths(options = {}) {
   }
   const l = resolveLinuxEngineLayout(env);
   return {
-    dataEnv: { HOME: l.home, XDG_DATA_HOME: l.dataHome, XDG_CONFIG_HOME: l.configHome, OLYMPUS_ENGINE_HOST: "1" },
+    dataEnv: { ...linuxEngineEnvironment(l), OLYMPUS_ENGINE_HOST: "1" },
     linux: l,
     label: "olympus-engine.service",
     plistPath: l.unitPath,
