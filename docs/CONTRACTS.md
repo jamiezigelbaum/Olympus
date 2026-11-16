@@ -473,7 +473,9 @@ final release/connection check after its optional Private probe.
   are serialized per endpoint on slot 0, prime the exact shared prefix each
   run, and re-prime after errors or an observed cold slot. The daily cap
   counts item attempts, including retries: default 250,000 in decision mode,
-  20,000 in full mode; an explicit owner cap wins. Probes and primes carry no
+  20,000 in full mode; an explicit owner cap wins. (From 16 Nov 2026 the
+  engine applies no default daily cap to a local model, which costs nothing
+  per call; the defaults remain for cloud judging with no dollar cap.) Probes and primes carry no
   item attempt and do not spend that cap. SourceConnector, EvidencePack and
   Analyst semantics and shapes are unchanged, so the contract-evolution
   version gate does not require a version increment. Focused fake-server

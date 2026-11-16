@@ -546,7 +546,13 @@ export function createFileExtractionRuntime(
         // to an extractor: its content tier is not known until its text is.
         itemTrustTier: (ref) => view
           ? view.itemTrustTier(ref.localItemId)
-          : store.localContent(ref.localItemId, 1)?.trustTier,
+          : (() => {
+              const stored = store.localContent(ref.localItemId, 1)?.trustTier;
+              const verdict = store.effectiveLocalItemTier(ref.localItemId);
+              if (verdict === 'secret' || stored === 'S5') return 'S5';
+              if (verdict === 'private' || verdict === 'unknown') return 'S4';
+              return stored;
+            })(),
       },
       ...(guardsRefs ? { authorization: { assertCurrent: assertRefCurrent } } : {}),
     });

@@ -1,3 +1,5 @@
+import { effectiveItemVerdicts, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
+import { visibilityHere } from '../connector-store/child-visibility.ts';
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { sourceItemReadSelectedItem, sourceItemReadPage } from '../../core/source-index/selected-items.ts';
 import { DeepReadRefused } from './runtime/deep-read-jobs.ts';
@@ -3671,10 +3673,42 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const visible = new Set(options.sourceIndexVisibilityGate
               ? options.sourceIndexVisibilityGate(tagged)
               : tagged);
-            // A hit is Private by the one definition (isSecureSensitivity):
-            // its store's domain or its row's own tier. A hit with no tier is
-            // judged Private (every connector-store hit carries one).
-            const hitIsPrivate = (hit: (typeof tagged)[number]): boolean => hit.trustTier === undefined
+            const verdictScopes = new Map<string, TierVisibilityScope & { corpusIds: Set<string> }>();
+            const unreadCorpora = new Set<string>();
+            for (const { store } of runs) {
+              try {
+                const ledger = store.governingTierLedger();
+                if (!ledger) continue;
+                const scope = verdictScopes.get(ledger.dbPath);
+                if (scope) scope.corpusIds.add(store.corpusId);
+                else verdictScopes.set(ledger.dbPath, { ledger, corpusIds: new Set([store.corpusId]) });
+              } catch {
+                unreadCorpora.add(store.corpusId);
+              }
+            }
+            const privateNames = new Set(tagged.filter(hit => unreadCorpora.has(hit.corpusId)));
+            // Secret names are listed on no path, the Private one included:
+            // the release check withholds Secret whatever the caller may read.
+            const secretNames = new Set<(typeof tagged)[number]>();
+            for (const scope of verdictScopes.values()) {
+              const governed = tagged.filter(hit => scope.corpusIds.has(hit.corpusId));
+              try {
+                const verdicts = visibilityHere(effectiveItemVerdicts(() => [scope], governed.map(hit => ({
+                  ...hit.sourceItem, corpusId: hit.corpusId, privateAtAnswer: false, layer: 'names' as const,
+                }))));
+                governed.forEach((hit, index) => {
+                  if (verdicts[index]!.tier === 'secret') secretNames.add(hit);
+                  else if (!['legacy', 'public_or_personal'].includes(verdicts[index]!.tier)) privateNames.add(hit);
+                });
+              } catch {
+                // Only this ledger's names fail closed; other corpora keep their verdicts.
+                for (const hit of governed) privateNames.add(hit);
+              }
+            }
+            // Names are at least as private as their ledger verdict and the
+            // existing stored sensitivity. A hit with no tier is Private too
+            // (every connector-store hit carries one).
+            const hitIsPrivate = (hit: (typeof tagged)[number]): boolean => privateNames.has(hit) || hit.trustTier === undefined
               || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier });
             // A search that read no secure_local store did not ask for Private
             // results, so a Personal store's row that is Private by its own
@@ -3684,6 +3718,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // titles under local_only, and returns this one the same way.
             const searchedSecureLocal = runs.some((run) => run.store.trustDomain === 'secure_local');
             let privateTierWithheld = 0;
+            for (const hit of secretNames) visible.delete(hit);
             if (!searchedSecureLocal) {
               for (const hit of [...visible]) {
                 if (!hitIsPrivate(hit)) continue;

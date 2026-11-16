@@ -976,6 +976,259 @@ var init_worker_transport = __esm(() => {
   init_atomic_file();
 });
 
+// src/core/open-targets.ts
+function allOpenTargets() {
+  return [
+    { kind: "dashboard" },
+    { kind: "private_answers" },
+    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
+    { kind: "archives" }
+  ];
+}
+function openTargetPath(target) {
+  if (target.kind === "private_answers")
+    return target.answerId ? `private/${target.answerId}` : "private";
+  if (target.kind === "connect")
+    return `connect/${target.source}`;
+  if (target.kind === "fix")
+    return `fix/${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable/${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
+  return "dashboard";
+}
+function openTargetFromPath(path) {
+  if (typeof path !== "string")
+    return;
+  const answer = /^private\/([A-Za-z0-9_-]{22})$/.exec(path);
+  if (answer)
+    return { kind: "private_answers", answerId: answer[1] };
+  return allOpenTargets().find((target) => openTargetPath(target) === path);
+}
+function openTargetToken(target) {
+  if (target.kind === "private_answers")
+    return target.answerId ? `page.private.${target.answerId}` : "page.private";
+  if (target.kind === "connect")
+    return `connect.${target.source}`;
+  if (target.kind === "fix")
+    return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
+  return;
+}
+function openTargetTokenPattern() {
+  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isConnectOpenTarget(target) {
+  return target.kind === "connect";
+}
+function isKeysOpenTarget(target) {
+  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function tokenPattern(filter) {
+  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function keysOpenTargetTokenPattern() {
+  return tokenPattern(isKeysOpenTarget);
+}
+function connectOpenTargetTokenPattern() {
+  return tokenPattern(isConnectOpenTarget);
+}
+function privateAnswersOpenTargetTokenPattern() {
+  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
+}
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable" || target.kind === "archives";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var init_open_targets = __esm(() => {
+  OPEN_CONNECT_SOURCES = {
+    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
+    readwise: { sourceId: "readwise.library", label: "Readwise" },
+    telegram: { sourceId: "telegram.messages", label: "Telegram" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" },
+    evernote: { sourceId: "evernote.notes", label: "Evernote" }
+  };
+  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+  OPEN_UNREADABLE_SOURCES = {
+    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
+});
+
+// src/core/dashboard-launch.ts
+var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_UNLOCK_STORAGE_KEY = "olympus-dashboard-unlock-v1", DASHBOARD_UNLOCK_HEADER = "X-Olympus-Dashboard-Unlock", DASHBOARD_UNLOCK_SHELL_HEADER = "X-Olympus-Dashboard-Shell", DASHBOARD_LAUNCH_PAGE_HTML, DASHBOARD_UNLOCK_SHELL_HTML;
+var init_dashboard_launch = __esm(() => {
+  init_open_targets();
+  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var CONNECT = /${connectOpenTargetTokenPattern()}/;
+        var PANEL = /${panelOpenTargetTokenPattern()}/;
+        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
+        var status = document.getElementById('status');
+        var open = '';
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          var params = new URLSearchParams(hash);
+          // Where to land: one of a closed list, or the plain dashboard.
+          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
+          if (OPEN.test(wanted)) open = wanted;
+          return params.get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
+          window.location.replace('/dashboard');
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (!response.ok) return response;
+          // This browser's key for later plain navigations (#1187): kept per origin, so per port.
+          return response.json().then(function (body) {
+            try {
+              if (body && typeof body.unlock_key === 'string') window.localStorage.setItem('${DASHBOARD_UNLOCK_STORAGE_KEY}', body.unlock_key);
+            } catch (e) {}
+            return response;
+          }, function () { return response; });
+        }).then(function (response) {
+          // A link already used or expired (a reload, a second open) still
+          // lands on the dashboard: the session it opened is in its cookie,
+          // and without one the dashboard itself offers the way back in.
+          if (response.ok || response.status === 403) {
+            // Connect lands on Connect a source, where the computer's setup sheets live; a
+            // model fix lands on Privacy settings (?keys), where the models live. Each only
+            // opens something there, never submits anything.
+            // A panel target (See why on one source) lands on the dashboard there.
+            // Private answers lands on that page, carrying nothing.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(CONNECT.test(open)
+              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
+            return;
+          }
+          // Anything else: the dashboard is the way in (its session, or how to get one).
+          window.location.replace('/dashboard');
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
+  DASHBOARD_UNLOCK_SHELL_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      code { color: #e8e6e3; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail"></p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_UNLOCK_STORAGE_KEY}';
+        var SHELL = '${DASHBOARD_UNLOCK_SHELL_HEADER}';
+        var HEADER = '${DASHBOARD_UNLOCK_HEADER}';
+        var status = document.getElementById('status');
+        var detail = document.getElementById('detail');
+        function locked() {
+          try { window.localStorage.removeItem(KEY); } catch (e) {}
+          status.textContent = 'Dashboard controls are locked';
+          detail.textContent = 'Run ';
+          var command = document.createElement('code');
+          command.textContent = 'olympus dashboard';
+          detail.appendChild(command);
+          detail.appendChild(document.createTextNode(' in a terminal on this computer to open it again.'));
+        }
+        function failed() {
+          status.textContent = 'Opening failed.';
+          detail.textContent = 'Reload this page to try again.';
+        }
+        var key = '';
+        try { key = window.localStorage.getItem(KEY) || ''; } catch (e) {}
+        if (!key) { locked(); return; }
+        var headers = {};
+        headers[HEADER] = key;
+        fetch(window.location.href, {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          headers: headers
+        }).then(function (response) {
+          // A page that moved: go there, and its own navigation proves itself the same way.
+          if (response.redirected) { window.location.replace(response.url); return; }
+          if (response.headers.get(SHELL) || response.status === 401 || response.status === 403) { locked(); return; }
+          var type = response.headers.get('Content-Type') || '';
+          if (!response.ok || type.indexOf('text/html') !== 0) { failed(); return; }
+          return response.text().then(function (html) {
+            document.open();
+            document.write(html);
+            document.close();
+          });
+        }).catch(failed);
+      }());
+    </script>
+  </body>
+</html>
+`;
+});
+
 // src/core/operation-error.ts
 function sourceAnswerJobNotFound() {
   return new OperationError("source_answer_job_not_found", "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted.", "Ask the question again with source_answer.");
@@ -8834,6 +9087,61 @@ var init_router = __esm(() => {
     "token"
   ]);
   NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+});
+
+// src/workers/dashboard/backup-paths.ts
+var init_backup_paths = () => {};
+
+// src/workers/dashboard/session-marker.ts
+var init_session_marker = () => {};
+
+// src/core/request-peer.ts
+var ownerSockets, peers;
+var init_request_peer = __esm(() => {
+  ownerSockets = new WeakSet;
+  peers = new WeakMap;
+});
+
+// src/workers/http.ts
+import { createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
+function createGatewayCallbackPeerHeader(peer, authToken) {
+  const normalized = normalizeGatewayCallbackPeer(peer);
+  const signature = createHmac("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${normalized}`).digest("base64url");
+  return `${normalized}.${signature}`;
+}
+function normalizeGatewayCallbackPeer(value) {
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 256 ? normalized : "unknown";
+}
+function hasValidWorkerBearerToken(header, expectedToken) {
+  if (!header)
+    return false;
+  const [scheme, ...rest] = header.split(" ");
+  if (scheme !== "Bearer" || rest.length !== 1)
+    return false;
+  return constantTimeStringEqual(rest[0] ?? "", expectedToken);
+}
+function constantTimeStringEqual(actual, expected) {
+  const actualBytes = new TextEncoder().encode(actual);
+  const expectedBytes = new TextEncoder().encode(expected);
+  const maxLength = Math.max(actualBytes.byteLength, expectedBytes.byteLength, 1);
+  const actualPadded = new Uint8Array(maxLength);
+  const expectedPadded = new Uint8Array(maxLength);
+  actualPadded.set(actualBytes.slice(0, maxLength));
+  expectedPadded.set(expectedBytes.slice(0, maxLength));
+  return timingSafeEqual(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
+}
+var DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", AGENT_MINT_PATHS, AGENT_MINT_WINDOW_MS, REMOTE_ACCESS_TOGGLE_WINDOW_MS;
+var init_http = __esm(() => {
+  init_backup_paths();
+  init_session_marker();
+  init_request_peer();
+  init_worker_auth();
+  init_dashboard_launch();
+  DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+  AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
+  AGENT_MINT_WINDOW_MS = 10 * 60000;
+  REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
 });
 
 // src/core/app-release-capture.ts
@@ -16703,6 +17011,36 @@ var init_tier_placement = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
 });
+// src/workers/source-index/media-judge.ts
+var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
+var init_media_judge = __esm(() => {
+  MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
+  MEDIA_JUDGE_PROMPTS = Object.freeze({
+    id_document: "a photo of a passport, national identity card or driving licence",
+    bank_card: "a photo of a credit card, debit card or bank card",
+    financial_document: "a bank statement, payslip or document showing account numbers",
+    medical_document: "a medical report or lab test results document",
+    intimate: "a nude, intimate or sexually explicit photo",
+    ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
+  });
+  MEDIA_JUDGE_THRESHOLDS = Object.freeze({
+    margin: 0.04,
+    intimateMargin: 0.025
+  });
+  promptVectorCache = new Map;
+});
+
+// src/workers/connector-store/stored-names.ts
+var init_stored_names = __esm(() => {
+  init_tier_ledger();
+});
+
+// src/workers/connector-store/parent-context.ts
+var init_parent_context = __esm(() => {
+  init_sniffer();
+  init_tier_classifier();
+  init_stored_names();
+});
 
 // src/workers/connector-store/child-visibility.ts
 var askReads, releasing;
@@ -16810,27 +17148,244 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/workers/classification/secret-scan-off-thread.ts
+var init_secret_scan_off_thread = __esm(() => {
+  init_engine();
+});
+
+// src/workers/connector-store/tier-rejudge.ts
+var init_tier_rejudge = __esm(() => {
+  init_sniffer();
+  init_media_judge();
+  init_parent_context();
+  init_stored_names();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_loop_pass();
+  init_secrets_disposition();
+  init_tier_placement();
+  init_secret_scan_off_thread();
+  init_engine();
+});
+// src/workers/source-index/built-in-embedding/litert-runtime.ts
+var REQUEST_TIMEOUT_MS;
+var init_litert_runtime = __esm(() => {
+  init_off_thread();
+  REQUEST_TIMEOUT_MS = 3 * 60000;
+});
+
+// src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
+var init_remote_litert_runtime = () => {};
+
+// src/workers/source-index/built-in-embedding/runtime.ts
+var init_runtime = () => {};
+// src/workers/source-index/built-in-embedding/wordpiece.ts
+var init_wordpiece = () => {};
+
+// src/workers/source-index/built-in-embedding/provider.ts
+var RETRY_AFTER_FAILURE_MS, PICTURE_HOLD_MS;
+var init_provider = __esm(() => {
+  init_off_thread();
+  init_operation_error();
+  init_embedding_identity();
+  init_media_cache();
+  init_embeddings();
+  init_assets();
+  init_manifest();
+  init_litert_runtime();
+  init_remote_litert_runtime();
+  init_runtime();
+  init_wordpiece();
+  RETRY_AFTER_FAILURE_MS = 2 * 60000;
+  PICTURE_HOLD_MS = 60 * 60000;
+});
+
+// src/workers/connector-store/tier-auto-move.ts
+var init_tier_auto_move = __esm(() => {
+  init_provider();
+});
+
+// src/workers/embedding-ledger.ts
+var EMBEDDING_LEDGER_OWNER_APPROVAL, recordedIdCache, EMBEDDING_LEDGER_APPROVAL_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
+var init_embedding_ledger = __esm(() => {
+  init_olympus_layout();
+  EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
+  recordedIdCache = new Map;
+  EMBEDDING_LEDGER_APPROVAL_TEXT = {
+    [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
+    "system-automatic": "Not approved — the system did this on its own",
+    "unattributed-historical": "Not approved — no decision is on record"
+  };
+  WIPED_CORPORA = [
+    "dropbox",
+    "gmail-secure",
+    "drive-secure",
+    "whatsapp-live",
+    "telegram-protected"
+  ];
+  LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
+  EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
+    {
+      entry_id: "backfill-2026-08-20-endpoint-retarget",
+      recorded_at: "2026-08-20T02:42:00.000Z",
+      kind: "endpoint_change",
+      what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
+      approved_by: "unattributed-historical",
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-20-invalidation",
+      recorded_at: "2026-08-20T12:03:00.000Z",
+      kind: "invalidation",
+      what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      scope: { corpora: WIPED_CORPORA },
+      why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
+      approved_by: "system-automatic",
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-20-re-embed",
+      recorded_at: "2026-08-20T12:04:00.000Z",
+      kind: "re_embed_started",
+      what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      endpoint: DELPHI_ROUTER_ENDPOINT,
+      scope: { corpora: WIPED_CORPORA },
+      why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
+      approved_by: "system-automatic",
+      status: "in_progress"
+    },
+    {
+      entry_id: "backfill-2026-08-24-model-decision",
+      recorded_at: "2026-08-24T00:00:00.000Z",
+      kind: "model_decision",
+      what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
+      model_id: QWEN3_MODEL_ID,
+      epoch: QWEN3_EPOCH,
+      why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "backfill-2026-08-24-drain-lane-enablement",
+      recorded_at: "2026-08-24T23:30:00.000Z",
+      kind: "note",
+      what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
+      scope: {
+        corpora: LANE_ENABLEMENT_CORPORA,
+        chunks: { dropbox: 52840, "x-bookmarks": 15 }
+      },
+      why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-24-readwise-hybrid",
+      recorded_at: "2026-09-24T13:30:00.000Z",
+      kind: "model_decision",
+      what: "Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep " + "vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword " + "retrieval on the models they already embed with — the Personal store on its cloud identity, the " + "Private store on the approved private (Venice) lane — and embedding runs in the lane's own " + "embedding task instead of inside the pull and reconcile.",
+      scope: { corpora: ["readwise", "readwise-secure"] },
+      why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-25-chat-lane-catch-up",
+      recorded_at: "2026-09-25T07:00:00.000Z",
+      kind: "model_decision",
+      what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
+      scope: {
+        corpora: [
+          "internal.x.bookmarks",
+          "secure_local.x.bookmarks",
+          "internal.whatsapp.messages",
+          "secure_local.whatsapp.messages",
+          "internal.telegram.messages",
+          "secure_local.telegram.protected.messages"
+        ]
+      },
+      why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    },
+    {
+      entry_id: "decision-2026-09-30-gmail-catch-up",
+      recorded_at: "2026-09-30T21:05:00.000Z",
+      kind: "model_decision",
+      what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
+      scope: { corpora: ["internal.email"] },
+      why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
+      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    }
+  ];
+});
+
+// src/workers/connector-store/tier-move.ts
+var init_tier_move = __esm(() => {
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_local_index();
+  init_secrets_disposition();
+  init_job_names();
+  init_tier_placement();
+});
+
+// src/workers/answer-activity.ts
+var DEFAULT_ANSWER_LEASE_MS;
+var init_answer_activity = __esm(() => {
+  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+});
+
+// src/workers/engine-split/commands.ts
+var ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_BODY_MAX_BYTES, forwardedRecordIds, HOP_HEADERS;
+var init_commands = __esm(() => {
+  init_release_manifest();
+  init_engine_split();
+  init_operation_error();
+  init_http();
+  init_answer_activity();
+  ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
+  ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
+  forwardedRecordIds = new WeakMap;
+  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+});
+
+// src/workers/classification/chunk-release.ts
+var init_chunk_release = __esm(() => {
+  init_release_manifest();
+  init_tier_classifier();
+  init_delphi_scorer();
+  init_tier_ledger();
+  init_tier_rejudge();
+  init_tier_auto_move();
+  init_tier_move();
+  init_store_write_guard();
+  init_answer_activity();
+  init_commands();
+  init_parent_context();
+});
+
+// src/workers/connector-store/tier-visibility.ts
+var init_tier_visibility = __esm(() => {
+  init_chunk_release();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_child_visibility();
+});
+
 // src/core/source-index/reactions.ts
 var init_reactions = () => {};
-
-// src/workers/source-index/media-judge.ts
-var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
-var init_media_judge = __esm(() => {
-  MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
-  MEDIA_JUDGE_PROMPTS = Object.freeze({
-    id_document: "a photo of a passport, national identity card or driving licence",
-    bank_card: "a photo of a credit card, debit card or bank card",
-    financial_document: "a bank statement, payslip or document showing account numbers",
-    medical_document: "a medical report or lab test results document",
-    intimate: "a nude, intimate or sexually explicit photo",
-    ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
-  });
-  MEDIA_JUDGE_THRESHOLDS = Object.freeze({
-    margin: 0.04,
-    intimateMargin: 0.025
-  });
-  promptVectorCache = new Map;
-});
 
 // src/workers/connector-store/local-index.ts
 function connectorStoreContentPreference(vettedVectorItemIds) {
@@ -16871,6 +17426,7 @@ var init_local_index = __esm(() => {
   init_secret_locations();
   init_tier_set_binding();
   init_tier_placement();
+  init_tier_visibility();
   init_secrets_disposition();
   init_child_visibility();
   init_source_ingestion_exclusions();
@@ -17083,17 +17639,6 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
-// src/workers/connector-store/stored-names.ts
-var init_stored_names = __esm(() => {
-  init_tier_ledger();
-});
-
-// src/workers/connector-store/parent-context.ts
-var init_parent_context = __esm(() => {
-  init_sniffer();
-  init_tier_classifier();
-  init_stored_names();
-});
 
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
@@ -17108,142 +17653,6 @@ var init_tier_held_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_loop_pass();
-});
-
-// src/workers/embedding-ledger.ts
-var EMBEDDING_LEDGER_OWNER_APPROVAL, recordedIdCache, EMBEDDING_LEDGER_APPROVAL_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
-var init_embedding_ledger = __esm(() => {
-  init_olympus_layout();
-  EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
-  recordedIdCache = new Map;
-  EMBEDDING_LEDGER_APPROVAL_TEXT = {
-    [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
-    "system-automatic": "Not approved — the system did this on its own",
-    "unattributed-historical": "Not approved — no decision is on record"
-  };
-  WIPED_CORPORA = [
-    "dropbox",
-    "gmail-secure",
-    "drive-secure",
-    "whatsapp-live",
-    "telegram-protected"
-  ];
-  LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
-  EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
-    {
-      entry_id: "backfill-2026-08-20-endpoint-retarget",
-      recorded_at: "2026-08-20T02:42:00.000Z",
-      kind: "endpoint_change",
-      what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
-      approved_by: "unattributed-historical",
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-20-invalidation",
-      recorded_at: "2026-08-20T12:03:00.000Z",
-      kind: "invalidation",
-      what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      scope: { corpora: WIPED_CORPORA },
-      why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
-      approved_by: "system-automatic",
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-20-re-embed",
-      recorded_at: "2026-08-20T12:04:00.000Z",
-      kind: "re_embed_started",
-      what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      endpoint: DELPHI_ROUTER_ENDPOINT,
-      scope: { corpora: WIPED_CORPORA },
-      why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
-      approved_by: "system-automatic",
-      status: "in_progress"
-    },
-    {
-      entry_id: "backfill-2026-08-24-model-decision",
-      recorded_at: "2026-08-24T00:00:00.000Z",
-      kind: "model_decision",
-      what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
-      model_id: QWEN3_MODEL_ID,
-      epoch: QWEN3_EPOCH,
-      why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "backfill-2026-08-24-drain-lane-enablement",
-      recorded_at: "2026-08-24T23:30:00.000Z",
-      kind: "note",
-      what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
-      scope: {
-        corpora: LANE_ENABLEMENT_CORPORA,
-        chunks: { dropbox: 52840, "x-bookmarks": 15 }
-      },
-      why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "decision-2026-09-24-readwise-hybrid",
-      recorded_at: "2026-09-24T13:30:00.000Z",
-      kind: "model_decision",
-      what: "Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep " + "vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword " + "retrieval on the models they already embed with — the Personal store on its cloud identity, the " + "Private store on the approved private (Venice) lane — and embedding runs in the lane's own " + "embedding task instead of inside the pull and reconcile.",
-      scope: { corpora: ["readwise", "readwise-secure"] },
-      why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "decision-2026-09-25-chat-lane-catch-up",
-      recorded_at: "2026-09-25T07:00:00.000Z",
-      kind: "model_decision",
-      what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
-      scope: {
-        corpora: [
-          "internal.x.bookmarks",
-          "secure_local.x.bookmarks",
-          "internal.whatsapp.messages",
-          "secure_local.whatsapp.messages",
-          "internal.telegram.messages",
-          "secure_local.telegram.protected.messages"
-        ]
-      },
-      why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    },
-    {
-      entry_id: "decision-2026-09-30-gmail-catch-up",
-      recorded_at: "2026-09-30T21:05:00.000Z",
-      kind: "model_decision",
-      what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
-      scope: { corpora: ["internal.email"] },
-      why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
-      approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    }
-  ];
-});
-
-// src/workers/connector-store/tier-move.ts
-var init_tier_move = __esm(() => {
-  init_engine();
-  init_tier_classifier();
-  init_tier_ledger();
-  init_embedding_ledger();
-  init_local_index();
-  init_secrets_disposition();
-  init_job_names();
-  init_tier_placement();
 });
 
 // src/workers/connector-store/tier-content-purge.ts
@@ -17277,43 +17686,6 @@ var init_tier_auto_prune_sweep = __esm(() => {
     "database disk image is malformed"
   ]);
 });
-// src/workers/source-index/built-in-embedding/litert-runtime.ts
-var REQUEST_TIMEOUT_MS;
-var init_litert_runtime = __esm(() => {
-  init_off_thread();
-  REQUEST_TIMEOUT_MS = 3 * 60000;
-});
-
-// src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-var init_remote_litert_runtime = () => {};
-
-// src/workers/source-index/built-in-embedding/runtime.ts
-var init_runtime = () => {};
-// src/workers/source-index/built-in-embedding/wordpiece.ts
-var init_wordpiece = () => {};
-
-// src/workers/source-index/built-in-embedding/provider.ts
-var RETRY_AFTER_FAILURE_MS, PICTURE_HOLD_MS;
-var init_provider = __esm(() => {
-  init_off_thread();
-  init_operation_error();
-  init_embedding_identity();
-  init_media_cache();
-  init_embeddings();
-  init_assets();
-  init_manifest();
-  init_litert_runtime();
-  init_remote_litert_runtime();
-  init_runtime();
-  init_wordpiece();
-  RETRY_AFTER_FAILURE_MS = 2 * 60000;
-  PICTURE_HOLD_MS = 60 * 60000;
-});
-
-// src/workers/connector-store/tier-auto-move.ts
-var init_tier_auto_move = __esm(() => {
-  init_provider();
-});
 
 // src/workers/connector-store/tier-row-rehome.ts
 var MOVE_WHY;
@@ -17324,26 +17696,6 @@ var init_tier_row_rehome = __esm(() => {
   init_embedding_ledger();
   init_tier_move();
   MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
-});
-
-// src/workers/classification/secret-scan-off-thread.ts
-var init_secret_scan_off_thread = __esm(() => {
-  init_engine();
-});
-
-// src/workers/connector-store/tier-rejudge.ts
-var init_tier_rejudge = __esm(() => {
-  init_sniffer();
-  init_media_judge();
-  init_parent_context();
-  init_stored_names();
-  init_tier_classifier();
-  init_tier_ledger();
-  init_loop_pass();
-  init_secrets_disposition();
-  init_tier_placement();
-  init_secret_scan_off_thread();
-  init_engine();
 });
 
 // src/workers/connector-store/tier-override-settle.ts
@@ -17710,12 +18062,6 @@ var init_analyst_built_in = __esm(() => {
 var init_analyst_delphi = __esm(() => {
   init_operation_error();
 });
-// src/workers/answer-activity.ts
-var DEFAULT_ANSWER_LEASE_MS;
-var init_answer_activity = __esm(() => {
-  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
-});
-
 // src/core/analyst-openclaw-infer.ts
 var MAX_PROMPT_BYTES = 1e5, OPENCLAW_INFER_MAX_PROMPT_BYTES;
 var init_analyst_openclaw_infer = __esm(() => {
@@ -21781,264 +22127,11 @@ init_worker_transport();
 
 // src/core/dashboard-opening.ts
 init_worker_transport();
+init_dashboard_launch();
+init_open_targets();
+init_operation_error();
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { join as join5 } from "node:path";
-
-// src/core/open-targets.ts
-var OPEN_CONNECT_SOURCES = {
-  x: { sourceId: "x.bookmarks", label: "X bookmarks" },
-  readwise: { sourceId: "readwise.library", label: "Readwise" },
-  telegram: { sourceId: "telegram.messages", label: "Telegram" },
-  whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" },
-  evernote: { sourceId: "evernote.notes", label: "Evernote" }
-};
-var OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
-var OPEN_UNREADABLE_SOURCES = {
-  dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
-  drive: { sourceId: "google_drive.docs", label: "Google Drive" },
-  whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
-};
-function allOpenTargets() {
-  return [
-    { kind: "dashboard" },
-    { kind: "private_answers" },
-    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
-    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
-    { kind: "archives" }
-  ];
-}
-function openTargetPath(target) {
-  if (target.kind === "private_answers")
-    return target.answerId ? `private/${target.answerId}` : "private";
-  if (target.kind === "connect")
-    return `connect/${target.source}`;
-  if (target.kind === "fix")
-    return `fix/${target.section}`;
-  if (target.kind === "unreadable")
-    return `unreadable/${target.source}`;
-  if (target.kind === "archives")
-    return "archives";
-  return "dashboard";
-}
-function openTargetFromPath(path) {
-  if (typeof path !== "string")
-    return;
-  const answer = /^private\/([A-Za-z0-9_-]{22})$/.exec(path);
-  if (answer)
-    return { kind: "private_answers", answerId: answer[1] };
-  return allOpenTargets().find((target) => openTargetPath(target) === path);
-}
-function openTargetToken(target) {
-  if (target.kind === "private_answers")
-    return target.answerId ? `page.private.${target.answerId}` : "page.private";
-  if (target.kind === "connect")
-    return `connect.${target.source}`;
-  if (target.kind === "fix")
-    return `fix.${target.section}`;
-  if (target.kind === "unreadable")
-    return `unreadable.${target.source}`;
-  if (target.kind === "archives")
-    return "archives";
-  return;
-}
-function openTargetTokenPattern() {
-  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function isConnectOpenTarget(target) {
-  return target.kind === "connect";
-}
-function isKeysOpenTarget(target) {
-  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
-}
-function tokenPattern(filter) {
-  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function keysOpenTargetTokenPattern() {
-  return tokenPattern(isKeysOpenTarget);
-}
-function connectOpenTargetTokenPattern() {
-  return tokenPattern(isConnectOpenTarget);
-}
-function privateAnswersOpenTargetTokenPattern() {
-  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
-}
-function isPanelOpenTarget(target) {
-  return target.kind === "unreadable" || target.kind === "archives";
-}
-function panelOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-var DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open";
-var DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
-
-// src/core/dashboard-launch.ts
-var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
-var DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120;
-var DASHBOARD_UNLOCK_STORAGE_KEY = "olympus-dashboard-unlock-v1";
-var DASHBOARD_UNLOCK_HEADER = "X-Olympus-Dashboard-Unlock";
-var DASHBOARD_UNLOCK_SHELL_HEADER = "X-Olympus-Dashboard-Shell";
-var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="referrer" content="no-referrer">
-    <title>Olympus</title>
-    <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
-      main { max-width: 32rem; margin: 0 auto; }
-      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
-      p { margin: 0; color: #a9a4ae; }
-      a { color: #cfc7ff; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
-    </main>
-    <script>
-      (function () {
-        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
-        var OPEN = /${openTargetTokenPattern()}/;
-        var KEYS = /${keysOpenTargetTokenPattern()}/;
-        var CONNECT = /${connectOpenTargetTokenPattern()}/;
-        var PANEL = /${panelOpenTargetTokenPattern()}/;
-        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
-        var status = document.getElementById('status');
-        var open = '';
-        function take() {
-          var hash = window.location.hash.slice(1);
-          // Clear even malformed fragments before parsing or making a request.
-          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
-          catch (e) { return ''; }
-          var params = new URLSearchParams(hash);
-          // Where to land: one of a closed list, or the plain dashboard.
-          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
-          if (OPEN.test(wanted)) open = wanted;
-          return params.get(KEY) || '';
-        }
-        var ticket = take();
-        if (!ticket) {
-          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
-          window.location.replace('/dashboard');
-          return;
-        }
-        fetch('/dashboard/control/launch/redeem', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ticket: ticket })
-        }).then(function (response) {
-          if (!response.ok) return response;
-          // This browser's key for later plain navigations (#1187): kept per origin, so per port.
-          return response.json().then(function (body) {
-            try {
-              if (body && typeof body.unlock_key === 'string') window.localStorage.setItem('${DASHBOARD_UNLOCK_STORAGE_KEY}', body.unlock_key);
-            } catch (e) {}
-            return response;
-          }, function () { return response; });
-        }).then(function (response) {
-          // A link already used or expired (a reload, a second open) still
-          // lands on the dashboard: the session it opened is in its cookie,
-          // and without one the dashboard itself offers the way back in.
-          if (response.ok || response.status === 403) {
-            // Connect lands on Connect a source, where the computer's setup sheets live; a
-            // model fix lands on Privacy settings (?keys), where the models live. Each only
-            // opens something there, never submits anything.
-            // A panel target (See why on one source) lands on the dashboard there.
-            // Private answers lands on that page, carrying nothing.
-            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(CONNECT.test(open)
-              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
-            return;
-          }
-          // Anything else: the dashboard is the way in (its session, or how to get one).
-          window.location.replace('/dashboard');
-        }).catch(function () {
-          status.textContent = 'Opening failed.';
-        });
-      }());
-    </script>
-  </body>
-</html>
-`;
-var DASHBOARD_UNLOCK_SHELL_HTML = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="referrer" content="no-referrer">
-    <title>Olympus</title>
-    <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
-      main { max-width: 32rem; margin: 0 auto; }
-      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
-      p { margin: 0; color: #a9a4ae; }
-      code { color: #e8e6e3; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1 id="status">Opening Olympus…</h1>
-      <p id="detail"></p>
-    </main>
-    <script>
-      (function () {
-        var KEY = '${DASHBOARD_UNLOCK_STORAGE_KEY}';
-        var SHELL = '${DASHBOARD_UNLOCK_SHELL_HEADER}';
-        var HEADER = '${DASHBOARD_UNLOCK_HEADER}';
-        var status = document.getElementById('status');
-        var detail = document.getElementById('detail');
-        function locked() {
-          try { window.localStorage.removeItem(KEY); } catch (e) {}
-          status.textContent = 'Dashboard controls are locked';
-          detail.textContent = 'Run ';
-          var command = document.createElement('code');
-          command.textContent = 'olympus dashboard';
-          detail.appendChild(command);
-          detail.appendChild(document.createTextNode(' in a terminal on this computer to open it again.'));
-        }
-        function failed() {
-          status.textContent = 'Opening failed.';
-          detail.textContent = 'Reload this page to try again.';
-        }
-        var key = '';
-        try { key = window.localStorage.getItem(KEY) || ''; } catch (e) {}
-        if (!key) { locked(); return; }
-        var headers = {};
-        headers[HEADER] = key;
-        fetch(window.location.href, {
-          cache: 'no-store',
-          credentials: 'same-origin',
-          headers: headers
-        }).then(function (response) {
-          // A page that moved: go there, and its own navigation proves itself the same way.
-          if (response.redirected) { window.location.replace(response.url); return; }
-          if (response.headers.get(SHELL) || response.status === 401 || response.status === 403) { locked(); return; }
-          var type = response.headers.get('Content-Type') || '';
-          if (!response.ok || type.indexOf('text/html') !== 0) { failed(); return; }
-          return response.text().then(function (html) {
-            document.open();
-            document.write(html);
-            document.close();
-          });
-        }).catch(failed);
-      }());
-    </script>
-  </body>
-</html>
-`;
-
-// src/core/dashboard-opening.ts
-init_operation_error();
 var OLYMPUS_PLUGIN_BIN_HINT = "<rootDir>/bin/olympus";
 function olympusCommandHint(input = {}) {
   const env = input.env ?? process.env;
@@ -22112,6 +22205,8 @@ async function mintDashboardOpeningUrl(base, token, dependencies = {}) {
 }
 
 // src/core/remote-open-tool.ts
+init_dashboard_launch();
+init_open_targets();
 init_operation_error();
 
 // src/core/linux-desktop-opener.ts
@@ -22385,6 +22480,7 @@ for (const extension of OPENABLE_EXTENSIONS) {
 
 // src/core/remote-open.ts
 init_worker_transport();
+init_open_targets();
 var SERVER_MODE_ENV = "OLYMPUS_SERVER_MODE";
 var SERVER_SSH_TARGET_ENV = "OLYMPUS_SERVER_SSH_TARGET";
 var SERVER_AGENT_ROUTE_ENV = "OLYMPUS_SERVER_AGENT_ROUTE";
@@ -24994,6 +25090,7 @@ init_http_timeout();
 var REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
 
 // src/core/linux-owner-bridge.ts
+init_dashboard_launch();
 var PROOF_HEADER = "X-Olympus-Owner-Proof";
 var FORM_PROOF = "_olympus_owner_proof";
 var STORAGE = "olympus-desktop-owner-v1";
@@ -26644,50 +26741,7 @@ function humanUtcMinute(value) {
 
 // src/native-plugin.ts
 init_source_watch();
-
-// src/workers/http.ts
-import { createHmac, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
-
-// src/core/request-peer.ts
-var ownerSockets = new WeakSet;
-var peers = new WeakMap;
-
-// src/workers/http.ts
-init_worker_auth();
-var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
-var DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin";
-var DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer";
-var DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1";
-var AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
-var AGENT_MINT_WINDOW_MS = 10 * 60000;
-var REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
-function createGatewayCallbackPeerHeader(peer, authToken) {
-  const normalized = normalizeGatewayCallbackPeer(peer);
-  const signature = createHmac("sha256", authToken).update(`${DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT}:${normalized}`).digest("base64url");
-  return `${normalized}.${signature}`;
-}
-function normalizeGatewayCallbackPeer(value) {
-  const normalized = value.trim();
-  return normalized.length > 0 && normalized.length <= 256 ? normalized : "unknown";
-}
-function hasValidWorkerBearerToken(header, expectedToken) {
-  if (!header)
-    return false;
-  const [scheme, ...rest] = header.split(" ");
-  if (scheme !== "Bearer" || rest.length !== 1)
-    return false;
-  return constantTimeStringEqual(rest[0] ?? "", expectedToken);
-}
-function constantTimeStringEqual(actual, expected) {
-  const actualBytes = new TextEncoder().encode(actual);
-  const expectedBytes = new TextEncoder().encode(expected);
-  const maxLength = Math.max(actualBytes.byteLength, expectedBytes.byteLength, 1);
-  const actualPadded = new Uint8Array(maxLength);
-  const expectedPadded = new Uint8Array(maxLength);
-  actualPadded.set(actualBytes.slice(0, maxLength));
-  expectedPadded.set(expectedBytes.slice(0, maxLength));
-  return timingSafeEqual(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
-}
+init_http();
 
 // src/core/operations.ts
 init_release_manifest();
@@ -32310,6 +32364,7 @@ var OLYMPUS_DASHBOARD_PANEL_PATH = "/olympus/dashboard/panel";
 
 // src/core/control-ui-gateway.ts
 init_worker_auth();
+init_http();
 var OLYMPUS_TAB_TOOL_NAMES = [
   "olympus_limits",
   "olympus_dashboard",
@@ -32840,6 +32895,7 @@ function enumValue(value, values, label) {
 }
 
 // src/core/remote-access-config.ts
+init_http();
 var REMOTE_ACCESS_CONFIG_ROUTE = "/plugins/olympus/remote-access";
 var REMOTE_ACCESS_ENABLED_CONFIG_PATH = "plugins.entries.olympus.config.remote.enabled";
 async function handleRemoteAccessConfigRequest(input) {

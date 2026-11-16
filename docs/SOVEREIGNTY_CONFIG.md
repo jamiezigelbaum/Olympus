@@ -579,13 +579,13 @@ input and 2M output tokens. Pace: the service checks for work every second
 (`OLYMPUS_TIER_SNIFFER_INTERVAL_MS`) and a pass keeps asking for up to 30
 seconds. A local model is shared with answers, which preempt the sniffer at
 once. `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS` sets an optional call limit per
-pass. The daily cap (`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`) defaults to
-20,000 attempts in full mode, which works through a 100k-item backlog in about
-five days; on Venice that is at most about $1.10 a day at an assumed,
-unverified price. A local llama.cpp server can use decision mode, a one-token
-read of the same question, where the default is 250,000 attempts a day
-([design](design/per-item-four-tier-classification.md)). A local model is
-bounded by its own throughput first. Source index status reports the backlog as counts only
+pass. For cloud judging with no dollar cap, the daily cap
+(`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`) defaults to 20,000 attempts in
+full mode, which works through a 100k-item backlog in about five days; on
+Venice that is at most about $1.10 a day at an assumed, unverified price.
+A local model has no default daily cap: it costs nothing per call and is
+bounded by its own throughput. Setting the variable applies a cap to any
+judge ([design](design/per-item-four-tier-classification.md)). Source index status reports the backlog as counts only
 (`tier_classification`: "Checking N items, about X questions remaining"), and
 each store's `pending_classification_items`; there is deliberately no time
 estimate. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,

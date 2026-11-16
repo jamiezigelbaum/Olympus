@@ -109,7 +109,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import { arrivalOrderedSniffer, conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import type { SourceItemReadResult, SourceItemReadRefusal } from '../../core/source-item-read.ts';
-import { checkReleaseChunks, chunkCoverageNote, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ReleaseCheck, type ReleaseInput } from '../../core/release-manifest.ts';
+import { checkReleaseChunks, chunkCoverageNote, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
 import { assertStoreTierLedgerCanOpen, findTierSetLedger } from '../classification/tier-set-binding.ts';
@@ -121,6 +121,7 @@ import {
   type ConnectorStorePlacement,
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
+import { effectiveItemVerdicts } from './tier-visibility.ts';
 import { forgetSecretInSideStores, retireSecretRedactions } from './secrets-disposition.ts';
 import {
   hiddenChildKeys,
@@ -4197,6 +4198,35 @@ export class LocalConnectorStore {
    */
   governingTierLedger(): TierLedger | undefined {
     return this.visibilityLedger();
+  }
+
+  /** Batch current item verdicts, independent of placement; unreadable ledgers hold Private. */
+  effectiveItemTiers(identities: readonly TierLedgerIdentity[], layer?: 'names'): ReleaseInputVerdict['tier'][] {
+    try {
+      const ledger = this.governingTierLedger();
+      return visibilityHere(effectiveItemVerdicts(
+        () => ledger ? [{ ledger, corpusIds: new Set([this.corpusId]) }] : [],
+        identities.map(identity => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...(layer ? { layer } : {}) })),
+        // An item the release check calls gone (routed, no current copy here)
+        // is never eligible for a remote exit: held Private unless Secret.
+      )).map(verdict => (verdict.gone && verdict.tier !== 'secret' ? 'private' : verdict.tier));
+    } catch {
+      // An unreadable governing ledger never authorizes this exit.
+      return identities.map(() => 'private');
+    }
+  }
+
+  /** The verdict of one stored item by its local id, with its full identity (conversation included); no row is Private. */
+  effectiveLocalItemTier(localItemId: string): ReleaseInputVerdict['tier'] {
+    const row = this.db.query(`
+      SELECT provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
+    `).get(localItemId) as { provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null } | null;
+    if (!row) return 'private';
+    return this.effectiveItemTiers([{
+      provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    }])[0]!;
   }
 
   /** The ledger this store records tier decisions in, opening the default one on first use. */
@@ -13216,11 +13246,11 @@ export class LocalConnectorStore {
 
   /**
    * The rows of an embedding batch this embedder may still receive, judged
-   * from the store as it is now: a row whose item is now Private by its own
-   * tier (or carries an unknown tier) is counted `privateTier`; one now
-   * deleted or kept out of view by the tier ledger is counted `notVisible`.
-   * With no `embeddableTiers` (an embedder approved for Private content)
-   * only visibility is rechecked. Synchronous, so the caller can dispatch
+   * from the store and one batched ledger read: a row whose item is now
+   * Private by its stored tier or effective text verdict (unknown included)
+   * is counted `privateTier`; one deleted, Secret, or kept out of view by the
+   * ledger is counted `notVisible`. With no `embeddableTiers` (an embedder
+   * approved for Private content), Private text remains eligible. Synchronous, so the caller can dispatch
    * with no await in between. Visibility is looked up for the batch's items
    * alone, not by rebuilding the store's whole hidden-copy set.
    */
@@ -13244,14 +13274,20 @@ export class LocalConnectorStore {
     }>;
     const current = new Map(currentRows.map((row) => [row.item_pk, row] as const));
     const hidden = this.embeddingHiddenAmong(currentRows, this.canEmbedHeld(provider));
+    const verdicts = this.effectiveItemTiers(currentRows.map(item => ({
+      provider: item.provider, accountScope: item.account_scope, providerItemId: item.provider_item_id,
+      ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
+    })));
+    const tiers = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
     const kept: T[] = [];
     let privateTier = 0;
     let notVisible = 0;
     for (const row of batch) {
       const item = current.get(row.item_pk);
-      if (!item || item.tombstoned !== 0 || item.trust_tier === 'S5' || hidden.has(row.item_pk)) {
+      if (!item || item.tombstoned !== 0 || item.trust_tier === 'S5' || tiers.get(row.item_pk) === 'secret' || hidden.has(row.item_pk)) {
         notVisible += 1;
-      } else if (embeddableTiers !== undefined && !(embeddableTiers as readonly string[]).includes(item.trust_tier)) {
+      } else if (embeddableTiers !== undefined && (!(embeddableTiers as readonly string[]).includes(item.trust_tier)
+        || tiers.get(row.item_pk) === 'private' || tiers.get(row.item_pk) === 'unknown')) {
         privateTier += 1;
       } else {
         kept.push(row);

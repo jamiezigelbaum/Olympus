@@ -231,6 +231,85 @@ function interleaveByCorpus(hits: readonly SourceIndexRoutedSearchHit[]): Source
   return ordered;
 }
 
+/** One batched ledger snapshot per scope; shared by release checks and local exits. Throws on unreadable ledgers. */
+export function* effectiveItemVerdicts(
+  scopes: () => readonly TierVisibilityScope[],
+  inputs: Parameters<ReleaseCheck['inputs']>[0],
+): Generator<VisibilityRead, ReleaseInputVerdict[], unknown> {
+  const verdicts: ReleaseInputVerdict[] = inputs.map(() => ({ tier: 'legacy', gone: false }));
+  if (inputs.length === 0) return verdicts;
+  for (const scope of scopes()) {
+    const governed: Array<{ index: number; identity: TierLedgerIdentity }> = [];
+    inputs.forEach((input, index) => {
+      if (!scope.corpusIds.has(input.corpusId)) return;
+      if (!input.accountScope || !input.provider || !input.providerItemId) {
+        verdicts[index] = { tier: 'unknown', gone: false };
+        return;
+      }
+      governed.push({
+        index,
+        identity: {
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: input.providerItemId,
+          ...(input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}),
+        },
+      });
+    });
+    if (governed.length === 0) continue;
+    // The same ledger snapshot now runs on the pool for Ask release. Deduplicate
+    // identities there so repeated citations do not reread the same rows.
+    const identities = governed.map(({ identity }) => identity);
+    const states = yield* visibilityRead(() => memoVisibilityItemsHere(scope.ledger, 'states', () => scope.ledger.changeMarker(), identities, tierLedgerIdentityKey, missing => scope.ledger.itemStatesForMany(missing)),
+      () => itemStatesOffThread(scope.ledger, identities));
+    for (const { index, identity } of governed) {
+      const state = states.get(tierLedgerIdentityKey(identity));
+      if (!state) continue;
+      const { record, copies, override } = state;
+      // An input of the names layer (a child citation's parent label) is
+      // judged on the item's names alone: its content tier never limits an
+      // answer that carries only its names.
+      const namesOnly = inputs[index]!.layer === 'names';
+      const tiers = namesOnly
+        ? [record.metadataTier, record.targetMetadataTier]
+        : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+      // Owner edits take effect before their queued placement settles.
+      if (override?.kind === 'tier') tiers.push(override.tier);
+      // What waits for its model question is held Private, as placement
+      // holds it, though its recorded tier is the Personal default: an
+      // answer read from it is Private until the model says otherwise.
+      const held = record.metadataPending || (!namesOnly && contentHeldForJudgment(record));
+      verdicts[index] = {
+        tier: tiers.includes('secrets') ? 'secret' : held || tiers.includes('secure') ? 'private' : 'public_or_personal',
+        gone: record.routed && !copies.some((copy) => copy.state === 'current'
+          && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata')),
+      };
+    }
+    // A child whose parent is not served any more is gone, whatever its own
+    // copies say, and the answer that drew on it is withheld whole.
+    const lane = childLane(scope);
+    if (lane) {
+      const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter(({ index }) => inputs[index]!.dependency !== 'parent_label').map(({ identity }) => identity));
+      for (const { index, identity } of governed) {
+        if (inputs[index]!.dependency !== 'parent_label' && orphaned.has(tierLedgerIdentityKey(identity))) {
+          verdicts[index] = { ...verdicts[index]!, gone: true, hiddenByParent: true };
+        }
+      }
+      // The parent label's names are the parent's own, so they are judged the way the parent's
+      // children are, by what its rows say now and not by its ledger copies alone: a parent
+      // tombstoned by an absence reconcile keeps its copy rows until the sync that did it ends.
+      const named = governed.filter(({ index }) => inputs[index]!.dependency === 'parent_label');
+      if (named.length > 0) {
+        const standing = yield* itemVerdictsSteps(lane, named.map(({ identity }) => identity));
+        for (const { index, identity } of named) {
+          if (standing.get(tierLedgerIdentityKey(identity))?.visible !== true) verdicts[index] = { ...verdicts[index]!, gone: true };
+        }
+      }
+    }
+  }
+  return verdicts;
+}
+
 /**
  * The current tiers of the items an answer was written from (its release
  * manifest, core/release-manifest.ts), read when a remote agent collects the
@@ -255,91 +334,17 @@ export function createReleaseTierCheck(
   secureDerivativeDefault: () => 'allow' | 'approval',
   chunkOptions: Pick<ChunkReleaseOptions, 'judgeNow' | 'boost'> = {},
 ): ReleaseCheck {
-  function* inputsSteps(inputs: Parameters<ReleaseCheck['inputs']>[0]): Generator<VisibilityRead, ReleaseInputVerdict[], unknown> {
-    const verdicts: ReleaseInputVerdict[] = inputs.map(() => ({ tier: 'legacy', gone: false }));
-    if (inputs.length === 0) return verdicts;
-    for (const scope of scopes()) {
-      const governed: Array<{ index: number; identity: TierLedgerIdentity }> = [];
-      inputs.forEach((input, index) => {
-        if (!scope.corpusIds.has(input.corpusId)) return;
-        if (!input.accountScope || !input.provider || !input.providerItemId) {
-          verdicts[index] = { tier: 'unknown', gone: false };
-          return;
-        }
-        governed.push({
-          index,
-          identity: {
-            provider: input.provider,
-            accountScope: input.accountScope,
-            providerItemId: input.providerItemId,
-            ...(input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}),
-          },
-        });
-      });
-      if (governed.length === 0) continue;
-      // The same ledger snapshot now runs on the pool for Ask release. Deduplicate
-      // identities there so repeated citations do not reread the same rows.
-      const identities = governed.map(({ identity }) => identity);
-      const states = yield* visibilityRead(() => memoVisibilityItemsHere(scope.ledger, 'states', () => scope.ledger.changeMarker(), identities, tierLedgerIdentityKey, missing => scope.ledger.itemStatesForMany(missing)),
-        () => itemStatesOffThread(scope.ledger, identities));
-      for (const { index, identity } of governed) {
-        const state = states.get(tierLedgerIdentityKey(identity));
-        if (!state) continue;
-        const { record, copies, override } = state;
-        // An input of the names layer (a child citation's parent label) is
-        // judged on the item's names alone: its content tier never limits an
-        // answer that carries only its names.
-        const namesOnly = inputs[index]!.layer === 'names';
-        const tiers = namesOnly
-          ? [record.metadataTier, record.targetMetadataTier]
-          : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
-        // Owner edits take effect before their queued placement settles.
-        if (override?.kind === 'tier') tiers.push(override.tier);
-        // What waits for its model question is held Private, as placement
-        // holds it, though its recorded tier is the Personal default: an
-        // answer read from it is Private until the model says otherwise.
-        const held = record.metadataPending || (!namesOnly && contentHeldForJudgment(record));
-        verdicts[index] = {
-          tier: tiers.includes('secrets') ? 'secret' : held || tiers.includes('secure') ? 'private' : 'public_or_personal',
-          gone: record.routed && !copies.some((copy) => copy.state === 'current'
-            && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata')),
-        };
-      }
-      // A child whose parent is not served any more is gone, whatever its own
-      // copies say, and the answer that drew on it is withheld whole.
-      const lane = childLane(scope);
-      if (lane) {
-        const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter(({ index }) => inputs[index]!.dependency !== 'parent_label').map(({ identity }) => identity));
-        for (const { index, identity } of governed) {
-          if (inputs[index]!.dependency !== 'parent_label' && orphaned.has(tierLedgerIdentityKey(identity))) {
-            verdicts[index] = { ...verdicts[index]!, gone: true, hiddenByParent: true };
-          }
-        }
-        // The parent label's names are the parent's own, so they are judged the way the parent's
-        // children are, by what its rows say now and not by its ledger copies alone: a parent
-        // tombstoned by an absence reconcile keeps its copy rows until the sync that did it ends.
-        const named = governed.filter(({ index }) => inputs[index]!.dependency === 'parent_label');
-        if (named.length > 0) {
-          const standing = yield* itemVerdictsSteps(lane, named.map(({ identity }) => identity));
-          for (const { index, identity } of named) {
-            if (standing.get(tierLedgerIdentityKey(identity))?.visible !== true) verdicts[index] = { ...verdicts[index]!, gone: true };
-          }
-        }
-      }
-    }
-    return verdicts;
-  }
   const check: ReleaseCheck = {
     secureDerivativeDefault,
     chunks: (inputs, options) => releaseChunks(inputs, scopes, check, { ...chunkOptions, ...options }),
-    inputs: (inputs) => visibilityHere(inputsSteps(inputs)),
+    inputs: (inputs) => visibilityHere(effectiveItemVerdicts(scopes, inputs)),
     // A write during the pooled check takes it again, then checks here once.
     inputsOffThread: (inputs) => judgedAwaited(async () => {
       const unchanged = scopes().map(scope => childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
-      const verdicts = await visibilityOffThread(inputsSteps(inputs));
+      const verdicts = await visibilityOffThread(effectiveItemVerdicts(scopes, inputs));
       if (unchanged.some(check => !check())) throw new VisibilityChangedError();
       return verdicts;
-    }, () => visibilityHere(inputsSteps(inputs))),
+    }, () => visibilityHere(effectiveItemVerdicts(scopes, inputs))),
   };
   return check;
 }
