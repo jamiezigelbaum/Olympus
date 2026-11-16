@@ -69,7 +69,9 @@ export interface SourceIndexSearchRequest {
   // A reranker pool (evidence-pack): seat every store's leader, then go deep
   // in the strongest stores first, up to storeDepth of each store's own ranks
   // (applyStrengthPoolBudget). Absent: stores share seats in even turns.
-  poolAllocation?: { storeDepth: number };
+  // semanticSeats: seats added after that draw for the best vector rows
+  // across stores by margin over each store's bar (withSemanticPoolSeats).
+  poolAllocation?: { storeDepth: number; semanticSeats?: number };
 }
 
 export interface SourceIndexCorpusSearchRequest {
@@ -164,6 +166,14 @@ export interface SourceIndexCorpusSearchResponse {
    * from the search the store already ran, so no second vector scan is paid.
    */
   semanticNeighbourHits?: readonly SourceIndexSearchHit[];
+  /**
+   * Internal: the store's best vector rows in this same search, nearest
+   * first, whether or not they cleared its relevance bar, each hit's score
+   * its cosine, with the bar they are measured against. A reranked pool may
+   * seat them by margin over the bar (withSemanticPoolSeats); like the
+   * neighbours they are never matches and never counted.
+   */
+  semanticRows?: { hits: readonly SourceIndexSearchHit[]; bar: number };
   rawExposed: false;
 }
 
@@ -319,6 +329,10 @@ export interface SourceIndexRoutedSearchResponse {
   // (withReservedRecencySeats). A prompt fit reads them right after seats 1 to
   // 3. Internal.
   recencySeats?: number;
+  // The pool seats withSemanticPoolSeats added, with their margins, so a
+  // build that fuses several runs can seat them again past its own cut.
+  // Internal.
+  semanticSeats?: readonly SemanticPoolSeat[];
   latencyMs: number;
   rawExposed: false;
 }
@@ -497,7 +511,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const laneAudits: RetrievalLaneAudit[] = [];
   const degradations: RetrievalDegradation[] = [];
   const corpusTimings: SourceIndexRoutedCorpusTiming[] = [];
-  const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[]; relevance?: SourceIndexStoreRelevance }> = [];
+  const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[]; relevance?: SourceIndexStoreRelevance; semantic?: SemanticPoolSeat[] }> = [];
   const matchCounts: SourceIndexRoutedMatchCount[] = [];
   const incompleteCorpora: string[] = [];
   let encounteredSecureLocal = false;
@@ -677,6 +691,12 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
         corpusId: corpus.corpusId,
         trustDomain: corpus.trustDomain,
       })),
+      ...(request.poolAllocation?.semanticSeats && response.semanticRows?.hits.length
+        ? { semantic: response.semanticRows.hits.map((hit) => ({
+            hit: { ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain },
+            margin: (hit.score ?? Number.NEGATIVE_INFINITY) - response.semanticRows!.bar,
+          })) }
+        : {}),
     });
   }
 
@@ -684,10 +704,15 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   if (options.visibilityGate) {
     // One call for every lane's hits: one snapshot decides them all.
     const unchecked = new Set<string>();
-    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items), {
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => [
+      ...lane.items, ...(lane.semantic ?? []).map((seat) => seat.hit),
+    ]), {
       onUnchecked: (corpusIds) => { for (const corpusId of corpusIds) unchecked.add(corpusId); },
     }));
-    for (const lane of lanes) lane.items = lane.items.filter((hit) => kept.has(hit));
+    for (const lane of lanes) {
+      lane.items = lane.items.filter((hit) => kept.has(hit));
+      if (lane.semantic) lane.semantic = lane.semantic.filter((seat) => kept.has(seat.hit));
+    }
     // A source whose hits the gate could not judge is named, never thinner in silence (#1460).
     for (const corpusId of [...unchecked].sort()) degradations.push(visibilityCheckDegradation(corpusId));
   }
@@ -708,6 +733,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     encounteredSecureLocal,
     secureLaneAudits,
     ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
+    ...(recency.semanticSeats?.length ? { semanticSeats: recency.semanticSeats } : {}),
     latencyMs: Date.now() - startedAt,
     rawExposed: false,
   };
@@ -727,13 +753,57 @@ export interface SeatingLane {
   name: string;
   relevance?: SourceIndexStoreRelevance;
   items: readonly SourceIndexRoutedSearchHit[];
+  // The store's best vector rows with their margin over its bar (semanticRows).
+  semantic?: readonly SemanticPoolSeat[];
+}
+
+export interface SemanticPoolSeat {
+  hit: SourceIndexRoutedSearchHit;
+  // Cosine minus the store's relevance bar: comparable across stores whose
+  // models score on different scales, negative below the bar.
+  margin: number;
+}
+
+// At most this many semantic seats go to one store, so one dense store's
+// near-duplicates cannot take them all.
+export const SEMANTIC_POOL_SEATS_PER_STORE = 2;
+
+/**
+ * Seats for the best vector rows across stores, added after the pool is
+ * drawn: best margin over its store's bar first, at most
+ * SEMANTIC_POOL_SEATS_PER_STORE per store, skipping any already seated. They
+ * go after the drawn pool, which only a reranker reads, so they never move a
+ * seat the draw gave; the reranker decides whether they are kept.
+ */
+export function withSemanticPoolSeats(
+  hits: readonly SourceIndexRoutedSearchHit[],
+  lanes: readonly SeatingLane[],
+  seats: number,
+): { hits: SourceIndexRoutedSearchHit[]; seated: SemanticPoolSeat[] } {
+  if (seats <= 0) return { hits: [...hits], seated: [] };
+  const taken = new Set(hits.map(routedHitCandidateId));
+  const offered = lanes.flatMap((lane) => lane.semantic ?? [])
+    .filter((seat) => Number.isFinite(seat.margin))
+    .sort((left, right) => right.margin - left.margin);
+  const perStore = new Map<string, number>();
+  const seated: SemanticPoolSeat[] = [];
+  for (const seat of offered) {
+    if (seated.length >= seats) break;
+    const id = routedHitCandidateId(seat.hit);
+    const used = perStore.get(seat.hit.corpusId) ?? 0;
+    if (taken.has(id) || used >= SEMANTIC_POOL_SEATS_PER_STORE) continue;
+    taken.add(id);
+    perStore.set(seat.hit.corpusId, used + 1);
+    seated.push(seat);
+  }
+  return { hits: [...hits, ...seated.map((seat) => seat.hit)], seated };
 }
 
 // Pure seating shared by routed search and offline eval replay.
 export function seatRoutedLanes(
   lanes: readonly SeatingLane[],
   options: Pick<SourceIndexSearchRequest, 'maxResults' | 'poolAllocation' | 'temporalIntent'>,
-): { hits: SourceIndexRoutedSearchHit[]; degradations: RetrievalDegradation[]; recencySeats: number } {
+): { hits: SourceIndexRoutedSearchHit[]; degradations: RetrievalDegradation[]; recencySeats: number; semanticSeats?: SemanticPoolSeat[] } {
   // Store order within each turn: how well each store's best hit answers
   // this question (storeOrderForQuestion), then lane declaration order.
   // registry.list() preserves the order the corpora were registered in, which
@@ -769,7 +839,10 @@ export function seatRoutedLanes(
   const recency = options.temporalIntent
     ? withReservedRecencySeats(leadered, pool, options.maxResults)
     : { ...leadered, recencySeats: 0 };
-  return recency;
+  const seats = options.poolAllocation?.semanticSeats ?? 0;
+  if (seats <= 0) return recency;
+  const semantic = withSemanticPoolSeats(recency.hits, lanes, seats);
+  return { ...recency, hits: semantic.hits, ...(semantic.seated.length ? { semanticSeats: semantic.seated } : {}) };
 }
 
 // Whether one corpus lane's raw response (before any filter or trim) carried

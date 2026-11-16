@@ -430,19 +430,27 @@ export function builtInAnalystMaxTokensForChars(chars: number | undefined): numb
  * running (unreachable, not slow), the built-in model answers instead. Both
  * run on this computer, so the trust boundary does not move. Any other failure
  * (a policy refusal, a bad answer, a timeout) surfaces unchanged.
+ *
+ * Only while the configured service has never answered (a computer whose
+ * only local model is the built-in one): once it has, it is the owner's real
+ * model and its being down surfaces as an error the route reports or hands
+ * to the owner's backup, never a silent drop to the small model (owner
+ * ruling, 2026-11-16).
  */
-export function withBuiltInFallback(primary: Analyst, builtIn: Analyst): Analyst {
+export function withBuiltInFallback(primary: Analyst, builtIn: Analyst, seen: { answered: boolean } = { answered: false }): Analyst {
   const analyst = withEvidenceFormatOf({
     async analyze(pack, options) {
       try {
-        return await primary.analyze(pack, options);
+        const result = await primary.analyze(pack, options);
+        seen.answered = true;
+        return result;
       } catch (error) {
-        if (!isLocalServiceDown(error)) throw error;
+        if (!isLocalServiceDown(error) || seen.answered) throw error;
         return builtIn.analyze(pack, options);
       }
     },
   }, primary, builtIn);
-  return registerLocalAnalystFallback(analyst, fit => withBuiltInFallback(fit(primary), fit(builtIn)));
+  return registerLocalAnalystFallback(analyst, fit => withBuiltInFallback(fit(primary), fit(builtIn), seen));
 }
 
 function isLocalServiceDown(error: unknown): boolean {

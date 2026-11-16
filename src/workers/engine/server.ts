@@ -308,6 +308,7 @@ import {
   recordAccountPlacement,
   recordProviderAccount,
   type StorageAccount,
+  storeOpensSoFar,
 } from '../../core/source-storage.ts';
 import { recordedProviderAccount } from '../../core/provider-account-history.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
@@ -578,6 +579,9 @@ import {
 import {
   builtInBacksPrivateAnalyst,
   probeLocalAnalystService,
+  createLocalPrivateRoute,
+  createLocalSovereigntyAnalystModel,
+  probeLocalSovereigntyProfile,
   trustedAnalystAssistTimeoutMs,
   createSovereigntyAnalystMap,
   analystRouteTrustDomain,
@@ -624,6 +628,10 @@ let dataOwnerLock: HeldDataOwnerLock | undefined;
  * front start applies a small delta instead of rebuilding.
  */
 const VISIBILITY_REFRESH_MS = 30_000;
+/** After the background opens a store, how long the front looks for it every 2 s (the store may still be getting its schema). */
+const FRONT_MOUNT_LOOK_AFTER_CHANGE_MS = 60_000;
+/** With no new store, how often the front looks anyway. */
+const FRONT_MOUNT_LOOK_QUIET_MS = 60_000;
 /**
  * The longest the front waits on those sets before it listens; the rest
  * finishes after, in turns. Well inside the verified install's 60 s health
@@ -780,6 +788,9 @@ export async function main(): Promise<void> {
   } : undefined);
   const answerBuiltInModel = workerBuiltInModel
     ? localModelActivity.track('built_in', workerBuiltInModel.model) : undefined;
+  // The owner's Private answer route as the ChatGPT private panel uses it:
+  // set where the answer analysts are built, below.
+  let localPrivateRoute: ReturnType<typeof createLocalPrivateRoute> | undefined;
   registerBuiltInPrivateModel(workerBuiltInModel
     ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
     : undefined);
@@ -1083,6 +1094,16 @@ export async function main(): Promise<void> {
     canRestart: () => workerRestartsItself(workerLaunch, process.env),
     requestRestart: () => modelReloadInstalled && requestModelReload(),
   });
+  // Whether the built-in model answers for this pool member (the owner set up no other local model): the one place that decides it.
+  const builtInAnswersFor = (id: string): boolean => {
+    try {
+      const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members;
+      const available = new Set(members.filter(member => member.profile.provider !== 'venice' || bootModelCredentials.get(member.id)).map(member => member.id));
+      return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, members, available);
+    } catch {
+      return false;
+    }
+  };
   const modelSetup = new ModelSetupService({
     config: sovereigntyEngine.config,
     credentialState: modelCredentialState,
@@ -1094,15 +1115,7 @@ export async function main(): Promise<void> {
       if (internal?.id === id) return internalPolicyEmbeddingProvider?.dimension;
       return undefined;
     },
-    builtInAnswers: (id) => {
-      try {
-        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members;
-        const available = new Set(members.filter(member => member.profile.provider !== 'venice' || bootModelCredentials.get(member.id)).map(member => member.id));
-        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, members, available);
-      } catch {
-        return false;
-      }
-    },
+    builtInAnswers: (id) => builtInAnswersFor(id),
   });
   const localModelDiscovery = new LocalModelDiscovery();
   const getModelSetup = () => {
@@ -3473,6 +3486,27 @@ export async function main(): Promise<void> {
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? defaultLocal;
+      // Both private panels answer on the same local model as Ask's Private
+      // answers (the first member of the secure_local pool, when local). When
+      // it is set up but down they say so; the built-in model answers only
+      // where it stands in for the owner's local model.
+      localPrivateRoute = createLocalPrivateRoute({
+        firstMember: () => {
+          const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' });
+          return (pool.explicitOrder ?? pool.members)[0];
+        },
+        model: (member) => sovereigntyEngine.source === 'env_bridge' && member.id === 'local-source-answer'
+          ? { model: localSourceAnswerModel, modelId: localEndpoint.model, ...(!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {}) }
+          : (() => {
+            const model = createLocalSovereigntyAnalystModel({ profile: member.profile, profileId: member.id, localModelActivity, olympusConfig, env: process.env, bootSecretResolver });
+            return model ? { model, modelId: member.profile.model ?? member.id, ...(!member.profile.secretRef && member.profile.baseUrl ? { baseUrl: member.profile.baseUrl } : {}) } : undefined;
+          })(),
+        reachable: (member) => sovereigntyEngine.source === 'env_bridge' && member.id === 'local-source-answer'
+          ? probeLocalAnalystService(olympusConfig)
+          : probeLocalSovereigntyProfile(olympusConfig, member.profile),
+        window: (model, baseUrl) => resolveLocalAnalystWindow({ model, ...(baseUrl ? { baseUrl } : {}) }),
+        builtInStandsIn: (member) => builtInAnswersFor(member.id),
+      });
       // Uses the installed default at 16 GiB RAM and above; the owner can opt
       // out. Asked per question, so the download finishing after boot turns it
       // on without a restart.
@@ -5417,6 +5451,7 @@ export async function main(): Promise<void> {
     : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: answerBuiltInModel,
+    route: () => localPrivateRoute?.() ?? Promise.resolve(undefined),
     eligible: privateEvidenceEligible,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,
@@ -5514,6 +5549,7 @@ export async function main(): Promise<void> {
       lanes: sourceAnswerLanes,
       model: answerBuiltInModel,
       available: () => workerBuiltInModel?.available() ?? false,
+      route: () => localPrivateRoute?.() ?? Promise.resolve(undefined),
       relevanceEmbedding: () => builtInEmbeddingOnly(secureLocalPolicyEmbeddingProvider ?? sourceIndexEmbeddingProvider, loadedBuiltInEmbedding),
       sourceLinks: (item) => {
         const provenance = item.provenance as { sourceItem?: { provider?: unknown }; citation?: { uri?: unknown } } | undefined;
@@ -6511,7 +6547,27 @@ export async function main(): Promise<void> {
   // as soon as they exist, including sources with no handle or stores at boot.
   // A tier store the background creates later (a lane's Private or Public
   // store, on its first item) is opened here too.
-  const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2_000) : undefined;
+  // Looking costs a walk of the data root's layout on this loop (2.5 s on a
+  // busy disk, lane 6 gate, 16 Nov), so it runs every 2 s only for a while
+  // after the background opened a store (its snapshot's count changed, or a
+  // new background), while the store may still be getting its schema, and
+  // once a minute otherwise. A change the front makes itself (an archive, a
+  // source) refreshes at once.
+  let frontMountsSeen: string | undefined;
+  let frontMountsLookUntil = 0;
+  let frontMountsLastLook = 0;
+  const frontMountRetry = engineFront ? setInterval(() => {
+    const snapshot = engineFront!.status()?.snapshot;
+    const seen = `${snapshot?.instance_id ?? ''}:${snapshot?.stores_opened ?? ''}`;
+    const now = Date.now();
+    if (seen !== frontMountsSeen) {
+      frontMountsSeen = seen;
+      frontMountsLookUntil = now + FRONT_MOUNT_LOOK_AFTER_CHANGE_MS;
+    }
+    if (now >= frontMountsLookUntil && now - frontMountsLastLook < FRONT_MOUNT_LOOK_QUIET_MS) return;
+    frontMountsLastLook = now;
+    refreshFrontMounts();
+  }, 2_000) : undefined;
   frontMountRetry?.unref?.();
   // Keeps each store's set current, and saved by a writer; see keepVisibilityCurrent.
   if (!engineFront) void keepVisibilityCurrent('after start');
@@ -6701,6 +6757,7 @@ export async function main(): Promise<void> {
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
+        stores_opened: storeOpensSoFar(),
         ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
         ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
         ...((files) => (files ? { sqlite_files: files } : {}))(sqliteFilesHealth()),

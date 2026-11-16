@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
-import { RERANK_POOL_STORE_DEPTH, type EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
+import { RERANK_POOL_STORE_DEPTH, rerankPoolSemanticSeats, type EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import { createAnalyst, withPromptBudget, type AnalystReadingNotes } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
@@ -24,6 +24,7 @@ import { answerMeaningJudge } from './answer-judge.ts';
 import { enterStage, failureCode, runEvalCli, type EvalStage } from './cli-failure.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { calibratedSemanticRelevanceBar } from '../src/workers/connector-store/local-index.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
@@ -51,8 +52,10 @@ export interface FunnelRow {
   keywordRank?: number | null; vectorRank?: number | null;
   /** The vector probe's rank with the exact full-vector scan instead of the digest (present when probed). */
   exactVectorRank?: number | null;
+  /** The best expected item's cosine in the vector probe minus its store's relevance bar (present when probed and found). */
+  vectorMargin?: number | null;
 }
-export interface LaneProbe { keyword: number | null; vector: number | null; exactVector?: number | null }
+export interface LaneProbe { keyword: number | null; vector: number | null; exactVector?: number | null; vectorMargin?: number | null }
 export interface QuestionJudgement { answers: boolean | null; specific: boolean | null }
 export interface PassageAnswer {
   outcome: 'answered' | 'failed'; cited?: boolean; coverage?: number; right?: boolean; answerMs?: number; code?: string;
@@ -109,6 +112,8 @@ export interface PassageReceipt {
   reranker: string;
   /** The per-store depth of the reranker's strength-drawn pool; absent with the reranker off. */
   rerankPoolStoreDepth?: number;
+  /** Semantic seats added to the reranked pool (OLYMPUS_SEMANTIC_POOL_SEATS); absent with the reranker off. */
+  semanticPoolSeats?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
   summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
     /** By the expected item's stored chunks (1_chunk, 2-3_chunks, 4+_chunks), when counted. */
@@ -375,7 +380,7 @@ export async function runPassageEval(input: {
       const stage: FunnelStage = passageRank !== null ? 'hit' : objectRank !== null ? 'fitted_no_passage' : packRank !== null ? 'packed_not_fitted'
         : storeRank !== null ? 'returned_not_packed' : !lanes ? 'not_returned' : lanes.keyword !== null || lanes.vector !== null ? 'found_not_returned' : 'not_found';
       funnel = { stage, storeRank, storeHits: searches.length ? Math.max(...searches.map(search => search.providerItemIds.length)) : null,
-        packRank, packSize: original.candidates.length, fitRank: objectRank, ...chunkCount(identities), ...(lanes ? { keywordRank: lanes.keyword, vectorRank: lanes.vector, ...(lanes.exactVector !== undefined ? { exactVectorRank: lanes.exactVector } : {}) } : {}) };
+        packRank, packSize: original.candidates.length, fitRank: objectRank, ...chunkCount(identities), ...(lanes ? { keywordRank: lanes.keyword, vectorRank: lanes.vector, ...(lanes.exactVector !== undefined ? { exactVectorRank: lanes.exactVector } : {}), ...(lanes.vectorMargin !== undefined ? { vectorMargin: lanes.vectorMargin } : {}) } : {}) };
     }
     const quoted = question.expectedEvidence?.find(expected => expected.quote)?.quote;
     if (answerable && quoted && input.judgeQuestion) step('judge');
@@ -396,7 +401,7 @@ export async function runPassageEval(input: {
     // Identity includes only ids and structural labels; never hashes private text.
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
     maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off',
-    ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth } : {}),
+    ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth, semanticPoolSeats: rerankPoolSemanticSeats() } : {}),
     storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
     summary: summaries(rows, ks),
     ...(split === 'open' ? { questions: rows } : {}),
@@ -462,14 +467,18 @@ const LANE_PROBE_DEPTH = 50;
 export function laneProbe(stores: readonly LocalConnectorStore[], embeddingFor: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined) {
   return async (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>): Promise<LaneProbe> => {
     const best = (ranks: number[]) => ranks.length ? Math.min(...ranks) : null;
-    const keyword: number[] = []; const vector: number[] = []; const exact: number[] = [];
+    const keyword: number[] = []; const vector: number[] = []; const exact: number[] = []; const margins: number[] = [];
     for (const store of stores.filter(store => items.some(item => item.corpusId === store.corpusId))) {
       const wanted = new Set(items.filter(item => item.corpusId === store.corpusId).map(item => item.providerItemId));
       const rankIn = (ids: string[]) => { const at = ids.findIndex(id => wanted.has(id)); return at < 0 ? [] : [at + 1]; };
       keyword.push(...rankIn(store.searchItemsDetailed(question.question, LANE_PROBE_DEPTH).rows.map(row => row.sourceItem.providerItemId)));
       const provider = embeddingFor(store.trustDomain);
       if (!provider) continue;
-      vector.push(...rankIn((await store.vectorSearchItems(question.question, provider, LANE_PROBE_DEPTH)).map(row => row.sourceItem.providerItemId)));
+      const scored = await store.vectorSearchItemsWithScores(question.question, provider, LANE_PROBE_DEPTH);
+      vector.push(...rankIn(scored.map(row => row.sourceItem.providerItemId)));
+      const bar = calibratedSemanticRelevanceBar(provider.modelId);
+      const found = scored.find(row => wanted.has(row.sourceItem.providerItemId));
+      if (found && bar !== undefined) margins.push(Math.round((found.bestCosine - bar) * 1000) / 1000);
       // The same search on the exact full-vector scan: an item it finds that
       // the digest does not is lost to the digest, not to the embedding.
       const digest = process.env.OLYMPUS_VECTOR_DIGEST;
@@ -480,7 +489,7 @@ export function laneProbe(stores: readonly LocalConnectorStore[], embeddingFor: 
         if (digest === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = digest;
       }
     }
-    return { keyword: best(keyword), vector: best(vector), exactVector: best(exact) };
+    return { keyword: best(keyword), vector: best(vector), exactVector: best(exact), vectorMargin: margins.length ? Math.max(...margins) : null };
   };
 }
 

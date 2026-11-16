@@ -450,6 +450,17 @@ describe('Private lane fallback', () => {
     await expect(withBuiltInFallback(failing(refused), fixed('built-in')).analyze(pack, { localOnly: true })).rejects.toBe(refused);
   });
 
+  // Jamie, 2026-11-16: "for my Olympus, we should never be using the small model".
+  test('once the owner\'s local model has answered, its being down is an error, never the built-in model', async () => {
+    const down = new OperationError('argus_unreachable', 'Argus fast lane is unreachable at http://127.0.0.1:28090/v1/chat/completions.');
+    let up = true;
+    const primary: Analyst = { analyze: async () => { if (!up) throw down; return answer('delphi'); } };
+    const wrapped = withBuiltInFallback(primary, fixed('built-in'));
+    expect((await wrapped.analyze(pack, { localOnly: true })).answer).toBe('delphi');
+    up = false;
+    await expect(wrapped.analyze(pack, { localOnly: true })).rejects.toBe(down);
+  });
+
   test('wired into local secure-pool members before Venice', async () => {
     const down = failing(new OperationError('argus_unreachable', 'Argus lane is unreachable at http://127.0.0.1:28090.'));
     const entry = (id: string, backend: 'local' | 'venice' | 'cloud', analyst: Analyst) => [id, {

@@ -5282,6 +5282,20 @@ function metadataTraversalCompleteFromSchedulers(
   return walks.length === 0 ? (unreported ? false : undefined) : walks.every(Boolean);
 }
 
+/**
+ * A source that cannot be watched for changes is polled instead; the card says
+ * so, and says when polling is slower than the ten-minute arrival target.
+ */
+function changeWatchNote(scheduler: SourceSchedulerSourceStatus | undefined): string {
+  const watch = scheduler?.change_watch;
+  if (!watch || watch.state !== 'polling') return '';
+  const minutes = Math.max(1, Math.round(watch.poll_interval_seconds / 60));
+  const every = `checking every ${minutes} min because it can't watch for changes`;
+  return watch.meets_arrival_target
+    ? `; ${every}`
+    : `; ${every}, slower than the 10-minute target for new items`;
+}
+
 function freshnessFrom(
   corpus: SourceIndexStatusCorpus,
   scheduler: SourceSchedulerSourceStatus | undefined,
@@ -5289,10 +5303,11 @@ function freshnessFrom(
   const hours = scheduler?.freshness_hours;
   const threshold = scheduler?.freshness_threshold_hours;
   const stale = scheduler?.stale_sync_anomaly === true;
+  const polling = changeWatchNote(scheduler);
   if (hours !== undefined) {
     const checked = `Last checked ${relativeDurationFromHours(hours)}`;
     return {
-      label: stale ? `${checked}; refresh is late` : checked,
+      label: `${stale ? `${checked}; refresh is late` : checked}${polling}`,
       hours,
       ...(threshold !== undefined ? { threshold_hours: threshold } : {}),
       stale,

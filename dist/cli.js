@@ -57800,6 +57800,7 @@ var init_media_judge = __esm(() => {
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash30, randomUUID as randomUUID10 } from "node:crypto";
 import { closeSync as closeSync16, existsSync as existsSync35, fsyncSync as fsyncSync3, lstatSync as lstatSync22, mkdirSync as mkdirSync23, openSync as openSync16, statSync as statSync16, statfsSync } from "node:fs";
+import { open as openFile } from "node:fs/promises";
 import { dirname as dirname41 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
@@ -59164,10 +59165,15 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   }), keywordLane);
   const vettedRows = new Set(vectorRows.map((row) => row.sourceItem.localItemId));
   const semanticNeighbourHits = scoredVectorRows.filter((row) => !vettedRows.has(row.sourceItem.localItemId)).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope));
+  const semanticRows = contentBar === undefined || scoredVectorRows.length === 0 ? undefined : {
+    hits: [...scoredVectorRows].sort((left, right) => right.bestCosine - left.bestCosine).slice(0, CONNECTOR_STORE_SEMANTIC_ROWS).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
+    bar: contentBar
+  };
   return {
     hits,
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     ...semanticNeighbourHits.length > 0 ? { semanticNeighbourHits } : {},
+    ...semanticRows ? { semanticRows } : {},
     latencyMs: Date.now() - startedAt,
     laneAudits: [
       { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
@@ -61647,7 +61653,7 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, CONNECTOR_STORE_SEMANTIC_ROWS = 3, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -70113,6 +70119,20 @@ ${parentKey(ref)}`, { ref, origin });
           closeSync16(fd);
       }
     }
+    async durabilityBarrierOffLoop() {
+      if (this.dbPath === ":memory:" || this.readOnly)
+        return;
+      let handle;
+      try {
+        handle = await openFile(`${this.dbPath}-wal`, "r");
+        await handle.sync();
+      } catch (error) {
+        if (error.code !== "ENOENT")
+          throw error;
+      } finally {
+        await handle?.close();
+      }
+    }
     sqliteJournalSettings() {
       return sqliteJournalSettingsOf(this.db);
     }
@@ -70795,7 +70815,11 @@ import { basename as basename9, join as join45, resolve as resolve14, sep as sep
 function enableSourceRegistryAdoption() {
   adoptionEnabled = true;
 }
+function storeOpensSoFar() {
+  return storeOpens2;
+}
 function frontReadOnly(options) {
+  storeOpens2 += 1;
   return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
 }
 function openConnectorStore(account, requested, env = process.env) {
@@ -71203,7 +71227,7 @@ function storeFileCheckpoint(path, busyTimeoutMs = 2000) {
       closeSqliteStore(db, { checkpoint: false });
   }
 }
-var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, CAPTURE_CLAIM_RECLAIM_AGE_MS, busyWait = (ms) => Math.max(0, Math.floor(ms));
+var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, storeOpens2 = 0, CAPTURE_CLAIM_RECLAIM_AGE_MS, busyWait = (ms) => Math.max(0, Math.floor(ms));
 var init_source_storage = __esm(() => {
   init_store_write_guard();
   init_secret_locations();
@@ -98965,12 +98989,12 @@ class TieredRoutingRun {
       });
     }
     this.cachedLowerings.clear();
-    const barrier = () => {
+    const barrier = async () => {
       for (const domain of TIER_DOMAIN_ORDER)
-        this.set.store(domain)?.durabilityBarrier();
+        await this.set.store(domain)?.durabilityBarrierOffLoop();
     };
     if (this.copyRemovals.size > 0)
-      barrier();
+      await barrier();
     for (const identity of this.copyRemovals.values()) {
       await ingestionTurn();
       this.set.ledger.removeCopies(identity);
@@ -98992,7 +99016,7 @@ class TieredRoutingRun {
       cleared.push(identity);
     }
     if (cleared.length > 0)
-      barrier();
+      await barrier();
     for (const identity of cleared)
       this.set.ledger.clearWriteIntent(identity);
     this.intents.clear();
@@ -99986,7 +100010,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
       }).finally(() => {
         probing = false;
       });
-    }, Math.min(LIVENESS_PROBE_MS, Math.max(1000, Math.floor(idleMs / 4))));
+    }, Math.min(LIVENESS_PROBE_MS, Math.max(50, Math.floor(idleMs / 4))));
     try {
       const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}${path}`, {
         method: "POST",
@@ -101534,19 +101558,21 @@ function builtInAnalystMaxTokensForChars(chars) {
     return 1024;
   return Math.max(512, Math.ceil(chars / 2));
 }
-function withBuiltInFallback(primary, builtIn) {
+function withBuiltInFallback(primary, builtIn, seen = { answered: false }) {
   const analyst = withEvidenceFormatOf({
     async analyze(pack, options) {
       try {
-        return await primary.analyze(pack, options);
+        const result = await primary.analyze(pack, options);
+        seen.answered = true;
+        return result;
       } catch (error) {
-        if (!isLocalServiceDown(error))
+        if (!isLocalServiceDown(error) || seen.answered)
           throw error;
         return builtIn.analyze(pack, options);
       }
     }
   }, primary, builtIn);
-  return registerLocalAnalystFallback(analyst, (fit) => withBuiltInFallback(fit(primary), fit(builtIn)));
+  return registerLocalAnalystFallback(analyst, (fit) => withBuiltInFallback(fit(primary), fit(builtIn), seen));
 }
 function isLocalServiceDown(error) {
   return error instanceof OperationError && error.code === "argus_unreachable" && !/timed out/i.test(error.message);
@@ -102444,6 +102470,13 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/core/evidence-reranker.ts
+function rerankPoolSemanticSeats(env = process.env) {
+  const raw = env[SEMANTIC_POOL_SEATS_ENV]?.trim();
+  if (!raw)
+    return DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
+  const seats = Number(raw);
+  return Number.isInteger(seats) && seats >= 0 && seats <= 48 ? seats : DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
+}
 function rerankOutcomeCounts() {
   return { ...outcomeCounts };
 }
@@ -102538,7 +102571,7 @@ function rerankPoolSize(reranker, maxResults) {
   const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
   return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
 }
-var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, RERANK_POOL_STORE_DEPTH = 10, outcomeCounts, counted = (result) => {
+var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, RERANK_POOL_STORE_DEPTH = 10, DEFAULT_RERANK_POOL_SEMANTIC_SEATS = 0, SEMANTIC_POOL_SEATS_ENV = "OLYMPUS_SEMANTIC_POOL_SEATS", outcomeCounts, counted = (result) => {
   outcomeCounts[result.audit.outcome] += 1;
   return result;
 }, MAX_RERANK_POOL_SIZE = 400, systemTimers;
@@ -102726,20 +102759,30 @@ async function routePreparedSourceIndexSearch(options) {
         ...hit,
         corpusId: corpus.corpusId,
         trustDomain: corpus.trustDomain
-      }))
+      })),
+      ...request.poolAllocation?.semanticSeats && response.semanticRows?.hits.length ? { semantic: response.semanticRows.hits.map((hit) => ({
+        hit: { ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain },
+        margin: (hit.score ?? Number.NEGATIVE_INFINITY) - response.semanticRows.bar
+      })) } : {}
     });
   }
   const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
     const unchecked = new Set;
-    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items), {
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => [
+      ...lane.items,
+      ...(lane.semantic ?? []).map((seat) => seat.hit)
+    ]), {
       onUnchecked: (corpusIds) => {
         for (const corpusId of corpusIds)
           unchecked.add(corpusId);
       }
     }));
-    for (const lane of lanes)
+    for (const lane of lanes) {
       lane.items = lane.items.filter((hit) => kept.has(hit));
+      if (lane.semantic)
+        lane.semantic = lane.semantic.filter((seat) => kept.has(seat.hit));
+    }
     for (const corpusId of [...unchecked].sort())
       degradations.push(visibilityCheckDegradation(corpusId));
   }
@@ -102758,6 +102801,7 @@ async function routePreparedSourceIndexSearch(options) {
     encounteredSecureLocal,
     secureLaneAudits,
     ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {},
+    ...recency.semanticSeats?.length ? { semanticSeats: recency.semanticSeats } : {},
     latencyMs: Date.now() - startedAt,
     rawExposed: false
   };
@@ -102771,6 +102815,26 @@ async function routePreparedSourceIndexSearch(options) {
   });
   return result;
 }
+function withSemanticPoolSeats(hits, lanes, seats) {
+  if (seats <= 0)
+    return { hits: [...hits], seated: [] };
+  const taken = new Set(hits.map(routedHitCandidateId));
+  const offered = lanes.flatMap((lane) => lane.semantic ?? []).filter((seat) => Number.isFinite(seat.margin)).sort((left, right) => right.margin - left.margin);
+  const perStore = new Map;
+  const seated = [];
+  for (const seat of offered) {
+    if (seated.length >= seats)
+      break;
+    const id = routedHitCandidateId(seat.hit);
+    const used = perStore.get(seat.hit.corpusId) ?? 0;
+    if (taken.has(id) || used >= SEMANTIC_POOL_SEATS_PER_STORE)
+      continue;
+    taken.add(id);
+    perStore.set(seat.hit.corpusId, used + 1);
+    seated.push(seat);
+  }
+  return { hits: [...hits, ...seated.map((seat) => seat.hit)], seated };
+}
 function seatRoutedLanes(lanes, options) {
   const laneOrder = storeOrderForQuestion(lanes);
   const fusedAll = fuseRankedCandidateLanes({
@@ -102783,7 +102847,11 @@ function seatRoutedLanes(lanes, options) {
   const pool = fusedAll.map((candidate) => candidate.item);
   const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
   const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
-  return recency;
+  const seats = options.poolAllocation?.semanticSeats ?? 0;
+  if (seats <= 0)
+    return recency;
+  const semantic = withSemanticPoolSeats(recency.hits, lanes, seats);
+  return { ...recency, hits: semantic.hits, ...semantic.seated.length ? { semanticSeats: semantic.seated } : {} };
 }
 function corpusContributedSecure(corpus, response) {
   const count = response.matchCount;
@@ -103085,7 +103153,7 @@ function assertNoForbiddenRouterResultKeys(value, path) {
 function normalizeRouterResultKey(key) {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60000, DEFAULT_ASK_SEARCH_BUDGET_MS = 1e5, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, STORE_ORDER_MIN_CONCEPT_SHARE;
+var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60000, DEFAULT_ASK_SEARCH_BUDGET_MS = 1e5, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, SEMANTIC_POOL_SEATS_PER_STORE = 2, STORE_ORDER_MIN_CONCEPT_SHARE;
 var init_router = __esm(() => {
   init_partial_search();
   init_keyword_context();
@@ -103138,7 +103206,7 @@ async function buildEvidencePackDetailed(input) {
 async function buildPreparedEvidencePackDetailed(input) {
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
-  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined));
+  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
   const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
@@ -103497,7 +103565,8 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
   if (runs.length === 1)
     return literalRun;
   const recency = seatRoutedQueryRuns(runs.map((run) => run.hits), retrievalLimit, questionHasTemporalIntent(input));
-  const { hits: fused, degradations: budgetDegradations } = recency;
+  const { degradations: budgetDegradations } = recency;
+  const fused = withRunSemanticSeats(recency.hits, runs, poolAllocation?.semanticSeats ?? 0);
   return {
     hits: fused,
     searchedCorpora: literalRun.searchedCorpora,
@@ -103510,6 +103579,23 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
     ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}
   };
+}
+function withRunSemanticSeats(hits, runs, seats) {
+  if (seats <= 0)
+    return hits;
+  const seated = new Set(hits.map(routedHitCandidateId));
+  const offered = runs.flatMap((run) => run.semanticSeats ?? []).sort((left, right) => right.margin - left.margin);
+  const added = [];
+  for (const { hit } of offered) {
+    if (added.length >= seats)
+      break;
+    const id = routedHitCandidateId(hit);
+    if (seated.has(id))
+      continue;
+    seated.add(id);
+    added.push(hit);
+  }
+  return added.length ? [...hits, ...added] : hits;
 }
 function seatRoutedQueryRuns(runs, retrievalLimit, temporalIntent) {
   const ranked = fuseRankedCandidateLanes({
@@ -136098,14 +136184,23 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
   }
   return walks.length === 0 ? unreported ? false : undefined : walks.every(Boolean);
 }
+function changeWatchNote(scheduler) {
+  const watch = scheduler?.change_watch;
+  if (!watch || watch.state !== "polling")
+    return "";
+  const minutes = Math.max(1, Math.round(watch.poll_interval_seconds / 60));
+  const every = `checking every ${minutes} min because it can't watch for changes`;
+  return watch.meets_arrival_target ? `; ${every}` : `; ${every}, slower than the 10-minute target for new items`;
+}
 function freshnessFrom(corpus, scheduler) {
   const hours = scheduler?.freshness_hours;
   const threshold = scheduler?.freshness_threshold_hours;
   const stale = scheduler?.stale_sync_anomaly === true;
+  const polling = changeWatchNote(scheduler);
   if (hours !== undefined) {
     const checked = `Last checked ${relativeDurationFromHours(hours)}`;
     return {
-      label: stale ? `${checked}; refresh is late` : checked,
+      label: `${stale ? `${checked}; refresh is late` : checked}${polling}`,
       hours,
       ...threshold !== undefined ? { threshold_hours: threshold } : {},
       stale
@@ -184505,11 +184600,11 @@ var init_private_answer_contract = __esm(() => {
 // src/workers/chatgpt/private-answer-model.ts
 function createBuiltInPrivateAnswerModel(options) {
   const { model } = options;
-  const limits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
+  const baseLimits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
   return {
     status() {
       if (!model)
-        return { state: "no_model" };
+        return options.route ? { state: "ready" } : { state: "no_model" };
       if (options.available())
         return { state: "ready" };
       let status;
@@ -184525,8 +184620,13 @@ function createBuiltInPrivateAnswerModel(options) {
     },
     async answerPrivately(question, evidence, signal, observe, request) {
       const full = request?.detail === "full";
-      if (!model)
+      const chosen = await options.route?.().catch(() => ({ unavailable: true, modelId: "the Private answer model" }));
+      if (chosen && "unavailable" in chosen)
+        throw new PrivateRouteUnavailableError(chosen.modelId);
+      const route = chosen;
+      if (!model && !route)
         throw new Error("no private answer model");
+      const limits = baseLimits;
       const read = privateEvidence(evidence, limits.maxPassageChars);
       let unreadable = read.unreadable;
       const readableHits = new Set(read.sources);
@@ -184613,12 +184713,13 @@ function createBuiltInPrivateAnswerModel(options) {
       }
       const prompted = picked.map(hitOf);
       let revoked = false;
+      const answering = route?.model ?? model;
       const guarded = {
-        name: model.name,
-        spec: model.spec,
-        prepare: () => model.prepare(),
-        status: () => model.status(),
-        stop: () => model.stop(),
+        name: BUILT_IN_ANALYST_NAME,
+        spec: route ? { ...model?.spec ?? {}, modelId: route.modelId } : model.spec,
+        prepare: () => model?.prepare() ?? Promise.resolve(),
+        status: () => model?.status() ?? { state: "ready" },
+        stop: () => model?.stop() ?? Promise.resolve(),
         async complete(modelRequest) {
           const guard = async () => {
             const ok = await checkPrivateEvidence(options.eligible, prompted);
@@ -184630,7 +184731,7 @@ function createBuiltInPrivateAnswerModel(options) {
           return runWithLocalInferenceGuard(guard, async () => {
             await guard();
             observe?.modelStarting?.();
-            return model.complete(modelRequest);
+            return answering.complete(modelRequest);
           });
         }
       };
@@ -185046,12 +185147,22 @@ function record5(value) {
 function string4(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
-var PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MIN_REPEAT_WORDS = 3, MAX_PASSAGE_CHARS = 6000;
+var PrivateRouteUnavailableError, PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MIN_REPEAT_WORDS = 3, MAX_PASSAGE_CHARS = 6000;
 var init_private_answer_model = __esm(() => {
   init_answer_activity();
+  init_analyst_built_in();
+  init_local_analyst_window();
   init_source_model_policy();
   init_evidence_versions();
   init_private_answer_contract();
+  PrivateRouteUnavailableError = class PrivateRouteUnavailableError extends Error {
+    modelId;
+    constructor(modelId) {
+      super(`The Private answer model ${modelId} is not answering right now.`);
+      this.name = "PrivateRouteUnavailableError";
+      this.modelId = modelId;
+    }
+  };
   PANEL_ANSWER_LIMITS = {
     maxItems: 4,
     relevanceMargin: 0.04,
@@ -185349,6 +185460,7 @@ function createLocalAnswerPath(options) {
     model: options.model,
     eligible,
     available: options.available,
+    ...options.route ? { route: options.route } : {},
     answer: answerPrivately,
     relevance: embeddingPanelRelevance(options.relevanceEmbedding),
     readItem: (item, request) => readLocalEvidenceItem({ lanes, item, ...request }),
@@ -221284,6 +221396,7 @@ class SourceScheduler {
   continueWake;
   changeDebounceMs;
   changeWakes = new Map;
+  changeWatchFailures = new Map;
   holdForAsk;
   constructor(options) {
     this.enabled = options.enabled;
@@ -221358,6 +221471,7 @@ class SourceScheduler {
   stop() {
     this.stops += 1;
     this.closeChangeSubscriptions(() => true);
+    this.changeWatchFailures.clear();
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
       this.timer = undefined;
@@ -221379,6 +221493,10 @@ class SourceScheduler {
       return;
     const wanted = new Map(this.sources.filter((source) => source.subscribeChanges !== undefined).map((source) => [source.sourceId, source]));
     this.closeChangeSubscriptions((sourceId, entry) => wanted.get(sourceId)?.subscribeChanges !== entry.subscribe);
+    for (const [sourceId, failure] of [...this.changeWatchFailures]) {
+      if (wanted.get(sourceId)?.subscribeChanges !== failure.subscribe)
+        this.changeWatchFailures.delete(sourceId);
+    }
     for (const [sourceId, source] of wanted) {
       if (this.changeWakes.has(sourceId))
         continue;
@@ -221389,13 +221507,20 @@ class SourceScheduler {
       };
       try {
         entry.unsubscribe = source.subscribeChanges(() => this.signalChange(sourceId, entry));
-      } catch {
+      } catch (error) {
         entry.closed = true;
         if (entry.timer)
           this.clearTimeoutImpl(entry.timer);
         delete entry.timer;
+        const known = this.changeWatchFailures.get(sourceId);
+        this.changeWatchFailures.set(sourceId, { subscribe: entry.subscribe, reason: changeWatchFailureReason(error) });
+        if (!known) {
+          const watch = this.changeWatchStatus(source);
+          console.warn(`[olympus:source-scheduler] change_watch_unavailable source_id=${sourceId} error_kind=${safeSchedulerErrorKind(error)} poll_interval_seconds=${watch.poll_interval_seconds} meets_arrival_target=${watch.meets_arrival_target}`);
+        }
         continue;
       }
+      this.changeWatchFailures.delete(sourceId);
       this.changeWakes.set(sourceId, entry);
     }
   }
@@ -222084,7 +222209,20 @@ ${request.taskId}`);
       freshness_threshold_hours: source.freshnessThresholdHours,
       ...freshnessHours !== undefined ? { freshness_hours: freshnessHours } : {},
       stale_sync_anomaly: source.cadence === "continuous" && (source.lastSyncCompletedAt ? freshnessHours === undefined || freshnessHours > source.freshnessThresholdHours : taskStatuses.some((task) => task.kind === "sync" && task.stale_anomaly === true)),
+      ...source.subscribeChanges ? { change_watch: this.changeWatchStatus(source) } : {},
       tasks: taskStatuses
+    };
+  }
+  changeWatchStatus(source) {
+    const failure = this.changeWatchFailures.get(source.sourceId);
+    const syncIntervals = this.states.filter((state) => state.source === source && state.task.kind === "sync").map((state) => taskIntervalMs(source, state.task));
+    const pollingMs = syncIntervals.length > 0 ? Math.min(...syncIntervals) : source.intervalMs;
+    const watching = this.changeWakes.has(source.sourceId) && !failure;
+    return {
+      state: watching ? "watching" : "polling",
+      ...watching ? {} : { reason: failure?.reason ?? "Change watching has not started yet." },
+      poll_interval_seconds: Math.round(pollingMs / 1000),
+      meets_arrival_target: watching || pollingMs <= SOURCE_ARRIVAL_TARGET_MS
     };
   }
   taskStatus(state, now) {
@@ -223145,6 +223283,14 @@ function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
 function utcDayOf(timestamp) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString().slice(0, 10) : undefined;
 }
+function changeWatchFailureReason(error) {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const firstLine = message.split(`
+`)[0]?.trim() ?? "";
+  if (!firstLine)
+    return "Change watching could not start.";
+  return firstLine.length > 200 ? `${firstLine.slice(0, 199)}…` : firstLine;
+}
 function safeSchedulerErrorKind(error) {
   if (error instanceof SourceSchedulerTaskFailure)
     return mapExplicitSchedulerErrorKind(error.errorKind);
@@ -223271,7 +223417,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_ASK_RECHECK_MS = 1000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_ASK_RECHECK_MS = 1000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SOURCE_ARRIVAL_TARGET_MS, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_provider_rate_limits();
   init_api();
@@ -223309,6 +223455,7 @@ var init_source_scheduler = __esm(() => {
     archiveImports: "archive.imports",
     evernote: "evernote.notes"
   };
+  SOURCE_ARRIVAL_TARGET_MS = 10 * 60000;
   SourceSchedulerTaskDeferral = class SourceSchedulerTaskDeferral extends Error {
     retryAt;
     counts;
@@ -236832,13 +236979,12 @@ self.onmessage = ({ data }) => {
       connections.set(path, held);
     }
     const started = performance.now();
-    let row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
-    // All copied and nothing reading: a large file is cut back now, since an
-    // idle store's writer may not commit again for a long time. With no
-    // busy wait it gives up at once if a reader or writer is there.
-    if (row.busy === 0 && row.log === row.checkpointed && data.walBytes > 67108864) {
-      row = held.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
-    }
+    // PASSIVE only. TRUNCATE takes the writer lock and holds it through its
+    // fsync and truncate, which on a busy disk outlasted a loop writer's 10 s
+    // busy wait: syncs failed with "database is locked" on the lane 6 gate
+    // (16 Nov). After a complete PASSIVE pass the writer's next commit
+    // rewinds the WAL, and journal_size_limit cuts the file back to 64 MB.
+    const row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
     postMessage({ id, ok: true, ms: performance.now() - started, busy: row.busy, log: row.log, checkpointed: row.checkpointed });
   } catch (error) {
     postMessage({ id, ok: false, error: error && error.name ? error.name : 'Error' });
@@ -239213,6 +239359,7 @@ var init_installed_tier_classification = __esm(() => {
 // src/workers/classification/sniffer-service.ts
 import { Database as Database30 } from "bun:sqlite";
 import { existsSync as existsSync120, rmSync as rmSync48 } from "node:fs";
+import { basename as basename24 } from "node:path";
 function unrefTimer(timer) {
   timer?.unref?.();
 }
@@ -239258,6 +239405,7 @@ class TierSnifferService {
   lastYieldReason;
   lastHeldLogMs = Number.NEGATIVE_INFINITY;
   lastSkipLogMs = Number.NEGATIVE_INFINITY;
+  unreadable = new Map;
   lastProgressMs = 0;
   passStep = "starting";
   progress = () => {
@@ -239398,8 +239546,10 @@ class TierSnifferService {
       if (!autoMoves || !autoMoves.localEmbeddingsOnly())
         return 0;
     } catch {
+      this.noteUnreadable("automatic moves", "which search model the automatic privacy moves use");
       return 0;
     }
+    this.noteReadable("automatic moves");
     let queued = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       try {
@@ -239407,6 +239557,7 @@ class TierSnifferService {
         if (!set || !setEmbedsWithBuiltInOnly(set))
           continue;
       } catch {
+        this.noteUnreadable(ledgerPath, "its store set, so its automatic privacy moves are not counted");
         continue;
       }
       const opened = this.openBacklogLedger(ledgerPath);
@@ -239416,7 +239567,9 @@ class TierSnifferService {
         queued += opened.db.query(`SELECT COUNT(*) AS n FROM (
           SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
         ) AS tier_items WHERE 1 ${tierMovingDirectionClause("lower")}`).get(MOVES_SCAN_BOUND).n;
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its queued privacy moves");
+      } finally {
         opened.db.close();
       }
     }
@@ -239443,7 +239596,7 @@ class TierSnifferService {
     const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
     return {
       ...counts,
-      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ""),
+      summary: checkingItems === 0 ? this.unreadable.size > 0 ? `No items counted as waiting.${this.unreadableNote()}` : "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : "") + this.unreadableNote(),
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
       ...this.lastTick?.state === "awaiting_owner_approval" ? { awaitingApproval: {
         lane: this.lastTick.lane,
@@ -239451,8 +239604,46 @@ class TierSnifferService {
         modelId: this.lastTick.modelId,
         promptVersion: this.lastTick.promptVersion
       } } : {},
-      ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
+      ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {},
+      ...this.unreadable.size > 0 ? { unreadableSources: this.unreadableSources() } : {}
     };
+  }
+  unreadableNote() {
+    if (this.unreadable.size === 0)
+      return "";
+    return ` Could not read ${this.unreadableSources().map(({ source, what }) => `${what} for ${source}`).join("; ")}: those items stay held and are not in these counts.`;
+  }
+  noteUnreadable(path, what) {
+    if (this.unreadable.get(path) === what)
+      return;
+    this.unreadable.set(path, what);
+    this.options.log?.(`Olympus tier sniffer: could not read ${what} for ${this.sourceLabel(path)}; its items stay held and are not counted until it can be read.`);
+  }
+  noteReadable(path) {
+    if (this.unreadable.delete(path))
+      this.options.log?.(`Olympus tier sniffer: ${this.sourceLabel(path)} can be read again.`);
+  }
+  sourceLabel(path) {
+    try {
+      const corpora = [...new Set(this.options.stores().filter((store) => store.dbPath === path || tierLedgerPathForStore(store.dbPath) === path || this.ledgerPathsNamedBy(store).includes(path)).map((store) => store.corpusId).filter((id) => typeof id === "string" && id.length > 0))];
+      if (corpora.length > 0)
+        return corpora.sort().join(", ");
+    } catch {}
+    return basename24(path);
+  }
+  ledgerPathsNamedBy(store) {
+    const named = [];
+    for (const read of [() => store.tierLedgerPathInUse?.(), () => store.tierSetLedgerPath?.(), () => store.tierSetBinding?.()?.ledgerPath]) {
+      try {
+        const path = read();
+        if (path)
+          named.push(path);
+      } catch (error) {}
+    }
+    return named;
+  }
+  unreadableSources() {
+    return [...this.unreadable].map(([path, what]) => ({ source: this.sourceLabel(path), what }));
   }
   openBacklogLedger(ledgerPath) {
     let db;
@@ -239464,6 +239655,7 @@ class TierSnifferService {
         const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
         if (row?.value !== expectedId) {
           db.close();
+          this.noteUnreadable(ledgerPath, "the privacy ledger its store is bound to (another file is at its path)");
           return;
         }
       }
@@ -239471,9 +239663,12 @@ class TierSnifferService {
       const hasQueue = existsSync120(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
+      db.query("SELECT 1 FROM tier_items LIMIT 1").get();
+      this.noteReadable(ledgerPath);
       return { db, hasQueue };
     } catch {
       db?.close();
+      this.noteUnreadable(ledgerPath, "its privacy ledger");
       return;
     }
   }
@@ -239487,7 +239682,9 @@ class TierSnifferService {
         rows += opened.db.query("SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items").get().n;
         if (opened.hasQueue)
           rows += opened.db.query("SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions").get().n;
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its privacy ledger");
+      } finally {
         opened.db.close();
       }
     }
@@ -239504,7 +239701,9 @@ class TierSnifferService {
         pendingItems += opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get().n;
         if (opened.hasQueue)
           remainingQuestions += opened.db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its privacy ledger");
+      } finally {
         opened.db.close();
       }
     }
@@ -239520,7 +239719,9 @@ class TierSnifferService {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue)
           this.addQuestionSlice(counts, opened.db, undefined);
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its privacy ledger");
+      } finally {
         opened.db.close();
       }
     }
@@ -239536,7 +239737,13 @@ class TierSnifferService {
     if (!results || this.stopped)
       return;
     const counts = emptyBacklogCounts();
+    const read = new Set(ledgers.map((ledger) => ledger.path));
     for (const result of results) {
+      if ("unreadable" in result) {
+        read.delete(result.unreadable);
+        this.noteUnreadable(result.unreadable, result.mismatch ? "the privacy ledger its store is bound to (another file is at its path)" : "its privacy ledger");
+        continue;
+      }
       counts.pendingItems += result.n;
       counts.pendingWithoutQuestion += result.missing ?? 0;
       counts.checkingItems += result.n + (result.other ?? 0);
@@ -239544,6 +239751,8 @@ class TierSnifferService {
       if (result.oldest)
         counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(result.oldest));
     }
+    for (const path of read)
+      this.noteReadable(path);
     return counts;
   }
   async countBacklogInSlices() {
@@ -239583,7 +239792,9 @@ class TierSnifferService {
               return;
           }
         }
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its privacy ledger");
+      } finally {
         opened.db.close();
       }
     }
@@ -239944,7 +240155,10 @@ class TierSnifferService {
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
-      } catch {}
+        this.noteReadable(store.dbPath);
+      } catch {
+        this.noteUnreadable(store.dbPath, "which privacy ledger the store is bound to");
+      }
       const own = tierLedgerPathForStore(store.dbPath);
       if (existsSync120(own))
         paths.add(own);
@@ -239979,6 +240193,7 @@ class TierSnifferService {
       try {
         ledger = this.ledgerAt(ledgerPath);
       } catch {
+        this.noteUnreadable(ledgerPath, "the privacy ledger its store is bound to (another file is at its path)");
         continue;
       }
       const planner = tierSetPlannerForLedger(ledgerPath);
@@ -240795,14 +241010,14 @@ self.onmessage = ({ data }) => {
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
       if (ledger.expectedId !== null) {
         const row = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get();
-        if (!row || row.value !== ledger.expectedId) continue;
+        if (!row || row.value !== ledger.expectedId) { out.push({ unreadable: ledger.path, mismatch: true }); continue; }
       }
       if (ledger.queue) db.query('ATTACH DATABASE ? AS queue').run(ledger.queue);
       const pending = db.query(ledger.queue ? data.sql.pendingQueued : data.sql.pendingAlone).get();
       const questions = ledger.queue ? db.query(data.sql.questions).get() : { n: 0, other: 0 };
       out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other });
     } catch {
-      // An unreadable ledger counts nothing, as in the count on the loop.
+      out.push({ unreadable: ledger.path });
     } finally { try { db?.close(); } catch {} }
   }
   postMessage(out);
@@ -241904,7 +242119,7 @@ var init_remote_access_control = __esm(() => {
 
 // src/core/source-account-migration.ts
 import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync74, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync26, rmdirSync as rmdirSync8, statSync as statSync53, unlinkSync as unlinkSync7 } from "node:fs";
-import { basename as basename24, dirname as dirname117, isAbsolute as isAbsolute42, join as join153, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
+import { basename as basename25, dirname as dirname117, isAbsolute as isAbsolute42, join as join153, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value === "" || MIGRATION_ON.includes(value);
@@ -241933,7 +242148,7 @@ function candidates(sourceId, slot, env) {
   if (sourceId === TELEGRAM_SOURCE_ID) {
     const legacyDir = dirname117(legacyTelegramSessionBase(env));
     const folderDir = dirname117(accountSessionPath(account, env));
-    const own = basename24(legacyTelegramSessionBase(env));
+    const own = basename25(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames3(legacyDir))
       if (folderNameOfStagedTelegramLogin(name, env))
@@ -242047,7 +242262,7 @@ function nearRealPath(path) {
   const rest = [];
   let near = resolve33(path);
   for (;; ) {
-    rest.unshift(basename24(near));
+    rest.unshift(basename25(near));
     const up = dirname117(near);
     if (up === near)
       return resolve33(path);
@@ -242115,7 +242330,7 @@ function inspect(ctx, sourceId, slot, entry) {
     const found = look(candidate.from);
     if (found.kind === "absent")
       continue;
-    const name = basename24(candidate.from);
+    const name = basename25(candidate.from);
     if (found.kind === "unreadable")
       return skip("unreadable", `${name} cannot be looked at.`);
     if (found.kind === "link" || found.kind === "other" || found.kind !== candidate.kind) {
@@ -242133,7 +242348,7 @@ function inspect(ctx, sourceId, slot, entry) {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
   for (const { candidate, found } of present) {
-    const name = basename24(candidate.from);
+    const name = basename25(candidate.from);
     if (!destinationIsOurs(ctx, candidate.to))
       return skip("unexpected_file", `A folder on the way to ${name}'s place in the account folder is a link.`);
     const destination = look(candidate.to);
@@ -242182,7 +242397,7 @@ function checkDatabases(ctx, moves) {
     const path = absPath(ctx, move.from);
     const reads = storeFileReads(path, waitMs(ctx));
     if (reads === "busy")
-      return { busy: `${basename24(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename25(move.from)} is in use by another program, so the account stays where it is for now.` };
     if (reads === "damaged") {
       checked.push({ file: move.to, result: "damaged" });
       continue;
@@ -242198,7 +242413,7 @@ function checkDatabases(ctx, moves) {
     ctx.quickCheckSpentMs += ctx.now() - started;
     ctx.quickCheckBytes += bytes;
     if (result === "busy")
-      return { busy: `${basename24(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename25(move.from)} is in use by another program, so the account stays where it is for now.` };
     checked.push({ file: move.to, result });
   }
   return { checked };
@@ -242302,7 +242517,7 @@ function moveOne(ctx, move, direction) {
   const [from, to] = direction === "forward" ? [absPath(ctx, move.from), absPath(ctx, move.to)] : [absPath(ctx, move.to), absPath(ctx, move.from)];
   const source = look(from);
   const target = look(to);
-  const name = basename24(move.from);
+  const name = basename25(move.from);
   if (source.kind === "absent") {
     if (target.kind !== "absent")
       return "there";
@@ -242351,13 +242566,13 @@ function verifyIdentity(ctx, moves) {
     if (found.kind === "absent" && isDisposable(move))
       continue;
     if (found.kind !== "file" && found.kind !== "dir" || found.kind !== move.kind) {
-      throw new MoveFault("failed", "verify_failed", `${basename24(move.from)} is not there after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} is not there after the move.`);
     }
     if (String(found.dev) !== move.dev || String(found.ino) !== move.ino) {
-      throw new MoveFault("failed", "verify_failed", `${basename24(move.from)} is not the same file after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} is not the same file after the move.`);
     }
     if (move.kind === "file" && !move.from.endsWith("-shm") && Number(found.size) !== move.size) {
-      throw new MoveFault("failed", "verify_failed", `${basename24(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
+      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
     }
   }
 }
@@ -242365,12 +242580,12 @@ function verifyRestored(ctx, moves) {
   for (const move of moves) {
     const back = look(absPath(ctx, move.from));
     if (isPlanned(look(absPath(ctx, move.to)), move)) {
-      throw new MoveFault("failed", "move_failed", `${basename24(move.from)} is still in the account folder.`);
+      throw new MoveFault("failed", "move_failed", `${basename25(move.from)} is still in the account folder.`);
     }
     if (back.kind === "absent" && isDisposable(move))
       continue;
     if (back.kind !== "file" && back.kind !== "dir" || back.kind !== move.kind) {
-      throw new MoveFault("failed", "move_failed", `${basename24(move.from)} is not back at its old place.`);
+      throw new MoveFault("failed", "move_failed", `${basename25(move.from)} is not back at its old place.`);
     }
   }
 }
@@ -242382,7 +242597,7 @@ function forward(ctx, sourceId, slot, migration) {
   makeFolders(ctx, moves);
   moves.forEach((move, index) => {
     if (moveOne(ctx, move, "forward") === "lost") {
-      throw new MoveFault("failed", "move_failed", `${basename24(move.from)} is in neither place.`);
+      throw new MoveFault("failed", "move_failed", `${basename25(move.from)} is in neither place.`);
     }
     checkpoint(`rename:${index}`);
   });
@@ -242393,9 +242608,9 @@ function forward(ctx, sourceId, slot, migration) {
       continue;
     const reads = storeFileReads(absPath(ctx, move.to), waitMs(ctx));
     if (reads === "busy")
-      throw new MoveFault("skipped", "busy", `${basename24(move.from)} is in use by another program, so the account stays where it is for now.`);
+      throw new MoveFault("skipped", "busy", `${basename25(move.from)} is in use by another program, so the account stays where it is for now.`);
     if (reads !== "reads") {
-      throw new MoveFault("failed", "verify_failed", `${basename24(move.from)} does not open after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} does not open after the move.`);
     }
   }
   checkpoint("verified");
@@ -242433,7 +242648,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   const lost = [];
   back.forEach((move, index) => {
     if (moveOne(ctx, move, "back") === "lost")
-      lost.push(basename24(move.from));
+      lost.push(basename25(move.from));
     checkpoint(`unrename:${index}`);
   });
   for (const move of moves) {
@@ -242536,12 +242751,12 @@ function foldLogs(ctx, moves) {
       const logs = moves.filter((other) => other.from === `${move.from}-wal` || other.from === `${move.from}-journal`);
       if (logs.every((log) => log.size === 0))
         continue;
-      return notFolded(`${basename24(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
+      return notFolded(`${basename25(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
     }
     if (result === "busy") {
-      return { kind: "skip", reason: "busy", detail: `${basename24(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
+      return { kind: "skip", reason: "busy", detail: `${basename25(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
     }
-    return notFolded(`${basename24(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
+    return notFolded(`${basename25(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
   }
   return;
 }
@@ -244607,9 +244822,9 @@ function builtInBacksPrivateAnalyst(id, state, members, _availableIds) {
     return false;
   return members.some((member) => member.id === id && member.profile.provider === "local-openai-compatible");
 }
-async function probeLocalAnalystService(olympusConfig) {
+async function probeLocalAnalystService(olympusConfig, client = new DelphiClient(olympusConfig)) {
   try {
-    await new DelphiClient(olympusConfig).listModelsForProfile("source_answer", AbortSignal.timeout(3000));
+    await client.listModelsForProfile("source_answer", AbortSignal.timeout(3000));
     return true;
   } catch {
     return false;
@@ -244720,6 +244935,15 @@ function createAnalystForSovereigntyProfile(input) {
   const { profile } = input;
   const profileId = input.profileId ?? profile.model ?? profile.provider;
   if (profile.provider === "local-openai-compatible") {
+    const model = createLocalSovereigntyAnalystModel(input);
+    return model ? createAnalyst(model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" }) : undefined;
+  }
+  return createRemoteAnalystForSovereigntyProfile(input, profileId);
+}
+function createLocalSovereigntyAnalystModel(input) {
+  const { profile } = input;
+  const profileId = input.profileId ?? profile.model ?? profile.provider;
+  {
     if (!profile.baseUrl?.trim()) {
       throw new Error("Local sovereignty analyst profiles require baseUrl.");
     }
@@ -244737,8 +244961,11 @@ function createAnalystForSovereigntyProfile(input) {
     const model = createDelphiAnalystModel(new DelphiClient(config, undefined, {
       resolveSecretRef: () => apiKey
     }), { profile: "source_answer", preflightTimeoutMs: 0 });
-    return createAnalyst(input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" });
+    return input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model;
   }
+}
+function createRemoteAnalystForSovereigntyProfile(input, profileId) {
+  const { profile } = input;
   if (profile.provider === "openclaw-infer") {
     return createAnalyst(createOpenClawInferAnalystModel({
       model: profile.model,
@@ -244804,6 +245031,73 @@ function analystRouteTrustDomain(pack, localOnly) {
   }
   return "internal";
 }
+function createLocalPrivateRoute(input) {
+  const now = input.now ?? Date.now;
+  const log = input.log ?? ((line) => {
+    console.warn(line);
+  });
+  const models = new Map;
+  let checked;
+  const seenUp = new Set;
+  return async () => {
+    let member;
+    try {
+      member = input.firstMember();
+    } catch (error) {
+      log(`[private-model] pool unreadable reason=${error instanceof Error ? error.name : "unknown"}`);
+      return { unavailable: true, modelId: "the Private answer model" };
+    }
+    if (!member || member.profile.provider !== "local-openai-compatible")
+      return;
+    if (!models.has(member.id)) {
+      try {
+        models.set(member.id, input.model(member));
+      } catch {
+        models.set(member.id, undefined);
+      }
+    }
+    const entry = models.get(member.id);
+    if (!entry)
+      return;
+    if (!checked || checked.id !== member.id || now() - checked.atMs >= PRIVATE_ROUTE_REACHABLE_TTL_MS) {
+      let up = false;
+      try {
+        up = await input.reachable(member);
+      } catch {
+        up = false;
+      }
+      checked = { id: member.id, atMs: now(), up };
+      if (up)
+        seenUp.add(member.id);
+    }
+    if (!checked.up) {
+      let standsIn = false;
+      try {
+        standsIn = !seenUp.has(member.id) && input.builtInStandsIn?.(member) === true;
+      } catch {
+        standsIn = false;
+      }
+      return standsIn ? undefined : { unavailable: true, modelId: entry.modelId };
+    }
+    const window2 = await input.window(entry.modelId, entry.baseUrl).catch((error) => {
+      log(`[private-model] window unknown model=${entry.modelId} reason=${error instanceof Error ? error.name : "unknown"}; reading within the default budget`);
+      return;
+    });
+    return { model: entry.model, modelId: entry.modelId, windowTokens: window2?.windowTokens ?? 0 };
+  };
+}
+async function probeLocalSovereigntyProfile(olympusConfig, profile, apiKey) {
+  const config = structuredClone(olympusConfig);
+  config.argus.modelProfiles.source_answer = {
+    ...config.argus.modelProfiles.source_answer,
+    baseUrl: profile.baseUrl,
+    model: profile.model,
+    ...profile.secretRef ? { secretRef: profile.secretRef } : {},
+    purpose: "text_reasoning"
+  };
+  return probeLocalAnalystService(config, new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }));
+}
+var PRIVATE_ROUTE_REACHABLE_TTL_MS = 30000;
 var init_private_analysts = __esm(() => {
   init_analyst_tinfoil();
   init_local_analyst_window();
@@ -267497,6 +267791,7 @@ async function main() {
     }
   } : undefined);
   const answerBuiltInModel = workerBuiltInModel ? localModelActivity.track("built_in", workerBuiltInModel.model) : undefined;
+  let localPrivateRoute;
   registerBuiltInPrivateModel(workerBuiltInModel ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle } : undefined);
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
   let localWorkPending = () => false;
@@ -267701,6 +267996,15 @@ async function main() {
     canRestart: () => workerRestartsItself(workerLaunch, process.env),
     requestRestart: () => modelReloadInstalled && requestModelReload()
   });
+  const builtInAnswersFor = (id) => {
+    try {
+      const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" }).members;
+      const available = new Set(members.filter((member) => member.profile.provider !== "venice" || bootModelCredentials.get(member.id)).map((member) => member.id));
+      return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, members, available);
+    } catch {
+      return false;
+    }
+  };
   const modelSetup = new ModelSetupService({
     config: sovereigntyEngine.config,
     credentialState: modelCredentialState,
@@ -267714,15 +268018,7 @@ async function main() {
         return internalPolicyEmbeddingProvider?.dimension;
       return;
     },
-    builtInAnswers: (id) => {
-      try {
-        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" }).members;
-        const available = new Set(members.filter((member) => member.profile.provider !== "venice" || bootModelCredentials.get(member.id)).map((member) => member.id));
-        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, members, available);
-      } catch {
-        return false;
-      }
-    }
+    builtInAnswers: (id) => builtInAnswersFor(id)
   });
   const localModelDiscovery = new LocalModelDiscovery;
   const getModelSetup = () => {
@@ -269496,6 +269792,19 @@ ${key}`;
       });
     }
     const defaultLocalAnalyst = sovereigntyAnalysts.get("local-source-answer")?.analyst ?? defaultLocal;
+    localPrivateRoute = createLocalPrivateRoute({
+      firstMember: () => {
+        const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" });
+        return (pool.explicitOrder ?? pool.members)[0];
+      },
+      model: (member) => sovereigntyEngine.source === "env_bridge" && member.id === "local-source-answer" ? { model: localSourceAnswerModel, modelId: localEndpoint.model, ...!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {} } : (() => {
+        const model = createLocalSovereigntyAnalystModel({ profile: member.profile, profileId: member.id, localModelActivity, olympusConfig, env: process.env, bootSecretResolver });
+        return model ? { model, modelId: member.profile.model ?? member.id, ...!member.profile.secretRef && member.profile.baseUrl ? { baseUrl: member.profile.baseUrl } : {} } : undefined;
+      })(),
+      reachable: (member) => sovereigntyEngine.source === "env_bridge" && member.id === "local-source-answer" ? probeLocalAnalystService(olympusConfig) : probeLocalSovereigntyProfile(olympusConfig, member.profile),
+      window: (model, baseUrl) => resolveLocalAnalystWindow({ model, ...baseUrl ? { baseUrl } : {} }),
+      builtInStandsIn: (member) => builtInAnswersFor(member.id)
+    });
     const sourceReranker = createBuiltInRerankerResolver();
     sourceReranker();
     return createAnalystSourceIndexAnswerHandler({
@@ -270982,6 +271291,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const openCitedFile = process.platform === "darwin" || process.platform === "linux" ? (path, eligible) => openLocalFile(path, eligible, [...localDropboxRoots(), ...localFilesOpenableRoots()]) : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: answerBuiltInModel,
+    route: () => localPrivateRoute?.() ?? Promise.resolve(undefined),
     eligible: privateEvidenceEligible,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,
@@ -271057,6 +271367,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       lanes: sourceAnswerLanes,
       model: answerBuiltInModel,
       available: () => workerBuiltInModel?.available() ?? false,
+      route: () => localPrivateRoute?.() ?? Promise.resolve(undefined),
       relevanceEmbedding: () => builtInEmbeddingOnly(secureLocalPolicyEmbeddingProvider ?? sourceIndexEmbeddingProvider, loadedBuiltInEmbedding),
       sourceLinks: (item) => {
         const provenance = item.provenance;
@@ -271889,7 +272200,22 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
-  const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2000) : undefined;
+  let frontMountsSeen;
+  let frontMountsLookUntil = 0;
+  let frontMountsLastLook = 0;
+  const frontMountRetry = engineFront ? setInterval(() => {
+    const snapshot = engineFront.status()?.snapshot;
+    const seen = `${snapshot?.instance_id ?? ""}:${snapshot?.stores_opened ?? ""}`;
+    const now = Date.now();
+    if (seen !== frontMountsSeen) {
+      frontMountsSeen = seen;
+      frontMountsLookUntil = now + FRONT_MOUNT_LOOK_AFTER_CHANGE_MS;
+    }
+    if (now >= frontMountsLookUntil && now - frontMountsLastLook < FRONT_MOUNT_LOOK_QUIET_MS)
+      return;
+    frontMountsLastLook = now;
+    refreshFrontMounts();
+  }, 2000) : undefined;
   frontMountRetry?.unref?.();
   if (!engineFront)
     keepVisibilityCurrent("after start");
@@ -272070,6 +272396,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
+        stores_opened: storeOpensSoFar(),
         ...statusRecount ? { status_recount: statusRecount.health() } : {},
         ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth()),
         ...((files) => files ? { sqlite_files: files } : {})(sqliteFilesHealth()),
@@ -272268,7 +272595,7 @@ function workerListenPort(port) {
 function resolveEmailSourceBindHostFromEnv(env = process.env) {
   return resolveWorkerBindHost(env, ["OLYMPUS_EMAIL_SOURCE_HOST"]);
 }
-var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
+var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_MOUNT_LOOK_AFTER_CHANGE_MS = 60000, FRONT_MOUNT_LOOK_QUIET_MS = 60000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
 var init_server5 = __esm(async () => {
   init_analyst_tinfoil();
   init_evidence_reranker();
