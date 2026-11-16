@@ -42,6 +42,13 @@ EOF`;
 export function judgeRaiseTarget(stop: Pick<LimitsStop, 'limit' | 'used'>): number {
   return Math.max(stop.limit ?? 0, stop.used ?? 0) + 50;
 }
+/** The error's kind, code and first frame in our own scripts: never its message, which can carry machine output. */
+export function safeErrorShape(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error;
+  const code = (error as { code?: unknown }).code;
+  const frame = error.stack?.split('\n').map(line => /(scripts\/release-check\/[\w.-]+\.ts:\d+)/.exec(line)?.[1]).find(Boolean);
+  return [error.name, typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? code : undefined, frame ? `at ${frame}` : undefined].filter(Boolean).join(' ');
+}
 class Assertion extends LimitsReason {}
 function assert(value: unknown, message: string): asserts value { if (!value) throw new Assertion(message); }
 const REFILL_UNCONFIRMED = 'has not confirmed canConsume=true';
@@ -88,7 +95,7 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
     catch (error) {
       // Never forward machine output, paths, Home rows, item text or arbitrary exception messages.
       result.checks.push({ id: `limits.${id}`, title: `limits: ${id}`, status: 'fail',
-        detail: error instanceof LimitsReason ? error.message : 'machine or dashboard operation failed', ms: clock.now() - started });
+        detail: error instanceof LimitsReason ? error.message : `machine or dashboard operation failed (${safeErrorShape(error)})`, ms: clock.now() - started });
       return false;
     }
   };
