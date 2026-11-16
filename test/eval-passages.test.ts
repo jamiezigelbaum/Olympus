@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
-import { comparePassageReceipts, recallGroups, runPassageEval, type LaneProbe } from '../eval/run-passages.ts';
+import { comparePassageReceipts, followUpCheck, oracleNarrow, recallGroups, runPassageEval, type LaneProbe } from '../eval/run-passages.ts';
 import { fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
 import type { EvalDataset } from '../eval/types.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -347,4 +347,29 @@ test('without an answer callback the serialized receipt is byte-identical to the
     const receipt = await runPassageEval({ dataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail() });
     expect(createHash('sha256').update(JSON.stringify(receipt)).digest('hex')).toBe('56f12eb867b6dce832872531b0387a32ff5b3955e45b415f184184e307ec6ead');
   } finally { now.mockRestore(); }
+});
+
+test('--narrow: oracle scopes from the expected item, and the unnarrowed follow-up check leaves no names or text in the receipt', async () => {
+  const item = { corpusId: 'internal.fixture.chat', conversationId: 'chat-7', authoredAt: '2022-06-15T00:00:00Z' };
+  expect(oracleNarrow('source', item)).toEqual({ applied: 'source', corpusIds: ['internal.fixture.chat'] });
+  expect(oracleNarrow('conversation', item)).toEqual({ applied: 'conversation', corpusIds: ['internal.fixture.chat'], filters: { conversationId: 'chat-7' } });
+  const span = oracleNarrow('span', item);
+  expect(span.applied).toBe('span');
+  expect(Date.parse(span.filters!.authoredBefore!) - Date.parse(span.filters!.authoredAfter!)).toBe(365 * 24 * 60 * 60 * 1000);
+  expect(oracleNarrow('conversation', { corpusId: 'internal.fixture.file' })).toEqual({ applied: 'source', corpusIds: ['internal.fixture.file'] });
+  expect(oracleNarrow('source', undefined)).toEqual({ applied: 'none' });
+
+  const named = detail();
+  named.pack.candidates[0]!.provenance.citation = { conversationLabel: 'Private-looking chat name', authorLabel: 'Dana' };
+  const weak = { ...named, strength: { rerankBest: -9, conceptShareBest: 0.1 } };
+  const check = followUpCheck(weak, undefined, [{ corpusId: 'internal.fixture.file', senderLabel: 'Dana Smith' }]);
+  expect(check).toEqual({ triggered: true, reason: 'low_relevance', citationsKnown: false, options: 1, trueScopeOffered: true });
+  expect(followUpCheck(named, 0, [{ corpusId: 'elsewhere' }])).toMatchObject({ triggered: true, reason: 'no_citations', trueScopeOffered: false });
+
+  const receipt = await runPassageEval({ dataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => weak,
+    narrowApplied: () => 'source', followUp: async () => check });
+  expect(receipt.questions![0]!.narrow).toEqual({ applied: 'source' });
+  expect(receipt.summary.overall.followUp).toEqual({ checked: 2, triggered: 2, trueScopeOffered: 2, triggeredAndOffered: 2 });
+  const json = JSON.stringify(receipt);
+  for (const secret of ['Private-looking chat name', 'Dana', question, quote, passage]) expect(json).not.toContain(secret);
 });

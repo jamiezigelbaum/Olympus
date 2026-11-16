@@ -26,6 +26,9 @@ import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { followUpCandidates } from '../src/workers/source-index/analyst-answer.ts';
+import { followUpScopeOptions, scopeContains, searchCutShort, weakSearch } from '../src/core/follow-up.ts';
+import type { ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
 
 export type EvalSplit = 'open' | 'sealed';
 interface HitScore { firstHitRank: number | null; reciprocalRank: number; hitsAtK: Record<string, number> }
@@ -85,6 +88,8 @@ export interface PassageSummary {
   reach: { found: number; returned: number; seated: number; fitted: number; passage: number };
   /** Reranker outcomes and time, when one ran: a timed-out or failed rerank kept the fused order. */
   rerank?: { applied: number; timedOut: number; failed: number; elapsedMs: number; maxElapsedMs: number };
+  /** With --narrow: of the questions checked, how many the unnarrowed run would have asked, and how many offered the true scope. */
+  followUp?: { checked: number; triggered: number; trueScopeOffered: number; triggeredAndOffered: number };
 }
 export interface PassageRow {
   questionId: string; shape: string; families: string[]; tiers: string[];
@@ -94,10 +99,62 @@ export interface PassageRow {
   rerank?: { outcome: EvidenceRerankOutcome; scored: number; promoted: number; elapsedMs: number };
   /** Present when a store's search was cut short: which store and lane, and why (codes only). Left out of the metrics. */
   degraded?: Degradation[];
+  /** With --narrow: which oracle narrowing the metrics ran under, and the unnarrowed run's follow-up (counts and codes only). */
+  narrow?: { applied: NarrowMode | 'none' };
+  followUp?: FollowUpCheck;
   timings: PassageSummary['timings'];
   corpusTimings: { corpusId: string; elapsedMs: number; outcome: 'success' | 'timeout' }[];
 }
 export interface Degradation { corpusId: string; lane?: string; reason: string }
+export type NarrowMode = 'source' | 'span' | 'conversation';
+/**
+ * The unnarrowed run's follow-up for one question: whether it would have
+ * asked (and why), how many options it offered, and whether one of them
+ * holds the expected item. `citationsKnown` is false when no Analyst ran, so
+ * only the relevance bars could decide.
+ */
+export interface FollowUpCheck {
+  triggered: boolean; reason?: 'no_citations' | 'low_relevance'; citationsKnown: boolean;
+  options: number; trueScopeOffered: boolean;
+}
+/** The expected item's own metadata, read from its store; never written to disk. */
+export interface ExpectedItemMeta { corpusId: string; conversationId?: string; senderLabel?: string; authoredAt?: string }
+/** The scope an oracle narrowing searches: corpora, and per-store filters. */
+export interface OracleNarrow { applied: NarrowMode | 'none'; corpusIds?: string[]; filters?: ConnectorStoreSearchFilters }
+const SPAN_HALF_MS = 182.5 * 24 * 60 * 60 * 1000;
+
+/**
+ * The narrowing a perfect follow-up answer would pick, from the question's
+ * first expected item: its corpus; its corpus and twelve months around its
+ * authored date; or its conversation. An item without the metadata a mode
+ * needs falls back to its corpus.
+ */
+export function oracleNarrow(mode: NarrowMode, item: ExpectedItemMeta | undefined): OracleNarrow {
+  if (!item) return { applied: 'none' };
+  const corpusIds = [item.corpusId];
+  if (mode === 'conversation' && item.conversationId) return { applied: 'conversation', corpusIds, filters: { conversationId: item.conversationId } };
+  const at = item.authoredAt ? Date.parse(item.authoredAt) : Number.NaN;
+  if (mode === 'span' && Number.isFinite(at)) {
+    return { applied: 'span', corpusIds, filters: { authoredAfter: new Date(at - SPAN_HALF_MS).toISOString(), authoredBefore: new Date(at + SPAN_HALF_MS).toISOString() } };
+  }
+  return { applied: 'source', corpusIds };
+}
+
+/** The follow-up the unnarrowed pack would carry, judged against the expected items. */
+export function followUpCheck(detail: EvidencePackBuildDetail, citations: number | undefined, expected: readonly ExpectedItemMeta[]): FollowUpCheck {
+  const verdict = weakSearch({
+    // Without an Analyst only the relevance bars can decide.
+    citations: citations ?? 1,
+    ...(detail.strength ? { strength: detail.strength } : {}),
+    cutShort: searchCutShort({ skippedReasons: detail.skippedCorpora.map(skip => skip.reason), degradationReasons: detail.degradations.map(entry => entry.reason) }),
+  });
+  const options = followUpScopeOptions(followUpCandidates(detail));
+  return {
+    triggered: verdict.weak, ...(verdict.weak ? { reason: verdict.reason } : {}), citationsKnown: citations !== undefined,
+    options: options.length,
+    trueScopeOffered: options.some(option => expected.some(item => scopeContains(option.scope, item))),
+  };
+}
 export interface PassageReceipt {
   schema: 3; rule: typeof PASSAGE_MATCH_RULE; gitSha: string; split: EvalSplit;
   setId: string; maxResults: number; ks: number[];
@@ -164,6 +221,12 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
       elapsedMs: reranked.reduce((n, row) => n + row.rerank!.elapsedMs, 0),
       maxElapsedMs: Math.max(...reranked.map(row => row.rerank!.elapsedMs)),
     } } : {}),
+    ...(rows.some(row => row.followUp) ? { followUp: {
+      checked: rows.filter(row => row.followUp).length,
+      triggered: rows.filter(row => row.followUp?.triggered).length,
+      trueScopeOffered: rows.filter(row => row.followUp?.trueScopeOffered).length,
+      triggeredAndOffered: rows.filter(row => row.followUp?.triggered && row.followUp.trueScopeOffered).length,
+    } } : {}),
     questions: rows.length, answerable: positives.length, unanswerable: rows.length - positives.length,
     negativeSeats: rows.filter(row => !row.answerable).reduce((n, row) => n + row.seatsFilled, 0),
     degraded: all.length - rows.length,
@@ -215,7 +278,10 @@ export async function runPassageEval(input: {
   /** How many chunks an item has in its store (undefined when unknown). */
   itemChunks?: (corpusId: string, providerItemId: string) => number | undefined;
   /** Called as each question enters a step (1-based index; step names only). */
-  onProgress?: (index: number, total: number, step: 'build_pack' | 'fit' | 'answer' | 'probe_lanes' | 'judge') => void;
+  onProgress?: (index: number, total: number, step: 'build_pack' | 'fit' | 'answer' | 'probe_lanes' | 'judge' | 'follow_up') => void;
+  /** With --narrow: the oracle narrowing buildPack ran under, and the unnarrowed run's follow-up check. */
+  narrowApplied?: (question: EvalQuestion) => NarrowMode | 'none';
+  followUp?: (question: EvalQuestion) => Promise<FollowUpCheck>;
 }): Promise<PassageReceipt> {
   validatePassageDataset(input.dataset);
   const split = input.split ?? 'open';
@@ -231,7 +297,7 @@ export async function runPassageEval(input: {
     return known.length ? { chunks: Math.max(...known) } : {};
   };
   for (const [position, question] of questions.entries()) {
-    const step = (name: 'build_pack' | 'fit' | 'answer' | 'probe_lanes' | 'judge') => input.onProgress?.(position + 1, questions.length, name);
+    const step = (name: 'build_pack' | 'fit' | 'answer' | 'probe_lanes' | 'judge' | 'follow_up') => input.onProgress?.(position + 1, questions.length, name);
     const started = performance.now();
     step('build_pack');
     const detail = await input.buildPack(question);
@@ -242,12 +308,7 @@ export async function runPassageEval(input: {
     const builtAt = performance.now();
     step('fit');
     const original = detail.pack;
-    const pack = input.promptBytes === undefined ? original : fitPackToPromptBytes(original, input.promptBytes,
-      new Map(original.candidates.map((candidate, index) => [candidate, detail.candidateCorpusIds[index] ?? ''])),
-      { localOnly: original.candidates.some(candidate => candidate.trustDomain === 'secure_local') }, detail.recencySeats,
-      // A prompt budget is the local Analyst lane's, which is sent the compact
-      // format and only the kept seats' extraction gaps (as run-real.ts fits).
-      'compact', new Map(original.candidates.map((candidate, index) => [candidate.provenance, detail.candidateExtractionGapIndexes?.[index] ?? []])));
+    const pack = fittedPack(detail, input.promptBytes);
     let objectRank: number | null = null;
     let passageRank: number | null = null;
     const seatText = (seat: EvidencePack['candidates'][number]) => [...seat.chunks, ...(seat.facts ?? []).map(fact => fact.claim), ...(seat.tables ?? []).flatMap(table => [table.caption ?? '', ...table.columns, ...table.rows.map(row => row.join(' '))])].join('\n');
@@ -302,6 +363,9 @@ export async function runPassageEval(input: {
     const quoted = question.expectedEvidence?.find(expected => expected.quote)?.quote;
     if (answerable && quoted && input.judgeQuestion) step('judge');
     const judge = answerable && quoted && input.judgeQuestion ? await input.judgeQuestion(question.question, quoted) : undefined;
+    if (input.followUp) step('follow_up');
+    const followUp = input.followUp ? await input.followUp(question) : undefined;
+    const narrowApplied = input.narrowApplied?.(question);
     rows.push({ questionId: question.id, shape: question.shape,
       families: expectedStores.length ? [...new Set(expectedStores.map(store => store?.family ?? 'unknown'))] : ['unknown'],
       tiers: expectedStores.length ? [...new Set(expectedStores.map((store, i) => store?.tier ?? question.expectedEvidence![i]!.corpusId.split('.')[0]!))] : ['unknown'],
@@ -310,6 +374,8 @@ export async function runPassageEval(input: {
       ...(answer ? { answer } : {}),
       ...(detail.rerank ? { rerank: { outcome: detail.rerank.outcome, scored: detail.rerank.scored, promoted: detail.rerank.promoted, elapsedMs: detail.rerank.elapsedMs } } : {}),
       ...(degraded.length ? { degraded } : {}),
+      ...(narrowApplied ? { narrow: { applied: narrowApplied } } : {}),
+      ...(followUp ? { followUp } : {}),
       timings: { buildPackMs: builtAt - started, fitMs: finished - builtAt, totalMs: finished - started, storeSearchMs: (detail.corpusTimings ?? []).reduce((n, t) => n + t.elapsedMs, 0) },
       corpusTimings: (detail.corpusTimings ?? []).map(t => ({ corpusId: t.corpusId, elapsedMs: t.elapsedMs, outcome: t.outcome })),
     });
@@ -324,6 +390,17 @@ export async function runPassageEval(input: {
     ...(split === 'open' ? { questions: rows } : {}),
     degradedIds: rows.filter(row => row.degraded).map(row => row.questionId),
   };
+}
+
+/** The pack as the local Analyst lane is sent it: fitted to its prompt budget, when one is set. */
+export function fittedPack(detail: EvidencePackBuildDetail, promptBytes: number | undefined): EvidencePack {
+  const original = detail.pack;
+  return promptBytes === undefined ? original : fitPackToPromptBytes(original, promptBytes,
+    new Map(original.candidates.map((candidate, index) => [candidate, detail.candidateCorpusIds[index] ?? ''])),
+    { localOnly: original.candidates.some(candidate => candidate.trustDomain === 'secure_local') }, detail.recencySeats,
+    // A prompt budget is the local Analyst lane's, which is sent the compact
+    // format and only the kept seats' extraction gaps (as run-real.ts fits).
+    'compact', new Map(original.candidates.map((candidate, index) => [candidate.provenance, detail.candidateExtractionGapIndexes?.[index] ?? []])));
 }
 
 function summaries(rows: readonly PassageRow[], ks: readonly number[]): PassageReceipt['summary'] {
@@ -445,6 +522,18 @@ export function storedChunkCounter(stores: readonly LocalConnectorStore[]) {
         WHERE i.provider_item_id = ? AND i.tombstoned = 0 GROUP BY i.item_pk)`).get(providerItemId) as { n: number | null } | null;
       return row?.n ?? undefined;
     },
+    /** The item's conversation, sender and authored time, for the oracle narrowing; kept in memory only. */
+    meta(corpusId: string, providerItemId: string): ExpectedItemMeta | undefined {
+      const store = stores.find(candidate => candidate.corpusId === corpusId);
+      if (!store) return undefined;
+      let db = open.get(corpusId);
+      if (!db) { db = new Database(store.dbPath, { readonly: true, create: false }); db.exec('PRAGMA query_only = ON;'); open.set(corpusId, db); }
+      const row = db.query(`SELECT provider_conversation_id AS conversation_id, sender_label, authored_at FROM items
+        WHERE provider_item_id = ? AND tombstoned = 0 ORDER BY item_pk LIMIT 1`).get(providerItemId) as { conversation_id: string | null; sender_label: string | null; authored_at: string | null } | null;
+      if (!row) return { corpusId };
+      return { corpusId, ...(row.conversation_id ? { conversationId: row.conversation_id } : {}),
+        ...(row.sender_label ? { senderLabel: row.sender_label } : {}), ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
+    },
     close() { for (const db of open.values()) db.close(); open.clear(); },
   };
 }
@@ -512,12 +601,14 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
       if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer' || key === '--judge-answers') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
-      if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes'].includes(key!)) throw new Error('Unsupported passage eval option.');
+      if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes', '--narrow'].includes(key!)) throw new Error('Unsupported passage eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Passage eval option requires a value.');
       values.set(key!, value);
     } else { if (datasetPath) throw new Error('One dataset path is required.'); datasetPath = arg; }
   }
+  const narrowMode = values.get('--narrow');
+  if (narrowMode !== undefined && narrowMode !== 'source' && narrowMode !== 'span' && narrowMode !== 'conversation') throw new Error('--narrow must be source, span or conversation.');
   const split = values.get('--split') ?? 'open';
   if (split !== 'open' && split !== 'sealed') throw new Error('Split must be open or sealed.');
   const provider = values.get('--analyst-provider') ?? process.env.OLYMPUS_EVAL_ANALYST_PROVIDER ?? 'local';
@@ -558,20 +649,37 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const reranker = await prepareBuiltInRerankerFromEnv();
     // Each store search's returned ids, for the funnel's store rank.
     let searches: EvalStoreSearch[] = [];
-    const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor, onStoreSearch: search => { searches.push(search); } });
+    // --narrow: the oracle scope the next build searches under (none for the unnarrowed run).
+    let scope: OracleNarrow = { applied: 'none' };
+    const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor, onStoreSearch: search => { searches.push(search); },
+      ...(narrowMode ? { storeScope: () => (scope.filters ? { filters: scope.filters } : undefined) } : {}) });
     const judge = values.has('--judge-questions') ? questionJudge(localEvalModel(config)) : undefined;
     const judgeAnswer = values.has('--judge-answers') && answer ? answerMeaningJudge(localEvalModel(config)) : undefined;
     const probe = values.has('--probe-lanes') ? laneProbe(opened.stores, embedding.embeddingFor) : undefined;
     const storeTimes = values.has('--trace') ? new StoreTimes() : undefined;
     const itemChunks = storedChunkCounter(opened.stores);
     cleanups.push(itemChunks.close);
+    const expectedMeta = (q: EvalQuestion): ExpectedItemMeta[] => (q.expectedEvidence ?? []).flatMap(item => [item, ...(item.alternates ?? [])])
+      .flatMap(item => item.providerItemId ? [itemChunks.meta(item.corpusId, item.providerItemId) ?? { corpusId: item.corpusId }] : []);
+    const oracle = (q: EvalQuestion): OracleNarrow => oracleNarrow(narrowMode as NarrowMode, expectedMeta(q)[0]);
+    const unnarrowedFollowUp = async (q: EvalQuestion): Promise<FollowUpCheck> => {
+      scope = { applied: 'none' };
+      const detail = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}) });
+      let citations: number | undefined;
+      if (answer) {
+        try { citations = (await answer(q, fittedPack(detail, promptBytes))).citations.length; } catch { citations = undefined; }
+      }
+      return followUpCheck(detail, citations, expectedMeta(q));
+    };
     const receipt = await runPassageEval({ dataset, split, maxResults, storeCounts: opened.storeCounts, skippedStores: opened.skipped,
       gitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
       ...(promptBytes !== undefined ? { promptBytes } : {}),
       ...(reranker ? { rerankPoolStoreDepth: RERANK_POOL_STORE_DEPTH } : {}),
       buildPack: async q => {
         searches = [];
-        const build = () => buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}) });
+        scope = narrowMode ? oracle(q) : { applied: 'none' };
+        const corpusIds = scope.corpusIds;
+        const build = () => buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}), ...(corpusIds ? { corpusIds } : {}) });
         let built: Awaited<ReturnType<typeof build>>;
         if (storeTimes) {
           const trace = createSourceAnswerTrace();
@@ -585,6 +693,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       ...(judgeAnswer ? { judgeAnswer } : {}),
       ...(answer ? { answer } : {}),
       itemChunks: itemChunks.count,
+      ...(narrowMode ? { narrowApplied: (q: EvalQuestion) => oracle(q).applied, followUp: unnarrowedFollowUp } : {}),
       onProgress: (index, total, step) => enter(`question ${index}/${total}: ${step}`),
     });
     enter('write_receipt');
