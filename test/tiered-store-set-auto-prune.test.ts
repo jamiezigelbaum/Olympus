@@ -151,7 +151,7 @@ test('an item that keeps failing is stepped past after three passes, so the rest
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
       // Ledger id, corpora, a count and an error name: never item identity or content.
-      expect(line).toMatch(/^\[tier-auto-prune\] ledger=[0-9a-f]+ corpora=\S+ failures=\d+ reason=\w+$/);
+      expect(line).toMatch(/^\[tier-auto-prune\] ledger=[0-9a-f]+ corpora=\S+ failures=\d+ reason=\w+( code=[A-Z0-9_]+)?( sqlite="[^"]*")?$/);
     }
   } finally { unavailable.mockRestore(); warn.mockRestore(); }
   // Once the store is back, the walk finishes the item and completes.
@@ -766,4 +766,11 @@ test('sweep ledger and store lock contention retry without busy waits and restor
     } finally { blocker.exec('ROLLBACK'); blocker.close(); }
   }
   expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }).complete).toBe(true);
+});
+
+test('a prune failure names SQLite\'s own fixed reason, never another message', async () => {
+  const { safeFailureReasonForTest } = await import('../src/workers/connector-store/tier-auto-prune-sweep.ts');
+  const closed = Object.assign(new Error('Database has closed'), { code: 'SQLITE_MISUSE' });
+  expect(safeFailureReasonForTest(closed)).toBe('Error code=SQLITE_MISUSE sqlite="Database has closed"');
+  expect(safeFailureReasonForTest(new Error('cannot open /home/owner/private.sqlite'))).toBe('Error');
 });

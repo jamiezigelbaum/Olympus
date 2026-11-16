@@ -370,8 +370,9 @@ function* sweepPage(set: TieredStoreSet, options: {
       const key = tierLedgerIdentityKey(identity);
       const count = durable.failing?.key === key ? durable.failing.count + 1 : 1;
       const corpora = durable.pending?.copies.map(copy => copy.corpusId).join(',') || 'unknown';
-      // The error's name only: a message from below could carry a path.
-      const reason = error instanceof Error ? error.name : 'unknown';
+      // The error's name and SQLite code, and its message only when it is
+      // one of SQLite's own fixed texts: any other message could carry a path.
+      const reason = safeFailureReason(error);
       console.warn(`[tier-auto-prune] ledger=${ledger.ledgerId()} corpora=${corpora} failures=${count} reason=${reason}`);
       if (count < MAX_ITEM_FAILURES) {
         durable.failing = { key, count };
@@ -468,3 +469,19 @@ export function startSupersededSweepTicker(options: {
   cancel = every(tick, interval);
   return () => { stopped = true; cancel(); };
 }
+
+/** SQLite's fixed, content-free messages, which say why a pass failed without naming anything of the owner's. */
+const SQLITE_FIXED_MESSAGES = new Set([
+  'Database has closed', 'database is locked', 'database table is locked', 'disk I/O error',
+  'database or disk is full', 'attempt to write a readonly database', 'database disk image is malformed',
+]);
+
+function safeFailureReason(error: unknown): string {
+  if (!(error instanceof Error)) return 'unknown';
+  const code = (error as { code?: unknown }).code;
+  const parts = [error.name];
+  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,40}$/.test(code)) parts.push(`code=${code}`);
+  if (SQLITE_FIXED_MESSAGES.has(error.message)) parts.push(`sqlite=${JSON.stringify(error.message)}`);
+  return parts.join(' ');
+}
+export const safeFailureReasonForTest = safeFailureReason;

@@ -16827,7 +16827,7 @@ var init_tier_content_purge = __esm(() => {
 });
 
 // src/workers/connector-store/tier-auto-prune-sweep.ts
-var RECLAIM_MAX_RETAINED_FREE_BYTES, sweeping;
+var RECLAIM_MAX_RETAINED_FREE_BYTES, sweeping, SQLITE_FIXED_MESSAGES;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
@@ -16840,6 +16840,15 @@ var init_tier_auto_prune_sweep = __esm(() => {
   init_tiered_store_set();
   RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
   sweeping = new WeakSet;
+  SQLITE_FIXED_MESSAGES = new Set([
+    "Database has closed",
+    "database is locked",
+    "database table is locked",
+    "disk I/O error",
+    "database or disk is full",
+    "attempt to write a readonly database",
+    "database disk image is malformed"
+  ]);
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 var REQUEST_TIMEOUT_MS;

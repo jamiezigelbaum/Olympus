@@ -33385,6 +33385,15 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
 // src/workers/connector-store/tier-auto-prune-sweep.ts
 var RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
 var sweeping = new WeakSet;
+var SQLITE_FIXED_MESSAGES = new Set([
+  "Database has closed",
+  "database is locked",
+  "database table is locked",
+  "disk I/O error",
+  "database or disk is full",
+  "attempt to write a readonly database",
+  "database disk image is malformed"
+]);
 
 // src/workers/source-index/built-in-embedding/provider.ts
 import { isMainThread as isMainThread5 } from "node:worker_threads";

@@ -93307,7 +93307,7 @@ function* sweepPage(set, options, spent, now, timing) {
       const key = tierLedgerIdentityKey(identity);
       const count = durable.failing?.key === key ? durable.failing.count + 1 : 1;
       const corpora = durable.pending?.copies.map((copy) => copy.corpusId).join(",") || "unknown";
-      const reason = error instanceof Error ? error.name : "unknown";
+      const reason = safeFailureReason(error);
       console.warn(`[tier-auto-prune] ledger=${ledger.ledgerId()} corpora=${corpora} failures=${count} reason=${reason}`);
       if (count < MAX_ITEM_FAILURES) {
         durable.failing = { key, count };
@@ -93390,7 +93390,18 @@ function startSupersededSweepTicker(options = {}) {
     cancel();
   };
 }
-var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, SUPERSEDED_SWEEP_IDLE_TICK_MS = 250, SUPERSEDED_SWEEP_IDLE_AFTER_MS = 60000, SWEEP_LOG_STATEMENT_MS = 250, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3, RECLAIM_MAX_RETAINED_FREE_BYTES, RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1, emptyReport = () => ({ checked: 0, purged: 0, kept: 0, failed: 0, complete: false }), newTiming = () => ({ pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false, heldMs: 0 }), sweeping;
+function safeFailureReason(error) {
+  if (!(error instanceof Error))
+    return "unknown";
+  const code = error.code;
+  const parts = [error.name];
+  if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,40}$/.test(code))
+    parts.push(`code=${code}`);
+  if (SQLITE_FIXED_MESSAGES.has(error.message))
+    parts.push(`sqlite=${JSON.stringify(error.message)}`);
+  return parts.join(" ");
+}
+var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, SUPERSEDED_SWEEP_IDLE_TICK_MS = 250, SUPERSEDED_SWEEP_IDLE_AFTER_MS = 60000, SWEEP_LOG_STATEMENT_MS = 250, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3, RECLAIM_MAX_RETAINED_FREE_BYTES, RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1, emptyReport = () => ({ checked: 0, purged: 0, kept: 0, failed: 0, complete: false }), newTiming = () => ({ pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false, heldMs: 0 }), sweeping, SQLITE_FIXED_MESSAGES;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
@@ -93403,6 +93414,15 @@ var init_tier_auto_prune_sweep = __esm(() => {
   init_tiered_store_set();
   RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
   sweeping = new WeakSet;
+  SQLITE_FIXED_MESSAGES = new Set([
+    "Database has closed",
+    "database is locked",
+    "database table is locked",
+    "disk I/O error",
+    "database or disk is full",
+    "attempt to write a readonly database",
+    "database disk image is malformed"
+  ]);
 });
 
 // src/core/model-install-failure.ts
