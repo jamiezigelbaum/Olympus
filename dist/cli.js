@@ -39281,6 +39281,29 @@ function engineHeartbeatBeating(heartbeat, options = {}) {
 function startupCapMs(storeBytes) {
   return STARTUP_CAP_BASE_MS + Math.ceil(storeBytes / 1024 ** 3) * STARTUP_CAP_PER_GB_MS;
 }
+function readEngineStartProgress(env, options = {}) {
+  const alive = options.alive ?? processAlive2;
+  const belongs = (pid, startedAt) => (options.pid === undefined || options.pid === pid) && alive(pid) && (options.since === undefined || Date.parse(startedAt) >= options.since);
+  const tokens = [];
+  const steps = [];
+  let booting = false;
+  for (const boot of [readBootProgress(env), readFrontProgress(env)]) {
+    if (!boot || boot.phase === "failed" || !belongs(boot.pid, boot.startedAt))
+      continue;
+    if (boot.phase !== "done")
+      booting = true;
+    tokens.push(Date.parse(boot.updatedAt));
+    steps.push(bootProgressLine(boot, options.now));
+  }
+  const heartbeat = readEngineHeartbeat(env);
+  if (heartbeat && belongs(heartbeat.pid, heartbeat.startedAt)) {
+    steps.push(engineHeartbeatLine(heartbeat, options.now));
+    if (booting && engineHeartbeatBeating(heartbeat, { now: options.now ?? Date.now(), alive }))
+      tokens.push(Date.parse(heartbeat.writtenAt));
+  }
+  const finite = tokens.filter(Number.isFinite);
+  return { token: finite.length ? Math.max(...finite) : undefined, waitingOn: steps.join("; ") || "boot progress or a heartbeat" };
+}
 function createStartupWatch(input) {
   const now = input.now ?? (() => performance.now());
   const log = input.log ?? ((line) => console.log(line));
@@ -39318,6 +39341,7 @@ function processAlive2(pid) {
 }
 var ENGINE_HEARTBEAT_SCHEMA = "olympus.engine-heartbeat.v1", HEARTBEAT_WRITE_MS = 1000, LOOP_TICK_MS = 250, HEARTBEAT_STALE_MS = 15000, STEP_BYTES = 200, beat, HEARTBEAT_WORKER_SOURCE, STARTUP_CAP_BASE_MS, STARTUP_CAP_PER_GB_MS = 60000;
 var init_engine_heartbeat = __esm(() => {
+  init_boot_progress();
   init_olympus_layout();
   HEARTBEAT_WORKER_SOURCE = `
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
@@ -97279,40 +97303,68 @@ function scanThread() {
       unavailable = true;
       return;
     }
-    const worker = new Worker(path);
+    const worker = workerFactory2(path);
     worker.unref?.();
-    const started = { worker, pending: new Map };
+    const buffer = new SharedArrayBuffer(8);
+    const started = { worker, pending: new Map, progress: new Int32Array(buffer) };
     worker.onmessage = (event) => {
       const message = event.data;
       const waiting = started.pending.get(message.id);
       if (!waiting)
         return;
       started.pending.delete(message.id);
-      clearTimeout(waiting.timer);
+      clock4.clearTimeout(waiting.timer);
       if (message.ok && Array.isArray(message.kinds))
         waiting.resolve(message.kinds);
       else
         waiting.reject(new Error(message.error ?? "off-thread secret scan failed"));
     };
     worker.onerror = (event) => retire2(started, new Error(event.message || "secret scan thread stopped"));
+    worker.addEventListener("close", () => retire2(started, new Error("secret scan worker closed while waiting for a scan reply")));
     thread = started;
+    worker.postMessage({ op: "progress", buffer });
     return started;
   } catch {
+    if (thread)
+      retire2(thread, new Error("secret scan worker could not receive its progress buffer"), false);
     unavailable = true;
     return;
   }
 }
-function retire2(stopped, error) {
+function retire2(stopped, error, report = true) {
+  if (stopped.retired)
+    return;
+  stopped.retired = true;
+  if (report && stopped.pending.size)
+    log(`[secret-scan] waiting for off-thread secret scan reply: ${error.message}; the classifier will scan locally`);
   if (thread === stopped)
     thread = undefined;
   for (const waiting of stopped.pending.values()) {
-    clearTimeout(waiting.timer);
+    clock4.clearTimeout(waiting.timer);
     waiting.reject(error);
   }
   stopped.pending.clear();
   try {
     stopped.worker.terminate();
   } catch {}
+}
+function checkReply(scanner, id) {
+  const waiting = scanner.pending.get(id);
+  if (!waiting || scanner.retired)
+    return;
+  if (Atomics.load(scanner.progress, 1) >= id) {
+    if (waiting.finishedSeen) {
+      const error = new Error(`worker finished secret scan request ${id}, but its reply was not delivered`);
+      log(`[secret-scan] waiting for off-thread secret scan reply: ${error.message}; the classifier will scan locally`);
+      scanner.pending.delete(id);
+      waiting.reject(error);
+      if (scanner.pending.size === 0)
+        retire2(scanner, error, false);
+      return;
+    }
+    waiting.finishedSeen = true;
+  }
+  waiting.timer = clock4.setTimeout(() => checkReply(scanner, id), OFF_THREAD_SCAN_TIMEOUT_MS);
 }
 async function scanSecretsAhead(text) {
   if (!secretScanReusable(text) || secretScanRemembered(text))
@@ -97323,18 +97375,28 @@ async function scanSecretsAhead(text) {
   const id = nextId2++;
   try {
     const kinds = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => retire2(scanner, new Error("off-thread secret scan timed out")), OFF_THREAD_SCAN_TIMEOUT_MS);
-      scanner.pending.set(id, { resolve, reject, timer });
-      scanner.worker.postMessage({ id, text });
+      const waiting = { resolve, reject };
+      scanner.pending.set(id, waiting);
+      waiting.timer = clock4.setTimeout(() => checkReply(scanner, id), OFF_THREAD_SCAN_TIMEOUT_MS);
+      try {
+        scanner.worker.postMessage({ id, text });
+      } catch {
+        retire2(scanner, new Error("secret scan request could not be delivered to its worker"));
+      }
     });
     rememberSecretFindingKinds(text, kinds);
   } catch {
     scanner.pending.delete(id);
   }
 }
-var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable = false, nextId2 = 1;
+var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, REAL_CLOCK2, clock4, workerFactory2 = (path) => new Worker(path), log = (line) => console.warn(line), thread, unavailable = false, nextId2 = 1;
 var init_secret_scan_off_thread = __esm(() => {
   init_engine();
+  REAL_CLOCK2 = {
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
+  };
+  clock4 = REAL_CLOCK2;
 });
 
 // src/workers/connector-store/tier-rejudge.ts
@@ -148740,6 +148802,7 @@ function enginePaths(homeDir) {
   const appSupportDir = join116(home, "Library", "Application Support", "Olympus");
   const dataEnv = { HOME: home };
   return {
+    dataEnv,
     label: ENGINE_LABEL,
     plistPath: join116(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
@@ -148770,6 +148833,7 @@ function engineServicePaths(options = {}) {
   }
   const l = resolveLinuxEngineLayout(env);
   return {
+    dataEnv: { HOME: l.home, XDG_DATA_HOME: l.dataHome, XDG_CONFIG_HOME: l.configHome, OLYMPUS_ENGINE_HOST: "1" },
     linux: l,
     label: "olympus-engine.service",
     plistPath: l.unitPath,
@@ -149149,6 +149213,8 @@ async function waitForEngineHealthy(input, deps = {}) {
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
   const fetchImpl = deps.fetchImpl ?? workerFetch;
   const started = now();
+  let lastProgressAt = started;
+  let progressToken;
   let last = {
     ok: false,
     expected_build: input.expectedBuild,
@@ -149160,9 +149226,17 @@ async function waitForEngineHealthy(input, deps = {}) {
   };
   for (;; ) {
     last = { ...await checkEngineHealthOnce(input, pidAlive, fetchImpl, deps), waited_ms: now() - started };
-    if (last.ok || now() - started >= timeoutMs)
+    if (last.ok)
       return last;
-    await sleep(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - started))));
+    const expectedProcess = input.expectedBuild === null || last.running_build === null || last.running_build === input.expectedBuild;
+    const progress = input.paths.dataEnv && expectedProcess ? readEngineStartProgress(input.paths.dataEnv, { since: input.since, now: now(), alive: pidAlive }) : undefined;
+    if (progress?.token !== undefined && (progressToken === undefined || progress.token > progressToken)) {
+      lastProgressAt = now();
+      progressToken = progress.token;
+    }
+    if (now() - lastProgressAt >= timeoutMs)
+      return last;
+    await sleep(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - lastProgressAt))));
   }
 }
 async function checkEngineHealthOnce(input, pidAlive, fetchImpl, deps) {
@@ -150284,6 +150358,7 @@ function saveMacComputerUseChoice(choice) {
 }
 var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, ENGINE_BACKGROUND_STATUS_ID = "olympus-worker-background", MAINTENANCE_FENCE, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "pending", ENV_POLICY_KEY, SERVER_MODE_MIN_ROLLBACK_VERSION = "1.3.2", ENGINE_HELPER_STAGING_PREFIX = ".helper-", ENGINE_HELPER_ASIDE_NAME = "previous.app", LOG_TAIL_BYTES, MAC_SERVER_MODE_AGENT_LABEL = "ai.olympusplugin.engine-server-mode-off", MAC_SERVER_MODE_HANDOFF_MS = 120000;
 var init_engine_service = __esm(() => {
+  init_engine_heartbeat();
   init_mac_engine_daemon();
   init_mac_engine_daemon();
   init_engine_store_copies();
