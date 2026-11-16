@@ -35347,7 +35347,7 @@ var SOURCE_CODE_EXTENSIONS = new Set([
 ]);
 
 // src/workers/dropbox-files/provider-client.ts
-var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
+var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 2 * 60000;
 // src/workers/connector-store/file-ingestion-matcher.ts
 var POLICY_ADMITTED = Object.freeze({
   excluded: false,
@@ -36609,6 +36609,9 @@ var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
   ODP_MIME_TYPE,
   EPUB_MIME_TYPE
 ]);
+
+// src/workers/file-extraction/extractors/transcription.ts
+var DEFAULT_TRANSCRIBE_TIMEOUT_MS = 5 * 60000;
 // src/workers/telegram-messages/spool-lines.ts
 var CHUNK_BYTES2 = 1 << 20;
 var hints = new Map;
