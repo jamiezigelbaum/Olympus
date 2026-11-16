@@ -67,6 +67,8 @@ export interface AnalystModelUsage {
   promptMs?: number;
   outputTokens?: number;
   outputMs?: number;
+  // Prompt tokens the server reused from its cache instead of reading again.
+  cachedTokens?: number;
 }
 
 export interface AnalystModel {

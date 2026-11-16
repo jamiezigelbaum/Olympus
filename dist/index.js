@@ -6686,6 +6686,16 @@ self.onmessage = ({ data }) => {
   const decoder = new TextDecoder();
   let lastTick = -1, lastTickAt = Date.now(), lastChange = -1, stepSince = Date.now();
   let maxLag = 0;
+  // A loop held for good never reaches its own freeze log. This thread says
+  // so while it lasts: at 10 s, at a minute, then every five minutes.
+  let saidAt = 0, heldSaid = 0;
+  const sayHeld = (now, blockedMs, step) => {
+    if (blockedMs < 10000) { if (heldSaid) console.error(new Date(now).toISOString() + ' [olympus:control-path] ' + role + ' loop turned again after ' + Math.round(heldSaid / 1000) + ' s or more'); heldSaid = 0; saidAt = 0; return; }
+    const due = heldSaid === 0 || (heldSaid < 60000 && blockedMs >= 60000) || now - saidAt >= 300000;
+    if (!due) return;
+    heldSaid = blockedMs; saidAt = now;
+    console.error(new Date(now).toISOString() + ' [olympus:control-path] ' + role + ' loop held for ' + Math.round(blockedMs / 1000) + ' s and still held; step: ' + (step || 'none said'));
+  };
   const write = () => {
     const now = Date.now();
     const tick = Atomics.load(ints, 0);
@@ -6702,6 +6712,7 @@ self.onmessage = ({ data }) => {
       ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5) } } : {}),
       blockedMs: Math.max(0, now - lastTickAt - ${LOOP_TICK_MS}),
       ...(step ? { step, stepSince: new Date(stepSince).toISOString() } : {}) };
+    sayHeld(now, body.blockedMs, step);
     try {
       const partial = path + '.' + pid + '.tmp';
       writeFileSync(partial, JSON.stringify(body) + '\\n', { mode: 0o600 });
@@ -23425,7 +23436,8 @@ class DelphiClient {
       ...options.lane ? { lane: options.lane } : {},
       ...options.profile ? { profile: options.profile } : {},
       model: data.model || model,
-      ...data.usage !== undefined ? { usage: data.usage } : {}
+      ...data.usage !== undefined ? { usage: data.usage } : {},
+      ...data.timings != null ? { timings: data.timings } : {}
     };
   }
   resolveRoute(options) {

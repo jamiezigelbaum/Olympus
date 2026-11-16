@@ -180,6 +180,19 @@ local Dropbox index and a reachable Argus lane:
    meaning, the median answer time, and wins and losses against the first
    arm with an exact sign test. `bun eval/reading-notes-probe.ts --show`
    checks the arms' wording on made-up documents first.
+   Faster arm runs: `--only id1,id2` scores a chosen set of questions (a
+   screen on today's failures plus a few passes; one run per arm is enough
+   to drop a clear loser, since the local Analyst answers at temperature 0).
+   `--answers <file>` keeps every answer by question, arm, repeat, fitted
+   pack and Analyst source, and reuses it on the next run, so the baseline
+   arm is written once and other runs on the same packs only ask for their
+   own arm. The file holds private answer text: keep it beside the eval's
+   private files, never in git. Meaning verdicts (`--judge-answers`) are
+   judged after all answers are written, so an arm's calls on one pack run
+   back to back. With `--answer`, the run also prints `answerCalls`: per
+   arm, the model calls, the prompt tokens read and reused from the server's
+   cache, and the prompt and output milliseconds, when the server reports
+   them.
    To tell a steady Analyst misreading from a coin flip, set
    `OLYMPUS_EVAL_ANALYST_REPEATS=3` (and optionally
    `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS=value-2,secure-summary-1`): the

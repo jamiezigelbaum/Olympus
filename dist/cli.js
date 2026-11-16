@@ -39364,6 +39364,16 @@ self.onmessage = ({ data }) => {
   const decoder = new TextDecoder();
   let lastTick = -1, lastTickAt = Date.now(), lastChange = -1, stepSince = Date.now();
   let maxLag = 0;
+  // A loop held for good never reaches its own freeze log. This thread says
+  // so while it lasts: at 10 s, at a minute, then every five minutes.
+  let saidAt = 0, heldSaid = 0;
+  const sayHeld = (now, blockedMs, step) => {
+    if (blockedMs < 10000) { if (heldSaid) console.error(new Date(now).toISOString() + ' [olympus:control-path] ' + role + ' loop turned again after ' + Math.round(heldSaid / 1000) + ' s or more'); heldSaid = 0; saidAt = 0; return; }
+    const due = heldSaid === 0 || (heldSaid < 60000 && blockedMs >= 60000) || now - saidAt >= 300000;
+    if (!due) return;
+    heldSaid = blockedMs; saidAt = now;
+    console.error(new Date(now).toISOString() + ' [olympus:control-path] ' + role + ' loop held for ' + Math.round(blockedMs / 1000) + ' s and still held; step: ' + (step || 'none said'));
+  };
   const write = () => {
     const now = Date.now();
     const tick = Atomics.load(ints, 0);
@@ -39380,6 +39390,7 @@ self.onmessage = ({ data }) => {
       ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5) } } : {}),
       blockedMs: Math.max(0, now - lastTickAt - ${LOOP_TICK_MS}),
       ...(step ? { step, stepSince: new Date(stepSince).toISOString() } : {}) };
+    sayHeld(now, body.blockedMs, step);
     try {
       const partial = path + '.' + pid + '.tmp';
       writeFileSync(partial, JSON.stringify(body) + '\\n', { mode: 0o600 });
@@ -48120,6 +48131,8 @@ function installMainThreadSqlTrace() {
     if (planRecorder && !planRecorder.explaining && typeof args[0] === "string" && SINGLE_WRITE.test(args[0])) {
       recordPlan({ [SQL]: args[0], [DB]: this });
     }
+    if (siteCounts)
+      countSite();
     if (!sliceTiming && !slowLog)
       return exec.apply(this, args);
     const started = performance.now();
@@ -48157,6 +48170,8 @@ function timeStatement(statement) {
     held[method] = function(...args) {
       if (planRecorder && !planRecorder.explaining)
         recordPlan(held);
+      if (siteCounts)
+        countSite();
       const answer = sourceAnswerTraceActive();
       if (!answer && !sliceTiming && !slowLog)
         return call.apply(this, args);
@@ -48280,6 +48295,22 @@ function sourceSite() {
   const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace"));
   return mine.slice(0, 2).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
 }
+function countSite() {
+  const site = sourceSite() || "(no source frame)";
+  siteCounts.set(site, (siteCounts.get(site) ?? 0) + 1);
+}
+function startMainThreadSqlSiteCount() {
+  installMainThreadSqlTrace();
+  const counts = new Map;
+  siteCounts = counts;
+  return {
+    sites: () => [...counts.entries()].map(([site, statements]) => ({ site, statements })).sort((a, b) => b.statements - a.statements),
+    stop() {
+      if (siteCounts === counts)
+        siteCounts = undefined;
+    }
+  };
+}
 function startSlowMainThreadSqlLog(thresholdMs, log = (line) => console.warn(line)) {
   installMainThreadSqlTrace();
   if (!isMainThread3)
@@ -48330,7 +48361,7 @@ function shortFrame(frame) {
   const [file, line] = where.split(":");
   return `${name} ${file}${line ? `:${line}` : ""}`;
 }
-var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, SINGLE_WRITE, sliceTiming, SQL = "__olympusMainThreadSql", DB = "__olympusMainThreadSqlDb", planRecorder, LOOP_SLOW_SQL_MS = 100, slowLog, SLOW_RECENT = 10;
+var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, SINGLE_WRITE, sliceTiming, SQL = "__olympusMainThreadSql", DB = "__olympusMainThreadSqlDb", planRecorder, siteCounts, LOOP_SLOW_SQL_MS = 100, slowLog, SLOW_RECENT = 10;
 var init_main_thread_sql_trace = __esm(() => {
   init_answer_latency_trace();
   STATEMENT_METHODS = ["all", "get", "run", "values"];
@@ -102831,7 +102862,8 @@ function createDelphiAnalystModel(delphi, options) {
         ...request.signal ? { signal: request.signal } : {}
       };
       const result = await delphi.complete(completeOptions);
-      return { text: result.text, modelId: result.model };
+      const usage = delphiUsage(result.timings, result.usage);
+      return { text: result.text, modelId: result.model, ...usage ? { usage } : {} };
     }
   };
 }
@@ -102847,6 +102879,20 @@ async function assertRouteAnswers(delphi, options, timeoutMs, signal) {
   } finally {
     clearTimeout(timer);
   }
+}
+function delphiUsage(timings, usage) {
+  const count = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+  const t = timings ?? {};
+  const u = usage ?? {};
+  const fields = [
+    ["promptTokens", count(t.prompt_n) ?? count(u.prompt_tokens)],
+    ["promptMs", count(t.prompt_ms)],
+    ["outputTokens", count(t.predicted_n) ?? count(u.completion_tokens)],
+    ["outputMs", count(t.predicted_ms)],
+    ["cachedTokens", count(t.cache_n) ?? count(u.prompt_tokens_details?.cached_tokens)]
+  ];
+  const kept = fields.filter((field) => field[1] !== undefined);
+  return kept.length > 0 ? Object.fromEntries(kept) : undefined;
 }
 function maxTokensForChars2(chars) {
   return Math.max(256, Math.ceil(chars / 3));
@@ -141883,7 +141929,8 @@ class DelphiClient {
       ...options.lane ? { lane: options.lane } : {},
       ...options.profile ? { profile: options.profile } : {},
       model: data.model || model,
-      ...data.usage !== undefined ? { usage: data.usage } : {}
+      ...data.usage !== undefined ? { usage: data.usage } : {},
+      ...data.timings != null ? { timings: data.timings } : {}
     };
   }
   resolveRoute(options) {
@@ -185058,6 +185105,8 @@ function createCrossEncoderReranker(options) {
         const owners = [];
         const windows = request.passages.flatMap((passage, index) => {
           const pairs = options.tokenizer.encodePairWindows(request.query, passage, maxPairTokens, Math.floor(maxPairTokens / WINDOW_OVERLAP_FRACTION));
+          if (!options.everyWindow)
+            pairs.length = Math.min(pairs.length, 1);
           for (let count = 0;count < pairs.length; count += 1)
             owners.push(index);
           return pairs;
@@ -185164,14 +185213,15 @@ function builtInRerankerFromEnv(options = {}) {
     session: () => runtime.createSession(modelPath, { threads }),
     tokenizer: existsSync104(vocabularyPath) ? new WordPieceTokenizer(readFileSync95(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync95(tokenizerPath, "utf8")),
     ...poolSize !== undefined ? { poolSize } : {},
-    ...maxPairTokens !== undefined ? { maxPairTokens } : {}
+    ...maxPairTokens !== undefined ? { maxPairTokens } : {},
+    ...env[SOURCE_RERANKER_WINDOWS_ENV]?.trim().toLowerCase() === "all" ? { everyWindow: true } : {}
   });
 }
 function positiveInteger7(value) {
   const parsed = Number(value?.trim());
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
-var SOURCE_RERANKER_ENV = "OLYMPUS_SOURCE_RERANKER", SOURCE_RERANKER_MODEL_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_MODEL_DIR", SOURCE_RERANKER_POOL_ENV = "OLYMPUS_SOURCE_RERANKER_POOL", SOURCE_RERANKER_THREADS_ENV = "OLYMPUS_SOURCE_RERANKER_THREADS", SOURCE_RERANKER_RUNTIME_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR", SOURCE_RERANKER_MAX_TOKENS_ENV = "OLYMPUS_SOURCE_RERANKER_MAX_TOKENS", MAX_PAIR_TOKENS = 512, BATCH_SIZE = 8, DEFAULT_PAIR_TOKENS = 256, WINDOW_OVERLAP_FRACTION = 8, IDLE_RELEASE_MS, DEFAULT_ON_MIN_MEMORY_BYTES;
+var SOURCE_RERANKER_ENV = "OLYMPUS_SOURCE_RERANKER", SOURCE_RERANKER_MODEL_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_MODEL_DIR", SOURCE_RERANKER_POOL_ENV = "OLYMPUS_SOURCE_RERANKER_POOL", SOURCE_RERANKER_THREADS_ENV = "OLYMPUS_SOURCE_RERANKER_THREADS", SOURCE_RERANKER_RUNTIME_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR", SOURCE_RERANKER_MAX_TOKENS_ENV = "OLYMPUS_SOURCE_RERANKER_MAX_TOKENS", SOURCE_RERANKER_WINDOWS_ENV = "OLYMPUS_SOURCE_RERANKER_WINDOWS", MAX_PAIR_TOKENS = 512, BATCH_SIZE = 8, DEFAULT_PAIR_TOKENS = 256, WINDOW_OVERLAP_FRACTION = 8, IDLE_RELEASE_MS, DEFAULT_ON_MIN_MEMORY_BYTES;
 var init_built_in_reranker = __esm(() => {
   init_off_thread();
   init_evidence_reranker();
@@ -242166,6 +242216,7 @@ class TierSnifferService {
       phaseAt = now;
       this.progress();
       this.passStep = `in the step after "${name}"`;
+      setEngineStep(`judge pass, after "${name}"`);
     };
     await this.settleStoredItems();
     phase("settle");
@@ -242883,6 +242934,7 @@ var init_sniffer_service = __esm(() => {
   init_classification_ledger();
   init_secrets_disposition();
   init_tier_move();
+  init_engine_heartbeat();
   init_tier_auto_move();
   init_built_in_sniffer();
   init_sniffer();
@@ -269586,7 +269638,7 @@ __export(exports_server, {
 });
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile6 } from "node:child_process";
-import { appendFileSync, existsSync as existsSync126, readFileSync as readFileSync115 } from "node:fs";
+import { appendFileSync, existsSync as existsSync126, readFileSync as readFileSync115, writeFileSync as writeFileSync29 } from "node:fs";
 import { dirname as dirname121, join as join154 } from "node:path";
 async function startWorkerWithLaunch(launch) {
   workerLaunch = { ...launch };
@@ -269617,7 +269669,16 @@ async function main() {
   }
   if (engineRole !== "front")
     beginBootProgress(process.env);
-  else {
+  const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
+  if (sqlSitesDir) {
+    const sqlSites = startMainThreadSqlSiteCount();
+    const writeSqlSites = () => {
+      try {
+        writeFileSync29(join154(sqlSitesDir, `${engineRole}.sql-sites.json`), JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() }));
+      } catch {}
+    };
+    setInterval(writeSqlSites, 1e4).unref?.();
+  } else {
     beginFrontProgress(process.env);
     const exitOnError = (error) => {
       failFrontProgress(error);

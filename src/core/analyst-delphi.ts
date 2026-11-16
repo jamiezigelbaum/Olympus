@@ -10,7 +10,7 @@
 import type { ArgusLane, ArgusModelProfile } from './config.ts';
 import { DelphiClient, type CompleteOptions } from './delphi.ts';
 import { OperationError } from './operation-error.ts';
-import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from './analyst.ts';
+import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest, AnalystModelUsage } from './analyst.ts';
 
 export interface DelphiAnalystModelOptions {
   lane?: ArgusLane;
@@ -45,7 +45,8 @@ export function createDelphiAnalystModel(
         ...(request.signal ? { signal: request.signal } : {}),
       };
       const result = await delphi.complete(completeOptions);
-      return { text: result.text, modelId: result.model };
+      const usage = delphiUsage(result.timings, result.usage);
+      return { text: result.text, modelId: result.model, ...(usage ? { usage } : {}) };
     },
   };
 }
@@ -83,6 +84,26 @@ async function assertRouteAnswers(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Counts and milliseconds from the server's reply: llama-server's `timings`
+ * (prompt_n counts the tokens it read, cache_n the ones it reused), else the
+ * OpenAI-style `usage` counts. Never content.
+ */
+export function delphiUsage(timings: unknown, usage: unknown): AnalystModelUsage | undefined {
+  const count = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined);
+  const t = (timings ?? {}) as Record<string, unknown>;
+  const u = (usage ?? {}) as Record<string, unknown>;
+  const fields: Array<[keyof AnalystModelUsage, number | undefined]> = [
+    ['promptTokens', count(t.prompt_n) ?? count(u.prompt_tokens)],
+    ['promptMs', count(t.prompt_ms)],
+    ['outputTokens', count(t.predicted_n) ?? count(u.completion_tokens)],
+    ['outputMs', count(t.predicted_ms)],
+    ['cachedTokens', count(t.cache_n) ?? count((u.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens)],
+  ];
+  const kept = fields.filter((field): field is [keyof AnalystModelUsage, number] => field[1] !== undefined);
+  return kept.length > 0 ? Object.fromEntries(kept) as AnalystModelUsage : undefined;
 }
 
 // Rough char->token budget (~3 chars/token) with a floor so a tight answer

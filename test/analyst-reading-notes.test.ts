@@ -148,3 +148,10 @@ test('batches must place every candidate exactly once; one batch answers the pac
   expect(seen).toHaveLength(2);
   expect(seen[0]!.prompt).toContain('Text of file 5');
 });
+
+test("the Delphi model reports the server's counts and times, cached prompt tokens included", async () => {
+  const { delphiUsage } = await import('../src/core/analyst-delphi.ts');
+  expect(delphiUsage({ prompt_n: 12, prompt_ms: 30.4, predicted_n: 5, predicted_ms: 99.6, cache_n: 4000 }, undefined)).toEqual({ promptTokens: 12, promptMs: 30, outputTokens: 5, outputMs: 100, cachedTokens: 4000 });
+  expect(delphiUsage(undefined, { prompt_tokens: 7, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 2 } })).toEqual({ promptTokens: 7, outputTokens: 3, cachedTokens: 2 });
+  expect(delphiUsage(undefined, undefined)).toBeUndefined();
+});
