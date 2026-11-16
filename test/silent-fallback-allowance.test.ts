@@ -40,7 +40,7 @@ describe('failures never quietly leave the owner with less', () => {
       if (!(path in counts)) problems.push(`${path}: none left. Remove its entry from ${ALLOWANCE_PATH}.`);
     }
     expect(problems).toEqual([]);
-  }, 30_000);
+  });
 
   test('the count finds each form', () => {
     expect(countSilentFallbacks(`

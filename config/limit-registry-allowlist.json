@@ -372,12 +372,6 @@
     "retire_when": "Remove when the bounded input/output clamp PRIVACY_KEY_MAX_CHARS is removed or becomes a registered work stop."
   },
   {
-    "path": "src/workers/classification/sniffer-service.ts",
-    "symbol": "DEFAULT_TIER_SNIFFER_MAX_PASS_MS",
-    "reason": "pacing",
-    "retire_when": "Remove when the resumable pacing/retry boundary DEFAULT_TIER_SNIFFER_MAX_PASS_MS is retired or adopted."
-  },
-  {
     "path": "src/workers/classification/tier-classifier.ts",
     "symbol": "SNIFFER_EXCERPT_MAX_CHARS",
     "reason": "clamp",
