@@ -409,6 +409,8 @@ export async function withOffThreadSnapshot<T>(
   options: { lane?: ReadPoolLane; noWait?: boolean } = {},
 ): Promise<T> {
   const lane = options.lane ?? 'shared';
+  // Before the first await, while the caller's frames are still on the stack.
+  const site = callerSite();
   if (!runtimeHasWorkers()) throw new Error('off-thread reads are unavailable');
   // Tied to the store's lifetime: a release while the snapshot waits for a
   // thread, or between its reservation and its open, cancels it.
@@ -435,7 +437,6 @@ export async function withOffThreadSnapshot<T>(
   // across a whole walk pinned the WAL: no checkpoint could reset it, and
   // tier-ledger-1's WAL stood at 6 GB through a gate run (16 Nov).
   const perRead = lane === 'background';
-  const site = callerSite();
   try {
     await send(reader, { op: 'open', snapshot, path: dbPath, perRead });
     if (!perRead) markRead(dbPath, snapshot, { atMs: clock.now(), lane, site });
@@ -494,9 +495,16 @@ function unmarkRead(dbPath: string, id: number): void {
 // The function that asked for the snapshot (code names only, never data).
 function callerSite(): string {
   const frames = (new Error().stack ?? '').split('\n').map((line) => line.trim()).filter((line) => line.startsWith('at '));
-  const frame = frames.find((line) => !/off-thread-reads|withOffThreadSnapshot|readInBackground|ledgerReadOffThread|readStepsInBackground|<anonymous>|processTicksAndRejections/.test(line));
-  const name = frame?.slice(3).split(' ')[0];
-  return name && /^[\w.$<>]+$/.test(name) ? name : 'unknown';
+  // "at async name (file:line)": the name, with its file's base name, for the
+  // first two frames past the pool's own (minified builds keep file names).
+  const names = frames.filter((line) => !/off-thread-reads|withOffThreadSnapshot|readInBackground|ledgerReadOffThread|readStepsInBackground|processTicksAndRejections/.test(line))
+    .map((line) => {
+      const match = /^at (?:async )?([\w.$<>]+)?\s*\(?(?:.*[\\/])?([\w.-]+\.(?:ts|js)):(\d+)/.exec(line);
+      return match ? `${match[1] ?? '<anonymous>'}@${match[2]}:${match[3]}` : undefined;
+    })
+    .filter((name): name is string => name !== undefined)
+    .slice(0, 2);
+  return names.length > 0 ? names.join('<') : 'unknown';
 }
 
 /** The longest-open read on this store's workers: its age, lane and the function that opened it, or undefined. */

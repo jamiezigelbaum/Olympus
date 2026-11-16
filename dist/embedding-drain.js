@@ -18843,6 +18843,7 @@ function send(reader, message, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS, sqlMs) {
 }
 async function withOffThreadSnapshot(dbPath, work, options = {}) {
   const lane = options.lane ?? "shared";
+  const site = callerSite();
   if (!runtimeHasWorkers())
     throw new Error("off-thread reads are unavailable");
   const generation = releases.get(dbPath) ?? 0;
@@ -18861,7 +18862,6 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
   const snapshot = nextId++;
   let reserveWaitMs = clock2.now() - askedAtMs;
   const perRead = lane === "background";
-  const site = callerSite();
   try {
     await send(reader, { op: "open", snapshot, path: dbPath, perRead });
     if (!perRead)
@@ -18921,9 +18921,11 @@ function unmarkRead(dbPath, id) {
 function callerSite() {
   const frames = (new Error().stack ?? "").split(`
 `).map((line) => line.trim()).filter((line) => line.startsWith("at "));
-  const frame = frames.find((line) => !/off-thread-reads|withOffThreadSnapshot|readInBackground|ledgerReadOffThread|readStepsInBackground|<anonymous>|processTicksAndRejections/.test(line));
-  const name = frame?.slice(3).split(" ")[0];
-  return name && /^[\w.$<>]+$/.test(name) ? name : "unknown";
+  const names = frames.filter((line) => !/off-thread-reads|withOffThreadSnapshot|readInBackground|ledgerReadOffThread|readStepsInBackground|processTicksAndRejections/.test(line)).map((line) => {
+    const match = /^at (?:async )?([\w.$<>]+)?\s*\(?(?:.*[\\/])?([\w.-]+\.(?:ts|js)):(\d+)/.exec(line);
+    return match ? `${match[1] ?? "<anonymous>"}@${match[2]}:${match[3]}` : undefined;
+  }).filter((name) => name !== undefined).slice(0, 2);
+  return names.length > 0 ? names.join("<") : "unknown";
 }
 var snapshotWaiters = [];
 var releases = new Map;
