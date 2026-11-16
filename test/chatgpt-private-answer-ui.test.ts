@@ -682,9 +682,9 @@ describe('collecting the private answer', () => {
     const host = mount({ pollCapMs: 60, fullPollCapMs: 5_000, replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '2' }] });
     host.push(ready());
     expect(host.text()).toContain(W.preparing);
-    await sleep(400); // several silence limits of steady 202s
+    // Far more polls than fit in one 60 ms silence limit: steady 202s kept it waiting.
+    await host.until(() => host.fetched.length > 150, 'many steady polls');
     expect(host.text()).not.toContain(W.slow);
-    expect(host.fetched.length).toBeGreaterThan(3);
     host.replies.splice(0, host.replies.length, 'ready');
     await host.until(() => host.text().includes('31 March'), 'the answer');
     expect(new Set(host.fetched.map((call) => call.body.publicKey)).size).toBe(1);
