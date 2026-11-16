@@ -82071,10 +82071,13 @@ var init_engine_children = __esm(() => {
 import { spawnSync as spawnSync11 } from "node:child_process";
 import { chmodSync as chmodSync17, existsSync as existsSync48, lstatSync as lstatSync30, mkdirSync as mkdirSync35, readdirSync as readdirSync10, readFileSync as readFileSync43, readlinkSync, realpathSync as realpathSync13, renameSync as renameSync8, rmSync as rmSync17, statfsSync as statfsSync2, statSync as statSync23, writeFileSync as writeFileSync11 } from "node:fs";
 import { basename as basename11, dirname as dirname53, join as join59, relative as relative9, resolve as resolve16, sep as sep12 } from "node:path";
+function samePlace(a, b) {
+  return a === b || join59(realOrSelf(dirname53(a)), basename11(a)) === join59(realOrSelf(dirname53(b)), basename11(b));
+}
 function keptWithLive(folder, env) {
-  if (folder === olympusDataRoot(env) || realOrSelf(folder) === realOrSelf(olympusDataRoot(env)))
+  if (samePlace(folder, olympusDataRoot(env)))
     return ROOT_KEPT;
-  if (realOrSelf(folder) === realOrSelf(legacyCaptureDataRoot(env)))
+  if (samePlace(folder, legacyCaptureDataRoot(env)))
     return CAPTURE_KEPT;
   return new Set;
 }
@@ -82084,7 +82087,7 @@ function removeTree(path) {
     return;
   } catch (error) {
     const code = error.code;
-    if (code !== "EACCES" && code !== "EPERM")
+    if (code !== "EACCES" && code !== "EPERM" && code !== "ENOTEMPTY")
       throw error;
   }
   const writable = (directory) => {

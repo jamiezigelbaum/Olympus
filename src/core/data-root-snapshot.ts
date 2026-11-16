@@ -52,7 +52,8 @@ function keptWithLive(folder: string, env: LayoutEnv): Set<string> {
 function removeTree(path: string): void {
   try { rmSync(path, { recursive: true, force: true }); return; } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== 'EACCES' && code !== 'EPERM') throw error;
+    // A Mac reports a read-only child as ENOTEMPTY on the parent (put-back-mac CI, 16 Nov 2026).
+    if (code !== 'EACCES' && code !== 'EPERM' && code !== 'ENOTEMPTY') throw error;
   }
   const writable = (directory: string): void => {
     try { chmodSync(directory, 0o700); } catch { return; }
