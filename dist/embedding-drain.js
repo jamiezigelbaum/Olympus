@@ -30871,7 +30871,7 @@ ${parentKey(ref)}`, { ref, origin });
   }
   embeddingInputHashesChecked = false;
   embeddingInputHashWalk;
-  async repairEmbeddingInputHashes(pageKeys = 20000, pages = 10) {
+  async repairEmbeddingInputHashes(pageKeys = 2000, pages = 50) {
     if (this.readOnly || this.embeddingInputHashesChecked)
       return 0;
     const pool = offThreadReadsSupported(this.dbPath);

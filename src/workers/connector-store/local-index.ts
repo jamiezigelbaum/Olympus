@@ -16305,9 +16305,11 @@ export class LocalConnectorStore {
    * the chunks that were there when it began: `pageKeys` chunk keys a page,
    * each page a seek and its own read on the read thread, up to `pages`
    * pages a call, set by key here. Once the walk passes the last key, this
-   * process stops looking. Returns the chunks set.
+   * process stops looking. Returns the chunks set. A page of 20,000 keys
+   * held a background read for 10 s on a cold store and its UPDATE held the
+   * loop for as many rows (loop-stall gate, 16 Nov), so a page is 2,000.
    */
-  async repairEmbeddingInputHashes(pageKeys = 20_000, pages = 10): Promise<number> {
+  async repairEmbeddingInputHashes(pageKeys = 2_000, pages = 50): Promise<number> {
     if (this.readOnly || this.embeddingInputHashesChecked) return 0;
     const pool = offThreadReadsSupported(this.dbPath);
     const read = async (sql: string, params: number[]): Promise<unknown> => (pool
