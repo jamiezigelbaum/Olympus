@@ -903,6 +903,31 @@ describe('the status snapshot', () => {
     expect(readEngineStatusSnapshot(join(root, 'missing.json'))).toBeUndefined();
   });
 
+  test('a snapshot that cannot be written is said at once, each minute while it lasts, and when it is written again', async () => {
+    const root = tempRoot();
+    const clock = createTestClock();
+    const lines: string[] = [];
+    let broken = true;
+    const publisher = startEngineStatusPublisher({
+      path: join(root, 'status.json'), instanceId: 'background-1', now: clock.date, intervalMs: 3_000,
+      setInterval: clock.setInterval, clearInterval: (timer) => clock.clearInterval(timer as never),
+      log: (line) => lines.push(line),
+      collect: () => {
+        if (broken) throw new TypeError('synthetic collect failure');
+        return { scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: {} };
+      },
+    });
+    expect(lines).toEqual(['[engine-split] status snapshot not written (1 attempt(s) in a row): TypeError: synthetic collect failure']);
+    await clock.advance(57_000);
+    expect(lines).toHaveLength(1);
+    await clock.advance(3_000);
+    expect(lines[1]).toBe('[engine-split] status snapshot not written (21 attempt(s) in a row): TypeError: synthetic collect failure');
+    broken = false;
+    await clock.advance(3_000);
+    expect(lines[2]).toBe('[engine-split] status snapshot written again after 21 failed attempt(s)');
+    publisher.stop();
+  });
+
   test('the front scheduler answers from the snapshot and turns wakes into commands', async () => {
     const sent: EngineCommand[] = [];
     const status = { kind: 'source_scheduler_status', enabled: true, running: true, generated_at: 'now', sources: [{ source_id: 'gmail.email', corpus_id: 'gmail', tasks: [{ running: true }] }], policy: {} };

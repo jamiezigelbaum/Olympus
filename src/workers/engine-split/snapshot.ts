@@ -103,7 +103,11 @@ export interface EngineStatusPublisherOptions {
 /** The background's publisher: one snapshot at once, then every interval. A failed collect or write keeps the last file. */
 export function startEngineStatusPublisher(options: EngineStatusPublisherOptions): { publish(): void; stop(): void } {
   const now = options.now ?? (() => new Date());
-  let warned = false;
+  // A snapshot that cannot be written is said at once, then once a minute
+  // with the count for as long as it lasts, and once when it is written again:
+  // the front shows a stale status meanwhile, and the log must say why.
+  let failures = 0;
+  let saidAtMs = 0;
   const publish = () => {
     try {
       writeEngineStatusSnapshot(options.path, {
@@ -112,10 +116,20 @@ export function startEngineStatusPublisher(options: EngineStatusPublisherOptions
         written_at: now().toISOString(),
         ...options.collect(),
       });
-      warned = false;
+      if (failures > 0) options.log?.(`[engine-split] status snapshot written again after ${failures} failed attempt(s)`);
+      failures = 0;
     } catch (error) {
-      if (!warned) options.log?.(`[engine-split] status snapshot not written: ${error instanceof Error ? error.message : 'unknown error'}`);
-      warned = true;
+      failures += 1;
+      const atMs = now().getTime();
+      if (failures === 1 || atMs - saidAtMs >= 60_000) {
+        saidAtMs = atMs;
+        // The error's class and code; the message only for the runtime's own
+        // type and range errors, which describe the code and not the data. Any
+        // other message can carry a path or a name.
+        const code = (error as { code?: unknown } | null)?.code;
+        const runtime = error instanceof TypeError || error instanceof RangeError;
+        options.log?.(`[engine-split] status snapshot not written (${failures} attempt(s) in a row): ${error instanceof Error ? error.name : 'unknown error'}${typeof code === 'string' ? ` ${code}` : ''}${runtime ? `: ${error.message.slice(0, 120)}` : ''}`);
+      }
     }
   };
   publish();
