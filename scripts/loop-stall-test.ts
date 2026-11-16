@@ -150,9 +150,12 @@ async function build(dir: string, items: number, chunks: number): Promise<void> 
     for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(next() * (i + 1)); [order[i], order[j]] = [order[j]!, order[i]!]; }
     const base = baseDecision();
     let unreadable = 0;
-    for (let from = 0; from < items; from += 250) {
+    // A synthetic fixture built once and kept: no fsync per batch, and larger batches. On Sparta's busy disk the build made
+    // 230k of 600k items in the 60 minutes it had (cloud-job 43786974268), most of it waiting on commits.
+    for (const handle of [ledger, ...stores]) db(handle).exec('PRAGMA synchronous = OFF');
+    for (let from = 0; from < items; from += 2_000) {
       db(ledger).transaction(() => db(big).transaction(() => db(secure).transaction(() => {
-        for (const id of order.slice(from, from + 250)) {
+        for (const id of order.slice(from, from + 2_000)) {
           const parts = Array.from({ length: chunks }, (_, chunkIndex) => {
             const boundedText = text(id, chunkIndex);
             const contentHash = hash(boundedText);
