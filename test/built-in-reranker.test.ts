@@ -50,6 +50,52 @@ const environment = (path: string) => ({
 });
 const request = () => ({ query: 'invoice', passages: ['hello', ''], signal: new AbortController().signal });
 
+describe('long passages', () => {
+  const vocabulary = '[PAD]\n[UNK]\n[CLS]\n[SEP]\ninvoice\nhello\nfiller';
+  // Scores a pair by whether its passage window holds "invoice" (id 4) after the query's [SEP].
+  const session = (batches: EmbeddingBatch[]): EmbeddingSession => ({ run: async (batch) => {
+    batches.push(batch);
+    const data = new Float32Array(batch.batchSize);
+    for (let row = 0; row < batch.batchSize; row += 1) {
+      const ids = [...batch.inputIds.slice(row * batch.sequenceLength, (row + 1) * batch.sequenceLength)];
+      data[row] = ids.slice(ids.indexOf(3n) + 1).includes(4n) ? 9 : -9;
+    }
+    return { data, dims: [batch.batchSize, 1] };
+  } });
+
+  test('a passage is scored by its best window, so the deciding words count wherever they sit', async () => {
+    const batches: EmbeddingBatch[] = [];
+    const ticks: number[] = [];
+    const reranker = createCrossEncoderReranker({
+      id: 'windows', session: async () => session(batches), tokenizer: new WordPieceTokenizer(vocabulary), maxPairTokens: 32, batchSize: 4,
+    });
+    const filler = Array(100).fill('filler').join(' ');
+    const scores = await reranker.score({
+      query: 'hello',
+      passages: [`${filler} invoice`, filler, 'invoice', `${filler} invoice ${filler}`, ''],
+      signal: new AbortController().signal,
+      onProgress: () => ticks.push(batches.length),
+    });
+    // The first 32-token window of passages 0 and 3 holds no "invoice".
+    expect(scores).toEqual([9, -9, 9, 9, -9]);
+    // 28 passage tokens per window, 4 shared: 101 tokens is 5 windows, 100 is 4, 201 is 9.
+    const pairs = batches.reduce((sum, batch) => sum + batch.batchSize, 0);
+    expect(pairs).toBe(5 + 4 + 1 + 9 + 1);
+    expect(batches.every((batch) => batch.sequenceLength <= 32)).toBe(true);
+    // Progress after every batch: the caller's stall clock restarts on each.
+    expect(ticks).toEqual(batches.map((_, index) => index + 1));
+  });
+
+  test('a passage that fits the window is one pair, exactly as before', async () => {
+    const batches: EmbeddingBatch[] = [];
+    const tokenizer = new WordPieceTokenizer(vocabulary);
+    const reranker = createCrossEncoderReranker({ id: 'short', session: async () => session(batches), tokenizer, maxPairTokens: 32 });
+    await reranker.score({ query: 'hello', passages: ['invoice filler'], signal: new AbortController().signal });
+    expect(batches).toHaveLength(1);
+    expect([...batches[0]!.inputIds].map(Number)).toEqual(tokenizer.encodePair('hello', 'invoice filler', 32).ids);
+  });
+});
+
 describe('built-in reranker model loading', () => {
   test.each([['40', 40], ['8', 32], ['9999', 512]] as const)('OLYMPUS_SOURCE_RERANKER_MAX_TOKENS=%s bounds each pair to %d tokens', async (value, limit) => {
     const path = modelDirectory('wordpiece');

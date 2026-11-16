@@ -43,6 +43,8 @@ export interface EvalQuestion {
   // represented in any answer template.
   expectedAnswerContains?: readonly string[]; // substrings a correct answer must contain
   expectedEvidence?: readonly EvalExpectedEvidence[];
+  /** Files a multi-file panel answer must read; independent of passage expectations. */
+  neededFiles?: readonly { corpusId: string; providerItemId: string }[];
   mustReportGap?: boolean; // for gap_honesty / coverage_negative
   /** Per-question product latency ceiling; tighter than the runner default. */
   maxDurationMs?: number;
@@ -67,6 +69,7 @@ export function validatePassageDataset(value: unknown): asserts value is EvalDat
   for (const q of (value as EvalDataset).questions) {
     if (!q || typeof q.id !== 'string' || !q.id || ids.has(q.id) || typeof q.question !== 'string' || !q.question.trim() || !shapes.has(q.shape)) return fail();
     ids.add(q.id);
+    if (q.neededFiles !== undefined && (!Array.isArray(q.neededFiles) || q.neededFiles.some(file => !file || typeof file.corpusId !== 'string' || !file.corpusId || typeof file.providerItemId !== 'string' || !file.providerItemId))) return fail();
     if (q.split !== undefined && q.split !== 'open' && q.split !== 'sealed') return fail();
     if (q.shape !== 'coverage_negative' && (!Array.isArray(q.expectedEvidence) || !q.expectedEvidence.length)) return fail();
     if (q.expectedEvidence !== undefined && !Array.isArray(q.expectedEvidence)) return fail();

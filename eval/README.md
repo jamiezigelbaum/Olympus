@@ -168,6 +168,18 @@ local Dropbox index and a reachable Argus lane:
    For ordering runs that must not depend on machine load, lift the per-store
    lane deadline with `OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS=120000` (0 turns
    it off) and report deadline losses at the product cap separately.
+   To run the whole set with one of the Analyst's reading-notes arms (#1590),
+   set `OLYMPUS_EVAL_ANALYST_READING_NOTES=first` or `pass` (default `off`):
+   `first` asks for the facts before the answer in the same reply, `pass`
+   reads them out in a call of its own. The run prints the arm on its
+   `eval reading notes:` line. The passage eval compares arms on identical
+   packs: `bun run eval:passages --data-root <copy> --answer-arms
+   off,first,pass --answer-repeats 3 --judge-answers` answers each fitted
+   pack with every arm, and each summary (overall, by shape, by family)
+   gains `arms`: per arm, the questions right in most runs, strict and by
+   meaning, the median answer time, and wins and losses against the first
+   arm with an exact sign test. `bun eval/reading-notes-probe.ts --show`
+   checks the arms' wording on made-up documents first.
    To tell a steady Analyst misreading from a coin flip, set
    `OLYMPUS_EVAL_ANALYST_REPEATS=3` (and optionally
    `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS=value-2,secure-summary-1`): the
@@ -682,3 +694,55 @@ Run length is about the sum of sections times seconds per section, plus one
 baseline Ask per row. Run a couple of rows first (`--only`) to measure seconds
 per section. `test/eval-deep-read.test.ts` runs both scripts end to end on
 fixture stores with a fake model.
+
+## Private panel answer eval
+
+`run-panel.ts` runs the ChatGPT private panel's own answer model, using
+`createLocalPrivateRoute` for the explicitly selected local OpenAI-compatible
+model. It requires an offline `--data-root` copy and a passage dataset; it never
+opens the live data root. The usual `--forbid-root`, `--allow-no-fd-check` and
+`--allow-unreadable-stores` isolation flags apply. On macOS the explicit
+`--allow-no-fd-check` waiver is needed because `/proc/self/fd` is unavailable.
+
+```sh
+bun eval/run-panel.ts --data-root <offline-copy> \
+  --model-base-url http://127.0.0.1:8080/v1 --model <served-model-id> \
+  --limits today <passage-dataset.json>
+```
+
+`--limits today` (default) uses the panel's current limits. `--limits window`
+uses `panelLimitsForWindow` with the route's served window, and fails if that
+window cannot be determined. The window and effective item/prompt budgets are
+numbers in the receipt. No answer deadline is added; synthesis waits while the
+model works. Judging uses the existing local `answerMeaningJudge`, on the same
+endpoint/model, with the same expected quote text as `run-passages.ts
+--judge-answers`. The existing judge's request deadline still applies; an
+unavailable/unreadable judgement increments `judgeUnknown`.
+
+The runner calls the engine's `searchPrivateEvidence` directly, with the same
+request and defaults as `chatgptPrivateMatchProbe`, and reuses the engine lane
+factory, eligibility checks and document rereads. This offline mode uses the
+keyword lane without starting any installed embedding service (`retrievalHybrid:
+0`); panel selection retains retrieval order when relevance embeddings are
+unavailable. It therefore measures that explicit configuration, rather than a
+live install's embedding quality.
+
+Each question may optionally add `neededFiles: [{corpusId, providerItemId}]`.
+Existing datasets remain valid. Duplicate file identities count once. Per-row
+`foundDoc` and `foundParagraph` are 0/1 for any expected identity (including
+alternates) in the search candidates and its expected quote in that candidate's
+passages. `answeredCorrectly` and `answeredPartially` are the meaning judge's
+0/1 verdicts, reported separately from retrieval. `neededFilesRead` counts the
+needed identities retained by the panel and prompt fitting, not merely found
+or cited. `filesRead` counts all retained items. Expected quotes are joined for
+judging; `expectedAnswerContains` is the fallback when there are no quotes.
+
+Stdout is one JSON receipt containing only dataset ids and numeric counts and
+budgets, with aggregate counts and open-split rows. `--split sealed` runs only
+sealed questions and omits rows. No item, question, answer, endpoint, model name
+or local path is printed. Questions with no readable evidence increment `noEvidence` and `judgeUnknown`
+and do not stop later questions. Route diagnostics print `{"routeErrors":1}`; other failures print only
+`{"errors":1}` and exit nonzero.
+The synthetic CLI acceptance run is `bun run test:focus -- test/eval-panel.test.ts`; its
+loopback stub implements `/models`, `/props` and `/chat/completions` and uses no
+private data or installed services.
