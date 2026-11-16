@@ -74,6 +74,19 @@ export const DEFAULT_RERANK_POOL_SIZE = 30;
 // (13 Nov 2026) this recovered 3 documents and 2 paragraphs the even turns
 // left out of a pool of the same size, losing no document.
 export const RERANK_POOL_STORE_DEPTH = 10;
+// Seats added to a reranked pool for the best vector rows across stores, by
+// margin over each store's relevance bar, below the bar included: a store's
+// nearest item that its keyword matches crowd out of its own list can still be
+// the answer, and the reranker decides. 0 keeps the pool as the strength draw
+// leaves it. OLYMPUS_SEMANTIC_POOL_SEATS sets it for eval arms.
+export const DEFAULT_RERANK_POOL_SEMANTIC_SEATS = 0;
+export const SEMANTIC_POOL_SEATS_ENV = 'OLYMPUS_SEMANTIC_POOL_SEATS';
+export function rerankPoolSemanticSeats(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env[SEMANTIC_POOL_SEATS_ENV]?.trim();
+  if (!raw) return DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
+  const seats = Number(raw);
+  return Number.isInteger(seats) && seats >= 0 && seats <= 48 ? seats : DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
+}
 
 // Every rerank outcome since this process started, for health: a timeout
 // falls back to the fused cut, and that must be countable, not silent.

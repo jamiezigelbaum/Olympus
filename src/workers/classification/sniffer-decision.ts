@@ -136,7 +136,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
         signal: AbortSignal.timeout(Math.min(10_000, idleMs)),
       }).then(() => { lastAlive = Date.now(); onAlive?.(); }, () => undefined)
         .finally(() => { probing = false; });
-    }, Math.min(LIVENESS_PROBE_MS, Math.max(1_000, Math.floor(idleMs / 4))));
+    }, Math.min(LIVENESS_PROBE_MS, Math.max(50, Math.floor(idleMs / 4))));
     try {
       const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}${path}`, {
         method: 'POST',

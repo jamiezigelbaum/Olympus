@@ -5,7 +5,7 @@ import {
   type SovereigntyAnalystRoutePlan,
   type SovereigntyAnalystRouteStep,
 } from '../../source-index/analyst-answer.ts';
-import { createAnalyst } from '../../../core/analyst.ts';
+import { createAnalyst, type AnalystModel } from '../../../core/analyst.ts';
 import {
   withBuiltInFallback,
   type BuiltInAnalystModel,
@@ -171,10 +171,10 @@ export function builtInBacksPrivateAnalyst(
   return members.some((member) => member.id === id && member.profile.provider === 'local-openai-compatible');
 }
 
-/** Whether this computer's configured local answer model answers /models within a few seconds. */
-export async function probeLocalAnalystService(olympusConfig: ReturnType<typeof loadConfig>): Promise<boolean> {
+/** Whether this computer's configured local answer model (or the client given) answers /models within a few seconds. */
+export async function probeLocalAnalystService(olympusConfig: ReturnType<typeof loadConfig>, client = new DelphiClient(olympusConfig)): Promise<boolean> {
   try {
-    await new DelphiClient(olympusConfig).listModelsForProfile('source_answer', AbortSignal.timeout(3_000));
+    await client.listModelsForProfile('source_answer', AbortSignal.timeout(3_000));
     return true;
   } catch {
     return false;
@@ -369,6 +369,24 @@ export function createAnalystForSovereigntyProfile(input: {
   const { profile } = input;
   const profileId = input.profileId ?? profile.model ?? profile.provider;
   if (profile.provider === 'local-openai-compatible') {
+    const model = createLocalSovereigntyAnalystModel(input);
+    return model ? createAnalyst(model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }) : undefined;
+  }
+  return createRemoteAnalystForSovereigntyProfile(input, profileId);
+}
+
+/** A local (OpenAI-compatible) sovereignty profile's model, tracked as local model activity; undefined when its secret does not resolve. */
+export function createLocalSovereigntyAnalystModel(input: {
+  profile: SovereigntyModelProfile;
+  profileId?: string;
+  localModelActivity?: LocalModelActivity;
+  olympusConfig: ReturnType<typeof loadConfig>;
+  env: Record<string, string | undefined>;
+  bootSecretResolver?: WorkerBootSecretResolver;
+}): AnalystModel | undefined {
+  const { profile } = input;
+  const profileId = input.profileId ?? profile.model ?? profile.provider;
+  {
     if (!profile.baseUrl?.trim()) {
       throw new Error('Local sovereignty analyst profiles require baseUrl.');
     }
@@ -384,18 +402,29 @@ export function createAnalystForSovereigntyProfile(input: {
     const config = structuredClone(input.olympusConfig);
     config.argus.modelProfiles.source_answer = {
       ...config.argus.modelProfiles.source_answer,
-      baseUrl: profile.baseUrl,
-      model: profile.model,
+      baseUrl: profile.baseUrl as string,
+      model: profile.model as string,
       ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
       purpose: 'text_reasoning',
     };
     const model = createDelphiAnalystModel(new DelphiClient(config, undefined, {
       resolveSecretRef: () => apiKey,
     }), { profile: 'source_answer', preflightTimeoutMs: 0 });
-    return createAnalyst(input.localModelActivity
-      ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model,
-    { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
+    return input.localModelActivity
+      ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model;
   }
+}
+
+function createRemoteAnalystForSovereigntyProfile(input: {
+  profile: SovereigntyModelProfile;
+  profileId?: string;
+  olympusConfig: ReturnType<typeof loadConfig>;
+  env: Record<string, string | undefined>;
+  veniceAnalystTimeoutMs: number | undefined;
+  veniceReasoningHeadroomTokens: number | undefined;
+  bootSecretResolver?: WorkerBootSecretResolver;
+}, profileId: string): Analyst | undefined {
+  const { profile } = input;
   if (profile.provider === 'openclaw-infer') {
     return createAnalyst(createOpenClawInferAnalystModel({
       model: profile.model,
@@ -488,4 +517,93 @@ export function analystRouteTrustDomain(pack: { candidates: readonly SecureSensi
     return 'public_safe';
   }
   return 'internal';
+}
+
+/** The panel's view of the owner's Private route: its model, served id and window. */
+export interface LocalPrivateRoute {
+  model: AnalystModel;
+  modelId: string;
+  windowTokens: number;
+}
+
+const PRIVATE_ROUTE_REACHABLE_TTL_MS = 30_000;
+
+/**
+ * The one chooser for the private panels' model (owner ruling, 2026-11-16:
+ * the biggest private model the owner has, never the built-in one when there
+ * is something better). The first member of the secure_local pool when it is
+ * a local model: the same model Ask's Private answers use. When it is set up
+ * but not answering, `unavailable` (the answer says so; no silent drop to the
+ * built-in model), unless the built-in model is what stands in for that
+ * member (`builtInStandsIn`: a computer whose only local model is the
+ * built-in one) and the member has not answered since this process started. Undefined when the first member is not local: the panel
+ * never takes a cloud route of its own. Reachability is asked at most every
+ * 30 s.
+ */
+export function createLocalPrivateRoute(input: {
+  firstMember: () => SovereigntyResolvedProfile | undefined;
+  model: (member: SovereigntyResolvedProfile) => { model: AnalystModel; modelId: string; baseUrl?: string } | undefined;
+  reachable: (member: SovereigntyResolvedProfile) => Promise<boolean>;
+  window: (modelId: string, baseUrl: string | undefined) => Promise<{ windowTokens: number } | undefined>;
+  /** Whether the built-in model is this member's stand-in (the owner set up no other local model). */
+  builtInStandsIn?: (member: SovereigntyResolvedProfile) => boolean;
+  now?: () => number;
+  /** Where a failed step is said (default: stderr). Ids and reasons only. */
+  log?: (line: string) => void;
+}): () => Promise<LocalPrivateRoute | { unavailable: true; modelId: string } | undefined> {
+  const now = input.now ?? Date.now;
+  const log = input.log ?? ((line: string) => { console.warn(line); });
+  const models = new Map<string, { model: AnalystModel; modelId: string; baseUrl?: string } | undefined>();
+  let checked: { id: string; atMs: number; up: boolean } | undefined;
+  // A member that has answered is the owner's real model: once seen up, the
+  // built-in model never stands in for it, however long it is down.
+  const seenUp = new Set<string>();
+  return async () => {
+    let member: SovereigntyResolvedProfile | undefined;
+    try { member = input.firstMember(); } catch (error) {
+      // The Private pool cannot be read: fail closed, never the built-in model.
+      log(`[private-model] pool unreadable reason=${error instanceof Error ? error.name : 'unknown'}`);
+      return { unavailable: true, modelId: 'the Private answer model' };
+    }
+    if (!member || member.profile.provider !== 'local-openai-compatible') return undefined;
+    if (!models.has(member.id)) {
+      try { models.set(member.id, input.model(member)); } catch { models.set(member.id, undefined); }
+    }
+    const entry = models.get(member.id);
+    if (!entry) return undefined;
+    if (!checked || checked.id !== member.id || now() - checked.atMs >= PRIVATE_ROUTE_REACHABLE_TTL_MS) {
+      let up = false;
+      try { up = await input.reachable(member); } catch { up = false; }
+      checked = { id: member.id, atMs: now(), up };
+      if (up) seenUp.add(member.id);
+    }
+    if (!checked.up) {
+      let standsIn = false;
+      try { standsIn = !seenUp.has(member.id) && input.builtInStandsIn?.(member) === true; } catch { standsIn = false; }
+      return standsIn ? undefined : { unavailable: true, modelId: entry.modelId };
+    }
+    const window = await input.window(entry.modelId, entry.baseUrl).catch((error: unknown) => {
+      log(`[private-model] window unknown model=${entry.modelId} reason=${error instanceof Error ? error.name : 'unknown'}; reading within the default budget`);
+      return undefined;
+    });
+    // An unknown window reads within the default local budget.
+    return { model: entry.model, modelId: entry.modelId, windowTokens: window?.windowTokens ?? 0 };
+  };
+}
+
+/** Whether a local sovereignty profile's server lists its models within a few seconds. */
+export async function probeLocalSovereigntyProfile(
+  olympusConfig: ReturnType<typeof loadConfig>,
+  profile: SovereigntyModelProfile,
+  apiKey?: string,
+): Promise<boolean> {
+  const config = structuredClone(olympusConfig);
+  config.argus.modelProfiles.source_answer = {
+    ...config.argus.modelProfiles.source_answer,
+    baseUrl: profile.baseUrl as string,
+    model: profile.model as string,
+    ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
+    purpose: 'text_reasoning',
+  };
+  return probeLocalAnalystService(config, new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }));
 }

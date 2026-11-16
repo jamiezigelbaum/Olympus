@@ -36,7 +36,7 @@ function slowServer() {
     provider: 'local-openai-compatible', trust: 'local', model: 'fixture-model', baseUrl: `http://127.0.0.1:${server.port}${prefix}/v1`, snifferMode: 'decision',
   } };
   const full: AnalystModel = { async complete() { throw new Error('not used'); } };
-  return { model: createDecisionSnifferModel(lane, full, { timeoutMs: 1_200 }), healthDown: () => { healthUp = false; }, release: () => release() };
+  return { model: createDecisionSnifferModel(lane, full, { timeoutMs: 400 }), healthDown: () => { healthUp = false; }, release: () => release() };
 }
 
 const request = (onAlive?: () => void): SnifferModelRequest => ({
@@ -48,18 +48,18 @@ test('a judge call that takes longer than the idle bound finishes while the mode
   const server = slowServer();
   let alive = 0;
   const call = server.model.complete(request(() => { alive += 1; }));
-  // Well past the 1.2 s idle bound, the server still answers its health probe.
-  await waitFor(() => alive >= 4, { description: 'four liveness answers during the call' });
+  // Well past the 0.4 s idle bound, the server still answers its health probe.
+  await waitFor(() => alive >= 2, { description: 'two liveness answers during the call' });
   server.release();
   const completion = await call as { decisionVerdict?: { tier: string } };
   expect(completion.decisionVerdict?.tier).toBe('personal');
   expect(alive).toBeGreaterThan(0);
-}, 15_000);
+});
 
 test('a judge call is given up once the model server stops answering for the idle bound', async () => {
   const server = slowServer();
   server.healthDown();
   const started = Date.now();
   await expect(server.model.complete(request())).rejects.toBeDefined();
-  expect(Date.now() - started).toBeLessThan(5_000);
-}, 15_000);
+  expect(Date.now() - started).toBeLessThan(3_000);
+});

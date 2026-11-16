@@ -21,12 +21,12 @@ test('loop connections turn the automatic checkpoint off only while the worker c
   expect(loopWalAutocheckpointPragma()).toContain('wal_autocheckpoint = 0');
 });
 
-test('a large WAL is checkpointed and cut back by the worker, with a status line, while the writer never checkpoints', async () => {
+test('a large WAL is checkpointed by the worker without the writer lock, and the writer\'s next commit cuts it back', async () => {
   const root = mkdtempSync(join(tmpdir(), 'olympus-checkpointer-'));
   roots.push(root);
   const path = join(root, 'store.sqlite');
   const writer = new Database(path);
-  writer.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE t (v BLOB)');
+  writer.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; PRAGMA journal_size_limit = 67108864; CREATE TABLE t (v BLOB)');
   const insert = writer.query('INSERT INTO t VALUES (randomblob(4096))');
   writer.transaction(() => { for (let n = 0; n < 20_000; n += 1) insert.run(); })();
   const before = statSync(`${path}-wal`).size;
@@ -35,9 +35,12 @@ test('a large WAL is checkpointed and cut back by the worker, with a status line
   const checkpointer = startSqliteCheckpointer({ log: (line) => lines.push(line) })!;
   expect(checkpointer).toBeDefined();
   checkpointer.tick([{ label: 'store-1', dbPath: path }]);
-  await waitFor(() => statSync(`${path}-wal`).size < before, { description: 'the WAL was cut back' });
   await waitFor(() => lines.length > 0, { description: 'the checkpoint reported' });
-  expect(lines.some((line) => /^\[olympus\] sqlite checkpoint: store-1 wal_bytes=\d+ ms=\d+ busy=0 /.test(line))).toBe(true);
+  expect(lines.some((line) => /^\[olympus\] sqlite checkpoint: store-1 wal_bytes=\d+ ms=\d+ busy=0 frames=(\d+) checkpointed=\1$/.test(line))).toBe(true);
+  // PASSIVE never takes the writer lock: the writer commits at once, with no busy wait.
+  writer.exec('PRAGMA busy_timeout = 0');
+  insert.run();
+  expect(statSync(`${path}-wal`).size).toBeLessThan(before);
   checkpointer.stop();
   writer.close();
 }, 60_000);
