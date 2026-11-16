@@ -35519,6 +35519,7 @@ class ControlPathHeadroom {
   log;
   freezeLogMs;
   freezeSubject;
+  roomGate;
   constructor(options = {}) {
     this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
     this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
@@ -35551,6 +35552,16 @@ class ControlPathHeadroom {
     this.ensureHeartbeat();
     if (this.pendingTurn)
       return this.pendingTurn;
+    const room = this.roomGate?.();
+    if (room) {
+      this.turns += 1;
+      const waiting = room.then(() => this.turn(0)).then(() => {
+        this.pendingTurn = undefined;
+        this.lastTurnAt = this.now();
+      });
+      this.pendingTurn = waiting;
+      return waiting;
+    }
     const now = this.now();
     if (now - this.lastTurnAt < this.sliceMs)
       return;
@@ -35564,6 +35575,9 @@ class ControlPathHeadroom {
     });
     this.pendingTurn = pending;
     return pending;
+  }
+  setRoomGate(gate) {
+    this.roomGate = gate;
   }
   snapshot() {
     return {
@@ -240020,114 +240034,354 @@ var init_sqlite_wal_sampler = __esm(() => {
 });
 
 // src/workers/engine/sqlite-checkpointer.ts
-import { statSync as statSync52 } from "node:fs";
 function startSqliteCheckpointer(options = {}) {
   if (typeof Worker === "undefined")
     return;
-  let worker;
-  try {
-    worker = new Worker(URL.createObjectURL(new Blob([WORKER_SOURCE2], { type: "text/javascript" })));
-  } catch {
-    return;
-  }
-  worker.unref?.();
   const log = options.log ?? ((line) => console.warn(line));
   const atBytes = options.atBytes ?? SQLITE_CHECKPOINT_AT_BYTES;
+  const roomBytes = options.roomBytes ?? SQLITE_WAL_ROOM_BYTES;
+  const hotMs = options.hotMs ?? SQLITE_CHECKPOINT_HOT_MS;
+  const idleMs = options.idleMs ?? SQLITE_CHECKPOINT_IDLE_MS;
+  const readerWaitMs = options.readerWaitMs ?? SQLITE_WAL_ROOM_READER_WAIT_MS;
+  const now = () => performance.now();
+  const states = new Map;
   const queue = [];
-  const queued = new Set;
-  const lastCheckpointed = new Map;
-  let running = false;
+  const pool = [];
   let nextId = 1;
   let stopped = false;
-  const pending = new Map;
-  worker.onmessage = ({ data }) => {
-    const reply = data;
-    const done = pending.get(reply.id);
-    pending.delete(reply.id);
-    done?.(data);
+  let needRoom;
+  let gate;
+  const stats = { waits: 0, totalMs: 0, worstMs: 0, rewinds: 0, rewindsMissed: 0 };
+  let summarized = { ...stats };
+  let summarizedAt = now();
+  const finish = (entry, reply) => {
+    const job = entry.job;
+    if (!job || job.id !== reply.id)
+      return;
+    entry.job = undefined;
+    job.state.running = false;
+    job.resolve(reply);
+    pump();
   };
-  const runNext = () => {
-    if (running || stopped)
+  const retire = (entry) => {
+    const index = pool.indexOf(entry);
+    if (index < 0)
       return;
-    const file = queue.shift();
-    if (!file)
-      return;
-    running = true;
-    const id = nextId++;
-    pending.set(id, (reply) => {
-      running = false;
-      queued.delete(file.dbPath);
-      if (!reply.ok) {
-        log(`[olympus] sqlite checkpoint: ${file.label} failed (${reply.error ?? "Error"}); tried again at the next sample.`);
-      } else if ((reply.ms ?? 0) >= CHECKPOINT_NOTABLE_MS || file.walBytes >= CHECKPOINT_NOTABLE_BYTES && lastCheckpointed.get(file.dbPath) !== reply.checkpointed) {
-        log(`[olympus] sqlite checkpoint: ${file.label} wal_bytes=${file.walBytes} ms=${Math.round(reply.ms ?? 0)} busy=${reply.busy} frames=${reply.log} checkpointed=${reply.checkpointed}`);
+    pool.splice(index, 1);
+    try {
+      entry.worker.terminate();
+    } catch {}
+    const job = entry.job;
+    entry.job = undefined;
+    if (job) {
+      job.state.running = false;
+      job.resolve({ id: job.id, ok: false, error: "WorkerStopped" });
+    }
+    if (pool.length === 0 && !stopped) {
+      needRoom = undefined;
+      log("[olympus] sqlite checkpoint: every checkpoint worker stopped; WALs are not being checkpointed until the engine restarts.");
+    }
+    pump();
+  };
+  try {
+    for (let n = 0;n < WORKERS; n += 1) {
+      const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SOURCE2], { type: "text/javascript" })));
+      worker.unref?.();
+      const entry = { worker, finished: undefined, job: undefined };
+      if (typeof SharedArrayBuffer === "function") {
+        const buffer = new SharedArrayBuffer(4);
+        entry.finished = new Int32Array(buffer);
+        worker.postMessage({ finished: buffer });
       }
-      if (reply.ok)
-        lastCheckpointed.set(file.dbPath, reply.checkpointed);
-      runNext();
+      worker.onmessage = ({ data }) => finish(entry, data);
+      worker.onerror = () => retire(entry);
+      pool.push(entry);
+    }
+  } catch {
+    for (const entry of pool) {
+      try {
+        entry.worker.terminate();
+      } catch {}
+    }
+    return;
+  }
+  function pump() {
+    if (stopped)
+      return;
+    for (const entry of pool) {
+      if (entry.job)
+        continue;
+      const index = queue.findIndex((job) => !job.state.running);
+      if (index < 0)
+        return;
+      const job = queue.splice(index, 1)[0];
+      job.state.queued = undefined;
+      job.state.running = true;
+      entry.job = job;
+      entry.worker.postMessage({ id: job.id, path: job.state.dbPath, atBytes });
+    }
+  }
+  function pass(state, makesRoom) {
+    return new Promise((resolve) => {
+      if (stopped || pool.length === 0) {
+        resolve({ id: 0, ok: false, error: "WorkerStopped" });
+        return;
+      }
+      const waiting = state.queued;
+      if (waiting) {
+        queue.splice(queue.indexOf(waiting), 1);
+        waiting.resolve({ id: waiting.id, ok: true, lost: true });
+      }
+      const job = { id: nextId++, state, resolve, seenFinished: 0 };
+      state.queued = job;
+      if (makesRoom)
+        queue.unshift(job);
+      else
+        queue.push(job);
+      pump();
     });
-    worker.postMessage({ id, path: file.dbPath, walBytes: file.walBytes });
-  };
+  }
+  function chooseRoom() {
+    needRoom = undefined;
+    if (stopped || pool.length === 0)
+      return;
+    for (const state of states.values()) {
+      if (!state.firstDone || state.held || state.awaitRewind || state.live < roomBytes)
+        continue;
+      if (!needRoom || state.live > needRoom.live)
+        needRoom = state;
+    }
+  }
+  function record(state, reply, madeRoom) {
+    state.lastPassAt = now();
+    if (!reply.ok) {
+      log(`[olympus] sqlite checkpoint: ${state.label} failed (${reply.error ?? "Error"}); tried again at the next pass.`);
+      return;
+    }
+    if (reply.lost)
+      return;
+    const expectedRewind = state.awaitRewind;
+    state.awaitRewind = madeRoom;
+    state.firstDone = true;
+    if (reply.skipped) {
+      if (expectedRewind)
+        stats.rewinds += 1;
+      state.live = 0;
+      state.hot = false;
+      state.held = false;
+      state.lastLog = undefined;
+      state.lastCheckpointed = undefined;
+      return;
+    }
+    const frames = Math.max(0, reply.log ?? 0);
+    const copied = Math.max(0, reply.checkpointed ?? 0);
+    const rewound = state.lastLog !== undefined && frames < state.lastLog;
+    if (expectedRewind && !madeRoom) {
+      if (rewound)
+        stats.rewinds += 1;
+      else
+        stats.rewindsMissed += 1;
+    }
+    const stuck = copied < frames && !rewound && state.lastCheckpointed !== undefined && copied <= state.lastCheckpointed;
+    const held = reply.busy === 1 || stuck;
+    const walBytes = reply.walBytes ?? 0;
+    if (held && !state.held) {
+      const read = oldestOffThreadSnapshot(state.dbPath);
+      log(`[olympus] sqlite wal held: ${state.label} wal_bytes=${walBytes} frames=${frames} checkpointed=${copied} oldest_read_ms=${Math.round(read?.ageMs ?? 0)}${read ? ` oldest_read_lane=${read.lane} oldest_read_site=${read.site}` : " (no read open in this process)"}; no work waits on this file until the read ends.`);
+    }
+    if ((reply.ms ?? 0) >= CHECKPOINT_NOTABLE_MS || walBytes >= CHECKPOINT_NOTABLE_BYTES && state.lastCheckpointed !== copied) {
+      log(`[olympus] sqlite checkpoint: ${state.label} wal_bytes=${walBytes} ms=${Math.round(reply.ms ?? 0)} busy=${reply.busy} frames=${frames} checkpointed=${copied}`);
+    }
+    state.hot = state.lastLog === undefined || frames !== state.lastLog || copied < frames;
+    state.held = held;
+    state.live = frames * (reply.frameBytes ?? 4120);
+    state.lastLog = frames;
+    state.lastCheckpointed = copied;
+  }
+  function paced(state) {
+    pass(state, false).then((reply) => {
+      record(state, reply, false);
+      chooseRoom();
+    });
+  }
+  async function readsFromBeforeEnd(dbPath, endedAt) {
+    const started = now();
+    for (;; ) {
+      const read = oldestOffThreadSnapshot(dbPath);
+      const waited = now() - started;
+      if (!read || read.ageMs < now() - endedAt || waited >= readerWaitMs || stopped)
+        return waited;
+      await new Promise((resolve) => {
+        setTimeout(resolve, READER_POLL_MS);
+      });
+    }
+  }
+  async function makeRoom(state) {
+    const started = now();
+    const live = state.live;
+    let level = false;
+    let before;
+    let reply = await pass(state, true);
+    for (let again = 0;; again += 1) {
+      record(state, reply, true);
+      if (!reply.ok || reply.lost || reply.skipped || state.held)
+        break;
+      const frames = reply.log ?? 0;
+      if (before !== undefined && frames < before)
+        break;
+      level = (reply.checkpointed ?? 0) >= frames && before === frames;
+      if (level || again >= ROOM_PASSES - 1)
+        break;
+      before = frames;
+      reply = await pass(state, true);
+    }
+    const passMs = now() - started;
+    const readersMs = level ? await readsFromBeforeEnd(state.dbPath, now()) : 0;
+    state.lastPassAt = now();
+    const waited = now() - started;
+    stats.waits += 1;
+    stats.totalMs += waited;
+    if (waited > stats.worstMs)
+      stats.worstMs = waited;
+    if (waited >= ROOM_NOTABLE_MS) {
+      log(`[olympus] sqlite wal room: ${state.label} work waited_ms=${Math.round(waited)} pass_ms=${Math.round(passMs)} reads_ms=${Math.round(readersMs)} wal_content_bytes=${live}`);
+    }
+  }
+  function drive() {
+    if (stopped)
+      return;
+    const at = now();
+    for (const entry of [...pool]) {
+      const job = entry.job;
+      if (job && entry.finished && Atomics.load(entry.finished, 0) === job.id && (job.seenFinished += 1) >= 2) {
+        finish(entry, { id: job.id, ok: true, lost: true });
+      }
+    }
+    for (const state of states.values()) {
+      if (state.running || state.queued)
+        continue;
+      if (at - state.lastPassAt >= (state.hot || state.awaitRewind ? hotMs : idleMs))
+        paced(state);
+    }
+    if (at - summarizedAt >= ROOM_SUMMARY_MS) {
+      const waits = stats.waits - summarized.waits;
+      const missed = stats.rewindsMissed - summarized.rewindsMissed;
+      if (waits > 0 || missed > 0) {
+        log(`[olympus] sqlite wal room: last minute waits=${waits} total_ms=${Math.round(stats.totalMs - summarized.totalMs)} worst_ms=${Math.round(stats.worstMs)} rewinds=${stats.rewinds - summarized.rewinds} rewinds_missed=${missed}`);
+      }
+      summarized = { ...stats };
+      summarizedAt = at;
+    }
+  }
+  const timer = setInterval(drive, Math.min(hotMs, idleMs));
+  timer.unref?.();
   return {
     tick(files) {
       if (stopped)
         return;
+      const current = new Set;
       for (const file of files) {
-        if (queued.has(file.dbPath))
-          continue;
-        let walBytes = 0;
-        try {
-          walBytes = statSync52(`${file.dbPath}-wal`).size;
-        } catch {
+        current.add(file.dbPath);
+        const known = states.get(file.dbPath);
+        if (known) {
+          known.label = file.label;
           continue;
         }
-        if (walBytes < atBytes)
-          continue;
-        queued.add(file.dbPath);
-        queue.push({ ...file, walBytes });
+        states.set(file.dbPath, {
+          ...file,
+          live: 0,
+          lastLog: undefined,
+          lastCheckpointed: undefined,
+          lastPassAt: -Infinity,
+          hot: false,
+          held: false,
+          firstDone: false,
+          awaitRewind: false,
+          running: false,
+          queued: undefined
+        });
       }
-      runNext();
+      for (const path of [...states.keys()])
+        if (!current.has(path))
+          states.delete(path);
+      chooseRoom();
+      drive();
     },
+    room() {
+      if (gate)
+        return gate;
+      const state = needRoom;
+      if (!state)
+        return;
+      needRoom = undefined;
+      gate = makeRoom(state).catch((error) => {
+        log(`[olympus] sqlite wal room: ${state.label} failed (${error instanceof Error ? error.name : "Error"}); work goes on.`);
+      }).then(() => {
+        gate = undefined;
+        chooseRoom();
+      });
+      return gate;
+    },
+    roomStats: () => ({ ...stats }),
     stop() {
       stopped = true;
-      queue.length = 0;
-      try {
-        worker.terminate();
-      } catch {}
+      clearInterval(timer);
+      needRoom = undefined;
+      for (const job of queue.splice(0))
+        job.resolve({ id: job.id, ok: false, error: "WorkerStopped" });
+      for (const entry of pool.splice(0)) {
+        try {
+          entry.worker.terminate();
+        } catch {}
+        if (entry.job)
+          entry.job.resolve({ id: entry.job.id, ok: false, error: "WorkerStopped" });
+      }
     }
   };
 }
-var SQLITE_CHECKPOINT_AT_BYTES, CHECKPOINT_NOTABLE_MS = 1000, CHECKPOINT_NOTABLE_BYTES, WORKER_SOURCE2 = `
+var SQLITE_CHECKPOINT_AT_BYTES, SQLITE_WAL_ROOM_BYTES, SQLITE_CHECKPOINT_HOT_MS = 1000, SQLITE_CHECKPOINT_IDLE_MS = 5000, SQLITE_WAL_ROOM_READER_WAIT_MS = 2000, READER_POLL_MS = 20, WORKERS = 2, CHECKPOINT_NOTABLE_MS = 1000, CHECKPOINT_NOTABLE_BYTES, ROOM_PASSES = 6, ROOM_NOTABLE_MS = 1000, ROOM_SUMMARY_MS = 60000, WORKER_SOURCE2 = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const connections = new Map();
+let finished;
 self.onmessage = ({ data }) => {
-  const { id, path } = data;
+  if (data.finished) { finished = new Int32Array(data.finished); return; }
+  const { id, path, atBytes } = data;
+  let reply;
   try {
-    const stat = statSync(path);
-    const file = stat.dev + ':' + stat.ino;
-    let held = connections.get(path);
-    if (held && held.file !== file) { try { held.db.close(); } catch {} held = undefined; }
-    if (!held) {
-      const db = new Database(path, { create: false });
-      db.exec('PRAGMA busy_timeout = 0; PRAGMA journal_size_limit = 67108864; PRAGMA wal_autocheckpoint = 0;');
-      held = { db, file };
-      connections.set(path, held);
+    let walBytes = 0;
+    try { walBytes = statSync(path + '-wal').size; } catch (error) { if (!error || error.code !== 'ENOENT') throw error; }
+    if (walBytes < atBytes) {
+      reply = { id, ok: true, skipped: true, walBytes };
+    } else {
+      const stat = statSync(path);
+      const file = stat.dev + ':' + stat.ino;
+      let held = connections.get(path);
+      if (held && held.file !== file) { try { held.db.close(); } catch {} held = undefined; }
+      if (!held) {
+        const db = new Database(path, { create: false });
+        db.exec('PRAGMA busy_timeout = 0; PRAGMA journal_size_limit = 67108864; PRAGMA wal_autocheckpoint = 0;');
+        held = { db, file, frameBytes: db.query('PRAGMA page_size').get().page_size + 24 };
+        connections.set(path, held);
+      }
+      const started = performance.now();
+      // PASSIVE only. TRUNCATE takes the writer lock and holds it through its
+      // fsync and truncate, which on a busy disk outlasted a loop writer's 10 s
+      // busy wait: syncs failed with "database is locked" on the lane 6 gate
+      // (16 Nov).
+      const row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
+      reply = { id, ok: true, ms: performance.now() - started, busy: row.busy, log: row.log, checkpointed: row.checkpointed, walBytes, frameBytes: held.frameBytes };
     }
-    const started = performance.now();
-    // PASSIVE only. TRUNCATE takes the writer lock and holds it through its
-    // fsync and truncate, which on a busy disk outlasted a loop writer's 10 s
-    // busy wait: syncs failed with "database is locked" on the lane 6 gate
-    // (16 Nov). After a complete PASSIVE pass the writer's next commit
-    // rewinds the WAL, and journal_size_limit cuts the file back to 64 MB.
-    const row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
-    postMessage({ id, ok: true, ms: performance.now() - started, busy: row.busy, log: row.log, checkpointed: row.checkpointed });
   } catch (error) {
-    postMessage({ id, ok: false, error: error && error.name ? error.name : 'Error' });
+    reply = { id, ok: false, error: error && error.name ? error.name : 'Error' };
   }
+  if (finished) Atomics.store(finished, 0, id);
+  postMessage(reply);
 };`;
 var init_sqlite_checkpointer = __esm(() => {
+  init_off_thread_reads();
   SQLITE_CHECKPOINT_AT_BYTES = 4 * 1024 * 1024;
+  SQLITE_WAL_ROOM_BYTES = 24 * 1024 * 1024;
   CHECKPOINT_NOTABLE_BYTES = 32 * 1024 * 1024;
 });
 
@@ -244561,7 +244815,7 @@ var init_remote_access_control = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync75, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync53, unlinkSync as unlinkSync7 } from "node:fs";
+import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync75, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
 import { basename as basename25, dirname as dirname119, isAbsolute as isAbsolute42, join as join154, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -244726,7 +244980,7 @@ function nearestExisting(path) {
   let near = resolve33(path);
   for (;; ) {
     try {
-      statSync53(near);
+      statSync52(near);
       return near;
     } catch {
       const up = dirname119(near);
@@ -244786,7 +245040,7 @@ function inspect(ctx, sourceId, slot, entry) {
   }
   let folderDevice;
   try {
-    folderDevice = statSync53(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
+    folderDevice = statSync52(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
   } catch {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
@@ -268712,7 +268966,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync44, lstatSync as lstatSync60, mkdirSync as mkdirSync76, statSync as statSync54 } from "node:fs";
+import { chmodSync as chmodSync44, lstatSync as lstatSync60, mkdirSync as mkdirSync76, statSync as statSync53 } from "node:fs";
 import { dirname as dirname120, isAbsolute as isAbsolute44 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -268798,7 +269052,7 @@ function ensureSettingsDirectory(directory) {
     if (error?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync54(dirname120(directory));
+      statSync53(dirname120(directory));
     } catch {
       return "home_missing";
     }
@@ -270205,6 +270459,8 @@ async function main() {
   const engineRole = engineRoleFromEnv(process.env);
   const checkpointer = engineRole === "background" ? startSqliteCheckpointer() : undefined;
   setSqliteCheckpointsOffLoop(checkpointer !== undefined);
+  if (checkpointer)
+    controlPathHeadroom.setRoomGate(() => checkpointer.room());
   const slowSqlFile = process.env.OLYMPUS_MAIN_THREAD_SQL_LOG;
   startSlowMainThreadSqlLog(LOOP_SLOW_SQL_MS, slowSqlFile ? (line, entry) => {
     console.warn(line);
@@ -275041,6 +275297,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     }) : undefined;
     engineBackground = { stop: () => {
       walSampler?.stop();
+      controlPathHeadroom.setRoomGate(undefined);
       checkpointer?.stop();
       statusRecount?.stop();
       rssRestart.stop();

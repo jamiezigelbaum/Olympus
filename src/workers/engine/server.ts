@@ -655,6 +655,8 @@ export async function main(): Promise<void> {
   // own (sqlite-checkpointer.ts), from before the first store opens.
   const checkpointer = engineRole === 'background' ? startSqliteCheckpointer() : undefined;
   setSqliteCheckpointsOffLoop(checkpointer !== undefined);
+  // Bulk work makes room for a WAL that needs rewinding: its turns wait for one checkpoint pass, off the loop.
+  if (checkpointer) controlPathHeadroom.setRoomGate(() => checkpointer.room());
   // Every statement that holds this process's loop past LOOP_SLOW_SQL_MS is
   // named in the log and counted in health, from before the first store opens
   // (loop-stall step-back, 15 Nov 2026): the next stall names itself.
@@ -6898,7 +6900,7 @@ export async function main(): Promise<void> {
           log: (line) => console.warn(line),
         })
       : undefined;
-    engineBackground = { stop: () => { walSampler?.stop(); checkpointer?.stop(); statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
+    engineBackground = { stop: () => { walSampler?.stop(); controlPathHeadroom.setRoomGate(undefined); checkpointer?.stop(); statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
   }
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
