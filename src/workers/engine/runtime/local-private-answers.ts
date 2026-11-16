@@ -152,6 +152,8 @@ export interface LocalAnswerPathOptions {
   /** The worker's one built-in private model. */
   model: BuiltInAnalystModel | undefined;
   available: () => boolean;
+  /** The owner's own Private model, from the one chooser (private-answer-model.ts BuiltInPrivateAnswerModelOptions.route). */
+  route?: import('../../chatgpt/private-answer-model.ts').BuiltInPrivateAnswerModelOptions['route'];
   /**
    * The embedding model that ranks the items read, as the built-in model this
    * process already holds (builtInEmbeddingOnly), or undefined.
@@ -200,6 +202,7 @@ export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
     model: options.model,
     eligible,
     available: options.available,
+    ...(options.route ? { route: options.route } : {}),
     answer: answerPrivately,
     relevance: embeddingPanelRelevance(options.relevanceEmbedding),
     readItem: (item, request) => readLocalEvidenceItem({ lanes, item, ...request }),
