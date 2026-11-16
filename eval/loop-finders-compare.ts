@@ -8,7 +8,10 @@
 // counts only: per corpus, the status snapshot's numbers (timings and stamps
 // left out); per ledger, rows by tiers, state and decider, overrides, copies by
 // corpus and state, and rows each run raised, lowered or changed since the
-// start copy. Exit 1 when A and B differ in any count, with every difference named.
+// start copy; per store file, items (live and tombstoned), chunks and vectors
+// per model (the superseded prune's removals and the embedding sweep's
+// writes; the status snapshot carries the work still owed per model). Exit 1
+// when A and B differ in any count, with every difference named.
 import { Database } from 'bun:sqlite';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -103,9 +106,34 @@ function ledgerCounts(root: string, base: string): Map<string, number> {
   return out;
 }
 
+/** Each store file's rows: what the superseded prune removes and what the embedding sweep writes. */
+function storeCounts(root: string): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const path of files(root, (name) => name.endsWith('.sqlite') && !name.endsWith(LEDGER_SUFFIX))) {
+    const name = relative(root, path);
+    let db: Database;
+    try { db = new Database(path, { readonly: true }); } catch { continue; }
+    try {
+      db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 10000;');
+      const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
+      if (!tables.has('items') || !tables.has('chunks')) continue;
+      for (const row of db.query('SELECT tombstoned t, count(*) n FROM items GROUP BY 1').all() as Array<{ t: number; n: number }>) {
+        out.set(`store:${name}:items:tombstoned=${row.t}`, row.n);
+      }
+      out.set(`store:${name}:chunks`, (db.query('SELECT count(*) n FROM chunks').get() as { n: number }).n);
+      if (tables.has('chunk_embeddings')) {
+        for (const row of db.query('SELECT model_id m, count(*) n FROM chunk_embeddings GROUP BY 1').all() as Array<{ m: string; n: number }>) {
+          out.set(`store:${name}:vectors:${row.m}`, row.n);
+        }
+      }
+    } finally { db.close(); }
+  }
+  return out;
+}
+
 const { base, a, b } = args();
-const left = new Map<string, unknown>([...snapshotCounts(a), ...ledgerCounts(a, base)]);
-const right = new Map<string, unknown>([...snapshotCounts(b), ...ledgerCounts(b, base)]);
+const left = new Map<string, unknown>([...snapshotCounts(a), ...ledgerCounts(a, base), ...storeCounts(a)]);
+const right = new Map<string, unknown>([...snapshotCounts(b), ...ledgerCounts(b, base), ...storeCounts(b)]);
 const differences: string[] = [];
 for (const key of [...new Set([...left.keys(), ...right.keys()])].sort()) {
   if (left.get(key) !== right.get(key)) differences.push(`${key}: A=${left.get(key) ?? '-'} B=${right.get(key) ?? '-'}`);
