@@ -135,7 +135,7 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
-      - run: bun test test/put-back-whole-root.test.ts test/engine-store-copies.test.ts
+      - run: HOME="$(mktemp -d)" bun test test/put-back-whole-root.test.ts test/engine-store-copies.test.ts
 
   deploy:
     name: deploy tests ${{ matrix.shard }}/4
