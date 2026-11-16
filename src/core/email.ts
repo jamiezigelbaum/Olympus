@@ -1,6 +1,7 @@
 import { parseSourceItemReadResult, type SourceItemReadResult } from './source-item-read.ts';
 import { sourceItemReadSelectedItem, sourceItemReadPage } from './source-index/selected-items.ts';
 import { ANSWER_RELEASE_UNVERIFIED, isWithheldSourceAnswer, withheldSourceAnswer, recordReleaseManifest } from './release-manifest.ts';
+import { parseFollowUp, type SourceAnswerFollowUp } from './follow-up.ts';
 import { workerFetch } from './worker-transport.ts';
 import { isSourceIndexReadSurfaceEnabled, type OlympusConfig } from './config.ts';
 import { assertNoRawEmailFields } from './email-policy.ts';
@@ -111,6 +112,8 @@ export interface SourceIndexAnswerOptions {
   authoredAfter?: string;
   authoredBefore?: string;
   selectedItems?: SourceAnswerSelectedItemOption[];
+  /** A follow-up option's opaque scope handle (core/follow-up.ts). */
+  narrow?: string;
   retrievalMode?: 'keyword' | 'hybrid';
   analystProvider?: 'default' | 'local' | 'venice' | 'tinfoil' | 'cloud';
   analystModel?: string;
@@ -247,6 +250,7 @@ export interface SourceIndexAnswerResult {
   answer: string;
   evidence: unknown[];
   secret_locations?: SourceSecretLocation[];
+  follow_up?: SourceAnswerFollowUp;
   audit: {
     searched_corpora: string[];
     skipped_corpora: unknown[];
@@ -600,6 +604,7 @@ export class EmailClient {
         ...(options.authoredAfter ? { authored_after: options.authoredAfter } : {}),
         ...(options.authoredBefore ? { authored_before: options.authoredBefore } : {}),
         ...(options.selectedItems ? { selected_items: options.selectedItems } : {}),
+        ...(options.narrow ? { narrow: options.narrow } : {}),
         ...(options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {}),
         ...(options.analystProvider ? { analyst_provider: options.analystProvider } : {}),
         ...(options.analystModel ? { analyst_model: options.analystModel } : {}),
@@ -1256,6 +1261,7 @@ function parseSourceIndexAnswerResult(value: Record<string, unknown>): SourceInd
     ...(value.internal_context !== undefined ? { internal_context: value.internal_context } : {}),
     ...(value.opsec !== undefined ? { opsec: parseSourceAnswerOpsec(value.opsec) } : {}),
     ...(parseSecretLocations(value.secret_locations) ? { secret_locations: parseSecretLocations(value.secret_locations)! } : {}),
+    ...(parseFollowUp(value.follow_up) ? { follow_up: parseFollowUp(value.follow_up)! } : {}),
   };
 }
 

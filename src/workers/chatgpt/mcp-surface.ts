@@ -218,6 +218,18 @@ const QUESTION_PROPERTY = {
   ].join(' '),
 } as const;
 
+/**
+ * The `narrow` argument: a follow-up option the last answer offered
+ * (core/follow-up.ts), passed back unchanged. Opaque: it names no item.
+ */
+const NARROW_PROPERTY = {
+  type: 'string',
+  description: [
+    'Only after an answer that carried follow_up: ask the user its question, then call again with the same question',
+    'and the narrow of the option they chose, unchanged, to look only there.',
+  ].join(' '),
+} as const;
+
 export const SOURCE_ANSWER_TOOL: ChatGptToolDefinition = {
   name: 'source_answer',
   title: 'Ask Olympus',
@@ -237,6 +249,7 @@ export const SOURCE_ANSWER_TOOL: ChatGptToolDefinition = {
     properties: {
       question: QUESTION_PROPERTY,
       detail: DETAIL_PROPERTY,
+      narrow: NARROW_PROPERTY,
     },
     required: ['question'],
     additionalProperties: false,
@@ -620,6 +633,7 @@ async function runChatGptTool(
           // bounded derivative, is answered from on this surface.
           runOperation(SOURCE_ANSWER_TOOL.name, ctx, {
             question,
+            ...(typeof args.narrow === 'string' && args.narrow ? { narrow: args.narrow } : {}),
             include_secure_local: false,
             include_secure_local_content: false,
             timeoutMs: SOURCE_ANSWER_TIMEOUT_MS,

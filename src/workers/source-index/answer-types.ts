@@ -7,6 +7,7 @@ import type { OnDemandReadLimit } from '../file-extraction/on-demand-read.ts';
 // treat with the same care as the OPSEC policy fields they carry.
 
 import type { OperationCallerWire } from '../../core/operation-caller.ts';
+import type { SourceAnswerFollowUp } from '../../core/follow-up.ts';
 import type { OpsecReleaseAudit, SourceInstructionFlag } from '../../core/opsec.ts';
 import type {
   RetrievalDegradationReason,
@@ -90,6 +91,9 @@ export interface SourceIndexAnswerResult {
   evidence: SourceIndexAnswerEvidence[];
   // Present only when Secrets matched the question: where they are, never what they say.
   secret_locations?: SourceIndexAnswerSecretLocation[];
+  // Present only when the search was weak (core/follow-up.ts): one question
+  // built from what was found's metadata, with options to search again inside.
+  follow_up?: SourceAnswerFollowUp;
   audit: {
     on_demand_limits?: OnDemandReadLimit[];
     searched_corpora: string[];
