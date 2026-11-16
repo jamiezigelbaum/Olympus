@@ -563,6 +563,8 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000), wal: walLines.slice(0, 2000) } };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
+  // last-run.json stays on the host and the next run replaces it; an engine that died puts its last words in the job log too.
+  if (errors.length) for (const role of ['background', 'front']) console.error(`--- ${role} engine log tail ---\n${output[role]!.slice(-6_000)}`);
   console.log(JSON.stringify(receipt));
   console.log(`${pass ? 'PASS' : 'FAIL'} (${options.runCase}): background ${background.max_ms} ms (<250), front ${front.max_ms} ms (<100), ${slow_sql.length} slow SQL statements, workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}, WALs over 64 MB at end ${guards.wal_over_limit.length}, background reads over 2 s ${guards.background_reads_over_2s.length}`);
   rmSync(runDir, { recursive: true, force: true });
