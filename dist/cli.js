@@ -185105,6 +185105,8 @@ function createCrossEncoderReranker(options) {
         const owners = [];
         const windows = request.passages.flatMap((passage, index) => {
           const pairs = options.tokenizer.encodePairWindows(request.query, passage, maxPairTokens, Math.floor(maxPairTokens / WINDOW_OVERLAP_FRACTION));
+          if (!options.everyWindow)
+            pairs.length = Math.min(pairs.length, 1);
           for (let count = 0;count < pairs.length; count += 1)
             owners.push(index);
           return pairs;
@@ -185211,14 +185213,15 @@ function builtInRerankerFromEnv(options = {}) {
     session: () => runtime.createSession(modelPath, { threads }),
     tokenizer: existsSync104(vocabularyPath) ? new WordPieceTokenizer(readFileSync95(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync95(tokenizerPath, "utf8")),
     ...poolSize !== undefined ? { poolSize } : {},
-    ...maxPairTokens !== undefined ? { maxPairTokens } : {}
+    ...maxPairTokens !== undefined ? { maxPairTokens } : {},
+    ...env[SOURCE_RERANKER_WINDOWS_ENV]?.trim().toLowerCase() === "all" ? { everyWindow: true } : {}
   });
 }
 function positiveInteger7(value) {
   const parsed = Number(value?.trim());
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
-var SOURCE_RERANKER_ENV = "OLYMPUS_SOURCE_RERANKER", SOURCE_RERANKER_MODEL_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_MODEL_DIR", SOURCE_RERANKER_POOL_ENV = "OLYMPUS_SOURCE_RERANKER_POOL", SOURCE_RERANKER_THREADS_ENV = "OLYMPUS_SOURCE_RERANKER_THREADS", SOURCE_RERANKER_RUNTIME_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR", SOURCE_RERANKER_MAX_TOKENS_ENV = "OLYMPUS_SOURCE_RERANKER_MAX_TOKENS", MAX_PAIR_TOKENS = 512, BATCH_SIZE = 8, DEFAULT_PAIR_TOKENS = 256, WINDOW_OVERLAP_FRACTION = 8, IDLE_RELEASE_MS, DEFAULT_ON_MIN_MEMORY_BYTES;
+var SOURCE_RERANKER_ENV = "OLYMPUS_SOURCE_RERANKER", SOURCE_RERANKER_MODEL_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_MODEL_DIR", SOURCE_RERANKER_POOL_ENV = "OLYMPUS_SOURCE_RERANKER_POOL", SOURCE_RERANKER_THREADS_ENV = "OLYMPUS_SOURCE_RERANKER_THREADS", SOURCE_RERANKER_RUNTIME_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR", SOURCE_RERANKER_MAX_TOKENS_ENV = "OLYMPUS_SOURCE_RERANKER_MAX_TOKENS", SOURCE_RERANKER_WINDOWS_ENV = "OLYMPUS_SOURCE_RERANKER_WINDOWS", MAX_PAIR_TOKENS = 512, BATCH_SIZE = 8, DEFAULT_PAIR_TOKENS = 256, WINDOW_OVERLAP_FRACTION = 8, IDLE_RELEASE_MS, DEFAULT_ON_MIN_MEMORY_BYTES;
 var init_built_in_reranker = __esm(() => {
   init_off_thread();
   init_evidence_reranker();

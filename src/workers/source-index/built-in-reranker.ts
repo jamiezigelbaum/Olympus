@@ -39,6 +39,13 @@ export const SOURCE_RERANKER_THREADS_ENV = 'OLYMPUS_SOURCE_RERANKER_THREADS';
 export const SOURCE_RERANKER_RUNTIME_DIR_ENV = 'OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR';
 /** Tokens of each query and passage pair the model reads (default 256). A shorter window scores a bigger pool (#921). */
 export const SOURCE_RERANKER_MAX_TOKENS_ENV = 'OLYMPUS_SOURCE_RERANKER_MAX_TOKENS';
+/**
+ * "all" scores every window of a long passage and keeps the best. Off by
+ * default: the store's pick already puts a candidate's best passage first, and
+ * on 90 long-file questions every window cost 3.3 times the scoring for no
+ * paragraph found. Kept as an eval arm.
+ */
+export const SOURCE_RERANKER_WINDOWS_ENV = 'OLYMPUS_SOURCE_RERANKER_WINDOWS';
 
 /** Tokens per (query, passage) pair, including the model's special tokens. */
 const MAX_PAIR_TOKENS = 512;
@@ -62,6 +69,8 @@ export interface CrossEncoderRerankerOptions {
   poolSize?: number;
   maxPairTokens?: number;
   batchSize?: number;
+  /** Score every window of a long passage (best window wins) instead of its first. */
+  everyWindow?: boolean;
 }
 
 export interface CrossEncoderReranker extends EvidenceReranker {
@@ -124,12 +133,12 @@ export function createCrossEncoderReranker(options: CrossEncoderRerankerOptions)
       lastActivity = timers.now();
       try {
         const model = await session();
-        // Every window of every passage, scored on one scale; a passage's
-        // score is its best window (MaxP), so the deciding paragraph counts
-        // wherever it sits in the text.
+        // A passage is scored on its first window. With everyWindow, every
+        // window is scored on one scale and the passage takes its best (MaxP).
         const owners: number[] = [];
         const windows = request.passages.flatMap((passage, index) => {
           const pairs = options.tokenizer.encodePairWindows(request.query, passage, maxPairTokens, Math.floor(maxPairTokens / WINDOW_OVERLAP_FRACTION));
+          if (!options.everyWindow) pairs.length = Math.min(pairs.length, 1);
           for (let count = 0; count < pairs.length; count += 1) owners.push(index);
           return pairs;
         });
@@ -278,6 +287,7 @@ export function builtInRerankerFromEnv(options: BuiltInRerankerFromEnvOptions = 
       : new JsonPairTokenizer(readFileSync(tokenizerPath, 'utf8')),
     ...(poolSize !== undefined ? { poolSize } : {}),
     ...(maxPairTokens !== undefined ? { maxPairTokens } : {}),
+    ...(env[SOURCE_RERANKER_WINDOWS_ENV]?.trim().toLowerCase() === 'all' ? { everyWindow: true } : {}),
   });
 }
 
