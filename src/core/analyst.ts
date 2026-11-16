@@ -115,6 +115,12 @@ const CONFLICT_RULE =
 const VERSION_INSTRUCTION =
   'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.';
 
+// A claim is checked against the answer sentence by sentence, word for word
+// (foldCitationClaimsIntoAnswer): a claim that rewords the answer is folded
+// back in as a near-duplicate sentence or reported as a gap. Asked for the
+// answer's own sentence, the local model's claim matches.
+const CLAIM_RULE = 'Each citation\'s "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.';
+
 const ANALYST_SYSTEM = [
   'You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.',
   'Rules:',
@@ -205,6 +211,7 @@ const compactSystem = (notes: AnalystReadingNotes | 'batched' = 'off'): string =
   'Return ONLY a single JSON object shaped exactly as:',
   `{"parts": string[], ${notes === 'first' ? '"notes": [{"evidence": number, "fact": string}], ' : ''}"answer": string, "citations": [{"evidence": number, "claim": string}], "unanswered": string[], "sufficient": boolean}`,
   '"parts" lists each thing the question asks for, in the question\'s words, before you write "answer"; "answer" then gives every part the cited items hold.',
+  CLAIM_RULE,
   '"sufficient" is true only when the evidence fully answers the question.',
 ].join('\n');
 const ANALYST_COMPACT_SYSTEM = compactSystem();
@@ -221,6 +228,7 @@ const ANALYST_AUDIT_SYSTEM = [
   'If the draft omitted or misstated any requested item, or missed a citation for a contributing candidate, replace it with a complete corrected JSON object even when the draft claimed it was sufficient.',
   'Set "sufficient" to true only when every requested item is answered and every contributing candidate is cited.',
   'Every claim you cite must be about something the corrected answer states; never cite a fact the answer leaves out.',
+  CLAIM_RULE,
   CONFLICT_RULE.slice(2),
   'Keep the corrected answer under six short sentences unless the question explicitly asks for a longer list, each citation claim to one short sentence, and every unanswered entry brief.',
   'Do not repeat the draft, evidence blocks, or source metadata in the corrected JSON.',
@@ -546,6 +554,7 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
       const completion = await model.complete(request);
       if (arm === 'first') notes = parseReadingNotes(completion.text, (number) => number >= 1 && number <= pack.candidates.length).notes;
       let parsed = parseAnalystModelOutput(completion.text);
+      let citedBeforeFold = false;
 
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
         // Amounts the draft states that the evidence it was written from
@@ -566,6 +575,11 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
           ...(bounded ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {}),
         });
         parsed = parseAnalystModelOutput(auditCompletion.text) ?? parsed;
+        // The model's own answer cited an item it was shown. The fold below
+        // may take that citation away when its claim is the answer reworded
+        // and cannot be seated; that is a gap to report, never a reason to
+        // throw a grounded answer away (#1590).
+        citedBeforeFold = hasGroundedPartialAnswer(parsed, pack);
         // A weaker local model can occasionally put an exact requested value
         // in a valid citation claim while omitting it from the answer field.
         // Claims already cross the same AnalystResult membrane, so the audited
@@ -590,6 +604,7 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
       if (
         localOnly
         && !sufficient
+        && !citedBeforeFold
         && !hasGroundedPartialAnswer(parsed, pack)
         && !isUnsupportedNoContentAnswer(parsed)
       ) {
@@ -723,8 +738,17 @@ const notesBlock = (notes: readonly ReadingNote[], heading = NOTES_HEADING): str
  * `cut` says the reply held more notes than are kept.
  */
 function parseReadingNotes(text: string, shown: (evidence: number) => boolean): { notes: ReadingNote[]; cut: boolean } {
-  const listed = parseModelJsonObject(text)?.notes;
+  // A reply that ran out of room stops mid-note: keep the notes it finished.
+  const lastWhole = text.lastIndexOf('}');
+  const whole = parseModelJsonObject(text);
+  const mended = whole ?? (lastWhole > 0 ? parseModelJsonObject(`${text.slice(0, lastWhole + 1)}]}`) : null);
+  const listed = mended?.notes;
   if (!Array.isArray(listed)) return { notes: [], cut: false };
+  if (!whole) return { notes: keepNotes(listed, shown).notes, cut: true };
+  return keepNotes(listed, shown);
+}
+
+function keepNotes(listed: readonly unknown[], shown: (evidence: number) => boolean): { notes: ReadingNote[]; cut: boolean } {
   const seen = new Set<string>();
   const notes: ReadingNote[] = [];
   for (const entry of listed) {
@@ -1298,7 +1322,7 @@ function foldCitationClaimsIntoAnswer(
   candidateCount: number,
 ): ParsedModelOutput {
   const lead = draft.answer.trim();
-  const stated = statedSentences(lead);
+  const stated = statedText(lead);
   const plans: ClaimFoldPlan[] = [];
 
   // Plan first, seat second: whether the claim set is an enumeration decides
@@ -1311,16 +1335,21 @@ function foldCitationClaimsIntoAnswer(
     // An answer field the model left empty dropped everything, so the first
     // grounded claim rescues it whatever facts it carries.
     const rescuesEmptyAnswer = lead === '' && plans.length === 0;
-    if (!rescuesEmptyAnswer && !claimAddsToAnswer(claim, stated)) continue;
-    const plan: ClaimFoldPlan = { sentence: asSentence(claim), shape: claimShape(claim) };
-    plans.push(plan);
-    // Absorbing the sentence the plan will SEAT does double duty: later claims
-    // are judged against exactly the sentences the answer will carry, and
-    // verbatim twins — the same sentence cited from two candidates — collapse
-    // to one seat, since the second is then already stated. One sentence is
-    // enough to state the claim, and every citation that named it is a receipt
-    // for that one sentence.
-    absorbStatedSentences(stated, plan.sentence);
+    // A claim of several sentences is planned sentence by sentence (#1590):
+    // seated whole it overran the budget, lost its citation, and a complete
+    // answer was thrown away with it. Each sentence the answer does not
+    // already state is one plan, so a list of them is an enumeration.
+    for (const sentence of sentenceTexts(claim)) {
+      if (!rescuesEmptyAnswer && sentenceIsStated(sentence, stated)) continue;
+      const plan: ClaimFoldPlan = { sentence: asSentence(sentence), shape: claimShape(sentence) };
+      plans.push(plan);
+      // Absorbing the sentence the plan will SEAT does double duty: later claims
+      // are judged against exactly the sentences the answer will carry, and
+      // verbatim twins — the same sentence cited from two candidates — collapse
+      // to one seat, since the second is then already stated. Every citation
+      // that named it is a receipt for that one sentence.
+      absorbStatedText(stated, plan.sentence);
+    }
   }
 
   return reconcileCitations(draft, seatClaims(lead, plans), candidateCount);
@@ -1371,17 +1400,21 @@ function reconcileCitations(
   answer: string,
   candidateCount: number,
 ): ParsedModelOutput {
-  const stated = statedSentences(answer);
+  const stated = statedText(answer);
   const citations: Array<{ evidence: number; claim: string }> = [];
   const gaps: string[] = [];
   for (const citation of draft.citations) {
     const claim = citation.claim.trim();
     const inRange = citation.evidence >= 1 && citation.evidence <= candidateCount;
-    if (!inRange || !claim || !claimAddsToAnswer(claim, stated)) {
-      citations.push(citation);
-      continue;
-    }
-    gaps.push(`Cited but not stated in the answer: ${claim}`);
+    const sentences = inRange && claim ? sentenceTexts(claim) : [];
+    const unstated = sentences.filter((sentence) => !sentenceIsStated(sentence, stated));
+    // A citation stands while the answer states any sentence of its claim: it
+    // is still a receipt for that. Each sentence the answer does not state is
+    // a gap; a claim with none stated loses its citation.
+    if (unstated.length < sentences.length || sentences.length === 0) citations.push(citation);
+    gaps.push(...(unstated.length === sentences.length
+      ? unstated.length > 0 ? [`Cited but not stated in the answer: ${claim}`] : []
+      : unstated.map((sentence) => `Cited but not stated in the answer: ${sentence}`)));
   }
 
   if (gaps.length === 0) {
@@ -1419,18 +1452,23 @@ function asSentence(claim: string): string {
 // answer whose claim differs only by a terminator — an everyday cost against
 // an exposure requiring the same model, in the same completion, to quote the
 // same evidence with inconsistent whitespace that a consumer then relies on.
-function statedSentences(text: string): Set<string> {
-  return new Set(sentenceKeys(text));
+interface StatedText {
+  // Each sentence as its verbatim key (sentenceKeys).
+  sentences: Set<string>;
+}
+
+function statedText(text: string): StatedText {
+  return { sentences: new Set(sentenceKeys(text)) };
 }
 
 // A planned claim is absorbed as the sentence it will be seated as, never
 // merged into the sentence before it, so the plan judges later claims against
 // exactly the sentences the seated answer will carry.
-function absorbStatedSentences(stated: Set<string>, text: string): void {
-  for (const key of sentenceKeys(text)) stated.add(key);
+function absorbStatedText(stated: StatedText, text: string): void {
+  for (const key of sentenceKeys(text)) stated.sentences.add(key);
 }
 
-function sentenceKeys(text: string): string[] {
+function sentenceTexts(text: string): string[] {
   const sentences: string[][] = [];
   let sentenceInitial = true;
   for (const rawToken of compactSourceText(text).split(' ')) {
@@ -1439,25 +1477,23 @@ function sentenceKeys(text: string): string[] {
     sentences[sentences.length - 1]!.push(rawToken);
     sentenceInitial = endsSentence(rawToken);
   }
+  return sentences.map((tokens) => tokens.join(' '));
+}
+
+function sentenceKeys(text: string): string[] {
   // Exactly ONE sentence-final "." is trimmed from the key — the mark seating
   // itself adds (asSentence) and pure orthography either way. Nothing more:
   // "!" can be a factorial ("The result is 5!"), "?" withdraws the assertion,
   // a second "." belongs to an ellipsis, and every interior mark can change
   // the proposition, so all of those stay in the key.
-  return sentences.map((tokens) => {
-    const key = tokens.join(' ');
-    return key.endsWith('.') ? key.slice(0, -1) : key;
-  });
+  return sentenceTexts(text).map((key) => key.endsWith('.') ? key.slice(0, -1) : key);
 }
 
-// A claim earns a place in the answer unless the answer already states it, and
-// it is stated only when EVERY sentence of the claim is a sentence of the
-// answer. Nothing is read off the question, and nothing is read off a class of
-// words: an open-class modifier ("monthly") is simply a token the answer's
-// sentence must carry in the same place. A claim with no tokens at all asserts
-// nothing to restate, so it adds nothing.
-function claimAddsToAnswer(claim: string, stated: ReadonlySet<string>): boolean {
-  return sentenceKeys(claim).some((key) => !stated.has(key));
+// One sentence of a claim is stated exactly when the answer carries it
+// verbatim (sentenceKeys): nothing looser is safe, since shared words, case
+// and punctuation can each change the proposition.
+function sentenceIsStated(sentence: string, stated: StatedText): boolean {
+  return stated.sentences.has(sentence.endsWith('.') ? sentence.slice(0, -1) : sentence);
 }
 
 // A claim splits into the facts it carries — the tokens the system prompt

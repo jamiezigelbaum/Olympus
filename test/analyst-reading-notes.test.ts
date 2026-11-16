@@ -155,3 +155,53 @@ test("the Delphi model reports the server's counts and times, cached prompt toke
   expect(delphiUsage(undefined, { prompt_tokens: 7, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 2 } })).toEqual({ promptTokens: 7, outputTokens: 3, cachedTokens: 2 });
   expect(delphiUsage(undefined, undefined)).toBeUndefined();
 });
+
+// Probe finding (16 Nov): the local model's answer was complete and cited,
+// but its claim reworded the answer in several sentences. The claim could not
+// be seated whole, its citation was dropped, and the whole answer was
+// replaced by the "evidence was insufficient" escalation text.
+async function audited(answer: string, claim: string) {
+  const analyst = createAnalyst({ complete: async () => ({ text: JSON.stringify({ answer, citations: [{ evidence: 1, claim }], unanswered: [], sufficient: true }), modelId: 'fixture' }) },
+    { evidenceFormat: 'compact', auditSuspiciousDrafts: true });
+  return analyst.analyze(pack, { localOnly: true });
+}
+
+test('a claim of several sentences is folded sentence by sentence, and a list of them keeps its citation', async () => {
+  const result = await audited('The payment dates are: 14 May 2027, 2 May 2027 and 9 March 2028.',
+    'Instalment 1 falls due on 14 May 2027. Instalment 2 falls due on 2 May 2027. Instalment 3 falls due on 9 March 2028. Instalment 4 falls due on 15 September 2028. Instalment 5 falls due on 12 August 2029.');
+  expect(result.escalation).toBeUndefined();
+  expect(result.citations).toHaveLength(1);
+  // The two dates the answer left out arrive with the claim's sentences.
+  expect(result.answer).toContain('15 September 2028');
+  expect(result.answer).toContain('12 August 2029');
+  expect(result.unanswered).toEqual([]);
+});
+
+test('a sentence of the claim the answer already states is not folded in again', async () => {
+  const result = await audited('The fee is 1,000 EUR. Payment is due by 12 April 2027.', 'Payment is due by 12 April 2027. Pay to account PT50 7041 8147.');
+  expect(result.answer).toBe('The fee is 1,000 EUR. Payment is due by 12 April 2027. Pay to account PT50 7041 8147.');
+  expect(result.citations).toHaveLength(1);
+});
+
+test('a cited answer whose reworded claim cannot be seated is still given, with the gap named, never thrown away', async () => {
+  const answer = 'One is so. Two is so. Three is so. Four is so. Five is so. The premium is 300 EUR.';
+  const result = await audited(answer, 'The policy has many terms. Its yearly premium comes to 300 EUR.');
+  expect(result.escalation).toBeUndefined();
+  expect(result.answer).toBe(answer);
+  expect(result.unanswered.some((gap) => gap.startsWith('Cited but not stated in the answer:'))).toBe(true);
+});
+
+test('the local rules ask for each claim to be a sentence copied from the answer', async () => {
+  const seen = await calls(undefined, { audit: true });
+  for (const request of seen) expect(request.system).toContain('"claim" is one sentence copied word for word from "answer"');
+});
+
+test('a notes reply cut off mid-note keeps the notes it finished', async () => {
+  const seen: AnalystModelRequest[] = [];
+  const analyst = createAnalyst({ complete: async (request) => {
+    seen.push(request);
+    return { text: request.system.startsWith('You are reading evidence') ? '{"notes": [{"evidence": 1, "fact": "Deposit: 2,000 EUR."}, {"evidence": 2, "fact": "Monthly rent: 1,0' : JSON.stringify(reply), modelId: 'fixture' };
+  } }, { evidenceFormat: 'compact', readingNotes: 'pass' });
+  await analyst.analyze(pack, { localOnly: true });
+  expect(seen[1]!.prompt).toContain('- [1] Deposit: 2,000 EUR.\n\nAnswer this question');
+});
