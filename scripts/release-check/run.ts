@@ -478,7 +478,7 @@ export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean, archiv
 export function phaseBudgetMs(name: string): number {
   const minutes: Record<string, number> = {
     provision: 25, 'restore-provision': 25, install: 25, 'reranker-ready': 16, 'restore-zig': 5, prepare: 7, 'prepare-source': 7,
-    ingest: 4, 'ingest-earlier-release': 10, settle: 10, 'front-seed': 6, 'front-steady': 10, 'front-watch': 5,
+    ingest: 4, 'ingest-earlier-release': 10, settle: 10, 'front-seed': 15, 'front-steady': 10, 'front-watch': 5,
     'archive-beside-live': 8, 'archive-import': 12, 'archive-changed': 12,
     'archive-drain': 8, 'archive-remove': 5, 'archive-model': 7,
     'archive-scale-mbox': 30, 'archive-scale-readwise': 20,
@@ -1473,6 +1473,8 @@ async function runFrontSteady(run: Run): Promise<void> {
  */
 async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: string | null | undefined): Promise<{ set?: FrontStoreSet; storeFiles?: number }> {
   const seed = randomBytes(6).toString('hex');
+  // On the earlier release, whose counts trail its writes by up to 5 minutes: 6 minutes stopped a healthy seed part way and left the
+  // front-steady stage nothing to compare (mac-upgrade 43783902175, 16 Nov 2026; 15 minutes with the real judge before the stand-in).
   const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed}`, 30 * 60_000));
   const set = seeded.result as FrontStoreSet | undefined;
   if (!set) run.log(`front-seed: ${agentDetail(seeded)}`);
