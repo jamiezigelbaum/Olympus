@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildEvidencePack, conversationWindowPerSide, CONVERSATION_WINDOW_ENV } from '../src/core/evidence-pack.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { CONNECTOR_STORE_CONVERSATION_INDEX_SQL } from '../src/workers/connector-store/local-index.ts';
 import {
   LocalConnectorStore,
   createConnectorStoreContentProvider,
@@ -51,14 +52,25 @@ async function chatStore() {
   return store;
 }
 
+function indexed(store: LocalConnectorStore): LocalConnectorStore {
+  (store as unknown as { db: { exec(sql: string): void } }).db.exec(CONNECTOR_STORE_CONVERSATION_INDEX_SQL);
+  return store;
+}
+
 const saved = process.env[CONVERSATION_WINDOW_ENV];
 afterEach(() => {
   if (saved === undefined) delete process.env[CONVERSATION_WINDOW_ENV]; else process.env[CONVERSATION_WINDOW_ENV] = saved;
 });
 
 describe('conversationNeighbours', () => {
-  test('nearest first, alternating sides, same conversation only', async () => {
+  test('nothing without the conversation index, which no open creates', async () => {
     const store = await chatStore();
+    expect(store.conversationNeighbours(`${ACCOUNT}:m3`, 2)).toEqual([]);
+    store.close();
+  });
+
+  test('nearest first, alternating sides, same conversation only', async () => {
+    const store = indexed(await chatStore());
     expect(store.conversationNeighbours(`${ACCOUNT}:m3`, 2).map((row) => row.sourceItem.providerItemId)).toEqual(['m2', 'm4', 'm1', 'm5']);
     expect(store.conversationNeighbours(`${ACCOUNT}:m1`, 1).map((row) => row.sourceItem.providerItemId)).toEqual(['m2']);
     expect(store.conversationNeighbours(`${ACCOUNT}:x1`, 2)).toEqual([]);
@@ -69,7 +81,7 @@ describe('conversationNeighbours', () => {
 
 describe('a pack with conversation windows', () => {
   async function pack() {
-    const store = await chatStore();
+    const store = indexed(await chatStore());
     const result = await buildEvidencePack({
       question: 'When is the passport renewal appointment?',
       searchQuery: 'passport renewal',

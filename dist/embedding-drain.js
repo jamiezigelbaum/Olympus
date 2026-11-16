@@ -21752,6 +21752,9 @@ var EMBEDDING_BATCH_SIZE = 32;
 var MAX_SELECTED_EMBED_ITEM_IDS = 25000;
 var MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 var MIN_VECTOR_SCORE = 0.18;
+var CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time";
+var CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
+  ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
 var MAX_REQUIRED_CONCEPTS = 3;
 var RARE_CONCEPT_WEIGHT_SHARE = 0.6;
 var READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
@@ -30559,6 +30562,9 @@ ${parentKey(ref)}`, { ref, origin });
     const side = Math.max(0, Math.min(Math.floor(perSide), 10));
     if (side === 0)
       return [];
+    this.conversationIndexReady ||= this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(CONNECTOR_STORE_CONVERSATION_INDEX) !== null;
+    if (!this.conversationIndexReady)
+      return [];
     const anchor = this.db.query(`
       SELECT item_pk, provider_conversation_id AS conversation, authored_at, account_scope
       FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
@@ -30595,6 +30601,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
     return this.visibleRecentRows(ordered);
   }
+  conversationIndexReady;
   visibleRecentRows(rows) {
     return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
   }
@@ -33482,11 +33489,6 @@ function createConnectorStoreSenderIndexes(db) {
 }
 var PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`;
 function createConnectorStorePeopleIndex(db) {
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_connector_store_items_conversation_time
-      ON items(provider_conversation_id, authored_at)
-      WHERE provider_conversation_id IS NOT NULL;
-  `);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
       ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)
