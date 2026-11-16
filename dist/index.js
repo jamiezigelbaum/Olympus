@@ -16261,6 +16261,7 @@ var init_child_visibility = __esm(() => {
 // src/workers/connector-store/loop-pass.ts
 var init_loop_pass = __esm(() => {
   init_child_visibility();
+  init_off_thread_reads();
 });
 
 // connect-relay/shared/tokens.ts
@@ -16920,6 +16921,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();
+  init_off_thread_reads();
   init_stored_names();
   init_tier_rejudge();
 });

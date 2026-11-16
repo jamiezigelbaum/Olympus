@@ -1,6 +1,6 @@
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from '../connector-store/sqlite-mmap.ts';
-import { offThreadReadsSupported, withOffThreadSnapshot, type StoreRead } from '../connector-store/off-thread-reads.ts';
+import { BACKGROUND_READS, offThreadReadsSupported, withOffThreadSnapshot, type StoreRead } from '../connector-store/off-thread-reads.ts';
 import type { OnDemandReadRequest, OnDemandReadResult } from './on-demand-read.ts';
 /**
  * The generic extraction job side database.
@@ -1921,7 +1921,7 @@ export class LocalFileExtractionJobStore {
       return step.value;
     };
     if (!offThreadReadsSupported(this.dbPath)) return drive(async (query) => this.readHere(query));
-    return withOffThreadSnapshot(this.dbPath, drive);
+    return withOffThreadSnapshot(this.dbPath, drive, BACKGROUND_READS);
   }
 
   private *scopedReadinessSteps(

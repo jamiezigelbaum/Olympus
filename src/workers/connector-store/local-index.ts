@@ -22,7 +22,7 @@ import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith 
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { BACKGROUND_READS, OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readInBackground, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -3948,7 +3948,7 @@ export class LocalConnectorStore {
       const state = vectorDigestState(this.db, model);
       if (state.completed) return;
       const rows = this.vectorDigestBackfillRows;
-      const source = await readOnPool(this.dbPath, { mode: 'all', ...vectorDigestSourceQuery(state.cursorRowid, rows) }) as VectorDigestSourceRow[];
+      const source = await readInBackground(this.dbPath, { mode: 'all', ...vectorDigestSourceQuery(state.cursorRowid, rows) }) as VectorDigestSourceRow[];
       if (this.closedForPoolReads) return;
       // Only the write runs on this thread, so only its time sizes the turn:
       // a slow pool read stalls nothing here (#1487).
@@ -4771,7 +4771,7 @@ export class LocalConnectorStore {
           if (waits >= VISIBILITY_HOLD_WAITS) return this.visibilityBootstrapFinder(ledger).here();
           await new Promise<void>((resolve) => { setTimeout(resolve, VISIBILITY_HOLD_WAIT_MS); });
         }
-        const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId));
+        const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId), BACKGROUND_READS);
         if (flagged.length === 0 || !offThreadReadsSupported(this.dbPath)) {
           return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
         }
@@ -4786,7 +4786,7 @@ export class LocalConnectorStore {
             }
           }
           return out;
-        });
+        }, BACKGROUND_READS);
         return join(flagged, rows);
       },
     };
@@ -7161,7 +7161,7 @@ export class LocalConnectorStore {
     const read = this.imageContentOutsidePrivateRead();
     if (!read) return [];
     if (!offThreadReadsSupported(this.dbPath)) return this.db.query(read.sql).all() as ImageContentOutsidePrivateRow[];
-    return await withOffThreadSnapshot(this.dbPath, async (run) => run(read)) as ImageContentOutsidePrivateRow[];
+    return await readInBackground(this.dbPath, read) as ImageContentOutsidePrivateRow[];
   }
 
   /** The same rows on this thread (a direct caller, not the engine's loop). */
@@ -7702,7 +7702,7 @@ export class LocalConnectorStore {
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
-      while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
+      while (!step.done) step = steps.next(await readInBackground(this.dbPath, step.value));
       if (this.visibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
@@ -7779,7 +7779,7 @@ export class LocalConnectorStore {
   async authorCoverageOffThread(): Promise<Array<{ provider: string; items: number; itemsWithoutAuthor: number }>> {
     if (!offThreadReadsSupported(this.dbPath)) return this.authorCoverage();
     const read = this.authorCoverageRead();
-    return authorCoverageRows(await withOffThreadSnapshot(this.dbPath, async (run) => run(read)) as AuthorCoverageRow[]);
+    return authorCoverageRows(await readInBackground(this.dbPath, read) as AuthorCoverageRow[]);
   }
 
   private authorCoverageRead(): StoreRead {
@@ -12807,7 +12807,7 @@ export class LocalConnectorStore {
    * only for an in-memory store, with a turn before each read.
    */
   private embeddingSweepRead(offThread: boolean): (query: StoreRead) => Promise<unknown> {
-    if (offThread) return (query) => withOffThreadSnapshot(this.dbPath, async (run) => run(query));
+    if (offThread) return (query) => readInBackground(this.dbPath, query);
     return async (query) => {
       await ingestionTurn();
       const statement = this.db.query(query.sql);
@@ -12947,7 +12947,7 @@ export class LocalConnectorStore {
   ): Promise<{ missingChunks: number; estimatedTokens: number }> {
     if (!offThreadReadsSupported(this.dbPath)) return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
     const read = this.embeddingBacklogRead(modelId, embedder, scope, options, false);
-    const row = await withOffThreadSnapshot(this.dbPath, async (run) => run(read)) as { missing: number; chars: number };
+    const row = await readInBackground(this.dbPath, read) as { missing: number; chars: number };
     return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
   }
 
@@ -12985,7 +12985,7 @@ export class LocalConnectorStore {
   /** pdfExtractionBacklog on the store's read thread. */
   async pdfExtractionBacklogOffThread(): Promise<{ pendingPdfs: number; extractedPdfs: number; extractedChars: number }> {
     if (!offThreadReadsSupported(this.dbPath)) return this.pdfExtractionBacklog();
-    return pdfBacklogFromRow(await withOffThreadSnapshot(this.dbPath, async (run) => run({ sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: 'get' })) as PdfBacklogRow);
+    return pdfBacklogFromRow(await readInBackground(this.dbPath, { sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: 'get' }) as PdfBacklogRow);
   }
 
   /** `countsMaxAgeMs` only for counts a status snapshot shows (see STATUS_COUNTS_MAX_AGE_MS); never for what is embedded. */
@@ -15860,7 +15860,7 @@ export class LocalConnectorStore {
         return { identities, rows: runSteps(this.itemRowsForIdentitiesSteps(identities, conversationOf, extra)) };
       },
       offThread: async () => {
-        const identities = await ledgerReadOffThread(ledger, ledger.corpusCopyIdentityReads(this.corpusId, filter));
+        const identities = await ledgerReadOffThread(ledger, ledger.corpusCopyIdentityReads(this.corpusId, filter), BACKGROUND_READS);
         return { identities, rows: await this.itemRowsForIdentitiesOffThread(identities, conversationOf, extra) };
       },
     };
@@ -15937,7 +15937,7 @@ export class LocalConnectorStore {
         }
       }
       return out;
-    });
+    }, BACKGROUND_READS);
   }
 
   /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
@@ -16010,7 +16010,7 @@ export class LocalConnectorStore {
     if (!storeTotalsInstalled(this.db)) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
     const sql = storeTotalsCountSql(NON_SYNC_RUN_CONNECTORS_SQL);
     const count = (offThreadReadsSupported(this.dbPath)
-      ? await withOffThreadSnapshot(this.dbPath, async (read) => await read({ sql, params: [], mode: 'get' }))
+      ? await readInBackground(this.dbPath, { sql, params: [], mode: 'get' })
       : this.db.query(sql).get()) as StoreTotalsCount;
     return applyStoreTotalsCount(this.db, count, new Date().toISOString());
   }
@@ -16046,7 +16046,7 @@ export class LocalConnectorStore {
       let step = steps.next();
       while (!step.done) step = steps.next(await read(step.value));
       return step.value;
-    });
+    }, BACKGROUND_READS);
   }
 
   private *statusSteps(

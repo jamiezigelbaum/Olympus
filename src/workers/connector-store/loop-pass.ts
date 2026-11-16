@@ -15,6 +15,7 @@
 // transaction, what it read (the ledger's generation and override guards).
 
 import { ledgerReadOffThread } from './child-visibility.ts';
+import { BACKGROUND_READS } from './off-thread-reads.ts';
 import type { LedgerRead, TierLedger } from '../classification/tier-ledger.ts';
 
 /** One finder: how to run it here, and how to run it on the read worker. */
@@ -40,7 +41,7 @@ export function* turn(): Generator<LoopPassStep, void, unknown> {
 export function ledgerFinder<T>(ledger: TierLedger, steps: () => Generator<LedgerRead, T, unknown>): LoopFinder<T> {
   return {
     here: () => ledger.readSteps(steps()),
-    offThread: () => ledgerReadOffThread(ledger, steps()),
+    offThread: () => ledgerReadOffThread(ledger, steps(), BACKGROUND_READS),
   };
 }
 
@@ -119,7 +120,7 @@ export function ledgerFinderAfterHold<T>(ledger: TierLedger, steps: () => Genera
         if (waits >= LEDGER_HOLD_WAITS) return ledger.readSteps(steps());
         await new Promise<void>((resolve) => { setTimeout(resolve, LEDGER_HOLD_WAIT_MS); });
       }
-      return ledgerReadOffThread(ledger, steps());
+      return ledgerReadOffThread(ledger, steps(), BACKGROUND_READS);
     },
   };
 }

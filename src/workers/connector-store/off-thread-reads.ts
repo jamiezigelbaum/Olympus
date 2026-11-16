@@ -1,7 +1,8 @@
 // Read-only SQLite work uses one warm Bun Worker per open store (#1305).
-// Search statements and status snapshots share that store's executor; a scan
-// snapshot (the vector lane) takes a second worker of the store, started on
-// its first use, so it never waits behind them (see ReadPoolLane). Its
+// The owner's search statements use that store's shared executor; a scan
+// snapshot (the vector lane) takes a second worker of the store, and the
+// engine's own finders and counts a third, each started on its first use, so
+// an owner read never waits behind them (see ReadPoolLane). Its
 // connection stays open until releaseOffThreadReads: subsequent Asks do not
 // repeatedly pay a cold store open. Inline worker source also works in the CLI.
 //
@@ -42,7 +43,20 @@ export const READ_POOL_SIZE = 1;
  * leg, 15 Nov: 29 to 54 s behind keyword reads on one thread). Every store
  * gets the same treatment; nothing is chosen by source.
  */
-export type ReadPoolLane = 'shared' | 'scan' | 'rescore';
+export type ReadPoolLane = 'shared' | 'scan' | 'rescore' | 'background';
+
+/**
+ * The lane of the engine's own reads: loop finders, sweeps, the status
+ * count, backlog estimates. It has one worker per store, so an owner's
+ * keyword read on the shared worker never waits behind a finder's statement
+ * (plan thread, 16 Nov: an owner read never waits behind background work).
+ */
+export const BACKGROUND_READS = { lane: 'background' } as const satisfies { lane: ReadPoolLane };
+
+/** One query on the store's background worker, in its own snapshot. */
+export function readInBackground(dbPath: string, query: StoreRead): Promise<unknown> {
+  return withOffThreadSnapshot(dbPath, async (read) => read(query), BACKGROUND_READS);
+}
 
 /**
  * Workers a store may give the vector re-score beside its scan worker. The

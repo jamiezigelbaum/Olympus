@@ -1,5 +1,5 @@
 import type { SovereigntyTrustDomainPolicy } from '../../core/sovereignty.ts';
-import { offThreadReadsSupported, readOnPool } from '../connector-store/off-thread-reads.ts';
+import { offThreadReadsSupported, readInBackground } from '../connector-store/off-thread-reads.ts';
 import { buildSourceIndexCorpusRegistry, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import { embeddingModelEstimate, estimatedEmbeddingCostUsd } from '../../core/embedding-cost-estimates.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
@@ -995,7 +995,7 @@ function secretLocationCount(
   if (!offThreadReadsSupported(path)) return reused(read);
   return reused(read, {
     read: async () => {
-      const row = await readOnPool(path, { sql: 'SELECT COUNT(*) AS n FROM secret_locations', params: [], mode: 'get' }) as { n: number } | null;
+      const row = await readInBackground(path, { sql: 'SELECT COUNT(*) AS n FROM secret_locations', params: [], mode: 'get' }) as { n: number } | null;
       return row?.n;
     },
     empty: undefined,

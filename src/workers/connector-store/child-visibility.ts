@@ -44,7 +44,7 @@
 
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type LedgerRead, type TierVisibilityReads, type TierCopy } from '../classification/tier-ledger.ts';
 import { currentSourceAnswerTrace } from '../source-index/answer-latency-trace.ts';
-import { offThreadReadsSupported, releaseOffThreadReads, withOffThreadSnapshot } from './off-thread-reads.ts';
+import { offThreadReadsSupported, releaseOffThreadReads, withOffThreadSnapshot, type ReadPoolLane } from './off-thread-reads.ts';
 
 /** One visibility read, shared by synchronous readers and the awaiting Ask path. */
 export interface VisibilityRead { here(): unknown; offThread(): Promise<unknown> }
@@ -225,7 +225,9 @@ const releasing = new WeakSet<TierLedger>();
 
 // Keep the ledger independent of the worker pool. Each judgment awaits one
 // snapshot here; a busy pool must withhold rather than freeze the Ask thread.
-export async function ledgerReadOffThread<T>(ledger: TierLedger, steps: Generator<LedgerRead, T, unknown>): Promise<T> {
+// An owner's read (a visibility check during an Ask) takes the shared worker;
+// the engine's finders pass the background lane.
+export async function ledgerReadOffThread<T>(ledger: TierLedger, steps: Generator<LedgerRead, T, unknown>, options: { lane?: ReadPoolLane } = {}): Promise<T> {
   if (!offThreadReadsSupported(ledger.dbPath)) return ledger.readSteps(steps);
   if (!releasing.has(ledger)) {
     releasing.add(ledger);
@@ -235,7 +237,7 @@ export async function ledgerReadOffThread<T>(ledger: TierLedger, steps: Generato
     let next = steps.next();
     while (!next.done) next = steps.next(await read(next.value));
     return next.value;
-  });
+  }, options);
 }
 
 /** The item a child came inside, as the child's row names it. */

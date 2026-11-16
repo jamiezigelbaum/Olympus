@@ -18670,6 +18670,10 @@ var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
 // src/workers/connector-store/off-thread-reads.ts
 var READ_POOL_SIZE = 1;
+var BACKGROUND_READS = { lane: "background" };
+function readInBackground(dbPath, query) {
+  return withOffThreadSnapshot(dbPath, async (read) => read(query), BACKGROUND_READS);
+}
 var READ_POOL_RESCORE_READERS = 3;
 var READ_POOL_QUEUE_PER_STORE = 8;
 var OFF_THREAD_READ_TIMEOUT_MS = 120000;
@@ -20550,7 +20554,7 @@ async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
   return visibilityFromRows(rows);
 }
 var releasing = new WeakSet;
-async function ledgerReadOffThread(ledger, steps) {
+async function ledgerReadOffThread(ledger, steps, options = {}) {
   if (!offThreadReadsSupported(ledger.dbPath))
     return ledger.readSteps(steps);
   if (!releasing.has(ledger)) {
@@ -20562,7 +20566,7 @@ async function ledgerReadOffThread(ledger, steps) {
     while (!next.done)
       next = steps.next(await read(next.value));
     return next.value;
-  });
+  }, options);
 }
 function parentIdentityOf(child) {
   const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
@@ -22723,7 +22727,7 @@ class LocalConnectorStore {
       if (state.completed)
         return;
       const rows = this.vectorDigestBackfillRows;
-      const source = await readOnPool(this.dbPath, { mode: "all", ...vectorDigestSourceQuery(state.cursorRowid, rows) });
+      const source = await readInBackground(this.dbPath, { mode: "all", ...vectorDigestSourceQuery(state.cursorRowid, rows) });
       if (this.closedForPoolReads)
         return;
       const started = performance.now();
@@ -23294,7 +23298,7 @@ class LocalConnectorStore {
             setTimeout(resolve, VISIBILITY_HOLD_WAIT_MS);
           });
         }
-        const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId));
+        const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId), BACKGROUND_READS);
         if (flagged.length === 0 || !offThreadReadsSupported(this.dbPath)) {
           return join(flagged, runSteps(this.itemRowsForIdentitiesSteps(flagged, conversationOf)));
         }
@@ -23308,7 +23312,7 @@ class LocalConnectorStore {
             }
           }
           return out;
-        });
+        }, BACKGROUND_READS);
         return join(flagged, rows);
       }
     };
@@ -25109,7 +25113,7 @@ ${parentKey(ref)}`, { ref, origin });
       return [];
     if (!offThreadReadsSupported(this.dbPath))
       return this.db.query(read.sql).all();
-    return await withOffThreadSnapshot(this.dbPath, async (run) => run(read));
+    return await readInBackground(this.dbPath, read);
   }
   imageContentOutsidePrivateRows() {
     const read = this.imageContentOutsidePrivateRead();
@@ -25462,7 +25466,7 @@ ${parentKey(ref)}`, { ref, origin });
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done)
-        step = steps.next(await readOnPool(this.dbPath, step.value));
+        step = steps.next(await readInBackground(this.dbPath, step.value));
       if (this.visibilityMarker() === marker)
         return this.peopleObservationsFromRows(step.value);
     }
@@ -25526,7 +25530,7 @@ ${parentKey(ref)}`, { ref, origin });
     if (!offThreadReadsSupported(this.dbPath))
       return this.authorCoverage();
     const read = this.authorCoverageRead();
-    return authorCoverageRows(await withOffThreadSnapshot(this.dbPath, async (run) => run(read)));
+    return authorCoverageRows(await readInBackground(this.dbPath, read));
   }
   authorCoverageRead() {
     return { mode: "all", params: [], sql: `
@@ -28623,7 +28627,7 @@ ${parentKey(ref)}`, { ref, origin });
   }
   embeddingSweepRead(offThread) {
     if (offThread)
-      return (query) => withOffThreadSnapshot(this.dbPath, async (run) => run(query));
+      return (query) => readInBackground(this.dbPath, query);
     return async (query) => {
       await ingestionTurn();
       const statement = this.db.query(query.sql);
@@ -28721,7 +28725,7 @@ ${parentKey(ref)}`, { ref, origin });
     if (!offThreadReadsSupported(this.dbPath))
       return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
     const read = this.embeddingBacklogRead(modelId, embedder, scope, options, false);
-    const row = await withOffThreadSnapshot(this.dbPath, async (run) => run(read));
+    const row = await readInBackground(this.dbPath, read);
     return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
   }
   embeddingBacklogRead(modelId, embedder, scope, options, connectionLocal) {
@@ -28745,7 +28749,7 @@ ${parentKey(ref)}`, { ref, origin });
   async pdfExtractionBacklogOffThread() {
     if (!offThreadReadsSupported(this.dbPath))
       return this.pdfExtractionBacklog();
-    return pdfBacklogFromRow(await withOffThreadSnapshot(this.dbPath, async (run) => run({ sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: "get" })));
+    return pdfBacklogFromRow(await readInBackground(this.dbPath, { sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: "get" }));
   }
   embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false, connectionLocal = true) {
     const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
@@ -30497,7 +30501,7 @@ ${parentKey(ref)}`, { ref, origin });
         return { identities, rows: runSteps(this.itemRowsForIdentitiesSteps(identities, conversationOf, extra)) };
       },
       offThread: async () => {
-        const identities = await ledgerReadOffThread(ledger, ledger.corpusCopyIdentityReads(this.corpusId, filter));
+        const identities = await ledgerReadOffThread(ledger, ledger.corpusCopyIdentityReads(this.corpusId, filter), BACKGROUND_READS);
         return { identities, rows: await this.itemRowsForIdentitiesOffThread(identities, conversationOf, extra) };
       }
     };
@@ -30548,7 +30552,7 @@ ${parentKey(ref)}`, { ref, origin });
         }
       }
       return out;
-    });
+    }, BACKGROUND_READS);
   }
   settledUnreadableItems(scope) {
     return runHiddenStepsHere(this.settledUnreadableItemsSteps(scope));
@@ -30613,7 +30617,7 @@ ${parentKey(ref)}`, { ref, origin });
     if (!storeTotalsInstalled(this.db))
       createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
     const sql = storeTotalsCountSql(NON_SYNC_RUN_CONNECTORS_SQL);
-    const count = offThreadReadsSupported(this.dbPath) ? await withOffThreadSnapshot(this.dbPath, async (read) => await read({ sql, params: [], mode: "get" })) : this.db.query(sql).get();
+    const count = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params: [], mode: "get" }) : this.db.query(sql).get();
     return applyStoreTotalsCount(this.db, count, new Date().toISOString());
   }
   status(scope, options = {}) {
@@ -30635,7 +30639,7 @@ ${parentKey(ref)}`, { ref, origin });
       while (!step.done)
         step = steps.next(await read(step.value));
       return step.value;
-    });
+    }, BACKGROUND_READS);
   }
   *statusSteps(scope, options) {
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);

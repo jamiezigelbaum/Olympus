@@ -12,7 +12,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
+  BACKGROUND_READS,
   OffThreadReadBusyError,
+  readInBackground,
   openOffThreadSnapshot,
   READ_POOL_RESCORE_READERS,
   READ_POOL_SIZE,
@@ -75,6 +77,29 @@ describe('read pool', () => {
     releaseOffThreadReads(path);
     await waitFor(() => readPoolThreadsForTests().live === 0, { description: 'both workers released' });
   });
+
+  test('an owner read never waits behind a slow background statement: finders and counts have their own worker', async () => {
+    const path = storeFile();
+    const started: string[] = [];
+    setReadPoolObserverForTests((_, read) => started.push(read.sql), { snapshots: true });
+    let slowDone = false;
+    // A finder's long statement, and a background snapshot held open beside it.
+    const slow = readInBackground(path, SLOW).then(() => { slowDone = true; });
+    await waitFor(() => started.length === 1, { description: 'the slow background read running' });
+    const owner = await readOnPool(path, COUNT) as { c: number };
+    expect(owner.c).toBe(3);
+    expect(slowDone).toBe(false);
+    expect(readPoolThreadsForTests().live).toBe(2);
+    // A second background read queues on the background worker, not the shared one.
+    let queuedDone = false;
+    const queued = withOffThreadSnapshot(path, async (read) => read(COUNT), BACKGROUND_READS).then(() => { queuedDone = true; });
+    expect((await readOnPool(path, COUNT) as { c: number }).c).toBe(3);
+    expect(queuedDone).toBe(false);
+    expect(readPoolThreadsForTests().live).toBe(2);
+    await Promise.all([slow, queued]);
+    releaseOffThreadReads(path);
+    await waitFor(() => readPoolThreadsForTests().live === 0, { description: 'both workers released' });
+  }, 30_000);
 
   test('re-score side readers each take a worker of their own, and one more is refused rather than queued', async () => {
     const path = storeFile();

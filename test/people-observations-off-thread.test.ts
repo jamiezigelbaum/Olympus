@@ -198,7 +198,7 @@ describe('people observations off the main thread (#1305)', () => {
     setReadPoolObserverForTests(() => {
       reads += 1;
       if (reads === 1) ledgerDb.query(`UPDATE tier_copies SET embed_hold = 1 WHERE provider_item_id = ? AND copy_state = 'current'`).run(target.provider_item_id);
-    });
+    }, { snapshots: true });
     const after = await store.peopleObservationsOffThread();
     expect(after.some((o) => o.senderId === 'zed@example.com')).toBe(false);
     expect(reads).toBeGreaterThan(1);
@@ -223,7 +223,7 @@ describe('people observations off the main thread (#1305)', () => {
       if (!/GROUP BY/.test(read.sql)) return;
       pooled += 1;
       ledgerDb.query(`UPDATE tier_copies SET embed_hold = 1 - embed_hold WHERE provider_item_id = ? AND copy_state = 'current'`).run(target.provider_item_id);
-    });
+    }, { snapshots: true });
     const here: string[] = [];
     const original = db.query.bind(db);
     db.query = ((sql: string) => {
@@ -253,7 +253,7 @@ describe('people observations off the main thread (#1305)', () => {
       if (!/GROUP BY/.test(read.sql)) return;
       pooled += 1;
       fixture.ledger.writeMeta('test-unrelated-write', String(pooled));
-    });
+    }, { snapshots: true });
     const here: string[] = [];
     const original = db.query.bind(db);
     db.query = ((sql: string) => {
@@ -283,7 +283,7 @@ describe('people observations off the main thread (#1305)', () => {
   test("a refresh's sender read goes through the read pool, and no items GROUP BY runs on the store's own connection", async () => {
     const { store } = await senderFixture();
     const pooled: string[] = [];
-    setReadPoolObserverForTests((_dbPath, read) => pooled.push(read.sql));
+    setReadPoolObserverForTests((_dbPath, read) => pooled.push(read.sql), { snapshots: true });
     const db = storeDb(store);
     const original = db.query.bind(db);
     const here: string[] = [];
