@@ -3840,19 +3840,19 @@ export class LocalConnectorStore {
           throw new Error('Connector store read-only mode requires the v7 filter schema or newer.');
         }
       } else {
-        refuseUnversionedConnectorStoreSchema(this.db);
-        this.migrate();
-        runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
-        createConnectorStoreChunkMediaReleases(this.db);
-        createConnectorStoreMediaJudgments(this.db);
-        createConnectorStoreItemTextVersions(this.db);
-        createConnectorStoreVisibilityTables(this.db);
-        createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
-        createConnectorStorePeopleIndex(this.db);
-        this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
-          local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
-        );`);
-        validateConnectorStoreSchema(this.db);
+        // Fast path: a store this build's schema code already brought fully
+        // up to date (its user_version holds that code's fingerprint) runs no
+        // DDL, no backfill and no shape walk at open. Any change to the
+        // schema code changes the fingerprint, and the next open runs it all
+        // once (store-open step-back, 16 Nov: open-time DDL waited 11 to 20 s
+        // on locks, and a backfill read 600k chunks at every open).
+        const shape = connectorStoreOpenShape();
+        const current = !migrating && !creatingFile
+          && (this.db.query('PRAGMA user_version').get() as { user_version: number }).user_version === shape;
+        if (!current) {
+          applyConnectorStoreOpenSchema(this.db);
+          if (this.dbPath !== ':memory:') this.db.exec(`PRAGMA user_version = ${shape}`);
+        }
         if (migrating) {
           setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
           validateConnectorStoreRows(this.db, 'v15');
@@ -10907,8 +10907,9 @@ export class LocalConnectorStore {
     return { counts, matchedLocalItemIds, refreshedLocalItemIds };
   }
 
-  private migrate(): void {
-    this.db.exec(`
+  /** The store's base schema, idempotent: run by every open that is not on the fast path (openSchema). */
+  static migrateSchema(db: Database): void {
+    db.exec(`
       CREATE TABLE IF NOT EXISTS sync_runs (
         sync_run_id TEXT PRIMARY KEY,
         corpus_id TEXT NOT NULL,
@@ -10930,8 +10931,8 @@ export class LocalConnectorStore {
       CREATE INDEX IF NOT EXISTS idx_sync_runs_last_sync ON sync_runs(started_at)
         WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL};
     `);
-    createConversationScopedItemsTable(this.db, 'items', true);
-    this.db.exec(`
+    createConversationScopedItemsTable(db, 'items', true);
+    db.exec(`
       CREATE INDEX IF NOT EXISTS idx_items_local_item_id ON items(local_item_id);
       CREATE TABLE IF NOT EXISTS chunks (
         chunk_pk INTEGER PRIMARY KEY,
@@ -10970,14 +10971,17 @@ export class LocalConnectorStore {
       CREATE INDEX IF NOT EXISTS idx_connector_store_chunk_embeddings_model
         ON chunk_embeddings(model_id);
     `);
-    createItemOwnersTable(this.db);
-    addColumnIfMissing(this.db, 'sync_runs', 'audit_receipt_sha256', 'TEXT');
-    addColumnIfMissing(this.db, 'items', 'search_text', 'TEXT');
-    addColumnIfMissing(this.db, 'chunks', 'embedding_input_hash', 'TEXT');
-    this.db.query(`
-      UPDATE chunks SET embedding_input_hash = content_hash
-      WHERE embedding_input_hash IS NULL
-    `).run();
+    createItemOwnersTable(db);
+    addColumnIfMissing(db, 'sync_runs', 'audit_receipt_sha256', 'TEXT');
+    addColumnIfMissing(db, 'items', 'search_text', 'TEXT');
+    // The column and its backfill commit together, once: the backfill read
+    // every chunk at every open (46 s on a 600k-chunk store, loop-stall gate
+    // 43796532652), though every writer since has set the hash.
+    db.transaction(() => {
+      if (addColumnIfMissing(db, 'chunks', 'embedding_input_hash', 'TEXT')) {
+        db.query('UPDATE chunks SET embedding_input_hash = content_hash WHERE embedding_input_hash IS NULL').run();
+      }
+    })();
   }
 
   // --- Sync -----------------------------------------------------------------
@@ -20667,10 +20671,64 @@ function sameStringSet(actual: readonly string[], expected: readonly string[]): 
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
 
-function addColumnIfMissing(db: Database, table: string, column: string, definition: string): void {
+/** Everything an open that is not on the fast path runs to bring a store to this build's schema, idempotently. */
+function applyConnectorStoreOpenSchema(db: Database): void {
+  refuseUnversionedConnectorStoreSchema(db);
+  LocalConnectorStore.migrateSchema(db);
+  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations());
+  createConnectorStoreChunkMediaReleases(db);
+  createConnectorStoreMediaJudgments(db);
+  createConnectorStoreItemTextVersions(db);
+  createConnectorStoreVisibilityTables(db);
+  createStoreTotals(db, NON_SYNC_RUN_CONNECTORS_SQL);
+  createConnectorStorePeopleIndex(db);
+  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+  );`);
+  validateConnectorStoreSchema(db);
+}
+
+let openShape: number | undefined;
+/**
+ * This build's schema code, as a positive 31-bit number: a hash of every
+ * statement applyConnectorStoreOpenSchema runs on an empty store, recorded
+ * once per process on an in-memory database. A store whose user_version
+ * equals it has had all of them applied by this code.
+ */
+export function connectorStoreOpenShape(): number {
+  if (openShape !== undefined) return openShape;
+  const db = new Database(':memory:');
+  const seen: string[] = [];
+  try {
+    db.exec('PRAGMA busy_timeout = 0; PRAGMA foreign_keys = ON;');
+    const exec = db.exec.bind(db);
+    const query = db.query.bind(db);
+    const prepare = db.prepare.bind(db);
+    const run = db.run.bind(db);
+    (db as { exec: unknown }).exec = (sql: string, ...rest: unknown[]) => { seen.push(sql); return (exec as (...a: unknown[]) => unknown)(sql, ...rest); };
+    (db as { query: unknown }).query = (sql: string) => { seen.push(sql); return query(sql); };
+    (db as { prepare: unknown }).prepare = (sql: string, ...rest: unknown[]) => { seen.push(sql); return (prepare as (...a: unknown[]) => unknown)(sql, ...rest); };
+    (db as { run: unknown }).run = (sql: string, ...rest: unknown[]) => { seen.push(sql); return (run as (...a: unknown[]) => unknown)(sql, ...rest); };
+    applyConnectorStoreOpenSchema(db);
+  } finally {
+    db.close();
+  }
+  let hash = 0x811c9dc5;
+  const text = `${CONNECTOR_STORE_SQLITE_SCHEMA_VERSION}\n${seen.map((sql) => sql.replace(/\s+/g, ' ').trim()).join('\n')}`;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  // Never 0: a store no open of this code has finished reads 0.
+  openShape = (hash & 0x7fffffff) || 1;
+  return openShape;
+}
+
+function addColumnIfMissing(db: Database, table: string, column: string, definition: string): boolean {
   const rows = db.query(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
-  if (rows.some((row) => row.name === column)) return;
+  if (rows.some((row) => row.name === column)) return false;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  return true;
 }
 
 function createItemOwnersTable(db: Database): void {

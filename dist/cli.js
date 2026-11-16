@@ -60537,11 +60537,69 @@ function sameStrings(actual, expected) {
 function sameStringSet(actual, expected) {
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
+function applyConnectorStoreOpenSchema(db) {
+  refuseUnversionedConnectorStoreSchema(db);
+  LocalConnectorStore.migrateSchema(db);
+  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations());
+  createConnectorStoreChunkMediaReleases(db);
+  createConnectorStoreMediaJudgments(db);
+  createConnectorStoreItemTextVersions(db);
+  createConnectorStoreVisibilityTables(db);
+  createStoreTotals(db, NON_SYNC_RUN_CONNECTORS_SQL);
+  createConnectorStorePeopleIndex(db);
+  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+  );`);
+  validateConnectorStoreSchema(db);
+}
+function connectorStoreOpenShape() {
+  if (openShape !== undefined)
+    return openShape;
+  const db = new Database9(":memory:");
+  const seen = [];
+  try {
+    db.exec("PRAGMA busy_timeout = 0; PRAGMA foreign_keys = ON;");
+    const exec = db.exec.bind(db);
+    const query = db.query.bind(db);
+    const prepare = db.prepare.bind(db);
+    const run = db.run.bind(db);
+    db.exec = (sql, ...rest) => {
+      seen.push(sql);
+      return exec(sql, ...rest);
+    };
+    db.query = (sql) => {
+      seen.push(sql);
+      return query(sql);
+    };
+    db.prepare = (sql, ...rest) => {
+      seen.push(sql);
+      return prepare(sql, ...rest);
+    };
+    db.run = (sql, ...rest) => {
+      seen.push(sql);
+      return run(sql, ...rest);
+    };
+    applyConnectorStoreOpenSchema(db);
+  } finally {
+    db.close();
+  }
+  let hash = 2166136261;
+  const text = `${CONNECTOR_STORE_SQLITE_SCHEMA_VERSION}
+${seen.map((sql) => sql.replace(/\s+/g, " ").trim()).join(`
+`)}`;
+  for (let index = 0;index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  openShape = hash & 2147483647 || 1;
+  return openShape;
+}
 function addColumnIfMissing(db, table, column, definition) {
   const rows = db.query(`PRAGMA table_info(${table})`).all();
   if (rows.some((row) => row.name === column))
-    return;
+    return false;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  return true;
 }
 function createItemOwnersTable(db) {
   db.exec(`
@@ -60974,7 +61032,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
     FROM items i
     WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
   )
-`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_source_size_limits();
   init_store_totals();
@@ -61210,19 +61268,13 @@ var init_local_index = __esm(() => {
             throw new Error("Connector store read-only mode requires the v7 filter schema or newer.");
           }
         } else {
-          refuseUnversionedConnectorStoreSchema(this.db);
-          this.migrate();
-          runSqliteMigrations(this.db, SQLITE_STORE_ID, connectorStoreMigrations());
-          createConnectorStoreChunkMediaReleases(this.db);
-          createConnectorStoreMediaJudgments(this.db);
-          createConnectorStoreItemTextVersions(this.db);
-          createConnectorStoreVisibilityTables(this.db);
-          createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
-          createConnectorStorePeopleIndex(this.db);
-          this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
-          local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
-        );`);
-          validateConnectorStoreSchema(this.db);
+          const shape = connectorStoreOpenShape();
+          const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === shape;
+          if (!current) {
+            applyConnectorStoreOpenSchema(this.db);
+            if (this.dbPath !== ":memory:")
+              this.db.exec(`PRAGMA user_version = ${shape}`);
+          }
           if (migrating) {
             setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
             validateConnectorStoreRows(this.db, "v15");
@@ -66122,8 +66174,8 @@ ${parentKey(ref)}`, { ref, origin });
       })();
       return { counts, matchedLocalItemIds, refreshedLocalItemIds };
     }
-    migrate() {
-      this.db.exec(`
+    static migrateSchema(db) {
+      db.exec(`
       CREATE TABLE IF NOT EXISTS sync_runs (
         sync_run_id TEXT PRIMARY KEY,
         corpus_id TEXT NOT NULL,
@@ -66145,8 +66197,8 @@ ${parentKey(ref)}`, { ref, origin });
       CREATE INDEX IF NOT EXISTS idx_sync_runs_last_sync ON sync_runs(started_at)
         WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL};
     `);
-      createConversationScopedItemsTable(this.db, "items", true);
-      this.db.exec(`
+      createConversationScopedItemsTable(db, "items", true);
+      db.exec(`
       CREATE INDEX IF NOT EXISTS idx_items_local_item_id ON items(local_item_id);
       CREATE TABLE IF NOT EXISTS chunks (
         chunk_pk INTEGER PRIMARY KEY,
@@ -66185,14 +66237,14 @@ ${parentKey(ref)}`, { ref, origin });
       CREATE INDEX IF NOT EXISTS idx_connector_store_chunk_embeddings_model
         ON chunk_embeddings(model_id);
     `);
-      createItemOwnersTable(this.db);
-      addColumnIfMissing(this.db, "sync_runs", "audit_receipt_sha256", "TEXT");
-      addColumnIfMissing(this.db, "items", "search_text", "TEXT");
-      addColumnIfMissing(this.db, "chunks", "embedding_input_hash", "TEXT");
-      this.db.query(`
-      UPDATE chunks SET embedding_input_hash = content_hash
-      WHERE embedding_input_hash IS NULL
-    `).run();
+      createItemOwnersTable(db);
+      addColumnIfMissing(db, "sync_runs", "audit_receipt_sha256", "TEXT");
+      addColumnIfMissing(db, "items", "search_text", "TEXT");
+      db.transaction(() => {
+        if (addColumnIfMissing(db, "chunks", "embedding_input_hash", "TEXT")) {
+          db.query("UPDATE chunks SET embedding_input_hash = content_hash WHERE embedding_input_hash IS NULL").run();
+        }
+      })();
     }
     async syncFromConnector(connector, options) {
       try {

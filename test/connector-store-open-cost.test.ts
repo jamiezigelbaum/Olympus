@@ -60,3 +60,58 @@ test('only an open that migrates reads every row: a reopen at this schema, read-
   expect(writeOpen.some(scansRows)).toBe(false);
   expect(again!.searchItemsDetailed('synthetic', 5).rows.length).toBe(1);
 });
+
+// Store opens stalled the loop for minutes (lane 6 gate, 2026-11-16): every
+// writable open re-ran migrate() and the schema DDL, and one backfill
+// (`UPDATE chunks SET embedding_input_hash = content_hash ...`) took 46 s on a
+// 600k-chunk store at every open. A store whose PRAGMA user_version already
+// holds this build's schema fingerprint opens with the PRAGMAs and read-only
+// shape checks: no DDL, no UPDATE, nothing that takes the write lock.
+const writesSchema = (sql: string): boolean => /^\s*(CREATE|ALTER|DROP|UPDATE|INSERT|DELETE)\b/i.test(sql)
+  && !/^\s*CREATE TEMP TABLE/i.test(sql)
+  && !/tier_visibility_lease/i.test(sql);
+const OPEN_STATEMENT_CEILING = 100;
+
+test('a writable reopen at this schema runs a fixed few statements and no DDL or backfill', () => {
+  const { dir, cleanup } = tempDir('olympus-store-open-fast-');
+  cleanups.push(cleanup);
+  const dbPath = join(dir, 'internal.sqlite');
+  const options = { dbPath, corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, family: 'file' as const, trustDomain: 'internal' as const, tierLedger: null };
+  const first = statementsDuring(() => { new LocalConnectorStore(options).close(); });
+
+  const reopen = statementsDuring(() => { new LocalConnectorStore(options).close(); });
+  expect(reopen.filter(writesSchema)).toEqual([]);
+  expect(reopen.length).toBeLessThanOrEqual(OPEN_STATEMENT_CEILING);
+  expect(first.length).toBeGreaterThan(reopen.length * 2);
+});
+
+test('a store whose schema fingerprint differs runs the schema step once, then opens fast', () => {
+  const { dir, cleanup } = tempDir('olympus-store-open-shape-');
+  cleanups.push(cleanup);
+  const dbPath = join(dir, 'internal.sqlite');
+  const options = { dbPath, corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, family: 'file' as const, trustDomain: 'internal' as const, tierLedger: null };
+  new LocalConnectorStore(options).close();
+  const raw = new Database(dbPath);
+  raw.exec('PRAGMA user_version = 7');
+  raw.close();
+
+  const stepped = statementsDuring(() => { new LocalConnectorStore(options).close(); });
+  expect(stepped.some(writesSchema)).toBe(true);
+  const after = statementsDuring(() => { new LocalConnectorStore(options).close(); });
+  expect(after.filter(writesSchema)).toEqual([]);
+});
+
+test('the embedding-input backfill runs only when its column is added', () => {
+  const { dir, cleanup } = tempDir('olympus-store-open-backfill-');
+  cleanups.push(cleanup);
+  const dbPath = join(dir, 'internal.sqlite');
+  const options = { dbPath, corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, family: 'file' as const, trustDomain: 'internal' as const, tierLedger: null };
+  new LocalConnectorStore(options).close();
+  const backfills = (sql: string) => /embedding_input_hash = content_hash/.test(sql);
+  let raw: Database;
+  // A schema step that finds the column already there does not walk the rows.
+  raw = new Database(dbPath);
+  raw.exec('PRAGMA user_version = 7');
+  raw.close();
+  expect(statementsDuring(() => { new LocalConnectorStore(options).close(); }).some(backfills)).toBe(false);
+});

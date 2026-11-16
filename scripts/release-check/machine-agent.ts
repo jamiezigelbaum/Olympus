@@ -2281,6 +2281,7 @@ function dataRootSample(): Record<string, unknown> {
         try {
           const db = new Database(path, { readonly: true });
           try {
+            db.exec('PRAGMA busy_timeout = 1000');
             const rows = db.query("SELECT store_id, version FROM schema_version").all() as Array<{ store_id: string; version: number }>;
             row.schema = Object.fromEntries(rows.map((r) => [r.store_id, r.version]));
           } finally { db.close(); }

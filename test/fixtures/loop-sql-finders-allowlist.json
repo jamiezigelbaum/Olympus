@@ -157,11 +157,6 @@
       "reason": "a test's direct call to the ledger; the engine finds these on the read worker (family 3)"
     },
     {
-      "site": "migrate local-index.ts < new LocalConnectorStore local-index.ts",
-      "table": "chunks",
-      "reason": "boot or migration (step-back: boot work, later)"
-    },
-    {
       "site": "missingEmbeddingItemIds local-index.ts",
       "table": "items",
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
