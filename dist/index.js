@@ -1540,7 +1540,9 @@ var init_public_surface = __esm(() => {
   ];
   V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
     ...V0_4_HERMES_MCP_TOOLS,
-    "source_item_read"
+    "source_item_read",
+    "source_deep_read",
+    "source_deep_read_status"
   ];
   V0_4_PUBLIC_SOURCE_IDS = [
     "gmail.email",
@@ -8527,7 +8529,7 @@ var init_parent_label = __esm(() => {
 var init_secret_location_note = () => {};
 
 // src/core/remote-result.ts
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, REMOTE_PENDING_MESSAGE, REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, REMOTE_PENDING_MESSAGE, REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, DEEP_READ_STATES, DEEP_READ_JOB_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_source_item_read();
   init_app_release_capture();
@@ -8681,6 +8683,13 @@ var init_remote_result = __esm(() => {
   CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
   OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
   REMOTE_DESCRIPTIONS = {
+    source_deep_read: [
+      "Read ALL of one document, or one whole group, channel or chat, with the owner's private model on their computer, then answer the question from it.",
+      "For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.",
+      'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+      "It runs in the background; the answer lands in Olympus Private answers on the owner's computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status."
+    ].join(" "),
+    source_deep_read_status: "Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner's computer.",
     source_item_read: "Read more of a found Personal item. Pass its read_handle from olympus_search or source_answer. Handles expire after 30 minutes and work only on this connection. Each page is judged before release.",
     source_index_status: [
       "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
@@ -8903,6 +8912,21 @@ var init_remote_result = __esm(() => {
       }
     }
   };
+  DEEP_READ_STATES = ["reading", "answering", "done", "failed", "cancelled"];
+  DEEP_READ_JOB_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["id", "state", "sectionsTotal", "sectionsDone"],
+    properties: {
+      id: { type: "string", pattern: "^dr_[A-Za-z0-9_-]{8,}$" },
+      state: { type: "string", enum: [...DEEP_READ_STATES] },
+      sectionsTotal: { type: "integer", minimum: 0 },
+      sectionsDone: { type: "integer", minimum: 0 },
+      estimateSecondsLeft: { type: "integer", minimum: 0 },
+      waitingOn: { type: "string", enum: ["privacy checks"] },
+      failure: { type: "string" }
+    }
+  };
   REMOTE_OUTPUT_SCHEMAS = {
     source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
     source_answer_result: {
@@ -8910,6 +8934,18 @@ var init_remote_result = __esm(() => {
     },
     ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
     source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+    source_deep_read: {
+      type: "object",
+      additionalProperties: false,
+      required: ["job", "answerLandsIn"],
+      properties: { job: DEEP_READ_JOB_SCHEMA, answerLandsIn: { type: "string" } }
+    },
+    source_deep_read_status: {
+      oneOf: [
+        { type: "object", additionalProperties: false, required: ["jobs"], properties: { jobs: { type: "array", items: DEEP_READ_JOB_SCHEMA } } },
+        { type: "object", additionalProperties: false, required: ["cancelled"], properties: { cancelled: { type: "boolean" } } }
+      ]
+    },
     source_item_read: {
       type: "object",
       additionalProperties: false,

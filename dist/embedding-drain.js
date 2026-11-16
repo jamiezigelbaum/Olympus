@@ -1705,7 +1705,9 @@ var V0_4_HERMES_MCP_TOOLS = [
 ];
 var V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
   ...V0_4_HERMES_MCP_TOOLS,
-  "source_item_read"
+  "source_item_read",
+  "source_deep_read",
+  "source_deep_read_status"
 ];
 var V0_4_PUBLIC_SOURCE_IDS = [
   "gmail.email",
@@ -20086,6 +20088,13 @@ var NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
 var CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
 var OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
 var REMOTE_DESCRIPTIONS = {
+  source_deep_read: [
+    "Read ALL of one document, or one whole group, channel or chat, with the owner's private model on their computer, then answer the question from it.",
+    "For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.",
+    'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+    "It runs in the background; the answer lands in Olympus Private answers on the owner's computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status."
+  ].join(" "),
+  source_deep_read_status: "Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner's computer.",
   source_item_read: "Read more of a found Personal item. Pass its read_handle from olympus_search or source_answer. Handles expire after 30 minutes and work only on this connection. Each page is judged before release.",
   source_index_status: [
     "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
@@ -20308,6 +20317,21 @@ var REMOTE_ERROR_SCHEMA = {
     }
   }
 };
+var DEEP_READ_STATES = ["reading", "answering", "done", "failed", "cancelled"];
+var DEEP_READ_JOB_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "state", "sectionsTotal", "sectionsDone"],
+  properties: {
+    id: { type: "string", pattern: "^dr_[A-Za-z0-9_-]{8,}$" },
+    state: { type: "string", enum: [...DEEP_READ_STATES] },
+    sectionsTotal: { type: "integer", minimum: 0 },
+    sectionsDone: { type: "integer", minimum: 0 },
+    estimateSecondsLeft: { type: "integer", minimum: 0 },
+    waitingOn: { type: "string", enum: ["privacy checks"] },
+    failure: { type: "string" }
+  }
+};
 var REMOTE_OUTPUT_SCHEMAS = {
   source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
   source_answer_result: {
@@ -20315,6 +20339,18 @@ var REMOTE_OUTPUT_SCHEMAS = {
   },
   ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
   source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+  source_deep_read: {
+    type: "object",
+    additionalProperties: false,
+    required: ["job", "answerLandsIn"],
+    properties: { job: DEEP_READ_JOB_SCHEMA, answerLandsIn: { type: "string" } }
+  },
+  source_deep_read_status: {
+    oneOf: [
+      { type: "object", additionalProperties: false, required: ["jobs"], properties: { jobs: { type: "array", items: DEEP_READ_JOB_SCHEMA } } },
+      { type: "object", additionalProperties: false, required: ["cancelled"], properties: { cancelled: { type: "boolean" } } }
+    ]
+  },
   source_item_read: {
     type: "object",
     additionalProperties: false,
