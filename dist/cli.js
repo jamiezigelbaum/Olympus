@@ -192117,6 +192117,38 @@ function pickRelevantDays(candidates, hitProviderItemIds, spread = 1) {
     totalMessages: new Set(candidates.map(messageKey)).size
   };
 }
+function pickRelevantDaysWithin(candidates, hitProviderItemIds, fits, spread = 1) {
+  const whole = pickRelevantDays(candidates, hitProviderItemIds, spread);
+  if (whole.candidates.length === 0 || fits(whole.candidates))
+    return { ...whole, capped: false };
+  const hitsByDay = new Map;
+  const undated = new Set;
+  for (const candidate of candidates) {
+    const id = candidate.provenance.sourceItem.providerItemId;
+    if (!hitProviderItemIds.has(id))
+      continue;
+    const day = candidateDay(candidate);
+    if (!day) {
+      undated.add(id);
+      continue;
+    }
+    const ids = hitsByDay.get(day) ?? new Set;
+    ids.add(id);
+    hitsByDay.set(day, ids);
+  }
+  const order = [...hitsByDay.entries()].sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]));
+  const chosen = new Set(undated);
+  let kept;
+  for (const [, ids] of order) {
+    for (const id of ids)
+      chosen.add(id);
+    const next = pickRelevantDays(candidates, chosen, spread);
+    if (kept && !fits(next.candidates))
+      break;
+    kept = next;
+  }
+  return { ...kept ?? whole, capped: true };
+}
 function aboutDuration(seconds) {
   if (seconds < 90)
     return "about a minute";
@@ -192324,7 +192356,8 @@ ${readFooter(view, result)}` } : {},
       const choices = { all: { sections: fullSections, messageCount: allMessages, ...priced(fullSections) } };
       let relevantCandidates;
       if (set.whole === "conversation" && options.relevantItems) {
-        const pick = pickRelevantDays(candidates, await options.relevantItems(question, set, corpusIds));
+        const totalChars = candidates.reduce((n, c) => n + c.chunks.join("").length, 0) || 1;
+        const pick = pickRelevantDaysWithin(candidates, await options.relevantItems(question, set, corpusIds), (picked) => pace === undefined || fullSections * (picked.reduce((n, c) => n + c.chunks.join("").length, 0) / totalChars) * pace <= FULL_READ_DEFAULT_SECONDS);
         if (pick.candidates.length > 0) {
           relevantCandidates = pick.candidates;
           const sections = sectionsOf(pick.candidates);

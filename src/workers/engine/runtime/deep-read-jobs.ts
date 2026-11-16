@@ -194,6 +194,43 @@ export function pickRelevantDays(
   };
 }
 
+/**
+ * The relevant-days pick within a budget: hit days join in order of how many
+ * hits they hold (most first, then earliest), each with the day either side,
+ * until the next day would no longer fit. The first day always joins. Generic:
+ * hit counts only, no question-specific logic.
+ */
+export function pickRelevantDaysWithin(
+  candidates: readonly EvidenceCandidate[],
+  hitProviderItemIds: ReadonlySet<string>,
+  fits: (picked: readonly EvidenceCandidate[]) => boolean,
+  spread = 1,
+): ReturnType<typeof pickRelevantDays> & { capped: boolean } {
+  const whole = pickRelevantDays(candidates, hitProviderItemIds, spread);
+  if (whole.candidates.length === 0 || fits(whole.candidates)) return { ...whole, capped: false };
+  const hitsByDay = new Map<string, Set<string>>();
+  const undated = new Set<string>();
+  for (const candidate of candidates) {
+    const id = candidate.provenance.sourceItem.providerItemId;
+    if (!hitProviderItemIds.has(id)) continue;
+    const day = candidateDay(candidate);
+    if (!day) { undated.add(id); continue; }
+    const ids = hitsByDay.get(day) ?? new Set<string>();
+    ids.add(id);
+    hitsByDay.set(day, ids);
+  }
+  const order = [...hitsByDay.entries()].sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]));
+  const chosen = new Set(undated);
+  let kept: ReturnType<typeof pickRelevantDays> | undefined;
+  for (const [, ids] of order) {
+    for (const id of ids) chosen.add(id);
+    const next = pickRelevantDays(candidates, chosen, spread);
+    if (kept && !fits(next.candidates)) break;
+    kept = next;
+  }
+  return { ...(kept ?? whole), capped: true };
+}
+
 function aboutDuration(seconds: number): string {
   if (seconds < 90) return 'about a minute';
   const minutes = Math.round(seconds / 60);
@@ -426,7 +463,10 @@ export function createDeepReadJobs(options: {
       const choices: DeepReadJobView['choices'] = { all: { sections: fullSections, messageCount: allMessages, ...priced(fullSections) } };
       let relevantCandidates: EvidenceCandidate[] | undefined;
       if (set.whole === 'conversation' && options.relevantItems) {
-        const pick = pickRelevantDays(candidates, await options.relevantItems(question, set, corpusIds));
+        // Within the hour at the measured pace (sections scale with the text read); unmeasured, the whole pick.
+        const totalChars = candidates.reduce((n, c) => n + c.chunks.join('').length, 0) || 1;
+        const pick = pickRelevantDaysWithin(candidates, await options.relevantItems(question, set, corpusIds), picked => pace === undefined
+          || fullSections * (picked.reduce((n, c) => n + c.chunks.join('').length, 0) / totalChars) * pace <= FULL_READ_DEFAULT_SECONDS);
         if (pick.candidates.length > 0) {
           relevantCandidates = pick.candidates;
           const sections = sectionsOf(pick.candidates);

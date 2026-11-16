@@ -721,6 +721,12 @@ and messages kept against the totals. `--day-picker-only` scores this alone,
 with no model call (minutes, not hours). `--read relevant_days` runs the deep
 arm on the picked days instead of the whole set, so its three numbers can be
 set beside the full read's.
+`--day-budget-sections 54,108,216` also scores the pick capped as the engine
+caps it to its time budget (`pickRelevantDaysWithin`: hit days join busiest
+first until the next would overflow), per budget in sections; sections are
+estimated from the share of text picked, counted at `--deep-prompt-bytes` (the
+engine's 27,000-byte ceiling when not named). `--read relevant_days` reads
+the first budget's pick.
 
 Run length is about the sum of sections times seconds per section, plus one
 baseline Ask per row. Run a couple of rows first (`--only`) to measure seconds

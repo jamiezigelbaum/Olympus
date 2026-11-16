@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Analyst, EvidencePack } from '../src/core/contracts.ts';
 import type { SourceItemIdentity } from '../src/core/source-index/types.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
-import { chooseDeepRead, createDeepReadJobs, DeepReadRefused, pickRelevantDays, type DeepReadStore } from '../src/workers/engine/runtime/deep-read-jobs.ts';
+import { chooseDeepRead, createDeepReadJobs, DeepReadRefused, pickRelevantDays, pickRelevantDaysWithin, type DeepReadStore } from '../src/workers/engine/runtime/deep-read-jobs.ts';
 import type { AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 
 const dirs: string[] = [];
@@ -197,6 +197,16 @@ describe('relevant-days picker', () => {
     expect(pick.candidates.map(c => c.chunks[0])).toEqual(['a', 'b', 'c', 'e', 'f', 'g']);
     expect(pick).toMatchObject({ days: 5, totalDays: 6, hitDays: 2, messages: 6, totalMessages: 7 });
     expect(pickRelevantDays(candidates, new Set()).candidates).toEqual([]);
+  });
+  test('within a budget, the busiest hit days join first and the pick stops before it overflows', () => {
+    const candidates = [at('a', '2024-01-01'), at('b', '2024-01-10'), at('c', '2024-01-10'), at('d', '2024-01-20'), at('e', '2024-01-20'), at('f', '2024-01-20')];
+    const hits = new Set(['a', 'b', 'c', 'd', 'e', 'f']);
+    const two = pickRelevantDaysWithin(candidates, hits, picked => picked.length <= 4);
+    expect(two.candidates.map(c => c.chunks[0])).toEqual(['d', 'e', 'f']);
+    expect(two).toMatchObject({ capped: true, days: 1 });
+    expect(pickRelevantDaysWithin(candidates, hits, picked => picked.length <= 5).candidates.map(c => c.chunks[0])).toEqual(['b', 'c', 'd', 'e', 'f']);
+    expect(pickRelevantDaysWithin(candidates, hits, () => true)).toMatchObject({ capped: false, days: 3 });
+    expect(pickRelevantDaysWithin(candidates, hits, () => false).candidates).toHaveLength(3); // the first day always joins
   });
   test('the hour rule: full under an hour, relevant days over, the owner\'s pick wins', () => {
     const relevantDays = { sections: 2, messageCount: 50, seconds: 120 };

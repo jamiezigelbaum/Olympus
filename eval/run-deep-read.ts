@@ -8,15 +8,15 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { dirname } from 'node:path';
 import type { Analyst, AnalystResult, EvidenceCandidate, EvidencePack } from '../src/core/contracts.ts';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
-import { runDeepRead } from '../src/core/deep-read.ts';
+import { planDeepReadSections, runDeepRead } from '../src/core/deep-read.ts';
 import { createAnalyst, DEFAULT_ANALYST_MAX_OUTPUT_CHARS, withPromptBudget } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel, maxTokensForChars } from '../src/core/analyst-delphi.ts';
 import { DelphiClient } from '../src/core/delphi.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import { DEFAULT_MAX_CHARS_PER_CANDIDATE, DEFAULT_MAX_RESULTS, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
-import { localAnalystPromptBudget, resolveLocalAnalystWindow, type LocalAnalystPromptBudget } from '../src/workers/source-index/local-analyst-window.ts';
+import { LOCAL_ANALYST_PROMPT_BYTES_CEILING, localAnalystPromptBudget, resolveLocalAnalystWindow, type LocalAnalystPromptBudget } from '../src/workers/source-index/local-analyst-window.ts';
 import { prepareBuiltInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
-import { DeepReadRefused, pickRelevantDays, readDeepReadSet, searchSetHits, type DeepReadMode, type DeepReadStore } from '../src/workers/engine/runtime/deep-read-jobs.ts';
+import { DeepReadRefused, pickRelevantDays, pickRelevantDaysWithin, readDeepReadSet, searchSetHits, type DeepReadMode, type DeepReadStore } from '../src/workers/engine/runtime/deep-read-jobs.ts';
 import { openEvalDataRoot, type EvalStoreCount, type EvalSkippedStore } from './data-root.ts';
 import { parseDataRootArgs } from './data-root-args.ts';
 import { buildEvalPack, configuredEvalEmbedding, createEvalSourceLanes, prepareEvalEmbedding, type EvalStoreSearch } from './retrieval.ts';
@@ -51,7 +51,9 @@ export interface DeepOutcome extends ArmOutcome {
   /** Listing and reading the set's text; reading sections; answering from the notes. */
   setSeconds: number; readingSeconds: number; answerSeconds: number; secondsPerSection: number | null;
   /** Conversations: whether the relevant-days pick kept the answer-bearing message, and how much it kept. */
-  dayPicker?: { kept: boolean; days: number; totalDays: number; messageCount: number; totalMessages: number };
+  dayPicker?: { kept: boolean; days: number; totalDays: number; messageCount: number; totalMessages: number; sections: number; totalSections: number };
+  /** The same pick within each section budget (--day-budget-sections), as the engine caps it to the hour. */
+  dayPickerBudgets?: Array<{ budget: number; kept: boolean; days: number; messageCount: number; sections: number }>;
   /** Which read the deep arm ran. */
   readMode?: DeepReadMode;
 }
@@ -66,7 +68,8 @@ interface Summary {
   baseline?: ArmSummary;
   deep: ArmSummary & { sections: number; sectionsRead: number; readingSeconds: number; secondsPerSection: number | null };
   /** Day-picker recall: conversation rows whose answer-bearing message the relevant-days pick kept, and the share of days and messages it kept. */
-  dayPicker?: { rows: number; kept: number; days: number; totalDays: number; messageCount: number; totalMessages: number };
+  dayPicker?: { rows: number; kept: number; days: number; totalDays: number; messageCount: number; totalMessages: number; sections: number; totalSections: number };
+  dayPickerBudgets?: Array<{ budget: number; rows: number; kept: number; days: number; messageCount: number; sections: number }>;
   /** Deep read against baseline, row by row: a win is deep yes and baseline no. */
   paired?: { found: Paired; read: Paired; right: Paired; correctByMeaning?: Paired };
 }
@@ -104,10 +107,17 @@ export function summarizeDeepRead(rows: readonly DeepReadRow[]): Summary {
   const baselines = rows.flatMap(row => row.baseline ? [row.baseline] : []);
   const meaning = rows.some(row => row.deep.meaning !== undefined);
   const picks = deep.flatMap(d => d.dayPicker ? [d.dayPicker] : []);
-  const sum = (key: 'days' | 'totalDays' | 'messageCount' | 'totalMessages') => picks.reduce((n, p) => n + p[key], 0);
+  const sum = (key: 'days' | 'totalDays' | 'messageCount' | 'totalMessages' | 'sections' | 'totalSections') => picks.reduce((n, p) => n + p[key], 0);
+  const budgets = [...new Set(deep.flatMap(d => (d.dayPickerBudgets ?? []).map(b => b.budget)))];
   return {
     ...(picks.length ? { dayPicker: { rows: picks.length, kept: picks.filter(p => p.kept).length,
-      days: sum('days'), totalDays: sum('totalDays'), messageCount: sum('messageCount'), totalMessages: sum('totalMessages') } } : {}),
+      days: sum('days'), totalDays: sum('totalDays'), messageCount: sum('messageCount'), totalMessages: sum('totalMessages'),
+      sections: sum('sections'), totalSections: sum('totalSections') } } : {}),
+    ...(budgets.length ? { dayPickerBudgets: budgets.map(budget => {
+      const at = deep.flatMap(d => (d.dayPickerBudgets ?? []).filter(b => b.budget === budget));
+      return { budget, rows: at.length, kept: at.filter(b => b.kept).length, days: at.reduce((n, b) => n + b.days, 0),
+        messageCount: at.reduce((n, b) => n + b.messageCount, 0), sections: at.reduce((n, b) => n + b.sections, 0) };
+    }) } : {}),
     ...(baselines.length ? { baseline: armSummary(baselines) } : {}),
     deep: { ...armSummary(deep), sections: deep.reduce((n, d) => n + d.sections, 0), sectionsRead: sections, readingSeconds,
       secondsPerSection: sections ? Math.round(readingSeconds / sections * 10) / 10 : null },
@@ -145,6 +155,8 @@ export interface DeepReadEvalInput {
   setHits?: (q: DeepReadQuestion, corpusIds: readonly string[]) => Promise<ReadonlySet<string>>;
   /** The deep arm's read: every message (default) or the relevant days. */
   read?: DeepReadMode;
+  /** Section budgets to cap the relevant-days pick at; the relevant-days read uses the first. */
+  dayBudgets?: readonly number[];
   /** Score the day picker only: no model call. */
   dayPickerOnly?: boolean;
   storeCounts: readonly EvalStoreCount[]; skippedStores?: readonly EvalSkippedStore[]; gitSha: string;
@@ -219,20 +231,31 @@ async function deepArm(q: DeepReadQuestion, input: DeepReadEvalInput, onSection:
   // The target is the expected item's passage holding the quote; a quote split over two passages falls back to the item.
   const targets = new Set(withQuote.length ? withQuote : itemPieces);
   let dayPicker: DeepOutcome['dayPicker'];
+  let dayPickerBudgets: DeepOutcome['dayPickerBudgets'];
   let reading = set.candidates as EvidenceCandidate[];
   if (q.kind === 'conversation' && input.setHits) {
-    const pick = pickRelevantDays(set.candidates as EvidenceCandidate[], await input.setHits(q, set.corpusIds));
-    const kept = new Set(pick.candidates);
-    dayPicker = { kept: [...targets].some(index => kept.has(set.candidates[index]!)), days: pick.days, totalDays: pick.totalDays,
-      messageCount: pick.messages, totalMessages: pick.totalMessages };
-    if (input.read === 'relevant_days' && pick.candidates.length) reading = pick.candidates;
+    const all = set.candidates as EvidenceCandidate[];
+    const hits = await input.setHits(q, set.corpusIds);
+    // Sections scale with the text read, as the engine estimates them.
+    const totalSections = planDeepReadSections(q.question, all, set.corpusIds, input.deepPromptBytes, 'compact').length;
+    const chars = (picked: readonly EvidenceCandidate[]) => picked.reduce((n, c) => n + c.chunks.join('').length, 0);
+    const totalChars = chars(all) || 1;
+    const sectionsOf = (picked: readonly EvidenceCandidate[]) => Math.ceil(totalSections * chars(picked) / totalChars);
+    const keeps = (picked: readonly EvidenceCandidate[]) => { const kept = new Set(picked); return [...targets].some(index => kept.has(all[index]!)); };
+    const pick = pickRelevantDays(all, hits);
+    dayPicker = { kept: keeps(pick.candidates), days: pick.days, totalDays: pick.totalDays,
+      messageCount: pick.messages, totalMessages: pick.totalMessages, sections: sectionsOf(pick.candidates), totalSections };
+    const budgeted = (input.dayBudgets ?? []).map(budget => ({ budget, pick: pickRelevantDaysWithin(all, hits, picked => sectionsOf(picked) <= budget) }));
+    if (budgeted.length) dayPickerBudgets = budgeted.map(({ budget, pick: p }) => ({ budget, kept: keeps(p.candidates), days: p.days, messageCount: p.messages, sections: sectionsOf(p.candidates) }));
+    const readPick = budgeted[0]?.pick ?? pick;
+    if (input.read === 'relevant_days' && readPick.candidates.length) reading = readPick.candidates;
   }
   const readMode: DeepReadMode = reading === set.candidates ? 'all' : 'relevant_days';
   // Indices below are into the read's own candidates.
   const readTargets = new Set([...targets].flatMap(index => { const at = reading.indexOf(set.candidates[index]!); return at >= 0 ? [at] : []; }));
   const readItemPieces = itemPieces.flatMap(index => { const at = reading.indexOf(set.candidates[index]!); return at >= 0 ? [at] : []; });
   const base = { ...empty, items: set.items, unreadable: set.unreadable, passages: set.candidates.length, targetPieces: targets.size,
-    found: targets.size > 0, setSeconds: seconds(setDone - started), ...(dayPicker ? { dayPicker } : {}), readMode };
+    found: targets.size > 0, setSeconds: seconds(setDone - started), ...(dayPicker ? { dayPicker } : {}), ...(dayPickerBudgets ? { dayPickerBudgets } : {}), readMode };
   if (input.dayPickerOnly) return { ...base, code: 'DAY_PICKER_ONLY', seconds: seconds(performance.now() - started) };
   let readingStarted: number | undefined; let readingEnded: number | undefined;
   let notes: number[] = []; let sections = 0;
@@ -285,7 +308,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
       if (key === '--judge-answers' || key === '--no-baseline' || key === '--day-picker-only') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
-      if (!['--output', '--max-results', '--max-chars-per-candidate', '--prompt-bytes', '--deep-prompt-bytes', '--only', '--read'].includes(key!)) throw new Error('Unsupported deep-read eval option.');
+      if (!['--output', '--max-results', '--max-chars-per-candidate', '--prompt-bytes', '--deep-prompt-bytes', '--only', '--read', '--day-budget-sections'].includes(key!)) throw new Error('Unsupported deep-read eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Deep-read eval option requires a value.');
       values.set(key!, value);
@@ -300,6 +323,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   const read = values.get('--read');
   if (read !== undefined && read !== 'all' && read !== 'relevant_days') throw new Error('--read must be all or relevant_days.');
   const dayPickerOnly = values.has('--day-picker-only');
+  const dayBudgets = values.get('--day-budget-sections')?.split(',').map(value => positiveInteger(value.trim(), 0));
+  if (dayBudgets?.some(value => value <= 0)) throw new Error('--day-budget-sections takes positive section counts, comma-separated.');
   enter('open_data_root');
   const opened = openEvalDataRoot(isolation);
   try {
@@ -316,6 +341,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const output = values.get('--output') ?? 'eval/private/deep-read.latest.json';
     const run = async (rest: Pick<DeepReadEvalInput, 'analyst' | 'deepPromptBytes' | 'deepPromptBytesSource' | 'lanes'> & Partial<DeepReadEvalInput>) => {
       const receipt = await runDeepReadEval({ dataset: selected, stores: opened.stores, setHits, ...(read ? { read } : {}), ...(dayPickerOnly ? { dayPickerOnly } : {}),
+        ...(dayBudgets?.length ? { dayBudgets } : {}),
         storeCounts: opened.storeCounts, skippedStores: opened.skipped,
         gitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
         onProgress: (index, total, step) => enter(`question ${index}/${total}: ${step}`),
@@ -329,7 +355,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     };
     if (dayPickerOnly) {
       const lanes = createEvalSourceLanes({ ...opened });
-      const receipt = await run({ lanes: () => lanes(''), deepPromptBytes: 1, deepPromptBytesSource: 'option',
+      // Sections are counted at the named budget, else at the engine's ceiling.
+      const receipt = await run({ lanes: () => lanes(''), deepPromptBytes: positiveInteger(values.get('--deep-prompt-bytes'), LOCAL_ANALYST_PROMPT_BYTES_CEILING), deepPromptBytesSource: 'option',
         analyst: { analyze: async () => { throw new Error('No model call in --day-picker-only.'); } } });
       console.log(JSON.stringify({ storesOpened: opened.stores.length, storesSkipped: opened.skipped.length, ...receipt.summary }));
       return;

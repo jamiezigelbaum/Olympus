@@ -130,9 +130,10 @@ test('scores the day picker with the engine\'s own scoped search, and can run th
     const only = await runDeepReadEval({
       dataset: drafted.dataset, stores: opened.stores, lanes: () => lanes(''), analyst: { analyze: async () => { throw new Error('no model'); } },
       deepPromptBytes: 1, deepPromptBytesSource: 'option', storeCounts: opened.storeCounts, gitSha: 'fixture',
-      setHits: async () => new Set(), dayPickerOnly: true,
+      setHits: async () => new Set([q!.expected[0]!.provider_item_id]), dayPickerOnly: true, dayBudgets: [1, 1_000],
     });
-    expect(only.rows[0]!.deep).toMatchObject({ code: 'DAY_PICKER_ONLY', dayPicker: { kept: false } });
+    expect(only.summary.overall.dayPickerBudgets?.map(b => [b.budget, b.rows, b.kept])).toEqual([[1, 1, 1], [1_000, 1, 1]]);
+    expect(only.rows[0]!.deep).toMatchObject({ code: 'DAY_PICKER_ONLY', dayPicker: { kept: true } });
   } finally { opened.close(); }
 }, 60_000);
 
