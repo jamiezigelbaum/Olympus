@@ -1,12 +1,12 @@
-// #1639: `olympus engine install` replacing a running version copies the
-// stores first, puts them back when the new one does not prove healthy, and
-// removes the copies when it does, the way `olympus worker upgrade` does.
+// #1639: `olympus engine install` replacing a running version sets the data
+// root aside first, puts it back when the new one does not prove healthy, and
+// removes the copy when it does, the way `olympus worker upgrade` does.
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { failedUpdateSetAsidePath, readWorkerUpgradeInFlight, recordSchemaBackup, workerUpgradeInFlight } from '../src/core/boot-progress.ts';
+import { updateInFlightSince, updateRecordPath } from '../src/core/data-root-snapshot.ts';
 import { commitEngineStores, copyEngineStores, restoreEngineStores } from '../src/core/engine-store-copies.ts';
 import { olympusDataRoot, sharedDataPath } from '../src/core/olympus-layout.ts';
 
@@ -27,100 +27,61 @@ function setup() {
   return { env, store, body, update };
 }
 
-describe('the store copies an engine install takes', () => {
-  test('a failed new version: the stores go back as they were, and the mark goes', () => {
-    const { env, store, body, update } = setup();
-    copyEngineStores(env, { bunBin: process.execPath });
-    expect(workerUpgradeInFlight(env)).toBe(true);
-    expect(existsSync(`${store}.pre-schema-upgrade.bak`)).toBe(true);
-    update();
-    expect(restoreEngineStores(env)).toEqual(['ledger.sqlite']);
-    expect(body()).toBe('old');
-    expect(workerUpgradeInFlight(env)).toBe(false);
-  }, 30_000);
-
-  test('a failed new version: the stores and ledgers it made are set aside intact, and nothing that was there before is touched (run 43751182260)', () => {
+describe('the copy of the data an engine install takes', () => {
+  test('a failed new version: the data goes back as it was, and the record of the update says only what was kept', () => {
     const { env, body, update } = setup();
-    const root = olympusDataRoot(env);
-    const ledger = join(root, 'classification-ledger.jsonl');
-    writeFileSync(ledger, '{"kept":1}\n');
-    copyEngineStores(env, { bunBin: process.execPath });
-    const startedMs = Date.parse(readWorkerUpgradeInFlight(env)!);
+    copyEngineStores(env);
+    expect(updateInFlightSince(env)).toBeDefined();
+    expect(existsSync(`${olympusDataRoot(env)}.before-update`)).toBe(true);
     update();
-    // A file that was there before the mark, written by the new version, keeps its place and its bytes.
-    writeFileSync(ledger, '{"kept":1}\n{"later":2}\n');
-    const made = join(root, 'sources', 'archive.imports', '1', 'stores', 'email.secure_local.sqlite');
-    mkdirSync(join(made, '..'), { recursive: true });
-    const db = new Database(made, { create: true });
-    db.exec("CREATE TABLE imported (body TEXT); INSERT INTO imported VALUES ('mail')");
-    db.close();
-    writeFileSync(`${made}-wal`, 'wal bytes');
-    const madeBytes = readFileSync(made);
-    writeFileSync(join(root, 'embedding-ledger.jsonl'), '{}\n');
-    expect(restoreEngineStores(env)).toEqual([
-      'ledger.sqlite',
-      'embedding-ledger.jsonl (made by the update, set aside)',
-      'sources/archive.imports/1/stores/email.secure_local.sqlite (made by the update, set aside)',
-    ]);
+    expect(restoreEngineStores(env, { log: () => {} })[0]).toBe('The Olympus data was put back as it was before the update.');
     expect(body()).toBe('old');
-    expect(existsSync(made) || existsSync(`${made}-wal`) || existsSync(join(root, 'embedding-ledger.jsonl'))).toBe(false);
-    const aside = failedUpdateSetAsidePath(made, startedMs);
-    expect(readFileSync(aside).equals(madeBytes)).toBe(true);
-    expect(readFileSync(`${aside}-wal`, 'utf8')).toBe('wal bytes');
-    expect(readFileSync(ledger, 'utf8')).toBe('{"kept":1}\n{"later":2}\n');
-
-    // A second failure makes the store again: its own set-aside sits beside the first, which keeps its bytes.
-    copyEngineStores(env, { bunBin: process.execPath });
-    const secondMs = Date.parse(readWorkerUpgradeInFlight(env)!);
-    new Database(made, { create: true }).close();
-    expect(restoreEngineStores(env)).toEqual([
-      'ledger.sqlite',
-      'sources/archive.imports/1/stores/email.secure_local.sqlite (made by the update, set aside)',
-    ]);
-    expect(readFileSync(aside).equals(madeBytes)).toBe(true);
-    expect(existsSync(failedUpdateSetAsidePath(made, secondMs))).toBe(true);
-
-    // The next committed upgrade clears every set-aside with the copies.
-    copyEngineStores(env, { bunBin: process.execPath });
-    commitEngineStores(env);
-    expect(existsSync(aside) || existsSync(`${aside}-wal`) || existsSync(failedUpdateSetAsidePath(made, secondMs))).toBe(false);
+    expect(updateInFlightSince(env)).toBeUndefined();
   }, 30_000);
 
-  test('a store file the failed update made and a second store then joined is set aside, not put back to its first state', () => {
-    const { env } = setup();
+  test('a second failure keeps its own failed root beside the first, and the next committed update removes both', () => {
+    const { env, update } = setup();
     const root = olympusDataRoot(env);
-    copyEngineStores(env, { bunBin: process.execPath });
-    const startedMs = Date.parse(readWorkerUpgradeInFlight(env)!);
-    const made = join(root, 'joined.sqlite');
-    new Database(made, { create: true }).close();
-    // The second store's update copies the file the first one made, as a schema update does.
-    const copy = `${made}.pre-schema-3.bak`;
-    writeFileSync(copy, readFileSync(made));
-    recordSchemaBackup(env, { storeId: 'second', dbPath: made, backupPath: copy });
-    expect(restoreEngineStores(env)).toEqual(['ledger.sqlite', 'joined.sqlite (made by the update, set aside)']);
-    expect(existsSync(made)).toBe(false);
-    expect(existsSync(failedUpdateSetAsidePath(made, startedMs))).toBe(true);
+    copyEngineStores(env);
+    update();
+    restoreEngineStores(env, { log: () => {} });
+    copyEngineStores(env);
+    update();
+    restoreEngineStores(env, { log: () => {} });
+    const failed = readdirSync(join(root, '..')).filter((name) => name.startsWith('olympus.failed-update-'));
+    expect(failed.length).toBe(2);
+    copyEngineStores(env);
+    expect(commitEngineStores(env).length).toBe(2);
+    expect(readdirSync(join(root, '..')).filter((name) => name.startsWith('olympus.'))).toEqual([]);
   }, 30_000);
 
-  test('a healthy new version: its changes stay, and the copies and the mark go', () => {
-    const { env, store, body, update } = setup();
-    copyEngineStores(env, { bunBin: process.execPath });
+  test('a healthy new version: its changes stay, and the copy goes', () => {
+    const { env, body, update } = setup();
+    copyEngineStores(env);
     update();
     commitEngineStores(env);
     expect(body()).toBe('new');
-    expect(existsSync(`${store}.pre-schema-upgrade.bak`)).toBe(false);
-    expect(workerUpgradeInFlight(env)).toBe(false);
+    expect(existsSync(`${olympusDataRoot(env)}.before-update`)).toBe(false);
+    expect(updateInFlightSince(env)).toBeUndefined();
   }, 30_000);
 
-  test('with no install in flight, or a mark that cannot be read, nothing is put back', () => {
-    const { env, store, body, update } = setup();
+  test('a store copy a build from before the whole-root copy left is removed at the next commit', () => {
+    const { env, store } = setup();
+    writeFileSync(`${store}.pre-schema-upgrade.bak`, 'old copy');
+    writeFileSync(sharedDataPath('schema-backups', env), `${JSON.stringify({ storeId: 'ledger', dbPath: store, backupPath: `${store}.pre-schema-upgrade.bak` })}\n`);
+    copyEngineStores(env);
+    commitEngineStores(env);
+    expect(existsSync(`${store}.pre-schema-upgrade.bak`)).toBe(false);
+  }, 30_000);
+
+  test('with no install in flight nothing is put back, and a record that cannot be read stops the put-back', () => {
+    const { env, body, update } = setup();
     expect(restoreEngineStores(env)).toEqual([]);
-    copyEngineStores(env, { bunBin: process.execPath });
+    copyEngineStores(env);
     update();
-    writeFileSync(sharedDataPath('upgrade-in-flight', env), '{');
-    expect(restoreEngineStores(env)).toEqual([]);
+    writeFileSync(updateRecordPath(env), '{');
+    expect(() => restoreEngineStores(env)).toThrow(/cannot be read/);
     expect(body()).toBe('new');
-    expect(existsSync(`${store}.pre-schema-upgrade.bak`)).toBe(true);
   }, 30_000);
 });
 
@@ -130,7 +91,7 @@ describe('the copy and the put-back wait for the stopped engine to let go of its
   // The owner (the background or a single engine), and the split's front, which holds only the engine process share.
   for (const [who, take] of [['the data owner', 'holdDataOwnerLock(env)'], ['the split front', "takeWorkerDataOwnerLock(env, { engineRole: 'front' })"]] as const) test(`while ${who} is still alive, nothing is put back and the refusal says so`, () => {
     const { env, body, update } = setup();
-    copyEngineStores(env, { bunBin: process.execPath });
+    copyEngineStores(env);
     update();
     const owner = Bun.spawn([process.execPath, '-e', `
       const { holdDataOwnerLock, takeWorkerDataOwnerLock } = await import(${JSON.stringify(join(import.meta.dir, '..', 'src', 'core', 'data-owner-lock.ts'))});
@@ -144,12 +105,12 @@ describe('the copy and the put-back wait for the stopped engine to let go of its
       return reader.read().then(() => {
         expect(() => restoreEngineStores(env, { ownerWaitMs: 200 })).toThrow('an Olympus process still owns its data');
         expect(body()).toBe('new');
-        expect(workerUpgradeInFlight(env)).toBe(true);
+        expect(updateInFlightSince(env)).toBeDefined();
         owner.kill('SIGKILL');
         return owner.exited;
       }).then(() => {
         // Once it has exited, the put-back goes ahead.
-        expect(restoreEngineStores(env, { ownerWaitMs: 5_000 })).toEqual(['ledger.sqlite']);
+        expect(restoreEngineStores(env, { ownerWaitMs: 5_000, log: () => {} })[0]).toContain('put back');
         expect(body()).toBe('old');
       });
     } catch (error) {

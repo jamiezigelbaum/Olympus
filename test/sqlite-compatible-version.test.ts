@@ -1,13 +1,11 @@
 // A compatible version per store (Chromium's sql::MetaTable rule). A
 // migration that only adds tables, indexes or columns leaves the store usable
-// by the build one version behind: no copy before it, and a rollback is
-// "start the previous build". Everything else raises the compatible version.
+// by the build one version behind: a rollback is "start the previous build". Everything else raises the compatible version.
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { upgradeInFlight } from './helpers/upgrade-in-flight.ts';
 import { finishBootProgress } from '../src/core/boot-progress.ts';
 import {
   additiveMigration,
@@ -30,13 +28,11 @@ afterEach(() => {
 });
 
 function home(): Record<string, string> {
-  // HOME is the data root itself, where the store copies live (boot-progress.ts ownedBackup).
   const base = mkdtempSync(join(tmpdir(), 'olympus-compatible-version-'));
   roots.push(base);
   const root = join(base, 'openclaw', 'olympus');
   mkdirSync(root, { recursive: true });
   const env = { HOME: root, XDG_DATA_HOME: base, XDG_CONFIG_HOME: join(base, 'config'), XDG_STATE_HOME: join(base, 'state'), XDG_CACHE_HOME: join(base, 'cache') };
-  upgradeInFlight(env);
   return env;
 }
 
@@ -118,43 +114,6 @@ describe('a store records the lowest version that can use it', () => {
     expect(readSqliteCompatibleVersion(db, 'fixture')).toBe(2);
     expect(() => assertSqliteSchemaCanOpen(db, 'fixture', 1)).toThrow('only knows schema_version 1');
     db.close();
-  });
-});
-
-describe('the boot copies only what a rollback needs', () => {
-  test('an additive update of a store a compatible-version build wrote takes no copy', () => {
-    const env = home();
-    const path = join(env.HOME!, 'store.sqlite');
-    const db = new Database(path, { create: true });
-    runSqliteMigrations(db, 'fixture', [CREATE], { env, log: () => {} });
-    db.query('INSERT INTO items (body) VALUES (?)').run('kept');
-    const lines: string[] = [];
-    runSqliteMigrations(db, 'fixture', [CREATE, ADD], { env, log: (line) => lines.push(line) });
-    db.close();
-    expect(existsSync(`${path}.pre-schema-1.bak`)).toBe(false);
-    expect(lines.at(-1)).toMatch(/^\[storage\] fixture schema 1 to 2: in memory, no backup, migrated in \d+ ms$/);
-  });
-
-  test('a store from before compatible versions is still copied, since the previous build refuses newer versions', () => {
-    const env = home();
-    const path = join(env.HOME!, 'store.sqlite');
-    const db = new Database(path, { create: true });
-    db.exec(`CREATE TABLE items (id INTEGER PRIMARY KEY, body TEXT);
-      CREATE TABLE schema_version (store_id TEXT PRIMARY KEY, version INTEGER NOT NULL, applied_at TEXT NOT NULL);
-      INSERT INTO schema_version (store_id, version, applied_at) VALUES ('fixture', 1, '2026-11-01T00:00:00Z');`);
-    runSqliteMigrations(db, 'fixture', [CREATE, ADD], { env, log: () => {} });
-    db.close();
-    expect(existsSync(`${path}.pre-schema-1.bak`)).toBe(true);
-  });
-
-  test('an update with any rewrite in it is copied', () => {
-    const env = home();
-    const path = join(env.HOME!, 'store.sqlite');
-    const db = new Database(path, { create: true });
-    runSqliteMigrations(db, 'fixture', [CREATE], { env, log: () => {} });
-    runSqliteMigrations(db, 'fixture', [CREATE, ADD, REWRITE], { env, log: () => {} });
-    db.close();
-    expect(existsSync(`${path}.pre-schema-1.bak`)).toBe(true);
   });
 });
 

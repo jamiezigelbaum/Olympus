@@ -15,6 +15,7 @@
  * opens a shared SQLite file must own a step or a kept entry.
  */
 import { removeAllSchemaBackups } from './boot-progress.ts';
+import { removeDataRootCopies } from './data-root-snapshot.ts';
 import { appReleaseLogDbPath, forgetAppReleaseItems } from './app-release-log.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
@@ -538,14 +539,14 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
 ];
 
 /**
- * The copies of shared stores taken before a schema update still hold the
- * forgotten account's rows: they go too (core/boot-progress.ts). A rollback
- * after this has no copy to restore and keeps the updated stores.
+ * The copies of the data an update keeps (core/data-root-snapshot.ts) and the store copies earlier builds took before a
+ * schema update (core/boot-progress.ts) still hold the forgotten account's rows: they go too. A rollback after this has
+ * no copy to restore and keeps the updated data.
  */
 function forgetSchemaBackups(env: LayoutEnv, dryRun: boolean): string[] {
-  const count = removeAllSchemaBackups(env, dryRun);
+  const count = removeAllSchemaBackups(env, dryRun) + removeDataRootCopies(env, dryRun);
   if (count === 0) return [];
-  return [`${dryRun ? 'Would remove' : 'Removed'} ${count} store ${count === 1 ? 'copy' : 'copies'} taken before a schema update.`];
+  return [`${dryRun ? 'Would remove' : 'Removed'} ${count} ${count === 1 ? 'copy' : 'copies'} of Olympus data taken before an update.`];
 }
 
 /**

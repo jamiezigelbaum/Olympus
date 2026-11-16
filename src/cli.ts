@@ -3757,7 +3757,7 @@ export function formatCliFatalError(error: unknown): string[] {
   ) return [message];
   const lines = [`Error [${candidate.code}]: ${message}`];
   // The hint says what happened next and what to do: a failed upgrade's
-  // "Stores put back" and "The previous version is running" live here.
+  // "The Olympus data was put back" and "The previous version is running" live here.
   const suggestion = (error as { suggestion?: unknown }).suggestion;
   if (typeof suggestion === 'string' && suggestion.trim()) lines.push(`Fix: ${suggestion}`);
   if (

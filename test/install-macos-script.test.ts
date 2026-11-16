@@ -243,7 +243,7 @@ exec /bin/mv "$@"
       'if [ "$2" = status ]; then if [ -f "$HOME/Library/LaunchAgents/ai.olympusplugin.engine.plist" ] && ! grep -q OlympusEngineHost "$HOME/Library/LaunchAgents/ai.olympusplugin.engine.plist"; then printf \'{\\n  "helper": {\\n    "installed": true,\\n    "in_use": false\\n  }\\n}\\n\'; else printf \'{\\n  "helper": {\\n    "installed": true,\\n    "in_use": true\\n  }\\n}\\n\'; fi; exit 0; fi',
       'if [ "$2" = verify ]; then [ -z "$FAKE_UNHEALTHY" ] || exit 1; exit 0; fi',
       // A failed install says what it put back, as the real one's reason does (engine-service.ts).
-      `if [ "$2" = install ] && { [ "$FAKE_FAIL_VERSION" = "${version}" ] || [ -n "$FAKE_FAIL_RESTORE" ]; }; then [ -z "$FAKE_PUT_BACK" ] || echo '  "reason": "It was stopped. Stores put back as they were before the update: ledger.sqlite.",'; exit 1; fi`,
+      `if [ "$2" = install ] && { [ "$FAKE_FAIL_VERSION" = "${version}" ] || [ -n "$FAKE_FAIL_RESTORE" ]; }; then [ -z "$FAKE_PUT_BACK" ] || echo '  "reason": "It was stopped. The Olympus data was put back as it was before the update. The data as the failed update left it is kept at /tmp/olympus.failed-update-1 (2 MB).",'; exit 1; fi`,
       // FAKE_TERM_VERSION: that version's install stops the installer (Ctrl-C, a closed Terminal).
       `if [ "$2" = install ] && [ "$FAKE_TERM_VERSION" = "${version}" ]; then kill -TERM "$PPID"; fi`,
       '',
@@ -457,7 +457,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(failed.stdout).toContain('restoring the previous one');
     expect(failed.stderr).toContain('the previous version was restored and is running');
     // The stores the new version put back are named on the screen, in the words the Linux installer uses.
-    expect(failed.stderr).toContain('Stores put back as they were before the update: ledger.sqlite.\n');
+    expect(failed.stderr).toContain('The Olympus data was put back as it was before the update. The data as the failed update left it is kept at /tmp/olympus.failed-update-1 (2 MB).\n');
     expect(appVersion(h.app)).toBe(V2);
     expect(existsSync(`${h.app}.failed`)).toBe(false);
     expect(h.logLines().slice(-3)).toEqual([

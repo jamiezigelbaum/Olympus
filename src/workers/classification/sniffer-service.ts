@@ -1372,13 +1372,13 @@ export class TierSnifferService {
     }
     for (const path of [...targets.map(target => target.ledger.dbPath), this.options.classificationLedgerPath]) {
       if (path === ':memory:' || this.retiredPrefilterCleaned.has(path)) continue;
-      // Moved aside, not deleted, until the upgrade that retired them commits
-      // (core/boot-progress.ts retireStatePath, #1563).
+      // Removed: a failed update puts the whole data root back, these
+      // included (core/data-root-snapshot.ts).
       const retired = retiredEmbeddingPrefilterPaths(path);
       for (const directory of retired.directories) retireStatePath(process.env, 'embedding_prefilter_weights', directory);
-      // Only a ledger whose -wal is fully written into it is moved: what a
-      // busy checkpoint leaves in the -wal would be lost. It stays as it is,
-      // and the next start tries again.
+      // Only a ledger whose -wal is fully written into it is removed, so a
+      // reader still inside it is not left on a file that is gone. It stays
+      // as it is, and the next start tries again.
       if (checkpointRetiredLedger(retired.ledger)) {
         retireStatePath(process.env, TIER_LEDGER_SQLITE_STORE_ID, retired.ledger);
         for (const suffix of ['-wal', '-shm']) rmSync(`${retired.ledger}${suffix}`, { force: true });

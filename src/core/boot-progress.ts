@@ -13,8 +13,8 @@
 // The store backups each schema update takes are recorded beside it, so a
 // failed upgrade can put them back before the previous version starts.
 
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { olympusDataRoot, sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
@@ -245,22 +245,6 @@ function bootProgressPath(env: LayoutEnv): string {
   return sharedDataPath('boot-progress', env);
 }
 
-/** The copy `olympus worker upgrade` takes of each store before the new version starts (upgrade-store-copies.ts). */
-export const UPGRADE_COPY_SUFFIX = '.pre-schema-upgrade.bak';
-
-/**
- * Whether a worker upgrade is in flight: `olympus worker upgrade` marks it
- * before it copies the stores and clears it when it commits or rolls back.
- * Only then can a copy the boot takes be put back by anything; otherwise (the
- * upgrade committed, or the version came by another way) a boot copy is never
- * restored and never removed (rc.13's success leg: stores the engine first
- * opened after the commit each left a backup). So the boot copies, and moves
- * retired state aside, only while one is in flight.
- */
-export function workerUpgradeInFlight(env: LayoutEnv): boolean {
-  return existsSync(sharedDataPath('upgrade-in-flight', env));
-}
-
 /** Folders under the data root that hold no store: model files and a backup being packed. */
 const STORELESS_FOLDERS = new Set(['models', 'backup-staging']);
 
@@ -293,93 +277,7 @@ export function dataRootFiles(env: LayoutEnv, keep: (name: string) => boolean, o
   return files.sort();
 }
 
-/** The files a version keeps state in: stores, lock databases and ledgers. The record of copies is the put-back's own. */
-function stateFiles(env: LayoutEnv, strict = false): string[] {
-  const record = basename(sharedDataPath('schema-backups', env));
-  return dataRootFiles(env, (name) => /\.(sqlite|db|jsonl)$/.test(name) && name !== record, { strict });
-}
-
-/**
- * Marks an upgrade in flight, with the engine stopped. The mark lists the state files there are now, so a put-back
- * also takes away the ones the new version made: on the Mac forced-failure leg (run 43751182260, 15 Nov 2026) the new
- * version went on with an mbox import and made its archive store at its own schema, which the restored 1.4.4 refused.
- */
-export function markWorkerUpgradeInFlight(env: LayoutEnv, startedAt: string): void {
-  const path = sharedDataPath('upgrade-in-flight', env);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const root = olympusDataRoot(env);
-  // A list with a gap would set aside a file that was there: one the scan could not read stops the mark.
-  const stateNow = stateFiles(env, true).map((file) => relative(root, file));
-  writePrivateFileAtomicSync(path, `${JSON.stringify({ started_at: startedAt, state_files: stateNow })}\n`);
-}
-
-/**
- * `<path>.pre-schema-<ms>.bak`, `<ms>` the failed update's start: a state file it made, set aside by its put-back until
- * the next committed upgrade. One name per attempt, so a later failure never lands on an earlier one's, and a numbered
- * copy's name, so an earlier version's forget and commit reach it too (they know numbered, retired and upgrade copies).
- */
-export function failedUpdateSetAsidePath(path: string, startedMs: number): string {
-  return `${path}.pre-schema-${startedMs}.bak`;
-}
-
 const COMPANIONS = ['-wal', '-shm', '-journal'] as const;
-
-/** The state files the mark listed, relative to the data root; undefined for a mark without the list (an earlier build's). */
-function markedStateFiles(env: LayoutEnv): Set<string> | undefined {
-  let listed: unknown;
-  try { listed = (JSON.parse(readFileSync(sharedDataPath('upgrade-in-flight', env), 'utf8')) as { state_files?: unknown }).state_files; } catch { return undefined; }
-  return Array.isArray(listed) ? new Set(listed.filter((entry): entry is string => typeof entry === 'string')) : undefined;
-}
-
-/**
- * Sets aside the state files made since the mark, each with its -wal, -shm and -journal under the same new name, and
- * records them with the copies: a forget reaches them, and the next committed upgrade removes them with the copies.
- * Never deleted here, since they can hold what the owner imported while the update ran. The companions move first and
- * nothing already there is replaced, so a put-back cut short and run again finishes the move without losing a part.
- */
-function setAsideStateFilesMadeSinceMark(env: LayoutEnv, before: ReadonlySet<string>, startedMs: number): string[] {
-  const root = olympusDataRoot(env);
-  const setAside: string[] = [];
-  for (const file of stateFiles(env)) {
-    const id = relative(root, file);
-    if (before.has(id)) continue;
-    const target = failedUpdateSetAsidePath(file, startedMs);
-    if (existsSync(target)) {
-      setAside.push(`${id} (made by the update, not set aside: ${basename(target)} is already there)`);
-      continue;
-    }
-    recordSchemaBackup(env, { storeId: id, dbPath: file, backupPath: target, setAside: true });
-    for (const suffix of COMPANIONS) {
-      if (existsSync(`${file}${suffix}`) && !existsSync(`${target}${suffix}`)) renameSync(`${file}${suffix}`, `${target}${suffix}`);
-    }
-    renameSync(file, target);
-    setAside.push(`${id} (made by the update, set aside)`);
-  }
-  return setAside;
-}
-
-/**
- * When the upgrade in flight started: undefined when none is, '' when its
- * mark cannot be read (then nothing is put back: an earlier copy left on disk
- * would be older than the store).
- */
-export function readWorkerUpgradeInFlight(env: LayoutEnv): string | undefined {
-  try {
-    const mark = JSON.parse(readFileSync(sharedDataPath('upgrade-in-flight', env), 'utf8')) as { started_at?: unknown };
-    return typeof mark.started_at === 'string' && Number.isFinite(Date.parse(mark.started_at)) ? mark.started_at : '';
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : '';
-  }
-}
-
-export function clearWorkerUpgradeInFlight(env: LayoutEnv): void {
-  rmSync(sharedDataPath('upgrade-in-flight', env), { force: true });
-}
-
-/** `<db file>.pre-schema-<version>.bak`: a store as it was before its schema update. */
-export function preSchemaBackupPath(dbPath: string, version: number): string {
-  return `${dbPath}.pre-schema-${version}.bak`;
-}
 
 /** `<path>.pre-schema-retired.bak`: retired state, moved aside rather than deleted, until the upgrade commits. */
 export function retiredStateBackupPath(path: string): string {
@@ -387,32 +285,13 @@ export function retiredStateBackupPath(path: string): string {
 }
 
 /**
- * Retires a file or folder an earlier version kept (the removed pre-filter's
- * ledger and weights, #1415): moved aside and recorded with the schema
- * backups, not deleted. A failed upgrade puts it back with the stores, a
- * committed one removes it with the other copies, and `delete --all` finds
- * it (#1563: rc.4 deleted the pre-filter ledger outright, so its rollback
- * came back with 7 of 8 ledgers). A database must be checkpointed first:
- * only the main file is kept. Returns whether anything was moved.
+ * Retires a file or folder an earlier version kept (the removed pre-filter's ledger and weights, #1415). A failed
+ * update puts the whole data root back (core/data-root-snapshot.ts), so it is removed outright. Returns whether
+ * anything was there.
  */
-export function retireStatePath(env: LayoutEnv, storeId: string, path: string): boolean {
+export function retireStatePath(_env: LayoutEnv, _storeId: string, path: string): boolean {
   if (!existsSync(path)) return false;
-  // No upgrade in flight to put it back: it goes now (workerUpgradeInFlight).
-  if (!workerUpgradeInFlight(env)) {
-    rmSync(path, { recursive: true, force: true });
-    return true;
-  }
-  const backup = retiredStateBackupPath(path);
-  // A copy an earlier start left is older than the state here, which a
-  // version that still used it wrote since: the newer state is the one kept.
-  rmSync(backup, { recursive: true, force: true });
-  recordSchemaBackup(env, { storeId, dbPath: path, backupPath: backup });
-  // The restore and the commit pick their copies by time, so the time is set
-  // before the move, which keeps it: no moment where the copy is aside but
-  // looks older than the upgrade (#1563 review).
-  const now = new Date();
-  utimesSync(path, now, now);
-  renameSync(path, backup);
+  rmSync(path, { recursive: true, force: true });
   return true;
 }
 
@@ -453,16 +332,6 @@ export function preSchemaBackupsOf(dbPath: string): string[] {
   } catch {
     return [];
   }
-}
-
-/**
- * Records a backup taken before a schema update, so the upgrade that caused it
- * can put it back. One line per backup; a line is appended in one write.
- */
-export function recordSchemaBackup(env: LayoutEnv, entry: SchemaBackupEntry): void {
-  const path = sharedDataPath('schema-backups', env);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  appendFileSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 }
 
 /** `setAside`: a file a failed update made, kept until the next commit and never put back over a store. */
@@ -531,69 +400,12 @@ function ownedBackupName(dbPath: string, backupPath: string): boolean {
   }
 }
 
-function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
-  return schemaBackups(env).filter((entry) => {
-    // What a put-back set aside is never put back over a store.
-    if (entry.setAside === true) return false;
-    try {
-      return statSync(entry.backupPath).mtimeMs >= sinceMs;
-    } catch {
-      return false;
-    }
-  });
-}
-
-/**
- * Puts back every store backed up at or after `sinceMs`: the backup replaces
- * its database, and the database's -wal, -shm and -journal go. A -journal
- * left by a process stopped inside a transaction belongs to the file being
- * replaced: SQLite would roll it back into the restored copy, which is not
- * the file it was written for. Returns the store ids restored. The worker
- * must be stopped first, so every part-way copy a stopped process left is
- * removed too (the gate7 forced leg, 2026-11-13, left both behind).
- */
-export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): string[] {
-  const restored: string[] = [];
-  // A file the mark did not list was made by the update: a copy of it is a state the update made too (a second store
-  // joining it), so it is not put back; the file is set aside below, and the copy stays recorded until the next commit.
-  const before = markedStateFiles(env);
-  const root = olympusDataRoot(env);
-  // Two stores in one file each copy it before their update: the earliest
-  // copy is the file as it was, and the later ones are dropped.
-  const byFile = new Map<string, SchemaBackupEntry[]>();
-  for (const entry of backupsSince(env, sinceMs)) {
-    if (before && !before.has(relative(root, entry.dbPath))) continue;
-    byFile.set(entry.dbPath, [...(byFile.get(entry.dbPath) ?? []), entry]);
-  }
-  for (const [dbPath, entries] of byFile) {
-    const [earliest, ...later] = entries.sort((a, b) => statSync(a.backupPath).mtimeMs - statSync(b.backupPath).mtimeMs);
-    for (const suffix of COMPANIONS) rmSync(`${dbPath}${suffix}`, { force: true });
-    renameSync(earliest!.backupPath, dbPath);
-    for (const entry of later) rmSync(entry.backupPath, { recursive: true, force: true });
-    restored.push(...entries.map((entry) => entry.storeId));
-  }
-  // What the new version made did not exist before it: the earlier version would open it at a schema it does not know.
-  if (before) restored.push(...setAsideStateFilesMadeSinceMark(env, before, sinceMs));
-  removeAbandonedCopiesOfRecorded(env);
-  pruneSchemaBackupRecord(env);
-  return restored;
-}
-
 /**
  * Removes every recorded backup, whenever it was taken: the committed
  * upgrade's own and any an earlier version left, since nothing restores them.
  */
 export function removeRecordedSchemaBackups(env: LayoutEnv): number {
   const removed = schemaBackups(env).filter((entry) => copyOrPartLeft(entry.backupPath));
-  for (const entry of removed) removeCopy(entry.backupPath);
-  removeAbandonedCopiesOfRecorded(env);
-  pruneSchemaBackupRecord(env);
-  return removed.length;
-}
-
-/** Removes the backups taken at or after `sinceMs`: the update they guarded succeeded. */
-export function removeSchemaBackupsSince(env: LayoutEnv, sinceMs: number): number {
-  const removed = backupsSince(env, sinceMs);
   for (const entry of removed) removeCopy(entry.backupPath);
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);

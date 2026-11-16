@@ -218,7 +218,7 @@ export class CommandDriver {
           // The installer's own "Fix:" line says what it put back; the forced-failure check reads it.
           // The Mac installer says it on a line of its own, before its failure message.
           const lines = r.stderr.split(/[\r\n]+/).map((line) => line.trim());
-          const fix = lines.filter((line) => line.startsWith('Fix:')).pop() ?? lines.filter((line) => line.startsWith('Stores put back as they were before the update')).pop();
+          const fix = lines.filter((line) => line.startsWith('Fix:')).pop() ?? lines.filter((line) => line.startsWith('The Olympus data was put back as it was before the update')).pop();
           throw new Error(`driver upgrade failed (exit ${r.code}${r.timedOut ? ', timed out' : ''})${fix ? `: ${fix}` : ''}`);
         }
       },

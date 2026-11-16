@@ -1,18 +1,14 @@
 /**
- * The store copies an `olympus engine install` takes when it replaces a
- * running version (#1639), the same copies `olympus worker upgrade` takes:
- * with the engine stopped, every store is copied and the upgrade is marked in
- * flight, so the new version's boot copies only what this did not and keeps
- * retired state. A failed health proof puts the copies back before the
- * previous version starts; a healthy one removes them. Without this, a
- * failed upgrade across a schema change that is not additive started the
- * previous build on stores it refuses.
+ * What an `olympus engine install` that replaces a running version (#1639) and `olympus worker upgrade` keep of the
+ * data: with the engine stopped, the whole data root is set aside (core/data-root-snapshot.ts). A failed health proof
+ * puts it back before the previous version starts; a healthy one removes it. Without this, a failed upgrade across a
+ * schema change that is not additive started the previous build on stores it refuses.
  */
-import { clearWorkerUpgradeInFlight, markWorkerUpgradeInFlight, readWorkerUpgradeInFlight, removeRecordedSchemaBackups, restoreSchemaBackupsSince } from './boot-progress.ts';
+import { removeRecordedSchemaBackups } from './boot-progress.ts';
+import { commitDataRootSnapshot, putDataRootBack, snapshotDataRoot, updateInFlightSince, type DataRootDeps } from './data-root-snapshot.ts';
 import { DataOwnerBusyError, withNoEngineProcess } from './data-owner-lock.ts';
 import { OperationError } from './operation-error.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
-import { copyStoresBeforeUpgrade } from './upgrade-store-copies.ts';
 import { putBackManifest } from './put-back-manifest.ts';
 
 /**
@@ -33,42 +29,35 @@ export function withStoppedEngine<T>(env: LayoutEnv, what: string, step: () => T
   }
 }
 
-/** With the engine stopped: mark the upgrade in flight, then copy every store. Throws, changing nothing that stays, when it cannot. */
-export function copyEngineStores(env: LayoutEnv, options: { bunBin?: string; log?: (line: string) => void; ownerWaitMs?: number } = {}): void {
+/** With the engine stopped: set the whole data root aside (core/data-root-snapshot.ts). Throws, changing nothing that stays, when it cannot. */
+export function copyEngineStores(env: LayoutEnv, options: { log?: (line: string) => void; ownerWaitMs?: number; deps?: DataRootDeps } = {}): void {
   withStoppedEngine(env, 'copied', () => {
-    markWorkerUpgradeInFlight(env, new Date().toISOString());
-    try {
-      const copied = copyStoresBeforeUpgrade(env, options);
-      if (copied.stores > 0) options.log?.(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);
-    } catch (error) {
-      clearWorkerUpgradeInFlight(env);
-      throw error;
-    }
+    snapshotDataRoot(env, { ...(options.log ? { log: options.log } : {}), ...(options.deps ? { deps: options.deps } : {}) });
   }, options.ownerWaitMs ?? ENGINE_STORES_OWNER_WAIT_MS);
 }
 
-/** With the new version stopped: put back what was copied since the mark. Returns the stores put back. */
-export function restoreEngineStores(env: LayoutEnv, options: { ownerWaitMs?: number; log?: (line: string) => void } = {}): string[] {
-  const startedAt = readWorkerUpgradeInFlight(env);
-  if (startedAt === undefined) return [];
+/** With the new version stopped: put the data root back as it was before the update. Returns what the owner is told. */
+export function restoreEngineStores(env: LayoutEnv, options: { ownerWaitMs?: number; log?: (line: string) => void; deps?: DataRootDeps } = {}): string[] {
+  if (updateInFlightSince(env) === undefined) return [];
   // The install log keeps what the put-back worked from, before and after, so a failed rollback explains itself.
   const log = options.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   return withStoppedEngine(env, 'put back', () => {
     log(putBackManifest(env, 'before put-back'));
-    const restored = startedAt === '' ? [] : restoreSchemaBackupsSince(env, Date.parse(startedAt));
-    clearWorkerUpgradeInFlight(env);
+    const told = putDataRootBack(env, options.deps ? { deps: options.deps } : {});
     log(putBackManifest(env, 'after put-back'));
-    return restored;
+    return told;
   }, options.ownerWaitMs ?? ENGINE_STORES_OWNER_WAIT_MS);
 }
 
-/** The new version proved healthy: the mark goes first, then every recorded copy. */
-export function commitEngineStores(env: LayoutEnv): void {
-  if (readWorkerUpgradeInFlight(env) === undefined) return;
-  clearWorkerUpgradeInFlight(env);
+/** The new version proved healthy: the copy goes, and any failed root an earlier update left. Returns what was removed. */
+export function commitEngineStores(env: LayoutEnv): string[] {
   try {
+    const removed = commitDataRootSnapshot(env);
+    // Store copies a build from before the whole-root copy left (core/boot-progress.ts): nothing puts them back now.
     removeRecordedSchemaBackups(env);
+    return removed;
   } catch {
     // A copy left behind costs disk, which the next commit takes back.
+    return [];
   }
 }

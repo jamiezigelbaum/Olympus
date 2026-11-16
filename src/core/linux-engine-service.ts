@@ -765,7 +765,7 @@ function restoreInstallTransaction(layout: LinuxEngineLayout, exec: EngineExec, 
  const stoppedFacts=inspectSystemdEngine(layout,exec);assertKnown(stoppedFacts);
  removeReleasedWorkerSocket(layout,currentFacts,stoppedFacts,options);
  // The new version is stopped: the stores go back as they were before it (#1639).
- restoreEngineStores(engineDataEnv(layout));
+ for (const line of restoreEngineStores(engineDataEnv(layout))) process.stderr.write(`${line}\n`);
  removeNewUnitLinks(layout, transaction);
  restoreLegacySettings(layout,transaction);
  for (const [path, snapshot] of Object.entries(transaction.before.files)) restoreOptionalFile(path, snapshot);
@@ -943,7 +943,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    // Replacing a running version: its stores are copied while it is stopped,
    // and put back if the new one does not prove healthy (#1639).
    const replacing=currentProgram(l);
-   if(before.state!=='not_loaded' && replacing && replacing.build!==program.build) copyEngineStores(engineDataEnv(l),{bunBin:program.runtimePath,log:line=>process.stderr.write(`${line}\n`)});
+   if(before.state!=='not_loaded' && replacing && replacing.build!==program.build) copyEngineStores(engineDataEnv(l),{log:line=>process.stderr.write(`${line}\n`)});
    transaction.phase='activating'; writeInstallTransaction(l,transaction);
    lifecycleCheckpoint(options,'activating_published');
    migrateLegacySettings(l,transaction,options);
@@ -1025,7 +1025,7 @@ export async function recoverInterruptedLinuxEngineInstall(
   if(!transaction)return {recovered:false};
   assertDesktopTransactionTargets(layout,transaction);
   if(transaction.phase==='qualified'){
-   commitEngineStores(engineDataEnv(layout));
+   for(const line of commitEngineStores(engineDataEnv(layout)))process.stderr.write(`${line}\n`);
    cleanupLegacySettingsDirectories(layout);
    pruneOldGenerations(layout);refreshMachineArtifacts(layout,false);cleanupTransactionBackup(transaction);removeFileDurablySync(transactionPath(layout));return {recovered:true};
   }
@@ -1065,7 +1065,7 @@ export async function settleLinuxEngineInstall(
   if (health.ok) {
    transaction.phase='qualified';writeInstallTransaction(layout,transaction);
    lifecycleCheckpoint(options,'qualified_published');
-   commitEngineStores(engineDataEnv(layout));
+   for(const line of commitEngineStores(engineDataEnv(layout)))process.stderr.write(`${line}\n`);
    cleanupLegacySettingsDirectories(layout);
    pruneOldGenerations(layout);
    refreshMachineArtifacts(layout,false);

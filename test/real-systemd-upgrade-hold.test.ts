@@ -5,9 +5,9 @@
 // restarter keeps asking systemd to start the unit, standing in for whatever
 // started the engine 15 s after the upgrade's stop on the gate7 rc.11 legs.
 //
-// Without the hold, the restarted engine opens the store under the copy and
-// the copy fails, as it did on those legs. With it, no start gets through
-// until the hold is let go, and the copy completes.
+// Without the hold, the restarted engine has the store open, so the whole-root
+// copy refuses, naming it. With it, no start gets through until the hold is
+// let go, and the copy completes.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
-import { copyStoresBeforeUpgrade, upgradeCopyPath } from '../src/core/upgrade-store-copies.ts';
+import { snapshotDataRoot, snapshotPathOf } from '../src/core/data-root-snapshot.ts';
 import { holdLinuxWorkerStopped, installWorkerService, workerServicePaths } from '../src/core/worker-service.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -86,8 +86,8 @@ describe.skipIf(!REAL)('the upgrade copy under a real systemd user unit', () => 
     expect(systemctl('stop', '--job-mode=replace-irreversibly', UNIT).status).toBe(0);
     // The restarter starts it again, and it opens the store.
     await waitFor(() => activeState() === 'active' && readFileSync(opened, 'utf8').trim().split('\n').length >= 2, { timeoutMs: 20_000 });
-    expect(() => copyStoresBeforeUpgrade(env, { bunBin: process.execPath })).toThrow(/could not copy a store before updating it; it is open in pid \d+/);
-    expect(existsSync(upgradeCopyPath(store))).toBe(false);
+    expect(() => snapshotDataRoot(env)).toThrow(/still has Olympus data open, so the update did not start: pid \d+/);
+    expect(existsSync(snapshotPathOf(olympusDataRoot(env)))).toBe(false);
   }, 60_000);
 
   test('with the hold, nothing starts the engine until the copy is done', async () => {
@@ -101,12 +101,11 @@ describe.skipIf(!REAL)('the upgrade copy under a real systemd user unit', () => 
       await waitFor(() => performance.now() >= until, { timeoutMs: 5_000 });
       expect(['inactive', 'failed']).toContain(activeState());
       expect(readFileSync(opened, 'utf8').trim().split('\n').length).toBe(starts);
-      const copied = copyStoresBeforeUpgrade(env, { bunBin: process.execPath });
-      expect(copied.stores).toBe(1);
+      snapshotDataRoot(env);
     } finally {
       held.release();
     }
-    const copy = new Database(upgradeCopyPath(store), { readonly: true });
+    const copy = new Database(join(snapshotPathOf(olympusDataRoot(env)), 'tier-ledger.sqlite'));
     expect(copy.query('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
     copy.close();
     // Let go, the next start gets through.
