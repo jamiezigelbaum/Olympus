@@ -791,7 +791,7 @@ export class EmailClient {
    */
   async sourceDeepRead(options: {
     action: 'start' | 'status' | 'cancel'; question?: string; selectedItem?: SourceAnswerSelectedItemOption;
-    whole?: 'item' | 'conversation'; after?: string; before?: string; id?: string;
+    whole?: 'item' | 'conversation'; after?: string; before?: string; read?: 'all' | 'relevant_days'; id?: string;
   }): Promise<Record<string, unknown>> {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) throw new OperationError('source_index_not_enabled', 'Source-index read is disabled.');
     if (!this.config.email.enabled) throw new OperationError('email_not_configured', 'Private source worker is disabled.');
@@ -800,6 +800,7 @@ export class EmailClient {
       ? { question: options.question, set: {
         selected_item: sourceItemReadSelectedItem(options.selectedItem), whole: options.whole ?? 'item',
         ...(options.after ? { after: options.after } : {}), ...(options.before ? { before: options.before } : {}),
+        ...(options.read ? { read: options.read } : {}),
       } }
       : { ...(options.id ? { id: options.id } : {}) };
     const response = asRecord(await this.transport.requestJson(`${this.config.email.baseUrl}/source/deep-read${path}`, {

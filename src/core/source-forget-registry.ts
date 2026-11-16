@@ -497,6 +497,11 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
     reason: 'One-way SHA-256 digests of the questions Venice already kept Private, so a resumed double-check never pays for them twice. No source, account, item id or text; a digest only stops a repeat Venice call, and the item stays Private.',
   },
   {
+    file: 'deep-read-pace.json',
+    modules: [],
+    reason: 'Seconds per section a deep read measured on each private model ({ model: seconds }), to price the next read. No source, question or text.',
+  },
+  {
     file: 'tier-sniffer-budget.json',
     modules: [],
     reason: 'One global counter of the day\'s sniffer calls ({ day, used }).',

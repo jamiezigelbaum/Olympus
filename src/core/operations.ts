@@ -531,6 +531,7 @@ export const operations: Operation[] = [
       'Read ALL of one document, or one whole group, channel or chat, with the owner\'s private model, then answer the question from what it read.',
       'For questions a search alone answers poorly: a topic discussed over many messages, days or years, or facts spread through a long file.',
       'Pass the selected_item of a search hit from source_index_search, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+      'A long chat is priced two ways before it starts: every message, or only the days that mention the question (a day either side). The full read runs when it fits in an hour, else the relevant-days read; read="all" or read="relevant_days" picks one. Show the owner the job\'s choiceSummary as is.',
       'Runs in the background on the owner\'s computer and lands in Private answers; this returns the job with its progress. Check it with source_deep_read_status.',
     ].join(' '),
     params: {
@@ -539,10 +540,13 @@ export const operations: Operation[] = [
       whole: { type: 'string', description: '"conversation" (the hit\'s whole chat, group or channel) or "item" (that document; default).' },
       after: { type: 'string', description: 'For a conversation: only messages authored on or after this ISO date.' },
       before: { type: 'string', description: 'For a conversation: only messages authored before this ISO date.' },
+      read: { type: 'string', description: 'For a conversation: "all" (every message) or "relevant_days" (the days that mention the question). Left out, the full read runs when it fits in an hour.' },
     },
     mutating: false,
     nativeExposure: 'sourceIndexEnabledOnly',
     handler: async (ctx, params) => {
+      const read = params.read === undefined ? undefined : params.read;
+      if (read !== undefined && read !== 'all' && read !== 'relevant_days') throw new OperationError('invalid_params', 'read must be "all" or "relevant_days".');
       const whole = params.whole === undefined ? 'item' : params.whole;
       if (whole !== 'item' && whole !== 'conversation') throw new OperationError('invalid_params', 'whole must be "item" or "conversation".');
       const after = optionalString(params.after);
@@ -550,7 +554,7 @@ export const operations: Operation[] = [
       return ctx.email.sourceDeepRead({
         action: 'start', question: asString(params.question, 'question'),
         selectedItem: sourceItemReadSelectedItem(params.selected_item), whole,
-        ...(after ? { after } : {}), ...(before ? { before } : {}),
+        ...(after ? { after } : {}), ...(before ? { before } : {}), ...(read ? { read } : {}),
       });
     },
   },
