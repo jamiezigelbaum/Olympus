@@ -78,6 +78,8 @@ export const ENGINE_FORWARDED_ROUTES = {
   embed_chunks: ['/v1/source/index/embed'],
   // Reading can queue a window judgment or raise a tier: the writer owns both.
   source_item_read: ['/v1/source/item/read'],
+  // Deep reads run beside the stores and the Private answers inbox they land in.
+  deep_read: ['/v1/source/deep-read', '/v1/source/deep-read/status', '/v1/source/deep-read/cancel'],
   // The CLI's export (and so its backup): the background takes the snapshots
   // on the writer's own loop, between its writes (#1224).
   data_export: ['/v1/cli/data-export'],

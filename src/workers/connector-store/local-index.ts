@@ -5570,6 +5570,36 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Every active item of one conversation (and topic, when given) in authored
+   * order, for a deep read of the whole conversation (core/deep-read.ts).
+   * Identities and times only, never text: content is read afterwards through
+   * the store's content provider, which applies the owner's scope and tiers.
+   * `after` is inclusive and `before` exclusive, compared as stored ISO times.
+   */
+  conversationItems(key: {
+    provider: string; accountScope: string; providerConversationId: string;
+    providerThreadId?: string; after?: string; before?: string;
+  }): Array<{ sourceItem: SourceItemIdentity; authoredAt?: string }> {
+    const clauses = ['tombstoned = 0', 'provider = ?', 'account_scope = ?', 'normalized_conversation = ?'];
+    const params: string[] = [key.provider, key.accountScope, normalizeConversationId(key.providerConversationId)];
+    if (key.providerThreadId) { clauses.push('provider_thread_id = ?'); params.push(key.providerThreadId); }
+    if (key.after) { clauses.push('authored_at >= ?'); params.push(key.after); }
+    if (key.before) { clauses.push('authored_at < ?'); params.push(key.before); }
+    const rows = this.db.query(`
+      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, authored_at
+      FROM items WHERE ${clauses.join(' AND ')}
+      ORDER BY authored_at, item_pk
+    `).all(...params) as Array<Pick<ItemRow,
+      'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
+      | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'> & { authored_at: string | null }>;
+    return rows.map(row => ({
+      sourceItem: sourceItemFromRow({ ...row, rank: 0 } as ItemRow),
+      ...(row.authored_at ? { authoredAt: row.authored_at } : {}),
+    }));
+  }
+
+  /**
    * The parent link a child row stores: the local id of the item it came
    * inside. Undefined for an item that is not a child.
    */
