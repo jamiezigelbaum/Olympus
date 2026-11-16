@@ -478,7 +478,7 @@ export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean, archiv
 export function phaseBudgetMs(name: string): number {
   const minutes: Record<string, number> = {
     provision: 25, 'restore-provision': 25, install: 25, 'reranker-ready': 16, 'restore-zig': 5, prepare: 7, 'prepare-source': 7,
-    ingest: 5, settle: 5, 'front-seed': 6, 'front-steady': 10, 'front-watch': 5,
+    ingest: 10, settle: 10, 'front-seed': 6, 'front-steady': 10, 'front-watch': 5,
     'archive-beside-live': 8, 'archive-import': 12, 'archive-changed': 12,
     'archive-drain': 8, 'archive-remove': 5, 'archive-model': 7,
     'archive-scale-mbox': 30, 'archive-scale-readwise': 20,
@@ -583,9 +583,18 @@ function expectedTierCounts(): { personal: number; private: number; secrets: num
   return { personal: count('personal'), private: count('private'), secrets: count('secrets') };
 }
 
+/**
+ * The settle agent's own limit inside the ingest phase. The bound is the product's promise that a new item is searchable within
+ * about 10 minutes (ops#222). A dashboard's embedding count can trail the vectors by up to STORE_STATUS_REUSE_MS (5 minutes), so a
+ * 5-minute bound failed a healthy install whose items the stand-in judge had moved to Personal (run 43777041779).
+ */
+export const SETTLE_BOUND_S = Math.min(phaseBudgetMs('ingest'), phaseBudgetMs('settle')) / 1000 - 30;
+
 /** Waits for ingest to settle on the machine and checks that every item landed in its intended tier. */
 async function settleIngest(run: Run): Promise<{ settled: boolean; snap?: Record<string, number | string> }> {
-  const timeoutS = run.options.config.settleTimeoutS ?? 900;
+  // The agent stops 30 s inside the phase's bound, so a slow settle still reports its last snapshot (what is missing)
+  // instead of being killed with nothing to say (run 43777041779).
+  const timeoutS = Math.min(run.options.config.settleTimeoutS ?? 900, SETTLE_BOUND_S);
   const settled = await run.phase('ingest', () => run.agent('settle', `--timeout-s ${timeoutS}`, (timeoutS + 60) * 1000));
   const snap = settled.result?.snapshot as Record<string, number | string> | null | undefined;
   run.add({
