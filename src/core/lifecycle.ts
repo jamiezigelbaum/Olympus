@@ -12,11 +12,12 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
-import { bootProgressLine, clearWorkerUpgradeInFlight, markWorkerUpgradeInFlight, readBootProgress, readFrontProgress, removeRecordedSchemaBackups, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
+import { bootProgressLine, readBootProgress, readFrontProgress, type BootProgress } from './boot-progress.ts';
+import { putDataRootBack, snapshotDataRoot } from './data-root-snapshot.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, startupCapMs, type EngineHeartbeat } from './engine-heartbeat.ts';
-import { copyStoresBeforeUpgrade, olympusStoreBytes } from './upgrade-store-copies.ts';
+import { olympusStoreBytes } from './upgrade-store-copies.ts';
 import { putBackManifest } from './put-back-manifest.ts';
-import { withStoppedEngine } from './engine-store-copies.ts';
+import { commitEngineStores, withStoppedEngine } from './engine-store-copies.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
 import { OperationError } from './operation-error.ts';
@@ -443,7 +444,7 @@ function rolledBackUpgradeError(
     );
   }
   const notes: string[] = [];
-  if (rollback.restored.length > 0) notes.push(`Stores put back as they were before the update: ${[...new Set(rollback.restored)].join(', ')}.`);
+  notes.push(...rollback.restored);
   if (rollback.reactivated) {
     const health = previousWorkerHealth(options);
     if (!health.healthy) {
@@ -699,7 +700,7 @@ function recoverInterruptedTransaction(
 }
 
 interface RollbackResult {
-  /** The stores put back from the copies taken before their schema update. */
+  /** What the owner is told about the data put back (core/data-root-snapshot.ts). */
   restored: string[];
   /** Whether the previous worker was started again. */
   reactivated: boolean;
@@ -731,7 +732,7 @@ function rollbackTransaction(
       // The install log keeps what the put-back worked from, before and after, so a failed rollback explains itself.
       const log = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
       log(putBackManifest(lifecycleEnv(options), 'before put-back'));
-      const back = restoreSchemaBackupsSince(lifecycleEnv(options), Date.parse(transaction.started_at));
+      const back = putDataRootBack(lifecycleEnv(options));
       log(putBackManifest(lifecycleEnv(options), 'after put-back'));
       return back;
     })
@@ -802,35 +803,23 @@ function copyStoresForUpgrade(
     runWorkerServiceAction('stop', serviceActionOptions(options));
   }
   try {
-    // From here until it commits or rolls back, the new version's boot copies
-    // what this did not (a store outside the data root) and keeps retired state.
-    const copied = withStoppedEngine(lifecycleEnv(options), 'copied', () => {
-      markWorkerUpgradeInFlight(lifecycleEnv(options), readTransaction(options)?.started_at ?? new Date().toISOString());
-      return copyStoresBeforeUpgrade(lifecycleEnv(options), {
-        ...(options.bunBin ? { bunBin: options.bunBin } : {}),
-        log: progressLine,
-      });
+    // The whole data root is set aside until the upgrade commits or rolls back (core/data-root-snapshot.ts).
+    withStoppedEngine(lifecycleEnv(options), 'copied', () => {
+      snapshotDataRoot(lifecycleEnv(options), { log: progressLine });
     });
-    if (copied.stores > 0) progressLine(`Copied ${copied.stores} stores in ${Math.round(copied.ms / 1000)} s.`);
   } finally {
     hold?.release();
   }
 }
 
-/**
- * The new version is healthy and committed: every recorded copy goes, this
- * upgrade's and any an earlier version left, since nothing restores them now.
- */
+/** The new version is healthy and committed: the copy of the data goes, and any failed root an earlier update left. */
 function removeUpgradeBackups(options: WorkerLifecycleOptions & { homeDir: string }): void {
-  const transaction = readTransaction(options);
-  if (!transaction) return;
-  const env = lifecycleEnv(options);
+  if (!readTransaction(options)) return;
   try {
-    // Cleared first: a store the engine opens from here on takes no copy.
-    clearWorkerUpgradeInFlight(env);
-    removeRecordedSchemaBackups(env);
+    const progressLine = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
+    for (const line of commitEngineStores(lifecycleEnv(options))) progressLine(line);
   } catch {
-    // A copy left behind costs disk, not correctness.
+    // A copy left behind costs disk, which the next commit takes back.
   }
 }
 
@@ -982,11 +971,6 @@ function readTransaction(options: { homeDir?: string }): LifecycleTransactionV1 
 }
 
 function clearTransaction(options: { homeDir?: string }): void {
-  try {
-    clearWorkerUpgradeInFlight(lifecycleEnv({ ...options, homeDir: validateHomeDir(options.homeDir ?? homedir()) }));
-  } catch {
-    // A mark left behind costs a copy at a later boot, which the next commit removes.
-  }
   const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir()));
   assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir()), paths);
   for (const path of [paths.unitBackup, paths.envBackup, paths.launcherBackup, paths.transaction]) {

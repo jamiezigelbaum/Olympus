@@ -139,16 +139,15 @@ export function leftoverFileNames(root: string): string[] {
       const path = join(dir, entry.name);
       if (entry.isDirectory() && dir === root && entry.name === 'models') continue;
       if (entry.isDirectory()) walk(path);
-      // A store a failed update made is set aside on purpose until the next committed upgrade (boot-progress.ts).
-      else if (!/\.pre-schema-\d{13}\.bak/.test(entry.name) && /\.pre-schema-.*\.bak$|\.partial|-journal$/.test(entry.name)) names.push(relative(root, path));
+      else if (/\.pre-schema-.*\.bak$|\.partial|-journal$/.test(entry.name)) names.push(relative(root, path));
     }
   };
   walk(root);
   return names.sort();
 }
 
-/** What the installer says on stderr when it rolled the stores back (L1, floor c013270b). */
-export const STORES_PUT_BACK = 'Stores put back as they were before the update';
+/** What the installer says on stderr when it put the data root back (core/data-root-snapshot.ts). */
+export const STORES_PUT_BACK = 'The Olympus data was put back as it was before the update';
 
 export function compareStoreFiles(before: readonly string[], now: readonly string[]): StoreFileCount {
   const had = new Set(before);
