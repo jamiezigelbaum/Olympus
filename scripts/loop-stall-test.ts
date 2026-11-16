@@ -592,7 +592,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const guards = sqliteGuards(walAtEnd, walLines.map(entry => entry.line));
   const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok });
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, pass_b: front.beats > 0 && front.max_ms < LOOP_STALL_LIMIT_MS && background.beats > 0 && background.max_ms < 30_000 && workload_ok && guards.wal_ok, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000), wal: walLines.slice(0, 2000) } };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
@@ -621,6 +621,10 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     console.log(`${options.runCase} ${role}: worst ${Math.round(loop.max_ms)} ms at ${worst?.site ?? 'no sample'}; ${loop.max_ms < LOOP_STALL_LIMIT_MS ? 'PASS' : 'FAIL'}`);
   }
   console.log(`${options.runCase}: ${pass ? 'PASS' : 'FAIL'} (bar ${LOOP_STALL_LIMIT_MS} ms; over 250/100 ms: ${background.over_budget}/${front.over_budget}; slow SQL ${slow_sql.length}; workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}; WALs over 64 MB at end ${guards.wal_over_limit.length}; background reads over 2 s ${guards.background_reads_over_2s.length})`);
+  // Proposed scoring (b), printed beside today's (a) until the owner picks: the front at 1 s; the background on progress (no beat
+  // over 30 s, the work completes, the WAL limit), its beats over 1 s reported by site above.
+  const passB = front.beats > 0 && front.max_ms < LOOP_STALL_LIMIT_MS && background.beats > 0 && background.max_ms < 30_000 && workload_ok && guards.wal_ok;
+  console.log(`${options.runCase} scoring: (a) nothing over 1 s on either engine ${pass ? 'PASS' : 'FAIL'}; (b) front under 1 s, background under 30 s with the work done ${passB ? 'PASS' : 'FAIL'}`);
   console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));
   rmSync(runDir, { recursive: true, force: true });
   return pass;
