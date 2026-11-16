@@ -18,7 +18,7 @@ import {
   readClassificationLedger,
 } from '../classification-ledger.ts';
 import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
-import { moveTieredItem, TierMoveContentChangedError } from '../connector-store/tier-move.ts';
+import { moveTieredItem, TierMoveContentChangedError, TierMoveRefusedError } from '../connector-store/tier-move.ts';
 import type { LocalConnectorStore } from '../connector-store/local-index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { AUTO_MOVE_WHY, automaticTierMoveOptions, automaticTierMovesAllowed, setEmbedsWithBuiltInOnly } from '../connector-store/tier-auto-move.ts';
@@ -368,6 +368,12 @@ export interface TierClassificationBacklog {
   /** Why the last tick asked nothing while questions wait (absent while asking or idle). */
   waiting?: TierSnifferWaiting;
   /**
+   * Judged items whose queued move to their tier is refused each time it is
+   * tried (since this process started): they stay in the store they are in.
+   * Reasons are fixed words (tier-move.ts `TierMoveRefusal`), never item data.
+   */
+  movesRefused?: { items: number; attempts: number; byReason: Record<string, number> };
+  /**
    * Sources whose privacy records could not be read: their items are held,
    * are not in the counts above, and wait until they can be read. Content-free.
    */
@@ -512,6 +518,9 @@ export class TierSnifferService {
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
   private readonly moveFailures = new Map<string, number>();
+  /** Items whose queued move the primitive refused last time it was tried (ledger and item), with the refusal's fixed word. */
+  private readonly movesRefusedNow = new Map<string, string>();
+  private moveRefusalAttempts = 0;
   private abort: AbortController | undefined;
   private lastTick: TierSnifferTick | undefined;
   private stopped = false;
@@ -731,6 +740,7 @@ export class TierSnifferService {
           + (oldestPendingAgeMs >= 3_600_000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60_000)} minutes.` : '')
           + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : '')
           + this.unreadableNote(),
+      ...(this.movesRefusedNow.size > 0 ? { movesRefused: this.movesRefused() } : {}),
       awaitingOwnerApproval: this.lastTick?.state === 'awaiting_owner_approval',
       ...(this.lastTick?.state === 'awaiting_owner_approval' ? { awaitingApproval: {
         lane: this.lastTick.lane, profileId: this.lastTick.profileId, modelId: this.lastTick.modelId, promptVersion: this.lastTick.promptVersion,
@@ -738,6 +748,12 @@ export class TierSnifferService {
       ...(checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}),
       ...(this.unreadable.size > 0 ? { unreadableSources: this.unreadableSources() } : {}),
     };
+  }
+
+  private movesRefused(): NonNullable<TierClassificationBacklog['movesRefused']> {
+    const byReason: Record<string, number> = {};
+    for (const why of this.movesRefusedNow.values()) byReason[why] = (byReason[why] ?? 0) + 1;
+    return { items: this.movesRefusedNow.size, attempts: this.moveRefusalAttempts, byReason };
   }
 
   private unreadableNote(): string {
@@ -2082,6 +2098,13 @@ export class TierSnifferService {
         report.failed += 1;
         const why = moveFailureName(error);
         report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
+        // Keyed by item, not generation: a refusal that re-judges and queues
+        // the same move again (the content check) is one item refused twice.
+        const refusedKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}`;
+        if (error instanceof TierMoveRefusedError) {
+          this.moveRefusalAttempts += 1;
+          this.movesRefusedNow.set(refusedKey, why);
+        } else this.movesRefusedNow.delete(refusedKey);
         if (error instanceof TierMoveContentChangedError) {
           // A stale lowering was refused before import and taken out of
           // moving. Re-read the actual stored body, even when this model
@@ -2119,7 +2142,9 @@ export class TierSnifferService {
       };
       const succeeded = (record: TierLedgerRecord) => {
         report.moved++;
-        this.moveFailures.delete(`${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`);
+        const key = `${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`;
+        this.moveFailures.delete(key);
+        this.movesRefusedNow.delete(`${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}`);
       };
       const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
       for (let offset = 0; offset < queued.length && budget > 0 && !shouldStop();) {
@@ -2147,10 +2172,11 @@ export class TierSnifferService {
               // One item is indivisible; do not start another after its bound.
               shouldStop: () => shouldStop() || (copied++ > 0 && this.monotonicNow() >= batchDeadline),
             });
-            results.forEach((result, index) => {
-              if ('error' in result) failure(pending[index]!.record, result.error);
-              else succeeded(pending[index]!.record);
-            });
+            for (const [index, result] of results.entries()) {
+              const entry = pending[index]!;
+              if (!('error' in result)) { succeeded(entry.record); continue; }
+              failure(entry.record, result.error);
+            }
             // Unstarted candidates still belong to the queue; use the rest of
             // this slice rather than accidentally capping it at one small page.
             offset -= pending.length - results.length;
@@ -2314,6 +2340,7 @@ function positiveInteger(value: string | undefined, fallback: number, minimum: n
  */
 export function moveFailureName(error: unknown): string {
   if (!(error instanceof Error)) return 'unknown';
+  if (error instanceof TierMoveRefusedError && error.code !== 'refused') return `${error.name}:${error.code}`;
   if (error.constructor !== Error) return error.name || error.constructor.name || 'Error';
   return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : 'Error';
 }

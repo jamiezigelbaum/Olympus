@@ -67,14 +67,24 @@ export function rowRehomeReceiptId(ledger: Pick<TierLedger, 'ledgerId'>, identit
 
 /** A move the primitive refuses before writing anything (the item stays where it is). */
 export class TierMoveRefusedError extends Error {
-  constructor(message: string) {
+  /** Which refusal this is, as a fixed word for logs and status (never item data). */
+  readonly code: TierMoveRefusal;
+  constructor(message: string, code: TierMoveRefusal = 'refused') {
     super(message);
     this.name = 'TierMoveRefusedError';
+    this.code = code;
   }
 }
 
+export type TierMoveRefusal = 'refused' | 'mixed_sets' | 'secrets_in_lowering' | 'raise_in_lowering' | 'resumed_raise_in_lowering'
+  | 'repair_not_settled_private' | 'secrets_in_repair' | 'repair_lower_destination' | 'superseded_copy_kept'
+  | 'secrets_identity' | 'content_changed' | 'content_no_copy' | 'content_no_receipt' | 'content_several_receipts'
+  | 'content_receipt_mismatch' | 'content_still_pending';
+
 /** The lowering verdict does not authorize the stored content. */
-export class TierMoveContentChangedError extends TierMoveRefusedError {}
+export class TierMoveContentChangedError extends TierMoveRefusedError {
+  constructor(message: string, code: TierMoveRefusal = 'content_changed') { super(message, code); }
+}
 
 export type TierMoveEmbeddingIdentity = Pick<
   SourceEmbeddingProvider,
@@ -208,13 +218,13 @@ export function moveTieredItemsLowering(
 ): Array<{ result: TierMoveResult } | { error: unknown }> {
   if (!moves.length) return [];
   const set = moves[0]!.set;
-  if (moves.some(move => move.set !== set)) throw new TierMoveRefusedError('A lowering batch belongs to one set.');
+  if (moves.some(move => move.set !== set)) throw new TierMoveRefusedError('A lowering batch belongs to one set.', 'mixed_sets');
   const timings = moves[0]!.timings;
   // Open destinations before taking any writer locks. Public is lazy.
   for (const move of moves) {
     const target = move.decision ?? move.target;
     if (!target || target.metadataTier === 'secrets' || target.contentTier === 'secrets') {
-      throw new TierMoveRefusedError('Secrets cannot enter a lowering batch.');
+      throw new TierMoveRefusedError('Secrets cannot enter a lowering batch.', 'secrets_in_lowering');
     }
     for (const tier of [target.metadataTier, target.contentTier]) {
       set.store(tier === 'public' ? 'public_safe' : tier === 'private' ? 'internal' : 'secure_local', { create: true });
@@ -295,7 +305,7 @@ export function promoteLowerTierContent(
   const record = options.set.ledger.getCurrent(options.identity);
   if (!record || record.state === 'moving' || record.contentTier !== 'secure'
     || record.metadataTier === 'secrets' || source.trustDomain === 'secure_local') {
-    throw new TierMoveRefusedError('Only a settled Private placement can repair lower content.');
+    throw new TierMoveRefusedError('Only a settled Private placement can repair lower content.', 'repair_not_settled_private');
   }
   return moveTieredItemNow({ ...options, target: { metadataTier: record.metadataTier, contentTier: record.contentTier } }, source);
 }
@@ -328,7 +338,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
   }
 
   if (target.contentTier === 'secrets' || target.metadataTier === 'secrets') {
-    throw new TierMoveRefusedError('Secrets cannot use the content repair path.');
+    throw new TierMoveRefusedError('Secrets cannot use the content repair path.', 'secrets_in_repair');
   }
 
   // Once verified, a retry must never import again from a possibly emptied
@@ -347,7 +357,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
     const receipt = receiptToResume;
     if ((receipt.result?.generation ?? receipt.generation) !== record.generation || receipt.target.metadataTier !== target.metadataTier
       || receipt.target.contentTier !== target.contentTier) throw new TierLedgerGenerationConflictError();
-    if (loweringOnly && receipt.raise) throw new TierMoveRefusedError('Raises cannot enter a lowering batch.');
+    if (loweringOnly && receipt.raise) throw new TierMoveRefusedError('Raises cannot enter a lowering batch.', 'resumed_raise_in_lowering');
     return () => receipt;
   }
 
@@ -376,10 +386,10 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
   if (repairSource && !sources.some(copy => copy.corpusId === repairSource.corpusId)) sources.push(repairSource);
   if (repairSource && placement.copies.some(copy => copy.trustDomain !== 'secure_local'
     && !sources.some(source => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
-    throw new TierMoveRefusedError('Repair cannot write a lower destination.');
+    throw new TierMoveRefusedError('Repair cannot write a lower destination.', 'repair_lower_destination');
   }
   const raise = !!repairSource || placementIsRaise(sources, placement.copies);
-  if (loweringOnly && raise) throw new TierMoveRefusedError('Raises cannot enter a lowering batch.');
+  if (loweringOnly && raise) throw new TierMoveRefusedError('Raises cannot enter a lowering batch.', 'raise_in_lowering');
   const exports = new Map<string, ConnectorStoreItemCopy | undefined>();
   const exportFrom = (copy: Pick<TierCopy, 'corpusId'>): ConnectorStoreItemCopy | undefined => {
     if (!exports.has(copy.corpusId)) {
@@ -402,7 +412,9 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
       if (!raise && record.state === 'moving') {
         ledger.abandonMove(identity, { expectedGeneration: record.generation });
       }
-      throw new TierMoveContentChangedError('Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.');
+      throw new TierMoveContentChangedError('Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.',
+        !digest ? 'content_no_copy' : evidence.contentPending ? 'content_still_pending' : receipts.length === 0 ? 'content_no_receipt'
+          : receipts.length > 1 ? 'content_several_receipts' : 'content_receipt_mismatch');
     }
   }
   // Staging a destination rewrites that store's row. A copy kept there as
@@ -429,7 +441,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
       replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
       continue;
     }
-    throw new TierMoveRefusedError('The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.');
+    throw new TierMoveRefusedError('The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.', 'superseded_copy_kept');
   }
 
   // 1. Stage (a raise hides the source first).
@@ -977,7 +989,7 @@ function layersCover(held: TierCopyLayers, wanted: TierCopyLayers): boolean {
 }
 
 function fullIdentity(identity: TierMoveOptions['identity']): SourceItemIdentity {
-  if (!identity.family || !identity.localItemId) throw new TierMoveRefusedError('Secrets requires a full source identity.');
+  if (!identity.family || !identity.localItemId) throw new TierMoveRefusedError('Secrets requires a full source identity.', 'secrets_identity');
   return {
     family: identity.family,
     provider: identity.provider,
