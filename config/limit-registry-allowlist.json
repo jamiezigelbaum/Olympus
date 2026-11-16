@@ -138,12 +138,6 @@
     "retire_when": "Remove when the bounded input/output clamp OAUTH_CALLBACK_URL_MAX_BYTES is removed or becomes a registered work stop."
   },
   {
-    "path": "src/core/evidence-pack.ts",
-    "symbol": "MIN_EXPANSION_BUDGET_MS",
-    "reason": "pacing",
-    "retire_when": "Remove when the resumable pacing/retry boundary MIN_EXPANSION_BUDGET_MS is retired or adopted."
-  },
-  {
     "path": "src/core/follow-up.ts",
     "symbol": "FOLLOW_UP_MAX_OPTIONS",
     "reason": "clamp",

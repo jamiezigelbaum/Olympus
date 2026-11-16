@@ -1,3 +1,4 @@
+import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 // Read-only SQLite work uses one warm Bun Worker per open store (#1305).
 // The owner's search statements use that store's shared executor; a scan
 // snapshot (the vector lane) takes a second worker of the store, and the
@@ -558,6 +559,7 @@ export async function withOffThreadSnapshot<T>(
             await moveToFreshWorker();
             rows = await once();
           }
+          noteSourceIndexReadProgress();
           report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows', snapshot: true });
           return rows;
         } catch (error) {
@@ -699,7 +701,7 @@ export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineA
     report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: 'refused' });
     return Promise.reject(new OffThreadReadBusyError());
   }
-  return new Promise((resolve, reject) => {
+  return new Promise<unknown>((resolve, reject) => {
     const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, enqueuedAtMs: clock.now(), report };
     if (Number.isFinite(deadlineAtMs)) job.timer = clock.setTimeout(() => missedDeadline(job), deadlineAtMs - clock.now());
     waiting.push(job);
@@ -708,7 +710,7 @@ export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineA
       turns.push(dbPath);
     }
     dispatch();
-  });
+  }).then((rows) => { noteSourceIndexReadProgress(); return rows; });
 }
 
 /** Closes every pool connection to `dbPath` and drops its waiting queries (its store is closing). */

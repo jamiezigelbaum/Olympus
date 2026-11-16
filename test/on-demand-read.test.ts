@@ -270,6 +270,7 @@ describe('read on demand', () => {
     expect(calls.every(call => call.requester === 'analyst')).toBe(true);
     expect(answer.answer.startsWith('Reading 3 files for this question. Ask again in about a minute.')).toBe(true);
     expect(answer.answer).not.toContain('do not contain');
+    expect(answer.answer).toContain(`Still reading evidence from ${corpusId}`);
     expect(answer.evidence).toEqual([]);
   });
 

@@ -59,27 +59,19 @@ describe('olympus_search names every lane it cut short', () => {
 
     const result = searchToolResult(raw);
     expect(notes(result)).toContain(laneTimeoutGap(HELD));
-    expect(result.content[0]!.text).toContain(`Ran out of time searching ${HELD}`);
+    expect(result.content[0]!.text).toContain(`${HELD} is still being read`);
     expect((result.structuredContent as { evidence: unknown[] }).evidence.length).toBe(raw.evidence.length);
     store.close();
   });
 
   test('a chat store whose newest-items read runs out of time is named, and its keyword matches still come back', async () => {
     const store = await chatStore();
-    // The pool's clock jumps an hour the moment the newest-items read is sent,
-    // so that read (and only it) comes back past its deadline: what a held
-    // reader does to the last read of the lane.
-    let offsetMs = 0;
-    setReadPoolClockForTests({
-      now: () => Date.now() + offsetMs,
-      setTimeout: (callback, ms) => setTimeout(callback, ms),
-      clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
-    });
+    // Refuse only the newest-items batch; other keyword reads still answer.
     let held = 0;
     setReadPoolObserverForTests((_dbPath, read) => {
       if (read.sql.includes('ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC')) {
         held += 1;
-        offsetMs = 60 * 60_000;
+        throw new OffThreadReadBusyError();
       }
     });
     const raw = await searchReleasedEvidence({

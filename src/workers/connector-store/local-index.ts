@@ -1,3 +1,4 @@
+import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
@@ -2331,6 +2332,8 @@ export interface ConnectorStoreKeywordFtsOptions {
   privatePrecision?: boolean;
   /** One lane's item-level group answers; stays on this thread, never sent to the read pool. */
   conceptHitMemo?: ConnectorStoreConceptHitMemo;
+  // A tier-checked prefix, before remaining reads or chunk location finish.
+  onPartialRows?: (rows: readonly ConnectorStoreSearchRow[]) => void;
 }
 
 type ConnectorStoreConceptHitMemo = Map<string, Map<number, {
@@ -2589,6 +2592,7 @@ async function scanVectorPages(
     for (const [index, row] of page.entries()) {
       if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) return cutExact();
       if (excluded?.has(row.item_pk)) continue;
+      if ((index & 31) === 0) noteSourceIndexReadProgress();
       dimensionMismatches += foldVectorScore(bestByItem, row, queryVector).mismatch;
     }
     afterChunkPk = page.at(-1)!.chunk_pk;
@@ -2671,6 +2675,7 @@ export async function scanDigestPages(
     const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index, itemPk) => {
       if ((index & 31) === 0 && expired()) return false;
       if (excluded && itemPk !== undefined && excluded.has(itemPk)) return true;
+      if ((index & 31) === 0) noteSourceIndexReadProgress();
       heap.append(chunkPk, scoreVectorDigest(query, digest));
       return true;
     });
@@ -15096,7 +15101,9 @@ export class LocalConnectorStore {
         continue;
       }
       const statement = this.db.query(read.sql);
-      step = steps.next(read.mode === 'all' ? statement.all(...(read.params as SQLQueryBindings[])) : statement.get(...(read.params as SQLQueryBindings[])));
+      const rows = read.mode === 'all' ? statement.all(...(read.params as SQLQueryBindings[])) : statement.get(...(read.params as SQLQueryBindings[]));
+      noteSourceIndexReadProgress();
+      step = steps.next(rows);
     }
     return step.value;
   }
@@ -15310,6 +15317,7 @@ export class LocalConnectorStore {
         (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
       );
       selected.push(...visible);
+      if (visible.length > 0) ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
       // Only rows the tier filter hid earn another page. A page it hid nothing
       // from was cut by the minimum-signal filter alone, which has always
       // stopped at one page, and the cost of that common case stays as it was.
@@ -17175,6 +17183,18 @@ export interface ConnectorStoreCorpusAdapterOptions {
 // Otherwise the keyword lane serves alone (with an honest skip reason when a
 // provider was configured but could not run). secure_local stores never run
 // the vector lane with a non-local provider — fail closed to keyword.
+function partialKeywordRows(
+  store: LocalConnectorStore,
+  request: SourceIndexCorpusSearchRequest,
+  projector?: ConnectorStoreResultProjector,
+  locatorPathScope?: ConnectorStoreSearchFilters['locatorPathScope'],
+): (rows: readonly ConnectorStoreSearchRow[]) => void {
+  return rows => request.onPartialResponse?.({
+    hits: rows.slice(0, request.maxResults).map(row => connectorStoreHitFromRow(store, row, -row.rank, projector, locatorPathScope)),
+    latencyMs: 0, incomplete: true, rawExposed: false,
+  });
+}
+
 export function createConnectorStoreCorpusAdapter(
   options: ConnectorStoreCorpusAdapterOptions,
 ): SourceIndexCorpusSearchAdapter {
@@ -17199,7 +17219,7 @@ export function createConnectorStoreCorpusAdapter(
 
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
       const keywordLane = await revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
-        await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs),
+        await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs),
         options.localKeywordFallback, {}, request.deadlineAtMs));
       const rows = keywordLane.rows;
       let recencyCut = false;
@@ -17370,7 +17390,7 @@ export function createConnectorStoreCorpusAdapter(
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
       && store.vectorLaneServable(embeddingProvider.modelId);
-    const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
+    const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, onPartialRows: partialKeywordRows(store, request) };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(
@@ -17428,7 +17448,11 @@ export function createConnectorStoreCorpusAdapter(
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
   };
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
-  expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: KEYWORD_PREPARE_WAIT_MS }); };
+  expanded.prepareKeywords = async (query) => {
+    const status = { incomplete: false };
+    await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: KEYWORD_PREPARE_WAIT_MS, status });
+    return status;
+  };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
   // A local model that is still starting gets the router's preparation budget
@@ -17592,10 +17616,11 @@ async function hybridConnectorStoreSearch(
   // question (Sparta 2026-11-10, #1242).
   const keywordWork = (async () => {
     const keywordStartedAt = Date.now();
-    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size
       ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
       : undefined;
+    partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
   })();
   const vectorWork = (async () => {
@@ -17606,8 +17631,14 @@ async function hybridConnectorStoreSearch(
       laneLimit,
       accountScope,
       filters,
-      vectorScanDeadline(request.deadlineAtMs, vectorStartedAt),
+      request.deadlineAtMs,
     );
+    const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
+    const rows = bar === undefined ? lane.rows : lane.rows.filter(row => row.bestCosine >= bar);
+    request.onPartialResponse?.({
+      hits: rows.slice(0, maxResults).map(row => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
+      latencyMs: Date.now() - startedAt, incomplete: true, rawExposed: false,
+    });
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
@@ -17794,20 +17825,6 @@ function roundCosine(value: number): number {
 
 function connectorStoreVectorDeadlineExpired(deadlineAtMs: number | undefined): boolean {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
-}
-
-/**
- * The hybrid lane's vector scan stops a little before the lane's own
- * deadline, so a store too big to scan in time still answers with its
- * keyword rows and says its semantic lane was cut, instead of the whole lane
- * timing out with nothing (#1305). It keeps a tenth of the time left, at
- * least VECTOR_SCAN_RESERVE_MIN_MS, for fusion and the visibility recheck.
- */
-const VECTOR_SCAN_RESERVE_MIN_MS = 1_000;
-export function vectorScanDeadline(laneDeadlineAtMs: number | undefined, nowMs: number): number | undefined {
-  if (laneDeadlineAtMs === undefined || !Number.isFinite(laneDeadlineAtMs)) return laneDeadlineAtMs;
-  const left = laneDeadlineAtMs - nowMs;
-  return laneDeadlineAtMs - Math.max(VECTOR_SCAN_RESERVE_MIN_MS, left / 10);
 }
 
 function yieldConnectorStoreVectorScan(): Promise<void> {

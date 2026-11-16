@@ -1,3 +1,5 @@
+import { withSourceIndexReadProgress } from './read-progress.ts';
+import { noteSourceAnswerProgress } from '../source-answer-jobs.ts';
 import { READ_WIDE_MATCH_LIMIT } from '../read-wide.ts';
 import { isSourceIndexLaneBusyError } from './lane-busy.ts';
 import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT } from './partial-search.ts';
@@ -82,13 +84,12 @@ export interface SourceIndexCorpusSearchRequest {
   maxResults: number;
   corpus: SourceIndexCorpusDefinition;
   context: SourceIndexSearchContext;
-  /**
-   * Cooperative deadline for CPU-bound local adapters. The router still owns
-   * the authoritative Promise deadline; this earlier timestamp lets an exact
-   * scan stop and return its keyword lane before it can block the event loop
-   * long enough to prevent the authoritative timer from firing.
-   */
+  // Explicit deadlines from other callers remain supported by adapters. Routed
+  // lanes use batch progress instead of imposing a total deadline.
   deadlineAtMs?: number;
+  onProgress?: () => void;
+  // Latest usable prefix, rechecked by the router's normal visibility gate.
+  onPartialResponse?: (response: SourceIndexCorpusSearchResponse) => void;
 }
 
 export interface SourceIndexSearchHit {
@@ -215,7 +216,7 @@ export interface SourceIndexRoutedMatchCount extends SourceIndexCorpusMatchCount
 export interface SourceIndexCorpusSearchAdapter {
   (request: SourceIndexCorpusSearchRequest): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>;
   // Optional local-only preparation before lane deadlines start.
-  prepareKeywords?: (query: string) => Promise<void>;
+  prepareKeywords?: (query: string) => Promise<void | { incomplete: boolean }>;
   /**
    * Optional: get the query's embedding ready before lane deadlines start, so
    * a local embedding model that is still starting (the first question after
@@ -392,27 +393,19 @@ export interface RouteSourceIndexSearchOptions {
   onSeatingLanes?: (lanes: readonly SeatingLane[]) => void;
   // Eval capture only: ask each adapter for this depth independently of the seated pool.
   storeSearchDepth?: number;
-  // Per-lane retrieval deadline for the evidence-pack fan-out. A corpus adapter
-  // that does not settle within this budget is DROPPED from the pack and
-  // reported in skippedCorpora with reason 'lane_timeout', so one slow corpus
-  // (e.g. a multi-GB keyword index under write contention) can no longer hold
-  // the whole source_answer hostage — total fan-out time is bounded by this
-  // budget. Defaults to OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS, or 60s when
-  // unset. A non-positive / non-finite value disables the deadline (unbounded
-  // lanes — the pre-deadline behavior).
+  // Idle time without a returned store batch. Non-positive disables the wait.
+  // The existing option/env name is retained for compatibility.
   laneTimeoutMs?: number;
   // How long preparation may wait for a starting embedding model before the
   // lanes run (see DEFAULT_SEMANTIC_PREPARE_BUDGET_MS). Non-positive skips it.
   semanticPrepareBudgetMs?: number;
-  // When the whole search must end (epoch ms), preparation included: the lane
-  // timeout is cut to what is left once preparation is done, so a slow model
-  // wait cannot push a search past the Ask's budget.
+  // Legacy option, ignored: total clocks do not cut progressing lanes.
   searchDeadlineAtMs?: number;
   // The lane deadline's clock and timers. Tests pass a test clock; the default is the real one.
   laneClock?: LaneDeadlineClock;
 }
 
-// The time seam of the lane deadline (runCorpusLaneWithDeadline).
+// The time seam of the lane deadline (runCorpusLaneUntilIdle).
 export interface LaneDeadlineClock {
   now(): number;
   setTimeout(callback: () => void, ms: number): unknown;
@@ -435,39 +428,10 @@ const REAL_LANE_CLOCK: LaneDeadlineClock = {
 // EvidencePack's coverage says so.
 export const DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15_000;
 
-// The lane timeout, cut to what is left before the search's own deadline (at least 1 ms).
-export function laneTimeoutWithinDeadline(laneTimeoutMs: number, deadlineAtMs: number | undefined, now = Date.now()): number {
-  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs)) return laneTimeoutMs;
-  const left = Math.max(1, deadlineAtMs - now);
-  return Number.isFinite(laneTimeoutMs) && laneTimeoutMs > 0 ? Math.min(laneTimeoutMs, left) : left;
-}
-
-// Default per-lane retrieval deadline (ms), and the whole-Ask search budget.
-//
-// Since #1305 each store reads on its own warm worker, so a lane's time is its
-// own store's statement, not a queue behind other stores. The lane deadline
-// covers one healthy store at Sparta size with margin; the Ask budget is about
-// what a 1.4.x Ask takes on Sparta (roughly 100 s), across the literal query
-// and its expansions, which run one after another. A lane that misses either
-// is reported as still being searched (#1317's wording), and its statement
-// finishes on its worker, so the store is warm for the next Ask. Neither
-// binds on a small install, whose lanes return in milliseconds.
-//
-// Never below the stores' SQLite busy_timeout (10 s): a lane waiting out the
-// single writer resolves within it.
-//
-// Provisional until the #1305 testbed copy's live pool fields set them.
-const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60_000;
-const DEFAULT_ASK_SEARCH_BUDGET_MS = 100_000;
-// Exact-vector adapters receive a cooperative deadline just inside the
-// authoritative timer, so a scan can yield before holding the event loop.
-const COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50;
-// A deadline timer this late means the thread was held past it (see
-// runCorpusLaneWithDeadline); the lane then gets HELD_THREAD_GRACE_MS more,
-// up to HELD_THREAD_MAX_DEADLINE_FACTOR times its deadline in all.
+const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 20_000;
+// A delayed timer gives I/O a turn before deciding the store is idle.
 const HELD_THREAD_LATE_TIMER_MS = 500;
 const HELD_THREAD_GRACE_MS = 1_000;
-const HELD_THREAD_MAX_DEADLINE_FACTOR = 6;
 
 const FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
   'body',
@@ -574,7 +538,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   let prepareSemanticMaxMs = 0;
   const timed = async (run: () => Promise<void> | undefined): Promise<number> => {
     const started = Date.now();
-    try { await run(); } catch { /* the original query remains usable, and a lane reports its own skip */ }
+    try { await run(); } catch { /* a lane reports its own skip */ }
     return Date.now() - started;
   };
   const prepareStartedAt = Date.now();
@@ -587,29 +551,43 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       && request.context.metadataOnly !== true
       && retrievalStates.get(corpus.corpusId)!.hybridServable;
     const [keywordsMs, semanticMs] = await Promise.all([
-      timed(() => adapter.prepareKeywords?.(request.query)),
+      timed(async () => {
+        const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
+        if (prepared?.incomplete) degradations.push({ laneName: `${corpus.corpusId}:keywords`, laneType: 'keyword', reason: 'lane_timeout', detail: 'keyword_preparation_incomplete', occurrences: 1 });
+      }),
       semantic ? timed(() => adapter.prepareSemantic!(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0),
     ]);
     prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
     prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
   const lanesStartedAt = Date.now();
-  const laneTimeoutMs = laneTimeoutWithinDeadline(resolveLaneTimeoutMs(options.laneTimeoutMs), options.searchDeadlineAtMs);
+  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const matchingIds = new Set<SourceIndexCandidateId>();
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
-    const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);
+    let progress = () => {};
+    let partial: SourceIndexCorpusSearchResponse | undefined;
     const corpusRequest: SourceIndexCorpusSearchRequest = {
       query: request.query,
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: request.context,
-      ...(cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}),
+      onProgress: () => progress(),
+      onPartialResponse: (response) => {
+        assertSafeCorpusSearchResponse(response);
+        const key = (hit: SourceIndexSearchHit) => `${hit.sourceItem.providerItemId}\u0000${hit.sourceItem.localItemId}`;
+        const hits = new Map((partial?.hits ?? []).map(hit => [key(hit), hit]));
+        for (const hit of response.hits) {
+          hits.set(key(hit), hit);
+          if (request.readWide) matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+        }
+        partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
+      },
     };
     const retrievalState = retrievalStates.get(corpus.corpusId)!.state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
-    const outcome = await runCorpusLaneWithDeadline(
-      () => runInSourceAnswerLane(corpus.corpusId, async () => {
+    const outcome = await runCorpusLaneUntilIdle(
+      (report) => { progress = report; return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
         if (metadataMatches) {
           const response = await metadataMatches(corpusRequest);
           if (request.readWide) for (const hit of response.hits) matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
@@ -631,18 +609,17 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
         const seen = new Set(response.hits.map(key));
         const added = neighbours.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
         return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
-      }),
+      })); },
       laneTimeoutMs,
       corpus.corpusId,
       options.laneClock ?? REAL_LANE_CLOCK,
     );
-    return { corpus, outcome, retrievalState };
+    return { corpus, outcome, retrievalState, partial };
   }));
 
-  for (const { corpus, outcome, retrievalState } of laneOutcomes) {
+  for (const { corpus, outcome, retrievalState, partial } of laneOutcomes) {
     if (outcome.kind === 'timeout') {
-      // A lane that blew the deadline is dropped and reported honestly; the
-      // answer proceeds with whichever lanes made it. No silent degradation.
+      // An idle read keeps its available prefix and names the unfinished store.
       skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: 'lane_timeout' });
       degradations.push({
         laneName: corpus.corpusId,
@@ -655,17 +632,18 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
         elapsedMs: outcome.elapsedMs,
         outcome: 'timeout',
       });
-      continue;
+      if (!partial) continue;
+      incompleteCorpora.push(corpus.corpusId);
     }
-    const response = outcome.response;
-    corpusTimings.push({
+    const response = outcome.kind === 'response' ? outcome.response : partial!;
+    if (outcome.kind === 'response') corpusTimings.push({
       corpusId: corpus.corpusId,
       elapsedMs: outcome.elapsedMs,
       adapterReportedMs: response.latencyMs,
       outcome: 'success',
     });
     searchedCorpora.push(corpus.corpusId);
-    if (response.incomplete === true) incompleteCorpora.push(corpus.corpusId);
+    if (response.incomplete === true && !incompleteCorpora.includes(corpus.corpusId)) incompleteCorpora.push(corpus.corpusId);
     const corpusLaneAuditsStart = laneAudits.length;
     laneAudits.push(...(response.laneAudits ?? []));
     const contributedSecure = corpusContributedSecure(corpus, response);
@@ -1110,22 +1088,29 @@ type CorpusLaneOutcome =
   | { kind: 'response'; response: SourceIndexCorpusSearchResponse; elapsedMs: number }
   | { kind: 'timeout'; elapsedMs: number };
 
-// Race a single corpus adapter against the per-lane deadline. The safety
+// Race a single corpus adapter against its idle wait. The safety
 // assertion runs on the winning response exactly as before, so a lane that
 // returns forbidden raw fields still fails the whole search (a real error is
 // not the same as a slow lane). Crucially, when the deadline wins the race the
 // lane's own promise is still fully observed (laneSettled never rejects), so a
 // dropped lane that later rejects or resolves can never surface as an unhandled
 // rejection or dangling throw.
-async function runCorpusLaneWithDeadline(
-  run: () => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>,
+async function runCorpusLaneUntilIdle(
+  run: (report: () => void) => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>,
   timeoutMs: number,
   corpusId: string,
   clock: LaneDeadlineClock = REAL_LANE_CLOCK,
 ): Promise<CorpusLaneOutcome> {
   const startedAt = Date.now();
+  let active = true;
+  let lastProgressAt = clock.now();
+  const report = () => {
+    if (!active) return;
+    lastProgressAt = clock.now();
+    noteSourceAnswerProgress('searching');
+  };
   const runValidated = async (): Promise<SourceIndexCorpusSearchResponse> => {
-    const response = await run();
+    const response = await run(report);
     assertSafeCorpusSearchResponse(response);
     return response;
   };
@@ -1154,6 +1139,8 @@ async function runCorpusLaneWithDeadline(
         error_class: sourceAnswerTraceErrorClass(error),
       });
       throw error;
+    } finally {
+      active = false;
     }
   }
 
@@ -1164,26 +1151,18 @@ async function runCorpusLaneWithDeadline(
     (response) => ({ kind: 'response' as const, response }),
     (error) => ({ kind: 'error' as const, error }),
   );
-  // A held thread is not a slow lane. When the deadline's timer fires late,
-  // something else held the worker's thread past it (a judging pass, another
-  // lane's synchronous keyword search), so this lane never had its budget of
-  // turns. It gets a short grace instead of being dropped, and is dropped
-  // only when a timer fires on time after the deadline, or at the hard stop.
-  // Sparta, 2026-11-10 (#1079): with the thread held 32-45 s during a
-  // dashboard Ask, every lane missed its 10 s deadline together and the Ask
-  // reported every source as unsearchable, although the lanes had found
-  // candidates.
-  const hardStopAtMs = clock.now() + timeoutMs * HELD_THREAD_MAX_DEADLINE_FACTOR;
   const deadline = new Promise<{ kind: 'timeout' }>((resolve) => {
     const arm = (delayMs: number) => {
       const dueAtMs = clock.now() + delayMs;
       timer = clock.setTimeout(() => {
         const now = clock.now();
-        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS && now < hardStopAtMs) {
+        const remaining = timeoutMs - (now - lastProgressAt);
+        if (remaining > 0) { arm(remaining); return; }
+        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS) {
           arm(HELD_THREAD_GRACE_MS);
           return;
         }
-        resolve({ kind: 'timeout' as const });
+        resolve({ kind: 'timeout' });
       }, delayMs);
     };
     arm(timeoutMs);
@@ -1232,6 +1211,7 @@ async function runCorpusLaneWithDeadline(
     });
     return { kind: 'response', response: settled.response, elapsedMs };
   } finally {
+    active = false;
     if (timer !== undefined) clock.clearTimeout(timer);
   }
 }
@@ -1242,21 +1222,8 @@ export function resolveLaneTimeoutMs(explicit: number | undefined): number {
   if (!raw) return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
-  // parsed <= 0 is honored as "disable the deadline" by runCorpusLaneWithDeadline.
+  // Non-positive disables the idle wait.
   return parsed;
-}
-
-// The whole-Ask search budget (BuildEvidencePackInput.searchBudgetMs).
-export function resolveAskSearchBudgetMs(explicit: number | undefined): number {
-  if (explicit !== undefined) return explicit;
-  const raw = process.env.OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS?.trim();
-  const parsed = raw ? Number(raw) : NaN;
-  return Number.isFinite(parsed) ? parsed : DEFAULT_ASK_SEARCH_BUDGET_MS;
-}
-
-function cooperativeLaneDeadlineAtMs(timeoutMs: number): number | undefined {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return undefined;
-  return Date.now() + Math.max(1, timeoutMs - COOPERATIVE_LANE_DEADLINE_HEADROOM_MS);
 }
 
 function skipReasonForCorpus(
