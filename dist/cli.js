@@ -184541,9 +184541,7 @@ function createBuiltInPrivateAnswerModel(options) {
     },
     async answerPrivately(question, evidence, signal, observe, request) {
       const full = request?.detail === "full";
-      const chosen = await options.route?.().catch(() => {
-        return;
-      });
+      const chosen = await options.route?.().catch(() => ({ unavailable: true, modelId: "the Private answer model" }));
       if (chosen && "unavailable" in chosen)
         throw new PrivateRouteUnavailableError(chosen.modelId);
       const route = chosen;
@@ -244887,6 +244885,9 @@ function analystRouteTrustDomain(pack, localOnly) {
 }
 function createLocalPrivateRoute(input) {
   const now = input.now ?? Date.now;
+  const log = input.log ?? ((line) => {
+    console.warn(line);
+  });
   const models = new Map;
   let checked;
   const seenUp = new Set;
@@ -244894,8 +244895,9 @@ function createLocalPrivateRoute(input) {
     let member;
     try {
       member = input.firstMember();
-    } catch {
-      return;
+    } catch (error) {
+      log(`[private-model] pool unreadable reason=${error instanceof Error ? error.name : "unknown"}`);
+      return { unavailable: true, modelId: "the Private answer model" };
     }
     if (!member || member.profile.provider !== "local-openai-compatible")
       return;
@@ -244929,7 +244931,8 @@ function createLocalPrivateRoute(input) {
       }
       return standsIn ? undefined : { unavailable: true, modelId: entry.modelId };
     }
-    const window2 = await input.window(entry.modelId, entry.baseUrl).catch(() => {
+    const window2 = await input.window(entry.modelId, entry.baseUrl).catch((error) => {
+      log(`[private-model] window unknown model=${entry.modelId} reason=${error instanceof Error ? error.name : "unknown"}; reading within the default budget`);
       return;
     });
     return { model: entry.model, modelId: entry.modelId, windowTokens: window2?.windowTokens ?? 0 };
