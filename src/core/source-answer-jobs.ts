@@ -43,6 +43,7 @@
  * deadline and a revoked connection each take it out of the queue. Only when
  * and whether an answer starts changes, never what it says.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
@@ -77,8 +78,13 @@ export const SOURCE_ANSWER_HANDOFF_MIN_MS = 1_000;
 export const SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60_000;
 export const SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120_000;
 export const SOURCE_ANSWER_JOB_TTL_MS = 15 * 60_000;
-/** Backstop on a handed-off job; the answer's own timeout chain normally ends it first. */
-export const SOURCE_ANSWER_JOB_DEADLINE_MS = 20 * 60_000;
+/**
+ * A handed-off job stops only when it has made no progress for this long
+ * (no store finished, no evidence read, no analyst leg started or ended),
+ * never on a total clock (owner rule, 2026-11-16: an answer in progress is
+ * not cancelled). The work reports progress through noteSourceAnswerProgress.
+ */
+export const SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60_000;
 /**
  * Sized to the analyst, not to the HTTP server: the local analyst is a
  * single-lane model, and remote answers share that lane with the owner's own
@@ -108,7 +114,8 @@ export interface SourceAnswerJobLimits {
   handoffMs: number;
   resultWaitMs: number;
   ttlMs: number;
-  deadlineMs: number;
+  /** No progress for this long stops a handed-off job (SOURCE_ANSWER_JOB_IDLE_MS). */
+  idleMs: number;
   maxRunningPerOwner: number;
   maxRunningGlobal: number;
   maxRetainedPerOwner: number;
@@ -247,7 +254,7 @@ export class SourceAnswerJobRegistry {
       handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
       resultWaitMs: SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
       ttlMs: SOURCE_ANSWER_JOB_TTL_MS,
-      deadlineMs: SOURCE_ANSWER_JOB_DEADLINE_MS,
+      idleMs: SOURCE_ANSWER_JOB_IDLE_MS,
       maxRunningPerOwner: SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
       maxRunningGlobal: SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
       maxRetainedPerOwner: SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
@@ -288,7 +295,9 @@ export class SourceAnswerJobRegistry {
    * otherwise returns a pending handle and lets the work continue.
    *
    * `work` receives the signal that ends it: the client's disconnect before
-   * hand-off (through the surface's own wiring), the job deadline after.
+   * hand-off (through the surface's own wiring), after it only a stall: no
+   * progress (noteSourceAnswerProgress, called anywhere inside `work`) for
+   * the idle limit.
    */
   async run<T>(scope: SourceAnswerJobScope, work: (signal: AbortSignal) => Promise<T>): Promise<T | SourceAnswerPending> {
     this.sweep();
@@ -304,11 +313,17 @@ export class SourceAnswerJobRegistry {
     const callerManifests = currentReleaseManifestSink();
     const jobManifests = callerManifests ? createReleaseManifestSink() : undefined;
 
+    let lastProgressAt = startedAt;
+    let lastStage: SourceAnswerProgressStage | undefined;
+    const onProgress = (stage: SourceAnswerProgressStage) => {
+      lastProgressAt = this.now();
+      lastStage = stage;
+    };
     let pending: Promise<T>;
     try {
       const start = turn
-        ? () => turn.ready.then(() => work(controller.signal))
-        : () => work(controller.signal);
+        ? () => progressSink.run(onProgress, () => turn.ready.then(() => work(controller.signal)))
+        : () => progressSink.run(onProgress, () => work(controller.signal));
       pending = jobManifests ? runWithReleaseManifestSink(jobManifests, start) : start();
     } catch (error) {
       release();
@@ -332,8 +347,8 @@ export class SourceAnswerJobRegistry {
       throw first.error;
     }
 
-    // Hand-off. The client may now go away without cancelling the work; the
-    // job's own deadline is what ends it from here.
+    // Hand-off. The client may now go away without cancelling the work; only
+    // a stall (no progress for the idle limit) ends it from here.
     turn?.detach();
     scope.detachFromClient?.();
     let wake!: () => void;
@@ -354,13 +369,20 @@ export class SourceAnswerJobRegistry {
       abort: (reason) => controller.abort(reason),
       ...(jobManifests ? { releaseManifests: jobManifests } : {}),
     };
-    // The deadline frees the slot and records its own error at once; it does
-    // not wait for the work to notice the abort, so work that never settles
-    // cannot hold a slot past it.
-    job.deadline = setTimeout(() => {
-      job.abort(callerAbortError('source_answer job deadline reached'));
-      job.finish({ ok: false, error: sourceAnswerDeadline(this.limits.deadlineMs) });
-    }, Math.max(0, this.limits.deadlineMs - (this.now() - startedAt)));
+    // A stall frees the slot and records its own error at once; it does not
+    // wait for the work to notice the abort, so work that never settles
+    // cannot hold a slot past it. Progress pushes the check back.
+    const idleCheck = () => {
+      const quietMs = this.now() - lastProgressAt;
+      if (quietMs < this.limits.idleMs) {
+        job.deadline = setTimeout(idleCheck, this.limits.idleMs - quietMs);
+        job.deadline.unref?.();
+        return;
+      }
+      job.abort(callerAbortError('source_answer job stopped making progress'));
+      job.finish({ ok: false, error: sourceAnswerStalled(this.limits.idleMs, lastStage) });
+    };
+    job.deadline = setTimeout(idleCheck, Math.max(0, this.limits.idleMs - (this.now() - lastProgressAt)));
     job.deadline.unref?.();
     void outcome.then((result) => job.finish(result));
     this.jobs.set(job.id, job);
@@ -833,12 +855,27 @@ function sourceAnswerBusy(): OperationError {
   );
 }
 
-function sourceAnswerDeadline(deadlineMs: number): OperationError {
+function sourceAnswerStalled(idleMs: number, stage: SourceAnswerProgressStage | undefined): OperationError {
+  const minutes = Math.round(idleMs / 60_000);
   return new OperationError(
     'source_answer_deadline',
-    `The answer did not finish within Olympus's ${Math.round(deadlineMs / 60_000)}-minute limit and was stopped.`,
-    'Ask a narrower question, or try again later.',
+    `The answer made no progress for ${minutes} minute${minutes === 1 ? '' : 's'}${stage ? ` while ${stage}` : ''} and was stopped.`,
+    'Try again later; if it stops again at the same step, that part of Olympus needs attention.',
   );
+}
+
+/** What an answer was doing when it last made progress: fixed words, no content. */
+export type SourceAnswerProgressStage = 'searching' | 'reading evidence' | 'ranking evidence' | 'writing the answer';
+
+const progressSink = new AsyncLocalStorage<(stage: SourceAnswerProgressStage) => void>();
+
+/**
+ * Tells the answer job running this code that it is making progress (a store
+ * finished, evidence was read, an analyst leg started or ended), so its idle
+ * limit starts over. Does nothing outside a job.
+ */
+export function noteSourceAnswerProgress(stage: SourceAnswerProgressStage): void {
+  progressSink.getStore()?.(stage);
 }
 
 /**

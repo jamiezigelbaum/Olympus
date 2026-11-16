@@ -8210,91 +8210,6 @@ var init_keyword_context = __esm(() => {
   cachedOnly = new AsyncLocalStorage2;
   requestContext = new AsyncLocalStorage2;
 });
-// src/core/store-reclaim-admission.ts
-var init_store_reclaim_admission = __esm(() => {
-  init_file_lease();
-  init_olympus_layout();
-});
-
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-var poolSqlSites, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  init_store_reclaim_admission();
-  poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage3;
-  laneStorage = new AsyncLocalStorage3;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
-});
-
-// src/core/source-index/router.ts
-function normalizeRouterResultKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
-var init_router = __esm(() => {
-  init_partial_search();
-  init_keyword_context();
-  init_types();
-  init_answer_latency_trace();
-  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
-    "body",
-    "bodies",
-    "content",
-    "contents",
-    "message",
-    "messages",
-    "raw",
-    "raw_packet",
-    "rawPacket",
-    "raw_source",
-    "rawSource",
-    "sanitized_text",
-    "sanitizedText",
-    "snippet",
-    "snippets",
-    "source_text",
-    "sourceText",
-    "raw_source_text",
-    "rawSourceText",
-    "text",
-    "access_token",
-    "accessToken",
-    "api_key",
-    "apiKey",
-    "approved_scope_key",
-    "approvedScopeKey",
-    "refresh_token",
-    "refreshToken",
-    "token"
-  ]);
-  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
-});
-
-// src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
-var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
-var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage4;
-  completedPrivateAnswers = new Set;
-  JOB_QUESTION_TTL_MS = 30 * 60000;
-  jobQuestions = new Map;
-});
 // src/core/secret-patterns.ts
 var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
@@ -8498,6 +8413,105 @@ var init_opsec = __esm(() => {
   init_types();
 });
 
+// src/core/source-answer-jobs.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+var SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_IDLE_MS, SOURCE_ANSWER_MAX_RESULT_BYTES, progressSink;
+var init_source_answer_jobs = __esm(() => {
+  init_operation_error();
+  init_opsec();
+  init_release_manifest();
+  SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+  SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+  SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+  progressSink = new AsyncLocalStorage3;
+});
+
+// src/core/store-reclaim-admission.ts
+var init_store_reclaim_admission = __esm(() => {
+  init_file_lease();
+  init_olympus_layout();
+});
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var poolSqlSites, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  init_source_answer_jobs();
+  init_store_reclaim_admission();
+  poolSqlSites = new WeakMap;
+  storage2 = new AsyncLocalStorage4;
+  laneStorage = new AsyncLocalStorage4;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
+// src/core/source-index/router.ts
+function normalizeRouterResultKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
+var init_router = __esm(() => {
+  init_partial_search();
+  init_keyword_context();
+  init_types();
+  init_answer_latency_trace();
+  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
+    "body",
+    "bodies",
+    "content",
+    "contents",
+    "message",
+    "messages",
+    "raw",
+    "raw_packet",
+    "rawPacket",
+    "raw_source",
+    "rawSource",
+    "sanitized_text",
+    "sanitizedText",
+    "snippet",
+    "snippets",
+    "source_text",
+    "sourceText",
+    "raw_source_text",
+    "rawSourceText",
+    "text",
+    "access_token",
+    "accessToken",
+    "api_key",
+    "apiKey",
+    "approved_scope_key",
+    "approvedScopeKey",
+    "refresh_token",
+    "refreshToken",
+    "token"
+  ]);
+  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+});
+
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
+var init_app_release_capture = __esm(() => {
+  storage3 = new AsyncLocalStorage5;
+  completedPrivateAnswers = new Set;
+  JOB_QUESTION_TTL_MS = 30 * 60000;
+  jobQuestions = new Map;
+});
 // src/core/parent-label.ts
 var init_parent_label = __esm(() => {
   init_types();
@@ -13766,7 +13780,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, analystEvidenceFormats, packPromptBudgets, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
@@ -13776,7 +13790,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage5;
+  analystAbortSignalStorage = new AsyncLocalStorage6;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -15870,7 +15884,7 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
@@ -15878,7 +15892,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage6;
+  priorityQueryEmbedding = new AsyncLocalStorage7;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -16268,11 +16282,11 @@ var init_media_cache = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage7;
+  readAuthorization = new AsyncLocalStorage8;
 });
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {

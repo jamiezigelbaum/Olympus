@@ -2,6 +2,7 @@ import type { EvidenceRerankAudit } from '../../core/evidence-reranker.ts';
 import type { LocalAnalystPromptBudget } from './local-analyst-window.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
+import { noteSourceAnswerProgress } from '../../core/source-answer-jobs.ts';
 import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
 import type { AnalystBackend, SourceIndexAnswerPhaseTimings } from './answer-types.ts';
 
@@ -441,7 +442,7 @@ export async function observeSourceAnswerRetrievalAttempt<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   const trace = currentSourceAnswerTrace();
-  if (!trace) return run();
+  if (!trace) return run().finally(() => noteSourceAnswerProgress('searching'));
   const previous = trace.activeAttempt;
   const attempt = {
     kind,
@@ -461,12 +462,14 @@ export async function observeSourceAnswerRetrievalAttempt<T>(
       queries: attempt.queries,
     });
     if (kind === 'self_heal_rebuild') trace.selfHealRebuildMs += elapsedMs;
+    noteSourceAnswerProgress('searching');
     if (previous) trace.activeAttempt = previous;
     else delete trace.activeAttempt;
   }
 }
 
 export function recordSourceAnswerHydration(elapsedMs: number): void {
+  noteSourceAnswerProgress('reading evidence');
   const attempt = currentSourceAnswerTrace()?.activeAttempt;
   if (attempt) attempt.hydrationMs += nonNegativeMs(elapsedMs);
 }
@@ -527,6 +530,7 @@ export function copyQueryStages(stages: SourceAnswerTraceQueryStages): SourceAns
 }
 
 export function recordSourceAnswerCorpusTiming(timing: SourceAnswerTraceCorpusTiming): void {
+  noteSourceAnswerProgress('searching');
   const query = currentSourceAnswerTrace()?.activeQuery;
   if (!query) return;
   query.corpusTimings.push({
@@ -559,8 +563,10 @@ export async function observeSourceAnswerAnalystLeg<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   const startedAt = Date.now();
+  noteSourceAnswerProgress('writing the answer');
   try {
     const result = await run();
+    noteSourceAnswerProgress('writing the answer');
     recordAnalystLeg(input, startedAt, 'success');
     return result;
   } catch (error) {
@@ -619,6 +625,7 @@ export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['
 }
 
 export function recordSourceAnswerRerank(audit: EvidenceRerankAudit | undefined): void {
+  noteSourceAnswerProgress('ranking evidence');
   const trace = currentSourceAnswerTrace();
   if (trace && audit) trace.rerank = { ...audit };
 }

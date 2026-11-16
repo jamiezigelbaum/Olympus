@@ -9,6 +9,7 @@ import { recordReleaseManifest } from '../src/core/release-manifest.ts';
 // finishes only when a test releases it.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { waitFor } from './helpers/test-clock.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +22,7 @@ import { findOperationByName, type OperationContext } from '../src/core/operatio
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import {
   isSourceAnswerPending,
+  noteSourceAnswerProgress,
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_HANDOFF_MAX_MS,
   SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS,
@@ -352,7 +354,7 @@ describe('against the real worker route', () => {
   const sourceAnswerResult = () => findOperationByName('source_answer_result')!;
 
   test('a stuck analyst cannot hold a slot past the job deadline', async () => {
-    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 0, deadlineMs: 120, maxRunningGlobal: 1 } });
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 0, idleMs: 120, maxRunningGlobal: 1 } });
     analyst.honorAbort = false;
     analyst.hold();
     const ctx = realWorkerContext(new AbortController().signal, registry);
@@ -386,7 +388,7 @@ describe('against the real worker route', () => {
   });
 
   test('after hand-off a disconnect leaves the analyst running; the deadline stops it', async () => {
-    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 0, deadlineMs: 150 } });
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 0, idleMs: 150 } });
     analyst.hold();
     const client = new AbortController();
     const pending = await sourceAnswer().handler(realWorkerContext(client.signal, registry), { question: 'q' }) as SourceAnswerPending;
@@ -457,7 +459,7 @@ describe('client aborts and job deadlines', () => {
   });
 
   test('after hand-off a disconnect no longer aborts; the job deadline does', async () => {
-    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 200, deadlineMs: 150 } });
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 20, resultWaitMs: 200, idleMs: 150 } });
     const client = new AbortController();
     const seen: Request[] = [];
     const ctx = inProcess({ registry, clientSignal: client.signal, seen });
@@ -503,6 +505,38 @@ describe('client aborts and job deadlines', () => {
 
 describe('SourceAnswerJobRegistry', () => {
   const scope = (registry: SourceAnswerJobRegistry, owner = 'remote:a') => ({ registry, owner });
+
+  // Owner rule, 2026-11-16: an answer in progress is not cancelled on a clock.
+  test('a job that keeps making progress runs past the idle limit and finishes', async () => {
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 10, resultWaitMs: 0, idleMs: 60 } });
+    const pending = await registry.run(scope(registry), () => new Promise<string>((resolve) => {
+      let ticks = 0;
+      const timer = setInterval(() => {
+        noteSourceAnswerProgress('searching');
+        if (++ticks === 12) { clearInterval(timer); resolve('answer'); }
+      }, 20);
+    })) as SourceAnswerPending;
+    expect(pending.status).toBe('working');
+    // About 240 ms of work, four times the idle limit, with progress every 20 ms.
+    const answer = await waitFor(async () => registry.result('remote:a', pending.job_id).then((value) => value === 'answer' ? value : undefined, () => 'stopped'),
+      { description: 'the progressing job finishes' });
+    expect(answer).toBe('answer');
+  });
+
+  test('a job that stops making progress is stopped, and says what it was doing', async () => {
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 10, resultWaitMs: 0, idleMs: 60 } });
+    let signal: AbortSignal | undefined;
+    const pending = await registry.run(scope(registry), (abort) => {
+      signal = abort;
+      noteSourceAnswerProgress('writing the answer');
+      return new Promise<string>(() => {});
+    }) as SourceAnswerPending;
+    const error = await waitFor(async () => registry.result('remote:a', pending.job_id).then(() => undefined, (failure: unknown) => failure as OperationError),
+      { description: 'the stalled job stops' });
+    expect(error.code).toBe('source_answer_deadline');
+    expect(error.message).toBe('The answer made no progress for 0 minutes while writing the answer and was stopped.');
+    expect(signal?.aborted).toBe(true);
+  });
 
   test('results expire after the TTL', async () => {
     let now = 1_000_000;
