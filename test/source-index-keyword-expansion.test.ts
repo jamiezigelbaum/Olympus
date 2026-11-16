@@ -379,3 +379,22 @@ test('a cold sample read elsewhere detects its languages in slices, so the askin
   expect(turns).toBeGreaterThan(1);
   db.close();
 });
+
+// Plan ruling, 2026-11-16: term translation stays on the built-in model for
+// 1.5, on condition that a failed translation is never silent.
+test('a translation that fails is reported as an incomplete keyword preparation, not passed off as a full one', async () => {
+  registerBuiltInPrivateModel({ available: () => true, model: { async complete() { throw new Error('offline'); } } });
+  const status = { incomplete: false };
+  await expandSourceIndexKeywords('asteroid notary', ['spa'], {}, { waitMs: 5_000, status });
+  expect(status.incomplete).toBe(true);
+  // An answer that is not the JSON asked for is the same failure.
+  registerBuiltInPrivateModel({ available: () => true, model: { async complete() { return { text: 'not json', modelId: 'fixture' }; } } });
+  const garbled = { incomplete: false };
+  await expandSourceIndexKeywords('comet solicitor', ['spa'], {}, { waitMs: 5_000, status: garbled });
+  expect(garbled.incomplete).toBe(true);
+  // A translation that works is complete.
+  registerBuiltInPrivateModel({ available: () => true, model: { async complete() { return { text: '{"spa":{"0":["cometa"],"1":["abogado"]}}', modelId: 'fixture' }; } } });
+  const fine = { incomplete: false };
+  await expandSourceIndexKeywords('comet solicitor', ['spa'], {}, { waitMs: 5_000, status: fine });
+  expect(fine.incomplete).toBe(false);
+});

@@ -11,6 +11,10 @@ import { withKeywordAlternatives, requestKeywordAlternatives, pinKeywordAlternat
 interface CachedExpansion { pending: Promise<KeywordExpansionMap>; expires: number; value?: KeywordExpansionMap }
 const caches = new WeakMap<AnalystModel, Map<string, CachedExpansion>>();
 const EMPTY: KeywordExpansionMap = new Map();
+// Word lists returned because the model's translation failed or gave up: the
+// search used the static equivalents only, and its coverage says so.
+const failedTranslations = new WeakSet<KeywordExpansionMap>();
+const failedCopy = (fallback: KeywordExpansionMap): KeywordExpansionMap => { const copy = new Map(fallback); failedTranslations.add(copy); return copy; };
 const MAX_LANGUAGES = 6;
 const MAX_TERMS_PER_LANGUAGE = 8;
 const SYSTEM = 'Translate only the INDIVIDUAL content words in concepts, never the entire context sentence. Return translations under their numeric concept IDs. The question is context only. Translate each source content word into the target language named in languageNames. Use the ISO code only as the JSON key. Every equivalent must be in its named target language, regardless of the language of the context sentence. '
@@ -73,7 +77,7 @@ export async function expandSourceIndexKeywords(
     }
     const cached = { missing: false };
     const alternatives = await expandCachedSourceIndexKeywords(query, languages ?? [], cached);
-    if (options.status) options.status.incomplete = cached.missing || languages === undefined;
+    if (options.status) options.status.incomplete = cached.missing || languages === undefined || failedTranslations.has(alternatives);
     pinKeywordAlternatives(owner, query, alternatives);
     return alternatives;
   }
@@ -88,6 +92,7 @@ export async function expandSourceIndexKeywords(
   const alternatives = waited
     ? waited.value
     : await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
+  if (options.status && failedTranslations.has(alternatives)) options.status.incomplete = true;
   pinKeywordAlternatives(owner, query, alternatives);
   return alternatives;
 }
@@ -151,7 +156,7 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
         },
       });
       let generated: unknown;
-      try { generated=JSON.parse(completion.text); } catch { return fallback; }
+      try { generated=JSON.parse(completion.text); } catch { return failedCopy(fallback); }
       const merged: Record<string, Record<string, unknown>> = {};
       for (const language of languages) {
         const decoded: Record<string,unknown> = {...seeded[language]};
@@ -171,7 +176,7 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
       // Keep failure for this request and its hydration; retry on a later request.
       const failed = cache!.get(key);
       if (failed) failed.expires = Date.now() + 30_000;
-      return fallback;
+      return failedCopy(fallback);
     }
   }
 }

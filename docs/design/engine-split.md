@@ -258,6 +258,35 @@ the cause).
   status) are published by the background as a small snapshot, written
   atomically every few seconds; the front reads the last one and shows
   its age. No request waits on the background for status.
+- **The background's control plane is its own thread (16 Nov 2026).**
+  The background's loop calls SQLite synchronously, and how long a call
+  takes is set by the disk and by locks, not by the code: on a large
+  store the loop was held about a fifth of the time (worst 30 s) and
+  once for minutes. So the two things above do not run on that loop. A
+  Worker thread (`src/workers/engine-split/control-plane.ts`,
+  `control-worker.ts`, bundled as `dist/engine-control-worker.js`) holds
+  the command socket and writes the snapshot, as the heartbeat's thread
+  does for health:
+  - A command is checked, recorded and answered `received` by the thread
+    at once, with `loop_held_ms` (how long the loop has gone without a
+    turn), and handed to the loop by message. The ledger on the loop is
+    still the one place a command is applied, once; its result goes back
+    by message. The thread asks again about commands the loop has not
+    settled, so a lost message between threads loses no command.
+  - The loop collects its status every few seconds and hands it to the
+    thread. The thread writes the snapshot every few seconds whether the
+    loop turns or not: `written_at` says the background is alive,
+    `state_at` says when the loop last collected, `loop_held_ms` how long
+    it has been held, and `state_error` that a collect threw. A held
+    loop is therefore not a stale snapshot: the front keeps showing the
+    last state and can say how old it is (`state_age_ms`).
+  - The built-in model's completions still run on the loop, which holds
+    the model; the thread passes them through.
+  - No engine or store code runs on the thread, and it never waits on a
+    disk. If the thread cannot start, or ends, the loop serves the socket
+    and writes the snapshot itself, as before, and logs that it does.
+  `test/engine-control-plane.test.ts` holds a real background's loop in
+  one SQLite call for 60 s and checks all of it.
 - **Stores the front keeps writing.** Its own files stay its own: remote
   connections, waiting private questions, answer jobs, dashboard
   sessions, settings files. Nothing else writes them.

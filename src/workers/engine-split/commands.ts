@@ -258,6 +258,24 @@ export interface EngineCommandReceipt {
   instance_id: string;
   result?: unknown;
   error?: string;
+  /**
+   * `received` only, from the control thread (control-worker.ts): how long the
+   * background's loop had gone without a turn when this was answered. The
+   * command is accepted and is applied when the loop turns; 0 while it turns.
+   */
+  loop_held_ms?: number;
+}
+
+/**
+ * What the command socket answers from: the ledger itself on the engine's
+ * loop, or the control thread's mirror of it (control-mirror.ts), which
+ * answers while the loop is held.
+ */
+export interface EngineCommandRecords {
+  readonly instanceId: string;
+  submit(envelope: EngineCommandEnvelope): EngineCommandReceipt;
+  get(id: string): EngineCommandReceipt | undefined;
+  settled(id: string, wait: Promise<void>): Promise<EngineCommandReceipt | undefined>;
 }
 
 export class EngineCommandError extends Error {
@@ -518,7 +536,7 @@ export interface EngineCommandLedgerOptions {
  * The background's record of commands: receipt at once, the result once
  * applied, and each id applied at most once while this process lives.
  */
-export class EngineCommandLedger {
+export class EngineCommandLedger implements EngineCommandRecords {
   private readonly entries = new Map<string, LedgerEntry>();
   private readonly chains = new Map<string, Promise<void>>();
   private readonly now: () => number;
@@ -598,7 +616,7 @@ export class EngineCommandLedger {
 
 export interface EngineCommandServerOptions {
   authToken: string;
-  ledger: EngineCommandLedger;
+  ledger: EngineCommandRecords;
   /** True once the background's boot work is done and it accepts commands. */
   ready: () => boolean;
   /** Longest a result request may wait for the command to settle. */
