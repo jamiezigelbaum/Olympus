@@ -115,6 +115,64 @@ describe('status snapshot for the dashboard', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("a store the front mounted before the background counted it never makes the front count (rc.20 leg, 16 Nov)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'status-snapshot-'));
+    const snapshotPath = join(dir, 'source-status-snapshot.json');
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    // An import's new store: mounted on the front, not yet counted by the background.
+    const fresh = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'internal.readwise.library', family: 'file', trustDomain: 'internal' });
+    let now = 1_000_000;
+    try {
+      const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'writer' });
+      const counted = await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      let counts = 0;
+      for (const each of [store, fresh]) each.prepareStatusCounts = () => { counts += 1; return new Promise<void>(() => {}); };
+      const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store, fresh], nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
+      now += 3_000;
+      const shown = await within(front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT));
+      expect(shown).not.toBe('waited');
+      expect((shown as typeof counted).corpora).toEqual(counted.corpora);
+      expect((shown as typeof counted).snapshot_age_ms).toBe(3_000);
+      // A live read, a read for one corpus and a request the background never counted: all its count, none counted here.
+      const live = await within(front.status({ include_items: false }));
+      expect(live).not.toBe('waited');
+      expect((live as typeof counted).corpora.length).toBeGreaterThan(0);
+      const one = await within(front.status({ corpus_id: CORPUS_ID }, SNAPSHOT));
+      expect((one as typeof counted).corpora.map((corpus) => corpus.corpus_id)).toEqual([CORPUS_ID]);
+      await front.settled!();
+      expect(counts).toBe(0);
+    } finally {
+      store.close();
+      fresh.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a front started before the background's first count answers \"counting\" at once and counts nothing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'status-snapshot-'));
+    const snapshotPath = join(dir, 'source-status-snapshot.json');
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    try {
+      let counts = 0;
+      store.prepareStatusCounts = () => { counts += 1; return new Promise<void>(() => {}); };
+      const status = store.status.bind(store);
+      store.status = ((...args: Parameters<typeof store.status>) => { counts += 1; return status(...args); }) as typeof store.status;
+      store.statusOffThread = async () => { counts += 1; throw new Error('never counted on the front'); };
+      const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], snapshotPath, snapshotRole: 'reader' });
+      for (const read of [front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT), front.status({ include_items: false }), front.status({ corpus_id: CORPUS_ID }, SNAPSHOT)]) {
+        const shown = await within(read);
+        expect(shown).not.toBe('waited');
+        expect((shown as { counting?: boolean }).counting).toBe(true);
+        expect((shown as { corpora: unknown[] }).corpora).toEqual([]);
+      }
+      await front.settled!();
+      expect(counts).toBe(0);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('a busy read pool', () => {

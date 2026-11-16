@@ -131013,6 +131013,14 @@ function authorCoverageStatus(store, reused = (read) => read()) {
     return;
   }
 }
+function requestOf2(key) {
+  try {
+    const parsed = JSON.parse(key);
+    return Array.isArray(parsed) && parsed[0] && typeof parsed[0] === "object" ? parsed[0] : undefined;
+  } catch {
+    return;
+  }
+}
 function createSourceIndexStatusHandler(options = {}) {
   const staticRegistry = typeof options.corpusDefinitions === "function" ? undefined : buildSourceIndexCorpusRegistry(options.corpusDefinitions ?? defaultCorpusDefinitions());
   const currentRegistry = () => staticRegistry ?? buildSourceIndexCorpusRegistry(options.corpusDefinitions());
@@ -131138,6 +131146,36 @@ function createSourceIndexStatusHandler(options = {}) {
       return published?.entries.get(key);
     }
     return published.entries.get(key);
+  };
+  const servedOnFront = (request, countsMaxAgeMs) => {
+    const key = snapshotKey(request, countsMaxAgeMs);
+    const exact = publishedStatus(key);
+    const entries = [...published?.entries ?? new Map];
+    const newest = (match) => {
+      let found;
+      for (const [other, kept] of entries) {
+        const asked = requestOf2(other);
+        if (asked && match(asked) && (!found || kept.atMs > found.atMs))
+          found = kept;
+      }
+      return found;
+    };
+    const asked = requestOf2(key) ?? {};
+    const sameRequest = JSON.stringify(asked);
+    const { corpus_id: corpusId, ...wholeStore } = asked;
+    const kept = exact ?? newest((other) => JSON.stringify(other) === sameRequest) ?? newest((other) => other.corpus_id === undefined && JSON.stringify({ ...other }) === JSON.stringify({ ...wholeStore })) ?? newest((other) => other.corpus_id === undefined);
+    if (!kept) {
+      return {
+        kind: "source_index_status",
+        generated_at: new Date().toISOString(),
+        corpora: [],
+        counting: true,
+        policy: { read_only: true, raw_source_exposed: false, source_packets_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true }
+      };
+    }
+    const canonical = typeof corpusId === "string" ? canonicalSourceCorpusId(corpusId) : undefined;
+    const corpora = canonical === undefined ? kept.result.corpora : kept.result.corpora.filter((corpus) => corpus.corpus_id === canonical);
+    return { ...kept.result, corpora, snapshot_age_ms: Math.max(0, nowMs() - kept.atMs) };
   };
   const persistSnapshots = () => {
     if (!options.snapshotPath || role === "reader")
@@ -131344,6 +131382,11 @@ function createSourceIndexStatusHandler(options = {}) {
   return {
     async status(request = {}, snapshot = {}) {
       const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
+      if (role === "reader" && !request.include_sender_aggregation) {
+        assertSupportedStatusRequest(request);
+        publishedStatus(snapshotKey(request, countsMaxAgeMs));
+        return withLiveTotals(servedOnFront(request, countsMaxAgeMs));
+      }
       if (countsMaxAgeMs <= 0 || request.include_sender_aggregation)
         return withLiveTotals(await computeStatus(request, snapshot));
       assertSupportedStatusRequest(request);
@@ -217103,7 +217146,8 @@ function createEmailSourceWorker(options = {}) {
         }
         if (failedUrl.pathname.startsWith("/dashboard")) {
           const code = error instanceof EmailSourceWorkerError || error instanceof ConnectedHandleGrantMutationError ? error.code : isCredentialRefreshBusyError(error) ? "credential_refresh_busy" : "unexpected";
-          console.warn(`[olympus] dashboard ${failedUrl.pathname} failed: ${code}`);
+          const frame = code === "unexpected" && error instanceof Error ? dashboardFailureFrames(error) : undefined;
+          console.warn(`[olympus] dashboard ${failedUrl.pathname} failed: ${code}${frame ? ` at ${frame}` : ""}`);
         }
         if (error instanceof EmailSourceWorkerError) {
           return json({
@@ -217395,6 +217439,11 @@ function createEmailSourceWorker(options = {}) {
     }
     return false;
   }
+}
+function dashboardFailureFrames(error) {
+  const frames = (error.stack ?? "").split(`
+`).map((line) => line.trim()).filter((line) => line.startsWith("at ") && !/\((?:bun:|native|unknown)/.test(line)).slice(0, 3).map((line) => line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+)(?::\d+)?/g, "$1").slice(0, 120));
+  return frames.length > 0 ? frames.join(" < ") : undefined;
 }
 var init_engine2 = __esm(() => {
   init_remote_access_recheck();
@@ -231648,7 +231697,7 @@ function archiveOf(entry) {
     summary: summaryOf2(entry, stopped)
   };
 }
-function requestOf2(request) {
+function requestOf3(request) {
   const copy = ARCHIVE_AGENT_COPY.request;
   const kind = request.kind === "remove" ? "remove" : "import";
   let state;
@@ -231773,7 +231822,7 @@ function createArchiveImportAgent(deps) {
         result.requests_unreadable = { reason: meta.unreadable.reason, message: unreadableMessage(meta.unreadable) };
       } else {
         const asked = archiveId === undefined ? meta.requests : meta.requests.filter((request) => request.archiveId === archiveId);
-        result.requests = asked.map(requestOf2);
+        result.requests = asked.map(requestOf3);
       }
       if (held)
         result.private_model_note = ARCHIVE_AGENT_COPY.heldNote[meta.privateModel];
@@ -267229,8 +267278,12 @@ ${key}`;
   }
   const retrievalAvailability = {};
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
-    if (!connectorStores.includes(store))
+    if (!connectorStores.includes(store)) {
       connectorStores.push(store);
+      statusRecount?.soon();
+      if (engineFront)
+        console.log(`[olympus] front: mounted ${store.corpusId}`);
+    }
     probeExtractionEnded(store);
     if (!fullyDefinedCorpusIds.has(store.corpusId)) {
       const definition = registeredCorpusDefinitions.get(store.corpusId);

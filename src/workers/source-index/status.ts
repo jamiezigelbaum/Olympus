@@ -92,6 +92,8 @@ export interface SourceIndexStatusResult {
    * the next one is read behind the request.
    */
   snapshot_age_ms?: number;
+  /** The split's front before the background's first count: no numbers yet. */
+  counting?: boolean;
   corpora: SourceIndexStatusCorpus[];
   degraded_credentials?: WorkerCredentialDegradation[];
   embedding_lane?: SourceIndexEmbeddingLaneState;
@@ -461,6 +463,16 @@ type StatusCorpusDefinition = Omit<SourceIndexCorpusDefinition, 'activationMode'
   activationMode: SourceIndexCorpusDefinition['activationMode'] | 'metadata_only';
 };
 
+/** The request a status snapshot key was kept for, without its allowance, store list and scopes. */
+function requestOf(key: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(key) as unknown;
+    return Array.isArray(parsed) && parsed[0] && typeof parsed[0] === 'object' ? parsed[0] as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function createSourceIndexStatusHandler(
   options: SourceIndexStatusHandlerOptions = {},
 ): SourceIndexStatusHandler {
@@ -626,6 +638,44 @@ export function createSourceIndexStatusHandler(
       return published?.entries.get(key);
     }
     return published.entries.get(key);
+  };
+  // The split's front never counts a store, whatever the reason the
+  // background has no entry for this exact read: a store the front mounted
+  // first, a scope that moved, a front started before the background's first
+  // count, a background that is down (rc.20 leg, 16 Nov: the front counting
+  // a store an import had just made held its loop 10 to 15 s and failed the
+  // Sources page with SQLITE_BUSY). It serves, in order: this read's entry;
+  // the newest for the same request at any allowance; the newest whole-store
+  // count of any request, narrowed to the corpus asked for; else "counting"
+  // with no numbers.
+  const servedOnFront = (request: SourceIndexStatusRequest, countsMaxAgeMs: number): SourceIndexStatusResult => {
+    const key = snapshotKey(request, countsMaxAgeMs);
+    const exact = publishedStatus(key);
+    const entries = [...(published?.entries ?? new Map<string, KeptStatus>())];
+    const newest = (match: (other: Record<string, unknown>) => boolean): KeptStatus | undefined => {
+      let found: KeptStatus | undefined;
+      for (const [other, kept] of entries) {
+        const asked = requestOf(other);
+        if (asked && match(asked) && (!found || kept.atMs > found.atMs)) found = kept;
+      }
+      return found;
+    };
+    const asked = requestOf(key) ?? {};
+    const sameRequest = JSON.stringify(asked);
+    const { corpus_id: corpusId, ...wholeStore } = asked;
+    const kept = exact
+      ?? newest((other) => JSON.stringify(other) === sameRequest)
+      ?? newest((other) => other.corpus_id === undefined && JSON.stringify({ ...other }) === JSON.stringify({ ...wholeStore }))
+      ?? newest((other) => other.corpus_id === undefined);
+    if (!kept) {
+      return {
+        kind: 'source_index_status', generated_at: new Date().toISOString(), corpora: [], counting: true,
+        policy: { read_only: true, raw_source_exposed: false, source_packets_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true },
+      };
+    }
+    const canonical = typeof corpusId === 'string' ? canonicalSourceCorpusId(corpusId) : undefined;
+    const corpora = canonical === undefined ? kept.result.corpora : kept.result.corpora.filter((corpus) => corpus.corpus_id === canonical);
+    return { ...kept.result, corpora, snapshot_age_ms: Math.max(0, nowMs() - kept.atMs) };
   };
   const persistSnapshots = (): void => {
     if (!options.snapshotPath || role === 'reader') return;
@@ -883,6 +933,13 @@ export function createSourceIndexStatusHandler(
   return {
     async status(request: SourceIndexStatusRequest = {}, snapshot: { countsMaxAgeMs?: number } = {}): Promise<SourceIndexStatusResult> {
       const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
+      // The split's front: every status read is the background's count (an
+      // owner's question about one chat's senders is not a count, and is read).
+      if (role === 'reader' && !request.include_sender_aggregation) {
+        assertSupportedStatusRequest(request);
+        publishedStatus(snapshotKey(request, countsMaxAgeMs));
+        return withLiveTotals(servedOnFront(request, countsMaxAgeMs));
+      }
       // A live read (no allowance), or one that asks for a conversation's
       // senders, is read now as before.
       if (countsMaxAgeMs <= 0 || request.include_sender_aggregation) return withLiveTotals(await computeStatus(request, snapshot));

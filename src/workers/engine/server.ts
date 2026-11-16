@@ -2905,7 +2905,13 @@ export async function main(): Promise<void> {
   // Public store shares its Personal sibling's cloud identity; a lane's new
   // Private or Personal store is handed the identity for its domain.
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
-    if (!connectorStores.includes(store)) connectorStores.push(store);
+    if (!connectorStores.includes(store)) {
+      connectorStores.push(store);
+      // A new store shows on the dashboard at the background's next count: the
+      // split's front serves that count and never counts a store itself.
+      statusRecount?.soon();
+      if (engineFront) console.log(`[olympus] front: mounted ${store.corpusId}`);
+    }
     probeExtractionEnded(store);
     if (!fullyDefinedCorpusIds.has(store.corpusId)) {
       const definition = registeredCorpusDefinitions.get(store.corpusId);

@@ -3823,7 +3823,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // so a card's "could not complete" always has a line behind it (Sparta, 15 Nov).
         if (failedUrl.pathname.startsWith('/dashboard')) {
           const code = error instanceof EmailSourceWorkerError || error instanceof ConnectedHandleGrantMutationError ? error.code : isCredentialRefreshBusyError(error) ? 'credential_refresh_busy' : 'unexpected';
-          console.warn(`[olympus] dashboard ${failedUrl.pathname} failed: ${code}`);
+          // An unexpected one also names where it was raised (function and file:line, no folder or message),
+          // so a SQLITE_BUSY on a page load names its statement's caller (rc.20 leg, 16 Nov).
+          const frame = code === 'unexpected' && error instanceof Error ? dashboardFailureFrames(error) : undefined;
+          console.warn(`[olympus] dashboard ${failedUrl.pathname} failed: ${code}${frame ? ` at ${frame}` : ''}`);
         }
         if (error instanceof EmailSourceWorkerError) {
           return json(
@@ -4281,4 +4284,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     }
     return false;
   }
+}
+
+/** An error's innermost three frames of Olympus code as `function file:line`, folders dropped: never a message or a path. */
+function dashboardFailureFrames(error: Error): string | undefined {
+  const frames = (error.stack ?? '').split('\n').map((line) => line.trim()).filter((line) => line.startsWith('at ') && !/\((?:bun:|native|unknown)/.test(line)).slice(0, 3)
+    .map((line) => line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+)(?::\d+)?/g, '$1').slice(0, 120));
+  return frames.length > 0 ? frames.join(' < ') : undefined;
 }

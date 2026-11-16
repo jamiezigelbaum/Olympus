@@ -77,15 +77,17 @@ async function startSplit(extraEnv: Record<string, string> = {}, beforeFront?: (
 
   const workerFetch = createWorkerFetch({ platform: 'linux', env });
   // The corpora the front serves: index status lists every corpus it knows, and marks the mounted ones configured.
-  const mountedCorpora = async (): Promise<string[] | undefined> => {
+  // Every status the front serves is the background's count, which shows a new store at its next recount; the
+  // front says in its log when it has mounted one.
+  const mountedCorpora = async (corpusId?: string): Promise<string[] | undefined> => {
     const status = await workerFetch(`http://127.0.0.1:${port}/v1/source/index/status`, {
-      method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
+      method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(corpusId ? { corpus_id: corpusId } : {}),
     });
     if (status.status !== 200) return undefined;
     const corpora = (await status.json() as { corpora: Array<{ corpus_id: string; configured: boolean }> }).corpora;
     return corpora.filter((corpus) => corpus.configured).map((corpus) => corpus.corpus_id);
   };
-  const mounts = (corpusId: string) => waitFor(async () => (await mountedCorpora())?.includes(corpusId) || undefined, { timeoutMs: 20_000, intervalMs: 250 });
+  const mounts = (corpusId: string) => waitFor(() => front.output().includes(`[olympus] front: mounted ${corpusId}\n`) || undefined, { timeoutMs: 20_000, intervalMs: 250 });
   return { env, port, registryPath, front, workerFetch, mountedCorpora, mounts };
 }
 
