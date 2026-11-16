@@ -558,6 +558,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const acks: Array<{ at: string; ms: number; status: number; loop_held_ms?: number; error?: string }> = [];
   const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
   const dashReads: Array<{ path: string; ms: number; status: number; error?: string }> = [];
+  let frontLoopSql: { mode?: string; statements?: number; sites?: number; unlisted?: string[] } | null = null;
   const errors: string[] = [];
   const requestErrors: string[] = [];
   const restoreStarted = Date.now();
@@ -637,6 +638,12 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
       }
       await Bun.sleep(50);
     }
+    // SQLite on the front's loop (control plane, 5e38045): the front's own count of statements and call sites, and any site not
+    // on config/front-loop-sql-allowance.json. Read from health, since the logs keep only their tail.
+    try {
+      const response = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}` }, signal: AbortSignal.timeout(30_000) });
+      frontLoopSql = ((await response.json()) as { front_loop_sql?: typeof frontLoopSql }).front_loop_sql ?? null;
+    } catch (error) { requestErrors.push(`front health: ${error instanceof Error ? error.message : String(error)}`); }
     finished = true;
     await Promise.all(requests);
     // Allow the heartbeat thread to publish the final completed beat.
@@ -691,7 +698,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, front_loop_sql: frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000),
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -724,6 +731,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   }
   console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s)`);
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
+  console.log(`${options.runCase} front loop SQL (reported; plan rules whether it gates): ${frontLoopSql ? `${frontLoopSql.statements ?? '?'} statements at ${frontLoopSql.sites ?? '?'} sites, unlisted ${frontLoopSql.unlisted?.length ?? 0}${frontLoopSql.unlisted?.length ? ` (${frontLoopSql.unlisted.slice(0, 5).join('; ')}); FAIL` : '; PASS'}` : 'not reported by this build'}`);
   const peaks = Object.entries(guards.wal_peak).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, bytes]) => `${label} ${Math.round(bytes / 1048576)} MB`).join(', ') || 'no wal lines';
   console.log(`${options.runCase} WAL: peak ${peaks}; over 64 MB at any point ${guards.wal_peak_over.length}, at end ${guards.wal_over_limit.length}; ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
   console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}, judge model calls ${modelCalls.judge}); ${workload_ok ? 'PASS' : 'FAIL'}`);
