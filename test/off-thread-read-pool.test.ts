@@ -10,6 +10,7 @@ import { existsSync, mkdtempSync, readdirSync, readlinkSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
+import { withSourceIndexReadProgress } from '../src/core/source-index/read-progress.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
   BACKGROUND_READS,
@@ -300,6 +301,20 @@ describe('read pool', () => {
     });
     expect(((await search) as { c: number }).c).toBe(3);
     expect(order.indexOf('search')).toBeLessThan(order.indexOf('page 2'));
+  });
+
+  test('a read that waited in the queue tells its lane when it starts, so a wait behind other reads is not silence', async () => {
+    const path = storeFile();
+    const sent: string[] = [];
+    setReadPoolObserverForTests((_, read) => sent.push(read.sql));
+    const holders = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(path, SLOW));
+    await waitFor(() => sent.length === READ_POOL_SIZE, { description: 'the store workers busy' });
+    let reports = 0;
+    const queued = withSourceIndexReadProgress(() => { reports += 1; }, () => readOnPool(path, COUNT));
+    expect(reports).toBe(0);
+    await queued;
+    expect(reports).toBe(2); // once when it left the queue, once when its rows came back
+    await Promise.all(holders);
   });
 
   test("closing a store cancels its waiting queries and no search reopens it", async () => {

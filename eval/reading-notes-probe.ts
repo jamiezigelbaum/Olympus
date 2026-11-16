@@ -10,12 +10,16 @@
 // passage eval's --answer-arms on a real archive.
 //
 //   bun eval/reading-notes-probe.ts [--arms off,first,pass] [--repeats 3] [--show] [--out file.json]
+//     [--only k3-seat5,k2-seat3] [--raw calls.jsonl]
+//
+// --raw writes every model call of each incomplete answer (rules' first line,
+// the prompt's size, the whole reply) as one JSON line: made-up text only.
 //
 // It answers through the same local lane as eval:passages --answer
 // (OLYMPUS_SOURCE_INDEX_ANALYST_LANE / _PROFILE). --show prints each
 // incomplete answer and the values it left out.
-import { writeFileSync } from 'node:fs';
-import { createAnalyst, withPromptBudget, type AnalystReadingNotes } from '../src/core/analyst.ts';
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { createAnalyst, withPromptBudget, type AnalystModel, type AnalystReadingNotes } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
@@ -106,18 +110,27 @@ async function main(argv: readonly string[]): Promise<void> {
   const show = argv.includes('--show');
   const lane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE?.trim() ? parseLane(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE) : undefined;
   const profile = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PROFILE?.trim() ? parseModelProfile(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PROFILE) : 'source_answer';
-  const model = createDelphiAnalystModel(new DelphiClient(loadConfig()), lane ? { lane } : { profile });
+  const delphi = createDelphiAnalystModel(new DelphiClient(loadConfig()), lane ? { lane } : { profile });
+  const raw = option('--raw');
+  let calls: Array<{ system: string; promptChars: number; maxOutputChars?: number; reply: string }> = [];
+  const model: AnalystModel = { complete: async (request) => {
+    const completion = await delphi.complete(request);
+    calls.push({ system: request.system.split('\n')[0]!, promptChars: request.prompt.length, ...(request.maxOutputChars !== undefined ? { maxOutputChars: request.maxOutputChars } : {}), reply: completion.text });
+    return completion;
+  } };
   const analysts = new Map(arms.map(arm => [arm, createAnalyst(model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact', readingNotes: arm })]));
-  const questions = probeQuestions();
+  const only = option('--only')?.split(',');
+  const questions = probeQuestions().filter(question => !only || only.includes(question.id));
   const runs = new Map(arms.map(arm => [arm, questions.map(() => [] as Array<{ missing: number; ms: number }>)]));
   for (const [index, question] of questions.entries()) {
     for (let repeat = 0; repeat < repeats; repeat++) {
       for (let turn = 0; turn < arms.length; turn++) {
         const arm = arms[(turn + index + repeat) % arms.length]!;
-        const started = performance.now();
+        const started = performance.now(); calls = [];
         const result = await analysts.get(arm)!.analyze(withPromptBudget(question.pack, 27_000), { localOnly: true });
         const missing = missingValues(result.answer, question.values);
         runs.get(arm)![index]!.push({ missing: missing.length, ms: performance.now() - started });
+        if (raw && missing.length) appendFileSync(raw, `${JSON.stringify({ id: question.id, arm, repeat: repeat + 1, answer: result.answer, unanswered: result.unanswered, calls })}\n`);
         if (show && missing.length) console.error(`${question.id} ${arm} run ${repeat + 1} left out ${JSON.stringify(missing)}: ${result.answer}`);
       }
     }
