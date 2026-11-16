@@ -1,4 +1,4 @@
-import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
+import { currentSourceIndexReadProgress, noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 // Read-only SQLite work uses one warm Bun Worker per open store (#1305).
 // The owner's search statements use that store's shared executor; a scan
 // snapshot (the vector lane) takes a second worker of the store, and the
@@ -286,6 +286,8 @@ interface PoolJob {
   resolve: (rows: unknown) => void;
   reject: (error: Error) => void;
   timer: unknown;
+  /** Tells the asking lane its read left the queue: a wait behind other reads is not silence. */
+  started?: (() => void) | undefined;
   thread?: ReaderThread | undefined;
   settled?: boolean;
   /** Already run again once after a lost reply. */
@@ -702,7 +704,7 @@ export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineA
     return Promise.reject(new OffThreadReadBusyError());
   }
   return new Promise<unknown>((resolve, reject) => {
-    const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, enqueuedAtMs: clock.now(), report };
+    const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, started: currentSourceIndexReadProgress(), enqueuedAtMs: clock.now(), report };
     if (Number.isFinite(deadlineAtMs)) job.timer = clock.setTimeout(() => missedDeadline(job), deadlineAtMs - clock.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
@@ -814,6 +816,7 @@ function dispatch(): void {
     else queues.delete(store);
     job.thread = reader;
     job.sentAtMs = clock.now();
+    job.started?.();
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);

@@ -10,3 +10,8 @@ export function noteSourceIndexReadProgress(): void {
   if (!report) return;
   report();
 }
+// The current request's reporter, for an event that happens later outside its
+// async context (a queued read leaving the queue).
+export function currentSourceIndexReadProgress(): (() => void) | undefined {
+  return progress.getStore();
+}
