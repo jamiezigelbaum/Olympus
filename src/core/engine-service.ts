@@ -1,3 +1,4 @@
+import { readEngineStartProgress } from './engine-heartbeat.ts';
 import { MAC_ENGINE_DAEMON_PLIST, MAC_SERVER_MODE_SIGN_IN, macEngineManager, authorizeMacServerMode, currentMacUserName } from './mac-engine-daemon.ts';
 export { macEngineManager, macServerModeScript, validateMacEngineOwner } from './mac-engine-daemon.ts';
 import { commitEngineStores, copyEngineStores, restoreEngineStores } from './engine-store-copies.ts';
@@ -83,6 +84,8 @@ export interface EngineExecResult {
 export type EngineExec = (command: string, args: string[]) => EngineExecResult;
 
 export interface EnginePaths {
+  /** The same data-root environment the installed worker uses. */
+  dataEnv?: Record<string, string | undefined>;
   linux?: LinuxEngineLayout;
   engineManager?: 'agent' | 'daemon';
   /** Fixed system path; overridden only by isolated tests. */
@@ -122,6 +125,7 @@ export function enginePaths(homeDir: string): EnginePaths {
   // The agent runs with HOME only (no XDG_DATA_HOME), so its data root is the default one.
   const dataEnv = { HOME: home };
   return {
+    dataEnv,
     label: ENGINE_LABEL,
     plistPath: join(home, 'Library', 'LaunchAgents', `${ENGINE_LABEL}.plist`),
     logDir,
@@ -153,7 +157,7 @@ export function engineServicePaths(options: { homeDir?: string; platform?: strin
     return { ...paths, engineManager, daemonPlistPath, ...(engineManager === 'daemon' ? { plistPath: daemonPlistPath } : {}) };
   }
   const l = resolveLinuxEngineLayout(env);
-  return { linux: l, label: 'olympus-engine.service', plistPath: l.unitPath, logDir: l.stateDir,
+  return { dataEnv: { HOME: l.home, XDG_DATA_HOME: l.dataHome, XDG_CONFIG_HOME: l.configHome, OLYMPUS_ENGINE_HOST: '1' }, linux: l, label: 'olympus-engine.service', plistPath: l.unitPath, logDir: l.stateDir,
     logPath: join(l.stateDir, 'engine.log'), errorLogPath: join(l.stateDir, 'engine.err'), configPath: l.configPath,
     sovereigntyPath: l.sovereigntyPath, appSupportDir: l.packageDir, appDir: join(l.packageDir, 'app'),
     previousAppDir: join(l.packageDir, 'app.previous'), runtimeDir: join(l.packageDir, 'runtime'), workerEnvPath: l.workerEnvPath,
@@ -665,7 +669,7 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
 // ---------------------------------------------------------------------------
 // Health proof: an install or rollback is done when the new build is serving
 
-/** Default bound on waiting for the engine to prove the new build healthy. */
+/** No boot progress or fresh heartbeat for this long ends a health proof wait. */
 export const ENGINE_HEALTH_TIMEOUT_MS = 60_000;
 const ENGINE_HEALTH_POLL_MS = 500;
 const WORKER_SERVICE_ID = 'olympus-worker';
@@ -675,7 +679,7 @@ export interface EngineHealthDeps {
   exec?: EngineExec | undefined;
   pidInCgroup?: (pid: number, group: string) => boolean;
   processIdentity?: typeof processInstanceIdentity;
-  /** Longest wait for proof (default 60 s). */
+  /** Longest interval without progress while waiting for proof (default 60 s). */
   timeoutMs?: number;
   pollMs?: number;
   now?: () => number;
@@ -699,8 +703,8 @@ export interface EngineHealthProof {
 }
 
 /**
- * Waits, bounded, for fresh proof that the engine runs `expectedBuild`: its
- * status file (written by the host launchd started) reports that build, is
+ * Waits while boot progresses or a heartbeat beats for fresh proof that the
+ * engine runs `expectedBuild`: its status file (written by the host launchd started) reports that build, is
  * running, was started at or after `since` when given (so a status file from
  * before the restart proves nothing), names a live pid, and reports the
  * worker service ready; and the worker answers GET <baseUrl>/health.
@@ -715,6 +719,8 @@ export async function waitForEngineHealthy(
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
   const fetchImpl = deps.fetchImpl ?? workerFetch;
   const started = now();
+  let lastProgressAt = started;
+  let progressToken: number | undefined;
   let last: EngineHealthProof = {
     ok: false,
     expected_build: input.expectedBuild,
@@ -726,8 +732,19 @@ export async function waitForEngineHealthy(
   };
   for (;;) {
     last = { ...(await checkEngineHealthOnce(input, pidAlive, fetchImpl, deps)), waited_ms: now() - started };
-    if (last.ok || now() - started >= timeoutMs) return last;
-    await sleep(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - started))));
+    if (last.ok) return last;
+    // A heartbeat from a build we already know is wrong cannot advance
+    // proof of the requested build.
+    const expectedProcess = input.expectedBuild === null || last.running_build === null || last.running_build === input.expectedBuild;
+    const progress = input.paths.dataEnv && expectedProcess
+      ? readEngineStartProgress(input.paths.dataEnv, { since: input.since, now: now(), alive: pidAlive })
+      : undefined;
+    if (progress?.token !== undefined && (progressToken === undefined || progress.token > progressToken)) {
+      lastProgressAt = now();
+      progressToken = progress.token;
+    }
+    if (now() - lastProgressAt >= timeoutMs) return last;
+    await sleep(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - lastProgressAt))));
   }
 }
 
