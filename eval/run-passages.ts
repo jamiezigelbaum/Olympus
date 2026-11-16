@@ -25,7 +25,7 @@ import { answerMeaningJudge } from './answer-judge.ts';
 import { enterStage, failureCode, runEvalCli, type EvalStage } from './cli-failure.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { calibratedSemanticRelevanceBar } from '../src/workers/connector-store/local-index.ts';
+import { calibratedSemanticRelevanceBar, CONNECTOR_STORE_CONVERSATION_INDEX_SQL } from '../src/workers/connector-store/local-index.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
@@ -627,6 +627,15 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   const promptBytes = provider === 'local' ? positiveInteger(values.get('--prompt-bytes') ?? process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES) : undefined;
   enter('open_data_root');
   const opened = openEvalDataRoot(isolation);
+  // Conversation windows need their index, which no open creates; on an eval
+  // copy it is built here, up front, outside any timed question.
+  if (conversationWindowPerSide() > 0) {
+    enter('conversation_index');
+    for (const store of opened.stores) {
+      const db = new Database(store.dbPath);
+      try { db.exec(CONNECTOR_STORE_CONVERSATION_INDEX_SQL); } finally { db.close(); }
+    }
+  }
   const cleanups: Array<() => void> = [];
   try {
     const config = loadConfig();
