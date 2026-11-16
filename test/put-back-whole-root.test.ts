@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { processesWithFilesUnder } from '../src/core/data-root-snapshot.ts';
@@ -162,3 +162,28 @@ function processesHoldStore(store: string): boolean {
   const held = processesWithFilesUnder([realpathSync(join(store, '..'))]);
   return Array.isArray(held) && held.length > 0;
 }
+
+describe('an update cut short', () => {
+  test('a put-back cut short between its renames is finished by the next update, and nothing is lost', () => {
+    const m = machine();
+    writeFileSync(join(m.root, 'registry.json'), '"before"');
+    m.update();
+    // The put-back renamed the failed root aside, then stopped.
+    renameSync(m.root, `${m.root}.failed-update-1`);
+    m.update();
+    expect(readFileSync(join(m.root, 'registry.json'), 'utf8')).toBe('"before"');
+  }, 30_000);
+
+  test('a copy nothing put back or removed is kept, not deleted, when the next update starts', () => {
+    const m = machine();
+    writeFileSync(join(m.root, 'registry.json'), '"first"');
+    m.update();
+    writeFileSync(join(m.root, 'registry.json'), '"used since"');
+    m.update();
+    const kept = readdirSync(join(m.root, '..')).filter((name) => name.startsWith('olympus.failed-update-'));
+    expect(kept.length).toBe(1);
+    expect(readFileSync(join(m.root, '..', kept[0]!, 'registry.json'), 'utf8')).toBe('"first"');
+    m.putBack();
+    expect(readFileSync(join(m.root, 'registry.json'), 'utf8')).toBe('"used since"');
+  }, 30_000);
+});

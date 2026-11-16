@@ -203,6 +203,14 @@ function proveNoHolders(roots: string[], what: string, deps: DataRootDeps): void
   }
 }
 
+/** A folder that is gone, or holds nothing but the lock files a step's own locks made. */
+function holdsOnlyLocks(path: string, env: LayoutEnv): boolean {
+  let names: string[];
+  try { names = readdirSync(path); } catch { return !existsSync(path); }
+  const locks = new Set([basename(sharedDataPath('data-owner-lock', env)), basename(sharedDataPath('engine-process-lock', env))]);
+  return names.every((name) => locks.has(name));
+}
+
 /** Bytes a real copy of `directory` takes, the folders not cloned left out. */
 function treeBytes(directory: string, top = true): number {
   let total = 0;
@@ -278,21 +286,35 @@ export function snapshotDataRoot(env: LayoutEnv, options: { log?: (line: string)
   const deps = options.deps ?? {};
   const log = options.log ?? (() => {});
   const root = olympusDataRoot(env);
-  if (!existsSync(root)) return;
   const record = readRecord(env);
-  // A copy an earlier update took and nothing put back or removed is older than the data here, which a version has
-  // used since: it is replaced, and the log says so.
+  // A put-back cut short between its two renames left no live folder: the clone is the data from before that update.
   for (const pair of record.in_flight?.roots ?? []) {
-    if (!existsSync(pair.snapshot)) continue;
-    rmSync(pair.snapshot, { recursive: true, force: true });
-    log(`Removed the copy of ${pair.live} an earlier update took at ${record.in_flight!.started_at}, which was never put back or removed.`);
+    if (!existsSync(pair.snapshot) || !holdsOnlyLocks(pair.live, env)) continue;
+    // Taking the locks for this step made the root again, empty but for them.
+    rmSync(pair.live, { recursive: true, force: true });
+    renameSync(pair.snapshot, pair.live);
+    log(`Finished putting ${pair.live} back as it was before the update of ${record.in_flight!.started_at}.`);
   }
-  delete record.in_flight;
+  if (!existsSync(root)) return;
   const reaped = reapRecordedEngineChildren(engineChildrenPath(env));
   if (reaped.stopped.length > 0) log(`Stopped ${reaped.stopped.length} process ${reaped.stopped.length === 1 ? 'group' : 'groups'} the previous engine left running.`);
   const live = [root, ...foldersOutsideRoot(env)];
   proveNoHolders(live.map(realOrSelf), 'a process still has Olympus data open, so the update did not start', deps);
   for (const folder of live) rmSync(`${snapshotPathOf(folder)}.partial`, { recursive: true, force: true });
+  // A copy an earlier update took that nothing put back or removed is older than the data here, which a version has used
+  // since. It is kept with the failed roots, named in the log, until the next update that succeeds.
+  if (record.in_flight) {
+    const startedMs = Date.parse(record.in_flight.started_at);
+    for (const pair of record.in_flight.roots) {
+      const kept = failedRootPathOf(pair.live, startedMs);
+      if (!existsSync(pair.snapshot) || existsSync(kept)) continue;
+      renameSync(pair.snapshot, kept);
+      record.failed.push({ live: pair.live, failed: kept, at: record.in_flight.started_at });
+      log(`An earlier update's copy of ${pair.live} from ${record.in_flight.started_at} was never put back or removed; it is kept at ${kept} until the next update that succeeds.`);
+    }
+    delete record.in_flight;
+    writeRecord(env, record);
+  }
   // Room for a real copy, per disk, where the disk cannot clone.
   const needed = new Map<string, { bytes: number; directory: string }>();
   for (const folder of live) {
