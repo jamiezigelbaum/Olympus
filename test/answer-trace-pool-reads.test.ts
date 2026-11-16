@@ -43,17 +43,17 @@ function storeFile(): string {
 }
 
 const COUNT: StoreRead = { mode: 'get', sql: 'SELECT COUNT(*) AS c FROM items', params: [] };
-// Runs for seconds on its thread; only the lane's deadline gives it up.
+// Runs for seconds on its thread; the explicit pool-read deadline gives it up.
 const SLOW: StoreRead = {
   mode: 'get',
   sql: 'WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000000) SELECT COUNT(*) AS c FROM n',
   params: [],
 };
 
-function poolAdapter(path: string, reads: StoreRead[]): SourceIndexCorpusSearchAdapter {
+function poolAdapter(path: string, reads: StoreRead[], readBudgetMs?: number): SourceIndexCorpusSearchAdapter {
   return async (request) => {
     for (const read of reads) {
-      await readOnPool(path, read, request.deadlineAtMs !== undefined ? { deadlineAtMs: request.deadlineAtMs } : {});
+      await readOnPool(path, read, readBudgetMs !== undefined ? { deadlineAtMs: Date.now() + readBudgetMs } : {});
     }
     return { hits: [], latencyMs: 1, rawExposed: false };
   };
@@ -69,10 +69,10 @@ test('each lane reports its pool reads: queue wait, run time, and reads given up
   await runWithSourceAnswerTrace(trace, () => observeSourceAnswerRetrievalAttempt('keyword', () =>
     observeSourceAnswerRoutedQuery(1, () => routeSourceIndexSearch({
       registry,
-      laneTimeoutMs: 400,
+      laneTimeoutMs: 1_000,
       adapters: {
         'public_safe.quick': poolAdapter(path, [COUNT, COUNT]),
-        'public_safe.stuck': poolAdapter(storeFile(), [SLOW]),
+        'public_safe.stuck': poolAdapter(storeFile(), [SLOW], 400),
       },
       request: { query: 'q', maxResults: 5, context: { allowedTrustDomains: ['public_safe'], allowCloudQueries: true } },
     }))));

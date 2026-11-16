@@ -355,7 +355,7 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
     expect(copyPrivateMatch({ count: 2, panelState: 'no_model', detail: 'full' })).toEqual({ v: 1, count: 2, state: 'no_model' });
   });
 
-  test('a full job has the longer deadline; a summary job keeps the short one', async () => {
+  test('explicit per-detail idle limits remain configurable', async () => {
     const never: PrivateAnswerModel = { status: () => ({ state: 'ready' }), answerPrivately: () => new Promise(() => {}) };
     const lines: string[] = [];
     const jobs = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE,
@@ -371,22 +371,20 @@ describe('detail: chosen by ChatGPT\'s model through the tool argument', () => {
     await Bun.sleep(150);
     expect((await jobs.claim(summary, key)).body.status).toBe('failed');
     expect((await jobs.claim(full, key2)).body.status).toBe('pending');
-    expect(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS).toBe(240_000);
+    expect(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS).toBe(60_000);
   });
 });
 
-describe('full detail fits its deadline on a busy Mac', () => {
-  // 2026-10-02 live: 10,000 characters of evidence and a 3,700-character
-  // answer budget took 179.4 s of a 180 s deadline (prefill 64 s for 3,920
-  // tokens, 2.8 tokens/s). Smaller budgets, and a longer deadline.
-  test('about 7k characters of evidence, an answer of about 1.5k characters, 240 s', () => {
+describe('full detail uses bounded evidence and a progress-based idle limit', () => {
+  // Output budgets stay bounded while token progress refreshes the idle limit.
+  test('about 7k evidence characters, a 1.5k answer and a 60-second idle limit', () => {
     expect(PANEL_ANSWER_LIMITS.deepEvidenceChars).toBe(7_000);
     const answer = (analystResponseSchema(PANEL_ANSWER_LIMITS.deepAnswerChars).properties as Record<string, { maxLength?: number }>).answer!;
     expect(answer.maxLength).toBeGreaterThanOrEqual(1_400);
     expect(answer.maxLength).toBeLessThanOrEqual(1_500);
     // The prompt holds the evidence and the instructions around it.
     expect(PANEL_ANSWER_LIMITS.deepPromptBytes).toBeGreaterThan(PANEL_ANSWER_LIMITS.deepEvidenceChars + 4_000);
-    expect(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS).toBe(240_000);
+    expect(PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS).toBe(60_000);
   });
 });
 
