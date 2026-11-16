@@ -1372,145 +1372,48 @@ export class TierLedger {
    * `next` is where the following call continues; absent once the ledger was
    * read to its end.
    */
-  rejudgeCandidatePage(options: {
-    engineVersion: string;
-    /** The configured sniffer's id; absent: only the classifier version counts. */
-    snifferId?: string;
-    after?: TierLedgerIdentity;
-    limit?: number;
-    /** Ledger rows read per call (default DEFAULT_REJUDGE_SCAN_ROWS). */
-    scanLimit?: number;
-  }): { records: TierLedgerRecord[]; causes: TierRejudgeCause[]; builtinPromptSkipped: number; next?: TierLedgerIdentity } {
+  rejudgeCandidatePage(options: RejudgePageOptions): RejudgePage {
+    // One statement, read here directly (no transaction needed for one read).
+    const steps = this.rejudgeCandidatePageSteps(options);
+    let next = steps.next();
+    while (!next.done) {
+      const statement = this.db.query(next.value.sql);
+      const params = next.value.params as never[];
+      next = steps.next(next.value.mode === 'get' ? statement.get(...params) : statement.all(...params));
+    }
+    return next.value;
+  }
+
+  /**
+   * `rejudgeCandidatePage` as a finder (loop-stall step-back, family 5): its
+   * window read runs wherever the steps are read, the ledger's read worker
+   * on the engine's loop. What it finds may be older than this connection's
+   * state, so the pass re-reads each candidate by key
+   * (`rejudgeCandidateNow`) before it judges it.
+   */
+  *rejudgeCandidatePageSteps(options: RejudgePageOptions): Generator<LedgerRead, RejudgePage, unknown> {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50_000));
-    const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
-    const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
-    const key = rejudgeKey(options.engineVersion, options.snifferId);
     const after = options.after
       ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
       : null;
-    const nowIso = this.now().toISOString();
-    const rows = this.db.query(`
-      WITH win AS (
+    const rows = (yield {
+      mode: 'all',
+      sql: rejudgeCandidateSql(`
         SELECT * FROM tier_items
         WHERE (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
         ORDER BY provider, account_scope, conversation_key, provider_item_id
-        LIMIT ?
-      )
-      SELECT i.*, CASE WHEN
-          i.routed = 1 AND i.content_read = 1
-          AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
-          -- A held row's stamp names the exact decision it re-read, so it
-          -- never outlives that decision (rejudgeKeyForHeld). So does a row
-          -- resting on a retired prior: a prior replayed after a completed
-          -- re-judge is a new decision and invalidates the old stamp, while a
-          -- re-read that changed nothing (no text) stays settled (markRejudged).
-          -- A stamp may be followed by an unavailable-text marker after
-          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
-          -- (instr, not substr: SQLite's string functions stop at the NUL.)
-          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
-            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
-          -- Settled by a verdict under this classifier and sniffer (markJudged):
-          -- not re-asked while its decision stays settled under this
-          -- classifier. A later decision that left it owed a verdict (fail-safe,
-          -- a retired source prior) is a candidate again, stamp or not.
-          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
-            AND i.state != 'pending' AND i.engine_version = ?
-            AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
-          AND (i.state = 'current'
-            -- Held for its text question alone: re-read once per classifier
-            -- and sniffer, so a question lost from the sniffer's queue (a
-            -- move that landed the item held, a verdict recorded under an
-            -- older prompt) is asked again instead of holding it forever.
-            OR (i.state = 'pending' AND i.content_pending = 1 AND i.metadata_pending = 0))
-          AND NOT (i.rejudge_json IS NOT NULL
-            AND json_extract(i.rejudge_json, '$.generation') = i.generation
-            AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at
-            AND json_extract(i.rejudge_json, '$.reasonsJson') = i.reasons_json
-            AND json_extract(i.rejudge_json, '$.decidedBy') = i.decided_by)
-          AND instr(i.reasons_json, '"override:') = 0
-          AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
-          AND NOT EXISTS (
-            SELECT 1 FROM tier_overrides o
-            WHERE o.provider = i.provider AND o.account_scope = i.account_scope
-              AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
-          )
-          -- A rule needs an actual identity change, never an absent model marker.
-          AND (i.decided_by != 'content_rule' OR i.engine_version != ?
-            OR (instr(i.reasons_json, '"content:rule_sniffer:') > 0
-              AND ? IS NOT NULL AND instr(i.reasons_json, ?) = 0))
-          AND (
-            i.state = 'pending'
-            -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
-            -- wrong under the owner ruling of 2026-10-28, so judged again now.
-            OR instr(i.reasons_json, '"metadata:prior:source_') > 0
-            -- Content settled fail-safe because its question was missing from
-            -- the queue, not because anything judged it (an enqueue lost while
-            -- the private model was off: about 2,400 messages on 2026-11-04):
-            -- its text is stored, so it is asked again (#606).
-            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
-              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
-                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
-            OR (i.decided_by = 'content_rule' AND ? IS NOT NULL
-              AND instr(i.reasons_json, ?) = 0)
-            OR i.engine_version != ?
-            OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
-            OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
-              AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
-              AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
-          )
-        THEN 1 ELSE 0 END AS rejudge_candidate,
-        -- Which rule made it a candidate (content-free, for the pass's log line).
-        CASE
-          WHEN i.state = 'pending' THEN 'held'
-          WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0 THEN 'retired_prior'
-          WHEN instr(i.reasons_json, ':fail_safe:missing_question"') > 0 THEN 'missing_question'
-          WHEN i.engine_version != ? THEN 'classifier'
-          WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
-          ELSE 'content_prompt'
-        END AS rejudge_cause
-      FROM (SELECT *, CASE WHEN state = 'pending'
-            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
-            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
-            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
-            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(
-      after ? 1 : null,
-      ...(after ?? [null, null, null, null]),
-      scanLimit,
-      options.engineVersion,
-      options.engineVersion,
-      options.snifferId ?? null,
-      JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
-      options.snifferId ?? null,
-      JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
-      options.engineVersion,
-      metadataMarker,
-      metadataMarker ?? '',
-      snifferMarker,
-      snifferMarker ?? '',
-      options.engineVersion,
-      metadataMarker,
-      metadataMarker ?? '',
-      key,
-      key,
-      key,
-      key,
-    ) as Array<TierItemRow & { rejudge_candidate: number; rejudge_cause: TierRejudgeCause }>;
+        LIMIT ?`),
+      params: [after ? 1 : null, ...(after ?? [null, null, null, null]), scanLimit, ...rejudgeCandidateParams(options)],
+    }) as RejudgeCandidateRow[];
     const records: TierLedgerRecord[] = [];
     const causes: TierRejudgeCause[] = [];
     let builtinPromptSkipped = 0;
     let last: TierItemRow | undefined;
     for (const row of rows) {
       last = row;
-      if (row.rejudge_candidate !== 1) continue;
-      // Its serving text could not be read under this classifier and sniffer
-      // at this decision (#1002): tried again once the backoff ends, or at
-      // once after a newer decision. It was never stamped settled.
-      if (rejudgeUnavailableUntil(row, key) > nowIso) continue;
-      const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
+      const cause = this.rejudgeCandidateCause(row, options);
+      if (cause === undefined) continue;
       if (cause === 'builtin_prompt_skipped') {
         builtinPromptSkipped += 1;
         continue;
@@ -1526,6 +1429,31 @@ export class TierLedger {
       builtinPromptSkipped,
       ...(more && last ? { next: identityOfRow(last) } : {}),
     };
+  }
+
+  /**
+   * One row of `rejudgeCandidatePage`, read now by its key on this
+   * connection: the record and why it is a candidate, or undefined when it
+   * is no longer one (a verdict, an override or a move landed since a finder
+   * found it, at the same generation or not).
+   */
+  rejudgeCandidateNow(identity: TierLedgerIdentity, options: Pick<RejudgePageOptions, 'engineVersion' | 'snifferId'>): { record: TierLedgerRecord; cause: TierRejudgeCause } | undefined {
+    const row = this.db.query(rejudgeCandidateSql(`
+        SELECT * FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`))
+      .get(identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId,
+        ...rejudgeCandidateParams(options) as never[]) as RejudgeCandidateRow | null;
+    const cause = row ? this.rejudgeCandidateCause(row, options) : undefined;
+    return row && cause !== undefined && cause !== 'builtin_prompt_skipped' ? { record: recordFromRow(row), cause } : undefined;
+  }
+
+  private rejudgeCandidateCause(row: RejudgeCandidateRow, options: Pick<RejudgePageOptions, 'engineVersion' | 'snifferId'>): TierRejudgeCause | 'builtin_prompt_skipped' | undefined {
+    if (row.rejudge_candidate !== 1) return undefined;
+    // Its serving text could not be read under this classifier and sniffer
+    // at this decision (#1002): tried again once the backoff ends, or at
+    // once after a newer decision. It was never stamped settled.
+    if (rejudgeUnavailableUntil(row, rejudgeKey(options.engineVersion, options.snifferId)) > this.now().toISOString()) return undefined;
+    return settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
   }
 
   /**
@@ -2606,6 +2534,11 @@ export class TierLedger {
    * (one primary-key probe per item), so a cleanup walk skips the rest.
    */
   listSupersededItemWindow(options: { after?: TierLedgerIdentity; limit: number }): TierLedgerRecord[] {
+    return this.readSteps(this.listSupersededItemWindowSteps(options));
+  }
+
+  /** `listSupersededItemWindow` as a finder: the superseded-copy sweep reads it on the ledger's read worker. */
+  *listSupersededItemWindowSteps(options: { after?: TierLedgerIdentity; limit: number }): Generator<LedgerRead, TierLedgerRecord[], unknown> {
     const after = options.after
       ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
       : [];
@@ -2613,14 +2546,13 @@ export class TierLedger {
     // not a walk over every item between two sparse leftovers. The join sits
     // before the limit: an archive removal keeps superseded copies after their
     // item row is gone, and those must not use up a page and end the sweep.
-    const rows = this.db.query(`SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
+    const rows = (yield { mode: 'all', params: [...after, Math.max(1, Math.min(options.limit, 500))], sql: `SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
       JOIN tier_items i ON i.provider = c.provider AND i.account_scope = c.account_scope
         AND i.conversation_key = c.conversation_key AND i.provider_item_id = c.provider_item_id
       WHERE c.copy_state = 'superseded'
         ${after.length ? 'AND (c.provider, c.account_scope, c.conversation_key, c.provider_item_id) > (?, ?, ?, ?)' : ''}
       GROUP BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id
-      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?`)
-      .all(...after, Math.max(1, Math.min(options.limit, 500))) as TierItemRow[];
+      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?` }) as TierItemRow[];
     return rows.map(recordFromRow);
   }
 
@@ -5002,6 +4934,133 @@ function copyFromRow(row: TierCopyRow): TierCopy {
     previousLayers: row.previous_layers,
     updatedAt: row.updated_at,
   };
+}
+
+interface RejudgePageOptions {
+  engineVersion: string;
+  /** The configured sniffer's id; absent: only the classifier version counts. */
+  snifferId?: string;
+  after?: TierLedgerIdentity;
+  limit?: number;
+  /** Ledger rows read per call (default DEFAULT_REJUDGE_SCAN_ROWS). */
+  scanLimit?: number;
+}
+
+export interface RejudgePage { records: TierLedgerRecord[]; causes: TierRejudgeCause[]; builtinPromptSkipped: number; next?: TierLedgerIdentity }
+
+type RejudgeCandidateRow = TierItemRow & { rejudge_candidate: number; rejudge_cause: TierRejudgeCause };
+
+/** The re-judge candidate test over the rows `win` selects (its parameters come first). */
+function rejudgeCandidateSql(win: string): string {
+  return `
+      WITH win AS (${win}
+      )
+      SELECT i.*, CASE WHEN
+          i.routed = 1 AND i.content_read = 1
+          AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
+          -- A held row's stamp names the exact decision it re-read, so it
+          -- never outlives that decision (rejudgeKeyForHeld). So does a row
+          -- resting on a retired prior: a prior replayed after a completed
+          -- re-judge is a new decision and invalidates the old stamp, while a
+          -- re-read that changed nothing (no text) stays settled (markRejudged).
+          -- A stamp may be followed by an unavailable-text marker after
+          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
+          -- (instr, not substr: SQLite's string functions stop at the NUL.)
+          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
+            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
+          -- Settled by a verdict under this classifier and sniffer (markJudged):
+          -- not re-asked while its decision stays settled under this
+          -- classifier. A later decision that left it owed a verdict (fail-safe,
+          -- a retired source prior) is a candidate again, stamp or not.
+          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
+            AND i.state != 'pending' AND i.engine_version = ?
+            AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
+          AND (i.state = 'current'
+            -- Held for its text question alone: re-read once per classifier
+            -- and sniffer, so a question lost from the sniffer's queue (a
+            -- move that landed the item held, a verdict recorded under an
+            -- older prompt) is asked again instead of holding it forever.
+            OR (i.state = 'pending' AND i.content_pending = 1 AND i.metadata_pending = 0))
+          AND NOT (i.rejudge_json IS NOT NULL
+            AND json_extract(i.rejudge_json, '$.generation') = i.generation
+            AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at
+            AND json_extract(i.rejudge_json, '$.reasonsJson') = i.reasons_json
+            AND json_extract(i.rejudge_json, '$.decidedBy') = i.decided_by)
+          AND instr(i.reasons_json, '"override:') = 0
+          AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_overrides o
+            WHERE o.provider = i.provider AND o.account_scope = i.account_scope
+              AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+          )
+          -- A rule needs an actual identity change, never an absent model marker.
+          AND (i.decided_by != 'content_rule' OR i.engine_version != ?
+            OR (instr(i.reasons_json, '"content:rule_sniffer:') > 0
+              AND ? IS NOT NULL AND instr(i.reasons_json, ?) = 0))
+          AND (
+            i.state = 'pending'
+            -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
+            -- wrong under the owner ruling of 2026-10-28, so judged again now.
+            OR instr(i.reasons_json, '"metadata:prior:source_') > 0
+            -- Content settled fail-safe because its question was missing from
+            -- the queue, not because anything judged it (an enqueue lost while
+            -- the private model was off: about 2,400 messages on 2026-11-04):
+            -- its text is stored, so it is asked again (#606).
+            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
+              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+            OR (i.decided_by = 'content_rule' AND ? IS NOT NULL
+              AND instr(i.reasons_json, ?) = 0)
+            OR i.engine_version != ?
+            OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
+            OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
+              AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
+              AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
+          )
+        THEN 1 ELSE 0 END AS rejudge_candidate,
+        -- Which rule made it a candidate (content-free, for the pass's log line).
+        CASE
+          WHEN i.state = 'pending' THEN 'held'
+          WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0 THEN 'retired_prior'
+          WHEN instr(i.reasons_json, ':fail_safe:missing_question"') > 0 THEN 'missing_question'
+          WHEN i.engine_version != ? THEN 'classifier'
+          WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
+          ELSE 'content_prompt'
+        END AS rejudge_cause
+      FROM (SELECT *, CASE WHEN state = 'pending'
+            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
+            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
+            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
+            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id`;
+}
+
+/** The candidate test's parameters, after the window's own. */
+function rejudgeCandidateParams(options: Pick<RejudgePageOptions, 'engineVersion' | 'snifferId'>): unknown[] {
+  const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
+  const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
+  const key = rejudgeKey(options.engineVersion, options.snifferId);
+  return [
+    options.engineVersion,
+    options.engineVersion,
+    options.snifferId ?? null,
+    JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
+    options.snifferId ?? null,
+    JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
+    options.engineVersion,
+    metadataMarker,
+    metadataMarker ?? '',
+    snifferMarker,
+    snifferMarker ?? '',
+    options.engineVersion,
+    metadataMarker,
+    metadataMarker ?? '',
+    key,
+    key,
+    key,
+    key,
+  ];
 }
 
 function rejudgeKey(engineVersion: string, snifferId: string | undefined): string {

@@ -49,42 +49,77 @@ export function findInLedger<T>(ledger: TierLedger, steps: () => Generator<Ledge
   return find(ledgerFinder(ledger, steps));
 }
 
+/**
+ * `wrap`, when given, runs around each synchronous stretch of a pass (every
+ * resume of the generator, and a finder run here): a setting that must hold
+ * only while the pass's own statements run, never across a wait.
+ */
+export type LoopPassWrap = <R>(stretch: () => R) => R;
+const unwrapped: LoopPassWrap = (stretch) => stretch();
+
 /** Runs a pass on its caller's connection, synchronously (not the engine's loop). */
-export function runPassHere<T>(pass: LoopPass<T>): T {
-  let next = pass.next();
+export function runPassHere<T>(pass: LoopPass<T>, options: { wrap?: LoopPassWrap } = {}): T {
+  const wrap = options.wrap ?? unwrapped;
+  let next = wrap(() => pass.next());
   while (!next.done) {
     const step = next.value;
-    if ('turn' in step) { next = pass.next(); continue; }
+    if ('turn' in step) { next = wrap(() => pass.next()); continue; }
     let value: unknown;
     try {
-      value = step.find.here();
+      value = wrap(() => step.find.here());
     } catch (error) {
-      next = pass.throw(error);
+      next = wrap(() => pass.throw(error));
       continue;
     }
-    next = pass.next(value);
+    next = wrap(() => pass.next(value));
   }
   return next.value;
 }
 
 /** Runs a pass on the loop: finders on the read worker, a turn wherever the pass asks for one. */
-export async function runPassOffThread<T>(pass: LoopPass<T>, options: { turn?: () => Promise<void> | undefined } = {}): Promise<T> {
-  let next = pass.next();
+export async function runPassOffThread<T>(pass: LoopPass<T>, options: { turn?: () => Promise<void> | undefined; wrap?: LoopPassWrap } = {}): Promise<T> {
+  const wrap = options.wrap ?? unwrapped;
+  let next = wrap(() => pass.next());
   while (!next.done) {
     const step = next.value;
     if ('turn' in step) {
       await options.turn?.();
-      next = pass.next();
+      next = wrap(() => pass.next());
       continue;
     }
     let value: unknown;
     try {
       value = await step.find.offThread();
     } catch (error) {
-      next = pass.throw(error);
+      next = wrap(() => pass.throw(error));
       continue;
     }
-    next = pass.next(value);
+    next = wrap(() => pass.next(value));
   }
   return next.value;
+}
+
+/** Waits of LEDGER_HOLD_WAIT_MS a finder after a hold makes before it reads on the loop's connection instead. */
+const LEDGER_HOLD_WAITS = 100;
+const LEDGER_HOLD_WAIT_MS = 10;
+
+/**
+ * A ledger finder whose start point the loop read (a cursor in the ledger's
+ * meta, rows the loop is about to act on). Inside a ledger hold
+ * (`holdingWrites` across an await) the loop's connection sees writes the
+ * worker's snapshot cannot yet, so the finder could step past rows the loop
+ * already counts on. It waits for the hold to end, a short wait at a time; a
+ * hold that outlasts the waits is read here, on the connection that holds it.
+ */
+export function ledgerFinderAfterHold<T>(ledger: TierLedger, steps: () => Generator<LedgerRead, T, unknown>): LoopFinder<T> {
+  return {
+    here: () => ledger.readSteps(steps()),
+    offThread: async () => {
+      for (let waits = 0; ledger.writesHeld(); waits += 1) {
+        if (waits >= LEDGER_HOLD_WAITS) return ledger.readSteps(steps());
+        await new Promise<void>((resolve) => { setTimeout(resolve, LEDGER_HOLD_WAIT_MS); });
+      }
+      return ledgerReadOffThread(ledger, steps());
+    },
+  };
 }

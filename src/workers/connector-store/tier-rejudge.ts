@@ -80,7 +80,9 @@ import {
   type TierOwnerOverrideGuard,
   type TierRejudgeCause,
 } from '../classification/tier-ledger.ts';
+import type { RejudgePage } from '../classification/tier-ledger.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
+import { ledgerFinderAfterHold, type LoopFinder } from './loop-pass.ts';
 import type { LocalConnectorStore, ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
 import { secretFencedSniffer } from './tier-placement.ts';
@@ -164,8 +166,14 @@ export function emptyTierRejudgeReport(): TierRejudgeReport {
 export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierRejudgeReport; next?: TierLedgerIdentity } {
   const steps = rejudgeSteps(options);
   let step = steps.next();
-  while (!step.done) step = steps.next();
+  while (!step.done) step = steps.next(isFinder(step.value) ? step.value.find.here() : undefined);
   return step.value;
+}
+
+type RejudgeStep = TierLedgerRecord | { find: LoopFinder<RejudgePage> };
+
+function isFinder(step: RejudgeStep): step is { find: LoopFinder<RejudgePage> } {
+  return 'find' in step;
 }
 
 /**
@@ -181,8 +189,16 @@ export async function rejudgeRoutedItemsInTurns(
   const steps = rejudgeSteps(options);
   let step = steps.next();
   while (!step.done) {
+    if (isFinder(step.value)) {
+      // The candidate page is a finder: read on the ledger's read worker.
+      let page: RejudgePage;
+      try { page = await step.value.find.offThread(); }
+      catch (error) { step = steps.throw(error); continue; }
+      step = steps.next(page);
+      continue;
+    }
     await options.turn();
-    const text = step.value === undefined ? undefined : storedContentText(options.set, step.value);
+    const text = storedContentText(options.set, step.value);
     if (text !== undefined && secretScanReusable(text)) await scanSecretsAhead(text);
     step = steps.next();
   }
@@ -204,8 +220,9 @@ function storedContentText(set: TieredStoreSet, record: TierLedgerRecord): strin
   }
 }
 
-// Yields each candidate before it is re-judged (a turn point for the caller).
-function* rejudgeSteps(options: TierRejudgeOptions): Generator<TierLedgerRecord, { report: TierRejudgeReport; next?: TierLedgerIdentity }> {
+// Yields each candidate before it is re-judged (a turn point for the caller),
+// and the candidate page as a finder (loop-stall step-back, family 5).
+function* rejudgeSteps(options: TierRejudgeOptions): Generator<RejudgeStep, { report: TierRejudgeReport; next?: TierLedgerIdentity }, unknown> {
   const report = emptyTierRejudgeReport();
   const { set } = options;
   const classification = set.classification();
@@ -245,17 +262,18 @@ function* rejudgeSteps(options: TierRejudgeOptions): Generator<TierLedgerRecord,
     ledger.advanceRecheck(request, scoped.next);
   }
   if (budget <= 0) return { report, ...(options.after ? { next: options.after } : {}) };
-  const page = ledger.rejudgeCandidatePage({
-    ...key,
-    ...(options.after ? { after: options.after } : {}),
-    limit: budget,
-  });
+  const pageOptions = { ...key, ...(options.after ? { after: options.after } : {}), limit: budget };
+  const page = (yield { find: ledgerFinderAfterHold(ledger, () => ledger.rejudgeCandidatePageSteps(pageOptions)) }) as RejudgePage;
   report.builtinPromptSkipped = page.builtinPromptSkipped;
-  for (const [index, record] of page.records.entries()) {
-    yield record;
+  for (const found of page.records) {
+    yield found;
+    // Found on the read worker, maybe before a verdict, an override or a move
+    // landed: judged only as its row reads now, by key, if still a candidate.
+    const now = ledger.rejudgeCandidateNow(identityOf(found), key);
+    if (!now) continue;
+    const { record, cause } = now;
     report.seen += 1;
-    const cause = page.causes[index];
-    if (cause) report[CAUSE_FIELD[cause]] += 1;
+    report[CAUSE_FIELD[cause]] += 1;
     try {
       rejudgeStoredContent(set, record, {
         sniffer: classification.sniffer,

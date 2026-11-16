@@ -16791,16 +16791,19 @@ var init_tier_content_purge = __esm(() => {
 });
 
 // src/workers/connector-store/tier-auto-prune-sweep.ts
-var RECLAIM_MAX_RETAINED_FREE_BYTES;
+var RECLAIM_MAX_RETAINED_FREE_BYTES, sweeping;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
   init_tier_content_purge();
   init_main_thread_sql_trace();
+  init_loop_pass();
+  init_control_path_headroom();
   init_store_reclaim_admission();
   init_tiered_store_set();
   RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
+  sweeping = new WeakSet;
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 var REQUEST_TIMEOUT_MS;
@@ -16864,6 +16867,7 @@ var init_tier_rejudge = __esm(() => {
   init_stored_names();
   init_tier_classifier();
   init_tier_ledger();
+  init_loop_pass();
   init_secrets_disposition();
   init_tier_placement();
   init_secret_scan_off_thread();

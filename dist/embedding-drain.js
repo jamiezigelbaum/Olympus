@@ -12816,111 +12816,37 @@ class TierLedger {
     return row?.move_attempts ?? 0;
   }
   rejudgeCandidatePage(options) {
+    const steps = this.rejudgeCandidatePageSteps(options);
+    let next = steps.next();
+    while (!next.done) {
+      const statement = this.db.query(next.value.sql);
+      const params = next.value.params;
+      next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
+    }
+    return next.value;
+  }
+  *rejudgeCandidatePageSteps(options) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50000));
-    const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
-    const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
-    const key = rejudgeKey(options.engineVersion, options.snifferId);
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
-    const nowIso = this.now().toISOString();
-    const rows = this.db.query(`
-      WITH win AS (
+    const rows = yield {
+      mode: "all",
+      sql: rejudgeCandidateSql(`
         SELECT * FROM tier_items
         WHERE (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
         ORDER BY provider, account_scope, conversation_key, provider_item_id
-        LIMIT ?
-      )
-      SELECT i.*, CASE WHEN
-          i.routed = 1 AND i.content_read = 1
-          AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
-          -- A held row's stamp names the exact decision it re-read, so it
-          -- never outlives that decision (rejudgeKeyForHeld). So does a row
-          -- resting on a retired prior: a prior replayed after a completed
-          -- re-judge is a new decision and invalidates the old stamp, while a
-          -- re-read that changed nothing (no text) stays settled (markRejudged).
-          -- A stamp may be followed by an unavailable-text marker after
-          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
-          -- (instr, not substr: SQLite's string functions stop at the NUL.)
-          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
-            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
-          -- Settled by a verdict under this classifier and sniffer (markJudged):
-          -- not re-asked while its decision stays settled under this
-          -- classifier. A later decision that left it owed a verdict (fail-safe,
-          -- a retired source prior) is a candidate again, stamp or not.
-          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
-            AND i.state != 'pending' AND i.engine_version = ?
-            AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
-          AND (i.state = 'current'
-            -- Held for its text question alone: re-read once per classifier
-            -- and sniffer, so a question lost from the sniffer's queue (a
-            -- move that landed the item held, a verdict recorded under an
-            -- older prompt) is asked again instead of holding it forever.
-            OR (i.state = 'pending' AND i.content_pending = 1 AND i.metadata_pending = 0))
-          AND NOT (i.rejudge_json IS NOT NULL
-            AND json_extract(i.rejudge_json, '$.generation') = i.generation
-            AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at
-            AND json_extract(i.rejudge_json, '$.reasonsJson') = i.reasons_json
-            AND json_extract(i.rejudge_json, '$.decidedBy') = i.decided_by)
-          AND instr(i.reasons_json, '"override:') = 0
-          AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
-          AND NOT EXISTS (
-            SELECT 1 FROM tier_overrides o
-            WHERE o.provider = i.provider AND o.account_scope = i.account_scope
-              AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
-          )
-          -- A rule needs an actual identity change, never an absent model marker.
-          AND (i.decided_by != 'content_rule' OR i.engine_version != ?
-            OR (instr(i.reasons_json, '"content:rule_sniffer:') > 0
-              AND ? IS NOT NULL AND instr(i.reasons_json, ?) = 0))
-          AND (
-            i.state = 'pending'
-            -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
-            -- wrong under the owner ruling of 2026-10-28, so judged again now.
-            OR instr(i.reasons_json, '"metadata:prior:source_') > 0
-            -- Content settled fail-safe because its question was missing from
-            -- the queue, not because anything judged it (an enqueue lost while
-            -- the private model was off: about 2,400 messages on 2026-11-04):
-            -- its text is stored, so it is asked again (#606).
-            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
-              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
-                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
-            OR (i.decided_by = 'content_rule' AND ? IS NOT NULL
-              AND instr(i.reasons_json, ?) = 0)
-            OR i.engine_version != ?
-            OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
-            OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
-              AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
-              AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
-          )
-        THEN 1 ELSE 0 END AS rejudge_candidate,
-        -- Which rule made it a candidate (content-free, for the pass's log line).
-        CASE
-          WHEN i.state = 'pending' THEN 'held'
-          WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0 THEN 'retired_prior'
-          WHEN instr(i.reasons_json, ':fail_safe:missing_question"') > 0 THEN 'missing_question'
-          WHEN i.engine_version != ? THEN 'classifier'
-          WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
-          ELSE 'content_prompt'
-        END AS rejudge_cause
-      FROM (SELECT *, CASE WHEN state = 'pending'
-            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
-            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
-            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
-            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "", key, key, key, key);
+        LIMIT ?`),
+      params: [after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, ...rejudgeCandidateParams(options)]
+    };
     const records = [];
     const causes = [];
     let builtinPromptSkipped = 0;
     let last;
     for (const row of rows) {
       last = row;
-      if (row.rejudge_candidate !== 1)
+      const cause = this.rejudgeCandidateCause(row, options);
+      if (cause === undefined)
         continue;
-      if (rejudgeUnavailableUntil(row, key) > nowIso)
-        continue;
-      const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
       if (cause === "builtin_prompt_skipped") {
         builtinPromptSkipped += 1;
         continue;
@@ -12937,6 +12863,20 @@ class TierLedger {
       builtinPromptSkipped,
       ...more && last ? { next: identityOfRow(last) } : {}
     };
+  }
+  rejudgeCandidateNow(identity, options) {
+    const row = this.db.query(rejudgeCandidateSql(`
+        SELECT * FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`)).get(identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId, ...rejudgeCandidateParams(options));
+    const cause = row ? this.rejudgeCandidateCause(row, options) : undefined;
+    return row && cause !== undefined && cause !== "builtin_prompt_skipped" ? { record: recordFromRow(row), cause } : undefined;
+  }
+  rejudgeCandidateCause(row, options) {
+    if (row.rejudge_candidate !== 1)
+      return;
+    if (rejudgeUnavailableUntil(row, rejudgeKey(options.engineVersion, options.snifferId)) > this.now().toISOString())
+      return;
+    return settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
   }
   secondRoundCandidatePage(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
@@ -13643,14 +13583,17 @@ class TierLedger {
     return rows.map(recordFromRow);
   }
   listSupersededItemWindow(options) {
+    return this.readSteps(this.listSupersededItemWindowSteps(options));
+  }
+  *listSupersededItemWindowSteps(options) {
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
-    const rows = this.db.query(`SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
+    const rows = yield { mode: "all", params: [...after, Math.max(1, Math.min(options.limit, 500))], sql: `SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
       JOIN tier_items i ON i.provider = c.provider AND i.account_scope = c.account_scope
         AND i.conversation_key = c.conversation_key AND i.provider_item_id = c.provider_item_id
       WHERE c.copy_state = 'superseded'
         ${after.length ? "AND (c.provider, c.account_scope, c.conversation_key, c.provider_item_id) > (?, ?, ?, ?)" : ""}
       GROUP BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id
-      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
+      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?` };
     return rows.map(recordFromRow);
   }
   listLowerContentLeftovers(options) {
@@ -15072,6 +15015,115 @@ function copyFromRow(row) {
     previousLayers: row.previous_layers,
     updatedAt: row.updated_at
   };
+}
+function rejudgeCandidateSql(win) {
+  return `
+      WITH win AS (${win}
+      )
+      SELECT i.*, CASE WHEN
+          i.routed = 1 AND i.content_read = 1
+          AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
+          -- A held row's stamp names the exact decision it re-read, so it
+          -- never outlives that decision (rejudgeKeyForHeld). So does a row
+          -- resting on a retired prior: a prior replayed after a completed
+          -- re-judge is a new decision and invalidates the old stamp, while a
+          -- re-read that changed nothing (no text) stays settled (markRejudged).
+          -- A stamp may be followed by an unavailable-text marker after
+          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
+          -- (instr, not substr: SQLite's string functions stop at the NUL.)
+          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
+            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
+          -- Settled by a verdict under this classifier and sniffer (markJudged):
+          -- not re-asked while its decision stays settled under this
+          -- classifier. A later decision that left it owed a verdict (fail-safe,
+          -- a retired source prior) is a candidate again, stamp or not.
+          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
+            AND i.state != 'pending' AND i.engine_version = ?
+            AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
+          AND (i.state = 'current'
+            -- Held for its text question alone: re-read once per classifier
+            -- and sniffer, so a question lost from the sniffer's queue (a
+            -- move that landed the item held, a verdict recorded under an
+            -- older prompt) is asked again instead of holding it forever.
+            OR (i.state = 'pending' AND i.content_pending = 1 AND i.metadata_pending = 0))
+          AND NOT (i.rejudge_json IS NOT NULL
+            AND json_extract(i.rejudge_json, '$.generation') = i.generation
+            AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at
+            AND json_extract(i.rejudge_json, '$.reasonsJson') = i.reasons_json
+            AND json_extract(i.rejudge_json, '$.decidedBy') = i.decided_by)
+          AND instr(i.reasons_json, '"override:') = 0
+          AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_overrides o
+            WHERE o.provider = i.provider AND o.account_scope = i.account_scope
+              AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+          )
+          -- A rule needs an actual identity change, never an absent model marker.
+          AND (i.decided_by != 'content_rule' OR i.engine_version != ?
+            OR (instr(i.reasons_json, '"content:rule_sniffer:') > 0
+              AND ? IS NOT NULL AND instr(i.reasons_json, ?) = 0))
+          AND (
+            i.state = 'pending'
+            -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
+            -- wrong under the owner ruling of 2026-10-28, so judged again now.
+            OR instr(i.reasons_json, '"metadata:prior:source_') > 0
+            -- Content settled fail-safe because its question was missing from
+            -- the queue, not because anything judged it (an enqueue lost while
+            -- the private model was off: about 2,400 messages on 2026-11-04):
+            -- its text is stored, so it is asked again (#606).
+            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
+              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+            OR (i.decided_by = 'content_rule' AND ? IS NOT NULL
+              AND instr(i.reasons_json, ?) = 0)
+            OR i.engine_version != ?
+            OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
+            OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
+              AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
+              AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
+          )
+        THEN 1 ELSE 0 END AS rejudge_candidate,
+        -- Which rule made it a candidate (content-free, for the pass's log line).
+        CASE
+          WHEN i.state = 'pending' THEN 'held'
+          WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0 THEN 'retired_prior'
+          WHEN instr(i.reasons_json, ':fail_safe:missing_question"') > 0 THEN 'missing_question'
+          WHEN i.engine_version != ? THEN 'classifier'
+          WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
+          ELSE 'content_prompt'
+        END AS rejudge_cause
+      FROM (SELECT *, CASE WHEN state = 'pending'
+            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
+            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
+            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
+            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id`;
+}
+function rejudgeCandidateParams(options) {
+  const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
+  const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
+  const key = rejudgeKey(options.engineVersion, options.snifferId);
+  return [
+    options.engineVersion,
+    options.engineVersion,
+    options.snifferId ?? null,
+    JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
+    options.snifferId ?? null,
+    JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
+    options.engineVersion,
+    metadataMarker,
+    metadataMarker ?? "",
+    snifferMarker,
+    snifferMarker ?? "",
+    options.engineVersion,
+    metadataMarker,
+    metadataMarker ?? "",
+    key,
+    key,
+    key,
+    key
+  ];
 }
 function rejudgeKey(engineVersion, snifferId) {
   return `${engineVersion}\x00${snifferId ?? ""}`;
@@ -21968,6 +22020,25 @@ async function runStepsInTurns(steps) {
   }
   return step.value;
 }
+var PK_SET_SLICE = 20000;
+async function pkSetInTurns(lists, keep, set = new Set) {
+  let added = 0;
+  for (const list of lists) {
+    for (const pk of list) {
+      if (keep && !keep(pk))
+        continue;
+      set.add(pk);
+      if (++added % PK_SET_SLICE === 0)
+        await ingestionTurn();
+    }
+  }
+  return set;
+}
+async function embeddingExcludedPksInTurns(tierHidden, allowHeld) {
+  const eligibleHeld = allowHeld ? await pkSetInTurns([tierHidden.heldForJudgment]) : undefined;
+  const excluded = await pkSetInTurns([tierHidden.hidden, tierHidden.metadataLayer]);
+  return pkSetInTurns([tierHidden.held], (pk) => !eligibleHeld?.has(pk), excluded);
+}
 
 class MutablePkList {
   values = [];
@@ -28510,12 +28581,15 @@ ${parentKey(ref)}`, { ref, origin });
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
-    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const allowHeld = this.canEmbedHeld(embedder);
     const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const offThread = offThreadReadsSupported(this.dbPath);
+    const tierExclusion = offThread ? { filter: "", params: [] } : this.embeddingWorkListExclusionFilter(0, tierHidden, allowHeld);
+    const excluded = offThread ? await embeddingExcludedPksInTurns(tierHidden, allowHeld) : undefined;
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
     const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
-    const query = this.db.query(`
-      SELECT c.chunk_pk AS chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+    const windowSql = `
+      SELECT MIN(c.chunk_pk) AS first_chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
@@ -28523,17 +28597,19 @@ ${parentKey(ref)}`, { ref, origin });
         AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
-      ORDER BY c.chunk_pk ASC
-    `);
-    const maxChunkPk = this.db.query("SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks").get().n;
+      GROUP BY i.item_pk
+      ORDER BY first_chunk_pk ASC
+    `;
+    const read = this.embeddingSweepRead(offThread);
+    const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
     const seen = new Set;
     const found = [];
     for (let after = 0;after < maxChunkPk && found.length < limit; after += windowChunks) {
       if (after > 0)
-        await new Promise((resolve) => setImmediate(resolve));
-      const rows = query.all(modelId, after, after + windowChunks, ...params);
+        await ingestionTurn();
+      const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: "all" });
       for (const row of rows) {
-        if (seen.has(row.item_pk))
+        if (excluded?.has(row.item_pk) || seen.has(row.item_pk))
           continue;
         seen.add(row.item_pk);
         if (failed?.has(row.local_item_id))
@@ -28545,13 +28621,22 @@ ${parentKey(ref)}`, { ref, origin });
     }
     return found;
   }
-  async embeddingSweepInventory(provider, scope = {}, stopAtMs) {
+  embeddingSweepRead(offThread) {
+    if (offThread)
+      return (query) => withOffThreadSnapshot(this.dbPath, async (run) => run(query));
+    return async (query) => {
+      await ingestionTurn();
+      const statement = this.db.query(query.sql);
+      return query.mode === "get" ? statement.get(...query.params) : statement.all(...query.params);
+    };
+  }
+  async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
     const started = Date.now();
     const tier = await this.tierHiddenItemPksInTurns();
-    const hidden = new Set(tier.hidden);
-    const held = new Set(tier.held);
-    const heldForJudgment = this.canEmbedHeld(provider) ? new Set(tier.heldForJudgment) : new Set;
-    const namesOnly = new Set(tier.metadataLayer);
+    const hidden = await pkSetInTurns([tier.hidden]);
+    const held = await pkSetInTurns([tier.held]);
+    const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
+    const namesOnly = await pkSetInTurns([tier.metadataLayer]);
     const moving = new Set;
     let walked = 0;
     for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
@@ -28577,33 +28662,38 @@ ${parentKey(ref)}`, { ref, origin });
       skipped_retired_chunks: 0,
       inventory_complete: 0
     };
-    const page = this.db.query(`
+    const windowSql = `
       SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
-        (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash) AS owed,
         CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
       FROM chunks c JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE c.chunk_pk > ?
-      ORDER BY c.chunk_pk LIMIT 2048
-    `);
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+      ORDER BY c.chunk_pk
+    `;
+    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
+    const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
     let after = 0;
     while (stopAtMs === undefined || Date.now() < stopAtMs) {
-      const rows = page.all(...account ? [account] : [], ...scoped.params, provider.modelId, after);
+      if (after >= maxChunkPk) {
+        counts.inventory_complete = 1;
+        break;
+      }
+      if (after > 0)
+        await ingestionTurn();
+      const rows = await read({
+        sql: windowSql,
+        mode: "all",
+        params: [...account ? [account] : [], ...scoped.params, provider.modelId, after, after + windowChunks]
+      });
       for (const row of rows) {
-        if (!row.owed)
-          continue;
         counts.pending_chunks += 1;
         const heldBack = held.has(row.item_pk) && !heldForJudgment.has(row.item_pk);
         const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
         const reason = row.tombstoned || row.trust_tier === "S5" ? "skipped_retired_chunks" : moving.has(row.item_pk) && visibilityExcluded ? "skipped_moving_chunks" : hidden.has(row.item_pk) ? "skipped_hidden_chunks" : namesOnly.has(row.item_pk) ? "skipped_metadata_chunks" : heldBack ? "skipped_held_chunks" : tiers && !tiers.includes(row.trust_tier) ? "skipped_private_tier_chunks" : this.embeddingFailureState?.has(row.local_item_id) ? "skipped_failed_chunks" : !row.in_scope ? "skipped_out_of_scope_chunks" : "eligible_chunks";
         counts[reason] += 1;
       }
-      if (rows.length < 2048) {
-        counts.inventory_complete = 1;
-        break;
-      }
-      after = rows.at(-1).chunk_pk;
-      await ingestionTurn();
+      after += windowChunks;
     }
     counts.inventory_ms = Date.now() - started;
     return counts;
@@ -33182,6 +33272,7 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
 
 // src/workers/connector-store/tier-auto-prune-sweep.ts
 var RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
+var sweeping = new WeakSet;
 
 // src/workers/source-index/built-in-embedding/provider.ts
 import { isMainThread as isMainThread5 } from "node:worker_threads";

@@ -41765,111 +41765,37 @@ class TierLedger {
     return row?.move_attempts ?? 0;
   }
   rejudgeCandidatePage(options) {
+    const steps = this.rejudgeCandidatePageSteps(options);
+    let next = steps.next();
+    while (!next.done) {
+      const statement = this.db.query(next.value.sql);
+      const params = next.value.params;
+      next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
+    }
+    return next.value;
+  }
+  *rejudgeCandidatePageSteps(options) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50000));
-    const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
-    const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
-    const key = rejudgeKey(options.engineVersion, options.snifferId);
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
-    const nowIso = this.now().toISOString();
-    const rows = this.db.query(`
-      WITH win AS (
+    const rows = yield {
+      mode: "all",
+      sql: rejudgeCandidateSql(`
         SELECT * FROM tier_items
         WHERE (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
         ORDER BY provider, account_scope, conversation_key, provider_item_id
-        LIMIT ?
-      )
-      SELECT i.*, CASE WHEN
-          i.routed = 1 AND i.content_read = 1
-          AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
-          -- A held row's stamp names the exact decision it re-read, so it
-          -- never outlives that decision (rejudgeKeyForHeld). So does a row
-          -- resting on a retired prior: a prior replayed after a completed
-          -- re-judge is a new decision and invalidates the old stamp, while a
-          -- re-read that changed nothing (no text) stays settled (markRejudged).
-          -- A stamp may be followed by an unavailable-text marker after
-          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
-          -- (instr, not substr: SQLite's string functions stop at the NUL.)
-          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
-            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
-          -- Settled by a verdict under this classifier and sniffer (markJudged):
-          -- not re-asked while its decision stays settled under this
-          -- classifier. A later decision that left it owed a verdict (fail-safe,
-          -- a retired source prior) is a candidate again, stamp or not.
-          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
-            AND i.state != 'pending' AND i.engine_version = ?
-            AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
-          AND (i.state = 'current'
-            -- Held for its text question alone: re-read once per classifier
-            -- and sniffer, so a question lost from the sniffer's queue (a
-            -- move that landed the item held, a verdict recorded under an
-            -- older prompt) is asked again instead of holding it forever.
-            OR (i.state = 'pending' AND i.content_pending = 1 AND i.metadata_pending = 0))
-          AND NOT (i.rejudge_json IS NOT NULL
-            AND json_extract(i.rejudge_json, '$.generation') = i.generation
-            AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at
-            AND json_extract(i.rejudge_json, '$.reasonsJson') = i.reasons_json
-            AND json_extract(i.rejudge_json, '$.decidedBy') = i.decided_by)
-          AND instr(i.reasons_json, '"override:') = 0
-          AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
-          AND NOT EXISTS (
-            SELECT 1 FROM tier_overrides o
-            WHERE o.provider = i.provider AND o.account_scope = i.account_scope
-              AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
-          )
-          -- A rule needs an actual identity change, never an absent model marker.
-          AND (i.decided_by != 'content_rule' OR i.engine_version != ?
-            OR (instr(i.reasons_json, '"content:rule_sniffer:') > 0
-              AND ? IS NOT NULL AND instr(i.reasons_json, ?) = 0))
-          AND (
-            i.state = 'pending'
-            -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
-            -- wrong under the owner ruling of 2026-10-28, so judged again now.
-            OR instr(i.reasons_json, '"metadata:prior:source_') > 0
-            -- Content settled fail-safe because its question was missing from
-            -- the queue, not because anything judged it (an enqueue lost while
-            -- the private model was off: about 2,400 messages on 2026-11-04):
-            -- its text is stored, so it is asked again (#606).
-            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
-              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
-                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
-            OR (i.decided_by = 'content_rule' AND ? IS NOT NULL
-              AND instr(i.reasons_json, ?) = 0)
-            OR i.engine_version != ?
-            OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
-            OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
-              AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
-              AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
-          )
-        THEN 1 ELSE 0 END AS rejudge_candidate,
-        -- Which rule made it a candidate (content-free, for the pass's log line).
-        CASE
-          WHEN i.state = 'pending' THEN 'held'
-          WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0 THEN 'retired_prior'
-          WHEN instr(i.reasons_json, ':fail_safe:missing_question"') > 0 THEN 'missing_question'
-          WHEN i.engine_version != ? THEN 'classifier'
-          WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
-          ELSE 'content_prompt'
-        END AS rejudge_cause
-      FROM (SELECT *, CASE WHEN state = 'pending'
-            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
-            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
-            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
-            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "", key, key, key, key);
+        LIMIT ?`),
+      params: [after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, ...rejudgeCandidateParams(options)]
+    };
     const records = [];
     const causes = [];
     let builtinPromptSkipped = 0;
     let last;
     for (const row of rows) {
       last = row;
-      if (row.rejudge_candidate !== 1)
+      const cause = this.rejudgeCandidateCause(row, options);
+      if (cause === undefined)
         continue;
-      if (rejudgeUnavailableUntil(row, key) > nowIso)
-        continue;
-      const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
       if (cause === "builtin_prompt_skipped") {
         builtinPromptSkipped += 1;
         continue;
@@ -41886,6 +41812,20 @@ class TierLedger {
       builtinPromptSkipped,
       ...more && last ? { next: identityOfRow(last) } : {}
     };
+  }
+  rejudgeCandidateNow(identity, options) {
+    const row = this.db.query(rejudgeCandidateSql(`
+        SELECT * FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`)).get(identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId, ...rejudgeCandidateParams(options));
+    const cause = row ? this.rejudgeCandidateCause(row, options) : undefined;
+    return row && cause !== undefined && cause !== "builtin_prompt_skipped" ? { record: recordFromRow(row), cause } : undefined;
+  }
+  rejudgeCandidateCause(row, options) {
+    if (row.rejudge_candidate !== 1)
+      return;
+    if (rejudgeUnavailableUntil(row, rejudgeKey(options.engineVersion, options.snifferId)) > this.now().toISOString())
+      return;
+    return settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
   }
   secondRoundCandidatePage(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
@@ -42592,14 +42532,17 @@ class TierLedger {
     return rows.map(recordFromRow);
   }
   listSupersededItemWindow(options) {
+    return this.readSteps(this.listSupersededItemWindowSteps(options));
+  }
+  *listSupersededItemWindowSteps(options) {
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
-    const rows = this.db.query(`SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
+    const rows = yield { mode: "all", params: [...after, Math.max(1, Math.min(options.limit, 500))], sql: `SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
       JOIN tier_items i ON i.provider = c.provider AND i.account_scope = c.account_scope
         AND i.conversation_key = c.conversation_key AND i.provider_item_id = c.provider_item_id
       WHERE c.copy_state = 'superseded'
         ${after.length ? "AND (c.provider, c.account_scope, c.conversation_key, c.provider_item_id) > (?, ?, ?, ?)" : ""}
       GROUP BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id
-      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
+      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?` };
     return rows.map(recordFromRow);
   }
   listLowerContentLeftovers(options) {
@@ -44021,6 +43964,115 @@ function copyFromRow(row) {
     previousLayers: row.previous_layers,
     updatedAt: row.updated_at
   };
+}
+function rejudgeCandidateSql(win) {
+  return `
+      WITH win AS (${win}
+      )
+      SELECT i.*, CASE WHEN
+          i.routed = 1 AND i.content_read = 1
+          AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
+          -- A held row's stamp names the exact decision it re-read, so it
+          -- never outlives that decision (rejudgeKeyForHeld). So does a row
+          -- resting on a retired prior: a prior replayed after a completed
+          -- re-judge is a new decision and invalidates the old stamp, while a
+          -- re-read that changed nothing (no text) stays settled (markRejudged).
+          -- A stamp may be followed by an unavailable-text marker after
+          -- char(1) (markRejudgeUnavailable): the stamp before it still counts.
+          -- (instr, not substr: SQLite's string functions stop at the NUL.)
+          AND NOT (i.rejudged_key IS NOT NULL AND (i.rejudged_key = i.expected_stamp
+            OR instr(i.rejudged_key, i.expected_stamp || char(1)) = 1))
+          -- Settled by a verdict under this classifier and sniffer (markJudged):
+          -- not re-asked while its decision stays settled under this
+          -- classifier. A later decision that left it owed a verdict (fail-safe,
+          -- a retired source prior) is a candidate again, stamp or not.
+          AND NOT ((COALESCE(i.rejudged_key, '') = i.judged_stamp OR instr(COALESCE(i.rejudged_key, ''), i.judged_stamp || char(1)) = 1)
+            AND i.state != 'pending' AND i.engine_version = ?
+            AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
+          AND (i.state = 'current'
+            -- Held for its text question alone: re-read once per classifier
+            -- and sniffer, so a question lost from the sniffer's queue (a
+            -- move that landed the item held, a verdict recorded under an
+            -- older prompt) is asked again instead of holding it forever.
+            OR (i.state = 'pending' AND i.content_pending = 1 AND i.metadata_pending = 0))
+          AND NOT (i.rejudge_json IS NOT NULL
+            AND json_extract(i.rejudge_json, '$.generation') = i.generation
+            AND json_extract(i.rejudge_json, '$.decidedAt') = i.decided_at
+            AND json_extract(i.rejudge_json, '$.reasonsJson') = i.reasons_json
+            AND json_extract(i.rejudge_json, '$.decidedBy') = i.decided_by)
+          AND instr(i.reasons_json, '"override:') = 0
+          AND instr(i.reasons_json, '"metadata:owner_rule:') = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_overrides o
+            WHERE o.provider = i.provider AND o.account_scope = i.account_scope
+              AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+          )
+          -- A rule needs an actual identity change, never an absent model marker.
+          AND (i.decided_by != 'content_rule' OR i.engine_version != ?
+            OR (instr(i.reasons_json, '"content:rule_sniffer:') > 0
+              AND ? IS NOT NULL AND instr(i.reasons_json, ?) = 0))
+          AND (
+            i.state = 'pending'
+            -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
+            -- wrong under the owner ruling of 2026-10-28, so judged again now.
+            OR instr(i.reasons_json, '"metadata:prior:source_') > 0
+            -- Content settled fail-safe because its question was missing from
+            -- the queue, not because anything judged it (an enqueue lost while
+            -- the private model was off: about 2,400 messages on 2026-11-04):
+            -- its text is stored, so it is asked again (#606).
+            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
+              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+            OR (i.decided_by = 'content_rule' AND ? IS NOT NULL
+              AND instr(i.reasons_json, ?) = 0)
+            OR i.engine_version != ?
+            OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
+            OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
+              AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
+              AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
+          )
+        THEN 1 ELSE 0 END AS rejudge_candidate,
+        -- Which rule made it a candidate (content-free, for the pass's log line).
+        CASE
+          WHEN i.state = 'pending' THEN 'held'
+          WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0 THEN 'retired_prior'
+          WHEN instr(i.reasons_json, ':fail_safe:missing_question"') > 0 THEN 'missing_question'
+          WHEN i.engine_version != ? THEN 'classifier'
+          WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
+          ELSE 'content_prompt'
+        END AS rejudge_cause
+      FROM (SELECT *, CASE WHEN state = 'pending'
+            THEN ? || char(0) || 'held' || char(0) || generation || char(0) || decided_at
+            WHEN instr(reasons_json, '"metadata:prior:source_') > 0
+            THEN ? || char(0) || 'prior' || char(0) || generation || char(0) || decided_at
+            ELSE ? END AS expected_stamp, ? || char(0) || 'judged' AS judged_stamp FROM win) i
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id`;
+}
+function rejudgeCandidateParams(options) {
+  const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
+  const metadataMarker = options.snifferId ? `"metadata:sniffer:${options.snifferId}:` : null;
+  const key = rejudgeKey(options.engineVersion, options.snifferId);
+  return [
+    options.engineVersion,
+    options.engineVersion,
+    options.snifferId ?? null,
+    JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
+    options.snifferId ?? null,
+    JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
+    options.engineVersion,
+    metadataMarker,
+    metadataMarker ?? "",
+    snifferMarker,
+    snifferMarker ?? "",
+    options.engineVersion,
+    metadataMarker,
+    metadataMarker ?? "",
+    key,
+    key,
+    key,
+    key
+  ];
 }
 function rejudgeKey(engineVersion, snifferId) {
   return `${engineVersion}\x00${snifferId ?? ""}`;
@@ -54536,25 +54588,42 @@ function findInLedger(ledger, steps) {
   return find(ledgerFinder(ledger, steps));
 }
 async function runPassOffThread(pass, options = {}) {
-  let next = pass.next();
+  const wrap = options.wrap ?? unwrapped;
+  let next = wrap(() => pass.next());
   while (!next.done) {
     const step = next.value;
     if ("turn" in step) {
       await options.turn?.();
-      next = pass.next();
+      next = wrap(() => pass.next());
       continue;
     }
     let value;
     try {
       value = await step.find.offThread();
     } catch (error) {
-      next = pass.throw(error);
+      next = wrap(() => pass.throw(error));
       continue;
     }
-    next = pass.next(value);
+    next = wrap(() => pass.next(value));
   }
   return next.value;
 }
+function ledgerFinderAfterHold(ledger, steps) {
+  return {
+    here: () => ledger.readSteps(steps()),
+    offThread: async () => {
+      for (let waits = 0;ledger.writesHeld(); waits += 1) {
+        if (waits >= LEDGER_HOLD_WAITS)
+          return ledger.readSteps(steps());
+        await new Promise((resolve) => {
+          setTimeout(resolve, LEDGER_HOLD_WAIT_MS);
+        });
+      }
+      return ledgerReadOffThread(ledger, steps());
+    }
+  };
+}
+var unwrapped = (stretch) => stretch(), LEDGER_HOLD_WAITS = 100, LEDGER_HOLD_WAIT_MS = 10;
 var init_loop_pass = __esm(() => {
   init_child_visibility();
 });
@@ -57469,6 +57538,24 @@ async function runStepsInTurns(steps) {
     step = steps.next();
   }
   return step.value;
+}
+async function pkSetInTurns(lists, keep, set = new Set) {
+  let added = 0;
+  for (const list of lists) {
+    for (const pk of list) {
+      if (keep && !keep(pk))
+        continue;
+      set.add(pk);
+      if (++added % PK_SET_SLICE === 0)
+        await ingestionTurn();
+    }
+  }
+  return set;
+}
+async function embeddingExcludedPksInTurns(tierHidden, allowHeld) {
+  const eligibleHeld = allowHeld ? await pkSetInTurns([tierHidden.heldForJudgment]) : undefined;
+  const excluded = await pkSetInTurns([tierHidden.hidden, tierHidden.metadataLayer]);
+  return pkSetInTurns([tierHidden.held], (pk) => !eligibleHeld?.has(pk), excluded);
 }
 
 class MutablePkList {
@@ -60807,7 +60894,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -67050,12 +67137,15 @@ ${parentKey(ref)}`, { ref, origin });
       const accountScope = normalizeOptionalAccountScope(scope.accountScope);
       const scoped = connectorStoreFilterSql(scope.filters);
       const failed = this.embeddingFailureState;
-      const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+      const allowHeld = this.canEmbedHeld(embedder);
       const privateTier = this.privateTierEmbeddingFilter(embedder);
+      const offThread = offThreadReadsSupported(this.dbPath);
+      const tierExclusion = offThread ? { filter: "", params: [] } : this.embeddingWorkListExclusionFilter(0, tierHidden, allowHeld);
+      const excluded = offThread ? await embeddingExcludedPksInTurns(tierHidden, allowHeld) : undefined;
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
       const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
-      const query = this.db.query(`
-      SELECT c.chunk_pk AS chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+      const windowSql = `
+      SELECT MIN(c.chunk_pk) AS first_chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
@@ -67063,17 +67153,19 @@ ${parentKey(ref)}`, { ref, origin });
         AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
-      ORDER BY c.chunk_pk ASC
-    `);
-      const maxChunkPk = this.db.query("SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks").get().n;
+      GROUP BY i.item_pk
+      ORDER BY first_chunk_pk ASC
+    `;
+      const read = this.embeddingSweepRead(offThread);
+      const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
       const seen = new Set;
       const found = [];
       for (let after = 0;after < maxChunkPk && found.length < limit; after += windowChunks) {
         if (after > 0)
-          await new Promise((resolve) => setImmediate(resolve));
-        const rows = query.all(modelId, after, after + windowChunks, ...params);
+          await ingestionTurn();
+        const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: "all" });
         for (const row of rows) {
-          if (seen.has(row.item_pk))
+          if (excluded?.has(row.item_pk) || seen.has(row.item_pk))
             continue;
           seen.add(row.item_pk);
           if (failed?.has(row.local_item_id))
@@ -67085,13 +67177,22 @@ ${parentKey(ref)}`, { ref, origin });
       }
       return found;
     }
-    async embeddingSweepInventory(provider, scope = {}, stopAtMs) {
+    embeddingSweepRead(offThread) {
+      if (offThread)
+        return (query) => withOffThreadSnapshot(this.dbPath, async (run) => run(query));
+      return async (query) => {
+        await ingestionTurn();
+        const statement = this.db.query(query.sql);
+        return query.mode === "get" ? statement.get(...query.params) : statement.all(...query.params);
+      };
+    }
+    async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
       const started = Date.now();
       const tier = await this.tierHiddenItemPksInTurns();
-      const hidden = new Set(tier.hidden);
-      const held = new Set(tier.held);
-      const heldForJudgment = this.canEmbedHeld(provider) ? new Set(tier.heldForJudgment) : new Set;
-      const namesOnly = new Set(tier.metadataLayer);
+      const hidden = await pkSetInTurns([tier.hidden]);
+      const held = await pkSetInTurns([tier.held]);
+      const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
+      const namesOnly = await pkSetInTurns([tier.metadataLayer]);
       const moving = new Set;
       let walked = 0;
       for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
@@ -67117,33 +67218,38 @@ ${parentKey(ref)}`, { ref, origin });
         skipped_retired_chunks: 0,
         inventory_complete: 0
       };
-      const page = this.db.query(`
+      const windowSql = `
       SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
-        (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash) AS owed,
         CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
       FROM chunks c JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE c.chunk_pk > ?
-      ORDER BY c.chunk_pk LIMIT 2048
-    `);
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+      ORDER BY c.chunk_pk
+    `;
+      const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
+      const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
       let after = 0;
       while (stopAtMs === undefined || Date.now() < stopAtMs) {
-        const rows = page.all(...account ? [account] : [], ...scoped.params, provider.modelId, after);
+        if (after >= maxChunkPk) {
+          counts.inventory_complete = 1;
+          break;
+        }
+        if (after > 0)
+          await ingestionTurn();
+        const rows = await read({
+          sql: windowSql,
+          mode: "all",
+          params: [...account ? [account] : [], ...scoped.params, provider.modelId, after, after + windowChunks]
+        });
         for (const row of rows) {
-          if (!row.owed)
-            continue;
           counts.pending_chunks += 1;
           const heldBack = held.has(row.item_pk) && !heldForJudgment.has(row.item_pk);
           const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
           const reason = row.tombstoned || row.trust_tier === "S5" ? "skipped_retired_chunks" : moving.has(row.item_pk) && visibilityExcluded ? "skipped_moving_chunks" : hidden.has(row.item_pk) ? "skipped_hidden_chunks" : namesOnly.has(row.item_pk) ? "skipped_metadata_chunks" : heldBack ? "skipped_held_chunks" : tiers && !tiers.includes(row.trust_tier) ? "skipped_private_tier_chunks" : this.embeddingFailureState?.has(row.local_item_id) ? "skipped_failed_chunks" : !row.in_scope ? "skipped_out_of_scope_chunks" : "eligible_chunks";
           counts[reason] += 1;
         }
-        if (rows.length < 2048) {
-          counts.inventory_complete = 1;
-          break;
-        }
-        after = rows.at(-1).chunk_pk;
-        await ingestionTurn();
+        after += windowChunks;
       }
       counts.inventory_ms = Date.now() - started;
       return counts;
@@ -92229,32 +92335,43 @@ async function reclaimAutomaticSupersededCopies(set, reclaimStore = (_store, wor
     return true;
   }) ?? false;
 }
-function sweepAutomaticSupersededCopies(set, options = {}) {
-  const timing = { pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false };
-  return withMainThreadSqlTiming(timing, () => set.ledger.withoutBusyWait(() => {
-    const now = options.now ?? (() => performance.now());
-    const started = now();
-    const budget = options.budgetMs ?? 0;
-    const spent = budget > 0 ? () => now() - started >= budget : () => false;
-    const total = sweepPage(set, options, spent, now, timing);
-    const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
-    let last = total.checked;
-    while (budget > 0 && !total.complete && total.failed === 0 && !timing.cut && last === limit && !spent()) {
-      const page = sweepPage(set, options, spent, now, timing);
-      total.checked += page.checked;
-      total.purged += page.purged;
-      total.kept += page.kept;
-      total.failed += page.failed;
-      total.complete = page.complete;
-      last = page.checked;
-    }
-    if (timing.pruneMs > 0 || total.purged > 0 || total.failed > 0 || timing.maxStatementMs >= SWEEP_LOG_STATEMENT_MS) {
-      console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}` + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete} max_statement_ms=${timing.maxStatementMs.toFixed(3)}`);
-    }
-    return total;
-  }));
+function sweepWrap(set, timing) {
+  return (stretch) => withMainThreadSqlTiming(timing, () => set.ledger.withoutBusyWait(stretch));
 }
-function sweepPage(set, options, spent, now, timing) {
+async function sweepAutomaticSupersededCopiesInTurns(set, options = {}) {
+  if (sweeping.has(set))
+    return emptyReport();
+  sweeping.add(set);
+  try {
+    const timing = { pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false };
+    return await runPassOffThread(sweepPass(set, options, timing), { wrap: sweepWrap(set, timing), turn: options.turn ?? ingestionTurn });
+  } finally {
+    sweeping.delete(set);
+  }
+}
+function* sweepPass(set, options, timing) {
+  const now = options.now ?? (() => performance.now());
+  const started = now();
+  const budget = options.budgetMs ?? 0;
+  const spent = budget > 0 ? () => now() - started >= budget : () => false;
+  const total = yield* sweepPage(set, options, spent, now, timing);
+  const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
+  let last = total.checked;
+  while (budget > 0 && !total.complete && total.failed === 0 && !timing.cut && last === limit && !spent()) {
+    const page = yield* sweepPage(set, options, spent, now, timing);
+    total.checked += page.checked;
+    total.purged += page.purged;
+    total.kept += page.kept;
+    total.failed += page.failed;
+    total.complete = page.complete;
+    last = page.checked;
+  }
+  if (timing.pruneMs > 0 || total.purged > 0 || total.failed > 0 || timing.maxStatementMs >= SWEEP_LOG_STATEMENT_MS) {
+    console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}` + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete} max_statement_ms=${timing.maxStatementMs.toFixed(3)}`);
+  }
+  return total;
+}
+function* sweepPage(set, options, spent, now, timing) {
   const ledger = set.ledger;
   const state = JSON.parse(ledger.readMeta(STATE) || "{}");
   const report = { checked: 0, purged: 0, kept: 0, failed: 0, complete: state.done === true };
@@ -92333,20 +92450,30 @@ function sweepPage(set, options, spent, now, timing) {
     }
     if (report.checked === limit)
       return report;
-    const rows = ledger.listSupersededItemWindow({ ...state.after ? { after: state.after } : {}, limit: limit - report.checked });
-    for (const record of rows.slice(0, limit - report.checked)) {
+    const windowOptions = { ...state.after ? { after: state.after } : {}, limit: limit - report.checked };
+    const rows = yield* find(ledgerFinderAfterHold(ledger, () => ledger.listSupersededItemWindowSteps(windowOptions)));
+    for (const found of rows.slice(0, limit - report.checked)) {
       if (report.checked > 0 && spent()) {
         timing.cut = true;
         break;
       }
+      if (report.checked > 0)
+        yield* turn();
       report.checked++;
       const identity = {
-        provider: record.provider,
-        accountScope: record.accountScope,
-        providerItemId: record.providerItemId,
-        ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+        provider: found.provider,
+        accountScope: found.accountScope,
+        providerItemId: found.providerItemId,
+        ...found.conversationKey ? { providerConversationId: found.conversationKey } : {}
       };
       attempt = identity;
+      const record = ledger.getCurrent(identity);
+      if (!record) {
+        state.after = identity;
+        delete state.failing;
+        save();
+        continue;
+      }
       ledger.withGenerationFence(identity, record.generation, () => {
         const now = ledger.getCurrent(identity);
         if (!now.routed || now.contentTier === "secrets" || now.metadataTier === "secrets" || ledger.hasMovedMigrationProposal(identity))
@@ -92470,6 +92597,7 @@ function startSupersededSweepTicker(options = {}) {
   let interval = options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS;
   let nextSet = 0;
   let stopped = false;
+  let slicing = false;
   const finished = new WeakSet;
   const reclaiming = new WeakSet;
   const sets = options.sets ?? registeredTierSets;
@@ -92492,24 +92620,37 @@ function startSupersededSweepTicker(options = {}) {
       if (cadence === SUPERSEDED_SWEEP_TICK_MS)
         return;
     }
-    if (!active)
+    if (!active || slicing)
       return;
     const all = sets();
     for (let checked = 0;checked < all.length; checked++) {
       const set = all[nextSet++ % all.length];
       if (finished.has(set) || reclaiming.has(set))
         continue;
-      if (!set.sweepSupersededSlice())
+      const complete = set.sweepSupersededSlice();
+      if (typeof complete === "boolean") {
+        if (complete)
+          reclaim(set);
         return;
-      reclaiming.add(set);
-      reclaimAutomaticSupersededCopies(set, options.reclaimStore).then((done) => {
-        if (done)
-          finished.add(set);
-      }).catch(() => {}).finally(() => {
-        reclaiming.delete(set);
+      }
+      slicing = true;
+      complete.then((done) => {
+        if (done && !stopped)
+          reclaim(set);
+      }, () => {}).finally(() => {
+        slicing = false;
       });
       return;
     }
+  };
+  const reclaim = (set) => {
+    reclaiming.add(set);
+    reclaimAutomaticSupersededCopies(set, options.reclaimStore).then((done) => {
+      if (done)
+        finished.add(set);
+    }).catch(() => {}).finally(() => {
+      reclaiming.delete(set);
+    });
   };
   cancel = every(tick, interval);
   return () => {
@@ -92517,16 +92658,19 @@ function startSupersededSweepTicker(options = {}) {
     cancel();
   };
 }
-var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, SUPERSEDED_SWEEP_IDLE_TICK_MS = 250, SUPERSEDED_SWEEP_IDLE_AFTER_MS = 60000, SWEEP_LOG_STATEMENT_MS = 250, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3, RECLAIM_MAX_RETAINED_FREE_BYTES, RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1;
+var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, SUPERSEDED_SWEEP_IDLE_TICK_MS = 250, SUPERSEDED_SWEEP_IDLE_AFTER_MS = 60000, SWEEP_LOG_STATEMENT_MS = 250, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3, RECLAIM_MAX_RETAINED_FREE_BYTES, RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1, emptyReport = () => ({ checked: 0, purged: 0, kept: 0, failed: 0, complete: false }), sweeping;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
   init_tier_content_purge();
   init_main_thread_sql_trace();
+  init_loop_pass();
+  init_control_path_headroom();
   init_store_reclaim_admission();
   init_tiered_store_set();
   RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
+  sweeping = new WeakSet;
 });
 
 // src/core/model-install-failure.ts
@@ -94460,12 +94604,26 @@ function emptyTierRejudgeReport() {
     rechecked: 0
   };
 }
+function isFinder(step) {
+  return "find" in step;
+}
 async function rejudgeRoutedItemsInTurns(options) {
   const steps = rejudgeSteps(options);
   let step = steps.next();
   while (!step.done) {
+    if (isFinder(step.value)) {
+      let page;
+      try {
+        page = await step.value.find.offThread();
+      } catch (error) {
+        step = steps.throw(error);
+        continue;
+      }
+      step = steps.next(page);
+      continue;
+    }
     await options.turn();
-    const text = step.value === undefined ? undefined : storedContentText(options.set, step.value);
+    const text = storedContentText(options.set, step.value);
     if (text !== undefined && secretScanReusable(text))
       await scanSecretsAhead(text);
     step = steps.next();
@@ -94524,18 +94682,17 @@ function* rejudgeSteps(options) {
   }
   if (budget <= 0)
     return { report, ...options.after ? { next: options.after } : {} };
-  const page = ledger.rejudgeCandidatePage({
-    ...key,
-    ...options.after ? { after: options.after } : {},
-    limit: budget
-  });
+  const pageOptions = { ...key, ...options.after ? { after: options.after } : {}, limit: budget };
+  const page = yield { find: ledgerFinderAfterHold(ledger, () => ledger.rejudgeCandidatePageSteps(pageOptions)) };
   report.builtinPromptSkipped = page.builtinPromptSkipped;
-  for (const [index, record] of page.records.entries()) {
-    yield record;
+  for (const found of page.records) {
+    yield found;
+    const now = ledger.rejudgeCandidateNow(identityOf2(found), key);
+    if (!now)
+      continue;
+    const { record, cause } = now;
     report.seen += 1;
-    const cause = page.causes[index];
-    if (cause)
-      report[CAUSE_FIELD[cause]] += 1;
+    report[CAUSE_FIELD[cause]] += 1;
     try {
       rejudgeStoredContent(set, record, {
         sniffer: classification.sniffer,
@@ -94822,6 +94979,7 @@ var init_tier_rejudge = __esm(() => {
   init_stored_names();
   init_tier_classifier();
   init_tier_ledger();
+  init_loop_pass();
   init_secrets_disposition();
   init_tier_placement();
   init_secret_scan_off_thread();
@@ -96119,14 +96277,10 @@ class TieredStoreSet {
   sweepSupersededSlice(options = {}) {
     if (writableStoreOpensForbidden())
       return true;
-    try {
-      return sweepAutomaticSupersededCopies(this, {
-        budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
-        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
-      }).complete;
-    } catch {
-      return false;
-    }
+    return sweepAutomaticSupersededCopiesInTurns(this, {
+      budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
+      ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
+    }).then((report) => report.complete, () => false);
   }
   openStores() {
     return TIER_DOMAIN_ORDER.flatMap((domain) => {

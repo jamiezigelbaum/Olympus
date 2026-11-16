@@ -1167,6 +1167,34 @@ interface TierLedgerHiddenItemPks {
   moving: number;
 }
 
+/** Pks added per turn when a hidden-copy list becomes a set on the loop. */
+const PK_SET_SLICE = 20_000;
+
+/** One set of these pk lists, built with a turn every PK_SET_SLICE entries (a list can hold 500k). */
+async function pkSetInTurns(lists: ReadonlyArray<readonly number[]>, keep?: (pk: number) => boolean, set = new Set<number>()): Promise<Set<number>> {
+  let added = 0;
+  for (const list of lists) {
+    for (const pk of list) {
+      if (keep && !keep(pk)) continue;
+      set.add(pk);
+      if (++added % PK_SET_SLICE === 0) await ingestionTurn();
+    }
+  }
+  return set;
+}
+
+/**
+ * The items no embedder is sent while the tier ledger keeps them out of
+ * view: hidden copies, names-only copies, and held items (unless this
+ * embedder may work ahead of judging, for the ones held for judgment). The
+ * same set embeddingWorkListExclusionFilter writes into SQL.
+ */
+async function embeddingExcludedPksInTurns(tierHidden: TierLedgerHiddenItemPks, allowHeld: boolean): Promise<Set<number>> {
+  const eligibleHeld = allowHeld ? await pkSetInTurns([tierHidden.heldForJudgment]) : undefined;
+  const excluded = await pkSetInTurns([tierHidden.hidden, tierHidden.metadataLayer]);
+  return pkSetInTurns([tierHidden.held], (pk) => !eligibleHeld?.has(pk), excluded);
+}
+
 /** Unordered pks with constant-work insertion/removal; no held-set copy per verdict. */
 class MutablePkList {
   readonly values: number[] = [];
@@ -12701,6 +12729,14 @@ export class LocalConnectorStore {
    * missingEmbeddingItemIds for the embedding sweep: the hidden-copy set is
    * built in turns first instead of synchronously, so a sweep over a store
    * that is being written never holds the worker's thread for the rebuild.
+   *
+   * The list is a finder (loop-stall step-back, family 5): its windows of
+   * the chunk/item/vector join are read on the store's read worker, and the
+   * loop only drops the items the tier ledger keeps out of view (its
+   * hidden-copy set, as numbers in memory) and the ones marked failed. A list
+   * found this way can be older than the writer's state; it never authorizes
+   * a dispatch: embedChunks re-checks each batch against the store and
+   * ledger as they are now (embeddingBatchRecheck) before anything is sent.
    */
   async missingEmbeddingItemIdsInTurns(
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
@@ -12713,17 +12749,23 @@ export class LocalConnectorStore {
     // The same list as missingEmbeddingItemIds (items in order of their first
     // chunk), read one window of chunk pks at a time with a turn between.
     // One query over every chunk held the background for 1.5-2.7 s on each
-    // sweep once most chunks were embedded (Sparta, rc.17, 15 Nov 2026).
+    // sweep once most chunks were embedded (Sparta, rc.17, 15 Nov 2026), and
+    // a window held it about 500 ms on rc.19.
     const modelId = embedder.modelId;
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
-    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const allowHeld = this.canEmbedHeld(embedder);
     const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const offThread = offThreadReadsSupported(this.dbPath);
+    // On the read worker the tier ledger's exclusions apply here, from the
+    // hidden-copy set: the worker's connection has none of this one's temp tables.
+    const tierExclusion = offThread ? { filter: '', params: [] as string[] } : this.embeddingWorkListExclusionFilter(0, tierHidden, allowHeld);
+    const excluded = offThread ? await embeddingExcludedPksInTurns(tierHidden, allowHeld) : undefined;
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
     const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
-    const query = this.db.query(`
-      SELECT c.chunk_pk AS chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+    const windowSql = `
+      SELECT MIN(c.chunk_pk) AS first_chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
@@ -12731,17 +12773,19 @@ export class LocalConnectorStore {
         AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
-      ORDER BY c.chunk_pk ASC
-    `);
-    const maxChunkPk = (this.db.query('SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks').get() as { n: number }).n;
+      GROUP BY i.item_pk
+      ORDER BY first_chunk_pk ASC
+    `;
+    const read = this.embeddingSweepRead(offThread);
+    const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
     // An item already listed from an earlier chunk keeps that place.
     const seen = new Set<number>();
     const found: string[] = [];
     for (let after = 0; after < maxChunkPk && found.length < limit; after += windowChunks) {
-      if (after > 0) await new Promise<void>((resolve) => setImmediate(resolve));
-      const rows = query.all(modelId, after, after + windowChunks, ...params) as Array<{ item_pk: number; local_item_id: string }>;
+      if (after > 0) await ingestionTurn();
+      const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: 'all' }) as Array<{ item_pk: number; local_item_id: string }>;
       for (const row of rows) {
-        if (seen.has(row.item_pk)) continue;
+        if (excluded?.has(row.item_pk) || seen.has(row.item_pk)) continue;
         seen.add(row.item_pk);
         if (failed?.has(row.local_item_id)) continue;
         found.push(row.local_item_id);
@@ -12752,24 +12796,40 @@ export class LocalConnectorStore {
   }
 
   /**
+   * How the embedding sweep reads: on the store's read worker, one snapshot
+   * per window so no read transaction spans the sweep; on this connection
+   * only for an in-memory store, with a turn before each read.
+   */
+  private embeddingSweepRead(offThread: boolean): (query: StoreRead) => Promise<unknown> {
+    if (offThread) return (query) => withOffThreadSnapshot(this.dbPath, async (run) => run(query));
+    return async (query) => {
+      await ingestionTurn();
+      const statement = this.db.query(query.sql);
+      return query.mode === 'get' ? statement.get(...query.params as never[]) : statement.all(...query.params as never[]);
+    };
+  }
+
+  /**
    * Missing vectors are not necessarily work: superseded copies deliberately
    * retain chunks. Report the reasons without reading text or returning ids.
-   * Page by chunk key and yield between pages so diagnostics do not freeze the
-   * worker. Counts are a pre-pass snapshot, not an authorization for dispatch;
-   * embedChunks still owns every privacy/scope check. A spent budget reports
-   * partial counts explicitly rather than pretending the unseen tail is empty.
+   * Read by windows of chunk keys on the store's read worker (a finder,
+   * loop-stall step-back family 5), with a turn between windows. Counts are a
+   * pre-pass snapshot, not an authorization for dispatch; embedChunks still
+   * owns every privacy/scope check. A spent budget reports partial counts
+   * explicitly rather than pretending the unseen tail is empty.
    */
   async embeddingSweepInventory(
     provider: SourceEmbeddingProvider,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
     stopAtMs?: number,
+    windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
   ): Promise<Record<string, number>> {
     const started = Date.now();
     const tier = await this.tierHiddenItemPksInTurns();
-    const hidden = new Set(tier.hidden);
-    const held = new Set(tier.held);
-    const heldForJudgment = this.canEmbedHeld(provider) ? new Set(tier.heldForJudgment) : new Set<number>();
-    const namesOnly = new Set(tier.metadataLayer);
+    const hidden = await pkSetInTurns([tier.hidden]);
+    const held = await pkSetInTurns([tier.held]);
+    const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set<number>();
+    const namesOnly = await pkSetInTurns([tier.metadataLayer]);
     const moving = new Set<number>();
     let walked = 0;
     for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
@@ -12785,22 +12845,27 @@ export class LocalConnectorStore {
       skipped_failed_chunks: 0, skipped_out_of_scope_chunks: 0,
       skipped_private_tier_chunks: 0, skipped_retired_chunks: 0, inventory_complete: 0,
     };
-    const page = this.db.query(`
+    // Only chunks that owe a vector come back: the rest count for nothing.
+    const windowSql = `
       SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
-        (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash) AS owed,
         CASE WHEN 1 = 1 ${account ? 'AND i.account_scope = ?' : ''} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
       FROM chunks c JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE c.chunk_pk > ?
-      ORDER BY c.chunk_pk LIMIT 2048
-    `);
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+      ORDER BY c.chunk_pk
+    `;
+    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
+    const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
     let after = 0;
     while (stopAtMs === undefined || Date.now() < stopAtMs) {
-      const rows = page.all(...(account ? [account] : []), ...scoped.params, provider.modelId, after) as Array<{
-        chunk_pk: number; item_pk: number; local_item_id: string; tombstoned: number; trust_tier: SourceTrustTier; in_scope: number; owed: number;
+      if (after >= maxChunkPk) { counts.inventory_complete = 1; break; }
+      if (after > 0) await ingestionTurn();
+      const rows = await read({ sql: windowSql, mode: 'all',
+        params: [...(account ? [account] : []), ...scoped.params, provider.modelId, after, after + windowChunks] }) as Array<{
+        chunk_pk: number; item_pk: number; local_item_id: string; tombstoned: number; trust_tier: SourceTrustTier; in_scope: number;
       }>;
       for (const row of rows) {
-        if (!row.owed) continue;
         counts.pending_chunks! += 1;
         const heldBack = held.has(row.item_pk) && !heldForJudgment.has(row.item_pk);
         const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
@@ -12815,9 +12880,7 @@ export class LocalConnectorStore {
           : !row.in_scope ? 'skipped_out_of_scope_chunks' : 'eligible_chunks';
         counts[reason]! += 1;
       }
-      if (rows.length < 2_048) { counts.inventory_complete = 1; break; }
-      after = rows.at(-1)!.chunk_pk;
-      await ingestionTurn();
+      after += windowChunks;
     }
     counts.inventory_ms = Date.now() - started;
     return counts;

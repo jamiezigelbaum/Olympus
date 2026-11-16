@@ -125,7 +125,7 @@ import {
 import { settleNamesOnlyItemsOffThread } from './tier-names-only-settle.ts';
 import { settlePersonalFirstItemsOffThread } from './tier-held-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
-import { sweepAutomaticSupersededCopies } from './tier-auto-prune-sweep.ts';
+import { sweepAutomaticSupersededCopiesInTurns } from './tier-auto-prune-sweep.ts';
 import { flushTierMoveNotes, moveTieredItem, type TierMoveOptions } from './tier-move.ts';
 import { automaticTierMoveOptions, automaticTierMovesAllowed } from './tier-auto-move.ts';
 
@@ -621,16 +621,13 @@ export class TieredStoreSet {
    * engine background's adaptive ticker takes them (startSupersededSweepTicker) and never while an owner question is in flight. True once
    * the sweep is done for this ledger.
    */
-  sweepSupersededSlice(options: { embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): boolean {
+  sweepSupersededSlice(options: { embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): boolean | Promise<boolean> {
     if (writableStoreOpensForbidden()) return true;
-    try {
-      return sweepAutomaticSupersededCopies(this, { budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
-        ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
-      }).complete;
-    } catch {
-      // The sweep keeps its own cursor; the next call retries.
-      return false;
-    }
+    // Its candidates are found on the ledger's read worker, with a turn
+    // between the items it prunes (loop-stall step-back, family 5).
+    return sweepAutomaticSupersededCopiesInTurns(this, { budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
+      ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
+    }).then((report) => report.complete, () => false);
   }
 
   /** Every store that exists, for reads and status. Never creates one. */

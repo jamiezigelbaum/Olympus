@@ -86,7 +86,7 @@ test('interrupted sweep keeps original chunk counts and resumes on worker startu
   await ctx.f.set.repairLowerContent();
   expect(ctx.f.ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')).toBe(true);
   // The ticker's next slice resumes the pending receipt.
-  ctx.f.set.sweepSupersededSlice({ embeddingLedger: ctx.embeddingLedger });
+  await ctx.f.set.sweepSupersededSlice({ embeddingLedger: ctx.embeddingLedger });
   await flushTierMoveNotes(ctx.f.ledger);
   expect(ctx.f.ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')).toBe(false);
   const entries = (await readEmbeddingLedger(ctx.embeddingLedger.path)).entries.filter(entry => entry.entry_id?.startsWith('automatic-superseded-prune:'));
@@ -369,7 +369,11 @@ test('the background ticker sweeps without the sniffer or a sync, then leaves a 
   // The split's front (inactive) takes no slice.
   expect(slice).not.toHaveBeenCalled();
   active = true;
-  for (let i = 0; i < 10 && !JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done; i++) tick!();
+  // A slice finds its page on the read worker: each tick's slice is awaited.
+  for (let i = 0; i < 10 && !JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done; i++) {
+    tick!();
+    await slice.mock.results.at(-1)?.value;
+  }
   expect(JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done).toBe(true);
   await waitFor(() => JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').reclaimed?.[CORPORA.secure_local]?.done,
     { description: 'ticker records small-store reclaim completion' });
