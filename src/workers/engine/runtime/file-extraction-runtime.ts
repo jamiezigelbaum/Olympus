@@ -548,7 +548,7 @@ export function createFileExtractionRuntime(
           ? view.itemTrustTier(ref.localItemId)
           : (() => {
               const stored = store.localContent(ref.localItemId, 1)?.trustTier;
-              const verdict = store.effectiveItemTiers([ref])[0];
+              const verdict = store.effectiveLocalItemTier(ref.localItemId);
               if (verdict === 'secret' || stored === 'S5') return 'S5';
               if (verdict === 'private' || verdict === 'unknown') return 'S4';
               return stored;

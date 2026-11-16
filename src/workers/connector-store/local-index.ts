@@ -4207,11 +4207,26 @@ export class LocalConnectorStore {
       return visibilityHere(effectiveItemVerdicts(
         () => ledger ? [{ ledger, corpusIds: new Set([this.corpusId]) }] : [],
         identities.map(identity => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...(layer ? { layer } : {}) })),
-      )).map(verdict => verdict.tier);
+        // An item the release check calls gone (routed, no current copy here)
+        // is never eligible for a remote exit: held Private unless Secret.
+      )).map(verdict => (verdict.gone && verdict.tier !== 'secret' ? 'private' : verdict.tier));
     } catch {
       // An unreadable governing ledger never authorizes this exit.
       return identities.map(() => 'private');
     }
+  }
+
+  /** The verdict of one stored item by its local id, with its full identity (conversation included); no row is Private. */
+  effectiveLocalItemTier(localItemId: string): ReleaseInputVerdict['tier'] {
+    const row = this.db.query(`
+      SELECT provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
+    `).get(localItemId) as { provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null } | null;
+    if (!row) return 'private';
+    return this.effectiveItemTiers([{
+      provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    }])[0]!;
   }
 
   /** The ledger this store records tier decisions in, opening the default one on first use. */

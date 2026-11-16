@@ -3687,6 +3687,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               }
             }
             const privateNames = new Set(tagged.filter(hit => unreadCorpora.has(hit.corpusId)));
+            // Secret names are listed on no path, the Private one included:
+            // the release check withholds Secret whatever the caller may read.
+            const secretNames = new Set<(typeof tagged)[number]>();
             for (const scope of verdictScopes.values()) {
               const governed = tagged.filter(hit => scope.corpusIds.has(hit.corpusId));
               try {
@@ -3694,7 +3697,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   ...hit.sourceItem, corpusId: hit.corpusId, privateAtAnswer: false, layer: 'names' as const,
                 }))));
                 governed.forEach((hit, index) => {
-                  if (!['legacy', 'public_or_personal'].includes(verdicts[index]!.tier)) privateNames.add(hit);
+                  if (verdicts[index]!.tier === 'secret') secretNames.add(hit);
+                  else if (!['legacy', 'public_or_personal'].includes(verdicts[index]!.tier)) privateNames.add(hit);
                 });
               } catch {
                 // Only this ledger's names fail closed; other corpora keep their verdicts.
@@ -3714,6 +3718,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // titles under local_only, and returns this one the same way.
             const searchedSecureLocal = runs.some((run) => run.store.trustDomain === 'secure_local');
             let privateTierWithheld = 0;
+            for (const hit of secretNames) visible.delete(hit);
             if (!searchedSecureLocal) {
               for (const hit of [...visible]) {
                 if (!hitIsPrivate(hit)) continue;

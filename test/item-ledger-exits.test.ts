@@ -134,7 +134,9 @@ for (const change of ['target', 'override', 'held', 'secret'] as const) {
     expect(JSON.stringify(personal.hits)).not.toContain('orchard-raised');
     expect(JSON.stringify(personal.hits)).toContain('orchard-ordinary');
     const privateResult = await search(fx, store, true);
-    expect(JSON.stringify(privateResult.hits)).toContain('orchard-raised');
+    // Private names stay on the Private path; Secret names are listed on none.
+    if (change === 'secret') expect(JSON.stringify(privateResult.hits)).not.toContain('orchard-raised');
+    else expect(JSON.stringify(privateResult.hits)).toContain('orchard-raised');
     expect(privateResult.policy.local_only).toBe(true);
   });
 }
@@ -163,4 +165,12 @@ test('shared verdict: release check and store agree; no row stays legacy; unread
     const personal = await search(fx, store);
     expect(personal.hits).toEqual([]);
   } finally { failed.mockRestore(); }
+});
+
+test('fallback reader: an unknown local id is held Private, and a verdict follows the stored identity', async () => {
+  const { fx, store } = await fixture();
+  expect(store.effectiveLocalItemTier('personal:not-here')).toBe('private');
+  expect(store.effectiveLocalItemTier('personal:ordinary')).toBe('public_or_personal');
+  raise(fx, 'override');
+  expect(store.effectiveLocalItemTier('personal:raised')).toBe('private');
 });
