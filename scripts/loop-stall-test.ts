@@ -462,7 +462,13 @@ async function waitForQuietHost(limitMs: number, maxWaitSeconds: number) {
 /** The WAL guards: no WAL over 64 MB at the end, and no background-lane read held over 2 s. Shared-lane reads are listed. */
 // Boot after upgrade starts with a WAL padded past the limit by design, so there the peak counts from each file's first line at or
 // under the limit (its first rewind); the time that took is reported.
-export function sqliteGuards(walAtEnd: Record<string, number>, walLines: readonly string[], options: { fromFirstLevel?: boolean } = {}) {
+// WAL bar (plan, 16 Nov 2026 17:53Z): after any crossing of 64 MB a file is back at or under it within 60 s; a WAL over 1 GB at any
+// point fails; peak and time over 64 MB are reported per store. Lines carry when they arrived ({ at, line }) so time over can be read.
+const WAL_BACK_WITHIN_MS = 60_000;
+const WAL_HARD_LIMIT_BYTES = 1024 * 1024 * 1024;
+type WalLine = string | { at: string; line: string };
+export function sqliteGuards(walAtEnd: Record<string, number>, entries: readonly WalLine[], options: { fromFirstLevel?: boolean } = {}) {
+  const walLines = entries.map(entry => typeof entry === 'string' ? entry : entry.line);
   const wal_over_limit = Object.entries(walAtEnd).filter(([, bytes]) => bytes > WAL_END_LIMIT_BYTES).map(([file, bytes]) => ({ file, bytes }));
   const reads = walLines.flatMap(line => {
     const match = /sqlite wal: (\S+) .*oldest_read_ms=(\d+) oldest_read_lane=(\S+) oldest_read_site=(\S+)/.exec(line);
@@ -478,15 +484,35 @@ export function sqliteGuards(walAtEnd: Record<string, number>, walLines: readonl
   // The peak, not only the end: closing an engine truncates its WALs, so the end alone can pass a run whose WAL ran away.
   const wal_peak: Record<string, number> = {};
   const level = new Set<string>();
-  for (const line of walLines) {
+  const overSince = new Map<string, number>();
+  const over: Record<string, { crossings: number; over_ms: number; longest_ms: number }> = {};
+  let lastAt = 0;
+  for (const entry of entries) {
+    const line = typeof entry === 'string' ? entry : entry.line;
+    const at = typeof entry === 'string' ? NaN : Date.parse(entry.at);
+    if (!Number.isNaN(at)) lastAt = Math.max(lastAt, at);
     const match = /sqlite (?:wal held|wal|checkpoint): (\S+) .*?wal_bytes=(\d+)/.exec(line);
     if (!match) continue;
-    const bytes = Number(match[2]);
-    if (options.fromFirstLevel && !level.has(match[1]!)) { if (bytes > WAL_END_LIMIT_BYTES) continue; level.add(match[1]!); }
-    wal_peak[match[1]!] = Math.max(wal_peak[match[1]!] ?? 0, bytes);
+    const label = match[1]!, bytes = Number(match[2]);
+    if (options.fromFirstLevel && !level.has(label)) { if (bytes > WAL_END_LIMIT_BYTES) continue; level.add(label); }
+    wal_peak[label] = Math.max(wal_peak[label] ?? 0, bytes);
+    const row = over[label] ??= { crossings: 0, over_ms: 0, longest_ms: 0 };
+    if (bytes > WAL_END_LIMIT_BYTES && !overSince.has(label)) { overSince.set(label, at); row.crossings++; }
+    else if (bytes <= WAL_END_LIMIT_BYTES && overSince.has(label)) {
+      const ms = at - overSince.get(label)!; overSince.delete(label);
+      if (!Number.isNaN(ms)) { row.over_ms += ms; row.longest_ms = Math.max(row.longest_ms, ms); }
+    }
   }
-  const wal_peak_over = Object.entries(wal_peak).filter(([, bytes]) => bytes > WAL_END_LIMIT_BYTES).map(([label, bytes]) => ({ label, bytes }));
-  return { wal_ok: wal_over_limit.length === 0 && wal_peak_over.length === 0, wal_over_limit, wal_peak, wal_peak_over, background_reads_over_2s, other_reads_over_2s };
+  // A crossing still open at the last line has lasted at least until then.
+  for (const [label, since] of overSince) {
+    const ms = lastAt - since;
+    if (!Number.isNaN(ms)) { over[label]!.over_ms += ms; over[label]!.longest_ms = Math.max(over[label]!.longest_ms, ms); }
+  }
+  const wal_peak_over = Object.entries(wal_peak).filter(([, bytes]) => bytes > WAL_END_LIMIT_BYTES)
+    .map(([label, bytes]) => ({ label, bytes, crossings: over[label]?.crossings ?? 0, over_s: Math.round((over[label]?.over_ms ?? 0) / 1000), longest_s: Math.round((over[label]?.longest_ms ?? 0) / 1000) }));
+  const wal_slow_back = wal_peak_over.filter(row => row.longest_s * 1000 > WAL_BACK_WITHIN_MS);
+  const wal_over_1gb = Object.entries(wal_peak).filter(([, bytes]) => bytes > WAL_HARD_LIMIT_BYTES).map(([label, bytes]) => ({ label, bytes }));
+  return { wal_ok: wal_over_limit.length === 0 && wal_slow_back.length === 0 && wal_over_1gb.length === 0, wal_over_limit, wal_peak, wal_peak_over, wal_slow_back, wal_over_1gb, background_reads_over_2s, other_reads_over_2s };
 }
 function coldFiles(dir: string) {
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite'));
@@ -706,14 +732,17 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const ack_ok = ackOk.length > 0 && ackSummary.over_1s.length === 0 && ackSummary.status_max_age_ms <= 10_000 && !ackSummary.no_control_thread;
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
-  const guards = sqliteGuards(walAtEnd, sqliteLines.map(entry => entry.line), { fromFirstLevel: options.runCase === 'boot-after-upgrade' });
+  const guards = sqliteGuards(walAtEnd, sqliteLines, { fromFirstLevel: options.runCase === 'boot-after-upgrade' });
   // Boot after upgrade: how long the padded WAL took to come down to the limit.
   const firstLevel = options.runCase === 'boot-after-upgrade' ? sqliteLines.find(entry => /tier-ledger\S* .*?wal_bytes=(\d+)/.test(entry.line) && Number(/wal_bytes=(\d+)/.exec(entry.line)![1]) <= WAL_END_LIMIT_BYTES) : undefined;
   // From the engines' start (plan, 16 Nov 2026 14:58Z): at or under 64 MB within 5 minutes; longer while making progress is a
   // report to the plan with the reason, not an automatic fail.
   const padded_wal_level_s = firstLevel ? Math.round((Date.parse(firstLevel.at) - (enginesStartedAt ?? started)) / 100) / 10 : null;
   // One bar for the 600k gate and the quick cold test (plan, 16 Nov 2026).
-  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok, runCase: options.runCase });
+  // Boot after upgrade (plan, 16 Nov 2026 17:50Z): acknowledgement is reported, not gating, like the boot front; a missing control
+  // thread still fails.
+  const ackGates = options.runCase !== 'boot-after-upgrade';
+  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ackGates ? ack_ok : !ackSummary.no_control_thread, runCase: options.runCase });
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
@@ -748,7 +777,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     const p95 = beatP95(loop);
     console.log(`${options.runCase} ${role}: p95 beat ${p95 === undefined ? 'n/a' : `<= ${p95} ms`}, worst ${Math.round(loop.max_ms)} ms at ${worst?.site ?? 'no sample'}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s${role === 'background' ? `; beats over 1 s, reported not gated: ${siteTable.background.reduce((sum, entry) => sum + entry.count, 0)}` : ''})`);
   }
-  console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s)`);
+  console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ackGates ? `${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s)` : `reported, not gated (${ack_ok ? 'under' : 'over'} 1 s)`}`);
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
   // Report only for 1.5 (plan, 16 Nov 2026): the allowance list is incomplete, so an unlisted site is usually one no run had reached.
   // A site matters to the gate only as the named frame of a front beat over 1 s (the per-site table above).
@@ -756,9 +785,9 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const unlistedSites = frontLoopSql?.unlisted_sites ?? frontLoopSql?.unlisted?.map(site => ({ site, statements: NaN })) ?? [];
   console.log(`${options.runCase} front loop SQL (reported, not gated): ${frontLoopSql ? `${frontLoopSql.statements ?? '?'} statements at ${frontLoopSql.sites ?? '?'} sites, ${unlistedSites.length} not on the allowance list${unlistedSites.length ? `:\n${unlistedSites.map(entry => `  ${Number.isNaN(entry.statements) ? '?' : entry.statements} statements  ${entry.site}`).join('\n')}` : ''}` : 'not reported by this build'}`);
   const peaks = Object.entries(guards.wal_peak).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, bytes]) => `${label} ${Math.round(bytes / 1048576)} MB`).join(', ') || 'no wal lines';
-  console.log(`${options.runCase} WAL: peak ${peaks}${options.runCase === 'boot-after-upgrade' ? ` (from each file's first rewind; padded ledger at or under 64 MB after ${padded_wal_level_s ?? 'never'} s from the engines' start, bar 300 s, predicted about 60 s${padded_wal_level_s === null || padded_wal_level_s > 300 ? '; OVER 5 MIN: report to the plan with the reason' : ''})` : ''}; over 64 MB at any point ${guards.wal_peak_over.length}, at end ${guards.wal_over_limit.length}; ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
+  console.log(`${options.runCase} WAL: peak ${peaks}${options.runCase === 'boot-after-upgrade' ? ` (from each file's first rewind; padded ledger at or under 64 MB after ${padded_wal_level_s ?? 'never'} s from the engines' start, bar 300 s, predicted about 60 s${padded_wal_level_s === null || padded_wal_level_s > 300 ? '; OVER 5 MIN: report to the plan with the reason' : ''})` : ''}; over 64 MB (reported): ${guards.wal_peak_over.map(row => `${row.label} ${row.crossings}x, ${row.over_s} s over, longest ${row.longest_s} s`).join('; ') || 'none'}; bar: back under 64 MB within 60 s (${guards.wal_slow_back.length} not), none over 1 GB (${guards.wal_over_1gb.length}), none over at end (${guards.wal_over_limit.length}); ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
   console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}, judge model calls ${modelCalls.judge}); ${workload_ok ? 'PASS' : 'FAIL'}`);
-  console.log(`${options.runCase} release bar (front under ${frontLimitMs(options.runCase) / 1000} s, ack under 1 s, background under 30 s, work done, WAL at most 64 MB throughout): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
+  console.log(`${options.runCase} release bar (front under ${frontLimitMs(options.runCase) / 1000} s, ${ackGates ? 'ack under 1 s' : 'ack reported'}, background under 30 s, work done, WAL back under 64 MB within 60 s and never over 1 GB): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
   console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));
   rmSync(runDir, { recursive: true, force: true });
   // A run that judged nothing did not exercise the background's long holds (plan, 16 Nov 2026): it counts as not run, not as a pass.
