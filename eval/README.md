@@ -168,6 +168,18 @@ local Dropbox index and a reachable Argus lane:
    For ordering runs that must not depend on machine load, lift the per-store
    lane deadline with `OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS=120000` (0 turns
    it off) and report deadline losses at the product cap separately.
+   To run the whole set with one of the Analyst's reading-notes arms (#1590),
+   set `OLYMPUS_EVAL_ANALYST_READING_NOTES=first` or `pass` (default `off`):
+   `first` asks for the facts before the answer in the same reply, `pass`
+   reads them out in a call of its own. The run prints the arm on its
+   `eval reading notes:` line. The passage eval compares arms on identical
+   packs: `bun run eval:passages --data-root <copy> --answer-arms
+   off,first,pass --answer-repeats 3 --judge-answers` answers each fitted
+   pack with every arm, and each summary (overall, by shape, by family)
+   gains `arms`: per arm, the questions right in most runs, strict and by
+   meaning, the median answer time, and wins and losses against the first
+   arm with an exact sign test. `bun eval/reading-notes-probe.ts --show`
+   checks the arms' wording on made-up documents first.
    To tell a steady Analyst misreading from a coin flip, set
    `OLYMPUS_EVAL_ANALYST_REPEATS=3` (and optionally
    `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS=value-2,secure-summary-1`): the
