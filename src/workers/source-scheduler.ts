@@ -315,6 +315,18 @@ export interface SourceSchedulerTaskRunResult {
 /** Window over which change signals from a source coalesce into one run. */
 export const SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500;
 
+/**
+ * A new item should be searchable within ten minutes. A source that cannot be
+ * watched for changes is polled instead, and its status says whether that
+ * poll interval still meets this target.
+ */
+export const SOURCE_ARRIVAL_TARGET_MS = 10 * 60_000;
+
+interface ChangeWatchFailure {
+  subscribe: NonNullable<SourceSchedulerSource['subscribeChanges']>;
+  reason: string;
+}
+
 interface ChangeWakeSubscription {
   subscribe: NonNullable<SourceSchedulerSource['subscribeChanges']>;
   unsubscribe: () => void;
@@ -463,7 +475,20 @@ export interface SourceSchedulerSourceStatus {
   freshness_threshold_hours: number;
   freshness_hours?: number;
   stale_sync_anomaly: boolean;
+  /**
+   * Only for sources that offer change watching. 'polling' means the watch
+   * could not start: the reason says why, and meets_arrival_target says
+   * whether polling alone still finds a new item within ten minutes.
+   */
+  change_watch?: SourceChangeWatchStatus;
   tasks: SourceSchedulerTaskStatus[];
+}
+
+export interface SourceChangeWatchStatus {
+  state: 'watching' | 'polling';
+  reason?: string;
+  poll_interval_seconds: number;
+  meets_arrival_target: boolean;
 }
 
 export interface SourceSchedulerTaskStatus {
@@ -597,6 +622,7 @@ export class SourceScheduler {
   private continueWake: { at: number; timer: ReturnType<typeof setTimeout> } | undefined;
   private readonly changeDebounceMs: number;
   private readonly changeWakes = new Map<string, ChangeWakeSubscription>();
+  private readonly changeWatchFailures = new Map<string, ChangeWatchFailure>();
   private readonly holdForAsk: (() => boolean) | undefined;
 
   constructor(options: SourceSchedulerOptions) {
@@ -678,6 +704,7 @@ export class SourceScheduler {
   stop(): void {
     this.stops += 1;
     this.closeChangeSubscriptions(() => true);
+    this.changeWatchFailures.clear();
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
       this.timer = undefined;
@@ -706,6 +733,9 @@ export class SourceScheduler {
       .map((source) => [source.sourceId, source] as const));
     this.closeChangeSubscriptions((sourceId, entry) =>
       wanted.get(sourceId)?.subscribeChanges !== entry.subscribe);
+    for (const [sourceId, failure] of [...this.changeWatchFailures]) {
+      if (wanted.get(sourceId)?.subscribeChanges !== failure.subscribe) this.changeWatchFailures.delete(sourceId);
+    }
     for (const [sourceId, source] of wanted) {
       if (this.changeWakes.has(sourceId)) continue;
       const entry: ChangeWakeSubscription = {
@@ -715,14 +745,23 @@ export class SourceScheduler {
       };
       try {
         entry.unsubscribe = source.subscribeChanges!(() => this.signalChange(sourceId, entry));
-      } catch {
-        // A source that cannot be watched keeps its polling backstop. A wake it
-        // signalled before throwing must not fire for an entry nothing can close.
+      } catch (error) {
+        // A source that cannot be watched is polled instead, and says so: its
+        // status names the reason and whether polling meets the arrival
+        // target. A wake it signalled before throwing must not fire for an
+        // entry nothing can close.
         entry.closed = true;
         if (entry.timer) this.clearTimeoutImpl(entry.timer);
         delete entry.timer;
+        const known = this.changeWatchFailures.get(sourceId);
+        this.changeWatchFailures.set(sourceId, { subscribe: entry.subscribe, reason: changeWatchFailureReason(error) });
+        if (!known) {
+          const watch = this.changeWatchStatus(source);
+          console.warn(`[olympus:source-scheduler] change_watch_unavailable source_id=${sourceId} error_kind=${safeSchedulerErrorKind(error)} poll_interval_seconds=${watch.poll_interval_seconds} meets_arrival_target=${watch.meets_arrival_target}`);
+        }
         continue;
       }
+      this.changeWatchFailures.delete(sourceId);
       this.changeWakes.set(sourceId, entry);
     }
   }
@@ -1564,7 +1603,23 @@ export class SourceScheduler {
           ? freshnessHours === undefined || freshnessHours > source.freshnessThresholdHours
           : taskStatuses.some((task) => task.kind === 'sync' && task.stale_anomaly === true)
       ),
+      ...(source.subscribeChanges ? { change_watch: this.changeWatchStatus(source) } : {}),
       tasks: taskStatuses,
+    };
+  }
+
+  private changeWatchStatus(source: SourceSchedulerSource): SourceChangeWatchStatus {
+    const failure = this.changeWatchFailures.get(source.sourceId);
+    const syncIntervals = this.states
+      .filter((state) => state.source === source && state.task.kind === 'sync')
+      .map((state) => taskIntervalMs(source, state.task));
+    const pollingMs = syncIntervals.length > 0 ? Math.min(...syncIntervals) : source.intervalMs;
+    const watching = this.changeWakes.has(source.sourceId) && !failure;
+    return {
+      state: watching ? 'watching' : 'polling',
+      ...(watching ? {} : { reason: failure?.reason ?? 'Change watching has not started yet.' }),
+      poll_interval_seconds: Math.round(pollingMs / 1_000),
+      meets_arrival_target: watching || pollingMs <= SOURCE_ARRIVAL_TARGET_MS,
     };
   }
 
@@ -3131,6 +3186,13 @@ function reportedDegradedReason(
 
 function utcDayOf(timestamp: number): string | undefined {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString().slice(0, 10) : undefined;
+}
+
+function changeWatchFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const firstLine = message.split('\n')[0]?.trim() ?? '';
+  if (!firstLine) return 'Change watching could not start.';
+  return firstLine.length > 200 ? `${firstLine.slice(0, 199)}…` : firstLine;
 }
 
 function safeSchedulerErrorKind(error: unknown): string {

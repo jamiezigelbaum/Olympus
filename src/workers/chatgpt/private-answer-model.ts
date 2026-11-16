@@ -289,7 +289,8 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
     },
     async answerPrivately(question, evidence, signal, observe, request) {
       const full = request?.detail === 'full';
-      const chosen = await options.route?.().catch(() => undefined);
+      // A chooser that fails is the owner's model not answering: never the built-in model in its place.
+      const chosen = await options.route?.().catch((): PanelRouteUnavailable => ({ unavailable: true, modelId: 'the Private answer model' }));
       if (chosen && 'unavailable' in chosen) throw new PrivateRouteUnavailableError(chosen.modelId);
       const route = chosen;
       if (!model && !route) throw new Error('no private answer model');

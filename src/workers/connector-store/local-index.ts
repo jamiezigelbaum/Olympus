@@ -269,6 +269,9 @@ const EMBEDDING_BATCH_SIZE = 32;
 const MAX_SELECTED_EMBED_ITEM_IDS = 25_000;
 const MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 const MIN_VECTOR_SCORE = 0.18;
+// How many of its nearest vector rows a store offers a reranked pool's
+// semantic seats (router withSemanticPoolSeats), whatever the bar.
+const CONNECTOR_STORE_SEMANTIC_ROWS = 3;
 // The most query concepts a keyword match must contain (see searchItemsDetailed).
 const MAX_REQUIRED_CONCEPTS = 3;
 // Or the share of the query's concept weight (IDF) a keyword match must carry.
@@ -17591,10 +17594,18 @@ async function hybridConnectorStoreSearch(
   const semanticNeighbourHits = scoredVectorRows
     .filter((row) => !vettedRows.has(row.sourceItem.localItemId))
     .map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope));
+  // The nearest rows, over the bar or not, for a reranked pool's semantic
+  // seats.
+  const semanticRows = contentBar === undefined || scoredVectorRows.length === 0 ? undefined : {
+    hits: [...scoredVectorRows].sort((left, right) => right.bestCosine - left.bestCosine).slice(0, CONNECTOR_STORE_SEMANTIC_ROWS)
+      .map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
+    bar: contentBar,
+  };
   return {
     hits,
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     ...(semanticNeighbourHits.length > 0 ? { semanticNeighbourHits } : {}),
+    ...(semanticRows ? { semanticRows } : {}),
     latencyMs: Date.now() - startedAt,
     // Per-lane candidate counts: keyword, vector, and the fused cut — the
     // same audit fields the Dropbox retrieval audit records
