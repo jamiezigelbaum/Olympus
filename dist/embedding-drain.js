@@ -19358,6 +19358,7 @@ function hasImmutableAccountLabel(id) {
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID7 } from "node:crypto";
 import { closeSync as closeSync10, existsSync as existsSync20, fsyncSync as fsyncSync3, lstatSync as lstatSync10, mkdirSync as mkdirSync13, openSync as openSync10, statSync as statSync12, statfsSync } from "node:fs";
+import { open as openFile } from "node:fs/promises";
 import { dirname as dirname21 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
@@ -30950,6 +30951,20 @@ ${parentKey(ref)}`, { ref, origin });
     } finally {
       if (fd !== undefined)
         closeSync10(fd);
+    }
+  }
+  async durabilityBarrierOffLoop() {
+    if (this.dbPath === ":memory:" || this.readOnly)
+      return;
+    let handle;
+    try {
+      handle = await openFile(`${this.dbPath}-wal`, "r");
+      await handle.sync();
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+    } finally {
+      await handle?.close();
     }
   }
   sqliteJournalSettings() {

@@ -53,6 +53,7 @@ import { BACKGROUND_READS, OffThreadReadBusyError, offThreadReadsSupported, open
 import { compareProviderAccounts } from '../../core/provider-account-identity.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, statSync, statfsSync } from 'node:fs';
+import { open as openFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
@@ -16273,6 +16274,25 @@ export class LocalConnectorStore {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     } finally {
       if (fd !== undefined) closeSync(fd);
+    }
+  }
+
+  /**
+   * durabilityBarrier with the fsync on libuv's thread pool, for a caller
+   * that can await it outside a transaction: the loop never waits on the disk
+   * (an fsync held the loop for seconds on a busy disk, lane 6 gate, 16 Nov).
+   * It covers every write committed before the call.
+   */
+  async durabilityBarrierOffLoop(): Promise<void> {
+    if (this.dbPath === ':memory:' || this.readOnly) return;
+    let handle: Awaited<ReturnType<typeof openFile>> | undefined;
+    try {
+      handle = await openFile(`${this.dbPath}-wal`, 'r');
+      await handle.sync();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    } finally {
+      await handle?.close();
     }
   }
 

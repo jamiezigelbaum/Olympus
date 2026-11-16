@@ -57736,6 +57736,7 @@ var init_media_judge = __esm(() => {
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash30, randomUUID as randomUUID10 } from "node:crypto";
 import { closeSync as closeSync16, existsSync as existsSync35, fsyncSync as fsyncSync3, lstatSync as lstatSync22, mkdirSync as mkdirSync23, openSync as openSync16, statSync as statSync16, statfsSync } from "node:fs";
+import { open as openFile } from "node:fs/promises";
 import { dirname as dirname41 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
@@ -70047,6 +70048,20 @@ ${parentKey(ref)}`, { ref, origin });
       } finally {
         if (fd !== undefined)
           closeSync16(fd);
+      }
+    }
+    async durabilityBarrierOffLoop() {
+      if (this.dbPath === ":memory:" || this.readOnly)
+        return;
+      let handle;
+      try {
+        handle = await openFile(`${this.dbPath}-wal`, "r");
+        await handle.sync();
+      } catch (error) {
+        if (error.code !== "ENOENT")
+          throw error;
+      } finally {
+        await handle?.close();
       }
     }
     sqliteJournalSettings() {
@@ -98905,12 +98920,12 @@ class TieredRoutingRun {
       });
     }
     this.cachedLowerings.clear();
-    const barrier = () => {
+    const barrier = async () => {
       for (const domain of TIER_DOMAIN_ORDER)
-        this.set.store(domain)?.durabilityBarrier();
+        await this.set.store(domain)?.durabilityBarrierOffLoop();
     };
     if (this.copyRemovals.size > 0)
-      barrier();
+      await barrier();
     for (const identity of this.copyRemovals.values()) {
       await ingestionTurn();
       this.set.ledger.removeCopies(identity);
@@ -98932,7 +98947,7 @@ class TieredRoutingRun {
       cleared.push(identity);
     }
     if (cleared.length > 0)
-      barrier();
+      await barrier();
     for (const identity of cleared)
       this.set.ledger.clearWriteIntent(identity);
     this.intents.clear();
