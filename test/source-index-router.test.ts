@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createTestClock, waitFor } from './helpers/test-clock.ts';
+import { currentSourceIndexReadProgress } from '../src/core/source-index/read-progress.ts';
 import {
   buildSourceIndexCorpusRegistry,
   defineSourceIndexCorpus,
@@ -335,6 +336,35 @@ describe('source-index router per-lane retrieval deadline', () => {
     }).then(value => { done = true; return value; });
     await waitFor(() => started);
     for (let batch = 0; batch < 7; batch++) {
+      await clock.advance(10_000);
+      expect(done).toBe(false);
+    }
+    await clock.advance(10_000);
+    const result = await routed;
+    expect(result.hits).toHaveLength(1);
+    expect(result.skippedCorpora).toEqual([]);
+    expect(clock.pendingTimers()).toBe(0);
+  });
+
+  test('one statement running on a read worker keeps its lane, however long it runs', async () => {
+    const clock = createTestClock();
+    let started = false;
+    let done = false;
+    const routed = routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1)),
+      laneTimeoutMs: 20_000, laneClock: clock,
+      adapters: { 'public_safe.fast': async request => {
+        const lane = currentSourceIndexReadProgress()!;
+        lane.began!(); // its statement starts on a worker: no rows for 100 s
+        started = true;
+        await clock.sleep(100_000);
+        lane.ended!();
+        return adapterFor([], 'public_safe.fast', 'file', 'fast-1')(request);
+      } },
+      request: { query: 'q', maxResults: 5, context },
+    }).then(value => { done = true; return value; });
+    await waitFor(() => started);
+    for (let step = 0; step < 9; step++) {
       await clock.advance(10_000);
       expect(done).toBe(false);
     }

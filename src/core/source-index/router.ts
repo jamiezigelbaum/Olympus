@@ -1,4 +1,4 @@
-import { withSourceIndexReadProgress } from './read-progress.ts';
+import { withSourceIndexReadProgress, type SourceIndexReadProgress } from './read-progress.ts';
 import { noteSourceAnswerProgress } from '../source-answer-jobs.ts';
 import { READ_WIDE_MATCH_LIMIT } from '../read-wide.ts';
 import { isSourceIndexLaneBusyError } from './lane-busy.ts';
@@ -565,7 +565,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const matchingIds = new Set<SourceIndexCandidateId>();
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
-    let progress = () => {};
+    let progress: SourceIndexReadProgress = () => {};
     let partial: SourceIndexCorpusSearchResponse | undefined;
     const corpusRequest: SourceIndexCorpusSearchRequest = {
       query: request.query,
@@ -1096,7 +1096,7 @@ type CorpusLaneOutcome =
 // dropped lane that later rejects or resolves can never surface as an unhandled
 // rejection or dangling throw.
 async function runCorpusLaneUntilIdle(
-  run: (report: () => void) => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>,
+  run: (report: SourceIndexReadProgress) => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>,
   timeoutMs: number,
   corpusId: string,
   clock: LaneDeadlineClock = REAL_LANE_CLOCK,
@@ -1104,11 +1104,16 @@ async function runCorpusLaneUntilIdle(
   const startedAt = Date.now();
   let active = true;
   let lastProgressAt = clock.now();
-  const report = () => {
+  // Reads of this lane whose statement is running on a read worker now.
+  let reading = 0;
+  const report: SourceIndexReadProgress = Object.assign(() => {
     if (!active) return;
     lastProgressAt = clock.now();
     noteSourceAnswerProgress('searching');
-  };
+  }, {
+    began: () => { reading += 1; report(); },
+    ended: () => { reading = Math.max(0, reading - 1); report(); },
+  });
   const runValidated = async (): Promise<SourceIndexCorpusSearchResponse> => {
     const response = await run(report);
     assertSafeCorpusSearchResponse(response);
@@ -1155,6 +1160,9 @@ async function runCorpusLaneUntilIdle(
     const arm = (delayMs: number) => {
       const dueAtMs = clock.now() + delayMs;
       timer = clock.setTimeout(() => {
+        // A statement running on a read worker is work in progress, however
+        // long it runs: the wait starts again and the answer is told.
+        if (reading > 0) report();
         const now = clock.now();
         const remaining = timeoutMs - (now - lastProgressAt);
         if (remaining > 0) { arm(remaining); return; }

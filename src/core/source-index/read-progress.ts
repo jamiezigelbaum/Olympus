@@ -1,8 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 // Request-local, content-free store batch receipts. Timers are never progress.
-const progress = new AsyncLocalStorage<() => void>();
-export function withSourceIndexReadProgress<T>(report: () => void, run: () => T): T {
+// A lane's reporter may also carry began/ended: a read running on a read
+// worker is work in progress for as long as its statement runs.
+export type SourceIndexReadProgress = (() => void) & { began?: () => void; ended?: () => void };
+const progress = new AsyncLocalStorage<SourceIndexReadProgress>();
+export function withSourceIndexReadProgress<T>(report: SourceIndexReadProgress, run: () => T): T {
   return progress.run(report, run);
 }
 export function noteSourceIndexReadProgress(): void {
@@ -12,6 +15,6 @@ export function noteSourceIndexReadProgress(): void {
 }
 // The current request's reporter, for an event that happens later outside its
 // async context (a queued read leaving the queue).
-export function currentSourceIndexReadProgress(): (() => void) | undefined {
+export function currentSourceIndexReadProgress(): SourceIndexReadProgress | undefined {
   return progress.getStore();
 }

@@ -1,4 +1,4 @@
-import { currentSourceIndexReadProgress, noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
+import { currentSourceIndexReadProgress, noteSourceIndexReadProgress, type SourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 // Read-only SQLite work uses one warm Bun Worker per open store (#1305).
 // The owner's search statements use that store's shared executor; a scan
 // snapshot (the vector lane) takes a second worker of the store, and the
@@ -287,7 +287,9 @@ interface PoolJob {
   reject: (error: Error) => void;
   timer: unknown;
   /** Tells the asking lane its read left the queue: a wait behind other reads is not silence. */
-  started?: (() => void) | undefined;
+  lane?: SourceIndexReadProgress | undefined;
+  /** Its statement is running on a worker, and the lane was told. */
+  running?: boolean;
   thread?: ReaderThread | undefined;
   settled?: boolean;
   /** Already run again once after a lost reply. */
@@ -552,6 +554,8 @@ export async function withOffThreadSnapshot<T>(
             sqlMs = ms;
           });
         };
+        const laneProgress = currentSourceIndexReadProgress();
+        laneProgress?.began?.();
         try {
           let rows: unknown;
           try {
@@ -568,6 +572,7 @@ export async function withOffThreadSnapshot<T>(
           report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error', snapshot: true });
           throw error;
         } finally {
+          laneProgress?.ended?.();
           if (perRead) unmarkRead(dbPath, readId);
           // A search waiting for this thread takes its turn before the next read.
           dispatch();
@@ -704,7 +709,7 @@ export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineA
     return Promise.reject(new OffThreadReadBusyError());
   }
   return new Promise<unknown>((resolve, reject) => {
-    const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, started: currentSourceIndexReadProgress(), enqueuedAtMs: clock.now(), report };
+    const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock.now(), report };
     if (Number.isFinite(deadlineAtMs)) job.timer = clock.setTimeout(() => missedDeadline(job), deadlineAtMs - clock.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
@@ -756,6 +761,7 @@ function settle(job: PoolJob, outcome: { rows: unknown } | { error: Error }): vo
   if (job.settled) return;
   job.settled = true;
   clock.clearTimeout(job.timer);
+  if (job.running) { job.running = false; job.lane?.ended?.(); }
   if (job.report) {
     const now = clock.now();
     const sentAtMs = job.sentAtMs;
@@ -816,7 +822,7 @@ function dispatch(): void {
     else queues.delete(store);
     job.thread = reader;
     job.sentAtMs = clock.now();
-    job.started?.();
+    if (job.lane) { job.lane(); job.lane.began?.(); job.running = true; }
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
@@ -835,6 +841,7 @@ function dispatch(): void {
             counters.retries += 1;
             job.thread = undefined;
             job.sentAtMs = undefined;
+            if (job.running) { job.running = false; job.lane?.ended?.(); }
             const waiting = queues.get(job.store) ?? [];
             waiting.unshift(job);
             if (!queues.has(job.store)) { queues.set(job.store, waiting); turns.push(job.store); }
