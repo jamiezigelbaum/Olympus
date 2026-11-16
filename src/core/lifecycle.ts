@@ -15,6 +15,7 @@ import {
 import { bootProgressLine, clearWorkerUpgradeInFlight, markWorkerUpgradeInFlight, readBootProgress, readFrontProgress, removeRecordedSchemaBackups, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, startupCapMs, type EngineHeartbeat } from './engine-heartbeat.ts';
 import { copyStoresBeforeUpgrade, olympusStoreBytes } from './upgrade-store-copies.ts';
+import { putBackManifest } from './put-back-manifest.ts';
 import { withStoppedEngine } from './engine-store-copies.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
@@ -726,7 +727,14 @@ function rollbackTransaction(
   // copies taken before, so the previous version can open them (#1494).
   // Under the engine locks: a service manager that reports the worker stopped has not proved its process gone.
   const restored = intent.touchServiceManager
-    ? withStoppedEngine(lifecycleEnv(options), 'put back', () => restoreSchemaBackupsSince(lifecycleEnv(options), Date.parse(transaction.started_at)))
+    ? withStoppedEngine(lifecycleEnv(options), 'put back', () => {
+      // The install log keeps what the put-back worked from, before and after, so a failed rollback explains itself.
+      const log = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
+      log(putBackManifest(lifecycleEnv(options), 'before put-back'));
+      const back = restoreSchemaBackupsSince(lifecycleEnv(options), Date.parse(transaction.started_at));
+      log(putBackManifest(lifecycleEnv(options), 'after put-back'));
+      return back;
+    })
     : [];
   restoreManagedFile(options.homeDir, transaction.unit_path, paths.unitBackup, transaction.previous_unit_present, transaction.previous_unit_sha256);
   restoreManagedFile(options.homeDir, transaction.env_path, paths.envBackup, transaction.previous_env_present, transaction.previous_env_sha256);

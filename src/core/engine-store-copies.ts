@@ -13,6 +13,7 @@ import { DataOwnerBusyError, withNoEngineProcess } from './data-owner-lock.ts';
 import { OperationError } from './operation-error.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { copyStoresBeforeUpgrade } from './upgrade-store-copies.ts';
+import { putBackManifest } from './put-back-manifest.ts';
 
 /**
  * How long the copy and the put-back wait for the engine that was stopped to let go of its data. A stop the service
@@ -47,12 +48,16 @@ export function copyEngineStores(env: LayoutEnv, options: { bunBin?: string; log
 }
 
 /** With the new version stopped: put back what was copied since the mark. Returns the stores put back. */
-export function restoreEngineStores(env: LayoutEnv, options: { ownerWaitMs?: number } = {}): string[] {
+export function restoreEngineStores(env: LayoutEnv, options: { ownerWaitMs?: number; log?: (line: string) => void } = {}): string[] {
   const startedAt = readWorkerUpgradeInFlight(env);
   if (startedAt === undefined) return [];
+  // The install log keeps what the put-back worked from, before and after, so a failed rollback explains itself.
+  const log = options.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   return withStoppedEngine(env, 'put back', () => {
+    log(putBackManifest(env, 'before put-back'));
     const restored = startedAt === '' ? [] : restoreSchemaBackupsSince(env, Date.parse(startedAt));
     clearWorkerUpgradeInFlight(env);
+    log(putBackManifest(env, 'after put-back'));
     return restored;
   }, options.ownerWaitMs ?? ENGINE_STORES_OWNER_WAIT_MS);
 }
