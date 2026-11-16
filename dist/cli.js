@@ -59100,10 +59100,15 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   }), keywordLane);
   const vettedRows = new Set(vectorRows.map((row) => row.sourceItem.localItemId));
   const semanticNeighbourHits = scoredVectorRows.filter((row) => !vettedRows.has(row.sourceItem.localItemId)).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope));
+  const semanticRows = contentBar === undefined || scoredVectorRows.length === 0 ? undefined : {
+    hits: [...scoredVectorRows].sort((left, right) => right.bestCosine - left.bestCosine).slice(0, CONNECTOR_STORE_SEMANTIC_ROWS).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
+    bar: contentBar
+  };
   return {
     hits,
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     ...semanticNeighbourHits.length > 0 ? { semanticNeighbourHits } : {},
+    ...semanticRows ? { semanticRows } : {},
     latencyMs: Date.now() - startedAt,
     laneAudits: [
       { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
@@ -61583,7 +61588,7 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, CONNECTOR_STORE_SEMANTIC_ROWS = 3, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -102380,6 +102385,13 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/core/evidence-reranker.ts
+function rerankPoolSemanticSeats(env = process.env) {
+  const raw = env[SEMANTIC_POOL_SEATS_ENV]?.trim();
+  if (!raw)
+    return DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
+  const seats = Number(raw);
+  return Number.isInteger(seats) && seats >= 0 && seats <= 48 ? seats : DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
+}
 function rerankOutcomeCounts() {
   return { ...outcomeCounts };
 }
@@ -102474,7 +102486,7 @@ function rerankPoolSize(reranker, maxResults) {
   const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
   return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
 }
-var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, RERANK_POOL_STORE_DEPTH = 10, outcomeCounts, counted = (result) => {
+var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, RERANK_POOL_STORE_DEPTH = 10, DEFAULT_RERANK_POOL_SEMANTIC_SEATS = 0, SEMANTIC_POOL_SEATS_ENV = "OLYMPUS_SEMANTIC_POOL_SEATS", outcomeCounts, counted = (result) => {
   outcomeCounts[result.audit.outcome] += 1;
   return result;
 }, MAX_RERANK_POOL_SIZE = 400, systemTimers;
@@ -102662,20 +102674,30 @@ async function routePreparedSourceIndexSearch(options) {
         ...hit,
         corpusId: corpus.corpusId,
         trustDomain: corpus.trustDomain
-      }))
+      })),
+      ...request.poolAllocation?.semanticSeats && response.semanticRows?.hits.length ? { semantic: response.semanticRows.hits.map((hit) => ({
+        hit: { ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain },
+        margin: (hit.score ?? Number.NEGATIVE_INFINITY) - response.semanticRows.bar
+      })) } : {}
     });
   }
   const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
     const unchecked = new Set;
-    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items), {
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => [
+      ...lane.items,
+      ...(lane.semantic ?? []).map((seat) => seat.hit)
+    ]), {
       onUnchecked: (corpusIds) => {
         for (const corpusId of corpusIds)
           unchecked.add(corpusId);
       }
     }));
-    for (const lane of lanes)
+    for (const lane of lanes) {
       lane.items = lane.items.filter((hit) => kept.has(hit));
+      if (lane.semantic)
+        lane.semantic = lane.semantic.filter((seat) => kept.has(seat.hit));
+    }
     for (const corpusId of [...unchecked].sort())
       degradations.push(visibilityCheckDegradation(corpusId));
   }
@@ -102694,6 +102716,7 @@ async function routePreparedSourceIndexSearch(options) {
     encounteredSecureLocal,
     secureLaneAudits,
     ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {},
+    ...recency.semanticSeats?.length ? { semanticSeats: recency.semanticSeats } : {},
     latencyMs: Date.now() - startedAt,
     rawExposed: false
   };
@@ -102707,6 +102730,26 @@ async function routePreparedSourceIndexSearch(options) {
   });
   return result;
 }
+function withSemanticPoolSeats(hits, lanes, seats) {
+  if (seats <= 0)
+    return { hits: [...hits], seated: [] };
+  const taken = new Set(hits.map(routedHitCandidateId));
+  const offered = lanes.flatMap((lane) => lane.semantic ?? []).filter((seat) => Number.isFinite(seat.margin)).sort((left, right) => right.margin - left.margin);
+  const perStore = new Map;
+  const seated = [];
+  for (const seat of offered) {
+    if (seated.length >= seats)
+      break;
+    const id = routedHitCandidateId(seat.hit);
+    const used = perStore.get(seat.hit.corpusId) ?? 0;
+    if (taken.has(id) || used >= SEMANTIC_POOL_SEATS_PER_STORE)
+      continue;
+    taken.add(id);
+    perStore.set(seat.hit.corpusId, used + 1);
+    seated.push(seat);
+  }
+  return { hits: [...hits, ...seated.map((seat) => seat.hit)], seated };
+}
 function seatRoutedLanes(lanes, options) {
   const laneOrder = storeOrderForQuestion(lanes);
   const fusedAll = fuseRankedCandidateLanes({
@@ -102719,7 +102762,11 @@ function seatRoutedLanes(lanes, options) {
   const pool = fusedAll.map((candidate) => candidate.item);
   const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
   const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
-  return recency;
+  const seats = options.poolAllocation?.semanticSeats ?? 0;
+  if (seats <= 0)
+    return recency;
+  const semantic = withSemanticPoolSeats(recency.hits, lanes, seats);
+  return { ...recency, hits: semantic.hits, ...semantic.seated.length ? { semanticSeats: semantic.seated } : {} };
 }
 function corpusContributedSecure(corpus, response) {
   const count = response.matchCount;
@@ -103021,7 +103068,7 @@ function assertNoForbiddenRouterResultKeys(value, path) {
 function normalizeRouterResultKey(key) {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60000, DEFAULT_ASK_SEARCH_BUDGET_MS = 1e5, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, STORE_ORDER_MIN_CONCEPT_SHARE;
+var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60000, DEFAULT_ASK_SEARCH_BUDGET_MS = 1e5, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, SEMANTIC_POOL_SEATS_PER_STORE = 2, STORE_ORDER_MIN_CONCEPT_SHARE;
 var init_router = __esm(() => {
   init_partial_search();
   init_keyword_context();
@@ -103074,7 +103121,7 @@ async function buildEvidencePackDetailed(input) {
 async function buildPreparedEvidencePackDetailed(input) {
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
-  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined));
+  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
   const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
@@ -103433,7 +103480,8 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
   if (runs.length === 1)
     return literalRun;
   const recency = seatRoutedQueryRuns(runs.map((run) => run.hits), retrievalLimit, questionHasTemporalIntent(input));
-  const { hits: fused, degradations: budgetDegradations } = recency;
+  const { degradations: budgetDegradations } = recency;
+  const fused = withRunSemanticSeats(recency.hits, runs, poolAllocation?.semanticSeats ?? 0);
   return {
     hits: fused,
     searchedCorpora: literalRun.searchedCorpora,
@@ -103446,6 +103494,23 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
     ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}
   };
+}
+function withRunSemanticSeats(hits, runs, seats) {
+  if (seats <= 0)
+    return hits;
+  const seated = new Set(hits.map(routedHitCandidateId));
+  const offered = runs.flatMap((run) => run.semanticSeats ?? []).sort((left, right) => right.margin - left.margin);
+  const added = [];
+  for (const { hit } of offered) {
+    if (added.length >= seats)
+      break;
+    const id = routedHitCandidateId(hit);
+    if (seated.has(id))
+      continue;
+    seated.add(id);
+    added.push(hit);
+  }
+  return added.length ? [...hits, ...added] : hits;
 }
 function seatRoutedQueryRuns(runs, retrievalLimit, temporalIntent) {
   const ranked = fuseRankedCandidateLanes({
