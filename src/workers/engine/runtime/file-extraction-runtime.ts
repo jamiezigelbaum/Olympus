@@ -308,6 +308,9 @@ export interface ExtractionItemLocation {
  * corpus whose store is not mounted look identical to a corpus nobody
  * configured, and the operator's only symptom was text that never appeared.
  */
+/** Picture content stripped per loop turn at start: each item is one store write. */
+const IMAGE_STRIP_BATCH = 50;
+
 export function createFileExtractionRuntime(
   options: FileExtractionRuntimeOptions,
 ): FileExtractionRuntime | undefined {
@@ -411,13 +414,19 @@ export function createFileExtractionRuntime(
     // A store that is not Private holds no picture content of an item its set
     // never routed (or of any item, untiered); what an earlier build stored
     // there is removed (the names stay).
+    // Found on the read worker, not at start on this thread: the scan held
+    // the background's loop 12.7 s at a Sparta boot (rc.20, 16 Nov). Each
+    // batch is checked again and written by key, a turn between batches.
     if (store.trustDomain !== 'secure_local' && !readOnly) {
-      try {
-        if (tierSet) store.stripImageContentOutsidePrivate({ keep: (identity) => tierSet.ledger.isRouted(identity) });
-        else store.stripImageContentOutsidePrivate();
-      } catch {
+      void (async () => {
+        const found = await store.imageContentOutsidePrivateRowsOffThread();
+        for (let at = 0; at < found.length; at += IMAGE_STRIP_BATCH) {
+          if (at > 0) await new Promise<void>((resolve) => { setImmediate(resolve); });
+          store.stripImageContentRows(found.slice(at, at + IMAGE_STRIP_BATCH), tierSet ? { keep: (identity) => tierSet.ledger.isRouted(identity) } : {});
+        }
+      })().catch(() => {
         // Tried again at the next start.
-      }
+      });
     }
     const guardsRefs = options.scopeGuard !== undefined || config.accountScopeCurrent !== undefined;
     // The refusal a source gives for a ref it may not read or land now: its

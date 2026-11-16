@@ -73653,12 +73653,26 @@ class LocalPeopleIndex {
     const insertIdentity = this.db.query(`
       INSERT INTO people_identities (identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(identity_key) DO UPDATE SET provider = excluded.provider, sender_id = excluded.sender_id, sender_label = excluded.sender_label,
+        keys_json = excluded.keys_json, names_json = excluded.names_json, is_owner = excluded.is_owner, item_count = excluded.item_count,
+        person_id = excluded.person_id, corpus_ids_json = excluded.corpus_ids_json, link_reason = excluded.link_reason
+      WHERE provider IS NOT excluded.provider OR sender_id IS NOT excluded.sender_id OR sender_label IS NOT excluded.sender_label
+        OR keys_json IS NOT excluded.keys_json OR names_json IS NOT excluded.names_json OR is_owner IS NOT excluded.is_owner
+        OR item_count IS NOT excluded.item_count OR person_id IS NOT excluded.person_id OR corpus_ids_json IS NOT excluded.corpus_ids_json
+        OR link_reason IS NOT excluded.link_reason
     `);
     const insertPerson = this.db.query(`
       INSERT INTO people_persons (person_id, display_name, is_owner, name_shareable, item_count, linked_by_json) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(person_id) DO UPDATE SET display_name = excluded.display_name, is_owner = excluded.is_owner,
+        name_shareable = excluded.name_shareable, item_count = excluded.item_count, linked_by_json = excluded.linked_by_json
+      WHERE display_name IS NOT excluded.display_name OR is_owner IS NOT excluded.is_owner OR name_shareable IS NOT excluded.name_shareable
+        OR item_count IS NOT excluded.item_count OR linked_by_json IS NOT excluded.linked_by_json
     `);
+    const personIds = JSON.stringify(people.map((person) => person.personId));
+    const identityKeys = JSON.stringify(people.flatMap((person) => person.identities.map((identity) => identity.identityKey)));
     this.db.transaction(() => {
-      this.db.exec("DELETE FROM people_identities; DELETE FROM people_persons;");
+      this.db.query("DELETE FROM people_identities WHERE identity_key NOT IN (SELECT value FROM json_each(?))").run(identityKeys);
+      this.db.query("DELETE FROM people_persons WHERE person_id NOT IN (SELECT value FROM json_each(?))").run(personIds);
       for (const person of people) {
         insertPerson.run(person.personId, person.displayName, Number(person.isOwner), Number(person.nameShareable), person.itemCount, JSON.stringify(person.linkedBy));
         for (const identity of person.identities) {
@@ -128975,12 +128989,16 @@ function createFileExtractionRuntime(options) {
       return leg ? [leg] : [];
     }) : () => [store]);
     if (store.trustDomain !== "secure_local" && !readOnly) {
-      try {
-        if (tierSet)
-          store.stripImageContentOutsidePrivate({ keep: (identity) => tierSet.ledger.isRouted(identity) });
-        else
-          store.stripImageContentOutsidePrivate();
-      } catch {}
+      (async () => {
+        const found = await store.imageContentOutsidePrivateRowsOffThread();
+        for (let at = 0;at < found.length; at += IMAGE_STRIP_BATCH) {
+          if (at > 0)
+            await new Promise((resolve) => {
+              setImmediate(resolve);
+            });
+          store.stripImageContentRows(found.slice(at, at + IMAGE_STRIP_BATCH), tierSet ? { keep: (identity) => tierSet.ledger.isRouted(identity) } : {});
+        }
+      })().catch(() => {});
     }
     const guardsRefs = options.scopeGuard !== undefined || config.accountScopeCurrent !== undefined;
     const assertRefCurrent = (ref) => {
@@ -129451,7 +129469,7 @@ function optionalString9(value) {
     return;
   return value.trim();
 }
-var FILE_EXTRACTION_ENABLED_ENV = "OLYMPUS_FILE_EXTRACTION_ENABLED", FILE_EXTRACTION_CORPORA_ENV = "OLYMPUS_FILE_EXTRACTION_CORPORA_JSON", FILE_EXTRACTION_WORKER_ID_ENV = "OLYMPUS_FILE_EXTRACTION_WORKER_ID", FILE_EXTRACTION_SYNC_CONNECTOR_ID = "file-extraction-factory", DROPBOX_SCOPE_ACCOUNT;
+var FILE_EXTRACTION_ENABLED_ENV = "OLYMPUS_FILE_EXTRACTION_ENABLED", FILE_EXTRACTION_CORPORA_ENV = "OLYMPUS_FILE_EXTRACTION_CORPORA_JSON", FILE_EXTRACTION_WORKER_ID_ENV = "OLYMPUS_FILE_EXTRACTION_WORKER_ID", FILE_EXTRACTION_SYNC_CONNECTOR_ID = "file-extraction-factory", IMAGE_STRIP_BATCH = 50, DROPBOX_SCOPE_ACCOUNT;
 var init_file_extraction_runtime = __esm(() => {
   init_source_size_limits();
   init_size_limit_stops();
