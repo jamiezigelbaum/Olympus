@@ -44,6 +44,8 @@ export interface EngineStatusSnapshot {
   loop_lag?: { last_ms: number; max_ms: number; over_budget: number };
   /** Statements that held the background's loop past the slow-log threshold (main-thread-sql-trace.ts). */
   loop_slow_sql?: import('../connector-store/main-thread-sql-trace.ts').SlowMainThreadSqlHealth;
+  /** The background's largest WALs and longest-held reads at its last sample. */
+  sqlite_files?: ReturnType<typeof import('../engine/sqlite-wal-sampler.ts').sqliteFilesHealth>;
   /** The background's paced status recount (status-recount.ts). */
   status_recount?: { runs: number; failures: number; last_ms?: number; age_ms?: number; counting: boolean };
 }

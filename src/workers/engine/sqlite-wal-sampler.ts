@@ -41,9 +41,26 @@ export function sampleSqliteFiles(
     let walBytes = 0;
     try { walBytes = statSync(`${file.dbPath}-wal`).size; } catch { walBytes = 0; }
     const snapshot = oldestOffThreadSnapshot(file.dbPath);
+    latest.set(file.label, { label: file.label, wal_bytes: walBytes, oldest_read_ms: Math.round(snapshot?.ageMs ?? 0), ...(snapshot ? { oldest_read_site: snapshot.site } : {}) });
     if (walBytes < SQLITE_WAL_NOTABLE_BYTES && (snapshot?.ageMs ?? 0) < SQLITE_SNAPSHOT_NOTABLE_MS) continue;
     log(`[olympus] sqlite wal: ${file.label} wal_bytes=${walBytes} oldest_read_ms=${Math.round(snapshot?.ageMs ?? 0)}${snapshot ? ` oldest_read_lane=${snapshot.lane} oldest_read_site=${snapshot.site}` : ''}`);
   }
+}
+
+export interface SqliteFileHealth { label: string; wal_bytes: number; oldest_read_ms: number; oldest_read_site?: string }
+const latest = new Map<string, SqliteFileHealth>();
+
+/**
+ * For health: the largest WALs and the longest-held reads at the last
+ * sample, five of each at most (labels are corpus ids or file kinds).
+ */
+export function sqliteFilesHealth(): { largest_wal: SqliteFileHealth[]; oldest_reads: SqliteFileHealth[] } | undefined {
+  if (latest.size === 0) return undefined;
+  const all = [...latest.values()];
+  return {
+    largest_wal: [...all].sort((a, b) => b.wal_bytes - a.wal_bytes).slice(0, 5),
+    oldest_reads: all.filter((file) => file.oldest_read_ms > 0).sort((a, b) => b.oldest_read_ms - a.oldest_read_ms).slice(0, 5),
+  };
 }
 
 /** Samples every `intervalMs` until stopped. */

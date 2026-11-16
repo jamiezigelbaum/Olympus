@@ -293,7 +293,7 @@ import {
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
-import { startSqliteWalSampler } from './sqlite-wal-sampler.ts';
+import { sqliteFilesHealth, startSqliteWalSampler } from './sqlite-wal-sampler.ts';
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
 import { setSqliteCheckpointsOffLoop } from '../../core/sqlite-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
@@ -6263,6 +6263,7 @@ export async function main(): Promise<void> {
         // Statements that held this process's loop past the slow-log threshold, named by call site.
         ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
         ...(backgroundSnapshot?.loop_slow_sql ? { background_loop_slow_sql: backgroundSnapshot.loop_slow_sql } : {}),
+        ...(backgroundSnapshot?.sqlite_files ? { background_sqlite_files: backgroundSnapshot.sqlite_files } : {}),
         // The front answers while its background restarts or crash-loops: an
         // upgrade or rollback reads this before it calls the engine healthy
         // (#1563 review).
@@ -6685,6 +6686,7 @@ export async function main(): Promise<void> {
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
         ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
         ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
+        ...((files) => (files ? { sqlite_files: files } : {}))(sqliteFilesHealth()),
       }),
     });
     // A delete the front forwarded: stop answering ready (so no new front

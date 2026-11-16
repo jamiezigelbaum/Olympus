@@ -235933,10 +235933,20 @@ function sampleSqliteFiles(files, seen, log) {
       walBytes = 0;
     }
     const snapshot = oldestOffThreadSnapshot(file.dbPath);
+    latest.set(file.label, { label: file.label, wal_bytes: walBytes, oldest_read_ms: Math.round(snapshot?.ageMs ?? 0), ...snapshot ? { oldest_read_site: snapshot.site } : {} });
     if (walBytes < SQLITE_WAL_NOTABLE_BYTES && (snapshot?.ageMs ?? 0) < SQLITE_SNAPSHOT_NOTABLE_MS)
       continue;
     log(`[olympus] sqlite wal: ${file.label} wal_bytes=${walBytes} oldest_read_ms=${Math.round(snapshot?.ageMs ?? 0)}${snapshot ? ` oldest_read_lane=${snapshot.lane} oldest_read_site=${snapshot.site}` : ""}`);
   }
+}
+function sqliteFilesHealth() {
+  if (latest.size === 0)
+    return;
+  const all = [...latest.values()];
+  return {
+    largest_wal: [...all].sort((a, b) => b.wal_bytes - a.wal_bytes).slice(0, 5),
+    oldest_reads: all.filter((file) => file.oldest_read_ms > 0).sort((a, b) => b.oldest_read_ms - a.oldest_read_ms).slice(0, 5)
+  };
 }
 function startSqliteWalSampler(files, options = {}) {
   const seen = new Set;
@@ -235951,10 +235961,11 @@ function startSqliteWalSampler(files, options = {}) {
   timer.unref?.();
   return { stop: () => clearInterval(timer) };
 }
-var SQLITE_WAL_NOTABLE_BYTES, SQLITE_SNAPSHOT_NOTABLE_MS = 2000, SQLITE_WAL_SAMPLE_MS = 5000;
+var SQLITE_WAL_NOTABLE_BYTES, SQLITE_SNAPSHOT_NOTABLE_MS = 2000, SQLITE_WAL_SAMPLE_MS = 5000, latest;
 var init_sqlite_wal_sampler = __esm(() => {
   init_off_thread_reads();
   SQLITE_WAL_NOTABLE_BYTES = 32 * 1024 * 1024;
+  latest = new Map;
 });
 
 // src/workers/engine/sqlite-checkpointer.ts
@@ -270823,6 +270834,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         ...backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {},
         ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth()),
         ...backgroundSnapshot?.loop_slow_sql ? { background_loop_slow_sql: backgroundSnapshot.loop_slow_sql } : {},
+        ...backgroundSnapshot?.sqlite_files ? { background_sqlite_files: backgroundSnapshot.sqlite_files } : {},
         ...engineFront ? { engine_background: await engineFront.backgroundReady() ? "ready" : "unreachable" } : {}
       }, { status: response.status, headers: response.headers });
     }
@@ -271223,7 +271235,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         rss_restarts: rssRestart.restarts(),
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
         ...statusRecount ? { status_recount: statusRecount.health() } : {},
-        ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth())
+        ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth()),
+        ...((files) => files ? { sqlite_files: files } : {})(sqliteFilesHealth())
       })
     });
     restartForDelete = (request) => {
