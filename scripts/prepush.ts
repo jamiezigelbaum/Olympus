@@ -28,8 +28,8 @@ import { poolSize, runFilePool } from './test-lane-pool.ts';
 
 const ROOT = join(import.meta.dir, '..');
 const SCANNED = ['src', 'test', 'scripts', 'connect-relay', 'exchange', 'eval'];
-/** Files every test depends on without importing them. */
-const WHOLE_LANE = /^(package\.json|bun\.lock|bunfig\.toml|tsconfig\.json|test\/helpers\/test-lanes\.ts|scripts\/test-lane(-pool)?\.ts)$/;
+/** Files every test depends on without importing them (a dependency change always changes bun.lock). */
+const WHOLE_LANE = /^(bun\.lock|bunfig\.toml|tsconfig\.json|test\/helpers\/test-lanes\.ts|scripts\/test-lane(-pool)?\.ts)$/;
 const IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)['"](\.{1,2}\/[^'"]+)['"]/gm;
 
 const args = process.argv.slice(2);
