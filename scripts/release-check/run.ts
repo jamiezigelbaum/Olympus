@@ -292,6 +292,8 @@ export class Run {
   phaseDeadline = Number.POSITIVE_INFINITY;
   private phaseStarted = 0;
   private phaseName: string | undefined;
+  /** The current phase was given its own budget, which then also bounds its calls in place of the call's named budget. */
+  private phaseOwnBudget = false;
 
   checkList(): CheckResult[] {
     return liveChecks(check => publishFailedCheck(redactDeep(check, this.markers)));
@@ -356,14 +358,16 @@ export class Run {
     console.error(stamped);
   }
 
-  async phase<T>(name: string, work: () => Promise<T>): Promise<T> {
+  /** `budgetMs` replaces the named budget for a phase whose bound is set per run (an archive scale step's own bound). */
+  async phase<T>(name: string, work: () => Promise<T>, budgetMs?: number): Promise<T> {
     const started = this.clock.now();
     this.log(`phase ${name}: start`);
-    const budget = phaseBudgetMs(name);
-    const prior = { deadline: this.phaseDeadline, name: this.phaseName, started: this.phaseStarted };
+    const budget = budgetMs ?? phaseBudgetMs(name);
+    const prior = { deadline: this.phaseDeadline, name: this.phaseName, started: this.phaseStarted, own: this.phaseOwnBudget };
     this.phaseDeadline = Math.min(this.deadline, started + budget);
     this.phaseName = name;
     this.phaseStarted = started;
+    this.phaseOwnBudget = budgetMs !== undefined;
     let exceeded = false;
     const fail = () => {
       if (exceeded) return;
@@ -382,6 +386,7 @@ export class Run {
       this.phaseDeadline = prior.deadline;
       this.phaseName = prior.name;
       this.phaseStarted = prior.started;
+      this.phaseOwnBudget = prior.own;
       this.log(`phase ${name}: ${(elapsed / 1000).toFixed(1)} s (budget ${Math.round(budget / 1000)} s)`);
     }
   }
@@ -421,7 +426,7 @@ export class Run {
 
   async agent(sub: string, args = '', timeoutMs = 120_000): Promise<AgentCall> {
     const phaseBound = Math.max(1, this.phaseDeadline - this.clock.now());
-    const allowed = Math.min(agentTimeoutMs(timeoutMs, this.deadline, this.clock.now()), phaseBound, phaseBudgetMs(sub));
+    const allowed = Math.min(agentTimeoutMs(timeoutMs, this.deadline, this.clock.now()), phaseBound, this.phaseOwnBudget ? phaseBound : phaseBudgetMs(sub));
     const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs: allowed });
     if (exec.timedOut || exec.code === 124) this.add({ id: `phase.${this.phaseName ?? sub}.time-budget`,
       title: `${this.phaseName ?? sub} finishes within its bound`, status: 'fail',
@@ -1552,8 +1557,11 @@ async function runArchiveScaleLeg(run: Run, outDir: string, deadline: number): P
       const count = run.options.archiveScaleCount;
       const boundS = run.options.archiveScaleBoundS ?? SCALE_BOUND_S;
       const extra = `${count !== undefined && format !== 'readwise' ? ` --count ${count}` : ''}${run.options.archiveScaleBoundS !== undefined ? ` --bound-s ${boundS}` : ''}`;
-      const result = await run.phase(`archive-scale-${format}`, () => run.agent('archive-scale', `--format ${format} --seed ${sh(seed)}${extra}`,
-        (boundS * (format === 'readwise' ? 2 : 1) + SCALE_REPEAT_S * 2 + SCALE_REMOVE_S * 2 + 600) * 1_000));
+      // The step's own waits: the import bound (Readwise has a second one for its repeat sweep), the repeat and remove bounds, and margin.
+      const stepMs = (boundS * (format === 'readwise' ? 2 : 1) + SCALE_REPEAT_S * 2 + SCALE_REMOVE_S * 2 + 600) * 1_000;
+      // A bound given for this run sets the phase budget too, so the phase never cuts the step before its own bounds end it.
+      const phaseMs = run.options.archiveScaleBoundS !== undefined ? stepMs : undefined;
+      const result = await run.phase(`archive-scale-${format}`, () => run.agent('archive-scale', `--format ${format} --seed ${sh(seed)}${extra}`, stepMs), phaseMs);
       const obs = result.result as ScaleObservation | undefined;
       for (const check of scaleChecks(format, obs)) run.add(check);
       if (obs?.measurement) (run.stage.archiveScale ??= []).push(obs.measurement);

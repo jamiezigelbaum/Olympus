@@ -130,3 +130,27 @@ test('a real-machine leg reports its deadline live and still allows bounded rest
   expect(checks).toHaveLength(1);
   expect(checks[0]?.status).toBe('fail');
 });
+
+test('a phase given its own budget uses it instead of the named one', async () => {
+  const clock = createTestClock(0);
+  const run = new Run({ runId: 'clock', candidateDir: '/tmp', candidateLabel: 'clock', outDir: '/tmp', config: { driver: ['unused'] } }, new CommandDriver({ argv: ['unused'] }), clock);
+  run.deadline = 10 * 3_600_000;
+  let allowed = 0;
+  let finish!: () => void;
+  run.machine = { handle: 'clock', label: 'clock', os: 'linux', driver: 'clock',
+    exec: async (_script, options) => {
+      allowed = options?.timeoutMs ?? 0;
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { code: 0, timedOut: false, stdout: '{}', stderr: '', ms: clock.now() };
+    }, upgrade: async () => {}, put: async () => {}, get: async () => {},
+  } satisfies Machine;
+  // A Readwise scale step bounded at 1,200 s waits for the import and then the repeat sweep, each up to the bound.
+  const stepMs = (1_200 * 2 + 300 * 2 + 900 * 2 + 600) * 1_000;
+  const phase = run.phase('archive-scale-readwise', () => run.agent('archive-scale', '', stepMs), stepMs);
+  await flushMicrotasks();
+  expect(allowed).toBe(stepMs);
+  await clock.advance(phaseBudgetMs('archive-scale-readwise') + 1_000);
+  expect(run.checks.some(check => check.id === 'phase.archive-scale-readwise.time-budget')).toBe(false);
+  finish();
+  await phase;
+});
