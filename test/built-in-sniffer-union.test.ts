@@ -23,6 +23,8 @@ function fake(options: { chance?: number; tier?: string; confidence?: number; fa
     expect(request.headers.get('authorization')).toBe('Bearer fixture-token');
     const path = new URL(request.url).pathname.slice(prefix.length);
     if (path === '/props') return Response.json({});
+    // A "timeout" is a server that has stopped answering: a busy one that still answers is never cut off.
+    if (path === '/health') return options.failure === 'timeout' ? new Promise<Response>(() => {}) : Response.json({ status: 'ok' });
     const body = await request.json() as any;
     events.push({ path, body });
     if (path === '/v1/chat/completions') return Response.json({ choices: [{ message: { content: JSON.stringify({ verdicts: [

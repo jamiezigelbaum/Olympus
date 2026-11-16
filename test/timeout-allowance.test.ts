@@ -76,7 +76,7 @@ describe('timeouts never cancel progressing work (kind a only shrinks)', () => {
       if (!inline.has(path)) problems.push(`${path}: no inline timeouts left. Remove its entry from ${ALLOWANCE_PATH}.`);
     }
     expect(problems).toEqual([]);
-  }, 30_000);
+  });
 
   test('kind (a) never rises above its ceiling, and the ceiling follows it down', () => {
     const allowance = JSON.parse(readFileSync(join(repoRoot, ALLOWANCE_PATH), 'utf8')) as Allowance;
