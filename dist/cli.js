@@ -188953,89 +188953,90 @@ var init_deep_read = __esm(() => {
 
 // src/workers/engine/runtime/deep-read-jobs.ts
 import { randomBytes as randomBytes32 } from "node:crypto";
+async function readDeepReadSet(set, storesOf, lanesOf) {
+  const selected = set.selected_item;
+  const provider = selected.provider;
+  const accountScope = selected.account_scope;
+  if (!provider || !accountScope || !selected.local_item_id || !selected.corpus_id)
+    throw new DeepReadRefused("invalid_set", "The set must be a selected_item from a search hit.");
+  const lanes = lanesOf();
+  if (!lanes)
+    throw new DeepReadRefused("not_found", "Source search is not running.");
+  const stores = storesOf();
+  const anchorStore = stores.find((store) => store.corpusId === selected.corpus_id);
+  if (!anchorStore)
+    throw new DeepReadRefused("not_found", "That source is not on this computer.");
+  const family = anchorStore.family;
+  let members;
+  if (set.whole === "conversation") {
+    const conversationId = selected.provider_conversation_id;
+    if (!conversationId)
+      throw new DeepReadRefused("invalid_set", "That item is not part of a conversation.");
+    members = stores.filter((store) => store.family === family).flatMap((store) => store.conversationItems({
+      provider,
+      accountScope,
+      providerConversationId: conversationId,
+      ...selected.provider_thread_id ? { providerThreadId: selected.provider_thread_id } : {},
+      ...set.after ? { after: set.after } : {},
+      ...set.before ? { before: set.before } : {}
+    }).map((member) => ({ corpusId: store.corpusId, ...member })));
+    members.sort((a, b) => (a.authoredAt ?? "").localeCompare(b.authoredAt ?? ""));
+  } else {
+    if (!anchorStore.activeLocalItemRow(selected.local_item_id))
+      throw new DeepReadRefused("not_found", "That item is no longer stored.");
+    members = [{ corpusId: selected.corpus_id, sourceItem: {
+      family,
+      provider,
+      accountScope,
+      providerItemId: selected.provider_item_id ?? "",
+      localItemId: selected.local_item_id,
+      ...selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {},
+      ...selected.provider_thread_id ? { providerThreadId: selected.provider_thread_id } : {},
+      ...selected.provider_file_id ? { providerFileId: selected.provider_file_id } : {},
+      ...selected.source_version ? { sourceVersion: selected.source_version } : {}
+    } }];
+  }
+  const candidates = [];
+  const corpusIds = new Set;
+  const readItems = new Set;
+  const seen = new Set;
+  let unreadable = 0;
+  for (const member of members) {
+    const key = JSON.stringify([member.sourceItem.providerConversationId ?? "", member.sourceItem.providerItemId]);
+    seen.add(key);
+    if (readItems.has(key))
+      continue;
+    const trustDomain = lanes.registry.get(member.corpusId)?.trustDomain;
+    const contentProvider = lanes.contentProviders[member.corpusId];
+    if (!trustDomain || !contentProvider)
+      continue;
+    const content = await contentProvider.fetchLocalContent({ provenance: { sourceItem: member.sourceItem }, trustDomain, maxChars: Number.MAX_SAFE_INTEGER });
+    if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
+      continue;
+    readItems.add(key);
+    corpusIds.add(member.corpusId);
+    const citation = {
+      ...selected.conversation_label && set.whole === "conversation" ? { title: selected.conversation_label } : selected.title ? { title: selected.title } : {},
+      ...member.authoredAt ? { authoredAt: member.authoredAt } : {}
+    };
+    for (const chunk of content.chunks) {
+      candidates.push({
+        provenance: { sourceItem: member.sourceItem, ...Object.keys(citation).length ? { citation } : {} },
+        trustTier: content.sensitivity.trustTier,
+        trustDomain,
+        chunks: [chunk]
+      });
+    }
+  }
+  unreadable = [...seen].filter((key) => !readItems.has(key)).length;
+  const label = set.whole === "conversation" ? `${selected.conversation_label ?? "the conversation"}${set.after || set.before ? ` (${set.after?.slice(0, 10) ?? "start"} to ${set.before?.slice(0, 10) ?? "now"})` : ""}` : selected.title ?? "the document";
+  return { candidates, corpusIds: [...corpusIds], unreadable, items: seen.size, label };
+}
 function createDeepReadJobs(options) {
   const now = options.now ?? (() => new Date);
   const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const jobs = new Map;
-  async function readSet(set) {
-    const selected = set.selected_item;
-    const provider = selected.provider;
-    const accountScope = selected.account_scope;
-    if (!provider || !accountScope || !selected.local_item_id || !selected.corpus_id)
-      throw new DeepReadRefused("invalid_set", "The set must be a selected_item from a search hit.");
-    const lanes = options.lanes();
-    if (!lanes)
-      throw new DeepReadRefused("not_found", "Source search is not running.");
-    const stores = options.stores();
-    const anchorStore = stores.find((store) => store.corpusId === selected.corpus_id);
-    if (!anchorStore)
-      throw new DeepReadRefused("not_found", "That source is not on this computer.");
-    const family = anchorStore.family;
-    let members;
-    if (set.whole === "conversation") {
-      const conversationId = selected.provider_conversation_id;
-      if (!conversationId)
-        throw new DeepReadRefused("invalid_set", "That item is not part of a conversation.");
-      members = stores.filter((store) => store.family === family).flatMap((store) => store.conversationItems({
-        provider,
-        accountScope,
-        providerConversationId: conversationId,
-        ...selected.provider_thread_id ? { providerThreadId: selected.provider_thread_id } : {},
-        ...set.after ? { after: set.after } : {},
-        ...set.before ? { before: set.before } : {}
-      }).map((member) => ({ corpusId: store.corpusId, ...member })));
-      members.sort((a, b) => (a.authoredAt ?? "").localeCompare(b.authoredAt ?? ""));
-    } else {
-      if (!anchorStore.activeLocalItemRow(selected.local_item_id))
-        throw new DeepReadRefused("not_found", "That item is no longer stored.");
-      members = [{ corpusId: selected.corpus_id, sourceItem: {
-        family,
-        provider,
-        accountScope,
-        providerItemId: selected.provider_item_id ?? "",
-        localItemId: selected.local_item_id,
-        ...selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {},
-        ...selected.provider_thread_id ? { providerThreadId: selected.provider_thread_id } : {},
-        ...selected.provider_file_id ? { providerFileId: selected.provider_file_id } : {},
-        ...selected.source_version ? { sourceVersion: selected.source_version } : {}
-      } }];
-    }
-    const candidates = [];
-    const corpusIds = new Set;
-    const readItems = new Set;
-    const seen = new Set;
-    let unreadable = 0;
-    for (const member of members) {
-      const key = JSON.stringify([member.sourceItem.providerConversationId ?? "", member.sourceItem.providerItemId]);
-      seen.add(key);
-      if (readItems.has(key))
-        continue;
-      const trustDomain = lanes.registry.get(member.corpusId)?.trustDomain;
-      const contentProvider = lanes.contentProviders[member.corpusId];
-      if (!trustDomain || !contentProvider)
-        continue;
-      const content = await contentProvider.fetchLocalContent({ provenance: { sourceItem: member.sourceItem }, trustDomain, maxChars: Number.MAX_SAFE_INTEGER });
-      if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
-        continue;
-      readItems.add(key);
-      corpusIds.add(member.corpusId);
-      const citation = {
-        ...selected.conversation_label && set.whole === "conversation" ? { title: selected.conversation_label } : selected.title ? { title: selected.title } : {},
-        ...member.authoredAt ? { authoredAt: member.authoredAt } : {}
-      };
-      for (const chunk of content.chunks) {
-        candidates.push({
-          provenance: { sourceItem: member.sourceItem, ...Object.keys(citation).length ? { citation } : {} },
-          trustTier: content.sensitivity.trustTier,
-          trustDomain,
-          chunks: [chunk]
-        });
-      }
-    }
-    unreadable = [...seen].filter((key) => !readItems.has(key)).length;
-    const label = set.whole === "conversation" ? `${selected.conversation_label ?? "the conversation"}${set.after || set.before ? ` (${set.after?.slice(0, 10) ?? "start"} to ${set.before?.slice(0, 10) ?? "now"})` : ""}` : selected.title ?? "the document";
-    return { candidates, corpusIds: [...corpusIds], unreadable, items: seen.size, label };
-  }
+  const readSet = (set) => readDeepReadSet(set, options.stores, options.lanes);
   function land(view, result, candidates, corpusIds) {
     const store = options.inbox();
     if (!store)

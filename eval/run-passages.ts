@@ -249,13 +249,20 @@ function gradePassageAnswer(question: EvalQuestion, result: AnalystResult, detai
   const copy = !itself && result.citations.some(citation => expected.some(item =>
     citedCopyOfExpected(item, citation.provenance, corpusOf(citation), citationItemChunks(citation.provenance, detail.pack.candidates))));
   const cited = itself || copy;
-  const words = new Set(passageWords(result.answer));
-  const coverage = Math.max(0, ...expected.map(item => {
-    const content = passageWords(item.quote ?? '').filter(word => /^\p{L}{3,}$/u.test(word) && !ANSWER_STOP_WORDS.has(word));
+  const coverage = answerQuoteCoverage(expected.map(item => item.quote ?? ''), result.answer);
+  return { cited, coverage, right: cited && coverage >= ANSWER_RIGHT_COVERAGE, ...(cited ? { citedBy: itself ? 'item' as const : 'copy' as const } : {}) };
+}
+
+/** The share of an expected quote's content words the answer states, best quote first: the word half of the grading rule. */
+export function answerQuoteCoverage(quotes: readonly string[], answer: string): number {
+  const words = new Set(passageWords(answer));
+  return Math.max(0, ...quotes.map(quote => {
+    const content = passageWords(quote).filter(word => /^\p{L}{3,}$/u.test(word) && !ANSWER_STOP_WORDS.has(word));
     return content.length ? content.filter(word => words.has(word)).length / content.length : 0;
   }));
-  return { cited, coverage, right: cited && coverage >= 0.8, ...(cited ? { citedBy: itself ? 'item' as const : 'copy' as const } : {}) };
 }
+/** An answer is right when it cites the expected item and states this share of its quote's content words. */
+export const ANSWER_RIGHT_COVERAGE = 0.8;
 function grouped(rows: readonly PassageRow[], ks: readonly number[], groups: (row: PassageRow) => string[]): Record<string, PassageSummary> {
   const buckets = new Map<string, PassageRow[]>();
   for (const row of rows) for (const group of new Set(groups(row))) buckets.set(group, [...(buckets.get(group) ?? []), row]);
