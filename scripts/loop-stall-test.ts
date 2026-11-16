@@ -302,6 +302,48 @@ function capped(memoryMax: number): boolean {
     return Number(readFileSync(join(root, 'memory.max'), 'utf8')) <= memoryMax && readFileSync(join(root, 'memory.swap.max'), 'utf8').trim() === '0';
   } catch { return false; }
 }
+/**
+ * Pressure stall totals (PSI, microseconds) for the host and for this run's own cgroup, so a slow statement can be told
+ * apart as a disk or memory wait (the host's or the cap's) rather than a lock wait or a plan. Undefined where not readable.
+ */
+type PressureTotals = Record<string, number>;
+function readPressure(): PressureTotals {
+  const totals: PressureTotals = {};
+  const parse = (scope: string, kind: string, path: string) => {
+    try {
+      for (const line of readFileSync(path, 'utf8').split('\n')) {
+        const match = /^(some|full) .*total=(\d+)/.exec(line);
+        if (match) totals[`${scope}_${kind}_${match[1]}`] = Number(match[2]);
+      }
+    } catch { /* not readable here */ }
+  };
+  for (const kind of ['io', 'memory', 'cpu']) parse('host', kind, `/proc/pressure/${kind}`);
+  try {
+    const relative = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find(line => line.startsWith('0::'))!.slice(3);
+    for (const kind of ['io', 'memory']) parse('cgroup', kind, join('/sys/fs/cgroup', relative, `${kind}.pressure`));
+  } catch { /* no cgroup v2 */ }
+  return totals;
+}
+/** One sample a second: milliseconds stalled in that second, per scope and kind. Returns the samples and a stop. */
+function samplePressure(): { samples: Array<{ at: string } & Record<string, number | string>>; stop(): void } {
+  const samples: Array<{ at: string } & Record<string, number | string>> = [];
+  let last = readPressure();
+  const timer = setInterval(() => {
+    const now = readPressure();
+    const sample: { at: string } & Record<string, number | string> = { at: new Date().toISOString() };
+    for (const [key, total] of Object.entries(now)) if (last[key] !== undefined) sample[key] = Math.round((total - last[key]!) / 1000);
+    samples.push(sample);
+    last = now;
+  }, 1000);
+  return { samples, stop: () => clearInterval(timer) };
+}
+/** The worst second and the seconds with any stall at or over 100 ms, per key. */
+function pressureSummary(samples: Array<{ at: string } & Record<string, number | string>>) {
+  const keys = [...new Set(samples.flatMap(sample => Object.keys(sample).filter(key => key !== 'at')))];
+  const worst = Object.fromEntries(keys.map(key => [key, Math.max(0, ...samples.map(sample => Number(sample[key] ?? 0)))]));
+  const stalled = samples.filter(sample => keys.some(key => Number(sample[key] ?? 0) >= 100));
+  return { readable: keys.length > 0, worst_ms_per_second: worst, seconds_sampled: samples.length, seconds_with_stall_100ms: stalled.length, stalled_seconds: stalled.slice(0, 300) };
+}
 function coldFiles(dir: string) {
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite'));
   for (const path of files) for (const suffix of ['', '-wal']) {
@@ -349,6 +391,7 @@ async function run(dir: string, seconds: number, memoryMax: string) {
   const requestErrors: string[] = [];
   const started = Date.now();
   let finished = false;
+  const pressureSampler = samplePressure();
   try {
     coldFiles(dir);
     for (const role of ['background', 'front']) {
@@ -391,6 +434,7 @@ async function run(dir: string, seconds: number, memoryMax: string) {
     await Bun.sleep(125);
   } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
   finally {
+    pressureSampler.stop();
     for (const child of children) child.kill('SIGKILL');
     await Promise.all(children.map(child => child.exited)); await Promise.all(pumps);
     await Promise.allSettled(requests);
@@ -411,7 +455,7 @@ async function run(dir: string, seconds: number, memoryMax: string) {
   const allowed = JSON.parse(readFileSync(join(import.meta.dir, 'loop-stall-allowlist.json'), 'utf8')) as string[];
   const pass = gate({ background, front, slow_sql, workload_ok }, allowed);
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', sha, pass, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors };
+  const receipt = { phase: 'run', sha, pass, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, pressure: pressureSummary(pressureSampler.samples) };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
   console.log(JSON.stringify(receipt));
   console.log(`${pass ? 'PASS' : 'FAIL'}: background ${background.max_ms} ms (<250), front ${front.max_ms} ms (<100), ${slow_sql.length} slow SQL statements, workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}`);
