@@ -15930,6 +15930,14 @@ export class LocalConnectorStore {
       if (Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope);
       return memo;
     }
+    // A store the pool reads never walks the ledger here: on the loop that
+    // walk was the gate's top statement (16 Nov, up to 2.3 s, 12 times). The
+    // last count, or none yet, is served while a new one is counted in turns
+    // on the read worker; prepareStatusCounts waits for one.
+    if (offThreadReadsSupported(this.dbPath)) {
+      this.refreshSettledUnreadableCountInTurns(key, scope);
+      return memo ?? { count: 0, waitingPks: [], policyPks: [] };
+    }
     const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32) memos.clear();
     memos.set(key, { at: Date.now(), ...counts });

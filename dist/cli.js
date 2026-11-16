@@ -68988,6 +68988,10 @@ ${parentKey(ref)}`, { ref, origin });
           this.refreshSettledUnreadableCountInTurns(key, scope);
         return memo;
       }
+      if (offThreadReadsSupported(this.dbPath)) {
+        this.refreshSettledUnreadableCountInTurns(key, scope);
+        return memo ?? { count: 0, waitingPks: [], policyPks: [] };
+      }
       const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
       if (memos.size > 32)
         memos.clear();
