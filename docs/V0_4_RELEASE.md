@@ -54,6 +54,14 @@ three files and 25 MB per question. Every read goes through the shared
 extraction queue and stays out of evidence until judged. Lane 2 uses its existing
 `source_item_read` surface; lane 7 owns the visible limit setting.
 
+Follow-up questions (release-1.5 deep-read and follow-ups design, section 2):
+a weak Ask (no citations, or reranker and store relevance both under
+`FOLLOW_UP_WEAK_BARS` in `src/core/follow-up.ts`) returns what it found plus
+one `follow_up` built from candidates' metadata only; `source_answer.narrow`
+re-runs inside the chosen scope. A search cut short is coverage, not weak. The
+bars are re-calibrated with `bun eval/run-passages.ts --narrow
+source|span|conversation`.
+
 Rules for this release:
 
 - Recent requests from AI apps (#1266): the Agents panel and

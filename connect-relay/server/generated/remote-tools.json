@@ -111,6 +111,10 @@
             "type": "array",
             "description": "Optional selected evidence from a prior source_index_search; prefer hit.selected_item. Never source text."
           },
+          "narrow": {
+            "type": "string",
+            "description": "Optional follow_up option from a prior answer: when a result carries follow_up {question, options}, ask the user that question, then call again with the same question and the chosen option's narrow, unchanged, to search only there. It sets the scope, so pass no other scope filter with it."
+          },
           "retrieval_mode": {
             "type": "string",
             "description": "Optional retrieval override. Omit for the shared hybrid path; set keyword only for an explicit lexical-only request.",

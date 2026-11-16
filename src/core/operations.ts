@@ -14,6 +14,7 @@ import {
   type SourceCorpusCapability,
 } from './source-corpus-registry.ts';
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
+import { isNarrowHandle } from './follow-up.ts';
 import { V0_4_PUBLIC_NATIVE_TOOLS } from './public-surface.ts';
 import { readSetupStatus } from './setup-status.ts';
 import { OPEN_REMOTE_DESCRIPTION, OPEN_REMOTE_PARAMS, OPEN_REMOTE_TOOL_NAME, openRemote } from './remote-open-tool.ts';
@@ -179,6 +180,7 @@ const SOURCE_ANSWER_PARAMS = {
   authored_after: { type: 'string', description: 'Optional inclusive ISO lower bound on authored time.' },
   authored_before: { type: 'string', description: 'Optional inclusive ISO upper bound on authored time.' },
   selected_items: { type: 'array', description: 'Optional selected evidence from a prior source_index_search; prefer hit.selected_item. Never source text.' },
+  narrow: { type: 'string', description: 'Optional follow_up option from a prior answer: when a result carries follow_up {question, options}, ask the user that question, then call again with the same question and the chosen option\'s narrow, unchanged, to search only there. It sets the scope, so pass no other scope filter with it.' },
   retrieval_mode: { type: 'string', enum: ['keyword', 'hybrid'], description: 'Optional retrieval override. Omit for the shared hybrid path; set keyword only for an explicit lexical-only request.' },
   analyst_provider: { type: 'string', enum: ['default', 'local', 'venice', 'tinfoil', 'cloud'], description: 'Optional analyst constraint. Leave default; set local or venice only when {{ownerName}} explicitly asks. Presets: local-first = local then Venice; private-cloud-only = Venice only.' },
   analyst_model: { type: 'string', description: 'Optional Venice model id for an explicit Venice request. e2ee-* ids are refused; defaults kimi-k3 (strong), inkling (normal).' },
@@ -350,6 +352,7 @@ export const operations: Operation[] = [
       const authoredAfter = optionalString(params.authored_after);
       const authoredBefore = optionalString(params.authored_before);
       const selectedItems = optionalSourceAnswerSelectedItems(params.selected_items, corpusId);
+      const narrow = optionalNarrowHandle(params.narrow);
       const retrievalMode = optionalRetrievalMode(params.retrieval_mode);
       const analystProvider = optionalSourceAnswerAnalystProvider(params.analyst_provider);
       const analystModel = optionalAnalystModel(params.analyst_model, 'analyst_model', analystProvider);
@@ -374,6 +377,7 @@ export const operations: Operation[] = [
         ...(authoredAfter !== undefined ? { authoredAfter } : {}),
         ...(authoredBefore !== undefined ? { authoredBefore } : {}),
         ...(selectedItems !== undefined ? { selectedItems } : {}),
+        ...(narrow !== undefined ? { narrow } : {}),
         ...(retrievalMode !== undefined ? { retrievalMode } : {}),
         ...(analystProvider !== undefined ? { analystProvider } : {}),
         ...(analystModel !== undefined ? { analystModel } : {}),
@@ -1184,6 +1188,15 @@ function asStringList(value: unknown, name: string): string[] {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** A follow-up option's narrow (core/follow-up.ts), exactly as the answer gave it. */
+function optionalNarrowHandle(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (!isNarrowHandle(value)) {
+    throw new OperationError('invalid_params', 'narrow must be a follow_up option\'s narrow, passed back unchanged.');
+  }
+  return value;
 }
 
 function optionalNarrowingString(value: unknown, name: string): string | undefined {

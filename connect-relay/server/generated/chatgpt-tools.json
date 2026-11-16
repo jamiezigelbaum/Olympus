@@ -125,6 +125,10 @@
               "full"
             ],
             "description": "How much of the matching items the private answer reads. Leave it out (summary) for ordinary questions: faster. Use \"full\" when the user asks for all the details, the full results, every value, the whole document or similar, including a follow-up asking for more about something already answered; it is slower."
+          },
+          "narrow": {
+            "type": "string",
+            "description": "Only after an answer that carried follow_up: ask the user its question, then call again with the same question and the narrow of the option they chose, unchanged, to look only there."
           }
         },
         "required": [
