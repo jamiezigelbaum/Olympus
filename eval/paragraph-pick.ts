@@ -14,6 +14,13 @@
 //     --max-chars (no anchor, as a vector or keyword anchor varies by lane),
 //     in priority order, with the characters read from each
 //   pickedQuote: whether the pick's text holds the quote.
+//   quoteLexicalRank: the quote chunk's rank among the item's chunks by the
+//     picker's word score (null when it holds none of the question's words;
+//     the item's name terms are not removed here, unlike the picker)
+//   ruleHoldsQuoteChunk: whether three chunks chosen by other no-model rules
+//     include the quote chunk: cosine2 (the two most similar, then the best
+//     by words), cosine3 (the three most similar), fused (best by the sum of
+//     reciprocal cosine and word ranks).
 // With --rerank (OLYMPUS_SOURCE_RERANKER=built-in and its model directory
 // set), a reranker-led pick is sized before one is built: the item's 16 most
 // similar chunks are cut into 800-character windows (600 apart), each scored
@@ -26,6 +33,7 @@
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/core/config.ts';
 import { withExpandedSourceIndexKeywords } from '../src/core/source-index/keyword-expansion.ts';
+import { sourceIndexChunkQueryTerms, sourceIndexChunkTermScore } from '../src/core/source-index/chunk-selection.ts';
 import { cosineSimilarity, decodeEmbedding } from '../src/workers/source-index/embeddings.ts';
 import { openEvalDataRoot } from './data-root.ts';
 import { parseDataRootArgs } from './data-root-args.ts';
@@ -102,6 +110,30 @@ async function main(): Promise<void> {
                 shortlist: order.slice(0, 16).map(entry => entry.index),
               })
             : {};
+          const lexicalOrder = await withExpandedSourceIndexKeywords(question.question, () => store.keywordLanguages(), async () => {
+            const groups = sourceIndexChunkQueryTerms(question.question);
+            return chunks.map(chunk => ({ index: chunk.chunk_index, score: sourceIndexChunkTermScore(chunk.bounded_text, groups) }))
+              .filter(entry => entry.score > 0)
+              .sort((a, b) => b.score - a.score
+                || order.findIndex(entry => entry.index === a.index) - order.findIndex(entry => entry.index === b.index)
+                || a.index - b.index)
+              .map(entry => entry.index);
+          }, store);
+          const cosineOrder = order.map(entry => entry.index);
+          const lexicalRanks = targets.map(index => lexicalOrder.indexOf(index) + 1).filter(rank => rank > 0);
+          const reciprocal = (list: readonly number[], index: number) => { const at = list.indexOf(index); return at < 0 ? 0 : 1 / (60 + at + 1); };
+          const fused = chunks.map(chunk => chunk.chunk_index)
+            .map(index => ({ index, score: reciprocal(cosineOrder, index) + reciprocal(lexicalOrder, index) }))
+            .sort((a, b) => b.score - a.score || a.index - b.index).map(entry => entry.index);
+          const holds = (picks: readonly number[]) => targets.some(index => picks.includes(index));
+          const rules = {
+            quoteLexicalRank: lexicalRanks.length ? Math.min(...lexicalRanks) : null,
+            ruleHoldsQuoteChunk: {
+              cosine2: holds([...new Set([...cosineOrder.slice(0, 2), ...lexicalOrder])].slice(0, 3)),
+              cosine3: holds(cosineOrder.slice(0, 3)),
+              fused: holds(fused.slice(0, 3)),
+            },
+          };
           const content = await withExpandedSourceIndexKeywords(question.question, () => store.keywordLanguages(), () => store.localContent(item.local_item_id, maxChars, {
             query: question.question,
             ...(vector && provider ? { queryVector: vector, queryVectorModelId: provider.modelId } : {}),
@@ -114,7 +146,7 @@ async function main(): Promise<void> {
           console.log(JSON.stringify({ ...base, chunks: chunks.length, chunkChars: chunks.map(chunk => chunk.bounded_text.length),
             quoteWords: quote.split(/\s+/).filter(Boolean).length, quoteChunks, ...(quoteSpans.length ? { quoteSpans } : {}),
             quoteCosineRank, topCosineGap: quoteBest !== null && order.length ? Number((order[0]!.score! - quoteBest).toFixed(4)) : null,
-            picked, pickedQuote: Boolean(quote && passageContainsQuote((content?.chunks ?? []).join('\n'), quote)), ...rerank }));
+            picked, pickedQuote: Boolean(quote && passageContainsQuote((content?.chunks ?? []).join('\n'), quote)), ...rules, ...rerank }));
         }
       }
     }

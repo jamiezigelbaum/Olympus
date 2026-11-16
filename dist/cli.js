@@ -3124,7 +3124,9 @@ var init_public_surface = __esm(() => {
   ];
   V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
     ...V0_4_HERMES_MCP_TOOLS,
-    "source_item_read"
+    "source_item_read",
+    "source_deep_read",
+    "source_deep_read_status"
   ];
   V0_4_PUBLIC_CONNECT_SOURCES = [
     "google",
@@ -53760,6 +53762,8 @@ function withheldParams(operation) {
 function remoteDeclaredParams(operation, declared) {
   if (operation === "source_item_read")
     return ["read_handle", "page", "pages"];
+  if (operation === "source_deep_read")
+    return ["question", "read_handle", "whole", "after", "before"];
   const withheld = withheldParams(operation);
   return declared.filter((name) => !withheld.includes(name));
 }
@@ -53776,6 +53780,19 @@ function remoteToolSchema(operation, schema) {
         read_handle: { type: "string", description: "The read_handle returned for this item on this connection." },
         page: { type: "integer", minimum: 1, description: "Page to read (default 1)." },
         pages: { type: "integer", minimum: 1, maximum: 3, description: "Number of pages (default 1)." }
+      }
+    };
+  if (operation === "source_deep_read")
+    return {
+      type: "object",
+      additionalProperties: false,
+      required: ["question", "read_handle"],
+      properties: {
+        question: { type: "string", description: "The question to answer from the whole set." },
+        read_handle: { type: "string", description: "The read_handle of a hit on this connection: the document, or a message of the conversation." },
+        whole: { type: "string", enum: ["item", "conversation"], description: `"conversation" for the hit's whole chat, group or channel; "item" (default) for that document.` },
+        after: { type: "string", description: "For a conversation: only messages on or after this ISO date." },
+        before: { type: "string", description: "For a conversation: only messages before this ISO date." }
       }
     };
   const withheld = withheldParams(operation);
@@ -53848,6 +53865,15 @@ function remoteOperationOutput(operation, raw, options = {}) {
       if (result.pages.some((page) => secretLabelsInText(page.text).length > 0))
         throw new OperationError("email_policy_violation", "Item text withheld.");
       return { ...result };
+    }
+    case "source_deep_read":
+      return { job: deepReadJobOutput(asRecord7(asRecord7(raw)?.job) ?? {}), answerLandsIn: "Olympus Private answers on the owner's computer" };
+    case "source_deep_read_status": {
+      const record = asRecord7(raw) ?? {};
+      if (typeof record.cancelled === "boolean")
+        return { cancelled: record.cancelled };
+      const jobs = Array.isArray(record.jobs) ? record.jobs : [];
+      return { jobs: jobs.map((job) => deepReadJobOutput(asRecord7(job) ?? {})) };
     }
     case "source_index_status":
       return sourceIndexStatusOutput(raw);
@@ -54147,6 +54173,22 @@ function mintErrorRef() {
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
+function deepReadJobOutput(job) {
+  const count = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  const state = DEEP_READ_STATES.find((entry) => entry === job.state);
+  if (typeof job.id !== "string" || !/^dr_[A-Za-z0-9_-]{8,}$/.test(job.id) || !state) {
+    throw new OperationError("invalid_request", "Unexpected deep read result.");
+  }
+  return {
+    id: job.id,
+    state,
+    sectionsTotal: count(job.sectionsTotal) ?? 0,
+    sectionsDone: count(job.sectionsDone) ?? 0,
+    ...count(job.estimateSecondsLeft) !== undefined ? { estimateSecondsLeft: count(job.estimateSecondsLeft) } : {},
+    ...job.waitingOn === "privacy checks" ? { waitingOn: "privacy checks" } : {},
+    ...state === "failed" ? { failure: "The private model stopped before the read finished." } : {}
+  };
+}
 function remoteOutputSchema(operation) {
   return Object.prototype.hasOwnProperty.call(REMOTE_OUTPUT_SCHEMAS, operation) ? REMOTE_OUTPUT_SCHEMAS[operation] : undefined;
 }
@@ -54186,7 +54228,7 @@ function dateOnly(value) {
 function asRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, DEEP_READ_STATES, DEEP_READ_JOB_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_source_item_read();
   init_app_release_capture();
@@ -54343,6 +54385,7 @@ var init_remote_result = __esm(() => {
   OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
   REMOTE_WITHHELD_PARAMS = {
     source_item_read: ["selected_item"],
+    source_deep_read: ["selected_item"],
     source_index_status: [
       "conversation_id",
       "include_sender_aggregation",
@@ -54355,6 +54398,13 @@ var init_remote_result = __esm(() => {
     ]
   };
   REMOTE_DESCRIPTIONS = {
+    source_deep_read: [
+      "Read ALL of one document, or one whole group, channel or chat, with the owner's private model on their computer, then answer the question from it.",
+      "For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.",
+      'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+      "It runs in the background; the answer lands in Olympus Private answers on the owner's computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status."
+    ].join(" "),
+    source_deep_read_status: "Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner's computer.",
     source_item_read: "Read more of a found Personal item. Pass its read_handle from olympus_search or source_answer. Handles expire after 30 minutes and work only on this connection. Each page is judged before release.",
     source_index_status: [
       "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
@@ -54580,6 +54630,21 @@ var init_remote_result = __esm(() => {
       }
     }
   };
+  DEEP_READ_STATES = ["reading", "answering", "done", "failed", "cancelled"];
+  DEEP_READ_JOB_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["id", "state", "sectionsTotal", "sectionsDone"],
+    properties: {
+      id: { type: "string", pattern: "^dr_[A-Za-z0-9_-]{8,}$" },
+      state: { type: "string", enum: [...DEEP_READ_STATES] },
+      sectionsTotal: { type: "integer", minimum: 0 },
+      sectionsDone: { type: "integer", minimum: 0 },
+      estimateSecondsLeft: { type: "integer", minimum: 0 },
+      waitingOn: { type: "string", enum: ["privacy checks"] },
+      failure: { type: "string" }
+    }
+  };
   REMOTE_OUTPUT_SCHEMAS = {
     source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
     source_answer_result: {
@@ -54587,6 +54652,18 @@ var init_remote_result = __esm(() => {
     },
     ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
     source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+    source_deep_read: {
+      type: "object",
+      additionalProperties: false,
+      required: ["job", "answerLandsIn"],
+      properties: { job: DEEP_READ_JOB_SCHEMA, answerLandsIn: { type: "string" } }
+    },
+    source_deep_read_status: {
+      oneOf: [
+        { type: "object", additionalProperties: false, required: ["jobs"], properties: { jobs: { type: "array", items: DEEP_READ_JOB_SCHEMA } } },
+        { type: "object", additionalProperties: false, required: ["cancelled"], properties: { cancelled: { type: "boolean" } } }
+      ]
+    },
     source_item_read: {
       type: "object",
       additionalProperties: false,
@@ -178576,7 +178653,7 @@ var init_stdio2 = __esm(() => {
 
 // src/mcp/tools.ts
 function listMcpTools(config, surface = "mcp", options = {}) {
-  const listed = exposedOperations(operations, { config, surface }).filter((operation) => surface !== "remote" || operation.name !== "source_item_read" || options.remoteReadHandles === true);
+  const listed = exposedOperations(operations, { config, surface }).filter((operation) => surface !== "remote" || !HANDLE_BOUND_REMOTE_TOOLS.has(operation.name) || options.remoteReadHandles === true);
   return listed.map((operation) => ({
     name: operation.name,
     description: surface === "remote" ? remoteToolDescription(operation.name, operationDescription(operation, { config })) : operationDescription(operation, { config }),
@@ -178588,10 +178665,12 @@ function listMcpTools(config, surface = "mcp", options = {}) {
     }
   }));
 }
+var HANDLE_BOUND_REMOTE_TOOLS;
 var init_tools = __esm(() => {
   init_operation_exposure();
   init_operations();
   init_remote_result();
+  HANDLE_BOUND_REMOTE_TOOLS = new Set(["source_item_read", "source_deep_read", "source_deep_read_status"]);
 });
 
 // src/mcp/server.ts
@@ -178646,6 +178725,17 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
         throw new OperationError("invalid_params", "Invalid read handle.");
       }
       args = { selected_item: selected, page: args.page, pages: args.pages };
+    }
+    if (operation.name === "source_deep_read") {
+      const access = currentAccess(authorized);
+      if (access !== "active")
+        return refusedAccess(access);
+      const selected = readHandles?.resolveReadHandle(args.read_handle);
+      if (!selected || Object.keys(args).some((key) => !declaredParams.includes(key))) {
+        throw new OperationError("invalid_params", "Invalid read handle.");
+      }
+      const { read_handle: _handle, ...rest } = args;
+      args = { ...rest, selected_item: selected };
     }
     const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, args)));
     const afterHandler = currentAccess(authorized);
@@ -266285,7 +266375,7 @@ async function callTool(request, name, options) {
   const ctx = options.makeOperationContext(remoteOperationCaller(verification.connection), request.signal);
   const operation = findOperationByName(name);
   const demoRefused = options.demoGrant?.(verification.connection) === true && !DEMO_GRANT_REMOTE_TOOLS.includes(name);
-  if (name === "source_item_read" || demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: "remote" })) {
+  if (name === "source_item_read" || name === "source_deep_read" || name === "source_deep_read_status" || demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: "remote" })) {
     return failure2(404, remoteSurfaceErrorOutput("unknown_operation"));
   }
   if (!shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
@@ -266406,7 +266496,7 @@ function publicServerUrl(publicBaseUrl) {
 }
 function buildRemoteOpenApiSpec(options = {}) {
   const rendering = neutralSpecConfig();
-  const exposed = exposedOperations(operations, { config: rendering, surface: "remote" }).filter((operation) => operation.name !== "source_item_read");
+  const exposed = exposedOperations(operations, { config: rendering, surface: "remote" }).filter((operation) => operation.name !== "source_item_read" && operation.name !== "source_deep_read" && operation.name !== "source_deep_read_status");
   const paths = Object.fromEntries(exposed.map((operation) => [
     `${REMOTE_OPENAPI_TOOLS_PREFIX}${operation.name}`,
     { post: openApiOperation(operation, rendering) }

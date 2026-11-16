@@ -42,7 +42,8 @@ import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 
 /** The operations the remote surface serves (core/public-surface.ts V0_4_PUBLIC_REMOTE_MCP_TOOLS). */
-export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously' | 'source_item_read';
+export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously' | 'source_item_read'
+  | 'source_deep_read' | 'source_deep_read_status';
 
 export interface RemoteOutputOptions {
   /** Present only on non-ChatGPT remote MCP; never on remote OpenAPI. */
@@ -226,6 +227,7 @@ function oneOf(value: unknown, allowed: readonly string[]): string | undefined {
  */
 export const REMOTE_WITHHELD_PARAMS: Readonly<Partial<Record<RemoteOperationName, readonly string[]>>> = {
   source_item_read: ['selected_item'],
+  source_deep_read: ['selected_item'],
   source_index_status: [
     'conversation_id',
     'include_sender_aggregation',
@@ -239,6 +241,13 @@ export const REMOTE_WITHHELD_PARAMS: Readonly<Partial<Record<RemoteOperationName
 };
 
 const REMOTE_DESCRIPTIONS: Readonly<Partial<Record<RemoteOperationName, string>>> = {
+  source_deep_read: [
+    'Read ALL of one document, or one whole group, channel or chat, with the owner\'s private model on their computer, then answer the question from it.',
+    'For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.',
+    'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+    'It runs in the background; the answer lands in Olympus Private answers on the owner\'s computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status.',
+  ].join(' '),
+  source_deep_read_status: 'Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner\'s computer.',
   source_item_read: 'Read more of a found Personal item. Pass its read_handle from olympus_search or source_answer. Handles expire after 30 minutes and work only on this connection. Each page is judged before release.',
   source_index_status: [
     'Inspect source-index corpus status: each corpus\'s refresh status and aggregate counts.',
@@ -256,6 +265,7 @@ function withheldParams(operation: string): readonly string[] {
 /** The parameters an operation declares on the remote surface. */
 export function remoteDeclaredParams(operation: string, declared: readonly string[]): string[] {
   if (operation === 'source_item_read') return ['read_handle', 'page', 'pages'];
+  if (operation === 'source_deep_read') return ['question', 'read_handle', 'whole', 'after', 'before'];
   const withheld = withheldParams(operation);
   return declared.filter((name) => !withheld.includes(name));
 }
@@ -275,6 +285,16 @@ export function remoteToolSchema(operation: string, schema: Record<string, unkno
       read_handle: { type: 'string', description: 'The read_handle returned for this item on this connection.' },
       page: { type: 'integer', minimum: 1, description: 'Page to read (default 1).' },
       pages: { type: 'integer', minimum: 1, maximum: 3, description: 'Number of pages (default 1).' },
+    },
+  };
+  if (operation === 'source_deep_read') return {
+    type: 'object', additionalProperties: false, required: ['question', 'read_handle'],
+    properties: {
+      question: { type: 'string', description: 'The question to answer from the whole set.' },
+      read_handle: { type: 'string', description: 'The read_handle of a hit on this connection: the document, or a message of the conversation.' },
+      whole: { type: 'string', enum: ['item', 'conversation'], description: '"conversation" for the hit\'s whole chat, group or channel; "item" (default) for that document.' },
+      after: { type: 'string', description: 'For a conversation: only messages on or after this ISO date.' },
+      before: { type: 'string', description: 'For a conversation: only messages before this ISO date.' },
     },
   };
   const withheld = withheldParams(operation);
@@ -365,6 +385,14 @@ export function remoteOperationOutput(
       }
       if (result.pages.some(page => secretLabelsInText(page.text).length > 0)) throw new OperationError('email_policy_violation', 'Item text withheld.');
       return { ...result };
+    }
+    case 'source_deep_read':
+      return { job: deepReadJobOutput(asRecord(asRecord(raw)?.job) ?? {}), answerLandsIn: 'Olympus Private answers on the owner\'s computer' };
+    case 'source_deep_read_status': {
+      const record = asRecord(raw) ?? {};
+      if (typeof record.cancelled === 'boolean') return { cancelled: record.cancelled };
+      const jobs: unknown[] = Array.isArray(record.jobs) ? record.jobs : [];
+      return { jobs: jobs.map(job => deepReadJobOutput(asRecord(job) ?? {})) };
     }
     case 'source_index_status':
       return sourceIndexStatusOutput(raw);
@@ -1010,6 +1038,39 @@ export const REMOTE_ERROR_SCHEMA = {
   },
 } as const;
 
+const DEEP_READ_STATES = ['reading', 'answering', 'done', 'failed', 'cancelled'] as const;
+/**
+ * A deep read job as a remote agent sees it: progress only. Never the set's
+ * name, the question, item counts or the answer: those stay on the owner's
+ * computer, where the answer lands in Private answers.
+ */
+function deepReadJobOutput(job: Record<string, unknown>): Record<string, unknown> {
+  const count = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined);
+  const state = DEEP_READ_STATES.find(entry => entry === job.state);
+  if (typeof job.id !== 'string' || !/^dr_[A-Za-z0-9_-]{8,}$/.test(job.id) || !state) {
+    throw new OperationError('invalid_request', 'Unexpected deep read result.');
+  }
+  return {
+    id: job.id, state,
+    sectionsTotal: count(job.sectionsTotal) ?? 0, sectionsDone: count(job.sectionsDone) ?? 0,
+    ...(count(job.estimateSecondsLeft) !== undefined ? { estimateSecondsLeft: count(job.estimateSecondsLeft) } : {}),
+    ...(job.waitingOn === 'privacy checks' ? { waitingOn: 'privacy checks' } : {}),
+    ...(state === 'failed' ? { failure: 'The private model stopped before the read finished.' } : {}),
+  };
+}
+
+const DEEP_READ_JOB_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['id', 'state', 'sectionsTotal', 'sectionsDone'],
+  properties: {
+    id: { type: 'string', pattern: '^dr_[A-Za-z0-9_-]{8,}$' },
+    state: { type: 'string', enum: [...DEEP_READ_STATES] },
+    sectionsTotal: { type: 'integer', minimum: 0 }, sectionsDone: { type: 'integer', minimum: 0 },
+    estimateSecondsLeft: { type: 'integer', minimum: 0 },
+    waitingOn: { type: 'string', enum: ['privacy checks'] },
+    failure: { type: 'string' },
+  },
+} as const;
+
 /** Each remote operation's success output schema: one of its result families. */
 export const REMOTE_OUTPUT_SCHEMAS: Readonly<Record<RemoteOperationName, Record<string, unknown>>> = {
   source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
@@ -1018,6 +1079,16 @@ export const REMOTE_OUTPUT_SCHEMAS: Readonly<Record<RemoteOperationName, Record<
   },
   ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
   source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+  source_deep_read: {
+    type: 'object', additionalProperties: false, required: ['job', 'answerLandsIn'],
+    properties: { job: DEEP_READ_JOB_SCHEMA, answerLandsIn: { type: 'string' } },
+  },
+  source_deep_read_status: {
+    oneOf: [
+      { type: 'object', additionalProperties: false, required: ['jobs'], properties: { jobs: { type: 'array', items: DEEP_READ_JOB_SCHEMA } } },
+      { type: 'object', additionalProperties: false, required: ['cancelled'], properties: { cancelled: { type: 'boolean' } } },
+    ],
+  },
   source_item_read: {
     type: 'object', additionalProperties: false, required: ['pages', 'totalPages', 'totalChars', 'couldNotRead'],
     properties: {

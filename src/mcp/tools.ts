@@ -3,6 +3,8 @@ import { exposedOperations, type OperationSurface } from '../core/operation-expo
 import { operations, operationDescription, operationToolSchema } from '../core/operations.ts';
 import { remoteToolDescription, remoteToolSchema } from '../core/remote-result.ts';
 
+const HANDLE_BOUND_REMOTE_TOOLS = new Set(['source_item_read', 'source_deep_read', 'source_deep_read_status']);
+
 export function listMcpTools(
   config: OlympusConfig,
   surface: Extract<OperationSurface, 'mcp' | 'remote'> = 'mcp',
@@ -13,10 +15,10 @@ export function listMcpTools(
   inputSchema: Record<string, unknown>;
   annotations: { readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean };
 }> {
-  // A live remote handler owns the handle map. The relay's offline listing
+  // A live remote handler owns the handle map; the tools that take a read handle need it. The relay's offline listing
   // has no map and cannot serve reads; keep that generated listing unchanged.
   const listed = exposedOperations(operations, { config, surface })
-    .filter(operation => surface !== 'remote' || operation.name !== 'source_item_read' || options.remoteReadHandles === true);
+    .filter(operation => surface !== 'remote' || !HANDLE_BOUND_REMOTE_TOOLS.has(operation.name) || options.remoteReadHandles === true);
   return listed.map((operation) => ({
     name: operation.name,
     // The remote surface leaves out the parameters it does not serve
