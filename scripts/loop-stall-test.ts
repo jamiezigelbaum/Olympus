@@ -473,6 +473,8 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     OLYMPUS_LOOP_STALL_DIR: dir, OLYMPUS_LOOP_STALL_MODEL_URL: `http://127.0.0.1:${stub.port}`,
     OLYMPUS_ENGINE_LOOP_METRICS_DIR: metrics, OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED: 'true',
     OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES: '16000', OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_ENABLED: 'false',
+    // An untimed count of every statement the loops run (each pays for a stack): never set it on a timed run.
+    ...(process.env.OLYMPUS_MAIN_THREAD_SQL_SITES ? { OLYMPUS_MAIN_THREAD_SQL_SITES: process.env.OLYMPUS_MAIN_THREAD_SQL_SITES } : {}),
     OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify(DOMAINS.map(domain => ({ dbPath: storePath(dir, domain), corpusId: corpus(domain), family: 'file', trustDomain: domain }))),
   };
   const children: ReturnType<typeof Bun.spawn>[] = [];
