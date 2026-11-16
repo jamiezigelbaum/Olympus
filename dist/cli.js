@@ -70731,7 +70731,11 @@ import { basename as basename9, join as join45, resolve as resolve14, sep as sep
 function enableSourceRegistryAdoption() {
   adoptionEnabled = true;
 }
+function storeOpensSoFar() {
+  return storeOpens2;
+}
 function frontReadOnly(options) {
+  storeOpens2 += 1;
   return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
 }
 function openConnectorStore(account, requested, env = process.env) {
@@ -71139,7 +71143,7 @@ function storeFileCheckpoint(path, busyTimeoutMs = 2000) {
       closeSqliteStore(db, { checkpoint: false });
   }
 }
-var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, CAPTURE_CLAIM_RECLAIM_AGE_MS, busyWait = (ms) => Math.max(0, Math.floor(ms));
+var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, storeOpens2 = 0, CAPTURE_CLAIM_RECLAIM_AGE_MS, busyWait = (ms) => Math.max(0, Math.floor(ms));
 var init_source_storage = __esm(() => {
   init_store_write_guard();
   init_secret_locations();
@@ -271825,7 +271829,22 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
-  const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2000) : undefined;
+  let frontMountsSeen;
+  let frontMountsLookUntil = 0;
+  let frontMountsLastLook = 0;
+  const frontMountRetry = engineFront ? setInterval(() => {
+    const snapshot = engineFront.status()?.snapshot;
+    const seen = `${snapshot?.instance_id ?? ""}:${snapshot?.stores_opened ?? ""}`;
+    const now = Date.now();
+    if (seen !== frontMountsSeen) {
+      frontMountsSeen = seen;
+      frontMountsLookUntil = now + FRONT_MOUNT_LOOK_AFTER_CHANGE_MS;
+    }
+    if (now >= frontMountsLookUntil && now - frontMountsLastLook < FRONT_MOUNT_LOOK_QUIET_MS)
+      return;
+    frontMountsLastLook = now;
+    refreshFrontMounts();
+  }, 2000) : undefined;
   frontMountRetry?.unref?.();
   if (!engineFront)
     keepVisibilityCurrent("after start");
@@ -272006,6 +272025,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
+        stores_opened: storeOpensSoFar(),
         ...statusRecount ? { status_recount: statusRecount.health() } : {},
         ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth()),
         ...((files) => files ? { sqlite_files: files } : {})(sqliteFilesHealth()),
@@ -272204,7 +272224,7 @@ function workerListenPort(port) {
 function resolveEmailSourceBindHostFromEnv(env = process.env) {
   return resolveWorkerBindHost(env, ["OLYMPUS_EMAIL_SOURCE_HOST"]);
 }
-var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
+var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_MOUNT_LOOK_AFTER_CHANGE_MS = 60000, FRONT_MOUNT_LOOK_QUIET_MS = 60000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
 var init_server5 = __esm(async () => {
   init_analyst_tinfoil();
   init_evidence_reranker();

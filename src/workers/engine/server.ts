@@ -308,6 +308,7 @@ import {
   recordAccountPlacement,
   recordProviderAccount,
   type StorageAccount,
+  storeOpensSoFar,
 } from '../../core/source-storage.ts';
 import { recordedProviderAccount } from '../../core/provider-account-history.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
@@ -624,6 +625,10 @@ let dataOwnerLock: HeldDataOwnerLock | undefined;
  * front start applies a small delta instead of rebuilding.
  */
 const VISIBILITY_REFRESH_MS = 30_000;
+/** After the background opens a store, how long the front looks for it every 2 s (the store may still be getting its schema). */
+const FRONT_MOUNT_LOOK_AFTER_CHANGE_MS = 60_000;
+/** With no new store, how often the front looks anyway. */
+const FRONT_MOUNT_LOOK_QUIET_MS = 60_000;
 /**
  * The longest the front waits on those sets before it listens; the rest
  * finishes after, in turns. Well inside the verified install's 60 s health
@@ -6511,7 +6516,27 @@ export async function main(): Promise<void> {
   // as soon as they exist, including sources with no handle or stores at boot.
   // A tier store the background creates later (a lane's Private or Public
   // store, on its first item) is opened here too.
-  const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2_000) : undefined;
+  // Looking costs a walk of the data root's layout on this loop (2.5 s on a
+  // busy disk, lane 6 gate, 16 Nov), so it runs every 2 s only for a while
+  // after the background opened a store (its snapshot's count changed, or a
+  // new background), while the store may still be getting its schema, and
+  // once a minute otherwise. A change the front makes itself (an archive, a
+  // source) refreshes at once.
+  let frontMountsSeen: string | undefined;
+  let frontMountsLookUntil = 0;
+  let frontMountsLastLook = 0;
+  const frontMountRetry = engineFront ? setInterval(() => {
+    const snapshot = engineFront!.status()?.snapshot;
+    const seen = `${snapshot?.instance_id ?? ''}:${snapshot?.stores_opened ?? ''}`;
+    const now = Date.now();
+    if (seen !== frontMountsSeen) {
+      frontMountsSeen = seen;
+      frontMountsLookUntil = now + FRONT_MOUNT_LOOK_AFTER_CHANGE_MS;
+    }
+    if (now >= frontMountsLookUntil && now - frontMountsLastLook < FRONT_MOUNT_LOOK_QUIET_MS) return;
+    frontMountsLastLook = now;
+    refreshFrontMounts();
+  }, 2_000) : undefined;
   frontMountRetry?.unref?.();
   // Keeps each store's set current, and saved by a writer; see keepVisibilityCurrent.
   if (!engineFront) void keepVisibilityCurrent('after start');
@@ -6701,6 +6726,7 @@ export async function main(): Promise<void> {
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
+        stores_opened: storeOpensSoFar(),
         ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
         ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
         ...((files) => (files ? { sqlite_files: files } : {}))(sqliteFilesHealth()),
