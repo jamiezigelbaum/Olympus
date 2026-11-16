@@ -50,6 +50,7 @@ import {
 } from '../src/workers/classification/sniffer-resolver.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
+import type { SnifferModelRequest } from '../src/workers/classification/sniffer-decision.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { arrivalOrderedSniffer, classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { loadOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
@@ -281,6 +282,63 @@ describe('2. an answer preempts the sniffer', () => {
     // The bound starts again, and backlog never gets a turn from it.
     for (let s = 0; s < 30; s += 1) { clock += 1_000; await service.runOnce(); }
     expect(asked).toHaveLength(1);
+  });
+
+  test('a pass that keeps making progress is never stopped for its length; one with no progress is', async () => {
+    const dir = workspace();
+    const ledgerPath = join(dir, 'store.tier-ledger.sqlite');
+    const ledger = new TierLedger({ dbPath: ledgerPath });
+    cleanups.push(() => ledger.close());
+    const installed = new InstalledTierClassification({ env: {}, lane: LANE });
+    cleanups.push(() => installed.close());
+    const store = installed.snifferStoreForLedger(ledgerPath);
+    ledger.recordDecision(subject(0), classifyItemTiers({ signals: { title: 'bank 0', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(0) }, { sniffer: new CachedTierSniffer(store, LANE) }));
+    await appendClassificationLedgerEntry(join(dir, 'classification-ledger.jsonl'), {
+      recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'approved', model_id: LANE.modelId,
+      prompt_version: SNIFFER_PROMPT_VERSION, lane: LANE.kind, profile_id: LANE.profileId, approved_by: 'owner', status: 'complete',
+    });
+    let clock = Date.parse('2026-11-16T12:00:00Z');
+    let alive: (() => void) | undefined;
+    let finish: (() => void) | undefined;
+    let inCall: () => void = () => {};
+    const called = new Promise<void>((resolve) => { inCall = resolve; });
+    const lines: string[] = [];
+    const service = new TierSnifferService({
+      installed, lane: LANE, now: () => new Date(clock), log: (line) => lines.push(line),
+      stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+      classificationLedgerPath: join(dir, 'classification-ledger.jsonl'),
+      maxPassMs: 60_000,
+      model: { complete(request) {
+        alive = (request as SnifferModelRequest).onAlive;
+        inCall();
+        return new Promise((resolve, reject) => {
+          finish = () => resolve(answering(() => ({ tier: 'personal', category: 'other', confidence: 0.9 })).complete(request));
+          request.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      } },
+    });
+    cleanups.push(() => service.stop());
+    const pass = service.runOnce();
+    await called;
+    // Twenty minutes of a slow call whose server keeps answering: still in progress.
+    for (let m = 0; m < 20; m += 1) {
+      clock += 59_000;
+      alive?.();
+      expect((await service.runOnce()).state).toBe('skipped_running');
+    }
+    expect(lines.some((line) => line.includes('made no progress'))).toBe(false);
+    finish?.();
+    expect(await pass).toMatchObject({ state: 'ran', report: { calls: 1, verdictsApplied: 1 } });
+    // A second item's call goes quiet: stopped after the bound, saying what it waited on.
+    ledger.recordDecision(subject(1), classifyItemTiers({ signals: { title: 'bank 1', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(1) }, { sniffer: new CachedTierSniffer(store, LANE) }));
+    clock += 1_000;
+    const quiet = service.runOnce();
+    await Bun.sleep(10);
+    clock += 61_000;
+    expect((await service.runOnce()).state).toBe('skipped_running');
+    expect(lines.some((line) => line.includes('made no progress for 1 min while waiting on the judge model'))).toBe(true);
+    expect(await quiet).toMatchObject({ state: 'ran', report: { stoppedBy: 'preempted' } });
+    expect(ledger.getCurrent(subject(1))?.state).toBe('pending');
   });
 
   test('every call carries one item, on a local lane too', async () => {

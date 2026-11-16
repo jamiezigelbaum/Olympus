@@ -40,7 +40,18 @@ export async function decisionDivergence(post: DecisionPost): Promise<string> {
 
 export interface SnifferModelRequest extends AnalystModelRequest {
   snifferItem?: { pass: SnifferPass; material: string; ownerContext?: string | undefined };
+  /** Called each time the model's server answers a liveness probe while this call runs. */
+  onAlive?: () => void;
 }
+
+/**
+ * A judge call is never cut off for taking long (owner rule, 16 Nov 2026: "as
+ * long as the answer is in progress, it shouldn't cancel for no reason"). It
+ * is given up only when the model's server has stopped answering for this
+ * long: a long item read whole by a slow model is still in progress.
+ */
+export const DECISION_CALL_IDLE_MS = 60_000;
+const LIVENESS_PROBE_MS = 15_000;
 export interface SnifferModelCompletion extends AnalystModelCompletion {
   decisionVerdict?: Omit<StoredSnifferVerdict, 'decidedAt'>;
   /** Content-free native decoder diagnostics, including rejected coverage. */
@@ -107,20 +118,39 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
   if (!state) { state = { tail: Promise.resolve() }; endpoints.set(endpoint, state); }
   const sharedState = state;
   let signal: AbortSignal | undefined;
+  let onAlive: (() => void) | undefined;
   const post: DecisionPost = async <T>(path: string, body: unknown): Promise<T> => {
-    const timeout = AbortSignal.timeout(options.timeoutMs ?? 60_000);
+    // Idle, not total: any answer from the server (even an error status) is
+    // proof it is up and working on the call.
+    const idleMs = options.timeoutMs ?? DECISION_CALL_IDLE_MS;
+    const idle = new AbortController();
+    let lastAlive = Date.now();
+    let probing = false;
+    const probe = setInterval(() => {
+      if (Date.now() - lastAlive >= idleMs) { idle.abort(); return; }
+      if (probing) return;
+      probing = true;
+      void fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}/health`, {
+        method: 'GET',
+        headers: options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {},
+        signal: AbortSignal.timeout(Math.min(10_000, idleMs)),
+      }).then(() => { lastAlive = Date.now(); onAlive?.(); }, () => undefined)
+        .finally(() => { probing = false; });
+    }, Math.min(LIVENESS_PROBE_MS, Math.max(1_000, Math.floor(idleMs / 4))));
     try {
       const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {}) },
         body: JSON.stringify(body),
-        signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
+        signal: signal ? AbortSignal.any([idle.signal, signal]) : idle.signal,
       });
       if (!response.ok) throw new NativeRequestError([404, 405, 501].includes(response.status));
       return await response.json() as T;
     } catch (error) {
       // Neither server errors (which can echo a prompt) nor fetch causes escape.
-      throw error instanceof NativeRequestError ? error : new NativeRequestError(false, timeout.aborted);
+      throw error instanceof NativeRequestError ? error : new NativeRequestError(false, idle.signal.aborted);
+    } finally {
+      clearInterval(probe);
     }
   };
   // A server that answers `/props` settles the weights for good; a timeout or
@@ -209,6 +239,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
       }
       return exclusive(sharedState, async () => {
         signal = request.signal;
+        onAlive = request.onAlive;
         assertSnifferProfileAllowed(lane.profileId, lane.profile);
         // Freeze the effective mode for a resolver run: its cache/reason id
         // was chosen before dispatch. A failed capability is re-probed next run.

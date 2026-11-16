@@ -99256,20 +99256,47 @@ function createDecisionSnifferModel(lane, full, options = {}) {
   }
   const sharedState = state;
   let signal;
+  let onAlive;
   const post = async (path, body) => {
-    const timeout = AbortSignal.timeout(options.timeoutMs ?? 60000);
+    const idleMs = options.timeoutMs ?? DECISION_CALL_IDLE_MS;
+    const idle = new AbortController;
+    let lastAlive = Date.now();
+    let probing = false;
+    const probe = setInterval(() => {
+      if (Date.now() - lastAlive >= idleMs) {
+        idle.abort();
+        return;
+      }
+      if (probing)
+        return;
+      probing = true;
+      fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}/health`, {
+        method: "GET",
+        headers: options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {},
+        signal: AbortSignal.timeout(Math.min(1e4, idleMs))
+      }).then(() => {
+        lastAlive = Date.now();
+        onAlive?.();
+      }, () => {
+        return;
+      }).finally(() => {
+        probing = false;
+      });
+    }, Math.min(LIVENESS_PROBE_MS, Math.max(1000, Math.floor(idleMs / 4))));
     try {
       const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json", ...options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {} },
         body: JSON.stringify(body),
-        signal: signal ? AbortSignal.any([timeout, signal]) : timeout
+        signal: signal ? AbortSignal.any([idle.signal, signal]) : idle.signal
       });
       if (!response.ok)
         throw new NativeRequestError([404, 405, 501].includes(response.status));
       return await response.json();
     } catch (error) {
-      throw error instanceof NativeRequestError ? error : new NativeRequestError(false, timeout.aborted);
+      throw error instanceof NativeRequestError ? error : new NativeRequestError(false, idle.signal.aborted);
+    } finally {
+      clearInterval(probe);
     }
   };
   const readWeights = async () => {
@@ -99368,6 +99395,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
       }
       return exclusive(sharedState, async () => {
         signal = request.signal;
+        onAlive = request.onAlive;
         assertSnifferProfileAllowed(lane.profileId, lane.profile);
         if (lane.snifferMode === undefined || lane.snifferMode === "pending")
           await prepare();
@@ -99418,7 +99446,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
     }
   };
 }
-var REPLY_TO_TIER = '{"verdicts":[{"i":1,"tier":"', PLACEHOLDER = "CALIBRATION_ITEM_PLACEHOLDER", NativeRequestError, endpoints;
+var REPLY_TO_TIER = '{"verdicts":[{"i":1,"tier":"', PLACEHOLDER = "CALIBRATION_ITEM_PLACEHOLDER", DECISION_CALL_IDLE_MS = 60000, LIVENESS_PROBE_MS = 15000, NativeRequestError, endpoints;
 var init_sniffer_decision = __esm(() => {
   init_model_transport();
   init_sniffer_lane();
@@ -160315,6 +160343,7 @@ async function completeSnifferQuestion(model, options) {
     responseSchema: SNIFFER_RESPONSE_SCHEMA,
     maxOutputChars: OUTPUT_CHARS_PER_ITEM + 200,
     ...options.signal ? { signal: options.signal } : {},
+    ...options.onAlive ? { onAlive: options.onAlive } : {},
     snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext }
   };
   return await model.complete(request);
@@ -160714,12 +160743,15 @@ async function runSnifferPass(options) {
         let decisionVerdict;
         let slotWaitMs = 0;
         try {
+          options.onProgress?.();
           const completion = await completeSnifferQuestion(options.model, {
             pass,
             material: next.question.material,
             ownerContext: options.ownerContext,
-            signal: options.signal
+            signal: options.signal,
+            onAlive: options.onProgress
           });
+          options.onProgress?.();
           text = completion.text;
           decisionVerdict = completion.decisionVerdict;
           slotWaitMs = typeof completion.slotWaitMs === "number" && Number.isFinite(completion.slotWaitMs) ? Math.max(0, completion.slotWaitMs) : 0;
@@ -238854,6 +238886,11 @@ class TierSnifferService {
   lastYieldReason;
   lastHeldLogMs = Number.NEGATIVE_INFINITY;
   lastSkipLogMs = Number.NEGATIVE_INFINITY;
+  lastProgressMs = 0;
+  passStep = "starting";
+  progress = () => {
+    this.lastProgressMs = this.clockMs();
+  };
   heldBackSinceMs;
   arrivalTurn = false;
   backlogRefresh;
@@ -239264,16 +239301,16 @@ class TierSnifferService {
       return { state: "skipped_running" };
     if (this.running) {
       const nowMs = this.clockMs();
-      const runningMs = nowMs - this.runningSinceMs;
-      if (runningMs >= (this.options.maxPassMs ?? DEFAULT_TIER_SNIFFER_MAX_PASS_MS) && !this.overrunReported) {
+      const stalledMs = nowMs - this.lastProgressMs;
+      if (stalledMs >= (this.options.maxPassMs ?? DEFAULT_TIER_SNIFFER_STALL_MS) && !this.overrunReported) {
         this.overrunReported = true;
         this.overrunAbortedAtMs = nowMs;
         this.abort?.abort();
-        this.options.log?.(`Olympus tier sniffer: a pass ran ${Math.round(runningMs / 60000)} min without finishing; it was stopped.`);
+        this.options.log?.(`Olympus tier sniffer: a pass made no progress for ${Math.round(stalledMs / 60000)} min while ${this.passStep}; it was stopped. Its items stay held and are asked again.`);
         this.setWaiting("pass_stuck");
         return { state: "skipped_running" };
       }
-      if (this.overrunAbortedAtMs === 0 || nowMs - this.overrunAbortedAtMs < (this.options.abandonAfterMs ?? DEFAULT_TIER_SNIFFER_ABANDON_MS)) {
+      if (this.overrunAbortedAtMs === 0 || nowMs - Math.max(this.overrunAbortedAtMs, this.lastProgressMs) < (this.options.abandonAfterMs ?? DEFAULT_TIER_SNIFFER_ABANDON_MS)) {
         if (this.overrunAbortedAtMs === 0)
           this.setWaiting("pass_running");
         return { state: "skipped_running" };
@@ -239287,6 +239324,8 @@ class TierSnifferService {
       this.heldBackSinceMs = undefined;
     this.running = true;
     this.runningSinceMs = this.clockMs();
+    this.lastProgressMs = this.runningSinceMs;
+    this.passStep = "settling stored items";
     this.overrunReported = false;
     this.overrunAbortedAtMs = 0;
     const abort = new AbortController;
@@ -239415,7 +239454,7 @@ class TierSnifferService {
       case "pass_running":
         return "a pass is still running";
       case "pass_stuck":
-        return "a pass ran too long and was stopped";
+        return "a pass made no progress and was stopped; its items stay held and are asked again";
       case "awaiting_owner_approval":
         return "waiting for the owner to approve the classifier";
       case "no_model": {
@@ -239696,6 +239735,8 @@ class TierSnifferService {
       const now = this.monotonicNow();
       phaseMs[name] = (phaseMs[name] ?? 0) + (now - phaseAt);
       phaseAt = now;
+      this.progress();
+      this.passStep = `in the step after "${name}"`;
     };
     await this.settleStoredItems();
     phase("settle");
@@ -239760,6 +239801,7 @@ class TierSnifferService {
         await this.options.secondRound(this.ledgerPaths(), (set) => this.autoMovesFor(set));
       } catch {}
     }
+    this.passStep = `waiting on the judge model (${lane.modelId}) or its slot`;
     const report = await runSnifferPass({
       targets,
       lane,
@@ -239773,6 +239815,7 @@ class TierSnifferService {
       passTimeMs: this.options.passTimeMs,
       ...this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {},
       shouldYield: () => this.yieldNow(),
+      onProgress: this.progress,
       ...this.options.pacing && isBuiltInLane(lane) ? { trickle: () => this.trickle() } : {},
       signal
     });
@@ -239842,7 +239885,7 @@ class TierSnifferService {
               continue;
             const copies = stores.map((store) => store.exportItemCopy(identity)).filter((copy) => copy !== undefined);
             if (copies.length === 0) {
-              if (this.clockMs() - Date.parse(row.decidedAt) < DEFAULT_TIER_SNIFFER_MAX_PASS_MS)
+              if (this.clockMs() - Date.parse(row.decidedAt) < ROUTED_ROWS_GRACE_MS)
                 continue;
               if (ledger.retireAbsentPending(row)) {
                 queue.deleteQuestion(identity, "metadata");
@@ -240369,7 +240412,7 @@ function runBacklogCountWorker(message) {
     worker.postMessage(message);
   });
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, ARRIVAL_STAND_BACK_MS = 15000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, BACKLOG_COUNT_WORKER_SOURCE = `
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_STALL_MS, ROUTED_ROWS_GRACE_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, ARRIVAL_STAND_BACK_MS = 15000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, BACKLOG_COUNT_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 self.onmessage = ({ data }) => {
   const out = [];
@@ -240421,7 +240464,8 @@ var init_sniffer_service = __esm(() => {
     setTimeout: (callback, ms) => setTimeout(callback, ms),
     clearTimeout: (timer) => clearTimeout(timer)
   };
-  DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
+  DEFAULT_TIER_SNIFFER_STALL_MS = 15 * 60000;
+  ROUTED_ROWS_GRACE_MS = 15 * 60000;
   EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
   DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
   DEFAULT_STALE_MOVE_MS = 60 * 60000;

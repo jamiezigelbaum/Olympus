@@ -171,13 +171,17 @@ export interface TierSnifferServiceOptions {
    * Default: the worker's shared control-path turn (control-path-headroom.ts).
    */
   ingestionTurn?: () => Promise<void> | undefined;
-  /** A pass still running after this long is aborted at the next tick. Default DEFAULT_TIER_SNIFFER_MAX_PASS_MS. */
+  /**
+   * A pass that has made no progress (no call started or ended, no verdict,
+   * no answer from the model's server, no step finished) for this long is
+   * stopped at the next tick. A pass that is working is never cut off for its
+   * length. Default DEFAULT_TIER_SNIFFER_STALL_MS.
+   */
   maxPassMs?: number;
   /**
-   * A pass aborted for running too long that still has not settled this long
-   * after its abort (something ignores the signal) is abandoned: its result
-   * is dropped and the next tick runs a fresh pass. Default
-   * DEFAULT_TIER_SNIFFER_ABANDON_MS.
+   * A stopped pass that still makes no progress this long after its stop
+   * (something ignores the signal) is abandoned: its result is dropped and the
+   * next tick runs a fresh pass. Default DEFAULT_TIER_SNIFFER_ABANDON_MS.
    */
   abandonAfterMs?: number;
   /**
@@ -266,11 +270,17 @@ export const DEFAULT_LOWER_MOVE_SLICE_MS = 1000;
 /** Absolute ceiling, also limited to one third of the judge budget. */
 const MAX_LOWER_MOVE_SLICE_MS = 10_000;
 export const DEFAULT_LOWER_MOVE_BATCH_MS = 25;
-/** A pass running longer than this is aborted at the next tick. */
-export const DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60_000;
+/**
+ * A pass with no progress at all for this long is stopped (owner rule, 16 Nov
+ * 2026: no arbitrary timeouts; work in progress is never cancelled). Its items
+ * stay held and are asked again on a later pass.
+ */
+export const DEFAULT_TIER_SNIFFER_STALL_MS = 15 * 60_000;
+/** A just-listed item's routing lands its store rows within this long; only then may recovery retire it. */
+const ROUTED_ROWS_GRACE_MS = 15 * 60_000;
 /** How long a listed file with no extraction job yet waits to be queued before recovery settles it. */
 const EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60_000;
-/** An overrun pass still unsettled this long after its abort is abandoned. */
+/** A stopped pass with still no progress this long after its stop is abandoned. */
 export const DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60_000;
 /**
  * Answers go first, but they never hold classification off for good. An agent
@@ -480,6 +490,10 @@ export class TierSnifferService {
   private lastYieldReason: 'breaker' | 'answer' | 'owner_answer' | 'caller' | undefined;
   private lastHeldLogMs = Number.NEGATIVE_INFINITY;
   private lastSkipLogMs = Number.NEGATIVE_INFINITY;
+  /** The running pass's last sign of progress, and the step it is in (for the stop line). */
+  private lastProgressMs = 0;
+  private passStep = 'starting';
+  private readonly progress = (): void => { this.lastProgressMs = this.clockMs(); };
   /** Since when passes have been held back by answers or the owner (cleared when one runs). */
   private heldBackSinceMs: number | undefined;
   /** This pass is an arrival's bounded turn: it asks one new arrival and does not give way. */
@@ -953,17 +967,17 @@ export class TierSnifferService {
       // if it still has not settled a while after that (something ignores
       // the abort), it is abandoned and this tick runs a fresh pass.
       const nowMs = this.clockMs();
-      const runningMs = nowMs - this.runningSinceMs;
-      if (runningMs >= (this.options.maxPassMs ?? DEFAULT_TIER_SNIFFER_MAX_PASS_MS) && !this.overrunReported) {
+      const stalledMs = nowMs - this.lastProgressMs;
+      if (stalledMs >= (this.options.maxPassMs ?? DEFAULT_TIER_SNIFFER_STALL_MS) && !this.overrunReported) {
         this.overrunReported = true;
         this.overrunAbortedAtMs = nowMs;
         this.abort?.abort();
-        this.options.log?.(`Olympus tier sniffer: a pass ran ${Math.round(runningMs / 60_000)} min without finishing; it was stopped.`);
+        this.options.log?.(`Olympus tier sniffer: a pass made no progress for ${Math.round(stalledMs / 60_000)} min while ${this.passStep}; it was stopped. Its items stay held and are asked again.`);
         this.setWaiting('pass_stuck');
         return { state: 'skipped_running' };
       }
       if (this.overrunAbortedAtMs === 0
-        || nowMs - this.overrunAbortedAtMs < (this.options.abandonAfterMs ?? DEFAULT_TIER_SNIFFER_ABANDON_MS)) {
+        || nowMs - Math.max(this.overrunAbortedAtMs, this.lastProgressMs) < (this.options.abandonAfterMs ?? DEFAULT_TIER_SNIFFER_ABANDON_MS)) {
         if (this.overrunAbortedAtMs === 0) this.setWaiting('pass_running');
         return { state: 'skipped_running' };
       }
@@ -975,6 +989,8 @@ export class TierSnifferService {
     if (this.arrivalTurn) this.heldBackSinceMs = undefined;
     this.running = true;
     this.runningSinceMs = this.clockMs();
+    this.lastProgressMs = this.runningSinceMs;
+    this.passStep = 'settling stored items';
     this.overrunReported = false;
     this.overrunAbortedAtMs = 0;
     const abort = new AbortController();
@@ -1131,7 +1147,7 @@ export class TierSnifferService {
       case 'yielding_to_answers': return 'yielding to answers in progress';
       case 'breaker_open': return 'the private model is resting after failures';
       case 'pass_running': return 'a pass is still running';
-      case 'pass_stuck': return 'a pass ran too long and was stopped';
+      case 'pass_stuck': return 'a pass made no progress and was stopped; its items stay held and are asked again';
       case 'awaiting_owner_approval': return 'waiting for the owner to approve the classifier';
       case 'no_model': {
         const state = this.modelState();
@@ -1427,6 +1443,8 @@ export class TierSnifferService {
       const now = this.monotonicNow();
       phaseMs[name] = (phaseMs[name] ?? 0) + (now - phaseAt);
       phaseAt = now;
+      this.progress();
+      this.passStep = `in the step after "${name}"`;
     };
     // Owner rules that raise, and names-only folders, apply to stored items
     // whatever the model's state: no model is asked.
@@ -1504,6 +1522,7 @@ export class TierSnifferService {
     if (!preparationStopped && this.options.secondRound) {
       try { await this.options.secondRound(this.ledgerPaths(), set => this.autoMovesFor(set)); } catch { /* Tried again next tick. */ }
     }
+    this.passStep = `waiting on the judge model (${lane.modelId}) or its slot`;
     const report = await runSnifferPass({
       targets,
       lane,
@@ -1518,6 +1537,7 @@ export class TierSnifferService {
       // One clock for the tick and its pass, so the breakdown adds up (#893).
       ...(this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {}),
       shouldYield: () => this.yieldNow(),
+      onProgress: this.progress,
       ...(this.options.pacing && isBuiltInLane(lane) ? { trickle: () => this.trickle() } : {}),
       signal,
     });
@@ -1613,7 +1633,7 @@ export class TierSnifferService {
             if (copies.length === 0) {
               // Routing records its plan before the page lands its store rows.
               // Never retire a just-listed item in that transient interval.
-              if (this.clockMs() - Date.parse(row.decidedAt) < DEFAULT_TIER_SNIFFER_MAX_PASS_MS) continue;
+              if (this.clockMs() - Date.parse(row.decidedAt) < ROUTED_ROWS_GRACE_MS) continue;
               if (ledger.retireAbsentPending(row)) {
                 queue.deleteQuestion(identity, 'metadata');
                 queue.deleteQuestion(identity, 'content');

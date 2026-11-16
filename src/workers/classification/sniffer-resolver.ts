@@ -222,6 +222,8 @@ export interface SnifferPassOptions {
    * (#1062) may go ahead regardless.
    */
   trickle?: () => boolean;
+  /** Called whenever the pass makes progress: a call starts or ends, a verdict lands, or the model's server answers while a call runs. */
+  onProgress?: () => void;
   /** An arrival's turn (the service's bounded stand-back): ask new arrivals only, and nothing else. */
   arrivalsOnly?: boolean;
   /** Items a question matched while they wait: asked first (judge-boost.ts). Default: the worker's set. */
@@ -384,6 +386,7 @@ export async function prepareSnifferModel(options: {
 /** One production dispatch, shared with read-only replay. Screens run before this call. */
 export async function completeSnifferQuestion(model: AnalystModel, options: {
   pass: SnifferPass; material: string; ownerContext?: string | undefined; signal?: AbortSignal | undefined;
+  onAlive?: (() => void) | undefined;
 }): Promise<SnifferModelCompletion> {
   const material = snifferMaterialForModel(options.material);
   const request: SnifferModelRequest = {
@@ -392,6 +395,7 @@ export async function completeSnifferQuestion(model: AnalystModel, options: {
     localOnly: true, responseSchema: SNIFFER_RESPONSE_SCHEMA,
     maxOutputChars: OUTPUT_CHARS_PER_ITEM + 200,
     ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.onAlive ? { onAlive: options.onAlive } : {}),
     snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext },
   };
   return await model.complete(request) as SnifferModelCompletion;
@@ -829,9 +833,12 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       let decisionVerdict: SnifferModelCompletion['decisionVerdict'];
       let slotWaitMs = 0;
       try {
+        options.onProgress?.();
         const completion: SnifferModelCompletion & SnifferSlotTimed = await completeSnifferQuestion(options.model, {
           pass, material: next.question.material, ownerContext: options.ownerContext, signal: options.signal,
+          onAlive: options.onProgress,
         });
+        options.onProgress?.();
         text = completion.text;
         decisionVerdict = completion.decisionVerdict;
         slotWaitMs = typeof completion.slotWaitMs === 'number' && Number.isFinite(completion.slotWaitMs) ? Math.max(0, completion.slotWaitMs) : 0;

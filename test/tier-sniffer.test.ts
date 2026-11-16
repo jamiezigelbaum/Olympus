@@ -653,7 +653,7 @@ describe('bounds and the owner-approval gate', () => {
       expect((await hanging.runOnce()).state).toBe('skipped_running');
       clock += 61_000;
       expect((await hanging.runOnce()).state).toBe('skipped_running');
-      expect(lines.some((line) => line.includes('without finishing; it was stopped'))).toBe(true);
+      expect(lines.some((line) => line.includes('made no progress for 1 min while waiting on the judge model'))).toBe(true);
       // The stopped pass settles as preempted (nothing counted against the
       // items), so the next tick can run a fresh one.
       expect(await first).toMatchObject({ state: 'ran', report: { stoppedBy: 'preempted' } });
@@ -741,7 +741,7 @@ describe('bounds and the owner-approval gate', () => {
       clock += 61_000;
       expect((await service.runOnce()).state).toBe('skipped_running');
       expect(service.status().waiting?.reason).toBe('pass_stuck');
-      expect(service.backlog().summary).toContain('Nothing asked now: a pass ran too long and was stopped.');
+      expect(service.backlog().summary).toContain('Nothing asked now: a pass made no progress and was stopped; its items stay held and are asked again.');
       // The aborted call never settles: still held off inside the grace...
       clock += 10_000;
       expect((await service.runOnce()).state).toBe('skipped_running');
