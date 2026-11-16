@@ -16,17 +16,46 @@ const READ_BATCH = 500;
 const PROFILE_REUSE_MS = 10 * 60_000;
 /** One read of the sample: the same shape as a connector store's pool read. */
 export interface KeywordLanguageRead { sql: string; params: readonly unknown[]; mode: 'get' | 'all' }
+/** Texts to detect: CPU, not a read. The answer is one language code per text, in order. */
+interface KeywordLanguageDetect { detect: readonly string[] }
+type ProfileStep = KeywordLanguageRead | KeywordLanguageDetect;
+// Detection is CPU on the thread that asked (the front, during an Ask). A
+// cold profile is up to 2,048 texts; on Sparta one 500-text batch held the
+// front's loop 4.6 s (rc.20, 16 Nov). The pool runner detects in slices of
+// about this long and gives the loop a turn between them.
+const DETECT_SLICE_MS = 15;
+
+function detectLanguage(text: string): string {
+  return franc(text, { minLength: 40 });
+}
 
 /** The store's content languages, sampled on this thread: for tests and stores the read pool cannot open. */
 export function storeKeywordLanguages(db: Database): readonly string[] {
   const steps = profileSteps(db);
   let next = steps.next();
   while (!next.done) {
-    const read = next.value;
-    const statement = db.query(read.sql);
-    next = steps.next(read.mode === 'get' ? statement.get(...(read.params as never[])) : statement.all(...(read.params as never[])));
+    const step = next.value;
+    if ('detect' in step) {
+      next = steps.next(step.detect.map(detectLanguage));
+      continue;
+    }
+    const statement = db.query(step.sql);
+    next = steps.next(step.mode === 'get' ? statement.get(...(step.params as never[])) : statement.all(...(step.params as never[])));
   }
   return next.value;
+}
+
+async function detectInSlices(texts: readonly string[]): Promise<string[]> {
+  const out: string[] = [];
+  let sliceStart = performance.now();
+  for (const text of texts) {
+    if (performance.now() - sliceStart >= DETECT_SLICE_MS) {
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+      sliceStart = performance.now();
+    }
+    out.push(detectLanguage(text));
+  }
+  return out;
 }
 
 const sampling = new WeakMap<Database, Promise<readonly string[]>>();
@@ -45,8 +74,11 @@ export function storeKeywordLanguagesWith(db: Database, read: (query: KeywordLan
   const pending = sampling.get(db);
   if (pending) return pending;
   const run = (async () => {
-    let next: IteratorResult<KeywordLanguageRead, readonly string[]> = first;
-    while (!next.done) next = steps.next(await read(next.value));
+    let next: IteratorResult<ProfileStep, readonly string[]> = first;
+    while (!next.done) {
+      const step = next.value;
+      next = steps.next('detect' in step ? await detectInSlices(step.detect) : await read(step));
+    }
     return next.value;
   })().finally(() => sampling.delete(db));
   sampling.set(db, run);
@@ -58,7 +90,7 @@ export function lastKeywordLanguages(db: Database): readonly string[] {
   return profiles.get(db)?.languages ?? [];
 }
 
-function* profileSteps(db: Database): Generator<KeywordLanguageRead, readonly string[], unknown> {
+function* profileSteps(db: Database): Generator<ProfileStep, readonly string[], unknown> {
   // The change markers are this connection's own and cost no page read.
   const revision = JSON.stringify([db.query('PRAGMA data_version').get(), db.query('SELECT total_changes() AS n').get()]);
   const cached = profiles.get(db);
@@ -104,7 +136,8 @@ function* profileSteps(db: Database): Generator<KeywordLanguageRead, readonly st
   for (let at = 0; at < unread.length; at += READ_BATCH) {
     const batch = unread.slice(at, at + READ_BATCH);
     const texts = (yield { sql: `SELECT c.rowid AS pk, c.content_hash AS hash, substr(c.bounded_text, 1, 1000) AS text FROM chunks c WHERE c.rowid IN (${batch.map(() => '?').join(',')})`, params: batch, mode: 'all' }) as {pk: number; hash: string; text: string | null}[];
-    for (const text of texts) detected.set(text.hash, franc(text.text ?? '', {minLength:40}));
+    const found = (yield { detect: texts.map((text) => text.text ?? '') }) as readonly string[];
+    texts.forEach((text, index) => detected.set(text.hash, found[index] ?? 'und'));
   }
   const counts = new Map<string, number>();
   for (const row of rows) {

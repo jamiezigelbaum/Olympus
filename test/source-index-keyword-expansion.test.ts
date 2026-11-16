@@ -353,3 +353,27 @@ test('once a translation has outlasted the wait, later searches start at once on
     setSystemTime();
   }
 }, 2_000);
+
+test('a cold sample read elsewhere detects its languages in slices, so the asking thread keeps its turns (rc.20: 4.6 s on the front)', async () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE items(item_pk INTEGER PRIMARY KEY, tombstoned INTEGER); CREATE TABLE chunks(item_pk INTEGER, bounded_text TEXT, content_hash TEXT); INSERT INTO items VALUES(1,0)');
+  const insert = db.query('INSERT INTO chunks VALUES(1, ?, ?)');
+  const words = ['escritura', 'notario', 'firma', 'comprador', 'condiciones', 'gastos', 'documento', 'partes', 'copia', 'identidad'];
+  // Distinct texts, so nothing is answered from the hash cache.
+  db.transaction(() => { for (let n = 1; n <= 2000; n++) insert.run(Array.from({ length: 120 }, (_, k) => words[(n * 7 + k * 3 + (k * n) % 5) % words.length]).join(' ') + ` ${n}`, `h${n}`); })();
+  const read = async (query: KeywordLanguageRead) => {
+    await Promise.resolve();
+    const statement = db.query(query.sql);
+    return query.mode === 'get' ? statement.get(...(query.params as never[])) : statement.all(...(query.params as never[]));
+  };
+  let turns = 0;
+  let running = true;
+  const tick = () => { if (!running) return; turns += 1; setImmediate(tick); };
+  setImmediate(tick);
+  const languages = await storeKeywordLanguagesWith(db, read);
+  running = false;
+  expect(languages.length).toBeGreaterThan(0);
+  // Reads here resolve as microtasks, so only the detection slices give the loop a turn.
+  expect(turns).toBeGreaterThan(1);
+  db.close();
+});

@@ -47821,15 +47821,36 @@ function childProviderItemId(parentProviderItemId, key) {
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/core/source-index/keyword-languages.ts
+function detectLanguage(text) {
+  return franc(text, { minLength: 40 });
+}
 function storeKeywordLanguages(db) {
   const steps = profileSteps(db);
   let next = steps.next();
   while (!next.done) {
-    const read = next.value;
-    const statement = db.query(read.sql);
-    next = steps.next(read.mode === "get" ? statement.get(...read.params) : statement.all(...read.params));
+    const step = next.value;
+    if ("detect" in step) {
+      next = steps.next(step.detect.map(detectLanguage));
+      continue;
+    }
+    const statement = db.query(step.sql);
+    next = steps.next(step.mode === "get" ? statement.get(...step.params) : statement.all(...step.params));
   }
   return next.value;
+}
+async function detectInSlices(texts) {
+  const out = [];
+  let sliceStart = performance.now();
+  for (const text of texts) {
+    if (performance.now() - sliceStart >= DETECT_SLICE_MS) {
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
+      sliceStart = performance.now();
+    }
+    out.push(detectLanguage(text));
+  }
+  return out;
 }
 function storeKeywordLanguagesWith(db, read) {
   const steps = profileSteps(db);
@@ -47841,8 +47862,10 @@ function storeKeywordLanguagesWith(db, read) {
     return pending;
   const run = (async () => {
     let next = first;
-    while (!next.done)
-      next = steps.next(await read(next.value));
+    while (!next.done) {
+      const step = next.value;
+      next = steps.next("detect" in step ? await detectInSlices(step.detect) : await read(step));
+    }
     return next.value;
   })().finally(() => sampling.delete(db));
   sampling.set(db, run);
@@ -47891,8 +47914,8 @@ function* profileSteps(db) {
   for (let at = 0;at < unread.length; at += READ_BATCH) {
     const batch = unread.slice(at, at + READ_BATCH);
     const texts = yield { sql: `SELECT c.rowid AS pk, c.content_hash AS hash, substr(c.bounded_text, 1, 1000) AS text FROM chunks c WHERE c.rowid IN (${batch.map(() => "?").join(",")})`, params: batch, mode: "all" };
-    for (const text of texts)
-      detected.set(text.hash, franc(text.text ?? "", { minLength: 40 }));
+    const found = yield { detect: texts.map((text) => text.text ?? "") };
+    texts.forEach((text, index) => detected.set(text.hash, found[index] ?? "und"));
   }
   const counts = new Map;
   for (const row of rows) {
@@ -47904,7 +47927,7 @@ function* profileSteps(db) {
   profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
   return languages;
 }
-var profiles, SAMPLE_TARGET = 1024, SAMPLE_LIMIT = 2048, READ_BATCH = 500, PROFILE_REUSE_MS, sampling;
+var profiles, SAMPLE_TARGET = 1024, SAMPLE_LIMIT = 2048, READ_BATCH = 500, PROFILE_REUSE_MS, DETECT_SLICE_MS = 15, sampling;
 var init_keyword_languages = __esm(() => {
   init_franc_min();
   profiles = new WeakMap;
