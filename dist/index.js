@@ -7597,6 +7597,38 @@ var init_source_item_read = __esm(() => {
   ];
 });
 
+// src/core/follow-up.ts
+function isNarrowHandle(value) {
+  return typeof value === "string" && NARROW_HANDLE_PATTERN.test(value);
+}
+function parseFollowUp(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return;
+  const record = value;
+  if (typeof record.question !== "string" || !record.question.trim() || !Array.isArray(record.options))
+    return;
+  const options = record.options.flatMap((option) => {
+    if (!option || typeof option !== "object")
+      return [];
+    const { label, narrow } = option;
+    return typeof label === "string" && label.trim() && isNarrowHandle(narrow) ? [{ label, narrow }] : [];
+  });
+  return options.length > 0 ? { question: record.question, options: options.slice(0, FOLLOW_UP_MAX_OPTIONS) } : undefined;
+}
+var FOLLOW_UP_WEAK_BARS, CUT_SHORT_REASONS, FOLLOW_UP_MAX_OPTIONS = 4, NARROW_HANDLE_PATTERN, NARROW_HANDLE_LIFETIME, narrowHandles;
+var init_follow_up = __esm(() => {
+  init_opsec();
+  FOLLOW_UP_WEAK_BARS = Object.freeze({
+    rerankScore: -3,
+    conceptShare: 0.34,
+    vectorMargin: 0.02
+  });
+  CUT_SHORT_REASONS = new Set(["lane_timeout", "semantic_lane_skipped"]);
+  NARROW_HANDLE_PATTERN = /^fu_[A-Za-z0-9_-]{24}$/;
+  NARROW_HANDLE_LIFETIME = 60 * 60 * 1000;
+  narrowHandles = new Map;
+});
+
 // src/core/operation-caller.ts
 function sanitizeCallerDisplayName(value) {
   if (typeof value !== "string")
@@ -8585,6 +8617,13 @@ function isExecutableFile(path) {
   }
 }
 var init_openclaw_executable = () => {};
+
+// src/core/read-wide.ts
+var matchingProvenances, wideProvenances;
+var init_read_wide = __esm(() => {
+  matchingProvenances = new WeakSet;
+  wideProvenances = new WeakSet;
+});
 // src/core/source-index/partial-search.ts
 function recentItemsTimeoutGap(corpusId) {
   return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
@@ -8645,6 +8684,7 @@ function normalizeRouterResultKey(key) {
 }
 var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
+  init_read_wide();
   init_partial_search();
   init_keyword_context();
   init_types();
@@ -8710,6 +8750,7 @@ var init_remote_result = __esm(() => {
   init_parent_label();
   init_release_manifest();
   init_secret_location_note();
+  init_follow_up();
   MAX_ANSWER = 64 * 1024;
   MAX_SENT = 16 * 1024;
   JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
@@ -14019,6 +14060,7 @@ var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values
 ].join(`
 `), ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, analystEvidenceFormats, packPromptBudgets, packEvidenceBatches, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
+  init_read_wide();
   init_opsec();
   init_chunk_selection();
   init_source_model_policy();
@@ -17551,6 +17593,7 @@ var init_evidence_reranker = () => {};
 // src/core/evidence-pack.ts
 var utf82, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
+  init_read_wide();
   init_keyword_context();
   init_release_manifest();
   init_partial_search();
@@ -17572,6 +17615,7 @@ var init_evidence_pack = __esm(() => {
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
   init_model_stream();
+  init_read_wide();
   init_analyst_built_in();
   init_local_analyst_window();
   init_analyst_delphi();
@@ -17586,6 +17630,8 @@ var init_analyst_answer = __esm(() => {
   init_parent_label();
   init_release_manifest();
   init_secret_location_note();
+  init_follow_up();
+  init_remote_result();
   init_source_corpus_registry();
   init_keyword_context();
   init_router();
@@ -23554,6 +23600,7 @@ function sourceItemReadPage(value, name, max = Number.MAX_SAFE_INTEGER) {
 
 // src/core/email.ts
 init_release_manifest();
+init_follow_up();
 init_worker_transport();
 init_config();
 
@@ -23724,6 +23771,7 @@ class EmailClient {
         ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
         ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
         ...options.selectedItems ? { selected_items: options.selectedItems } : {},
+        ...options.narrow ? { narrow: options.narrow } : {},
         ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
         ...options.analystProvider ? { analyst_provider: options.analystProvider } : {},
         ...options.analystModel ? { analyst_model: options.analystModel } : {},
@@ -24284,7 +24332,8 @@ function parseSourceIndexAnswerResult(value) {
     },
     ...value.internal_context !== undefined ? { internal_context: value.internal_context } : {},
     ...value.opsec !== undefined ? { opsec: parseSourceAnswerOpsec(value.opsec) } : {},
-    ...parseSecretLocations(value.secret_locations) ? { secret_locations: parseSecretLocations(value.secret_locations) } : {}
+    ...parseSecretLocations(value.secret_locations) ? { secret_locations: parseSecretLocations(value.secret_locations) } : {},
+    ...parseFollowUp(value.follow_up) ? { follow_up: parseFollowUp(value.follow_up) } : {}
   };
 }
 function parseSecretLocations(value) {
@@ -30681,6 +30730,7 @@ init_config();
 init_operation_error();
 init_source_corpus_registry();
 init_venice_models();
+init_follow_up();
 init_public_surface();
 
 // src/core/cli-via-worker.ts
@@ -31069,6 +31119,7 @@ var SOURCE_ANSWER_PARAMS = {
   authored_after: { type: "string", description: "Optional inclusive ISO lower bound on authored time." },
   authored_before: { type: "string", description: "Optional inclusive ISO upper bound on authored time." },
   selected_items: { type: "array", description: "Optional selected evidence from a prior source_index_search; prefer hit.selected_item. Never source text." },
+  narrow: { type: "string", description: "Optional follow_up option from a prior answer: when a result carries follow_up {question, options}, ask the user that question, then call again with the same question and the chosen option's narrow, unchanged, to search only there. It sets the scope, so pass no other scope filter with it." },
   retrieval_mode: { type: "string", enum: ["keyword", "hybrid"], description: "Optional retrieval override. Omit for the shared hybrid path; set keyword only for an explicit lexical-only request." },
   analyst_provider: { type: "string", enum: ["default", "local", "venice", "tinfoil", "cloud"], description: "Optional analyst constraint. Leave default; set local or venice only when {{ownerName}} explicitly asks. Presets: local-first = local then Venice; private-cloud-only = Venice only." },
   analyst_model: { type: "string", description: "Optional Venice model id for an explicit Venice request. e2ee-* ids are refused; defaults kimi-k3 (strong), inkling (normal)." },
@@ -31231,6 +31282,7 @@ var operations = [
       const authoredAfter = optionalString3(params.authored_after);
       const authoredBefore = optionalString3(params.authored_before);
       const selectedItems = optionalSourceAnswerSelectedItems(params.selected_items, corpusId);
+      const narrow = optionalNarrowHandle(params.narrow);
       const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
       const analystProvider = optionalSourceAnswerAnalystProvider(params.analyst_provider);
       const analystModel = optionalAnalystModel(params.analyst_model, "analyst_model", analystProvider);
@@ -31255,6 +31307,7 @@ var operations = [
         ...authoredAfter !== undefined ? { authoredAfter } : {},
         ...authoredBefore !== undefined ? { authoredBefore } : {},
         ...selectedItems !== undefined ? { selectedItems } : {},
+        ...narrow !== undefined ? { narrow } : {},
         ...retrievalMode !== undefined ? { retrievalMode } : {},
         ...analystProvider !== undefined ? { analystProvider } : {},
         ...analystModel !== undefined ? { analystModel } : {},
@@ -31984,6 +32037,14 @@ function asStringList(value, name) {
 }
 function optionalString3(value) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+function optionalNarrowHandle(value) {
+  if (value === undefined || value === null || value === "")
+    return;
+  if (!isNarrowHandle(value)) {
+    throw new OperationError("invalid_params", "narrow must be a follow_up option's narrow, passed back unchanged.");
+  }
+  return value;
 }
 function optionalNarrowingString(value, name) {
   if (value === undefined)

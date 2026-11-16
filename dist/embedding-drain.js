@@ -7756,6 +7756,10 @@ var progressSink = new AsyncLocalStorage2;
 // src/core/model-stream.ts
 var progress = new AsyncLocalStorage3;
 
+// src/core/read-wide.ts
+var matchingProvenances = new WeakSet;
+var wideProvenances = new WeakSet;
+
 // src/core/analyst.ts
 import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 
