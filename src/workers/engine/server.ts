@@ -2283,6 +2283,21 @@ export async function main(): Promise<void> {
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
+  // The background's SQLite files, sampled for the loop-stall receipt
+  // (sqlite-wal-sampler.ts): settings once, then WAL size and the
+  // longest-open read snapshot whenever either is large. Started as soon as
+  // the stores are known, before boot's own writes: with the loop's automatic
+  // checkpoint off, a boot that ran before the first sample let the ledger's
+  // WAL reach 2.19 GB unfolded (lane 6 boot leg on 01f40a09, 16 Nov).
+  const walSampler = engineRole === 'background' ? startSqliteWalSampler(() => [
+    ...connectorStores.map((store) => ({ label: store.corpusId, dbPath: store.dbPath, settings: () => store.sqliteJournalSettings() })),
+    ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
+      label: `tier-ledger-${index + 1}`, dbPath: ledger.dbPath, settings: () => ledger.sqliteJournalSettings(),
+    })),
+    ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
+      label: `judge-queue-${index + 1}`, dbPath: tierSnifferPathForLedger(ledger.dbPath),
+    })),
+  ], { afterSample: (files) => checkpointer?.tick(files) }) : undefined;
   // Test-only workloads; the hook requires an explicitly named synthetic fixture.
   const loopStallModule = '../../../scripts/loop-stall-test.ts';
   const loopStallFixture = process.env.NODE_ENV === 'test' && process.env.OLYMPUS_LOOP_STALL_DIR
@@ -6746,19 +6761,7 @@ export async function main(): Promise<void> {
           log: (line) => console.warn(line),
         })
       : undefined;
-    // The background's SQLite files, sampled for the loop-stall receipt
-    // (sqlite-wal-sampler.ts): settings once, then WAL size and the
-    // longest-open read snapshot whenever either is large.
-    const walSampler = startSqliteWalSampler(() => [
-      ...connectorStores.map((store) => ({ label: store.corpusId, dbPath: store.dbPath, settings: () => store.sqliteJournalSettings() })),
-      ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
-        label: `tier-ledger-${index + 1}`, dbPath: ledger.dbPath, settings: () => ledger.sqliteJournalSettings(),
-      })),
-      ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
-        label: `judge-queue-${index + 1}`, dbPath: tierSnifferPathForLedger(ledger.dbPath),
-      })),
-    ], { afterSample: (files) => checkpointer?.tick(files) });
-    engineBackground = { stop: () => { walSampler.stop(); checkpointer?.stop(); statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
+    engineBackground = { stop: () => { walSampler?.stop(); checkpointer?.stop(); statusRecount?.stop(); rssRestart.stop(); status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
   }
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)

@@ -148,7 +148,7 @@ test('a tier ledger open walks no copies: stale embedding holds are settled off 
   expect(statementsDuring(() => { new TierLedger({ dbPath }).close(); }).some(walks)).toBe(false);
 });
 
-test('chunks with no embedding input hash are set by key, a page at a time, and the search stops once none are left', async () => {
+test('chunks with no embedding input hash are set by key, a page of keys at a time, and the walk stops once past the last', async () => {
   const { dir, cleanup } = tempDir('olympus-store-input-hash-');
   cleanups.push(cleanup);
   const dbPath = join(dir, 'internal.sqlite');
@@ -165,13 +165,13 @@ test('chunks with no embedding input hash are set by key, a page at a time, and 
   const missing = () => (raw.query('SELECT COUNT(*) AS n FROM chunks WHERE embedding_input_hash IS NULL').get() as { n: number }).n;
   const total = missing();
   expect(total).toBeGreaterThanOrEqual(3);
-  expect(await store.repairEmbeddingInputHashes(2)).toBe(2);
+  expect(await store.repairEmbeddingInputHashes(2, 1)).toBe(2);
   let set = 2;
-  while (missing() > 0) set += await store.repairEmbeddingInputHashes(2);
+  while (missing() > 0) set += await store.repairEmbeddingInputHashes(2, 1);
   expect(set).toBe(total);
   expect((raw.query('SELECT COUNT(*) AS n FROM chunks WHERE embedding_input_hash <> content_hash').get() as { n: number }).n).toBe(0);
-  expect(await store.repairEmbeddingInputHashes(2)).toBe(0);
+  expect(await store.repairEmbeddingInputHashes(2, 1)).toBe(0);
   // A later NULL is not looked for again in this process.
   raw.exec('UPDATE chunks SET embedding_input_hash = NULL');
-  expect(await store.repairEmbeddingInputHashes(2)).toBe(0);
+  expect(await store.repairEmbeddingInputHashes(2, 1)).toBe(0);
 });

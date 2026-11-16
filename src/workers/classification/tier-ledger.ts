@@ -389,15 +389,17 @@ function listRoutedRead(options: { after?: TierLedgerIdentity; limit?: number })
   const after = options.after
     ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
     : null;
+  // Two texts, not "? IS NULL OR key > ?": with the OR, SQLite cannot seek
+  // to the key, and every page walked the index from its start.
   return {
     sql: `
       SELECT * FROM tier_items
       WHERE routed = 1
-        AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+        ${after ? 'AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : ''}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
     `,
-    params: [after ? 1 : null, ...(after ?? [null, null, null, null]), limit], mode: 'all',
+    params: [...(after ?? []), limit], mode: 'all',
   };
 }
 

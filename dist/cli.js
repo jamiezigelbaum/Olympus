@@ -40942,11 +40942,11 @@ function listRoutedRead(options) {
     sql: `
       SELECT * FROM tier_items
       WHERE routed = 1
-        AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+        ${after ? "AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : ""}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
     `,
-    params: [after ? 1 : null, ...after ?? [null, null, null, null], limit],
+    params: [...after ?? [], limit],
     mode: "all"
   };
 }
@@ -60902,7 +60902,24 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
     FROM items i
     WHERE i.tombstoned = 0 AND i.mime_type = 'application/pdf'
   )
-`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, PDF_EXTRACTION_BACKLOG_PAGE_SQL = `
+  SELECT
+    SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
+    SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
+    COALESCE(SUM(chars), 0) AS chars
+  FROM (
+    SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
+    FROM items i
+    WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND i.mime_type = 'application/pdf'
+  )
+`, AUTHOR_COVERAGE_PAGE_SQL = `
+  SELECT provider, COUNT(*) AS items,
+    SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
+      THEN 1 ELSE 0 END) AS without_author
+  FROM items
+  WHERE item_pk > ? AND item_pk <= ? AND tombstoned = 0 AND parent_local_item_id IS NULL
+  GROUP BY provider
+`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, IMAGE_CONTENT_PAGE_KEYS = 20000, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_source_size_limits();
   init_store_totals();
@@ -63633,7 +63650,16 @@ ${parentKey(ref)}`, { ref, origin });
         return [];
       if (!offThreadReadsSupported(this.dbPath))
         return this.db.query(read.sql).all();
-      return await readInBackground(this.dbPath, read);
+      const [last] = await readInBackground(this.dbPath, { sql: "SELECT MAX(item_pk) AS n FROM items", params: [], mode: "all" });
+      const found = [];
+      for (let lo = 0, end = Number(last?.n ?? 0);lo < end; lo += IMAGE_CONTENT_PAGE_KEYS) {
+        found.push(...await readInBackground(this.dbPath, {
+          sql: `${read.sql} AND i.item_pk > ? AND i.item_pk <= ?`,
+          params: [lo, Math.min(lo + IMAGE_CONTENT_PAGE_KEYS, end)],
+          mode: "all"
+        }));
+      }
+      return found;
     }
     imageContentOutsidePrivateRows() {
       const read = this.imageContentOutsidePrivateRead();
@@ -64049,8 +64075,16 @@ ${parentKey(ref)}`, { ref, origin });
     async authorCoverageOffThread() {
       if (!offThreadReadsSupported(this.dbPath))
         return this.authorCoverage();
-      const read = this.authorCoverageRead();
-      return authorCoverageRows(await readInBackground(this.dbPath, read));
+      const byProvider = new Map;
+      await this.walkItemKeys(async (lo, hi) => {
+        for (const row of await readInBackground(this.dbPath, { sql: AUTHOR_COVERAGE_PAGE_SQL, params: [lo, hi], mode: "all" })) {
+          const total = byProvider.get(row.provider) ?? { provider: row.provider, items: 0, without_author: 0 };
+          total.items += Number(row.items);
+          total.without_author = Number(total.without_author ?? 0) + Number(row.without_author ?? 0);
+          byProvider.set(row.provider, total);
+        }
+      });
+      return authorCoverageRows([...byProvider.values()].sort((a, b) => a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0));
     }
     authorCoverageRead() {
       return { mode: "all", params: [], sql: `
@@ -67248,9 +67282,33 @@ ${parentKey(ref)}`, { ref, origin });
     async embeddingBacklogEstimateOffThread(modelId, embedder, scope, options = {}) {
       if (!offThreadReadsSupported(this.dbPath))
         return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
-      const read = this.embeddingBacklogRead(modelId, embedder, scope, options, false);
-      const row = await readInBackground(this.dbPath, read);
-      return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, false);
+      const excluded = tierExclusion.params.length > 0 ? JSON.parse(tierExclusion.params[0]) : [];
+      const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
+      const scoped = statusScopeContentFilter(scope);
+      const sql = `
+      SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
+      FROM items i
+      CROSS JOIN chunks c ON c.item_pk = i.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}
+    `;
+      let missingChunks = 0;
+      let chars = 0;
+      await this.walkItemKeys(async (lo, hi) => {
+        const page = excluded.length > 0 ? [JSON.stringify(excluded.filter((pk) => pk > lo && pk <= hi))] : [];
+        const row = await readInBackground(this.dbPath, { sql, params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params], mode: "get" });
+        missingChunks += Number(row.missing);
+        chars += Number(row.chars);
+      });
+      return { missingChunks, estimatedTokens: Math.ceil(chars / 4) };
+    }
+    async walkItemKeys(page) {
+      const [last] = await readInBackground(this.dbPath, { sql: "SELECT MAX(item_pk) AS n FROM items", params: [], mode: "all" });
+      for (let lo = 0, end = Number(last?.n ?? 0);lo < end; lo += statusPageKeys)
+        await page(lo, Math.min(lo + statusPageKeys, end));
     }
     embeddingBacklogRead(modelId, embedder, scope, options, connectionLocal) {
       const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
@@ -67273,7 +67331,14 @@ ${parentKey(ref)}`, { ref, origin });
     async pdfExtractionBacklogOffThread() {
       if (!offThreadReadsSupported(this.dbPath))
         return this.pdfExtractionBacklog();
-      return pdfBacklogFromRow(await readInBackground(this.dbPath, { sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: "get" }));
+      const total = { pendingPdfs: 0, extractedPdfs: 0, extractedChars: 0 };
+      await this.walkItemKeys(async (lo, hi) => {
+        const page = pdfBacklogFromRow(await readInBackground(this.dbPath, { sql: PDF_EXTRACTION_BACKLOG_PAGE_SQL, params: [lo, hi], mode: "get" }));
+        total.pendingPdfs += page.pendingPdfs;
+        total.extractedPdfs += page.extractedPdfs;
+        total.extractedChars += page.extractedChars;
+      });
+      return total;
     }
     embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false, connectionLocal = true) {
       const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
@@ -69275,21 +69340,31 @@ ${parentKey(ref)}`, { ref, origin });
       return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
     }
     embeddingInputHashesChecked = false;
-    async repairEmbeddingInputHashes(pageSize = 2000) {
+    embeddingInputHashWalk;
+    async repairEmbeddingInputHashes(pageKeys = 20000, pages = 10) {
       if (this.readOnly || this.embeddingInputHashesChecked)
         return 0;
-      const sql = "SELECT chunk_pk FROM chunks WHERE embedding_input_hash IS NULL LIMIT ?";
-      const rows = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params: [pageSize], mode: "all" }) : this.db.query(sql).all(pageSize);
-      if (rows.length < pageSize)
-        this.embeddingInputHashesChecked = true;
-      if (rows.length === 0)
-        return 0;
+      const pool = offThreadReadsSupported(this.dbPath);
+      const read = async (sql, params) => pool ? readInBackground(this.dbPath, { sql, params, mode: "all" }) : this.db.query(sql).all(...params);
+      if (!this.embeddingInputHashWalk) {
+        const [row] = await read("SELECT MAX(chunk_pk) AS last FROM chunks", []);
+        this.embeddingInputHashWalk = { after: 0, last: Number(row?.last ?? 0) };
+      }
+      const walk = this.embeddingInputHashWalk;
       const set = this.db.query("UPDATE chunks SET embedding_input_hash = content_hash WHERE chunk_pk = ? AND embedding_input_hash IS NULL");
       let changed = 0;
-      this.db.transaction(() => {
-        for (const row of rows)
-          changed += set.run(row.chunk_pk).changes;
-      })();
+      for (let page = 0;page < pages && walk.after < walk.last; page += 1) {
+        const hi = Math.min(walk.after + pageKeys, walk.last);
+        const rows = await read("SELECT chunk_pk FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ? AND embedding_input_hash IS NULL", [walk.after, hi]);
+        walk.after = hi;
+        if (rows.length > 0)
+          this.db.transaction(() => {
+            for (const row of rows)
+              changed += set.run(row.chunk_pk).changes;
+          })();
+      }
+      if (walk.after >= walk.last)
+        this.embeddingInputHashesChecked = true;
       return changed;
     }
     status(scope, options = {}) {
@@ -267977,6 +268052,18 @@ ${key}`;
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
+  const walSampler = engineRole === "background" ? startSqliteWalSampler(() => [
+    ...connectorStores.map((store) => ({ label: store.corpusId, dbPath: store.dbPath, settings: () => store.sqliteJournalSettings() })),
+    ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
+      label: `tier-ledger-${index + 1}`,
+      dbPath: ledger.dbPath,
+      settings: () => ledger.sqliteJournalSettings()
+    })),
+    ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
+      label: `judge-queue-${index + 1}`,
+      dbPath: tierSnifferPathForLedger(ledger.dbPath)
+    }))
+  ], { afterSample: (files) => checkpointer?.tick(files) }) : undefined;
   const loopStallModule = "../../../scripts/loop-stall-test.ts";
   const loopStallFixture = undefined;
   let visibilityKeeping = false;
@@ -271469,20 +271556,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       },
       log: (line) => console.warn(line)
     }) : undefined;
-    const walSampler = startSqliteWalSampler(() => [
-      ...connectorStores.map((store) => ({ label: store.corpusId, dbPath: store.dbPath, settings: () => store.sqliteJournalSettings() })),
-      ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
-        label: `tier-ledger-${index + 1}`,
-        dbPath: ledger.dbPath,
-        settings: () => ledger.sqliteJournalSettings()
-      })),
-      ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
-        label: `judge-queue-${index + 1}`,
-        dbPath: tierSnifferPathForLedger(ledger.dbPath)
-      }))
-    ], { afterSample: (files) => checkpointer?.tick(files) });
     engineBackground = { stop: () => {
-      walSampler.stop();
+      walSampler?.stop();
       checkpointer?.stop();
       statusRecount?.stop();
       rssRestart.stop();

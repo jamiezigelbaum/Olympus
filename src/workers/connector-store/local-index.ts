@@ -7221,7 +7221,17 @@ export class LocalConnectorStore {
     const read = this.imageContentOutsidePrivateRead();
     if (!read) return [];
     if (!offThreadReadsSupported(this.dbPath)) return this.db.query(read.sql).all() as ImageContentOutsidePrivateRow[];
-    return await readInBackground(this.dbPath, read) as ImageContentOutsidePrivateRow[];
+    // A page of item keys per read, each a seek (plan thread, 16 Nov): one
+    // read over every item held the read worker 48 times a gate run.
+    const [last] = await readInBackground(this.dbPath, { sql: 'SELECT MAX(item_pk) AS n FROM items', params: [], mode: 'all' }) as Array<{ n: number | null }>;
+    const found: ImageContentOutsidePrivateRow[] = [];
+    for (let lo = 0, end = Number(last?.n ?? 0); lo < end; lo += IMAGE_CONTENT_PAGE_KEYS) {
+      found.push(...await readInBackground(this.dbPath, {
+        sql: `${read.sql} AND i.item_pk > ? AND i.item_pk <= ?`,
+        params: [lo, Math.min(lo + IMAGE_CONTENT_PAGE_KEYS, end)], mode: 'all',
+      }) as ImageContentOutsidePrivateRow[]);
+    }
+    return found;
   }
 
   /** The same rows on this thread (a direct caller, not the engine's loop). */
@@ -7838,8 +7848,16 @@ export class LocalConnectorStore {
   /** authorCoverage, read on the store's read thread (the status count runs it on every store). */
   async authorCoverageOffThread(): Promise<Array<{ provider: string; items: number; itemsWithoutAuthor: number }>> {
     if (!offThreadReadsSupported(this.dbPath)) return this.authorCoverage();
-    const read = this.authorCoverageRead();
-    return authorCoverageRows(await readInBackground(this.dbPath, read) as AuthorCoverageRow[]);
+    const byProvider = new Map<string, AuthorCoverageRow>();
+    await this.walkItemKeys(async (lo, hi) => {
+      for (const row of await readInBackground(this.dbPath, { sql: AUTHOR_COVERAGE_PAGE_SQL, params: [lo, hi], mode: 'all' }) as AuthorCoverageRow[]) {
+        const total = byProvider.get(row.provider) ?? { provider: row.provider, items: 0, without_author: 0 };
+        total.items += Number(row.items);
+        total.without_author = Number(total.without_author ?? 0) + Number(row.without_author ?? 0);
+        byProvider.set(row.provider, total);
+      }
+    });
+    return authorCoverageRows([...byProvider.values()].sort((a, b) => (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0)));
   }
 
   private authorCoverageRead(): StoreRead {
@@ -13014,9 +13032,36 @@ export class LocalConnectorStore {
     options: { countsMaxAgeMs?: number } = {},
   ): Promise<{ missingChunks: number; estimatedTokens: number }> {
     if (!offThreadReadsSupported(this.dbPath)) return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
-    const read = this.embeddingBacklogRead(modelId, embedder, scope, options, false);
-    const row = await readInBackground(this.dbPath, read) as { missing: number; chars: number };
-    return { missingChunks: row.missing, estimatedTokens: Math.ceil(row.chars / 4) };
+    // A page of item keys per read, each a seek; the excluded items go a
+    // page's worth at a time too (plan thread, 16 Nov).
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, false);
+    const excluded = tierExclusion.params.length > 0 ? JSON.parse(tierExclusion.params[0]!) as number[] : [];
+    const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
+    const scoped = statusScopeContentFilter(scope);
+    const sql = `
+      SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
+      FROM items i
+      CROSS JOIN chunks c ON c.item_pk = i.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}
+    `;
+    let missingChunks = 0;
+    let chars = 0;
+    await this.walkItemKeys(async (lo, hi) => {
+      const page = excluded.length > 0 ? [JSON.stringify(excluded.filter((pk) => pk > lo && pk <= hi))] : [];
+      const row = await readInBackground(this.dbPath, { sql, params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params], mode: 'get' }) as { missing: number; chars: number };
+      missingChunks += Number(row.missing);
+      chars += Number(row.chars);
+    });
+    return { missingChunks, estimatedTokens: Math.ceil(chars / 4) };
+  }
+
+  /** Calls `page` for each range of item keys (lo, hi], a page of STATUS_PAGE_KEYS, up to the last key now. */
+  private async walkItemKeys(page: (lo: number, hi: number) => Promise<void>): Promise<void> {
+    const [last] = await readInBackground(this.dbPath, { sql: 'SELECT MAX(item_pk) AS n FROM items', params: [], mode: 'all' }) as Array<{ n: number | null }>;
+    for (let lo = 0, end = Number(last?.n ?? 0); lo < end; lo += statusPageKeys) await page(lo, Math.min(lo + statusPageKeys, end));
   }
 
   private embeddingBacklogRead(
@@ -13053,7 +13098,14 @@ export class LocalConnectorStore {
   /** pdfExtractionBacklog on the store's read thread. */
   async pdfExtractionBacklogOffThread(): Promise<{ pendingPdfs: number; extractedPdfs: number; extractedChars: number }> {
     if (!offThreadReadsSupported(this.dbPath)) return this.pdfExtractionBacklog();
-    return pdfBacklogFromRow(await readInBackground(this.dbPath, { sql: PDF_EXTRACTION_BACKLOG_SQL, params: [], mode: 'get' }) as PdfBacklogRow);
+    const total = { pendingPdfs: 0, extractedPdfs: 0, extractedChars: 0 };
+    await this.walkItemKeys(async (lo, hi) => {
+      const page = pdfBacklogFromRow(await readInBackground(this.dbPath, { sql: PDF_EXTRACTION_BACKLOG_PAGE_SQL, params: [lo, hi], mode: 'get' }) as PdfBacklogRow);
+      total.pendingPdfs += page.pendingPdfs;
+      total.extractedPdfs += page.extractedPdfs;
+      total.extractedChars += page.extractedChars;
+    });
+    return total;
   }
 
   /** `countsMaxAgeMs` only for counts a status snapshot shows (see STATUS_COUNTS_MAX_AGE_MS); never for what is embedded. */
@@ -16243,25 +16295,38 @@ export class LocalConnectorStore {
   }
 
   private embeddingInputHashesChecked = false;
+  private embeddingInputHashWalk: { after: number; last: number } | undefined;
 
   /**
    * Chunks with no embedding input hash (written before the column, by a
    * backfill cut short, or copied from such a store) get their content hash,
-   * as migrate's backfill did at every open until it cost 46 s there. Found
-   * on the read thread a page at a time and set by key here; once a pass
-   * finds none, this process stops looking. Returns the chunks set.
+   * as migrate's backfill did at every open until it cost 46 s there. Every
+   * chunk written now has one, so this is a one-time walk per process over
+   * the chunks that were there when it began: `pageKeys` chunk keys a page,
+   * each page a seek and its own read on the read thread, up to `pages`
+   * pages a call, set by key here. Once the walk passes the last key, this
+   * process stops looking. Returns the chunks set.
    */
-  async repairEmbeddingInputHashes(pageSize = 2_000): Promise<number> {
+  async repairEmbeddingInputHashes(pageKeys = 20_000, pages = 10): Promise<number> {
     if (this.readOnly || this.embeddingInputHashesChecked) return 0;
-    const sql = 'SELECT chunk_pk FROM chunks WHERE embedding_input_hash IS NULL LIMIT ?';
-    const rows = (offThreadReadsSupported(this.dbPath)
-      ? await readInBackground(this.dbPath, { sql, params: [pageSize], mode: 'all' })
-      : this.db.query(sql).all(pageSize)) as Array<{ chunk_pk: number }>;
-    if (rows.length < pageSize) this.embeddingInputHashesChecked = true;
-    if (rows.length === 0) return 0;
+    const pool = offThreadReadsSupported(this.dbPath);
+    const read = async (sql: string, params: number[]): Promise<unknown> => (pool
+      ? readInBackground(this.dbPath, { sql, params, mode: 'all' })
+      : this.db.query(sql).all(...params));
+    if (!this.embeddingInputHashWalk) {
+      const [row] = await read('SELECT MAX(chunk_pk) AS last FROM chunks', []) as Array<{ last: number | null }>;
+      this.embeddingInputHashWalk = { after: 0, last: Number(row?.last ?? 0) };
+    }
+    const walk = this.embeddingInputHashWalk;
     const set = this.db.query('UPDATE chunks SET embedding_input_hash = content_hash WHERE chunk_pk = ? AND embedding_input_hash IS NULL');
     let changed = 0;
-    this.db.transaction(() => { for (const row of rows) changed += set.run(row.chunk_pk).changes; })();
+    for (let page = 0; page < pages && walk.after < walk.last; page += 1) {
+      const hi = Math.min(walk.after + pageKeys, walk.last);
+      const rows = await read('SELECT chunk_pk FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ? AND embedding_input_hash IS NULL', [walk.after, hi]) as Array<{ chunk_pk: number }>;
+      walk.after = hi;
+      if (rows.length > 0) this.db.transaction(() => { for (const row of rows) changed += set.run(row.chunk_pk).changes; })();
+    }
+    if (walk.after >= walk.last) this.embeddingInputHashesChecked = true;
     return changed;
   }
 
@@ -18902,6 +18967,27 @@ const PDF_EXTRACTION_BACKLOG_SQL = `
   )
 `;
 
+const PDF_EXTRACTION_BACKLOG_PAGE_SQL = `
+  SELECT
+    SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
+    SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
+    COALESCE(SUM(chars), 0) AS chars
+  FROM (
+    SELECT (SELECT SUM(LENGTH(c.bounded_text)) FROM chunks c WHERE c.item_pk = i.item_pk) AS chars
+    FROM items i
+    WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND i.mime_type = 'application/pdf'
+  )
+`;
+
+const AUTHOR_COVERAGE_PAGE_SQL = `
+  SELECT provider, COUNT(*) AS items,
+    SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '')
+      THEN 1 ELSE 0 END) AS without_author
+  FROM items
+  WHERE item_pk > ? AND item_pk <= ? AND tombstoned = 0 AND parent_local_item_id IS NULL
+  GROUP BY provider
+`;
+
 type PdfBacklogRow = { pending: number | null; extracted: number | null; chars: number };
 
 function pdfBacklogFromRow(row: PdfBacklogRow): { pendingPdfs: number; extractedPdfs: number; extractedChars: number } {
@@ -19058,6 +19144,9 @@ export function tierRowVisible(
 }
 
 /** Chunks held by names-only copies, as a status field present only when non-zero. */
+/** Item keys per page of the image-content finder: each page is a seek, its own read. */
+const IMAGE_CONTENT_PAGE_KEYS = 20_000;
+
 /** Item keys per page of a status count: each page is a seek on the items' key, its own read. */
 const STATUS_PAGE_KEYS = 20_000;
 let statusPageKeys = STATUS_PAGE_KEYS;

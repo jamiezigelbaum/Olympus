@@ -107,6 +107,10 @@ describe('connector store status off the worker thread', () => {
         try {
           expect(store.status(scope)).toEqual(whole);
           expect(await store.statusOffThread(scope)).toEqual(whole);
+          // The status estimates walk the same pages on the read worker.
+          expect(await store.authorCoverageOffThread()).toEqual(store.authorCoverage());
+          expect(await store.pdfExtractionBacklogOffThread()).toEqual(store.pdfExtractionBacklog());
+          expect(await store.embeddingBacklogEstimateOffThread('some-model', undefined, scope)).toEqual(store.embeddingBacklogEstimate('some-model', undefined, scope));
         } finally { setStatusPageKeysForTests(); }
       }
     } finally {

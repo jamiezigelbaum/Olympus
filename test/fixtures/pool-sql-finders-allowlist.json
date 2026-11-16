@@ -3,36 +3,6 @@
   "entries": [
     {
       "lane": "background",
-      "site": "authorCoverageOffThread@local-index.ts<<anonymous>@background-loop-named-calls.test.ts",
-      "table": "items",
-      "reason": "to page by key (SCAN items USING INDEX sqlite_autoindex_items_1: SELECT provider, COUNT(*) AS items, SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '') THEN 1 ELSE )"
-    },
-    {
-      "lane": "background",
-      "site": "authorCoverageOffThread@local-index.ts<reusedStoreRead@status.ts",
-      "table": "items",
-      "reason": "to page by key (SCAN items USING INDEX sqlite_autoindex_items_1: SELECT provider, COUNT(*) AS items, SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '') THEN 1 ELSE )"
-    },
-    {
-      "lane": "background",
-      "site": "embeddingBacklogEstimateOffThread@local-index.ts<<anonymous>@background-loop-named-calls.test.ts",
-      "table": "chunks",
-      "reason": "to page by key (SCAN c: SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars FROM chunks c JOIN items i ON i.item_pk = c.item_pk LEFT JOIN chunk_embeddings e O)"
-    },
-    {
-      "lane": "background",
-      "site": "imageContentOutsidePrivateRowsOffThread@local-index.ts<runPassOffThread@loop-pass.ts",
-      "table": "items",
-      "reason": "to page by key (SCAN i: SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id FROM items i WHERE i.tombstoned = 0 AND LOWER(i.mime_type) LIKE 'i)"
-    },
-    {
-      "lane": "background",
-      "site": "pdfExtractionBacklogOffThread@local-index.ts<<anonymous>@background-loop-named-calls.test.ts",
-      "table": "items",
-      "reason": "to page by key (SCAN i: SELECT SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted, COALESCE(SUM(chars), 0) AS chars )"
-    },
-    {
-      "lane": "background",
       "site": "runPassOffThread@loop-pass.ts<settleStoredItems@sniffer-service.ts",
       "table": "tier_items",
       "reason": "to page by key (SCAN tier_items USING INDEX sqlite_autoindex_tier_items_1: SELECT * FROM ( SELECT * FROM tier_items ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ? ) WHERE routed = 1 AND content_read = 0 AN)"
