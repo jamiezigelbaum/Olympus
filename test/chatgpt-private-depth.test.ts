@@ -24,7 +24,8 @@ import { NoPrivateEvidenceError, PRIVATE_ANSWER_META_KEY, type PrivateAnswerMode
 import { generatePanelKeyPair } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS, PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { SEARCH_TOOL, SOURCE_ANSWER_TOOL, callChatGptTool, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
-import { copyPrivateMatch, PRIVATE_CHECK_PENDING_NOTE } from '../src/workers/chatgpt/response-builder.ts';
+import { copyPrivateMatch, PRIVATE_CHECKING_PANEL_NOTE } from '../src/workers/chatgpt/response-builder.ts';
+import { waitFor } from './helpers/test-clock.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 
 /** Synthetic fixtures with no store behind them: every item is eligible unless a test says otherwise. */
@@ -405,32 +406,45 @@ describe('a private match probe that is slow or fails', () => {
     };
   }
 
-  test('a probe past its deadline: no panel, and one counts-only line that says it timed out', async () => {
+  // Jamie, 2026-11-16: "as long as the answer is in progress, it shouldn't cancel for no reason."
+  test('a search past the wait is not dropped: a checking panel, and one counts-only line that says it is still running', async () => {
     const lines: string[] = [];
     const result = await callChatGptTool(SEARCH_TOOL.name, { question: QUESTION }, {} as OperationContext, options(() => new Promise(() => {}), lines));
     expect(result.isError).not.toBe(true);
-    expect((result._meta as Record<string, unknown> | undefined)?.[PRIVATE_ANSWER_META_KEY]).toEqual({ v: 1, count: 0, state: 'none' });
-    expect(lines).toEqual(['[chatgpt] private match probe timed_out stage=search timeout_ms=30']);
-    // Never silent: the model says any Private answer will wait on the computer.
-    expect((result.structuredContent as { notes: string[] }).notes).toContain(PRIVATE_CHECK_PENDING_NOTE);
-    expect(JSON.stringify(result.content)).toContain('waiting in Olympus on their computer');
+    expect((result._meta as Record<string, Record<string, unknown>>)[PRIVATE_ANSWER_META_KEY]).toMatchObject({ v: 1, count: 1, state: 'ready' });
+    expect(lines).toEqual(['[chatgpt] private match probe still_running stage=search waited_ms=30']);
+    expect((result.structuredContent as { notes: string[] }).notes).toContain(PRIVATE_CHECKING_PANEL_NOTE);
   });
 
-  test('a probe that matches after its deadline still leaves the question waiting on the computer', async () => {
+  test('the checking panel answers from the search when it finishes, and the late match also waits on the computer', async () => {
     const lines: string[] = [];
     const recorded: unknown[] = [];
-    let finish: (value: { count: number; evidence: [] }) => void = () => {};
-    const slow = new Promise<{ count: number; evidence: [] }>((resolve) => { finish = resolve; });
+    let finish: (value: { count: number; evidence: PrivateEvidenceItem[] }) => void = () => {};
+    const slow = new Promise<{ count: number; evidence: PrivateEvidenceItem[] }>((resolve) => { finish = resolve; });
     const waitingQuestions = () => ({
       ticket: (connectionId: string) => ({ connectionId }),
       record: (ticket: unknown, input: unknown) => { recorded.push({ ticket, input }); return { id: 'w1', generation: 1, connectionId: 'conn-1' }; },
     }) as never;
+    const read: string[][] = [];
+    const model: PrivateAnswerModel = {
+      status: () => ({ state: 'ready' }),
+      answerPrivately: async (_q, evidence) => { read.push(evidence.map((item) => String(item.title))); return { answer: 'late answer', citations: [] }; },
+    };
+    const privateAnswers = new PrivateAnswerJobs({ eligible: ALL_ELIGIBLE, model: () => model, installId: () => INSTALL, log: () => {}, claimHoldMs: 0, acknowledge: () => true });
     const ctx = { caller: { surface: 'remote', connectionId: 'conn-1' } } as unknown as OperationContext;
-    const result = await callChatGptTool(SEARCH_TOOL.name, { question: QUESTION }, ctx, { ...options(() => slow, lines), waitingQuestions });
-    expect((result._meta as Record<string, unknown> | undefined)?.[PRIVATE_ANSWER_META_KEY]).toEqual({ v: 1, count: 0, state: 'none' });
+    const result = await callChatGptTool(SEARCH_TOOL.name, { question: QUESTION }, ctx, { ...options(() => slow, lines), privateAnswers, waitingQuestions });
+    const meta = (result._meta as Record<string, { jobId?: string; state: string }>)[PRIVATE_ANSWER_META_KEY]!;
+    expect(meta.state).toBe('ready');
     expect(recorded).toEqual([]);
-    finish({ count: 2, evidence: [] });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const key = (await generatePanelKeyPair()).publicKey;
+    expect((await privateAnswers.claim(meta.jobId!, key)).body.status).toBe('pending');
+    finish({ count: 1, evidence: [{ title: 'late report', trust_domain: 'secure_local', chunks: ['value 5'] } as unknown as PrivateEvidenceItem] });
+    const ready = await waitFor(async () => {
+      const claimed = await privateAnswers.claim(meta.jobId!, key);
+      return claimed.body.status === 'pending' ? undefined : claimed;
+    }, { description: 'the checking panel answers' });
+    expect(ready.body.status).toBe('ready');
+    expect(read).toEqual([['late report']]);
     expect(recorded).toEqual([{ ticket: { connectionId: 'conn-1' }, input: { question: QUESTION, surface: 'chatgpt', state: 'waiting', detail: 'summary' } }]);
     expect(lines[1]).toMatch(/^\[chatgpt\] private match probe matched_late stage=search elapsed_ms=\d+$/);
   });

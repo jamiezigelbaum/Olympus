@@ -97,6 +97,8 @@ export interface PrivateMatchSummary {
   panelState: PrivateAnswerPanelState;
   percent?: number;
   detail?: PrivateAnswerDetail;
+  /** The Private search was still running when the result went out: the panel shows its answer when it finishes. */
+  checking?: true;
 }
 
 /** One source of a private answer, as the panel decrypts it. */

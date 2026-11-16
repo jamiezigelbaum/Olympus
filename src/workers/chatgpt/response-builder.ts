@@ -639,6 +639,15 @@ const PRIVATE_PANEL_RULES = 'Don\'t suggest changing folder settings for those i
 const PANEL_WAIT = 'it can take up to a minute';
 const PANEL_FULL_WAIT = 'reading the full report can take a few minutes';
 export const PRIVATE_MATCH_PANEL_NOTE = privatePanelNote(PANEL_WAIT);
+/**
+ * The Private search was still running when this result went out (a big
+ * archive, a busy computer): a panel waits for it. Nothing is known yet about
+ * whether anything matches, so the model says only that it is still checking.
+ */
+export const PRIVATE_CHECKING_PANEL_NOTE = 'Olympus is still checking this question against the user\'s Private items on their computer. '
+  + 'If any match, it answers from them privately: in a panel below this reply if the app shows one, and always in Olympus on the user\'s computer. '
+  + 'Answer from any evidence above as usual, then say that in one short sentence; don\'t guess at the private part. '
+  + PRIVATE_PANEL_RULES;
 /** The same note when the panel reads the whole report (detail: full), which takes longer. */
 export const PRIVATE_MATCH_PANEL_FULL_NOTE = privatePanelNote(PANEL_FULL_WAIT);
 /** The panel note when the result also carries released evidence: answer from it, one line about the panel. */
@@ -677,6 +686,7 @@ export function privateMatchNote(
   const panel = copyPrivateMatch(match);
   if (panel) {
     if (panel.state !== 'ready') return PRIVATE_MATCH_PANEL_SETUP_NOTE;
+    if (match?.checking === true) return PRIVATE_CHECKING_PANEL_NOTE;
     if (releasedEvidence) return panel.detail === 'full' ? PRIVATE_MATCH_PANEL_EVIDENCE_FULL_NOTE : PRIVATE_MATCH_PANEL_EVIDENCE_NOTE;
     return panel.detail === 'full' ? PRIVATE_MATCH_PANEL_FULL_NOTE : PRIVATE_MATCH_PANEL_NOTE;
   }

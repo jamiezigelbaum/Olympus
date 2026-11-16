@@ -356,7 +356,9 @@ interface Job {
   openTokens: number;
   openRefilledAt: number;
   /** The waiting record this job answers, when the question was recorded. */
-  readonly waiting: PrivateAnswerWaitingRef | undefined;
+  waiting: PrivateAnswerWaitingRef | undefined;
+  /** A checking job's waiting record, made when its late search matches (read once its refresh returns). */
+  waitingLater?: (() => PrivateAnswerWaitingRef | undefined) | undefined;
   /** The single-use acknowledgment capability, minted when the answer is sealed; spent on use. */
   ack?: string | undefined;
   /** Handing the sealed answer to the claiming panel counts as its acknowledgment (begin's `seenOnDelivery`). */
@@ -562,6 +564,14 @@ export class PrivateAnswerJobs {
     /** The waiting record a rendered answer acknowledges. */
     waiting?: PrivateAnswerWaitingRef;
     /**
+     * A question whose Private search is still running when the tool result
+     * goes out: the job is made with no evidence yet, and its claim's refresh
+     * waits for that search, so the panel shows its answer whenever it
+     * finishes instead of the result dropping it. Count and evidence are
+     * unknown until then.
+     */
+    checking?: { waiting: () => PrivateAnswerWaitingRef | undefined };
+    /**
      * For a panel that cannot acknowledge (the plugin directory serves the
      * private answer panel as submitted, from before acknowledgments): the
      * first hand-out of the sealed answer to the claiming key acknowledges
@@ -583,7 +593,7 @@ export class PrivateAnswerJobs {
     }
     if (!input.secretMatch && status.state !== 'ready') return { count, panelState: 'no_model' };
     const installId = this.options.installId();
-    if (!installId || count === 0 || (input.evidence.length === 0 && !input.secretMatch)) return { count, panelState: 'no_model' };
+    if (!installId || (!input.checking && (count === 0 || (input.evidence.length === 0 && !input.secretMatch)))) return { count, panelState: 'no_model' };
     this.sweep();
     while (this.jobs.size >= this.maxJobs) {
       const oldest = this.jobs.keys().next().value;
@@ -618,11 +628,13 @@ export class PrivateAnswerJobs {
       openTokens: this.openRate.capacity,
       openRefilledAt: at,
       waiting: input.waiting,
+      ...(input.checking ? { waitingLater: input.checking.waiting } : {}),
       seenOnDelivery: input.seenOnDelivery === true,
     };
     this.jobs.set(id, job);
     if (!job.secretMatch && this.options.precompute === true) this.precompute(job);
-    return { count, panelState: 'ready', jobId: id, ...(job.detail === 'full' ? { detail: 'full' as const } : {}) };
+    // A checking job's count is not known yet: the panel needs one to show.
+    return { count: input.checking ? Math.max(1, count) : count, panelState: 'ready', jobId: id, ...(job.detail === 'full' ? { detail: 'full' as const } : {}) };
   }
 
   /** One panel POST: claim, poll, or collect (idempotent for the claiming key until expiry). */
@@ -1198,6 +1210,8 @@ export class PrivateAnswerJobs {
       // Preserve the Inbox as soon as the refresh knows, including mixed
       // results whose Private evidence can still answer in the panel.
       if (found.secretMatch === true) job.preserveWaiting = true;
+      if (!job.waiting && job.waitingLater) job.waiting = job.waitingLater();
+      job.waitingLater = undefined;
       if (refresh) timing.refreshMs = this.now() - refreshStarted;
       // A refresh that finished after the deadline (or after the job was
       // dropped) must not start inference.
