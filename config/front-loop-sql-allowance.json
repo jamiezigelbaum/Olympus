@@ -16,6 +16,7 @@
       "changeMarker tier-ledger.ts < memoVisibilityItemsHere child-visibility.ts",
       "corpusVisibilityPages tier-ledger.ts < tierLedgerHiddenSteps local-index.ts",
       "itemRowsForIdentitiesSteps local-index.ts < <anonymous> local-index.ts",
+      "readHere local-index.ts < <anonymous> local-index.ts",
       "readHere local-index.ts < memoVisibilityItemsHere child-visibility.ts",
       "savedVisibilitySteps local-index.ts < tierLedgerHiddenSteps local-index.ts"
     ],
@@ -26,6 +27,7 @@
       "assertTriggerExists local-index.ts < validateConnectorStoreLocatorIdentitySchema local-index.ts",
       "assertTriggerExists local-index.ts < validateVectorDigestSchema local-index.ts",
       "compatibleVersionColumnExists sqlite-migrations.ts < ensureSchemaVersionTable sqlite-migrations.ts",
+      "compatibleVersionColumnExists sqlite-migrations.ts < storedCompatibleVersion sqlite-migrations.ts",
       "ensureSchemaVersionTable sqlite-migrations.ts < runSqliteMigrations sqlite-migrations.ts",
       "indexColumns local-index.ts < assertIndexColumns local-index.ts",
       "indexColumns local-index.ts < validateConnectorStoreSchemaShape local-index.ts",
@@ -39,6 +41,7 @@
       "new LocalSourceWatchStore source-watch.ts < main server.ts",
       "new TierLedger tier-ledger.ts < boundTierLedger local-index.ts",
       "new TierLedger tier-ledger.ts < openTierLedger source-storage.ts",
+      "readSqliteSchemaVersion sqlite-migrations.ts < <anonymous> sqlite-migrations.ts",
       "readSqliteSchemaVersion sqlite-migrations.ts < <anonymous> tier-ledger.ts",
       "readSqliteSchemaVersion sqlite-migrations.ts < assertExactTableColumns local-index.ts",
       "readSqliteSchemaVersion sqlite-migrations.ts < assertSqliteSchemaCanOpen sqlite-migrations.ts",
@@ -50,11 +53,14 @@
       "readSqliteWithoutWriting tier-ledger.ts < findTierSetLedger tier-set-binding.ts",
       "readSqliteWithoutWriting tier-ledger.ts < readTierSetBinding tier-set-binding.ts",
       "schemaVersionTableExists sqlite-migrations.ts < readSqliteSchemaVersion sqlite-migrations.ts",
+      "schemaVersionTableExists sqlite-migrations.ts < storedCompatibleVersion sqlite-migrations.ts",
+      "storedCompatibleVersion sqlite-migrations.ts < <anonymous> sqlite-migrations.ts",
       "tableColumns local-index.ts < assertExactTableColumns local-index.ts",
       "tableColumns local-index.ts < new LocalConnectorStore local-index.ts",
       "tierSetBinding local-index.ts < visibilityLedger local-index.ts",
       "validateConnectorStoreLocatorIdentitySchema local-index.ts < validateConnectorStoreV12Schema local-index.ts",
-      "validateConnectorStoreSchemaShape local-index.ts < validateConnectorStoreItemSchema local-index.ts"
+      "validateConnectorStoreSchemaShape local-index.ts < validateConnectorStoreItemSchema local-index.ts",
+      "writeSqliteSchemaVersion sqlite-migrations.ts < <anonymous> sqlite-migrations.ts"
     ],
     "C": [
       "<anonymous> request-budget.ts < withLedger request-budget.ts",
@@ -71,6 +77,7 @@
       "release file-lease.ts < release file-lease.ts",
       "tryKernelLock file-lease.ts < acquireFileLease file-lease.ts",
       "tryKernelLock file-lease.ts < acquireFileLeaseSync file-lease.ts",
+      "up waiting-private-questions.ts < <anonymous> sqlite-migrations.ts",
       "withLedger request-budget.ts < runBudgetLedgerOperation request-budget.ts"
     ]
   }
