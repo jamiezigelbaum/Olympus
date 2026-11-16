@@ -1117,6 +1117,8 @@ type VisibilityUpdate = { identity: TierLedgerIdentity; pks: number[]; flags: Ti
  * connections to end (a hold is kept short: every other writer waits on it)
  * before it walks on those connections instead: 100 waits of 10 ms.
  */
+/** Rows per page of the embedding pass's work list (embeddingWorkRows). */
+const EMBEDDING_WORK_PAGE_ROWS = 5_000;
 const VISIBILITY_HOLD_WAITS = 100;
 const VISIBILITY_HOLD_WAIT_MS = 10;
 
@@ -14626,7 +14628,9 @@ export class LocalConnectorStore {
         ${tierExclusion.filter}
         ${selectedAccount ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
+        AND c.chunk_pk > ?
       ORDER BY c.chunk_pk ASC
+      LIMIT ${EMBEDDING_WORK_PAGE_ROWS}
     `;
     const params = [
       modelId,
@@ -14635,10 +14639,19 @@ export class LocalConnectorStore {
       ...(selectedAccount ? [selectedAccount] : []),
       ...selectedFilters.params,
     ];
-    const rows = await readInBackground(this.dbPath, { sql, params, mode: 'all' }) as Array<{
-      chunk_pk: number; item_pk: number; content_hash: string; trust_tier: string;
-      media_path: string | null; media_sha256: string | null; current_hash: string | null;
-    }>;
+    // A page at a time, each its own short read: the whole list in one
+    // statement ran past the pool's 120 s deadline on the gate's fixture and
+    // held its read transaction the whole time, so no checkpoint could reset
+    // the WAL (16 Nov). Pages seek on chunk_pk, the order the list keeps.
+    type WorkRow = { chunk_pk: number; item_pk: number; content_hash: string; trust_tier: string;
+      media_path: string | null; media_sha256: string | null; current_hash: string | null };
+    const rows: WorkRow[] = [];
+    for (let after = 0; ;) {
+      const page = await readInBackground(this.dbPath, { sql, params: [...params, after], mode: 'all' }) as WorkRow[];
+      for (const row of page) rows.push(row);
+      if (page.length < EMBEDDING_WORK_PAGE_ROWS) break;
+      after = page[page.length - 1]!.chunk_pk;
+    }
     return rows.map((row) => ({
       ...row,
       bounded_text: '', title: null, search_text: null, mime_type: null, authored_at: null, updated_at: null,
