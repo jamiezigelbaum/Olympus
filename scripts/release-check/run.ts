@@ -1473,11 +1473,13 @@ async function runFrontSteady(run: Run): Promise<void> {
  */
 async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: string | null | undefined): Promise<{ set?: FrontStoreSet; storeFiles?: number }> {
   const seed = randomBytes(6).toString('hex');
-  // On the earlier release, whose counts trail its writes by up to 5 minutes: 6 minutes stopped a healthy seed part way and left the
-  // front-steady stage nothing to compare (mac-upgrade 43783902175, 16 Nov 2026; 15 minutes with the real judge before the stand-in).
-  const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed}`, 30 * 60_000));
+  // The seed's own waits fit inside its phase, so a slow one returns what it saw (the Gmail import's last status, whether the job
+  // queue appeared) instead of being killed with nothing to say: twice a stopped seed left front-steady only "did not report"
+  // (mac-upgrade 43783902175 and 43790901220, 16 Nov 2026).
+  const seedS = phaseBudgetMs('front-seed') / 1000;
+  const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed} --settle-s ${seedS - 360} --queue-s 120`, 30 * 60_000));
   const set = seeded.result as FrontStoreSet | undefined;
-  if (!set) run.log(`front-seed: ${agentDetail(seeded)}`);
+  run.log(`front-seed: ${set ? `Gmail ${set.gmail.settled ? 'settled' : `not settled (${set.gmail.status ?? 'not listed'})`}, job queue ${set.jobQueue ? 'present' : 'missing'}${set.detail ? `; ${set.detail}` : ''}` : agentDetail(seeded)}`);
   const on = await run.agent('engine-split-on', '', 60_000);
   run.add({
     id: 'upgrade.split.switch',

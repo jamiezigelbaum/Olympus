@@ -2196,8 +2196,8 @@ async function frontSteadyCommand(seed: string, watchS: number): Promise<never> 
 const FRONT_MARK = join(WORKDIR, 'front-mark.json');
 const storeList = (name: string): string => join(WORKDIR, `store-files-${name.replace(/[^a-z0-9-]/gi, '')}.json`);
 
-async function frontSeedCommand(seed: string): Promise<never> {
-  emit({ ...(await seedFrontStoreSet(frontHost(), { seed })) });
+async function frontSeedCommand(seed: string, settleS?: number, queueS?: number): Promise<never> {
+  emit({ ...(await seedFrontStoreSet(frontHost(), { seed, ...(settleS !== undefined ? { settleS } : {}), ...(queueS !== undefined ? { queueS } : {}) })) });
 }
 
 /** Where the engine's logs end now; the next front-watch reads only what comes after. */
@@ -2647,7 +2647,8 @@ async function main(): Promise<void> {
     case 'archive-remove': return await archiveRemoveCommand({ targets: flag('--targets'), seed: flag('--seed') });
     case 'archive-model': return await archiveModelCommand(flag('--mode'));
     case 'front-steady': return await frontSteadyCommand(flag('--seed'), Number(flag('--watch-s', '150')));
-    case 'front-seed': return await frontSeedCommand(flag('--seed'));
+    case 'front-seed': return await frontSeedCommand(flag('--seed'),
+      rest.includes('--settle-s') ? Number(flag('--settle-s')) : undefined, rest.includes('--queue-s') ? Number(flag('--queue-s')) : undefined);
     case 'front-mark': return frontMarkCommand();
     case 'front-watch': return await frontWatchCommand(Number(flag('--watch-s', '150')));
     case 'engine-split-on': return engineSplitOnCommand();

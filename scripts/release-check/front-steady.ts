@@ -161,7 +161,7 @@ export type FrontWatch = Pick<FrontSteadyObservation, 'samples' | 'watchMs' | 'l
  * seeded through its own pull; then what each lane holds is read. Beside the archive leg's files, which its imports still
  * name: nothing there is removed.
  */
-export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; settleS?: number }): Promise<FrontStoreSet> {
+export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; settleS?: number; queueS?: number }): Promise<FrontStoreSet> {
   const set: FrontStoreSet = { ok: false, gmail: { approved: false, settled: false }, telegram: { ok: false }, lanes: [], archives: 0, traces: [] };
   try {
     const folder = join(host.home, FIXTURE_FOLDER);
@@ -194,7 +194,7 @@ export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; s
     // rc.4's front built an extraction runtime only for stores that already exist, the background's job queue among them, so the
     // restart or update waits for the background to have made it (L1, 13 Nov).
     const queue = sharedDataPath('file-extraction-jobs');
-    set.jobQueue = (await until(host, async () => (existsSync(queue) ? true : undefined), 600_000, 5_000)) === true;
+    set.jobQueue = (await until(host, async () => (existsSync(queue) ? true : undefined), (args.queueS ?? 600) * 1_000, 5_000)) === true;
     host.say(`front: extraction job queue ${set.jobQueue ? 'present' : 'never made'}`);
     set.ok = true;
   } catch (error) {
