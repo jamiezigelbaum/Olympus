@@ -35626,6 +35626,9 @@ function optionalEnvironmentString(value) {
 // src/workers/dropbox-files/dropbox-content-hash.ts
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
 // src/workers/file-extraction/extractors/command-runner.ts
+import { execFile, spawn as spawn2 } from "node:child_process";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
 var resolvedCommands = new Map;
 // src/workers/connector-store/filter-capabilities.ts
 var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
@@ -36160,7 +36163,7 @@ var WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsap
 var WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
 var CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
-var DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
+var DEFAULT_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
 var DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
 var DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
 var DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
@@ -36500,6 +36503,9 @@ var CODE_PAGE_LABELS = new Map([
   [65001, "utf-8"]
 ]);
 
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+var DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
+
 // src/workers/file-extraction/extractors/ocr-probe-fixture.ts
 var OCR_PROBE_IMAGE_BASE64 = [
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYn",
@@ -36577,10 +36583,6 @@ var OCR_READY_TTL_MS = 10 * 60000;
 // src/workers/file-extraction/extractors/input-limits.ts
 var DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
 var IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
-
-// src/workers/file-extraction/extractors/ocr.ts
-var OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
-var OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
 
 // src/workers/file-extraction/extractors/text.ts
 var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
