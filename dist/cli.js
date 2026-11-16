@@ -47696,7 +47696,7 @@ function frontLoopSqlHealth() {
   return {
     mode: watch.mode,
     statements: watch.statements,
-    ...watch.allowed ? { sites: watch.seen.size, unlisted: watch.unlisted.slice() } : {}
+    ...watch.allowed ? { sites: watch.seen.size, unlisted: watch.unlisted.slice(), unlisted_sites: watch.unlisted.map((site) => ({ site, statements: watch.seen.get(site) ?? 0 })) } : {}
   };
 }
 var FrontLoopSqlError, UNLISTED_KEPT = 50, watch;

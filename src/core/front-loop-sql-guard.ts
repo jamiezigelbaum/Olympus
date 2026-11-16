@@ -38,6 +38,8 @@ export interface FrontLoopSqlHealth {
   sites?: number;
   /** Call sites seen that the list does not hold, first seen first; at most 50. */
   unlisted?: string[];
+  /** The unlisted sites with the statements each has run so far. */
+  unlisted_sites?: Array<{ site: string; statements: number }>;
 }
 
 interface Watch {
@@ -90,7 +92,7 @@ export function frontLoopSqlHealth(): FrontLoopSqlHealth | undefined {
   if (!watch) return undefined;
   return {
     mode: watch.mode, statements: watch.statements,
-    ...(watch.allowed ? { sites: watch.seen.size, unlisted: watch.unlisted.slice() } : {}),
+    ...(watch.allowed ? { sites: watch.seen.size, unlisted: watch.unlisted.slice(), unlisted_sites: watch.unlisted.map(site => ({ site, statements: watch!.seen.get(site) ?? 0 })) } : {}),
   };
 }
 
