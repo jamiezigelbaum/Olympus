@@ -95,7 +95,7 @@ describe('ask_anonymously: operation → worker route → core', () => {
       return { ok: false, code: 'cancelled', message: 'cancelled' };
     });
     // Before hand-off: the caller's abort reaches the worker request.
-    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 60_000, resultWaitMs: 1_000, deadlineMs: 60_000, ttlMs: 60_000, maxRunningGlobal: 2, maxRunningPerOwner: 2, maxRetainedPerOwner: 4, maxResultBytes: 1_000_000 } });
+    const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 60_000, resultWaitMs: 1_000, idleMs: 60_000, ttlMs: 60_000, maxRunningGlobal: 2, maxRunningPerOwner: 2, maxRetainedPerOwner: 4, maxResultBytes: 1_000_000 } });
     const caller = new AbortController();
     const early = ask.handler({ ...ctx, signal: caller.signal, sourceAnswerJobs: { registry, owner: 'o' } }, { question: 'x', level: 'standard' });
     await Bun.sleep(5);
@@ -103,7 +103,7 @@ describe('ask_anonymously: operation → worker route → core', () => {
     expect(await early).toMatchObject({ ok: false, code: 'cancelled' });
     expect(seen[0]!.aborted).toBe(true);
     // After hand-off: the caller may go; the work keeps its own signal.
-    const quick = new SourceAnswerJobRegistry({ limits: { handoffMs: 5, resultWaitMs: 1_000, deadlineMs: 60_000, ttlMs: 60_000, maxRunningGlobal: 2, maxRunningPerOwner: 2, maxRetainedPerOwner: 4, maxResultBytes: 1_000_000 } });
+    const quick = new SourceAnswerJobRegistry({ limits: { handoffMs: 5, resultWaitMs: 1_000, idleMs: 60_000, ttlMs: 60_000, maxRunningGlobal: 2, maxRunningPerOwner: 2, maxRetainedPerOwner: 4, maxResultBytes: 1_000_000 } });
     const late = new AbortController();
     const handed = await ask.handler({ ...ctx, signal: late.signal, sourceAnswerJobs: { registry: quick, owner: 'o' } }, { question: 'x', level: 'standard' });
     expect(handed).toMatchObject({ status: 'working' });

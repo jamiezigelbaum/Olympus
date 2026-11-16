@@ -21,7 +21,7 @@ interface PinnedDownloadOptions {
   encoding: 'hex' | 'base64';
   noun: string;
   stallMs: number;
-  verifyTimeoutMs: number;
+  verifyStallMs: number;
   /** Persistent model partials survive exhaustion; temporary runtime assets need not. */
   keepPartial: boolean;
   error: (reason: Failure, message: string) => Error;
@@ -66,7 +66,7 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
     if (existsSync(partial)) {
       const size = statSync(partial).size;
       if (size > 0 && size < expectedBytes) {
-        await hashPartial(partial, hash, options.verifyTimeoutMs);
+        await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
         options.onProgress(size);
       } else rmSync(partial, { force: true });
@@ -183,11 +183,21 @@ export function writeDownloadChunk(fd: number, bytes: Uint8Array): void {
   }
 }
 
-async function hashPartial(path: string, hash: ReturnType<typeof createHash>, timeoutMs: number): Promise<void> {
+/** Stops only when the read stalls for `stallMs`, never for the file's size. */
+async function hashPartial(path: string, hash: ReturnType<typeof createHash>, stallMs: number): Promise<void> {
   const stream = createReadStream(path);
-  const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
-  try { for await (const bytes of stream) hash.update(bytes); }
-  finally { clearTimeout(timer); stream.destroy(); }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = (): void => {
+    clearTimeout(timer);
+    timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} stopped reading for ${Math.round(stallMs / 1000)} s.`)), stallMs);
+  };
+  arm();
+  try {
+    for await (const bytes of stream) {
+      arm();
+      hash.update(bytes);
+    }
+  } finally { clearTimeout(timer); stream.destroy(); }
 }
 
 function message(cause: unknown): string { return cause instanceof Error ? cause.message : String(cause); }

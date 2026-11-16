@@ -251,3 +251,43 @@ describe('resolveExtractionCommand', () => {
     expect(resolveExtractionCommand('tesseract', { path: '/usr/bin', fallbackDirs: [], isExecutable })).toBe('tesseract');
   });
 });
+
+describe('runExtractionCommand: the window is a stall clock, never a total clock', () => {
+  test('a command that keeps printing runs past its window', async () => {
+    const result = await runExtractionCommand({
+      command: 'bash',
+      args: ['-c', 'for i in 1 2 3 4 5 6 7 8 9 10; do echo page $i; sleep 0.1; done'],
+      timeoutMs: 400,
+    });
+    expect(result.stdout.trim().split('\n')).toHaveLength(10);
+  }, 15_000);
+
+  test('a silent command that keeps using CPU runs past its window', async () => {
+    const started = Date.now();
+    const result = await runExtractionCommand({
+      command: 'bash',
+      args: ['-c', 'end=$((SECONDS+2)); while [ $SECONDS -lt $end ]; do :; done; echo done'],
+      timeoutMs: 600,
+    });
+    expect(result.stdout.trim()).toBe('done');
+    expect(Date.now() - started).toBeGreaterThan(600);
+  }, 15_000);
+
+  test('a command whose group CPU stops moving is killed one window after its last progress', async () => {
+    let cpu = 0;
+    const started = Date.now();
+    let caught: unknown;
+    try {
+      await runExtractionCommand(
+        { command: 'sleep', args: ['30'], timeoutMs: 400 },
+        // CPU moves for the first 800 ms, then stops.
+        { groupCpuMs: () => (Date.now() - started < 800 ? ++cpu : cpu) },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ExtractionCommandTimeoutError);
+    expect((caught as Error).message).toContain('no output and no CPU use');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_000);
+  }, 15_000);
+});

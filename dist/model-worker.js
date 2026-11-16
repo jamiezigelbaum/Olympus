@@ -1448,7 +1448,7 @@ async function downloadPinnedFile(options) {
     if (existsSync5(partial)) {
       const size = statSync2(partial).size;
       if (size > 0 && size < expectedBytes) {
-        await hashPartial(partial, hash, options.verifyTimeoutMs);
+        await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
         options.onProgress(size);
       } else
@@ -1586,12 +1586,19 @@ function writeDownloadChunk(fd, bytes) {
     offset += written;
   }
 }
-async function hashPartial(path, hash, timeoutMs) {
+async function hashPartial(path, hash, stallMs) {
   const stream = createReadStream(path);
-  const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
+  let timer;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} stopped reading for ${Math.round(stallMs / 1000)} s.`)), stallMs);
+  };
+  arm();
   try {
-    for await (const bytes of stream)
+    for await (const bytes of stream) {
+      arm();
       hash.update(bytes);
+    }
   } finally {
     clearTimeout(timer);
     stream.destroy();
@@ -2222,7 +2229,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     encoding: expected.kind === "sha256" ? "hex" : "base64",
     noun: "built-in search model",
     stallMs,
-    verifyTimeoutMs: 10 * 60000,
+    verifyStallMs: 2 * 60000,
     keepPartial: false,
     error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
     onStart: () => reporter.set("downloading", label),
@@ -7160,8 +7167,8 @@ var RUNTIME_UNPACK_FACTOR = 4;
 var SPACE_BACKOFF_MS = 15 * 60000;
 var PROGRESS_WRITE_INTERVAL_MS2 = 500;
 var DOWNLOAD_STALL_MS2 = 2 * 60000;
-var VERIFY_TIMEOUT_MS = 15 * 60000;
-var EXTRACT_TIMEOUT_MS = 5 * 60000;
+var VERIFY_STALL_MS = 2 * 60000;
+var EXTRACT_STALL_MS = 2 * 60000;
 var LOG_PREFIX = "[built-in-model]";
 var RUNTIME_MARKER2 = "olympus-runtime.json";
 var SERVER_BINARY = "llama-server";
@@ -7223,7 +7230,7 @@ async function installPinnedModel(options) {
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS2,
-    verifyTimeoutMs: options.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS
+    verifyStallMs: options.verifyStallMs ?? VERIFY_STALL_MS
   };
   const lockWaitMs = options.lockWaitMs ?? STALE_LOCK_MS2;
   const lockRefreshMs = options.lockRefreshMs ?? LOCK_REFRESH_MS;
@@ -7242,7 +7249,7 @@ async function installPinnedModel(options) {
   };
   const verifyAll = async () => {
     for (const { file, path } of files)
-      await verifyPinnedFile(path, file, noun, reporter, timing.verifyTimeoutMs);
+      await verifyPinnedFile(path, file, noun, reporter, timing.verifyStallMs);
   };
   const finished = () => reporter.set("ready", `${capitalize(noun)} ready`, 100);
   try {
@@ -7424,22 +7431,41 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
 }
 function extractWithTar(archivePath, targetDir) {
   return new Promise((resolve, reject) => {
-    const child = spawn2("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn2("tar", ["-xzf", "-", "-C", targetDir], { stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
     child.stderr?.on("data", (chunk) => {
       if (stderr.length < 4000)
         stderr += chunk.toString();
     });
-    const timer = setTimeout(() => {
+    let timer;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`tar took no data for ${Math.round(EXTRACT_STALL_MS / 60000)} min`));
+      }, EXTRACT_STALL_MS);
+    };
+    arm();
+    const archive = createReadStream3(archivePath);
+    archive.on("data", arm);
+    archive.on("error", (error) => {
+      clearTimeout(timer);
       child.kill("SIGKILL");
-      reject(new Error(`tar did not finish within ${Math.round(EXTRACT_TIMEOUT_MS / 60000)} min`));
-    }, EXTRACT_TIMEOUT_MS);
+      reject(error);
+    });
+    child.stdin?.on("error", () => {
+      return;
+    });
+    if (child.stdin)
+      archive.pipe(child.stdin);
     child.on("error", (error) => {
       clearTimeout(timer);
+      archive.destroy();
       reject(error);
     });
     child.on("close", (status, signal) => {
       clearTimeout(timer);
+      archive.destroy();
       if (status === 0)
         resolve();
       else
@@ -7489,7 +7515,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     encoding: "hex",
     noun: space.noun,
     stallMs,
-    verifyTimeoutMs: VERIFY_TIMEOUT_MS,
+    verifyStallMs: VERIFY_STALL_MS,
     keepPartial: true,
     error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
     diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname12(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
@@ -7498,7 +7524,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     onProgress: (bytes) => reporter.advance(bytes, label)
   });
 }
-function hashInto(path, hash, timeoutMs, onProgress) {
+function hashInto(path, hash, stallMs, onProgress) {
   return new Promise((resolve, reject) => {
     let done = 0;
     let settled = false;
@@ -7515,17 +7541,23 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         resolve();
       }
     };
-    const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
+    let timer;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} read nothing for ${Math.round(stallMs / 1000)} s.`)), stallMs);
+    };
+    arm();
     stream.on("data", (chunk) => {
+      arm();
       hash.update(chunk);
       done += chunk.length;
       onProgress?.(done);
     }).on("error", (error) => finish(error)).on("end", () => finish()).on("close", () => finish(new Error(`Reading ${path} stopped before the end.`)));
   });
 }
-async function sha256File2(path, timeoutMs, onProgress) {
+async function sha256File2(path, stallMs, onProgress) {
   const hash = createHash4("sha256");
-  await hashInto(path, hash, timeoutMs, onProgress);
+  await hashInto(path, hash, stallMs, onProgress);
   return hash.digest("hex");
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {

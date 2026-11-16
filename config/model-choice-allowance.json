@@ -1,0 +1,21 @@
+{
+  "_readme": "Places outside the built-in model's own code (owners) that name it, its handles or its limits, per file (test/model-choice-guard.test.ts). Features ask the shared model chooser instead; add the chooser's module to owners. Counts only go down.",
+  "owners": [
+    "src/workers/source-index/built-in-reasoning/",
+    "src/core/analyst-built-in.ts"
+  ],
+  "files": {
+    "src/core/source-index/keyword-expansion.ts": 2,
+    "src/workers/chatgpt/private-answer-model.ts": 3,
+    "src/workers/classification/built-in-sniffer.ts": 1,
+    "src/workers/classification/installed-sniffer-runtime.ts": 1,
+    "src/workers/classification/sniffer-lane.ts": 2,
+    "src/workers/classification/sniffer.ts": 6,
+    "src/workers/engine/runtime/judging-models.ts": 6,
+    "src/workers/engine/runtime/local-private-answers.ts": 1,
+    "src/workers/engine/runtime/model-choices-backend.ts": 2,
+    "src/workers/engine/server.ts": 43,
+    "src/workers/source-index/analyst-answer.ts": 1,
+    "src/workers/source-index/local-analyst-window.ts": 1
+  }
+}

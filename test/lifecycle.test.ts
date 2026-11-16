@@ -778,6 +778,31 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
+  test('a boot still updating its stores is waited for past the cap while its heartbeat beats', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-cap-migrating-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      const readyAt = Date.now() + 1_500;
+      const at = new Date().toISOString();
+      const result = runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        readinessTimeoutMs: 300, actionSettlePollMs: 5, readinessCapMs: 600,
+        heartbeat: () => beat(process.pid, { step: 'updating tier-ledger', stepSince: at }),
+        bootProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'migrating', storeId: 'tier-ledger', startedAt: at, updatedAt: new Date().toISOString(), completedStores: 2 }),
+        frontProgress: () => undefined,
+        progressLine: () => {},
+        readinessProbe: () => Date.now() >= readyAt,
+      });
+      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('at the cap the upgrade rolls back and says what the engine said it was doing', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-cap-'));
     const manager = linuxManager('active');

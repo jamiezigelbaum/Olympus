@@ -8210,91 +8210,6 @@ var init_keyword_context = __esm(() => {
   cachedOnly = new AsyncLocalStorage2;
   requestContext = new AsyncLocalStorage2;
 });
-// src/core/store-reclaim-admission.ts
-var init_store_reclaim_admission = __esm(() => {
-  init_file_lease();
-  init_olympus_layout();
-});
-
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-var poolSqlSites, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  init_store_reclaim_admission();
-  poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage3;
-  laneStorage = new AsyncLocalStorage3;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
-});
-
-// src/core/source-index/router.ts
-function normalizeRouterResultKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
-var init_router = __esm(() => {
-  init_partial_search();
-  init_keyword_context();
-  init_types();
-  init_answer_latency_trace();
-  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
-    "body",
-    "bodies",
-    "content",
-    "contents",
-    "message",
-    "messages",
-    "raw",
-    "raw_packet",
-    "rawPacket",
-    "raw_source",
-    "rawSource",
-    "sanitized_text",
-    "sanitizedText",
-    "snippet",
-    "snippets",
-    "source_text",
-    "sourceText",
-    "raw_source_text",
-    "rawSourceText",
-    "text",
-    "access_token",
-    "accessToken",
-    "api_key",
-    "apiKey",
-    "approved_scope_key",
-    "approvedScopeKey",
-    "refresh_token",
-    "refreshToken",
-    "token"
-  ]);
-  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
-});
-
-// src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
-var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
-var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage4;
-  completedPrivateAnswers = new Set;
-  JOB_QUESTION_TTL_MS = 30 * 60000;
-  jobQuestions = new Map;
-});
 // src/core/secret-patterns.ts
 var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
@@ -8498,6 +8413,105 @@ var init_opsec = __esm(() => {
   init_types();
 });
 
+// src/core/source-answer-jobs.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+var SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_IDLE_MS, SOURCE_ANSWER_MAX_RESULT_BYTES, progressSink;
+var init_source_answer_jobs = __esm(() => {
+  init_operation_error();
+  init_opsec();
+  init_release_manifest();
+  SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+  SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+  SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+  progressSink = new AsyncLocalStorage3;
+});
+
+// src/core/store-reclaim-admission.ts
+var init_store_reclaim_admission = __esm(() => {
+  init_file_lease();
+  init_olympus_layout();
+});
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var poolSqlSites, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  init_source_answer_jobs();
+  init_store_reclaim_admission();
+  poolSqlSites = new WeakMap;
+  storage2 = new AsyncLocalStorage4;
+  laneStorage = new AsyncLocalStorage4;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
+// src/core/source-index/router.ts
+function normalizeRouterResultKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
+var init_router = __esm(() => {
+  init_partial_search();
+  init_keyword_context();
+  init_types();
+  init_answer_latency_trace();
+  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
+    "body",
+    "bodies",
+    "content",
+    "contents",
+    "message",
+    "messages",
+    "raw",
+    "raw_packet",
+    "rawPacket",
+    "raw_source",
+    "rawSource",
+    "sanitized_text",
+    "sanitizedText",
+    "snippet",
+    "snippets",
+    "source_text",
+    "sourceText",
+    "raw_source_text",
+    "rawSourceText",
+    "text",
+    "access_token",
+    "accessToken",
+    "api_key",
+    "apiKey",
+    "approved_scope_key",
+    "approvedScopeKey",
+    "refresh_token",
+    "refreshToken",
+    "token"
+  ]);
+  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+});
+
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
+var init_app_release_capture = __esm(() => {
+  storage3 = new AsyncLocalStorage5;
+  completedPrivateAnswers = new Set;
+  JOB_QUESTION_TTL_MS = 30 * 60000;
+  jobQuestions = new Map;
+});
 // src/core/parent-label.ts
 var init_parent_label = __esm(() => {
   init_types();
@@ -10223,7 +10237,7 @@ function verifyPinnedFiles(staging, asset, uid, label, tool) {
     }
   }
 }
-var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, ManagedToolsError;
+var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_STALL_MS2, ManagedToolsError;
 var init_managed_tools = __esm(() => {
   init_file_lease();
   ZKAPI_REQUIRED = [
@@ -10291,7 +10305,7 @@ var init_managed_tools = __esm(() => {
     }
   };
   MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
-  DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+  DOWNLOAD_STALL_MS2 = 2 * 60 * 1000;
   ManagedToolsError = class ManagedToolsError extends Error {
     code;
     tool;
@@ -13766,7 +13780,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, analystEvidenceFormats, packPromptBudgets, promptEncoder, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
@@ -13776,7 +13790,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage5;
+  analystAbortSignalStorage = new AsyncLocalStorage6;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -15870,7 +15884,7 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
@@ -15878,7 +15892,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage6;
+  priorityQueryEmbedding = new AsyncLocalStorage7;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -16268,11 +16282,11 @@ var init_media_cache = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage7;
+  readAuthorization = new AsyncLocalStorage8;
 });
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
@@ -17090,7 +17104,7 @@ var init_sniffer_decision = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/install.ts
-var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS;
+var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS3, VERIFY_STALL_MS, EXTRACT_STALL_MS;
 var init_install = __esm(() => {
   init_pinned_download();
   init_olympus_layout();
@@ -17099,9 +17113,9 @@ var init_install = __esm(() => {
   STALE_LOCK_MS2 = 60 * 60000;
   BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   SPACE_BACKOFF_MS = 15 * 60000;
-  DOWNLOAD_STALL_MS2 = 2 * 60000;
-  VERIFY_TIMEOUT_MS = 15 * 60000;
-  EXTRACT_TIMEOUT_MS = 5 * 60000;
+  DOWNLOAD_STALL_MS3 = 2 * 60000;
+  VERIFY_STALL_MS = 2 * 60000;
+  EXTRACT_STALL_MS = 2 * 60000;
 });
 
 // src/workers/source-index/built-in-reasoning/server.ts
@@ -17893,7 +17907,9 @@ var init_dropbox = __esm(() => {
 
 // src/workers/file-extraction/extractors/command-runner.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { spawn as spawn4 } from "node:child_process";
+import { execFile as execFile3, spawn as spawn4 } from "node:child_process";
+import { readFile as readFile2, readdir } from "node:fs/promises";
+import { promisify as promisify2 } from "node:util";
 import { accessSync as accessSync9, constants as fsConstants5, statSync as statSync19 } from "node:fs";
 import { delimiter as delimiter6, join as join44 } from "node:path";
 function errnoCode(error) {
@@ -17926,6 +17942,67 @@ function killExtractionProcessGroup(child, signal = "SIGKILL", kill = process.ki
     }
     return { ok: false, code: groupFailure ?? code };
   }
+}
+function stallCheckIntervalMs(windowMs) {
+  return Math.max(10, Math.min(15000, Math.floor(windowMs / 4)));
+}
+async function linuxGroupCpuMs(pgid) {
+  let entries;
+  try {
+    entries = await readdir("/proc");
+  } catch {
+    return;
+  }
+  const ticksPerSecond = 100;
+  let ticks = 0;
+  let found = false;
+  for (const entry of entries) {
+    if (!entry || [...entry].some((char) => char < "0" || char > "9"))
+      continue;
+    let stat;
+    try {
+      stat = await readFile2(`/proc/${entry}/stat`, "utf8");
+    } catch {
+      continue;
+    }
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    if (Number(fields[2]) !== pgid)
+      continue;
+    found = true;
+    ticks += Number(fields[11]) + Number(fields[12]);
+  }
+  return found ? ticks * 1000 / ticksPerSecond : undefined;
+}
+function cpuTimeMs(text) {
+  const [days, clock] = text.includes("-") ? text.split("-") : ["0", text];
+  const parts = clock.split(":").map(Number);
+  let seconds = 0;
+  for (const part of parts)
+    seconds = seconds * 60 + part;
+  return (Number(days) * 86400 + seconds) * 1000;
+}
+async function psGroupCpuMs(pgid) {
+  try {
+    const { stdout: out } = await execFileAsync2("ps", ["-A", "-o", "pgid=,time="], { encoding: "utf8", timeout: 5000 });
+    let total = 0;
+    let found = false;
+    for (const line of out.split(`
+`)) {
+      const [group, time] = line.trim().split(" ").filter(Boolean);
+      if (Number(group) !== pgid || !time)
+        continue;
+      found = true;
+      total += cpuTimeMs(time);
+    }
+    return found ? total : undefined;
+  } catch {
+    return;
+  }
+}
+async function processGroupCpuMs(pgid) {
+  if (process.platform === "win32")
+    return;
+  return process.platform === "linux" ? linuxGroupCpuMs(pgid) : psGroupCpuMs(pgid);
 }
 function resolveExtractionCommand(command, options = {}) {
   if (!command || command.includes("/") || command.includes("\\"))
@@ -17994,25 +18071,54 @@ async function runExtractionCommand(request, internals = {}) {
     const stderr = [];
     let settled = false;
     const useTimeout = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0;
-    const timer = useTimeout ? setTimeout(() => {
+    const groupCpuMs = internals.groupCpuMs ?? processGroupCpuMs;
+    const groupId = process.platform !== "win32" ? child.pid : undefined;
+    let lastProgress = Date.now();
+    let lastCpu;
+    let sampling = false;
+    const timer = useTimeout ? setInterval(async () => {
+      if (settled || sampling)
+        return;
+      sampling = true;
+      let cpu;
+      try {
+        cpu = groupId ? await groupCpuMs(groupId) : undefined;
+      } catch {
+        cpu = undefined;
+      } finally {
+        sampling = false;
+      }
       if (settled)
         return;
+      if (cpu !== undefined && (lastCpu === undefined ? cpu > 0 : cpu > lastCpu))
+        lastProgress = Date.now();
+      if (cpu !== undefined)
+        lastCpu = cpu;
+      if (Date.now() - lastProgress < request.timeoutMs)
+        return;
       settled = true;
+      clearInterval(timer);
       const outcome = killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(new ExtractionCommandTimeoutError({
         command: request.command,
         timeoutMs: request.timeoutMs,
         ...outcome.ok ? {} : { terminationFailed: outcome.code }
       }));
-    }, request.timeoutMs) : undefined;
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    }, stallCheckIntervalMs(request.timeoutMs)) : undefined;
+    child.stdout.on("data", (chunk) => {
+      stdout.push(chunk);
+      lastProgress = Date.now();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr.push(chunk);
+      lastProgress = Date.now();
+    });
     child.on("error", (error) => {
       if (settled)
         return;
       settled = true;
       if (timer)
-        clearTimeout(timer);
+        clearInterval(timer);
       killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(error);
     });
@@ -18021,7 +18127,7 @@ async function runExtractionCommand(request, internals = {}) {
         return;
       settled = true;
       if (timer)
-        clearTimeout(timer);
+        clearInterval(timer);
       const result = {
         stdout: Buffer2.concat(stdout).toString("utf8"),
         stderr: Buffer2.concat(stderr).toString("utf8")
@@ -18039,7 +18145,7 @@ async function runExtractionCommand(request, internals = {}) {
     });
   });
 }
-var ExtractionCommandError, ExtractionCommandTimeoutError, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
+var ExtractionCommandError, ExtractionCommandTimeoutError, execFileAsync2, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
 var init_command_runner = __esm(() => {
   init_descendant_groups();
   init_native_process_service();
@@ -18062,13 +18168,14 @@ var init_command_runner = __esm(() => {
     timeoutMs;
     terminationFailed;
     constructor(input) {
-      super(input.terminationFailed ? `${input.command} timed out and could not be terminated (${input.terminationFailed}); it may still be running.` : `${input.command} timed out.`);
+      super(input.terminationFailed ? `${input.command} timed out (no progress for ${Math.round(input.timeoutMs / 1000)} s) and could not be terminated (${input.terminationFailed}); it may still be running.` : `${input.command} timed out: no output and no CPU use for ${Math.round(input.timeoutMs / 1000)} s.`);
       this.name = "ExtractionCommandTimeoutError";
       this.command = input.command;
       this.timeoutMs = input.timeoutMs;
       this.terminationFailed = input.terminationFailed;
     }
   };
+  execFileAsync2 = promisify2(execFile3);
   EXTRACTION_COMMAND_FALLBACK_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
   resolvedCommands = new Map;
 });
@@ -19278,10 +19385,11 @@ function parseOcrEnginePreference(value) {
   }
   throw new Error(`OCR engine must be one of ${OCR_ENGINE_PREFERENCES.join(", ")}; got ${value}.`);
 }
-var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js", APPLE_VISION_OSASCRIPT = "/usr/bin/osascript", OCR_ENGINE_PREFERENCES;
+var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js", APPLE_VISION_OSASCRIPT = "/usr/bin/osascript", DEFAULT_APPLE_VISION_FILE_DEADLINE_MS, OCR_ENGINE_PREFERENCES;
 var init_apple_vision_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
+  DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
   OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
 });
 
@@ -19363,7 +19471,7 @@ var init_ocr_probe_fixture = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr-capability.ts
-import { mkdtemp, readFile as readFile2, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile as readFile3, readdir as readdir2, rm, writeFile } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
 import { join as join46 } from "node:path";
 function ocrmypdfArguments(input) {
@@ -19476,7 +19584,7 @@ async function probePdftoppm(input) {
   } catch (error) {
     return commandMissing(error) ? "missing" : "failed";
   }
-  const rendered = (await readdir(input.directory)).filter((name) => name.startsWith("render") && name.endsWith(".png"));
+  const rendered = (await readdir2(input.directory)).filter((name) => name.startsWith("render") && name.endsWith(".png"));
   const first = rendered[0];
   if (!first)
     return "failed";
@@ -19503,7 +19611,7 @@ async function probeOcrmypdf(input) {
     return commandMissing(error) ? "missing" : "failed";
   }
   try {
-    return probeWordRead(await readFile2(sidecarPath, "utf8")) ? "ok" : "failed";
+    return probeWordRead(await readFile3(sidecarPath, "utf8")) ? "ok" : "failed";
   } catch {
     return "failed";
   }
@@ -19555,7 +19663,6 @@ var init_pdf_raster_ocr = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr.ts
-var OCR_PDF_TIMEOUT_BYTES_PER_STEP, OCR_PDF_MAX_TIMEOUT_MS;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -19564,8 +19671,6 @@ var init_ocr = __esm(() => {
   init_ocr_capability();
   init_pdf_raster_ocr();
   init_input_limits();
-  OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
-  OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
 });
 
 // src/workers/file-extraction/extractors/remote-vlm.ts
@@ -19606,7 +19711,7 @@ var init_built_in_transcriber = __esm(() => {
   init_transcription_model();
   init_audio_wav();
   init_command_runner();
-  DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
+  DEFAULT_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
   DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
   DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
   DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;

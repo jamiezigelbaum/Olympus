@@ -129,7 +129,7 @@ const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
  */
 const DEFAULT_RETRY_PROBE_TIMEOUT_MS = 20_000;
 
-// A handed-off job's lifetime (core/source-answer-jobs.ts SOURCE_ANSWER_JOB_DEADLINE_MS plus its TTL).
+// A handed-off job's usual lifetime plus its TTL (core/source-answer-jobs.ts; a job now stops only when it stalls, SOURCE_ANSWER_JOB_IDLE_MS).
 const DEFAULT_HANDOFF_TTL_MS = 35 * 60_000;
 const MAX_HANDOFFS = 200;
 

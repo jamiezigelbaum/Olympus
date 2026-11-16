@@ -32,7 +32,11 @@ import {
 } from './release-signing.ts';
 import { installerForPlatform, newerVersion, UPDATE_MAX_BYTES } from './update-check.ts';
 
-export const SELF_UPDATE_DOWNLOAD_TIMEOUT_MS = 30_000;
+/**
+ * A download stops only when no bytes arrive for this long: a slow
+ * connection that keeps sending is never cut.
+ */
+export const SELF_UPDATE_DOWNLOAD_STALL_MS = 30_000;
 /** A run with no result after this long did not finish. */
 export const SELF_UPDATE_STALE_MS = 30 * 60_000;
 /** How long a finished update keeps saying so on the dashboard. */
@@ -146,7 +150,12 @@ function defaultLaunch(platform: string, homeDir: string | undefined): (runner: 
 
 async function download(fetchImpl: typeof fetch, url: string, maxBytes: number): Promise<Uint8Array> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SELF_UPDATE_DOWNLOAD_TIMEOUT_MS);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const stalled = () => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => controller.abort(), SELF_UPDATE_DOWNLOAD_STALL_MS);
+  };
+  stalled();
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     const response = await fetchImpl(url, { method: 'GET', headers: { 'User-Agent': 'Olympus' }, credentials: 'omit', redirect: 'error', signal: controller.signal });
@@ -157,6 +166,7 @@ async function download(fetchImpl: typeof fetch, url: string, maxBytes: number):
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      stalled();
       size += value.byteLength;
       if (size > maxBytes) throw new Error('oversized');
       chunks.push(value);

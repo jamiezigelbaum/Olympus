@@ -88,21 +88,20 @@ import { DOCUMENT_READER_MAX_INPUT_BYTES } from './input-limits.ts';
 
 export const OCR_EXTRACTOR_KIND = 'local_ocr_tesseract';
 export const OCR_EXTRACTOR_VERSION = 'ocr-v1';
+/**
+ * The OCR command's stall window: it is stopped only after this long with no
+ * output and no CPU use (command-runner.ts).
+ */
 export const DEFAULT_OCR_TIMEOUT_MS = 120_000;
-// A PDF gets the base time per this many bytes: each page is rasterized and read.
-export const OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
-// No PDF waits longer than this, however large: under the 15-minute job lease, DEFAULT_EXTRACTION_LEASE_SECONDS.
-export const OCR_PDF_MAX_TIMEOUT_MS = 12 * 60_000;
 
 /**
- * The time one PDF's OCR may take: the configured time for the first
- * OCR_PDF_TIMEOUT_BYTES_PER_STEP, and that again for each further step, up to
- * OCR_PDF_MAX_TIMEOUT_MS. One fixed time failed every large scan on every
- * retry (Sparta, 2026-11-04: four PDFs hit ocr_command_timeout each attempt).
+ * The stall window for one PDF's OCR. It no longer grows with the file's size
+ * up to a cap: the window counts only time with no progress, so a large scan
+ * that keeps working reads to the end however long it takes (owner rule,
+ * 16 Nov 2026; the size-stepped cap still failed big scans, Sparta 2026-11-04).
  */
-export function pdfOcrTimeoutMs(baseMs: number, sizeBytes: number): number {
-  const steps = Math.max(1, Math.ceil((Number.isFinite(sizeBytes) ? Math.max(0, sizeBytes) : 0) / OCR_PDF_TIMEOUT_BYTES_PER_STEP));
-  return Math.max(baseMs, Math.min(baseMs * steps, OCR_PDF_MAX_TIMEOUT_MS));
+export function pdfOcrTimeoutMs(baseMs: number, _sizeBytes: number): number {
+  return baseMs;
 }
 export const OCR_PDF_COMMAND = OCRMYPDF_COMMAND;
 export const OCR_IMAGE_COMMAND = TESSERACT_COMMAND;

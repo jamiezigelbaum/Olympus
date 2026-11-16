@@ -273,7 +273,8 @@ export const MANAGED_TOOL_ORDER: readonly ManagedToolName[] = ['tor', 'zkapi-cli
 const MANIFEST_FILE = 'olympus-tool.json';
 /** A bundle that inflates past this is refused (both pinned bundles are under 110 MB unpacked). */
 const MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
-const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+/** A tool download stops only when no bytes arrive for this long, never for its length. */
+const DOWNLOAD_STALL_MS = 2 * 60 * 1000;
 const VERSION_CHECK_TIMEOUT_MS = 20_000;
 
 // ---------------------------------------------------------------------------
@@ -921,8 +922,31 @@ async function downloadTo(
   label: string,
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  const stall = new AbortController();
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  const stillArriving = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => stall.abort(), DOWNLOAD_STALL_MS);
+  };
+  stillArriving();
+  const signal = options.signal ? AbortSignal.any([options.signal, stall.signal]) : stall.signal;
+  try {
+    return await downloadStream(path, asset, fetchImpl, signal, stillArriving, onBytes, tool, label);
+  } finally {
+    clearTimeout(stallTimer);
+  }
+}
+
+async function downloadStream(
+  path: string,
+  asset: ManagedToolAsset,
+  fetchImpl: typeof fetch,
+  signal: AbortSignal,
+  stillArriving: () => void,
+  onBytes: (received: number) => void,
+  tool: ManagedToolName,
+  label: string,
+): Promise<string> {
   let response: Response;
   try {
     response = await fetchImpl(asset.url, { signal, redirect: 'follow' });
@@ -948,6 +972,7 @@ async function downloadTo(
         throw new ManagedToolsError('download_failed', `The ${label} download stopped part way. Try again.`, tool);
       });
       if (chunk.done) break;
+      stillArriving();
       received += chunk.value.byteLength;
       if (received > asset.bytes) {
         await reader.cancel().catch(() => undefined);

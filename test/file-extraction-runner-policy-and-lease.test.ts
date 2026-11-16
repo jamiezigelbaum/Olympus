@@ -17,6 +17,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
+import { waitFor } from './helpers/test-clock.ts';
 import { buildExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
 import {
   DEFAULT_EXTRACTION_WORKER_ID,
@@ -250,5 +251,38 @@ describe('extraction runner: revoked folder scope fences in-flight work', () => 
     expect(result.records[0]).toMatchObject({ status: 'blocked_policy', errorKind: 'source_scope_superseded' });
     expect(calls).toEqual({ fetch: revokeAt === 'before_fetch' ? 0 : 1, extract: revokeAt === 'after_extract' ? 1 : 0, sink: 0 });
     expect(jobs.get(result.records[0]!.jobId)?.status).toBe('blocked_policy');
+  });
+});
+
+describe('extraction runner: a file still being read keeps its lease', () => {
+  test('an extraction that outlasts its lease renews it and records, instead of losing its text', async () => {
+    const { jobs } = newStore();
+    jobs.enqueue({ refs: [ref(1)], extractorKind: FAKE_KIND, extractorVersion: FAKE_VERSION, policyDecision: 'index_allowed' });
+    const runner = createFileExtractionRunner({
+      jobs,
+      registry: buildExtractorRegistry([textExtractor({
+        async extract(input): Promise<ExtractorOutput> {
+          // A big scan still working past its one-second lease: the read ends only once the first lease is well gone.
+          const firstExpiry = Date.parse(input.job.leaseExpiresAt);
+          await waitFor(() => Date.now() > firstExpiry + 1_000, { timeoutMs: 10_000, intervalMs: 50 });
+          return { status: 'indexed', text: 'extracted text' };
+        },
+      })]),
+      corpora: [{ corpusId: CORPUS_ID, trustDomain: 'secure_local', source: source([]), sink: sink() }],
+      leaseRenewMs: 200,
+    });
+
+    const result = await runner.run({ ...LANE, leaseSeconds: 1 });
+
+    expect(result.records[0]!.status).toBe('indexed');
+    expect(result.records[0]!.leaseLost).toBeUndefined();
+  }, 15_000);
+
+  test('a lease another run has taken is not renewed', () => {
+    const { jobs } = newStore();
+    jobs.enqueue({ refs: [ref(1)], extractorKind: FAKE_KIND, extractorVersion: FAKE_VERSION, policyDecision: 'index_allowed' });
+    const held = jobs.lease({ ...LANE, workerId: 'w', leaseSeconds: 60 }).leasedJobs[0]!;
+    expect(jobs.renewLease(held.jobId, held.leaseToken, 120)).toBeDefined();
+    expect(jobs.renewLease(held.jobId, 'not-the-token', 120)).toBeUndefined();
   });
 });

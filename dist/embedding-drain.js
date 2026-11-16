@@ -3300,7 +3300,7 @@ async function downloadPinnedFile(options) {
     if (existsSync6(partial)) {
       const size = statSync4(partial).size;
       if (size > 0 && size < expectedBytes) {
-        await hashPartial(partial, hash, options.verifyTimeoutMs);
+        await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
         options.onProgress(size);
       } else
@@ -3438,12 +3438,19 @@ function writeDownloadChunk(fd, bytes) {
     offset += written;
   }
 }
-async function hashPartial(path, hash, timeoutMs) {
+async function hashPartial(path, hash, stallMs) {
   const stream = createReadStream(path);
-  const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
+  let timer;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} stopped reading for ${Math.round(stallMs / 1000)} s.`)), stallMs);
+  };
+  arm();
   try {
-    for await (const bytes of stream)
+    for await (const bytes of stream) {
+      arm();
       hash.update(bytes);
+    }
   } finally {
     clearTimeout(timer);
     stream.destroy();
@@ -4043,7 +4050,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     encoding: expected.kind === "sha256" ? "hex" : "base64",
     noun: "built-in search model",
     stallMs,
-    verifyTimeoutMs: 10 * 60000,
+    verifyStallMs: 2 * 60000,
     keepPartial: false,
     error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
     onStart: () => reporter.set("downloading", label),
@@ -17202,7 +17209,38 @@ import { Database as Database2 } from "bun:sqlite";
 import { isMainThread as isMainThread3 } from "node:worker_threads";
 
 // src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+
+// src/core/source-answer-jobs.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+
+// src/core/release-manifest.ts
 import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+var chunkProvenance = new WeakMap;
+var storage = new AsyncLocalStorage4;
+var withheldAnswers = new WeakSet;
+
+// src/core/source-answer-jobs.ts
+var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+var progressSink = new AsyncLocalStorage5;
 
 // src/core/store-reclaim-admission.ts
 import { join as join17 } from "node:path";
@@ -17237,8 +17275,8 @@ function poolSqlSite(sql) {
 var SLOW_MAIN_THREAD_SQL_MS = 250;
 var SLOW_MAIN_THREAD_SQL_KEPT = 20;
 var SITE_TALLY_MS = 25;
-var storage = new AsyncLocalStorage4;
-var laneStorage = new AsyncLocalStorage4;
+var storage2 = new AsyncLocalStorage6;
+var laneStorage = new AsyncLocalStorage6;
 function beginSourceAnswerPoolRead(site) {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
@@ -17315,10 +17353,10 @@ var CONTENT_FREE_ERROR_CLASSES = new Set([
   "TypeError"
 ]);
 function currentSourceAnswerTrace() {
-  return storage.getStore();
+  return storage2.getStore();
 }
 function sourceAnswerTraceActive() {
-  return storage.getStore() !== undefined;
+  return storage2.getStore() !== undefined;
 }
 function recordSourceAnswerMainThreadSql(elapsedMs, site) {
   const trace = currentSourceAnswerTrace();
@@ -19847,30 +19885,8 @@ function ensureOwnerOnlyDir(dir) {
   chmodSync5(dir, 448);
 }
 
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
-function chunkCoverageNote(result) {
-  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
-}
-async function checkReleaseChunks(check, inputs, options) {
-  try {
-    const result = await check?.chunks?.(inputs, options);
-    if (result && result.allowed.length === inputs.length)
-      return result;
-  } catch {}
-  return {
-    allowed: inputs.map(() => []),
-    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
-    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
-  };
-}
-var chunkProvenance = new WeakMap;
-var storage2 = new AsyncLocalStorage5;
-var withheldAnswers = new WeakSet;
-
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 
 // src/core/source-item-read.ts
 var SOURCE_ITEM_READ_REFUSALS = [
@@ -19886,8 +19902,8 @@ var SOURCE_ITEM_READ_REFUSALS = [
 ];
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var storage3 = new AsyncLocalStorage6;
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+var storage3 = new AsyncLocalStorage7;
 var completedPrivateAnswers = new Set;
 var JOB_QUESTION_TTL_MS = 30 * 60000;
 var jobQuestions = new Map;
@@ -20303,7 +20319,7 @@ function currentAccess(authorized) {
     return "unavailable";
   }
 }
-var readAuthorization = new AsyncLocalStorage7;
+var readAuthorization = new AsyncLocalStorage8;
 function currentRemoteReadAccess() {
   const authorized = readAuthorization.getStore();
   return authorized ? currentAccess(authorized) : "active";
@@ -35639,6 +35655,9 @@ function optionalEnvironmentString(value) {
 // src/workers/dropbox-files/dropbox-content-hash.ts
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
 // src/workers/file-extraction/extractors/command-runner.ts
+import { execFile, spawn as spawn2 } from "node:child_process";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
 var resolvedCommands = new Map;
 // src/workers/connector-store/filter-capabilities.ts
 var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
@@ -35688,8 +35707,8 @@ var STALE_LOCK_MS2 = 60 * 60000;
 var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
 var SPACE_BACKOFF_MS = 15 * 60000;
 var DOWNLOAD_STALL_MS2 = 2 * 60000;
-var VERIFY_TIMEOUT_MS = 15 * 60000;
-var EXTRACT_TIMEOUT_MS = 5 * 60000;
+var VERIFY_STALL_MS = 2 * 60000;
+var EXTRACT_STALL_MS = 2 * 60000;
 
 // src/core/analyst-built-in.ts
 var GAP_GENERIC_WORDS = new Set([
@@ -36173,7 +36192,7 @@ var WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsap
 var WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
 var CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
-var DEFAULT_FILE_DEADLINE_MS = 30 * 60000;
+var DEFAULT_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
 var DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
 var DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
 var DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
@@ -36513,6 +36532,9 @@ var CODE_PAGE_LABELS = new Map([
   [65001, "utf-8"]
 ]);
 
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+var DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
+
 // src/workers/file-extraction/extractors/ocr-probe-fixture.ts
 var OCR_PROBE_IMAGE_BASE64 = [
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYn",
@@ -36590,10 +36612,6 @@ var OCR_READY_TTL_MS = 10 * 60000;
 // src/workers/file-extraction/extractors/input-limits.ts
 var DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
 var IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
-
-// src/workers/file-extraction/extractors/ocr.ts
-var OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
-var OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
 
 // src/workers/file-extraction/extractors/text.ts
 var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([

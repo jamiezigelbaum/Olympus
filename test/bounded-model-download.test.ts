@@ -98,7 +98,7 @@ for (const failure of ['oversized', 'short', 'checksum'] as const) {
       }) as unknown as typeof fetch,
       url: 'https://test/model', target: f.target, partial: `${f.target}.partial`, expectedBytes: 64,
       algorithm: 'sha256', digest: failure === 'checksum' ? '0'.repeat(64) : digest(64), encoding: 'hex', noun: 'test model',
-      stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: true,
+      stallMs: 60_000, verifyStallMs: 60_000, keepPartial: true,
       error: (_reason, message) => new Error(message),
       onStart: () => {}, onProgress: bytes => { written += bytes; },
     })).rejects.toThrow(message);
@@ -189,7 +189,7 @@ test(`a ${status} chunk already written can be freed while the next read is stil
     }), { status, headers: status === 206 ? { 'Content-Range': `bytes 0-${size - 1}/${size}` } : {} })) as unknown as typeof fetch,
     url: 'https://test/model', target, partial: `${target}.partial`, expectedBytes: size,
     algorithm: 'sha256', digest: digest(size), encoding: 'hex', noun: 'test model',
-    stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: false,
+    stallMs: 60_000, verifyStallMs: 60_000, keepPartial: false,
     error: (_reason, message) => new Error(message),
     onStart: () => {}, onProgress: (bytes) => { if (bytes > 0) written(); },
   });
@@ -217,7 +217,7 @@ test('a download hands the thread back between chunks, so the worker keeps answe
     fetchImpl: (async () => f.response(0, 16 * block.length - 1, { status: 200 })) as unknown as typeof fetch,
     url: 'https://test/model', target: f.target, partial: `${f.target}.partial`, expectedBytes: 16 * block.length,
     algorithm: 'sha256', digest: digest(16 * block.length), encoding: 'hex', noun: 'test model',
-    stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: true,
+    stallMs: 60_000, verifyStallMs: 60_000, keepPartial: true,
     error: (_reason, message) => new Error(message),
     onStart: () => {}, onProgress: () => { chunks += 1; },
     turn: () => { turns += 1; return Promise.resolve(); },
@@ -240,7 +240,7 @@ test('a large buffered response yields before 250 ms of write/hash work accumula
     fetchImpl: (async () => new Response(Buffer.alloc(size, 37))) as unknown as typeof fetch,
     url: 'https://test/model', target: f.target, partial: `${f.target}.partial`, expectedBytes: size,
     algorithm: 'sha256', digest: digest(size), encoding: 'hex', noun: 'test model',
-    stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: true,
+    stallMs: 60_000, verifyStallMs: 60_000, keepPartial: true,
     error: (_reason, message) => new Error(message), onStart: () => {}, onProgress: () => {},
     // Simulate slow storage deterministically, independent of CI's disk speed.
     write: (_fd, bytes) => { clock.set(clock.now() + bytes.byteLength / 1024); },
