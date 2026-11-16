@@ -120,7 +120,12 @@ Enforcement is mechanical, so this survives any thread or tool:
   change, never by loosening a guard or test; a new timeout, catch or
   built-in-model reference is listed in its allowance in the same commit.
   Codex briefs include this step, and a Codex builder runs it before it
-  pushes.
+  pushes. Merge `main` first, then run prepush, then push at once: a merge
+  after prepush means it checked a different tree. Never chain the push
+  through a pipe (`bun run prepush | tail && git push` pushes on `tail`'s
+  status); write the output to a file and test prepush's own exit code
+  (`bun run prepush > prepush.log 2>&1 || exit 1; git push`), or
+  `set -o pipefail` first.
 - `test/architecture-guard.test.ts` fails the build if the deleted template
   path reappears or if template/regex answer code appears anywhere in src.
   Do not weaken the guard to make a change pass.

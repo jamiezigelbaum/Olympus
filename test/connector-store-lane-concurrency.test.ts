@@ -143,7 +143,15 @@ test('a store keeps tier-checked keyword rows when a later read becomes silent',
     request: { query: 'orchard', maxResults: 5, context: { allowedTrustDomains: [store.trustDomain] } },
   });
   await waitFor(() => prefix);
-  await clock.advance(20_000);
+  // The lane re-arms its silence clock on progress that can land after the
+  // prefix, so one advance may come too early: keep advancing until it settles.
+  let settled = false;
+  void result.finally(() => { settled = true; });
+  while (!settled) {
+    await clock.advance(20_000);
+    const advanced = performance.now();
+    await waitFor(() => settled || performance.now() - advanced > 20);
+  }
   const response = await result;
   expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['row']);
   expect(response.skippedCorpora).toContainEqual({ corpusId: store.corpusId, trustDomain: store.trustDomain, reason: 'lane_timeout' });
