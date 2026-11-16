@@ -17,6 +17,7 @@ import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { removeFileDurablySync } from '../../core/atomic-file.ts';
 import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
+import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineForwardedKind, type EngineForwardedResponse } from './commands.ts';
 import { ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
@@ -31,11 +32,19 @@ export function engineStatusSnapshotPath(env: Record<string, string | undefined>
   return sharedDataPath('engine-status', env);
 }
 
+/** Each running background's control thread, for its status publisher (startEngineBackgroundStatus). */
+const controlPlanes = new Map<string, EngineControlPlane>();
+
 /**
  * Bind the background's command socket. Called after the data-owner lock is
  * held, so a socket left on the path belongs to a stopped background of this
  * data root: it is removed once no listener answers on it, and refused
  * otherwise.
+ *
+ * The socket is served by the control thread (control-plane.ts), so a command
+ * is accepted and answered while this loop is held; the ledger here still
+ * applies it. Where there is no thread to use, or it ends, the loop serves
+ * the socket itself, as it did before, and says so.
  */
 export function startEngineBackgroundServer(input: {
   socketPath: string;
@@ -45,7 +54,11 @@ export function startEngineBackgroundServer(input: {
   modelComplete?: (request: AnalystModelRequest) => Promise<AnalystModelCompletion>;
   instanceId?: string;
   log?: (line: string) => void;
-}): { instanceId: string; markReady(): void; markStopping(): void; stop(): void; ledger: EngineCommandLedger } {
+  /** False serves the socket from this loop (tests of the loop's own handler). */
+  controlThread?: boolean;
+  /** Tests only: how the control thread is made. */
+  createControlWorker?: (path: string) => Worker;
+}): { instanceId: string; markReady(): void; markStopping(): void; stop(): void; ledger: EngineCommandLedger; servedBy(): 'control-thread' | 'loop' } {
   const instanceId = input.instanceId ?? randomUUID();
   prepareEngineBackgroundSocketDirectory(input.socketPath);
   let present = false;
@@ -58,18 +71,58 @@ export function startEngineBackgroundServer(input: {
   }
   let ready = false;
   const ledger = new EngineCommandLedger({ instanceId, handlers: input.handlers });
-  const handler = createEngineCommandHandler({ authToken: input.authToken, ledger, ready: () => ready, ...(input.modelComplete ? { modelComplete: input.modelComplete } : {}) });
-  const server = bindWorkerSocket(input.socketPath, () => Bun.serve(workerSocketServe({
-    unix: input.socketPath,
-    fetch: (request: Request) => handler(request),
-  })));
+  let loopServer: { stop(closeActiveConnections?: boolean): unknown } | undefined;
+  const serveFromLoop = (): void => {
+    const handler = createEngineCommandHandler({ authToken: input.authToken, ledger, ready: () => ready, ...(input.modelComplete ? { modelComplete: input.modelComplete } : {}) });
+    loopServer = bindWorkerSocket(input.socketPath, () => Bun.serve(workerSocketServe({
+      unix: input.socketPath,
+      fetch: (request: Request) => handler(request),
+    })));
+  };
+  const log = input.log ?? ((line: string) => console.warn(line));
+  let stopped = false;
+  let control = input.controlThread === false ? undefined : startEngineControlPlane({
+    socketPath: input.socketPath,
+    authToken: input.authToken,
+    instanceId,
+    ledger,
+    ...(input.modelComplete ? { modelComplete: input.modelComplete } : {}),
+    ...(input.createControlWorker ? { createWorker: input.createControlWorker } : {}),
+    log,
+    // The thread ended: its socket went with it. The ledger here holds every
+    // command, so the loop takes the socket over and nothing is lost.
+    onLost: (reason) => {
+      controlPlanes.delete(instanceId);
+      control = undefined;
+      if (stopped) return;
+      log(`[engine-split] the control thread ended (${reason}); the engine loop answers commands and publishes status from here on.`);
+      try {
+        removeFileDurablySync(input.socketPath);
+        serveFromLoop();
+      } catch (error) {
+        log(`[engine-split] the engine loop could not take over the command socket: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+  });
+  if (control) {
+    controlPlanes.set(instanceId, control);
+  } else {
+    if (input.controlThread !== false) log('[engine-split] no control thread here; the engine loop answers commands and publishes status.');
+    serveFromLoop();
+  }
   return {
     instanceId,
     ledger,
-    markReady: () => { ready = true; },
+    markReady: () => { ready = true; control?.setReady(true); },
     /** Stop answering ready (the probe and new commands) while results stay readable: the background is about to restart. */
-    markStopping: () => { ready = false; },
-    stop: () => { void server.stop(true); },
+    markStopping: () => { ready = false; control?.setReady(false); },
+    stop: () => {
+      stopped = true;
+      controlPlanes.delete(instanceId);
+      control?.stop();
+      void loopServer?.stop(true);
+    },
+    servedBy: () => (control ? 'control-thread' : 'loop'),
   };
 }
 
@@ -82,6 +135,10 @@ export function startEngineBackgroundStatus(input: {
     path: engineStatusSnapshotPath(input.env),
     instanceId: input.instanceId,
     collect: input.collect,
+    // The loop collects; this background's control thread writes, and keeps
+    // writing while the loop is held. With no thread the loop writes.
+    hand: (state, at) => controlPlanes.get(input.instanceId)?.publishState(state, at, engineStatusSnapshotPath(input.env)) ?? false,
+    handFailure: (failure) => controlPlanes.get(input.instanceId)?.publishFailure(failure, engineStatusSnapshotPath(input.env)),
     log: (line) => console.warn(line),
   });
 }
@@ -191,7 +248,10 @@ export function createEngineFront(input: {
     if (!old && answering && answering.instance !== read.snapshot.instance_id && Date.parse(read.snapshot.written_at) > answering.at) {
       answering = { instance: read.snapshot.instance_id, at: Date.parse(read.snapshot.written_at) };
     }
-    return { ...read, age_ms: age, stale: old || (answering !== undefined && answering.instance !== read.snapshot.instance_id) };
+    return {
+      ...read, age_ms: age, state_age_ms: (read.state_age_ms ?? read.age_ms) + (age - read.age_ms),
+      stale: old || (answering !== undefined && answering.instance !== read.snapshot.instance_id),
+    };
   };
   const status = (): EngineStatusRead | undefined => {
     const at = now();

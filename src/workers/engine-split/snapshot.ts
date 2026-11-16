@@ -23,6 +23,21 @@ export interface EngineStatusSnapshot {
   /** The background instance that wrote it; a new one means it restarted. */
   instance_id: string;
   written_at: string;
+  /**
+   * When the engine's loop collected this state. The control thread
+   * (control-worker.ts) writes the snapshot again every interval whether the
+   * loop turns or not, so `written_at` says the background is alive and this
+   * says how old what it shows is. Absent when the loop wrote the file itself.
+   */
+  state_at?: string;
+  /** How long the engine's loop had gone without a turn at `written_at` (the control thread's reading). */
+  loop_held_ms?: number;
+  /**
+   * The loop could not collect its state (the collect threw): how many times
+   * in a row, the error's class and code, and when it last did. The state
+   * shown is the last one collected, or an empty one when there never was one.
+   */
+  state_error?: { attempts: number; error: string; at: string };
   scheduler: unknown;
   judge: {
     backlog: unknown;
@@ -61,12 +76,20 @@ export interface EngineManualSyncRun {
 
 export interface EngineStatusRead {
   snapshot: EngineStatusSnapshot;
-  /** How old the snapshot is, for the front to show. */
+  /** How old the snapshot's last write is: the background published this long ago. */
   age_ms: number;
   /**
-   * Not a reading of now: older than ENGINE_STATUS_STALE_MS, or written by a
-   * background other than the one answering commands. The front then shows
-   * nothing from it as current.
+   * How old the state in it is, for the front to show ("status is N s old"):
+   * a background whose loop is held keeps publishing its last state, and
+   * this grows. The same as `age_ms` when the snapshot does not say.
+   */
+  state_age_ms?: number;
+  /**
+   * Not a reading of this background: last written more than
+   * ENGINE_STATUS_STALE_MS ago, or written by a background other than the one
+   * answering commands. The front then shows nothing from it as current. A
+   * background that is alive with its loop held is not stale: it publishes
+   * its last state, and `state_age_ms` says how old that is.
    */
   stale: boolean;
 }
@@ -82,17 +105,39 @@ export function readEngineStatusSnapshot(path: string, now: () => number = () =>
     if (snapshot?.schema !== ENGINE_STATUS_SNAPSHOT_SCHEMA || typeof snapshot.instance_id !== 'string') return undefined;
     const written = Date.parse(snapshot.written_at);
     if (!Number.isFinite(written)) return undefined;
-    const age = Math.max(0, now() - written);
-    return { snapshot, age_ms: age, stale: age > ENGINE_STATUS_STALE_MS };
+    const at = now();
+    const age = Math.max(0, at - written);
+    const collected = typeof snapshot.state_at === 'string' ? Date.parse(snapshot.state_at) : Number.NaN;
+    return { snapshot, age_ms: age, state_age_ms: Number.isFinite(collected) ? Math.max(0, at - collected) : age, stale: age > ENGINE_STATUS_STALE_MS };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * A failed collect or write, for the log and the snapshot: the error's class
+ * and code; the message only for the runtime's own type and range errors,
+ * which describe the code and not the data. Any other message can carry a
+ * path or a name.
+ */
+export function describeSnapshotFailure(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  const runtime = error instanceof TypeError || error instanceof RangeError;
+  return `${error instanceof Error ? error.name : 'unknown error'}${typeof code === 'string' ? ` ${code}` : ''}${runtime ? `: ${error.message.slice(0, 120)}` : ''}`;
 }
 
 export interface EngineStatusPublisherOptions {
   path: string;
   instanceId: string;
   collect: () => Omit<EngineStatusSnapshot, 'schema' | 'instance_id' | 'written_at'>;
+  /**
+   * Hands the collected state to the control thread, which writes the file
+   * (control-plane.ts). Absent, or answering false (the thread is gone), the
+   * loop writes the file itself.
+   */
+  hand?: (state: Record<string, unknown>, at: number) => boolean;
+  /** Tells the control thread a collect failed, so the snapshot it keeps publishing says so. */
+  handFailure?: (failure: { attempts: number; error: string; at: number }) => void;
   now?: () => Date;
   intervalMs?: number;
   setInterval?: (callback: () => void, ms: number) => unknown;
@@ -100,7 +145,11 @@ export interface EngineStatusPublisherOptions {
   log?: (line: string) => void;
 }
 
-/** The background's publisher: one snapshot at once, then every interval. A failed collect or write keeps the last file. */
+/**
+ * The background's publisher: one snapshot at once, then every interval. A
+ * failed collect or write keeps the last file. The collect runs on the
+ * engine's loop; with a control thread the write does not.
+ */
 export function startEngineStatusPublisher(options: EngineStatusPublisherOptions): { publish(): void; stop(): void } {
   const now = options.now ?? (() => new Date());
   // A snapshot that cannot be written is said at once, then once a minute
@@ -109,26 +158,28 @@ export function startEngineStatusPublisher(options: EngineStatusPublisherOptions
   let failures = 0;
   let saidAtMs = 0;
   const publish = () => {
+    const at = now();
     try {
-      writeEngineStatusSnapshot(options.path, {
-        schema: ENGINE_STATUS_SNAPSHOT_SCHEMA,
-        instance_id: options.instanceId,
-        written_at: now().toISOString(),
-        ...options.collect(),
-      });
+      const state = options.collect();
+      if (!options.hand?.(state as Record<string, unknown>, at.getTime())) {
+        writeEngineStatusSnapshot(options.path, {
+          schema: ENGINE_STATUS_SNAPSHOT_SCHEMA,
+          instance_id: options.instanceId,
+          written_at: at.toISOString(),
+          ...state,
+        });
+      }
       if (failures > 0) options.log?.(`[engine-split] status snapshot written again after ${failures} failed attempt(s)`);
       failures = 0;
     } catch (error) {
       failures += 1;
-      const atMs = now().getTime();
+      const atMs = at.getTime();
+      const what = describeSnapshotFailure(error);
+      // The control thread keeps publishing the last state: the snapshot itself then says its state could not be collected.
+      options.handFailure?.({ attempts: failures, error: what, at: atMs });
       if (failures === 1 || atMs - saidAtMs >= 60_000) {
         saidAtMs = atMs;
-        // The error's class and code; the message only for the runtime's own
-        // type and range errors, which describe the code and not the data. Any
-        // other message can carry a path or a name.
-        const code = (error as { code?: unknown } | null)?.code;
-        const runtime = error instanceof TypeError || error instanceof RangeError;
-        options.log?.(`[engine-split] status snapshot not written (${failures} attempt(s) in a row): ${error instanceof Error ? error.name : 'unknown error'}${typeof code === 'string' ? ` ${code}` : ''}${runtime ? `: ${error.message.slice(0, 120)}` : ''}`);
+        options.log?.(`[engine-split] status snapshot not written (${failures} attempt(s) in a row): ${what}`);
       }
     }
   };
