@@ -6511,6 +6511,34 @@ var init_native_process_service = __esm(() => {
 // src/core/boot-progress.ts
 import { existsSync as existsSync9, lstatSync as lstatSync8, mkdirSync as mkdirSync9, readdirSync as readdirSync3, readFileSync as readFileSync14, realpathSync as realpathSync4, rmSync as rmSync5 } from "node:fs";
 import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute10, join as join19, resolve as resolve6 } from "node:path";
+function readBootProgress(env = process.env) {
+  return readProgressFile(bootProgressPath(env));
+}
+function readFrontProgress(env = process.env) {
+  return readProgressFile(sharedDataPath("front-progress", env));
+}
+function readProgressFile(path) {
+  try {
+    const value = JSON.parse(readFileSync14(path, "utf8"));
+    if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== "number" || typeof value.phase !== "string" || typeof value.startedAt !== "string" || typeof value.updatedAt !== "string")
+      return;
+    if (value.failures !== undefined && (!Number.isSafeInteger(value.failures) || value.failures < 0))
+      delete value.failures;
+    if (value.lastFailure !== undefined && typeof value.lastFailure !== "string")
+      delete value.lastFailure;
+    return { completedStores: 0, ...value };
+  } catch {
+    return;
+  }
+}
+function bootProgressLine(progress, now = Date.now()) {
+  const minutes = Math.max(0, Math.floor((now - Date.parse(progress.startedAt)) / 60000));
+  const store = progress.storeId ? `, now ${progress.storeId}` : "";
+  return `Updating your data: ${progress.completedStores} ${progress.completedStores === 1 ? "store" : "stores"} done${store} (${minutes}m)`;
+}
+function bootProgressPath(env) {
+  return sharedDataPath("boot-progress", env);
+}
 function dataRootFiles(env, keep, options = {}) {
   const files = [];
   const root = olympusDataRoot(env);
@@ -6544,7 +6572,7 @@ function dataRootFiles(env, keep, options = {}) {
   walk(root, true);
   return files.sort();
 }
-var STORELESS_FOLDERS;
+var BOOT_PROGRESS_SCHEMA = "olympus.boot-progress.v1", STORELESS_FOLDERS;
 var init_boot_progress = __esm(() => {
   init_atomic_file();
   init_olympus_layout();
@@ -6574,6 +6602,29 @@ function engineHeartbeatBeating(heartbeat, options = {}) {
 }
 function startupCapMs(storeBytes) {
   return STARTUP_CAP_BASE_MS + Math.ceil(storeBytes / 1024 ** 3) * STARTUP_CAP_PER_GB_MS;
+}
+function readEngineStartProgress(env, options = {}) {
+  const alive = options.alive ?? processAlive;
+  const belongs = (pid, startedAt) => (options.pid === undefined || options.pid === pid) && alive(pid) && (options.since === undefined || Date.parse(startedAt) >= options.since);
+  const tokens = [];
+  const steps = [];
+  let booting = false;
+  for (const boot of [readBootProgress(env), readFrontProgress(env)]) {
+    if (!boot || boot.phase === "failed" || !belongs(boot.pid, boot.startedAt))
+      continue;
+    if (boot.phase !== "done")
+      booting = true;
+    tokens.push(Date.parse(boot.updatedAt));
+    steps.push(bootProgressLine(boot, options.now));
+  }
+  const heartbeat = readEngineHeartbeat(env);
+  if (heartbeat && belongs(heartbeat.pid, heartbeat.startedAt)) {
+    steps.push(engineHeartbeatLine(heartbeat, options.now));
+    if (booting && engineHeartbeatBeating(heartbeat, { now: options.now ?? Date.now(), alive }))
+      tokens.push(Date.parse(heartbeat.writtenAt));
+  }
+  const finite = tokens.filter(Number.isFinite);
+  return { token: finite.length ? Math.max(...finite) : undefined, waitingOn: steps.join("; ") || "boot progress or a heartbeat" };
 }
 function createStartupWatch(input) {
   const now = input.now ?? (() => performance.now());
@@ -6612,6 +6663,7 @@ function processAlive(pid) {
 }
 var ENGINE_HEARTBEAT_SCHEMA = "olympus.engine-heartbeat.v1", LOOP_TICK_MS = 250, HEARTBEAT_STALE_MS = 15000, HEARTBEAT_WORKER_SOURCE, STARTUP_CAP_BASE_MS, STARTUP_CAP_PER_GB_MS = 60000;
 var init_engine_heartbeat = __esm(() => {
+  init_boot_progress();
   init_olympus_layout();
   HEARTBEAT_WORKER_SOURCE = `
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
@@ -26712,6 +26764,7 @@ init_atomic_file();
 init_linux_engine_layout();
 
 // src/core/engine-service.ts
+init_engine_heartbeat();
 init_mac_engine_daemon();
 init_mac_engine_daemon();
 
@@ -26783,6 +26836,7 @@ function enginePaths(homeDir) {
   const appSupportDir = join38(home, "Library", "Application Support", "Olympus");
   const dataEnv = { HOME: home };
   return {
+    dataEnv,
     label: ENGINE_LABEL,
     plistPath: join38(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
@@ -26813,6 +26867,7 @@ function engineServicePaths(options = {}) {
   }
   const l = resolveLinuxEngineLayout(env);
   return {
+    dataEnv: { HOME: l.home, XDG_DATA_HOME: l.dataHome, XDG_CONFIG_HOME: l.configHome, OLYMPUS_ENGINE_HOST: "1" },
     linux: l,
     label: "olympus-engine.service",
     plistPath: l.unitPath,
@@ -26886,6 +26941,8 @@ async function waitForEngineHealthy(input, deps = {}) {
   const pidAlive = deps.pidAlive ?? defaultPidAlive;
   const fetchImpl = deps.fetchImpl ?? workerFetch;
   const started = now();
+  let lastProgressAt = started;
+  let progressToken;
   let last = {
     ok: false,
     expected_build: input.expectedBuild,
@@ -26897,9 +26954,17 @@ async function waitForEngineHealthy(input, deps = {}) {
   };
   for (;; ) {
     last = { ...await checkEngineHealthOnce(input, pidAlive, fetchImpl, deps), waited_ms: now() - started };
-    if (last.ok || now() - started >= timeoutMs)
+    if (last.ok)
       return last;
-    await sleep(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - started))));
+    const expectedProcess = input.expectedBuild === null || last.running_build === null || last.running_build === input.expectedBuild;
+    const progress = input.paths.dataEnv && expectedProcess ? readEngineStartProgress(input.paths.dataEnv, { since: input.since, now: now(), alive: pidAlive }) : undefined;
+    if (progress?.token !== undefined && (progressToken === undefined || progress.token > progressToken)) {
+      lastProgressAt = now();
+      progressToken = progress.token;
+    }
+    if (now() - lastProgressAt >= timeoutMs)
+      return last;
+    await sleep(Math.min(deps.pollMs ?? ENGINE_HEALTH_POLL_MS, Math.max(0, timeoutMs - (now() - lastProgressAt))));
   }
 }
 async function checkEngineHealthOnce(input, pidAlive, fetchImpl, deps) {

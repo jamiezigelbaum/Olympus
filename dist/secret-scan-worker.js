@@ -1238,11 +1238,23 @@ var SECRET_FINDING_TYPES = new Set([
 var CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
 
 // src/workers/classification/secret-scan-worker.ts
+var progress;
 self.onmessage = (event) => {
-  const { id, text } = event.data;
+  const { id, text, op, buffer } = event.data;
+  if (op === "progress" && buffer) {
+    progress = new Int32Array(buffer);
+    return;
+  }
+  if (progress)
+    Atomics.store(progress, 0, id);
   try {
     self.postMessage({ id, ok: true, kinds: scanSecretFindingKinds(text) });
   } catch (error) {
     self.postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    if (progress) {
+      Atomics.store(progress, 1, id);
+      Atomics.store(progress, 0, 0);
+    }
   }
 };

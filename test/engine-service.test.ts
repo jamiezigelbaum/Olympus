@@ -41,7 +41,8 @@ import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lif
 import { runDoctor, type DoctorDeps, type DoctorHostFacts } from '../src/core/doctor.ts';
 import { emptyRemoteAccessStatus, remoteAccessDir, writeRemoteAccessStatus } from '../src/core/remote-access.ts';
 import { workerServicePaths } from '../src/core/worker-service.ts';
-import { olympusDataRoot } from '../src/core/olympus-layout.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
+import { olympusDataRoot, sharedDataPath } from '../src/core/olympus-layout.ts';
 import { updateInFlightSince } from '../src/core/data-root-snapshot.ts';
 import { Database } from 'bun:sqlite';
 import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
@@ -1042,6 +1043,83 @@ describe('install and rollback succeed only on proof the new build is healthy', 
     rmSync(paths.statusPath);
     const timedOut = await waitForEngineHealthy({ paths, expectedBuild: 'b1' }, { timeoutMs: 60_000, pollMs: 500, now: () => clock, sleep: async (ms) => { clock += ms; } });
     expect(timedOut).toMatchObject({ ok: false, waited_ms: 60_000, reason: 'the engine has not written its status yet' });
+  });
+
+  for (const signal of ['boot-progress', 'engine-heartbeat'] as const) {
+    test(`health waits past 60 seconds while ${signal} advances, then accepts readiness`, async () => {
+      const { home } = fixture();
+      const paths = enginePaths(home);
+      const clock = createTestClock();
+      const startedAt = clock.date().toISOString();
+      let finished = false;
+      const writeProgress = () => {
+        const value = signal === 'boot-progress'
+          ? { schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'migrating', storeId: 'fixture', startedAt, updatedAt: clock.date().toISOString(), completedStores: 1 }
+          : { schema: 'olympus.engine-heartbeat.v1', pid: process.pid, role: 'background', startedAt, writtenAt: clock.date().toISOString(), blockedMs: 0, step: 'migrating fixture' };
+        const path = sharedDataPath(signal, paths.dataEnv!);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, JSON.stringify(value));
+      };
+      if (signal === 'engine-heartbeat') {
+        // A heartbeat counts only while a boot is under way: one long step, its receipt unchanged.
+        const bootPath = sharedDataPath('boot-progress', paths.dataEnv!);
+        mkdirSync(dirname(bootPath), { recursive: true });
+        writeFileSync(bootPath, JSON.stringify({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'migrating', storeId: 'fixture', startedAt, updatedAt: startedAt, completedStores: 0 }));
+      }
+      writeProgress();
+      const pending = waitForEngineHealthy({ paths, expectedBuild: 'b1', since: clock.now() }, {
+        timeoutMs: 60_000, pollMs: 500, now: clock.now, sleep: clock.sleep,
+        fetchImpl: (async () => new Response('{}')) as unknown as typeof fetch,
+      }).then((proof) => { finished = true; return proof; });
+      await flushMicrotasks();
+      for (let i = 0; i < 16; i++) {
+        await clock.advance(5_000);
+        writeProgress();
+      }
+      expect(finished).toBe(false);
+      mkdirSync(dirname(paths.statusPath), { recursive: true });
+      writeFileSync(paths.statusPath, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: process.pid,
+        started_at: startedAt, state: 'running', build: 'b1', services: { 'olympus-worker': { state: 'ok' } } }));
+      await clock.advance(500);
+      expect(await pending).toMatchObject({ ok: true, waited_ms: 80_500 });
+    });
+  }
+
+  test('health gives up on a frozen heartbeat, naming the missing status proof', async () => {
+    const { home } = fixture();
+    const paths = enginePaths(home);
+    const clock = createTestClock();
+    const path = sharedDataPath('engine-heartbeat', paths.dataEnv!);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ schema: 'olympus.engine-heartbeat.v1', pid: process.pid, role: 'background',
+      startedAt: clock.date().toISOString(), writtenAt: clock.date().toISOString(), blockedMs: 0 }));
+    const pending = waitForEngineHealthy({ paths, expectedBuild: 'b1' }, { timeoutMs: 60_000, pollMs: 500, now: clock.now, sleep: clock.sleep });
+    await flushMicrotasks();
+    await clock.advance(60_000);
+    expect(await pending).toMatchObject({ ok: false, waited_ms: 60_000, reason: 'the engine has not written its status yet' });
+  });
+
+  test('a wrong build with a live heartbeat cannot extend proof of the requested build', async () => {
+    const { home } = fixture();
+    const paths = enginePaths(home);
+    const clock = createTestClock();
+    const startedAt = clock.date().toISOString();
+    const path = sharedDataPath('engine-heartbeat', paths.dataEnv!);
+    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname(paths.statusPath), { recursive: true });
+    writeFileSync(paths.statusPath, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: process.pid,
+      started_at: startedAt, state: 'running', build: 'old', services: { 'olympus-worker': { state: 'ok' } } }));
+    const beat = () => writeFileSync(path, JSON.stringify({ schema: 'olympus.engine-heartbeat.v1', pid: process.pid,
+      role: 'background', startedAt, writtenAt: clock.date().toISOString(), blockedMs: 0 }));
+    beat();
+    const timer = clock.setInterval(beat, 1_000);
+    const pending = waitForEngineHealthy({ paths, expectedBuild: 'b1', since: clock.now() }, {
+      timeoutMs: 60_000, pollMs: 500, now: clock.now, sleep: clock.sleep,
+    });
+    await flushMicrotasks();
+    await clock.advance(60_000);
+    clock.clearInterval(timer);
+    expect(await pending).toMatchObject({ ok: false, waited_ms: 60_000, reason: 'the engine runs build old, not b1' });
   });
 
   test('PoC: a rollback to a build that never gets healthy reports failure, puts the running build back, and proves it healthy', async () => {

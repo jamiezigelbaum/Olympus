@@ -12,6 +12,7 @@
 
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { bootProgressLine, readBootProgress, readFrontProgress } from './boot-progress.ts';
 import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
 export const ENGINE_HEARTBEAT_SCHEMA = 'olympus.engine-heartbeat.v1';
@@ -161,6 +162,38 @@ export const STARTUP_CAP_PER_GB_MS = 60_000;
 
 export function startupCapMs(storeBytes: number): number {
   return STARTUP_CAP_BASE_MS + Math.ceil(storeBytes / 1024 ** 3) * STARTUP_CAP_PER_GB_MS;
+}
+
+/**
+ * Progress of a start, for a wait that should last as long as the start is
+ * moving: boot receipts from live processes of this start (never an older
+ * boot), and the heartbeat while one of them is still booting. Once the boot
+ * is done a heartbeat alone is not progress, so a booted engine that never
+ * turns healthy still ends the wait.
+ */
+export function readEngineStartProgress(env: LayoutEnv, options: {
+  pid?: number; since?: number | undefined; now?: number; alive?: (pid: number) => boolean;
+} = {}): { token: number | undefined; waitingOn: string } {
+  const alive = options.alive ?? processAlive;
+  const belongs = (pid: number, startedAt: string): boolean =>
+    (options.pid === undefined || options.pid === pid) && alive(pid)
+    && (options.since === undefined || Date.parse(startedAt) >= options.since);
+  const tokens: number[] = [];
+  const steps: string[] = [];
+  let booting = false;
+  for (const boot of [readBootProgress(env), readFrontProgress(env)]) {
+    if (!boot || boot.phase === 'failed' || !belongs(boot.pid, boot.startedAt)) continue;
+    if (boot.phase !== 'done') booting = true;
+    tokens.push(Date.parse(boot.updatedAt));
+    steps.push(bootProgressLine(boot, options.now));
+  }
+  const heartbeat = readEngineHeartbeat(env);
+  if (heartbeat && belongs(heartbeat.pid, heartbeat.startedAt)) {
+    steps.push(engineHeartbeatLine(heartbeat, options.now));
+    if (booting && engineHeartbeatBeating(heartbeat, { now: options.now ?? Date.now(), alive })) tokens.push(Date.parse(heartbeat.writtenAt));
+  }
+  const finite = tokens.filter(Number.isFinite);
+  return { token: finite.length ? Math.max(...finite) : undefined, waitingOn: steps.join('; ') || 'boot progress or a heartbeat' };
 }
 
 /**

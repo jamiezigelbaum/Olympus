@@ -43,23 +43,23 @@ function storeFile(): string {
 }
 
 const COUNT: StoreRead = { mode: 'get', sql: 'SELECT COUNT(*) AS c FROM items', params: [] };
-// Runs for seconds on its thread; the explicit pool-read deadline gives it up.
+// Runs for seconds on its thread without returning a batch: a silent store.
 const SLOW: StoreRead = {
   mode: 'get',
   sql: 'WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000000) SELECT COUNT(*) AS c FROM n',
   params: [],
 };
 
-function poolAdapter(path: string, reads: StoreRead[], readBudgetMs?: number): SourceIndexCorpusSearchAdapter {
+function poolAdapter(path: string, reads: StoreRead[]): SourceIndexCorpusSearchAdapter {
   return async (request) => {
     for (const read of reads) {
-      await readOnPool(path, read, readBudgetMs !== undefined ? { deadlineAtMs: Date.now() + readBudgetMs } : {});
+      await readOnPool(path, read, request.deadlineAtMs !== undefined ? { deadlineAtMs: request.deadlineAtMs } : {});
     }
     return { hits: [], latencyMs: 1, rawExposed: false };
   };
 }
 
-test('each lane reports its pool reads: queue wait, run time, and reads given up at the deadline', async () => {
+test('each lane reports its pool reads; a lane dropped for silence is a timeout, and its read is not cut by a clock', async () => {
   const path = storeFile();
   const registry = buildSourceIndexCorpusRegistry([
     defineSourceIndexCorpus({ corpusId: 'public_safe.quick', family: 'file', trustDomain: 'public_safe' }),
@@ -69,10 +69,10 @@ test('each lane reports its pool reads: queue wait, run time, and reads given up
   await runWithSourceAnswerTrace(trace, () => observeSourceAnswerRetrievalAttempt('keyword', () =>
     observeSourceAnswerRoutedQuery(1, () => routeSourceIndexSearch({
       registry,
-      laneTimeoutMs: 1_000,
+      laneTimeoutMs: 400,
       adapters: {
         'public_safe.quick': poolAdapter(path, [COUNT, COUNT]),
-        'public_safe.stuck': poolAdapter(storeFile(), [SLOW], 400),
+        'public_safe.stuck': poolAdapter(storeFile(), [SLOW]),
       },
       request: { query: 'q', maxResults: 5, context: { allowedTrustDomains: ['public_safe'], allowCloudQueries: true } },
     }))));
@@ -84,10 +84,10 @@ test('each lane reports its pool reads: queue wait, run time, and reads given up
   expect(quick.pool).toMatchObject({ reads: 2, refused: 0, dropped_queued: 0, past_deadline_running: 0, errors: 0 });
   const stuck = byCorpus.get('public_safe.stuck')!;
   expect(stuck.outcome).toBe('timeout');
-  expect(stuck.pool).toMatchObject({ reads: 1, refused: 0, dropped_queued: 0, past_deadline_running: 1, errors: 0 });
-  // It ran on a thread until the deadline gave it up.
-  expect(stuck.pool!.run_ms).toBeGreaterThan(200);
-  expect(stuck.pool!.run_max_ms).toBe(stuck.pool!.run_ms);
+  // No deadline rides the read any more (owner rule, 2026-11-16): the lane is
+  // named as unfinished after 400 ms of silence, and the read itself runs on
+  // its worker, so nothing was given up at a deadline.
+  expect(stuck.pool?.past_deadline_running ?? 0).toBe(0);
 });
 
 test('a read made outside a traced Ask lane is not counted', async () => {
