@@ -34,8 +34,9 @@ test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-th
   // More RAM must not hide repeated scans through SQLite's small connection caches.
   // Two cases, each scored on its own line: a box in use, and the first boot after an upgrade left a large WAL.
   // Exit 3 is "host busy" (the IO floor was never reached): not a product result.
+  // Each case starts from the pristine fixture, copied outside the memory cap.
   const results = Object.fromEntries((['steady', 'boot-after-upgrade'] as const).map(runCase => [runCase,
-    invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase], 25 * 60_000, onDisk)]));
+    invoke(['bun', script, 'restore', '--dir', dir], 30 * 60_000, onDisk) || invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase], 25 * 60_000, onDisk)]));
   console.log(JSON.stringify({ phase: 'cases', results }));
   expect(results).toEqual({ steady: 0, 'boot-after-upgrade': 0 });
 }, 235 * 60_000);
@@ -62,6 +63,8 @@ test('fixture rebuilds an old shape with substantial embedded Personal and Priva
     expect(receipt.shape.version).toBeGreaterThan(4);
     expect(receipt.shape.chunksPerItem).toBe(1);
     expect(readFileSync(old, 'utf8')).toBe('previous fixture');
+    // Each run starts from this copy, so every run has judging to do.
+    expect(existsSync(join(fixture, `pristine-v${receipt.shape.version}`, 'set.tier-ledger.sqlite'))).toBe(true);
     const database = (name: string) => new Database(join(fixture, receipt.files.find((path: string) => path.endsWith(`/${name}.sqlite`))), { readonly: true });
     for (const [name, count] of [['internal', 120], ['secure_local', 80]] as const) {
       const store = database(name);
@@ -106,6 +109,9 @@ test('loop-stall gate fails on a WAL over 64 MB at the end and lists reads held 
   expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 }, [line('a', 2000, 'background'), line('a', 9000, 'shared')])).toMatchObject({ wal_ok: true, other_reads_over_2s: [{ ms: 9000, lane: 'shared' }] });
   expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 + 1 }, []).wal_ok).toBe(false);
   expect(sqliteGuards({}, ['[olympus] sqlite checkpoint: ledger wal_bytes=67108865 ms=1 busy=0 frames=1 checkpointed=1'])).toMatchObject({ wal_ok: false, wal_peak_over: [{ label: 'ledger', bytes: 67108865 }] });
+  const padded = ['[olympus] sqlite wal: ledger wal_bytes=2296000000 oldest_read_ms=0', '[olympus] sqlite checkpoint: ledger wal_bytes=67108864 ms=1 busy=0 frames=1 checkpointed=1'];
+  expect(sqliteGuards({}, padded).wal_ok).toBe(false);
+  expect(sqliteGuards({}, padded, { fromFirstLevel: true })).toMatchObject({ wal_ok: true, wal_peak: { ledger: 67108864 } });
   expect(sqliteGuards({}, [line('internal', 2001, 'background'), line('internal', 4000, 'background')])).toMatchObject({ wal_ok: true, background_reads_over_2s: [{ label: 'internal', ms: 4000 }] });
 });
 

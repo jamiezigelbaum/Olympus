@@ -62,6 +62,7 @@ import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } f
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   createFileExtractionRuntime,
@@ -480,6 +481,7 @@ import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat
 import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
+import { frontLoopSqlHealth, watchFrontLoopSql } from '../../core/front-loop-sql-guard.ts';
 import {
   createEngineFront,
   createEngineFrontRoutes,
@@ -679,7 +681,7 @@ export async function main(): Promise<void> {
   // A measuring run: every call site that runs a statement on this loop.
   const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
   if (sqlSitesDir) {
-    const sqlSites = startMainThreadSqlSiteCount();
+    const sqlSites = startMainThreadSqlSiteCount(Number(process.env.OLYMPUS_MAIN_THREAD_SQL_SITE_FRAMES) || 2);
     const writeSqlSites = () => {
       try { writeFileSync(join(sqlSitesDir, `${engineRole}.sql-sites.json`), JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() })); }
       catch { /* a measuring aid: the engine runs on without it */ }
@@ -709,6 +711,10 @@ export async function main(): Promise<void> {
     const frontToken = workerAuthTokenFromEnv(process.env);
     if (!frontToken) throw new Error('The engine front needs the worker auth token.');
     forbidWritableStoreOpens();
+    // And it is to run no SQLite on this loop (front-loop-sql-guard.ts). Until
+    // the last statement has moved off it this records; run from source (the
+    // gate and the tests) each call site is checked against the shrink-only list.
+    watchFrontLoopSql({ mode: 'record', ...frontLoopSqlAllowance() });
     // It listens at once and says it is starting; it opens stores on the
     // background's receipt that its boot work is done, never on how fast the
     // background answers (gate7 success leg on 893087f5, 13 Nov).
@@ -6380,6 +6386,8 @@ export async function main(): Promise<void> {
         ...(statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {}),
         loop_lag: loopLag,
         ...(backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {}),
+        // The front is to run no SQLite on this loop: how many statements it still does, and (from source) any site off the list.
+        ...(frontLoopSqlHealth() ? { front_loop_sql: frontLoopSqlHealth() } : {}),
         // How old the background's published state is and how long its loop has been held: a busy
         // background keeps publishing its last state (engine-split/control-plane.ts), so its age is said, never hidden.
         ...(backgroundStatus && !backgroundStatus.stale ? {
@@ -7057,4 +7065,18 @@ export function resolveEmailSourceBindHostFromEnv(env: Record<string, string | u
 
 if (import.meta.main) {
   await mainRecordingFrontFailure();
+}
+
+/**
+ * The call sites still allowed to run SQLite on the front's loop
+ * (config/front-loop-sql-allowance.json), when this engine runs from source.
+ * A packaged engine has no source frames to name a site by, so it gets no
+ * list and only counts.
+ */
+function frontLoopSqlAllowance(): { allowed?: string[] } {
+  if (!import.meta.url.endsWith('/src/workers/engine/server.ts')) return {};
+  const path = fileURLToPath(new URL('../../../config/front-loop-sql-allowance.json', import.meta.url));
+  if (!existsSync(path)) return {};
+  const sections = (JSON.parse(readFileSync(path, 'utf8')) as { sites: Record<string, string[]> }).sites;
+  return { allowed: Object.values(sections).flat() };
 }

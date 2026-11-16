@@ -10,6 +10,7 @@
 
 import { Database } from 'bun:sqlite';
 import { isMainThread } from 'node:worker_threads';
+import { frontLoopSqlWatched, noteFrontLoopStatement } from '../../core/front-loop-sql-guard.ts';
 import { recordSourceAnswerMainThreadSql, sourceAnswerTraceActive } from '../source-index/answer-latency-trace.ts';
 
 // A plain key, not a Symbol: a module-level call would keep the plugin
@@ -42,6 +43,7 @@ export function installMainThreadSqlTrace(): void {
     if (planRecorder && !planRecorder.explaining && typeof args[0] === 'string' && SINGLE_WRITE.test(args[0])) {
       recordPlan({ [SQL]: args[0], [DB]: this });
     }
+    if (frontLoopSqlWatched()) noteFrontLoopStatement(this.filename, sourceSite);
     if (siteCounts) countSite();
     if (!sliceTiming && !slowLog) return exec.apply(this, args);
     const started = performance.now();
@@ -75,6 +77,7 @@ function timeStatement<T>(statement: T): T {
     if (typeof call !== 'function') continue;
     held[method] = function (this: unknown, ...args: unknown[]) {
       if (planRecorder && !planRecorder.explaining) recordPlan(held);
+      if (frontLoopSqlWatched()) noteFrontLoopStatement((held[DB] as Database | undefined)?.filename, sourceSite);
       if (siteCounts) countSite();
       const answer = sourceAnswerTraceActive();
       if (!answer && !sliceTiming && !slowLog) return call.apply(this, args);
@@ -238,10 +241,10 @@ function tableAliases(sql: string): Map<string, string> {
 }
 
 // The innermost frames under src/ outside this module: function and file.
-function sourceSite(): string {
+function sourceSite(depth = 2): string {
   const frames = (new Error().stack ?? '').split('\n').slice(1).map((line) => line.trim().replace(/^at /, ''));
-  const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes('main-thread-sql-trace'));
-  return mine.slice(0, 2).map((frame) => shortFrame(frame).replace(/:\d+$/, '')).join(' < ');
+  const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes('main-thread-sql-trace') && !frame.includes('front-loop-sql-guard'));
+  return mine.slice(0, depth).map((frame) => shortFrame(frame).replace(/:\d+$/, '')).join(' < ');
 }
 
 // ---------------------------------------------------------------------------
@@ -249,17 +252,21 @@ function sourceSite(): string {
 // (freeze-proof design, 16 Nov 2026: the front's loop should run none). A
 // measuring run only: each statement pays for a stack. OLYMPUS_MAIN_THREAD_SQL_SITES
 // names a directory; `<role>.sql-sites.json` is rewritten there every 10 s.
+// OLYMPUS_MAIN_THREAD_SQL_SITE_FRAMES (1 to 8, default 2) is how many caller frames name a site.
 
 let siteCounts: Map<string, number> | undefined;
+let siteDepth = 2;
 
 function countSite(): void {
-  const site = sourceSite() || '(no source frame)';
+  const site = sourceSite(siteDepth) || '(no source frame)';
   siteCounts!.set(site, (siteCounts!.get(site) ?? 0) + 1);
 }
 
 /** Starts counting statement call sites on this thread; `sites()` is the list so far, busiest first. */
-export function startMainThreadSqlSiteCount(): { sites(): Array<{ site: string; statements: number }>; stop(): void } {
+export function startMainThreadSqlSiteCount(frames = 2): { sites(): Array<{ site: string; statements: number }>; stop(): void } {
   installMainThreadSqlTrace();
+  // More frames tell a shared helper's callers apart (a lease, a store open).
+  siteDepth = Math.max(1, Math.min(8, Math.floor(frames) || 2));
   const counts = new Map<string, number>();
   siteCounts = counts;
   return {

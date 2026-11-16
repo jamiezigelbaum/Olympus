@@ -17383,6 +17383,38 @@ function* iterateRows(db, sql, ...params) {
 import { Database as Database2 } from "bun:sqlite";
 import { isMainThread as isMainThread3 } from "node:worker_threads";
 
+// src/core/front-loop-sql-guard.ts
+class FrontLoopSqlError extends Error {
+  code = "front_loop_sql";
+  constructor(site) {
+    super(`The engine front ran SQLite on its loop${site ? ` (${site})` : ""}; the front reads through the read pool and writes through its stores thread.`);
+    this.name = "FrontLoopSqlError";
+  }
+}
+var UNLISTED_KEPT = 50;
+var watch;
+function frontLoopSqlWatched() {
+  return watch !== undefined;
+}
+function noteFrontLoopStatement(dbPath, site) {
+  const state = watch;
+  if (!state || dbPath === ":memory:" || dbPath === "" || dbPath?.startsWith("file::memory:"))
+    return;
+  if (state.mode === "throw")
+    throw new FrontLoopSqlError(site());
+  state.statements += 1;
+  if (!state.allowed)
+    return;
+  const at = site() || "(no source frame)";
+  const count = state.seen.get(at);
+  state.seen.set(at, (count ?? 0) + 1);
+  if (count !== undefined || state.allowed.has(at))
+    return;
+  if (state.unlisted.length < UNLISTED_KEPT)
+    state.unlisted.push(at);
+  state.log(`[olympus] front loop sql: unlisted site ${at}`);
+}
+
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 
@@ -17552,6 +17584,8 @@ function installMainThreadSqlTrace() {
     if (planRecorder && !planRecorder.explaining && typeof args[0] === "string" && SINGLE_WRITE.test(args[0])) {
       recordPlan({ [SQL]: args[0], [DB]: this });
     }
+    if (frontLoopSqlWatched())
+      noteFrontLoopStatement(this.filename, sourceSite);
     if (siteCounts)
       countSite();
     if (!sliceTiming && !slowLog)
@@ -17591,6 +17625,8 @@ function timeStatement(statement) {
     held[method] = function(...args) {
       if (planRecorder && !planRecorder.explaining)
         recordPlan(held);
+      if (frontLoopSqlWatched())
+        noteFrontLoopStatement(held[DB]?.filename, sourceSite);
       if (siteCounts)
         countSite();
       const answer = sourceAnswerTraceActive();
@@ -17713,15 +17749,16 @@ function tableAliases(sql) {
   }
   return aliases;
 }
-function sourceSite() {
+function sourceSite(depth = 2) {
   const frames = (new Error().stack ?? "").split(`
 `).slice(1).map((line) => line.trim().replace(/^at /, ""));
-  const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace"));
-  return mine.slice(0, 2).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
+  const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace") && !frame.includes("front-loop-sql-guard"));
+  return mine.slice(0, depth).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
 }
 var siteCounts;
+var siteDepth = 2;
 function countSite() {
-  const site = sourceSite() || "(no source frame)";
+  const site = sourceSite(siteDepth) || "(no source frame)";
   siteCounts.set(site, (siteCounts.get(site) ?? 0) + 1);
 }
 var slowLog;
