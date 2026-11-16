@@ -124,10 +124,11 @@ export interface RelayLimits {
   readonly maxResponseFrames: number;
   /** Wait for the install's response head. */
   readonly responseHeadTimeoutMs: number;
-  /** Longest silence inside a streaming response. */
+  /**
+   * Longest silence inside a streaming response. A response that keeps
+   * sending is never cut for its length.
+   */
   readonly responseIdleTimeoutMs: number;
-  /** Longest any one response may stream. */
-  readonly responseTotalTimeoutMs: number;
   /** Registrations with no session for this long are dropped. */
   readonly inactiveRegistrationTtlMs: number;
   /**
@@ -178,7 +179,6 @@ export const DEFAULT_LIMITS: RelayLimits = {
   maxResponseFrames: 65_536,
   responseHeadTimeoutMs: 5 * 60_000,
   responseIdleTimeoutMs: 5 * 60_000,
-  responseTotalTimeoutMs: 30 * 60_000,
   inactiveRegistrationTtlMs: 90 * 24 * 60 * 60_000,
   egressBytesPerIp: { capacity: 1024 * 1024 * 1024, refillPerSecond: 16 * 1024 * 1024 },
   egressBytesGlobal: { capacity: 4 * 1024 * 1024 * 1024, refillPerSecond: 64 * 1024 * 1024 },

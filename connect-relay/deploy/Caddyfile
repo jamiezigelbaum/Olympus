@@ -36,11 +36,12 @@
 			#   body stream; responses and SSE stream on.
 			# - HTTP/1.1: Go's background read after the body also hits the
 			#   deadline and cancels the request, so a whole HTTP/1.1
-			#   exchange is capped at this value. 36m is above the longest
-			#   exchange the relay allows (responseHeadTimeoutMs 5 min +
-			#   responseTotalTimeoutMs 30 min, server/limits.ts), so no
-			#   answer or stream the relay would deliver is cut; keep it
-			#   above their sum if those change.
+			#   exchange is capped at this value. The relay itself cuts a
+			#   response only for silence (responseHeadTimeoutMs and
+			#   responseIdleTimeoutMs, 5 min each, server/limits.ts), never
+			#   for its length; this edge bound is the one total clock left,
+			#   and only HTTP/1.1 callers meet it. Keep it well above
+			#   head plus idle.
 			# Inside this bound the relay itself refuses and times uploads
 			# (upload tickets, byte budget, 30 s absolute and 10 s idle
 			# deadlines) and closes the transport behind every refusal

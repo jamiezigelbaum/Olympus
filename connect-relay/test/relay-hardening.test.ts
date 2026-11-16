@@ -798,10 +798,11 @@ describe('R2: invalid-token floods cannot starve fresh authentication, refresh o
 });
 
 describe('the public edge', () => {
-  test('Caddy bounds request time above the longest exchange the relay allows, with header and body-size limits', () => {
+  test('Caddy bounds HTTP/1.1 request time well above the relay\'s own silence limits, with header and body-size limits', () => {
     const caddyfile = readFileSync(new URL('../deploy/Caddyfile', import.meta.url), 'utf8');
     const minutes = Number(/^\s*read_body (\d+)m$/m.exec(caddyfile)?.[1]);
-    expect(minutes * 60_000).toBeGreaterThan(DEFAULT_LIMITS.responseHeadTimeoutMs + DEFAULT_LIMITS.responseTotalTimeoutMs);
+    expect(minutes).toBeGreaterThanOrEqual(36);
+    expect(minutes * 60_000).toBeGreaterThan(DEFAULT_LIMITS.responseHeadTimeoutMs + DEFAULT_LIMITS.responseIdleTimeoutMs);
     expect(caddyfile).toMatch(/^\s*read_header 10s$/m);
     expect(caddyfile).toMatch(/^\s*max_size 2MB$/m);
   });

@@ -1,0 +1,368 @@
+{
+  "_readme": "Every timeout in src/ and connect-relay/, by kind (test/timeout-allowance.test.ts). a = a clock that cancels work that may still be progressing (goes; owner lane after the slash); b = an outside client's hard limit (returns \"still working\" with a handle); c = dead-peer or stall detection (stays, on a heartbeat or progress where it guards long work); d = retry, backoff or fairness pace (stays); n = not a clock (a bound, a display or freshness grace). Inline entries count the timeout sites per file by kind. A clock never cancels work that is still progressing; the kind (a) count can only shrink.",
+  "constants": {
+    "connect-relay/deploy/reviewer-check.ts#STEP_TIMEOUT_MS": "c",
+    "connect-relay/server/surface-map.ts#CLAUDE_APP_PANEL_GRACE_MS": "n",
+    "src/cli.ts#WORKER_STATUS_TIMEOUT_MS": "c",
+    "src/core/analyst-anthropic.ts#DEFAULT_TIMEOUT_MS": "a/L2",
+    "src/core/analyst-built-in.ts#DEFAULT_REQUEST_TIMEOUT_MS": "a/L2",
+    "src/core/analyst-built-in.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
+    "src/core/analyst-delphi.ts#DEFAULT_PREFLIGHT_TIMEOUT_MS": "c",
+    "src/core/analyst-openai.ts#DEFAULT_TIMEOUT_MS": "a/L2",
+    "src/core/analyst-openclaw-infer.ts#DEFAULT_TIMEOUT_MS": "a/L2",
+    "src/core/cli-via-worker.ts#WORKER_CONNECT_TIMEOUT_MS": "c",
+    "src/core/connect.ts#DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS": "c",
+    "src/core/connect.ts#DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS": "c",
+    "src/core/connect.ts#DETACHED_PARENT_WAIT_MS": "c",
+    "src/core/consult-settings-writer.ts#CONSULT_SETTINGS_LEASE_TIMEOUT_MS": "c",
+    "src/core/consult-settings.ts#CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS": "a/L2",
+    "src/core/consult-settings.ts#CONSULT_OWN_WRITER_TIMEOUT_BOUNDS_MS": "n",
+    "src/core/consult-transport-zkapi.ts#KILL_GRACE_MS": "c",
+    "src/core/consult-transport-zkapi.ts#MODELS_PROBE_TIMEOUT_MS": "c",
+    "src/core/consult-transport-zkapi.ts#PROBE_TIMEOUT_MS": "c",
+    "src/core/consult-transport-zkapi.ts#STOP_GRACE_MS": "c",
+    "src/core/consult-transport-zkapi.ts#ZKAPI_SESSION_READY_TIMEOUT_MS": "c",
+    "src/core/control-ui-gateway.ts#DASHBOARD_TIMEOUT_MAX_MS": "n",
+    "src/core/control-ui-gateway.ts#DASHBOARD_TIMEOUT_MIN_MS": "n",
+    "src/core/dashboard-opening.ts#DASHBOARD_LAUNCH_REQUEST_TIMEOUT_MS": "c",
+    "src/core/data-owner-lock.ts#WORKER_OWNER_LOCK_WAIT_MS": "c",
+    "src/core/descendant-groups.ts#DEFAULT_GRACE_MS": "c",
+    "src/core/doctor.ts#ARGUS_GENERATION_PROBE_TIMEOUT_MS": "c",
+    "src/core/email.ts#CONSULT_ASK_CLIENT_TIMEOUT_MS": "a/L2",
+    "src/core/email.ts#MAX_EMAIL_REQUEST_TIMEOUT_MS": "n",
+    "src/core/engine-brief.ts#STARTING_GRACE_MS": "n",
+    "src/core/engine-children.ts#DEFAULT_REAP_GRACE_MS": "c",
+    "src/core/engine-host.ts#STOP_DEADLINE_MS": "c",
+    "src/core/engine-service.ts#ENGINE_HEALTH_TIMEOUT_MS": "c",
+    "src/core/engine-service.ts#ENGINE_QUIET_WAIT_MS": "c",
+    "src/core/engine-service.ts#MAC_SERVER_MODE_HANDOFF_MS": "c",
+    "src/core/engine-store-copies.ts#ENGINE_STORES_OWNER_WAIT_MS": "c",
+    "src/core/evidence-pack.ts#MIN_EXPANSION_BUDGET_MS": "d",
+    "src/core/evidence-reranker.ts#DEFAULT_RERANK_TIMEOUT_MS": "a/L2",
+    "src/core/lifecycle.ts#DEFAULT_ACTION_SETTLE_TIMEOUT_MS": "c",
+    "src/core/lifecycle.ts#DEFAULT_READINESS_TIMEOUT_MS": "c",
+    "src/core/lifecycle.ts#MAX_READINESS_TIMEOUT_MS": "n",
+    "src/core/linux-desktop-opener.ts#COMMAND_TIMEOUT_MS": "c",
+    "src/core/managed-tools.ts#DOWNLOAD_TIMEOUT_MS": "a/L7",
+    "src/core/managed-tools.ts#VERSION_CHECK_TIMEOUT_MS": "c",
+    "src/core/mcp-source/session.ts#MCP_SOURCE_DEFAULT_CALL_TIMEOUT_MS": "a/L2",
+    "src/core/model-setup.ts#LOCAL_REQUEST_TIMEOUT_MS": "c",
+    "src/core/native-embedding-drain-service.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
+    "src/core/native-process-service.ts#DEFAULT_STOP_GRACE_MS": "c",
+    "src/core/native-relay-service.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
+    "src/core/native-telegram-service.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
+    "src/core/native-worker-service.ts#DEFAULT_ENGINE_BACKGROUND_WAIT_MS": "c",
+    "src/core/native-worker-service.ts#DEFAULT_WORKER_STARTUP_TIMEOUT_MS": "c",
+    "src/core/native-worker-service.ts#ENDPOINT_OCCUPANCY_TIMEOUT_MS": "c",
+    "src/core/native-worker-service.ts#READINESS_PROBE_TIMEOUT_MS": "c",
+    "src/core/provider-credit-status.ts#DEFAULT_TIMEOUT_MS": "c",
+    "src/core/release-manifest.ts#RELEASE_CHUNK_JUDGE_BUDGET_MS": "d",
+    "src/core/remote-connections.ts#LAST_USED_BUSY_TIMEOUT_MS": "c",
+    "src/core/remote-connections.ts#STORE_BUSY_TIMEOUT_MS": "c",
+    "src/core/remote-oauth-store.ts#REMOTE_OAUTH_REFRESH_GRACE_MS": "n",
+    "src/core/remote-private-part.ts#DEFAULT_HANDOFF_TTL_MS": "n",
+    "src/core/remote-private-part.ts#DEFAULT_PROBE_TIMEOUT_MS": "c",
+    "src/core/remote-private-part.ts#DEFAULT_RETRY_PROBE_TIMEOUT_MS": "c",
+    "src/core/self-update.ts#SELF_UPDATE_DOWNLOAD_TIMEOUT_MS": "a/L7",
+    "src/core/source-account-migration.ts#LOCK_WAIT_CAP_MS": "c",
+    "src/core/source-account-migration.ts#MIGRATION_BUDGET_MS": "a/L7",
+    "src/core/source-account-migration.ts#QUICK_CHECK_BUDGET_MS": "a/L7",
+    "src/core/source-answer-jobs.ts#SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS": "b",
+    "src/core/source-answer-jobs.ts#SOURCE_ANSWER_HANDOFF_DEFAULT_MS": "b",
+    "src/core/source-answer-jobs.ts#SOURCE_ANSWER_HANDOFF_MAX_MS": "b",
+    "src/core/source-answer-jobs.ts#SOURCE_ANSWER_HANDOFF_MIN_MS": "n",
+    "src/core/source-answer-jobs.ts#SOURCE_ANSWER_JOB_DEADLINE_MS": "a/L2",
+    "src/core/source-answer-jobs.ts#SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS": "b",
+    "src/core/source-answer-jobs.ts#SOURCE_ANSWER_RESULT_WAIT_MAX_MS": "b",
+    "src/core/source-answer-jobs.ts#SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS": "b",
+    "src/core/source-index/keyword-expansion.ts#KEYWORD_PREPARE_WAIT_MS": "a/L2",
+    "src/core/source-index/router.ts#COOPERATIVE_LANE_DEADLINE_HEADROOM_MS": "n",
+    "src/core/source-index/router.ts#DEFAULT_ASK_SEARCH_BUDGET_MS": "a/L2",
+    "src/core/source-index/router.ts#DEFAULT_SEMANTIC_PREPARE_BUDGET_MS": "a/L2",
+    "src/core/source-index/router.ts#DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS": "a/L2",
+    "src/core/source-index/router.ts#HELD_THREAD_GRACE_MS": "c",
+    "src/core/still-image-readiness.ts#DEFAULT_PROBE_TIMEOUT_MS": "c",
+    "src/core/update-check.ts#UPDATE_TIMEOUT_MS": "c",
+    "src/core/venice-model-catalog.ts#DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS": "c",
+    "src/core/venice-model-catalog.ts#MAX_CATALOG_TIMEOUT_MS": "n",
+    "src/core/waiting-private-questions.ts#CHATGPT_INBOX_GRACE_MS": "n",
+    "src/core/waiting-private-questions.ts#REVOKE_BUSY_TIMEOUT_MS": "c",
+    "src/core/waiting-private-questions.ts#STORE_BUSY_TIMEOUT_MS": "c",
+    "src/core/worker-front-proxy.ts#FRONT_PROXY_WAIT_MS": "c",
+    "src/core/worker-service-split.ts#STARTUP_TIMEOUT_MS": "c",
+    "src/core/worker-service-split.ts#STOP_GRACE_MS": "c",
+    "src/core/worker-shutdown.ts#WORKER_SHUTDOWN_DEADLINE_MS": "c",
+    "src/core/zkapi-confine-fetch.ts#HANDSHAKE_TIMEOUT_MS": "c",
+    "src/workers/chatgpt/mcp-surface.ts#PROBE_TIMEOUT_MS": "a/L2",
+    "src/workers/chatgpt/mcp-surface.ts#SOURCE_ANSWER_TIMEOUT_MS": "b",
+    "src/workers/chatgpt/private-answer-jobs.ts#PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS": "a/L2",
+    "src/workers/chatgpt/private-answer-jobs.ts#PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS": "a/L2",
+    "src/workers/classification/judge-pacing.ts#MAX_WAIT_MS": "d",
+    "src/workers/classification/secret-scan-off-thread.ts#OFF_THREAD_SCAN_TIMEOUT_MS": "c",
+    "src/workers/classification/sniffer-resolver.ts#DEFAULT_SNIFFER_PASS_TIME_MS": "d",
+    "src/workers/classification/sniffer-service.ts#BACKLOG_COUNT_WORKER_TIMEOUT_MS": "c",
+    "src/workers/classification/sniffer-service.ts#DEFAULT_TIER_SNIFFER_ABANDON_MS": "a/L3",
+    "src/workers/classification/sniffer-service.ts#DEFAULT_TIER_SNIFFER_MAX_PASS_MS": "a/L3",
+    "src/workers/classification/sniffer-service.ts#EXTRACTION_ENQUEUE_GRACE_MS": "n",
+    "src/workers/connector-store/capture-freshness.ts#CAPTURE_STOPPED_GRACE_SECONDS": "n",
+    "src/workers/connector-store/local-index.ts#CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS": "a/L1",
+    "src/workers/connector-store/local-index.ts#VECTOR_SCAN_BACKSTOP_GRACE_MS": "c",
+    "src/workers/connector-store/local-index.ts#VISIBILITY_HOLD_WAIT_MS": "d",
+    "src/workers/connector-store/loop-pass.ts#LEDGER_HOLD_WAIT_MS": "d",
+    "src/workers/control-path-headroom.ts#CPU_SAMPLE_STALL_MS": "c",
+    "src/workers/credential-broker/index.ts#GOOGLE_PUBLISHER_EXCHANGE_REFRESH_TIMEOUT_MS": "c",
+    "src/workers/credential-broker/index.ts#OAUTH2_DIRECT_REFRESH_TIMEOUT_MS": "c",
+    "src/workers/credential-health.ts#CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS": "n",
+    "src/workers/dashboard/chatgpt/client.ts#BUSY_GRACE_MS": "n",
+    "src/workers/dashboard/chatgpt/page.ts#CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS": "a/L2",
+    "src/workers/dashboard/chatgpt/page.ts#CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS": "a/L2",
+    "src/workers/dashboard/chatgpt/private-answer.ts#CHATGPT_PRIVATE_ANSWER_REQUEST_TIMEOUT_MS": "a/L2",
+    "src/workers/dashboard/chatgpt/private-question.ts#CHATGPT_PRIVATE_QUESTION_REQUEST_TIMEOUT_MS": "a/L2",
+    "src/workers/dropbox-files/provider-client.ts#DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS": "a/L5",
+    "src/workers/dropbox-files/provider-client.ts#DROPBOX_METADATA_REQUEST_TIMEOUT_MS": "c",
+    "src/workers/email-source/gogcli.ts#COMMAND_TIMEOUT_KILL_GRACE_MS": "c",
+    "src/workers/engine-split/client.ts#REQUEST_GRACE_MS": "a/L1",
+    "src/workers/engine-split/client.ts#RESULT_WAIT_MS": "a/L1",
+    "src/workers/engine-split/rss-restart.ts#ENGINE_RSS_RESTART_MAX_WAIT_MS": "c",
+    "src/workers/engine-split/runtime.ts#DATA_EXPORT_WAIT_MS": "a/L1",
+    "src/workers/engine-split/runtime.ts#OWNER_ACTION_WAIT_MS": "a/L1",
+    "src/workers/engine-split/runtime.ts#SOURCE_SYNC_WAIT_MS": "a/L1",
+    "src/workers/engine/server.ts#FRONT_VISIBILITY_READY_BOUND_MS": "a/L1",
+    "src/workers/file-extraction/extractors/apple-vision-ocr.ts#DEFAULT_APPLE_VISION_FILE_DEADLINE_MS": "a/L5",
+    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_CHUNK_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_CONVERT_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_FILE_DEADLINE_MS": "a/L5",
+    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_INSTALL_RETRY_CEILING_MS": "d",
+    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_INSTALL_RETRY_MS": "d",
+    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
+    "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_VERIFY_WAIT_MS": "c",
+    "src/workers/file-extraction/extractors/image-prepare.ts#DEFAULT_IMAGE_PREPARE_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/ocr-capability.ts#PROBE_OCRMYPDF_TIMEOUT_MS": "c",
+    "src/workers/file-extraction/extractors/ocr-capability.ts#PROBE_PDFTOPPM_TIMEOUT_MS": "c",
+    "src/workers/file-extraction/extractors/ocr-capability.ts#PROBE_TESSERACT_TIMEOUT_MS": "c",
+    "src/workers/file-extraction/extractors/ocr.ts#DEFAULT_OCR_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/ocr.ts#OCR_PDF_MAX_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/openai-compatible-client.ts#DEFAULT_LOCAL_VLM_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/pdf-render.ts#DEFAULT_PDF_RENDER_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/text.ts#DEFAULT_PDF_TEXT_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/transcription.ts#DEFAULT_TRANSCRIBE_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/venice-client.ts#DEFAULT_VENICE_EXTRACTION_TIMEOUT_MS": "a/L5",
+    "src/workers/file-extraction/extractors/vlm.ts#DEFAULT_VLM_PDF_HEALTHCHECK_TIMEOUT_MS": "c",
+    "src/workers/file-extraction/job-names.ts#CLEAR_NAMES_BUSY_TIMEOUT_MS": "c",
+    "src/workers/file-extraction/job-store.ts#DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS": "c",
+    "src/workers/file-extraction/job-store.ts#DEFAULT_SQLITE_BUSY_TIMEOUT_MS": "c",
+    "src/workers/readwise/api.ts#DEFAULT_TIMEOUT_MS": "c",
+    "src/workers/remote-oauth/handler.ts#CONNECT_BODY_DEADLINE_MS": "c",
+    "src/workers/source-index/analyst-answer.ts#DEFAULT_CLOUD_ANALYST_TIMEOUT_MS": "a/L2",
+    "src/workers/source-index/analyst-answer.ts#DEFAULT_LOCAL_ANALYST_TIMEOUT_MS": "a/L2",
+    "src/workers/source-index/analyst-answer.ts#DEFAULT_ON_DEMAND_READ_WAIT_MS": "a/L2",
+    "src/workers/source-index/analyst-answer.ts#DEFAULT_SELF_HEAL_MAX_MS": "a/L2",
+    "src/workers/source-index/analyst-answer.ts#DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS": "a/L2",
+    "src/workers/source-index/analyst-pool.ts#DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS": "a/L2",
+    "src/workers/source-index/analyst-pool.ts#MAX_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS": "n",
+    "src/workers/source-index/analyst-pool.ts#MIN_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS": "n",
+    "src/workers/source-index/built-in-embedding/assets.ts#DOWNLOAD_STALL_MS": "c",
+    "src/workers/source-index/built-in-embedding/litert-runtime.ts#REQUEST_TIMEOUT_MS": "a/L5",
+    "src/workers/source-index/built-in-reasoning/install.ts#DOWNLOAD_STALL_MS": "c",
+    "src/workers/source-index/built-in-reasoning/install.ts#EXTRACT_TIMEOUT_MS": "a/L7",
+    "src/workers/source-index/built-in-reasoning/install.ts#VERIFY_TIMEOUT_MS": "a/L7",
+    "src/workers/source-index/built-in-reasoning/server.ts#DEFAULT_KILL_WAIT_MS": "c",
+    "src/workers/source-index/built-in-reasoning/server.ts#DEFAULT_STOP_GRACE_MS": "c",
+    "src/workers/source-index/embeddings.ts#DEFAULT_MEDIA_FETCH_TIMEOUT_MS": "c",
+    "src/workers/source-index/local-analyst-window.ts#LOCAL_ANALYST_WINDOW_PROBE_TIMEOUT_MS": "c",
+    "src/workers/source-scheduler.ts#EMBEDDING_SWEEP_STORE_DEADLINE_MS": "d",
+    "src/workers/source-scheduler.ts#FILE_EXTRACTION_PASS_BUDGET_MS": "d",
+    "src/workers/whatsapp/media-fetch.ts#CALL_STALL_MS": "c"
+  },
+  "inline": {
+    "connect-relay/server/limits.ts": {
+      "c": 6
+    },
+    "connect-relay/server/relay.ts": {
+      "c": 1
+    },
+    "src/cli.ts": {
+      "c": 1
+    },
+    "src/core/analyst-tinfoil.ts": {
+      "a/L2": 1
+    },
+    "src/core/computer-identity.ts": {
+      "c": 1
+    },
+    "src/core/config.ts": {
+      "c": 3
+    },
+    "src/core/consult-transport-zkapi.ts": {
+      "c": 8
+    },
+    "src/core/consult-writer.ts": {
+      "a/L2": 1,
+      "c": 2
+    },
+    "src/core/data-root-snapshot.ts": {
+      "c": 2
+    },
+    "src/core/doctor.ts": {
+      "c": 1
+    },
+    "src/core/engine-bun.ts": {
+      "c": 1
+    },
+    "src/core/engine-children.ts": {
+      "c": 2
+    },
+    "src/core/engine-cli.ts": {
+      "c": 1
+    },
+    "src/core/engine-host.ts": {
+      "c": 2
+    },
+    "src/core/engine-maintenance.ts": {
+      "c": 1
+    },
+    "src/core/file-lease.ts": {
+      "c": 1
+    },
+    "src/core/google-own-app.ts": {
+      "c": 2
+    },
+    "src/core/lifecycle-artifact.ts": {
+      "c": 1
+    },
+    "src/core/lifecycle-lock.ts": {
+      "c": 1
+    },
+    "src/core/lifecycle.ts": {
+      "c": 3
+    },
+    "src/core/linux-desktop-entry.ts": {
+      "c": 1
+    },
+    "src/core/linux-engine-service.ts": {
+      "c": 2
+    },
+    "src/core/linux-owner-bridge-host.ts": {
+      "c": 1
+    },
+    "src/core/linux-owner-bridge.ts": {
+      "c": 1
+    },
+    "src/core/mac-engine-daemon.ts": {
+      "c": 1
+    },
+    "src/core/managed-tools.ts": {
+      "c": 3
+    },
+    "src/core/messaging-pairing.ts": {
+      "c": 1
+    },
+    "src/core/model-choices.ts": {
+      "c": 1
+    },
+    "src/core/oauth-callback-paste.ts": {
+      "c": 1
+    },
+    "src/core/remote-relay-runtime.ts": {
+      "c": 2
+    },
+    "src/core/secret-store.ts": {
+      "c": 1
+    },
+    "src/core/source-index/keyword-expansion.ts": {
+      "a/L2": 1
+    },
+    "src/core/source-storage.ts": {
+      "c": 1
+    },
+    "src/core/sovereignty.ts": {
+      "c": 3
+    },
+    "src/core/store-reclaim-admission.ts": {
+      "c": 1
+    },
+    "src/core/this-computer.ts": {
+      "c": 1
+    },
+    "src/core/worker-transport.ts": {
+      "c": 2
+    },
+    "src/core/zkapi-confine-selftest.ts": {
+      "c": 2
+    },
+    "src/core/zkapi-confinement-linux.ts": {
+      "c": 1
+    },
+    "src/core/zkapi-consult-settings.ts": {
+      "a/L2": 1,
+      "c": 4
+    },
+    "src/workers/classification/sniffer-decision.ts": {
+      "a/L3": 1,
+      "c": 1
+    },
+    "src/workers/dashboard/chatgpt/private-answer.ts": {
+      "c": 1
+    },
+    "src/workers/dashboard/host-page.ts": {
+      "c": 1
+    },
+    "src/workers/email-source/gogcli.ts": {
+      "c": 1
+    },
+    "src/workers/engine-split/client.ts": {
+      "a/L1": 1
+    },
+    "src/workers/engine-split/front-state.ts": {
+      "c": 1,
+      "a/L1": 1
+    },
+    "src/workers/engine/dashboard/dashboard-messaging-service.ts": {
+      "c": 1
+    },
+    "src/workers/engine/runtime/judging-models.ts": {
+      "c": 1,
+      "a/L3": 1
+    },
+    "src/workers/engine/runtime/private-analysts.ts": {
+      "c": 2
+    },
+    "src/workers/engine/server.ts": {
+      "c": 5,
+      "a/L1": 1
+    },
+    "src/workers/first-run-privacy-gate.ts": {
+      "c": 1
+    },
+    "src/workers/local-files/volume-identity.ts": {
+      "c": 2
+    },
+    "src/workers/local-pacing.ts": {
+      "c": 1
+    },
+    "src/workers/private-agent-listeners.ts": {
+      "c": 1
+    },
+    "src/workers/relay-surfaces.ts": {
+      "c": 1
+    },
+    "src/workers/remote-access-control.ts": {
+      "c": 1
+    },
+    "src/workers/source-index/built-in-embedding/assets.ts": {
+      "c": 1
+    },
+    "src/workers/source-index/built-in-embedding/litert-runtime.ts": {
+      "c": 1
+    },
+    "src/workers/source-index/built-in-embedding/remote-litert-runtime.ts": {
+      "c": 1
+    },
+    "src/workers/source-index/built-in-reasoning/server.ts": {
+      "c": 2
+    },
+    "src/workers/source-watch-runtime.ts": {
+      "c": 1
+    }
+  }
+}

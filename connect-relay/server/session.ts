@@ -92,7 +92,7 @@ interface Stream {
   waiting: boolean;
   resolveHead(response: Response): void;
   controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-  timers: { head?: Timer; idle?: Timer; total?: Timer };
+  timers: { head?: Timer; idle?: Timer };
   finished: boolean;
   onAbort?: () => void;
 }
@@ -201,9 +201,10 @@ export class InstallSession {
       case 'end':
         if (!stream.headSent) return 'protocol_error';
         stream.ended = true;
-        clearTimeout(stream.timers.idle);
-        // Whatever is still queued goes out first; the stream finishes when it drains.
+        // Whatever is still queued goes out first; the stream finishes when it
+        // drains. Until then the silence limit watches the caller's reads.
         if (stream.queue.length === 0) this.closeBody(stream);
+        else this.armIdle(stream);
         return 'ok';
       case 'abort':
         this.failStream(stream, 502);
@@ -270,6 +271,7 @@ export class InstallSession {
       this.uncharge(stream, entry.cost);
       controller.enqueue(entry.length === entry.buffer.byteLength ? entry.buffer : entry.buffer.subarray(0, entry.length));
       if (stream.ended && stream.queue.length === 0) this.closeBody(stream);
+      else if (stream.ended) this.armIdle(stream);
       return;
     }
     if (stream.ended) {
@@ -320,7 +322,6 @@ export class InstallSession {
       { highWaterMark: 0 },
     );
     this.armIdle(stream);
-    stream.timers.total = setTimeout(() => this.cancelStream(stream), this.limits.responseTotalTimeoutMs);
     stream.resolveHead(new Response(body, { status, headers }));
   }
 
@@ -369,7 +370,6 @@ export class InstallSession {
     stream.ended = true;
     clearTimeout(stream.timers.head);
     clearTimeout(stream.timers.idle);
-    clearTimeout(stream.timers.total);
     this.uncharge(stream, stream.queuedCost);
     stream.queue.length = 0;
     this.streams.delete(stream.id);
