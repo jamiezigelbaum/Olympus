@@ -160,3 +160,21 @@ describe('a freeze on a real install names its site in the log', () => {
     expect(line).not.toContain('main-thread-sql-trace');
   });
 });
+
+describe('a measuring run lists every call site that runs a statement on the loop', () => {
+  test('each site is counted, busiest first, and counting stops on stop()', async () => {
+    const { Database } = await import('bun:sqlite');
+    const { startMainThreadSqlSiteCount } = await import('../src/workers/connector-store/main-thread-sql-trace.ts');
+    const { readTwice } = await import('./fixtures/src/sql-site-fixture.ts');
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE t (n INTEGER)');
+    const count = startMainThreadSqlSiteCount();
+    readTwice(db);
+    const sites = count.sites();
+    count.stop();
+    readTwice(db);
+    expect(sites.find(entry => entry.site.includes('readTwice'))?.statements).toBe(2);
+    expect(count.sites().find(entry => entry.site.includes('readTwice'))?.statements).toBe(2);
+    db.close();
+  });
+});

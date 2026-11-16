@@ -42,6 +42,7 @@ export function installMainThreadSqlTrace(): void {
     if (planRecorder && !planRecorder.explaining && typeof args[0] === 'string' && SINGLE_WRITE.test(args[0])) {
       recordPlan({ [SQL]: args[0], [DB]: this });
     }
+    if (siteCounts) countSite();
     if (!sliceTiming && !slowLog) return exec.apply(this, args);
     const started = performance.now();
     try { return exec.apply(this, args); }
@@ -74,6 +75,7 @@ function timeStatement<T>(statement: T): T {
     if (typeof call !== 'function') continue;
     held[method] = function (this: unknown, ...args: unknown[]) {
       if (planRecorder && !planRecorder.explaining) recordPlan(held);
+      if (siteCounts) countSite();
       const answer = sourceAnswerTraceActive();
       if (!answer && !sliceTiming && !slowLog) return call.apply(this, args);
       const started = performance.now();
@@ -240,6 +242,30 @@ function sourceSite(): string {
   const frames = (new Error().stack ?? '').split('\n').slice(1).map((line) => line.trim().replace(/^at /, ''));
   const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes('main-thread-sql-trace'));
   return mine.slice(0, 2).map((frame) => shortFrame(frame).replace(/:\d+$/, '')).join(' < ');
+}
+
+// ---------------------------------------------------------------------------
+// Every call site that runs a statement on this thread at all, with a count
+// (freeze-proof design, 16 Nov 2026: the front's loop should run none). A
+// measuring run only: each statement pays for a stack. OLYMPUS_MAIN_THREAD_SQL_SITES
+// names a directory; `<role>.sql-sites.json` is rewritten there every 10 s.
+
+let siteCounts: Map<string, number> | undefined;
+
+function countSite(): void {
+  const site = sourceSite() || '(no source frame)';
+  siteCounts!.set(site, (siteCounts!.get(site) ?? 0) + 1);
+}
+
+/** Starts counting statement call sites on this thread; `sites()` is the list so far, busiest first. */
+export function startMainThreadSqlSiteCount(): { sites(): Array<{ site: string; statements: number }>; stop(): void } {
+  installMainThreadSqlTrace();
+  const counts = new Map<string, number>();
+  siteCounts = counts;
+  return {
+    sites: () => [...counts.entries()].map(([site, statements]) => ({ site, statements })).sort((a, b) => b.statements - a.statements),
+    stop() { if (siteCounts === counts) siteCounts = undefined; },
+  };
 }
 
 // ---------------------------------------------------------------------------
