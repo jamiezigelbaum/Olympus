@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { gate, memoryMaxBytes } from '../scripts/loop-stall-test.ts';
+import { gate, memoryMaxBytes, sqliteGuards } from '../scripts/loop-stall-test.ts';
 import { join } from 'node:path';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -92,6 +92,13 @@ test('loop-stall gate enforces both strict budgets and fails closed', () => {
   expect(gate({ ...healthy, background: { ...healthy.background, beats: 0 } }, allowed)).toBe(false);
   expect(gate({ ...healthy, workload_ok: false }, allowed)).toBe(false);
   expect(gate({ ...healthy, slow_sql: [{ sql_id: 'unexpected' }] }, allowed)).toBe(false);
+});
+
+test('loop-stall gate fails on a WAL over 64 MB at the end or a background read held over 2 s, and only lists shared reads', () => {
+  const line = (label: string, ms: number, lane: string) => `[olympus] sqlite wal: ${label} wal_bytes=1 oldest_read_ms=${ms} oldest_read_lane=${lane} oldest_read_site=async`;
+  expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 }, [line('a', 2000, 'background'), line('a', 9000, 'shared')])).toMatchObject({ ok: true, other_reads_over_2s: [{ ms: 9000, lane: 'shared' }] });
+  expect(sqliteGuards({ 'a.sqlite': 64 * 1024 * 1024 + 1 }, []).ok).toBe(false);
+  expect(sqliteGuards({}, [line('internal', 2001, 'background'), line('internal', 4000, 'background')])).toMatchObject({ ok: false, background_reads_over_2s: [{ label: 'internal', ms: 4000 }] });
 });
 
 // A completed tick alone misses a freeze still in progress at shutdown.

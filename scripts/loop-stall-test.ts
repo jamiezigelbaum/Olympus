@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import type { Database } from 'bun:sqlite';
+import { Database } from 'bun:sqlite';
 import type { AnalystModel } from '../src/core/analyst.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
@@ -202,6 +202,9 @@ async function build(dir: string, items: number, chunks: number): Promise<void> 
     big.tombstoneCopy(identity(-1), { connectorId: 'loop-stall-build' });
     console.error(`seeded ${items} items, ${items * chunks} chunks/vectors, ${unreadable} extraction jobs`);
   } finally { jobs.close(); for (const store of stores) store.close(); ledger.close(); }
+  // The build writes with synchronous=OFF and leaves multi-GB WALs (6.4 GB on the ledger, gate run 43832739175); a box in use
+  // keeps them small. Fold them in so a run starts from the shape an installed engine has.
+  truncateWals(dir);
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite')).map(name => relative(dir, join(dataDir(dir), name)));
   const fileBytes = Object.fromEntries(files.map(path => [path, statSync(join(dir, path)).size]));
   const bytes = Object.values(fileBytes).reduce((n, size) => n + size, 0);
@@ -352,6 +355,70 @@ function walSizes(dir: string): Record<string, number> {
   }
   return sizes;
 }
+/** A WAL over this at the end of a run fails the gate: the engine let it grow instead of checkpointing. */
+const WAL_END_LIMIT_BYTES = 64 * 1024 * 1024;
+/** A background-lane read held open longer than this fails the gate; shared-lane ones are listed only. */
+const BACKGROUND_READ_LIMIT_MS = 2_000;
+/** Folds every fixture WAL into its database and truncates it to zero. */
+function truncateWals(dir: string) {
+  for (const name of readdirSync(dataDir(dir)).filter(entry => entry.endsWith('.sqlite'))) {
+    const handle = new Database(join(dataDir(dir), name));
+    try { handle.exec('PRAGMA busy_timeout = 60000'); handle.query('PRAGMA wal_checkpoint(TRUNCATE)').all(); } finally { handle.close(); }
+  }
+}
+/**
+ * "First boot after an upgrade": leaves bytes of committed, uncheckpointed WAL on a store, the way an update that rewrote
+ * a store leaves it. A child writes and drops a pad table with checkpoints off, then is killed so close never folds it in.
+ */
+function leaveLargeWal(file: string, bytes: number) {
+  const code = `import { Database } from 'bun:sqlite';
+const db = new Database(process.env.LOOP_STALL_WAL_FILE);
+db.exec('PRAGMA busy_timeout = 60000'); db.exec('PRAGMA wal_autocheckpoint = 0');
+db.exec('CREATE TABLE IF NOT EXISTS loop_stall_wal_pad (b BLOB)');
+const insert = db.prepare('INSERT INTO loop_stall_wal_pad VALUES (randomblob(1048576))');
+for (let i = 0; i < Math.ceil(Number(process.env.LOOP_STALL_WAL_BYTES) / 1048576); i++) insert.run();
+db.exec('DROP TABLE loop_stall_wal_pad');
+process.kill(process.pid, 'SIGKILL');`;
+  spawnSync(process.execPath, ['-e', code], { env: { ...process.env, LOOP_STALL_WAL_FILE: file, LOOP_STALL_WAL_BYTES: String(bytes) }, stdio: 'inherit' });
+  const size = statSync(`${file}-wal`).size;
+  if (size < bytes) throw new Error(`Could not leave a ${bytes}-byte WAL on ${file} (have ${size})`);
+}
+/**
+ * The IO floor: waits until the host's full IO stall averages under limitMs per second over 10 seconds, so a run measures
+ * the engine and not someone else's disk load. Not quiet within maxWaitSeconds means the run is "host busy", not a result.
+ */
+async function waitForQuietHost(limitMs: number, maxWaitSeconds: number) {
+  const started = Date.now();
+  const window: number[] = [];
+  let last = readPressure();
+  if (last.host_io_full === undefined) return { readable: false, quiet: true, waited_s: 0, host_io_full_ms_per_s: null as number | null, limit_ms_per_s: limitMs };
+  while (Date.now() - started < maxWaitSeconds * 1000) {
+    await Bun.sleep(1000);
+    const now = readPressure();
+    window.push((now.host_io_full! - last.host_io_full!) / 1000); last = now;
+    if (window.length > 10) window.shift();
+    const mean = window.reduce((n, v) => n + v, 0) / window.length;
+    if (window.length === 10 && mean < limitMs) return { readable: true, quiet: true, waited_s: Math.round((Date.now() - started) / 1000), host_io_full_ms_per_s: Math.round(mean), limit_ms_per_s: limitMs };
+  }
+  const mean = window.reduce((n, v) => n + v, 0) / Math.max(1, window.length);
+  return { readable: true, quiet: false, waited_s: Math.round((Date.now() - started) / 1000), host_io_full_ms_per_s: Math.round(mean), limit_ms_per_s: limitMs };
+}
+/** The WAL guards: no WAL over 64 MB at the end, and no background-lane read held over 2 s. Shared-lane reads are listed. */
+export function sqliteGuards(walAtEnd: Record<string, number>, walLines: readonly string[]) {
+  const wal_over_limit = Object.entries(walAtEnd).filter(([, bytes]) => bytes > WAL_END_LIMIT_BYTES).map(([file, bytes]) => ({ file, bytes }));
+  const reads = walLines.flatMap(line => {
+    const match = /sqlite wal: (\S+) .*oldest_read_ms=(\d+) oldest_read_lane=(\S+) oldest_read_site=(\S+)/.exec(line);
+    return match && Number(match[2]) > BACKGROUND_READ_LIMIT_MS ? [{ label: match[1]!, ms: Number(match[2]), lane: match[3]!, site: match[4]! }] : [];
+  });
+  const longest = (lane: (name: string) => boolean) => [...reads.filter(read => lane(read.lane)).reduce((map, read) => {
+    const key = `${read.label} ${read.site}`;
+    if ((map.get(key)?.ms ?? 0) < read.ms) map.set(key, read);
+    return map;
+  }, new Map<string, typeof reads[number]>()).values()].sort((a, b) => b.ms - a.ms);
+  const background_reads_over_2s = longest(lane => lane === 'background');
+  const other_reads_over_2s = longest(lane => lane !== 'background');
+  return { ok: wal_over_limit.length === 0 && background_reads_over_2s.length === 0, wal_over_limit, background_reads_over_2s, other_reads_over_2s };
+}
 function coldFiles(dir: string) {
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite'));
   for (const path of files) for (const suffix of ['', '-wal']) {
@@ -361,7 +428,8 @@ function coldFiles(dir: string) {
     if (result.status !== 0) throw new Error(`Cannot evict synthetic pages: ${result.stderr}`);
   }
 }
-async function run(dir: string, seconds: number, memoryMax: string) {
+type RunCase = 'steady' | 'boot-after-upgrade';
+async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number }) {
   const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
   const isCapped = capped(memoryMaxBytes(memoryMax));
@@ -397,7 +465,7 @@ async function run(dir: string, seconds: number, memoryMax: string) {
   const keepSqliteLines = (role: string, text: string) => {
     const lines = (partial[role] + text).split('\n');
     partial[role] = lines.pop() ?? '';
-    for (const line of lines) if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
+    for (const line of lines) if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:') || line.includes('[olympus] sqlite checkpoint:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
   };
   const pumps: Promise<void>[] = [];
   const requests: Promise<void>[] = [];
@@ -405,6 +473,17 @@ async function run(dir: string, seconds: number, memoryMax: string) {
   const asks: Array<{ ms: number; status: number; evidence_ms: unknown }> = [];
   const errors: string[] = [];
   const requestErrors: string[] = [];
+  // Steady: every run starts with the WALs folded in, as on a box in use. Boot after upgrade: one large WAL left on the ledger.
+  truncateWals(dir);
+  if (options.runCase === 'boot-after-upgrade') leaveLargeWal(ledgerPath(dir), options.walBytes);
+  const host = await waitForQuietHost(options.ioFloorMs, options.ioWaitSeconds);
+  if (!host.quiet) {
+    const receipt = { phase: 'run', case: options.runCase, sha: spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(), pass: false, host_busy: true, host, qualified: isCapped, memory_max: memoryMax };
+    console.log(JSON.stringify(receipt));
+    console.log(`HOST BUSY: host IO stall ${host.host_io_full_ms_per_s} ms/s over ${host.waited_s} s (floor ${host.limit_ms_per_s} ms/s). Not a product result; run again when the host is quiet.`);
+    stub.stop(true); rmSync(runDir, { recursive: true, force: true });
+    return 'host_busy' as const;
+  }
   const started = Date.now();
   let finished = false;
   const pressureSampler = samplePressure();
@@ -471,13 +550,17 @@ async function run(dir: string, seconds: number, memoryMax: string) {
   const workload_ok = finished && errors.length === 0 && workloads.failures.length === 0 && workloads.sync_items > 0 && workloads.embed_passes_started > 0 && workloads.judge_passes > 0 && workloads.recounts_started > 0
     && modelCalls.judge > 0 && asks.some(ask => ask.status === 200 && typeof ask.evidence_ms === 'number') && forwarded.some(read => read.status === 200);
   const allowed = JSON.parse(readFileSync(join(import.meta.dir, 'loop-stall-allowlist.json'), 'utf8')) as string[];
-  const pass = gate({ background, front, slow_sql, workload_ok }, allowed);
+  const walAtEnd = walSizes(dir);
+  const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
+  const guards = sqliteGuards(walAtEnd, walLines.map(entry => entry.line));
+  const pass = gate({ background, front, slow_sql, workload_ok }, allowed) && guards.ok;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', sha, pass, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, pressure: pressureSummary(pressureSampler.samples),
-    sqlite: { wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walSizes(dir), settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200), wal: sqliteLines.filter(entry => entry.line.includes('sqlite wal:')).slice(0, 2000) } };
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, pressure: pressureSummary(pressureSampler.samples),
+    sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
+      checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000), wal: walLines.slice(0, 2000) } };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
   console.log(JSON.stringify(receipt));
-  console.log(`${pass ? 'PASS' : 'FAIL'}: background ${background.max_ms} ms (<250), front ${front.max_ms} ms (<100), ${slow_sql.length} slow SQL statements, workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}`);
+  console.log(`${pass ? 'PASS' : 'FAIL'} (${options.runCase}): background ${background.max_ms} ms (<250), front ${front.max_ms} ms (<100), ${slow_sql.length} slow SQL statements, workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}, WALs over 64 MB at end ${guards.wal_over_limit.length}, background reads over 2 s ${guards.background_reads_over_2s.length}`);
   rmSync(runDir, { recursive: true, force: true });
   return pass;
 }
@@ -486,8 +569,14 @@ if (import.meta.main) {
   const flag = (name: string, fallback?: string) => { const at = args.indexOf(`--${name}`); return at < 0 ? fallback : args[at + 1]; };
   const dir = flag('dir');
   const number = (name: string, fallback: string) => { const n = Number(flag(name, fallback)); if (!Number.isSafeInteger(n) || n < 1) throw new Error(`Invalid --${name}`); return n; };
-  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G]');
+  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case steady|boot-after-upgrade] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600]');
+  const runCase = flag('case', 'steady') as RunCase;
+  if (!['steady', 'boot-after-upgrade'].includes(runCase)) throw new Error('Invalid --case; use steady or boot-after-upgrade');
   if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
-  else process.exitCode = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!) ? 0 : 1;
+  else {
+    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600') });
+    // Exit 3 is "host busy": the run did not measure the engine.
+    process.exitCode = result === 'host_busy' ? 3 : result ? 0 : 1;
+  }
   process.exit(process.exitCode ?? 0);
 }
