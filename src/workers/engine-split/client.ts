@@ -52,6 +52,16 @@ export class EngineCommandUnavailableError extends Error {
   }
 }
 
+/**
+ * The owner's own actions among the commands the front waits out: a change
+ * made from the dashboard or the CLI. The rest (embedding batches, extraction
+ * work, an agent's sync, the judge's turn) are the engine's own traffic and
+ * are not what "your change is being applied" is about.
+ */
+const OWNER_ACTION_KINDS: ReadonlySet<EngineCommand['kind']> = new Set<EngineCommand['kind']>([
+  'tier_override', 'tier_set_recorded', 'people', 'capture', 'capture_stop', 'delete_source_data', 'storage_registry', 'owner_limits', 'reload', 'export_data',
+]);
+
 const RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000];
 const RESULT_WAIT_MS = 10_000;
 /**
@@ -64,6 +74,8 @@ const REQUEST_GRACE_MS = 15_000;
 class RequestTimedOut extends Error {}
 
 export class EngineCommandClient {
+  /** Owner actions the background has acknowledged and not finished, by command id, with when each was acknowledged. */
+  private readonly held = new Map<string, number>();
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
   private readonly newId: () => string;
@@ -85,12 +97,32 @@ export class EngineCommandClient {
     return this.postUntil(id, command, deadline);
   }
 
+  /**
+   * The owner's actions the background has received and is still applying:
+   * how many, and how long the oldest has waited. The dashboard says so
+   * while its background is busy (front-state.ts).
+   */
+  applying(): { count: number; oldestMs: number } {
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const at of this.held.values()) oldest = Math.min(oldest, at);
+    return { count: this.held.size, oldestMs: this.held.size ? Math.max(0, this.now() - oldest) : 0 };
+  }
+
   /** Deliver the command and wait for the background to apply it. */
   async send(command: EngineCommand, options: EngineSendOptions = {}): Promise<EngineCommandReceipt> {
     const id = options.id ?? this.newId();
+    try {
+      return await this.sendUntilSettled(id, command, options);
+    } finally {
+      this.held.delete(id);
+    }
+  }
+
+  private async sendUntilSettled(id: string, command: EngineCommand, options: EngineSendOptions): Promise<EngineCommandReceipt> {
     const silenceMs = options.timeoutMs ?? 60_000;
     let deadline = this.now() + silenceMs;
     let receipt = await this.postUntil(id, command, deadline);
+    if (receipt.state === 'received' && OWNER_ACTION_KINDS.has(command.kind)) this.held.set(id, this.now());
     deadline = this.now() + silenceMs;
     let attempt = 0;
     while (receipt.state === 'received') {

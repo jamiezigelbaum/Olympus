@@ -68,7 +68,7 @@ export interface ChatGptDashboardClientConfig {
    * indexed data ran, the page re-reads every `settleMs` (for at most
    * `settleForMs`) until the row stops offering it.
    */
-  refresh: { activeMs: number; idleMs: number; maxBackoffMs: number; staleTickMs: number; settleMs: number; settleForMs: number };
+  refresh: { activeMs: number; idleMs: number; maxBackoffMs: number; staleTickMs: number; settleMs: number; settleForMs: number; busyMs: number };
   /** The in-place Connect flow and folder/mail pickers (picker.ts). */
   picker: ChatGptPickerConfig;
   /** The privacy setup screen and the dashboard's Privacy row (privacy.ts). */
@@ -160,6 +160,8 @@ export function chatgptDashboardClient(
     /** A read timed out while the computer answered recently: it is busy, not gone, and the page tries again by itself. */
     slow: boolean;
     busy: string;
+    /** What the engine said of itself while the control in `busy` waits (watchBusy). */
+    busyEngine: Any;
     confirming: string;
     helpOpen: boolean;
     theme: string;
@@ -215,6 +217,7 @@ export function chatgptDashboardClient(
     slow: false,
     deleting: {},
     busy: '',
+    busyEngine: null,
     confirming: '',
     helpOpen: false,
     theme: '',
@@ -523,13 +526,37 @@ export function chatgptDashboardClient(
     return text ? String(text.text) : '';
   }
 
+  /**
+   * While a control's call waits, the page's own refresh is paused, so a
+   * busy engine would leave "Working…" with no reason. This reads the
+   * dashboard every few seconds for the engine's word on itself alone (how
+   * old its state is, and that it received the change), which the stale
+   * line then says. The data on the page is not replaced.
+   */
+  function watchBusy(key: string): void {
+    setTimeout(() => {
+      if (state.busy !== key || pageHidden()) return;
+      request('tools/call', { name: config.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
+        if (state.busy !== key) return;
+        const seen = result && !result.isError && isDashboard(result.structuredContent) ? result.structuredContent : null;
+        if (seen) {
+          state.busyEngine = { engine: seen.engine, generatedAt: seen.generatedAt };
+          if (!compact() && !editorOpen() && staleWords() !== drawnStale) render();
+        }
+        watchBusy(key);
+      }, () => { if (state.busy === key) watchBusy(key); });
+    }, R.busyMs);
+  }
+
   function callTool(name: string, args: Any, key: string): void {
     const mine = supersede();
     state.busy = key;
+    state.busyEngine = null;
     state.confirming = '';
     state.notice = '';
     state.actionError = null;
     render();
+    watchBusy(key);
     request('tools/call', { name, arguments: args || {} }, callTimeoutMs()).then((result) => {
       if (state.busy === key) state.busy = '';
       if (mine !== generation) {
@@ -546,6 +573,10 @@ export function chatgptDashboardClient(
         }
         state.actionError = { key, text: failed };
         render(key);
+        // A refusal often means the engine is busy: read its state soon, so the page says so with its age.
+        if (refreshTimer) clearTimeout(refreshTimer);
+        nextRefreshAt = Date.now() + R.settleMs;
+        refreshTimer = pageHidden() ? null : setTimeout(backgroundRefresh, R.settleMs);
         return;
       }
       if (name === H.unreadableOpenTool) {
@@ -1143,8 +1174,34 @@ export function chatgptDashboardClient(
     if (!data || state.relayDown) return '';
     if (state.slow) return P.busySlow;
     const at = Date.parse(data.generatedAt);
+    const seen = state.busy && state.busyEngine ? state.busyEngine : data;
+    const busy = busyWords(seen, Date.parse(seen.generatedAt));
+    if (busy) return busy;
     if (!isFinite(at) || Date.now() - at < config.staleAfterMs) return '';
     return fill(P.updated, { when: ago(data.generatedAt) });
+  }
+
+  /**
+   * A busy engine (contract `engine`): how old the state on the page is, in
+   * five-second steps under a minute, and the owner's changes it has
+   * received and not finished. '' when the engine reported neither.
+   */
+  function busyWords(data: Any, generatedAt: number): string {
+    const engine = data.engine;
+    if (!engine || typeof engine !== 'object') return '';
+    const words: string[] = [];
+    if (typeof engine.stateAgeSeconds === 'number' && isFinite(engine.stateAgeSeconds) && engine.stateAgeSeconds > 0) {
+      const since = isFinite(generatedAt) ? Math.max(0, Date.now() - generatedAt) / 1000 : 0;
+      const seconds = engine.stateAgeSeconds + since;
+      const when = seconds < 60
+        ? fill(P.secondsAgo, { n: Math.max(5, Math.floor(seconds / 5) * 5) })
+        : ago(new Date(Date.now() - seconds * 1000).toISOString());
+      words.push(fill(P.updatedBusy, { when }));
+    }
+    if (typeof engine.applying === 'number' && engine.applying >= 1) {
+      words.push(engine.applying === 1 ? P.applyingOne : fill(P.applyingMany, { n: count(engine.applying) }));
+    }
+    return words.join(' ');
   }
 
   function staleLine(): HTMLElement | null {

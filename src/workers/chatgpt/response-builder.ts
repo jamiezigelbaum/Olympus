@@ -246,7 +246,8 @@ export function dashboardForApprovedPage(view: DashboardViewModelV1): DashboardV
     const { done: _done, percent: _percent, ...stall } = progress;
     return { ...row, detail, ...(progress.stalled ? { progress: { ...stall, total: 0 } } : {}) };
   });
-  const { progress, ...rest } = view;
+  // A busy engine's line (contract `engine`, 16 Nov 2026) is newer than the submitted page too.
+  const { progress, engine: _engine, ...rest } = view;
   return { ...rest, sources, ...(progress && finite(progress.percent) && finite(progress.itemsLeft) ? { progress } : {}) };
 }
 
@@ -285,6 +286,14 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     generatedAt: iso(view.generatedAt) ?? new Date().toISOString(),
   };
   if (view.blocker) out.blocker = copyItem(view.blocker);
+  // A busy engine: two whole numbers, nothing else.
+  if (view.engine && typeof view.engine === 'object') {
+    const stateAgeSeconds = whole(view.engine.stateAgeSeconds);
+    const applying = whole(view.engine.applying);
+    if (stateAgeSeconds > 0 || applying > 0) {
+      out.engine = { ...(stateAgeSeconds > 0 ? { stateAgeSeconds } : {}), ...(applying > 0 ? { applying } : {}) };
+    }
+  }
   const waits = (view.waits ?? []).flatMap(copyWait);
   if (waits.length) out.waits = waits;
   const answers = view.models?.answers;

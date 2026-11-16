@@ -2048,6 +2048,12 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   updated: 'Updated {when}',
   /** A read ran out of time while the computer answered moments ago: busy, not gone; the page tries again by itself. */
   busySlow: 'Olympus is busy. Trying again…',
+  /** The page is up to date with the computer, but the engine's own state is this old because it is in the middle of long work. */
+  updatedBusy: 'Updated {when}. Olympus is busy.',
+  /** A change the owner made that the engine has received and not finished, said while it waits. */
+  applyingOne: 'Olympus received your change and is applying it.',
+  applyingMany: 'Olympus received your {n} changes and is applying them.',
+  secondsAgo: '{n} s ago',
   checkAgain: 'Check again',
   tryAgain: 'Try again',
   openOlympus: 'Open Olympus',

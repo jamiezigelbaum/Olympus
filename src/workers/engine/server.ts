@@ -495,7 +495,7 @@ import {
   type EngineFront,
 } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
-import { frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
+import { frontCaptureRuntime, frontCaptureStop, frontDataExport, frontEngineState, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import { readEngineStatusSnapshot, type EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rss-restart.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
@@ -5184,6 +5184,7 @@ export async function main(): Promise<void> {
             withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
             // In the split the background runs capture: the dashboard shows its snapshot (#1224).
             captureRuntime: engineFront ? frontCaptureRuntime(dashboardCaptureRuntime, () => engineFront!.status()) : dashboardCaptureRuntime,
+            ...(engineFront ? { engineState: frontEngineState(() => engineFront!.status(), engineFront.client) } : {}),
             // Delete indexed data: the same supervised restart a model-key
             // change uses. `canRestart` has no side effect, so the route can
             // check it before deleting anything.
@@ -6345,7 +6346,8 @@ export async function main(): Promise<void> {
     const statusRecountHealth = statusRecount?.health();
     // How late this process's loop turned: the last beat, the worst since start, and how many beats missed the 250 ms budget.
     const loopLag = (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot());
-    const backgroundSnapshot = engineFront?.status()?.snapshot;
+    const backgroundStatus = engineFront?.status();
+    const backgroundSnapshot = backgroundStatus?.snapshot;
     const backgroundLoopLag = backgroundSnapshot?.loop_lag;
     if ((path === '/v1/health' || path === '/health') && response?.ok) {
       return Response.json({
@@ -6369,6 +6371,19 @@ export async function main(): Promise<void> {
         ...(statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {}),
         loop_lag: loopLag,
         ...(backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {}),
+        // How old the background's published state is and how long its loop has been held: a busy
+        // background keeps publishing its last state (engine-split/control-plane.ts), so its age is said, never hidden.
+        ...(backgroundStatus && !backgroundStatus.stale ? {
+          background_state_age_ms: Math.round(backgroundStatus.state_age_ms ?? backgroundStatus.age_ms),
+          ...(typeof backgroundSnapshot?.loop_held_ms === 'number' ? { background_loop_held_ms: backgroundSnapshot.loop_held_ms } : {}),
+          ...(backgroundSnapshot?.state_error ? { background_state_error: backgroundSnapshot.state_error } : {}),
+        } : {}),
+        // The background's commands and status come from its control thread. From its loop instead
+        // (the thread's file is missing from the install, or the thread ended) they wait whenever the engine is busy.
+        ...(backgroundSnapshot?.control_plane ? {
+          engine_control_plane: backgroundSnapshot.control_plane,
+          ...(backgroundSnapshot.control_plane === 'loop' ? { engine_control_plane_problem: 'The background engine answers commands and publishes status from its own loop, not its control thread: both wait whenever the engine is busy. The install may be missing dist/engine-control-worker.js; the background\'s log says why.' } : {}),
+        } : {}),
         // Statements that held this process's loop past the slow-log threshold, named by call site.
         ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
         ...(backgroundSnapshot?.loop_slow_sql ? { background_loop_slow_sql: backgroundSnapshot.loop_slow_sql } : {}),

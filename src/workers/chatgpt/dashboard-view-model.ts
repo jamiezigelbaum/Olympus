@@ -470,6 +470,10 @@ export function buildChatGptDashboardViewModel(
       : {}),
     ...(options.remote ? { remote: options.remote } : {}),
     computerControls: { href: openPageUrl({ kind: 'dashboard' }) },
+    ...(view.engine_state ? { engine: {
+      ...(view.engine_state.state_age_seconds !== undefined ? { stateAgeSeconds: view.engine_state.state_age_seconds } : {}),
+      ...(view.engine_state.applying !== undefined ? { applying: view.engine_state.applying } : {}),
+    } } : {}),
     generatedAt: isoOrNow(view.generated_at, now),
   };
 }

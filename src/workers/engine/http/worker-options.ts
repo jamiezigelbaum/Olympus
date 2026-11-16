@@ -328,6 +328,12 @@ export interface EmailSourceWorkerOptions {
      * source another process owns capture for; the cards then say nothing of it.
      */
     captureRuntime?: () => Readonly<Record<string, DashboardCaptureRuntime>>;
+    /**
+     * The split's front only: what to say when its background is busy (how
+     * old the state shown is, and the owner's changes still being applied).
+     * Undefined when there is nothing to say (engine-split/front-state.ts).
+     */
+    engineState?: () => { state_age_seconds?: number; applying?: number } | undefined;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
      * The sources `triggerSourceSync` actually serves.

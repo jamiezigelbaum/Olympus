@@ -94,6 +94,8 @@ export const CHATGPT_DASHBOARD_REFRESH = {
   /** After Delete indexed data: the engine restarts, so re-read soon, for a minute at most. */
   settleMs: 2_000,
   settleForMs: 60_000,
+  /** While a control's own call waits: read how busy the engine is, to say so beside it. */
+  busyMs: 5_000,
 } as const;
 
 const STATUS_TONE = Object.fromEntries(

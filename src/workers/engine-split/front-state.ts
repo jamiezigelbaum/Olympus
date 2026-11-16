@@ -16,6 +16,36 @@ import type { EngineStatusRead } from './snapshot.ts';
 
 type Snapshot = () => EngineStatusRead | undefined;
 
+/** A state older than this is said with its age: three missed collects. */
+export const ENGINE_STATE_AGE_SHOWN_MS = 10_000;
+/** An owner action is said to be "being applied" once it has waited this long. */
+export const ENGINE_APPLYING_SHOWN_MS = 3_000;
+
+/**
+ * What the dashboard says about a busy background (source-dashboard.ts,
+ * `engine_state`): how old the state it shows is, once that is over ten
+ * seconds, and how many of the owner's changes the background has received
+ * and not finished. Undefined when there is nothing to say: the state is
+ * fresh and nothing waits. A background that stopped publishing is not this:
+ * its snapshot is stale and the front shows nothing from it.
+ */
+export function frontEngineState(
+  snapshot: Snapshot,
+  client: Pick<EngineCommandClient, 'applying'>,
+): () => { state_age_seconds?: number; applying?: number } | undefined {
+  return () => {
+    const read = current(snapshot);
+    const age = read ? read.state_age_ms ?? read.age_ms : 0;
+    const held = client.applying();
+    const applying = held.count > 0 && held.oldestMs >= ENGINE_APPLYING_SHOWN_MS ? held.count : 0;
+    if (age < ENGINE_STATE_AGE_SHOWN_MS && applying === 0) return undefined;
+    return {
+      ...(age >= ENGINE_STATE_AGE_SHOWN_MS ? { state_age_seconds: Math.round(age / 1000) } : {}),
+      ...(applying > 0 ? { applying } : {}),
+    };
+  };
+}
+
 /** The snapshot only while it is a reading of now (snapshot.ts, `stale`). */
 function current(snapshot: Snapshot): EngineStatusRead | undefined {
   const read = snapshot();

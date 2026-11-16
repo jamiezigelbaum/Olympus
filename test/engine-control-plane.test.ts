@@ -18,10 +18,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createUnixSocketFetch } from '../src/core/worker-transport.ts';
 import { EngineCommandClient } from '../src/workers/engine-split/client.ts';
+import { frontEngineState } from '../src/workers/engine-split/front-state.ts';
 import { EngineCommandError, type EngineCommandEnvelope, type EngineForwardedRequest, type EngineForwardedResponse } from '../src/workers/engine-split/commands.ts';
 import { EngineCommandMirror } from '../src/workers/engine-split/control-mirror.ts';
 import { createEngineFront, engineStatusSnapshotPath, startEngineBackgroundServer, startEngineBackgroundStatus } from '../src/workers/engine-split/runtime.ts';
-import { readEngineStatusSnapshot } from '../src/workers/engine-split/snapshot.ts';
+import { readEngineStatusSnapshot, type EngineStatusRead } from '../src/workers/engine-split/snapshot.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
 const TOKEN = 'control-plane-fixture-token-0123456789abcdef';
@@ -158,7 +159,7 @@ describe('the control thread and the engine loop', () => {
     const client = new EngineCommandClient({ fetch: createUnixSocketFetch(socketPath), authToken: TOKEN });
     expect(await client.send(override('one'), { timeoutMs: 20_000 })).toMatchObject({ state: 'done', instance_id: 'first' });
     const read = await waitFor(() => readEngineStatusSnapshot(engineStatusSnapshotPath(env)), { timeoutMs: 10_000, intervalMs: 50 });
-    expect(read.snapshot).toMatchObject({ instance_id: 'first', judge: { pending: 7 } });
+    expect(read.snapshot).toMatchObject({ instance_id: 'first', judge: { pending: 7 }, control_plane: 'thread' });
     expect(typeof read.snapshot.state_at).toBe('string');
     status.stop();
     first.stop();
@@ -195,6 +196,8 @@ describe('the control thread and the engine loop', () => {
     rmSync(engineStatusSnapshotPath(env), { force: true });
     status.publish();
     expect(readEngineStatusSnapshot(engineStatusSnapshotPath(env))?.snapshot.state_at).toBeUndefined();
+    // Health reads this to say the engine runs without its control thread.
+    await waitFor(() => readEngineStatusSnapshot(engineStatusSnapshotPath(env))?.snapshot.control_plane === 'loop', { timeoutMs: 10_000, intervalMs: 50 });
   }, 60_000);
 
   test('a collect that throws does not lose the snapshot: the thread publishes what it has and says the state could not be collected', async () => {
@@ -274,5 +277,58 @@ describe('the control thread\'s record of commands', () => {
     expect(sent).toEqual(['command-0001', 'command-0002', 'command-0002']);
     expect(mirror.get('command-0001')).toMatchObject({ state: 'failed', error: 'no' });
     expect(mirror.unsettled()).toEqual(['command-0002']);
+  });
+});
+
+describe('what the front says of a busy background', () => {
+  test('an owner action the background received and has not finished is counted until its result arrives; the engine\'s own traffic is not', async () => {
+    let now = 1_000;
+    let waits = 0;
+    // The result wait is held open until the test lets the background finish.
+    let finish!: () => void;
+    let finished = new Promise<void>((resolve) => { finish = resolve; });
+    const client = new EngineCommandClient({
+      authToken: TOKEN, now: () => now, sleep: async () => undefined, newId: () => 'command-0001',
+      fetch: (async (url: unknown, init: RequestInit) => {
+        if (init.method === 'POST') return Response.json({ id: (JSON.parse(init.body as string) as { id: string }).id, state: 'received', instance_id: 'fixture' }, { status: 202 });
+        waits += 1;
+        await finished;
+        return Response.json({ id: String(url).split('/').pop()!.split('?')[0]!, state: 'done', instance_id: 'fixture' }, { status: 200 });
+      }) as typeof fetch,
+    });
+    expect(client.applying()).toEqual({ count: 0, oldestMs: 0 });
+    const sent = client.send({ kind: 'capture_stop', source: 'telegram' }, { timeoutMs: 60_000 });
+    await waitFor(() => client.applying().count === 1, { timeoutMs: 5_000, intervalMs: 5 });
+    now += 4_000;
+    expect(client.applying()).toEqual({ count: 1, oldestMs: 4_000 });
+    finish();
+    expect((await sent).state).toBe('done');
+    expect(client.applying()).toEqual({ count: 0, oldestMs: 0 });
+
+    finished = new Promise<void>((resolve) => { finish = resolve; });
+    const traffic = client.send({ kind: 'archive_changed' }, { id: 'command-0002', timeoutMs: 60_000 });
+    await waitFor(() => waits === 2, { timeoutMs: 5_000, intervalMs: 5 });
+    expect(client.applying().count).toBe(0);
+    finish();
+    expect((await traffic).state).toBe('done');
+  });
+
+  test('nothing to say while the state is fresh and nothing waits; the age from ten seconds, a waiting change from three', () => {
+    let read: EngineStatusRead | undefined = { snapshot: { v: 1, written_at: '2026-11-16T12:00:00.000Z', pid: 1, instance_id: 'fixture', scheduler: null, judge: { backlog: null, pending: 0, spending: null }, captures: null } as unknown as EngineStatusRead['snapshot'], age_ms: 1_000, stale: false, state_age_ms: 4_000 };
+    let held = { count: 0, oldestMs: 0 };
+    const say = frontEngineState(() => read, { applying: () => held });
+    expect(say()).toBeUndefined();
+    read = { ...read, state_age_ms: 45_400 };
+    expect(say()).toEqual({ state_age_seconds: 45 });
+    held = { count: 2, oldestMs: 2_000 };
+    expect(say()).toEqual({ state_age_seconds: 45 });
+    held = { count: 2, oldestMs: 3_000 };
+    expect(say()).toEqual({ state_age_seconds: 45, applying: 2 });
+    // A background that stopped publishing is not "busy": the front shows nothing from it.
+    read = { ...read, stale: true };
+    expect(say()).toEqual({ applying: 2 });
+    read = undefined;
+    held = { count: 0, oldestMs: 0 };
+    expect(say()).toBeUndefined();
   });
 });

@@ -1274,6 +1274,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
               ...(sourceDashboard.captureRuntime ? { captureRuntime: sourceDashboard.captureRuntime() } : {}),
+              ...((() => { const engineState = sourceDashboard.engineState?.(); return engineState ? { engineState } : {}; })()),
               ...(options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {}),
               ...(options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {}),
               ...(credentialHealth ? { credentialHealth } : {}),
@@ -2320,7 +2321,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const busyError = () => new EmailSourceWorkerError(
               409,
               'disconnect_source_busy',
-              'This source is finishing a read. Retry Disconnect after the current read completes.',
+              readBusySentence('Disconnect', sourceDashboard?.engineState),
             );
             if (localFilesBusy()) throw busyError();
             const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
@@ -2388,7 +2389,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 throw new EmailSourceWorkerError(
                   409,
                   'disconnect_source_busy',
-                  'This source is finishing a read. Retry Disconnect after the current read completes.',
+                  readBusySentence('Disconnect', sourceDashboard?.engineState),
                 );
               }
               if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
@@ -2399,7 +2400,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   throw new EmailSourceWorkerError(
                     409,
                     'disconnect_source_busy',
-                    'This source is finishing a read. Retry Disconnect after the current read completes.',
+                    readBusySentence('Disconnect', sourceDashboard?.engineState),
                   );
                 }
                 // Stop new scheduled reads before touching credential custody. If
@@ -2623,7 +2624,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   throw new EmailSourceWorkerError(
                     409,
                     'unpair_source_busy',
-                    'This source is finishing a read. Retry Unpair after the current read completes.',
+                    readBusySentence('Unpair', sourceDashboard?.engineState),
                   );
                 }
                 // Park the lane before touching the session on disk, so a
@@ -4071,7 +4072,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         throw new EmailSourceWorkerError(
           409,
           'delete_source_busy',
-          'This source is finishing a read. Retry deleting its indexed data after the current read completes.',
+          readBusySentence('deleting its indexed data', sourceDashboard?.engineState),
         );
       }
       const custodyInput = custodyInputFor();
@@ -4365,4 +4366,19 @@ function dashboardFailureFrames(error: Error): string | undefined {
   const frames = (error.stack ?? '').split('\n').map((line) => line.trim()).filter((line) => line.startsWith('at ') && !/\((?:bun:|native|unknown)/.test(line)).slice(0, 3)
     .map((line) => line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+)(?::\d+)?/g, '$1').slice(0, 120));
   return frames.length > 0 ? frames.join(' < ') : undefined;
+}
+
+/**
+ * Why Disconnect, Unpair or a delete waits on a read. On an engine in two
+ * processes the read is the background's, known from its last report: when
+ * that report is over ten seconds old the sentence says so, so the wait has
+ * a reason and an age instead of looking stuck.
+ */
+function readBusySentence(
+  action: string,
+  engineState?: () => { state_age_seconds?: number } | undefined,
+): string {
+  const age = engineState?.()?.state_age_seconds;
+  return `This source is finishing a read. Retry ${action} after the current read completes.`
+    + (age !== undefined && age > 0 ? ` Olympus is busy: it last reported ${age} s ago.` : '');
 }

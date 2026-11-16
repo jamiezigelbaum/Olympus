@@ -285,6 +285,21 @@ the cause).
   - No engine or store code runs on the thread, and it never waits on a
     disk. If the thread cannot start, or ends, the loop serves the socket
     and writes the snapshot itself, as before, and logs that it does.
+    The snapshot says which is serving (`control_plane`), and the front's
+    `/v1/health` repeats it as `engine_control_plane` with a sentence
+    (`engine_control_plane_problem`) when it is the loop, so a package
+    without the thread's file is seen in health and not only in a log.
+  - What the owner sees of a held loop: `/v1/health` carries
+    `background_state_age_ms`, `background_loop_held_ms` and
+    `background_state_error`. Once the state is over ten seconds old the
+    dashboard says "Updated 45 s ago. Olympus is busy." (contract
+    `engine.stateAgeSeconds`), and a change of the owner's that the
+    background has acknowledged and not finished for three seconds is
+    said too (`engine.applying`, from `EngineCommandClient.applying()`).
+    While a control's own call waits, the page reads the dashboard every
+    five seconds for that line alone, so "Working…" has a reason. The
+    read refusals of Disconnect, Unpair and Delete name the age of the
+    report they rest on.
   `test/engine-control-plane.test.ts` holds a real background's loop in
   one SQLite call for 60 s and checks all of it.
 - **Stores the front keeps writing.** Its own files stay its own: remote

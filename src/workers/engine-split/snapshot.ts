@@ -38,6 +38,12 @@ export interface EngineStatusSnapshot {
    * shown is the last one collected, or an empty one when there never was one.
    */
   state_error?: { attempts: number; error: string; at: string };
+  /**
+   * What answers commands and writes this file: the control thread, or the
+   * engine's own loop when the thread could not start or ended. On the loop,
+   * commands and status wait whenever the engine is busy, so health says so.
+   */
+  control_plane?: 'thread' | 'loop';
   scheduler: unknown;
   judge: {
     backlog: unknown;

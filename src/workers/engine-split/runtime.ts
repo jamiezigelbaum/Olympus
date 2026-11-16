@@ -134,7 +134,7 @@ export function startEngineBackgroundStatus(input: {
   return startEngineStatusPublisher({
     path: engineStatusSnapshotPath(input.env),
     instanceId: input.instanceId,
-    collect: input.collect,
+    collect: () => ({ ...input.collect(), control_plane: controlPlanes.has(input.instanceId) ? 'thread' as const : 'loop' as const }),
     // The loop collects; this background's control thread writes, and keeps
     // writing while the loop is held. With no thread the loop writes.
     hand: (state, at) => controlPlanes.get(input.instanceId)?.publishState(state, at, engineStatusSnapshotPath(input.env)) ?? false,

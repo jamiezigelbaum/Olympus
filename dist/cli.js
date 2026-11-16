@@ -93780,6 +93780,10 @@ var init_vocabulary = __esm(() => {
     synced: "Synced {when}",
     updated: "Updated {when}",
     busySlow: "Olympus is busy. Trying again…",
+    updatedBusy: "Updated {when}. Olympus is busy.",
+    applyingOne: "Olympus received your change and is applying it.",
+    applyingMany: "Olympus received your {n} changes and is applying them.",
+    secondsAgo: "{n} s ago",
     checkAgain: "Check again",
     tryAgain: "Try again",
     openOlympus: "Open Olympus",
@@ -137940,6 +137944,7 @@ function buildSourceDashboardViewModel(options) {
     kind: "source_dashboard",
     ...options.modelSetup ? { model_setup: options.modelSetup } : {},
     generated_at: now.toISOString(),
+    ...options.engineState ? { engine_state: { ...options.engineState } } : {},
     ...degradedCredentials.length ? { degraded_credentials: degradedCredentials } : {},
     summary,
     onboarding: onboarding(summary, cardsWithProgress, folderPicker),
@@ -195666,6 +195671,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     slow: false,
     deleting: {},
     busy: "",
+    busyEngine: null,
     confirming: "",
     helpOpen: false,
     theme: "",
@@ -195934,13 +195940,35 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const text = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
     return text ? String(text.text) : "";
   }
+  function watchBusy(key) {
+    setTimeout(() => {
+      if (state.busy !== key || pageHidden())
+        return;
+      request("tools/call", { name: config.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
+        if (state.busy !== key)
+          return;
+        const seen = result && !result.isError && isDashboard(result.structuredContent) ? result.structuredContent : null;
+        if (seen) {
+          state.busyEngine = { engine: seen.engine, generatedAt: seen.generatedAt };
+          if (!compact() && !editorOpen() && staleWords() !== drawnStale)
+            render();
+        }
+        watchBusy(key);
+      }, () => {
+        if (state.busy === key)
+          watchBusy(key);
+      });
+    }, R.busyMs);
+  }
   function callTool(name, args, key) {
     const mine = supersede();
     state.busy = key;
+    state.busyEngine = null;
     state.confirming = "";
     state.notice = "";
     state.actionError = null;
     render();
+    watchBusy(key);
     request("tools/call", { name, arguments: args || {} }, callTimeoutMs()).then((result) => {
       if (state.busy === key)
         state.busy = "";
@@ -195959,6 +195987,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         }
         state.actionError = { key, text: failed };
         render(key);
+        if (refreshTimer)
+          clearTimeout(refreshTimer);
+        nextRefreshAt = Date.now() + R.settleMs;
+        refreshTimer = pageHidden() ? null : setTimeout(backgroundRefresh, R.settleMs);
         return;
       }
       if (name === H.unreadableOpenTool) {
@@ -196493,9 +196525,29 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (state.slow)
       return P.busySlow;
     const at = Date.parse(data.generatedAt);
+    const seen = state.busy && state.busyEngine ? state.busyEngine : data;
+    const busy = busyWords(seen, Date.parse(seen.generatedAt));
+    if (busy)
+      return busy;
     if (!isFinite(at) || Date.now() - at < config.staleAfterMs)
       return "";
     return fill(P.updated, { when: ago(data.generatedAt) });
+  }
+  function busyWords(data, generatedAt) {
+    const engine = data.engine;
+    if (!engine || typeof engine !== "object")
+      return "";
+    const words = [];
+    if (typeof engine.stateAgeSeconds === "number" && isFinite(engine.stateAgeSeconds) && engine.stateAgeSeconds > 0) {
+      const since = isFinite(generatedAt) ? Math.max(0, Date.now() - generatedAt) / 1000 : 0;
+      const seconds = engine.stateAgeSeconds + since;
+      const when = seconds < 60 ? fill(P.secondsAgo, { n: Math.max(5, Math.floor(seconds / 5) * 5) }) : ago(new Date(Date.now() - seconds * 1000).toISOString());
+      words.push(fill(P.updatedBusy, { when }));
+    }
+    if (typeof engine.applying === "number" && engine.applying >= 1) {
+      words.push(engine.applying === 1 ? P.applyingOne : fill(P.applyingMany, { n: count(engine.applying) }));
+    }
+    return words.join(" ");
   }
   function staleLine() {
     const words = staleWords();
@@ -202467,7 +202519,8 @@ var init_page = __esm(() => {
     maxBackoffMs: 5 * 60000,
     staleTickMs: 30000,
     settleMs: 2000,
-    settleForMs: 60000
+    settleForMs: 60000,
+    busyMs: 5000
   };
   STATUS_TONE = Object.fromEntries(Object.keys(DASHBOARD_STATUS_PRESENTATION).map((status) => [status, DASHBOARD_STATUS_PRESENTATION[status].colorToken]));
   CHATGPT_DASHBOARD_LIGHT = {
@@ -219969,6 +220022,10 @@ function createEmailSourceWorker(options = {}) {
               unpairedSources: dashboardUnpairedSourceStates(dashboardUnpairedSources, sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
               ...sourceDashboard.captureRuntime ? { captureRuntime: sourceDashboard.captureRuntime() } : {},
+              ...(() => {
+                const engineState = sourceDashboard.engineState?.();
+                return engineState ? { engineState } : {};
+              })(),
               ...options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {},
               ...options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {},
               ...credentialHealth ? { credentialHealth } : {},
@@ -220722,7 +220779,7 @@ function createEmailSourceWorker(options = {}) {
                 throw new EmailSourceWorkerError(501, "disconnect_scheduler_refresh_not_supported", "Disconnect cannot safely refresh the active scheduler in this worker.");
               }
               const localFilesBusy = () => dashboardManualSyncRuns.has("local.files") || sourceScheduler !== undefined && dashboardDisconnectHasRunningRead(sourceScheduler, new Set(["local.files"]));
-              const busyError = () => new EmailSourceWorkerError(409, "disconnect_source_busy", "This source is finishing a read. Retry Disconnect after the current read completes.");
+              const busyError = () => new EmailSourceWorkerError(409, "disconnect_source_busy", readBusySentence("Disconnect", sourceDashboard?.engineState));
               if (localFilesBusy())
                 throw busyError();
               const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
@@ -220770,14 +220827,14 @@ function createEmailSourceWorker(options = {}) {
                 throw new EmailSourceWorkerError(409, "source_not_connected", "This source has no connected local credential/account grant.");
               }
               if ([...plan.sourceIds].some((id) => dashboardManualSyncRuns.has(id))) {
-                throw new EmailSourceWorkerError(409, "disconnect_source_busy", "This source is finishing a read. Retry Disconnect after the current read completes.");
+                throw new EmailSourceWorkerError(409, "disconnect_source_busy", readBusySentence("Disconnect", sourceDashboard?.engineState));
               }
               if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
                 const removedHandleIds = new Set(plan.handles.map((handle) => handle.handle));
                 const remainingHandles = registry.handles.filter((handle) => !removedHandleIds.has(handle.handle));
                 const nextSources = await sourceDashboard.refreshSchedulerSources(remainingHandles);
                 if (dashboardDisconnectHasRunningRead(sourceScheduler, plan.sourceIds)) {
-                  throw new EmailSourceWorkerError(409, "disconnect_source_busy", "This source is finishing a read. Retry Disconnect after the current read completes.");
+                  throw new EmailSourceWorkerError(409, "disconnect_source_busy", readBusySentence("Disconnect", sourceDashboard?.engineState));
                 }
                 sourceScheduler.updateSources(nextSources);
               }
@@ -220900,7 +220957,7 @@ function createEmailSourceWorker(options = {}) {
                 const remainingHandles = registry.handles.filter((handle) => !removedHandleIds.has(handle.handle));
                 const nextSources = await sourceDashboard.refreshSchedulerSources(remainingHandles);
                 if (dashboardDisconnectHasRunningRead(sourceScheduler, selectedSourceIds)) {
-                  throw new EmailSourceWorkerError(409, "unpair_source_busy", "This source is finishing a read. Retry Unpair after the current read completes.");
+                  throw new EmailSourceWorkerError(409, "unpair_source_busy", readBusySentence("Unpair", sourceDashboard?.engineState));
                 }
                 sourceScheduler.updateSources(nextSources);
               }
@@ -221961,7 +222018,7 @@ function createEmailSourceWorker(options = {}) {
     return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
       const busy = () => dashboardManualSyncRuns.has(sourceId) || sourceScheduler !== undefined && dashboardDisconnectHasRunningRead(sourceScheduler, new Set([sourceId]));
       if (busy()) {
-        throw new EmailSourceWorkerError(409, "delete_source_busy", "This source is finishing a read. Retry deleting its indexed data after the current read completes.");
+        throw new EmailSourceWorkerError(409, "delete_source_busy", readBusySentence("deleting its indexed data", sourceDashboard?.engineState));
       }
       const custodyInput = custodyInputFor();
       const custody = dataDeleteCustody({ ...custodyInput, ...pathContext });
@@ -222147,6 +222204,10 @@ function dashboardFailureFrames(error) {
   const frames = (error.stack ?? "").split(`
 `).map((line) => line.trim()).filter((line) => line.startsWith("at ") && !/\((?:bun:|native|unknown)/.test(line)).slice(0, 3).map((line) => line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+)(?::\d+)?/g, "$1").slice(0, 120));
   return frames.length > 0 ? frames.join(" < ") : undefined;
+}
+function readBusySentence(action, engineState) {
+  const age = engineState?.()?.state_age_seconds;
+  return `This source is finishing a read. Retry ${action} after the current read completes.` + (age !== undefined && age > 0 ? ` Olympus is busy: it last reported ${age} s ago.` : "");
 }
 var init_engine2 = __esm(() => {
   init_tier_visibility();
@@ -243151,6 +243212,7 @@ import { randomUUID as randomUUID41 } from "node:crypto";
 
 class EngineCommandClient {
   options;
+  held = new Map;
   sleep;
   now;
   newId;
@@ -243173,11 +243235,26 @@ class EngineCommandClient {
     const deadline = this.now() + (options.timeoutMs ?? 30000);
     return this.postUntil(id, command, deadline);
   }
+  applying() {
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const at of this.held.values())
+      oldest = Math.min(oldest, at);
+    return { count: this.held.size, oldestMs: this.held.size ? Math.max(0, this.now() - oldest) : 0 };
+  }
   async send(command, options = {}) {
     const id = options.id ?? this.newId();
+    try {
+      return await this.sendUntilSettled(id, command, options);
+    } finally {
+      this.held.delete(id);
+    }
+  }
+  async sendUntilSettled(id, command, options) {
     const silenceMs = options.timeoutMs ?? 60000;
     let deadline = this.now() + silenceMs;
     let receipt = await this.postUntil(id, command, deadline);
+    if (receipt.state === "received" && OWNER_ACTION_KINDS.has(command.kind))
+      this.held.set(id, this.now());
     deadline = this.now() + silenceMs;
     let attempt = 0;
     while (receipt.state === "received") {
@@ -243320,7 +243397,7 @@ class OwnerBusyRelay {
     });
   }
 }
-var EngineCommandUnavailableError, RETRY_DELAYS_MS, RESULT_WAIT_MS = 1e4, REQUEST_GRACE_MS = 15000, RequestTimedOut;
+var EngineCommandUnavailableError, OWNER_ACTION_KINDS, RETRY_DELAYS_MS, RESULT_WAIT_MS = 1e4, REQUEST_GRACE_MS = 15000, RequestTimedOut;
 var init_client5 = __esm(() => {
   init_engine_split();
   init_commands();
@@ -243331,6 +243408,18 @@ var init_client5 = __esm(() => {
       this.name = "EngineCommandUnavailableError";
     }
   };
+  OWNER_ACTION_KINDS = new Set([
+    "tier_override",
+    "tier_set_recorded",
+    "people",
+    "capture",
+    "capture_stop",
+    "delete_source_data",
+    "storage_registry",
+    "owner_limits",
+    "reload",
+    "export_data"
+  ]);
   RETRY_DELAYS_MS = [100, 250, 500, 1000, 2000];
   RequestTimedOut = class RequestTimedOut extends Error {
   };
@@ -243686,7 +243775,7 @@ function startEngineBackgroundStatus(input) {
   return startEngineStatusPublisher({
     path: engineStatusSnapshotPath(input.env),
     instanceId: input.instanceId,
-    collect: input.collect,
+    collect: () => ({ ...input.collect(), control_plane: controlPlanes.has(input.instanceId) ? "thread" : "loop" }),
     hand: (state, at) => controlPlanes.get(input.instanceId)?.publishState(state, at, engineStatusSnapshotPath(input.env)) ?? false,
     handFailure: (failure) => controlPlanes.get(input.instanceId)?.publishFailure(failure, engineStatusSnapshotPath(input.env)),
     log: (line) => console.warn(line)
@@ -243998,6 +244087,20 @@ var init_runtime4 = __esm(() => {
 });
 
 // src/workers/engine-split/front-state.ts
+function frontEngineState(snapshot, client) {
+  return () => {
+    const read = current3(snapshot);
+    const age = read ? read.state_age_ms ?? read.age_ms : 0;
+    const held = client.applying();
+    const applying = held.count > 0 && held.oldestMs >= ENGINE_APPLYING_SHOWN_MS ? held.count : 0;
+    if (age < ENGINE_STATE_AGE_SHOWN_MS && applying === 0)
+      return;
+    return {
+      ...age >= ENGINE_STATE_AGE_SHOWN_MS ? { state_age_seconds: Math.round(age / 1000) } : {},
+      ...applying > 0 ? { applying } : {}
+    };
+  };
+}
 function current3(snapshot) {
   const read = snapshot();
   return read && !read.stale ? read : undefined;
@@ -244086,6 +244189,7 @@ function frontCaptureRuntime(local, snapshot) {
     return captures && typeof captures === "object" && !Array.isArray(captures) ? captures : local();
   };
 }
+var ENGINE_STATE_AGE_SHOWN_MS = 1e4, ENGINE_APPLYING_SHOWN_MS = 3000;
 var init_front_state = __esm(() => {
   init_runtime4();
   init_commands();
@@ -248750,6 +248854,10 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     } : {},
     ...options.remote ? { remote: options.remote } : {},
     computerControls: { href: openPageUrl({ kind: "dashboard" }) },
+    ...view.engine_state ? { engine: {
+      ...view.engine_state.state_age_seconds !== undefined ? { stateAgeSeconds: view.engine_state.state_age_seconds } : {},
+      ...view.engine_state.applying !== undefined ? { applying: view.engine_state.applying } : {}
+    } } : {},
     generatedAt: isoOrNow(view.generated_at, now)
   };
 }
@@ -252075,7 +252183,7 @@ function dashboardForApprovedPage(view) {
     const { done: _done, percent: _percent, ...stall } = progress;
     return { ...row, detail, ...progress.stalled ? { progress: { ...stall, total: 0 } } : {} };
   });
-  const { progress, ...rest } = view;
+  const { progress, engine: _engine, ...rest } = view;
   return { ...rest, sources, ...progress && finite2(progress.percent) && finite2(progress.itemsLeft) ? { progress } : {} };
 }
 function copyDashboardViewModel(view) {
@@ -252113,6 +252221,13 @@ function copyDashboardViewModel(view) {
   };
   if (view.blocker)
     out.blocker = copyItem(view.blocker);
+  if (view.engine && typeof view.engine === "object") {
+    const stateAgeSeconds = whole(view.engine.stateAgeSeconds);
+    const applying = whole(view.engine.applying);
+    if (stateAgeSeconds > 0 || applying > 0) {
+      out.engine = { ...stateAgeSeconds > 0 ? { stateAgeSeconds } : {}, ...applying > 0 ? { applying } : {} };
+    }
+  }
   const waits = (view.waits ?? []).flatMap(copyWait);
   if (waits.length)
     out.waits = waits;
@@ -273494,6 +273609,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         unlinkWhatsAppDevice,
         withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
         captureRuntime: engineFront ? frontCaptureRuntime(dashboardCaptureRuntime, () => engineFront.status()) : dashboardCaptureRuntime,
+        ...engineFront ? { engineState: frontEngineState(() => engineFront.status(), engineFront.client) } : {},
         workerRestart: {
           canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
           request: (reload) => restartForDelete(reload)
@@ -274412,7 +274528,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const standBackSeen = Object.keys(standBackCounts).length > 0;
     const statusRecountHealth = statusRecount?.health();
     const loopLag = (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot());
-    const backgroundSnapshot = engineFront?.status()?.snapshot;
+    const backgroundStatus = engineFront?.status();
+    const backgroundSnapshot = backgroundStatus?.snapshot;
     const backgroundLoopLag = backgroundSnapshot?.loop_lag;
     if ((path === "/v1/health" || path === "/health") && response?.ok) {
       return Response.json({
@@ -274432,6 +274549,15 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         ...statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {},
         loop_lag: loopLag,
         ...backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {},
+        ...backgroundStatus && !backgroundStatus.stale ? {
+          background_state_age_ms: Math.round(backgroundStatus.state_age_ms ?? backgroundStatus.age_ms),
+          ...typeof backgroundSnapshot?.loop_held_ms === "number" ? { background_loop_held_ms: backgroundSnapshot.loop_held_ms } : {},
+          ...backgroundSnapshot?.state_error ? { background_state_error: backgroundSnapshot.state_error } : {}
+        } : {},
+        ...backgroundSnapshot?.control_plane ? {
+          engine_control_plane: backgroundSnapshot.control_plane,
+          ...backgroundSnapshot.control_plane === "loop" ? { engine_control_plane_problem: "The background engine answers commands and publishes status from its own loop, not its control thread: both wait whenever the engine is busy. The install may be missing dist/engine-control-worker.js; the background's log says why." } : {}
+        } : {},
         ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth()),
         ...backgroundSnapshot?.loop_slow_sql ? { background_loop_slow_sql: backgroundSnapshot.loop_slow_sql } : {},
         ...backgroundSnapshot?.sqlite_files ? { background_sqlite_files: backgroundSnapshot.sqlite_files } : {},

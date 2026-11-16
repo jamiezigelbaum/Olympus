@@ -383,6 +383,15 @@ export interface DashboardViewModelV1 {
    * them, whose Open opens this page.
    */
   computerControls?: { href: string };
+  /**
+   * Contract v1 addition (2026-11-16): a busy engine, said on the page. On an
+   * engine that runs as two processes the page is served by one while the
+   * other writes; when the writer has not reported for over ten seconds,
+   * `stateAgeSeconds` is how old the state shown was at `generatedAt`, and
+   * `applying` counts the owner's changes the writer has received and not
+   * finished. Absent when the state is fresh and nothing waits.
+   */
+  engine?: { stateAgeSeconds?: number; applying?: number };
   generatedAt: string;
 }
 

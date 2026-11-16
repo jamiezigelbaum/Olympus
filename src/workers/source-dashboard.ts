@@ -311,6 +311,8 @@ export interface SourceDashboardViewModel {
   model_setup?: ModelSetupView;
   kind: 'source_dashboard';
   generated_at: string;
+  /** A busy background, said on the page (SourceDashboardBuildOptions.engineState). */
+  engine_state?: { state_age_seconds?: number; applying?: number };
   degraded_credentials?: WorkerCredentialDegradation[];
   summary: {
     configured_sources: number;
@@ -1502,6 +1504,12 @@ export interface SourceDashboardBuildOptions {
    * you; a source absent here shows neither.
    */
   captureRuntime?: Readonly<Record<string, DashboardCaptureRuntime>>;
+  /**
+   * The split's front only, while its background is busy: how old the state
+   * shown is (once over ten seconds) and how many of the owner's changes the
+   * background has received and not finished (engine-split/front-state.ts).
+   */
+  engineState?: { state_age_seconds?: number; applying?: number };
   /**
    * The last Sync now result per source id, kept by the worker that ran it.
    * Stamped on the card only while dashboardLiveManualSync says it is news.
@@ -2727,6 +2735,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     kind: 'source_dashboard',
     ...(options.modelSetup ? { model_setup: options.modelSetup } : {}),
     generated_at: now.toISOString(),
+    ...(options.engineState ? { engine_state: { ...options.engineState } } : {}),
     ...(degradedCredentials.length
       ? { degraded_credentials: degradedCredentials }
       : {}),

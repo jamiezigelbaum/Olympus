@@ -9,7 +9,7 @@ import { Window } from 'happy-dom';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_TOOLS } from '../src/workers/dashboard/chatgpt/privacy.ts';
 import type { DashboardFix, DashboardViewModelV1, SourceProgress } from '../src/workers/chatgpt/dashboard-contract.ts';
-import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
+import { copyDashboardViewModel, dashboardForApprovedPage } from '../src/workers/chatgpt/response-builder.ts';
 import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import {
   CHATGPT_DASHBOARD_CSS,
@@ -1124,6 +1124,46 @@ describe('freshness: the page re-reads the dashboard while it is visible', () =>
     await advance(60_000);
     expect(host.text()).toContain('Updated 11 min ago');
     expect(dashboardCalls(host)).toBe(0);
+  }));
+
+  test('a busy engine is said with the age of its state, counted on from when the page was built', withFakeTimers(async () => {
+    const host = mount({ html: chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, refresh: { idleMs: 24 * 60 * MIN } }) });
+    host.push({ structuredContent: { ...settled(), generatedAt: ago(0), engine: { stateAgeSeconds: 45 } } });
+    expect(host.text()).toContain('Updated 45 s ago. Olympus is busy.');
+    await advance(30_000);
+    expect(host.text()).toContain('Updated 1 min ago. Olympus is busy.');
+    host.push({ structuredContent: { ...settled(), generatedAt: ago(0) } });
+    expect(host.text()).not.toContain('Olympus is busy');
+  }));
+
+  test('the busy engine crosses the allowlisted copy as two whole numbers, and never reaches the submitted page', () => {
+    const view = { ...settled(), engine: { stateAgeSeconds: 45.4, applying: 1, note: 'private' } } as unknown as DashboardViewModelV1;
+    expect(copyDashboardViewModel(view).engine).toEqual({ stateAgeSeconds: 45, applying: 1 });
+    expect(copyDashboardViewModel(settled()).engine).toBeUndefined();
+    expect(copyDashboardViewModel({ ...settled(), engine: { stateAgeSeconds: 0 } }).engine).toBeUndefined();
+    expect('engine' in dashboardForApprovedPage(copyDashboardViewModel(view))).toBe(false);
+  });
+
+  test('a change the engine has received and not finished is said so', () => {
+    const host = mount();
+    host.push({ structuredContent: { ...settled(), generatedAt: ago(0), engine: { applying: 1 } } });
+    expect(host.text()).toContain('Olympus received your change and is applying it.');
+    host.push({ structuredContent: { ...settled(), generatedAt: ago(0), engine: { stateAgeSeconds: 12, applying: 2 } } });
+    expect(host.text()).toContain('Updated 10 s ago. Olympus is busy. Olympus received your 2 changes and is applying them.');
+  });
+
+  test('while a control waits on a busy engine, the page says why, and its data is not replaced', withFakeTimers(async () => {
+    const host = mount({ timeoutMs: 60_000 });
+    host.push({ structuredContent: model({ sources: [SOURCES[0]!] }) });
+    host.button('Disconnect').click();
+    host.button('Yes, disconnect').click();
+    expect(dashboardCalls(host)).toBe(0);
+    await advance(5_000);
+    answer(host, pendingCall(host, 'olympus_dashboard'), { structuredContent: { ...model({ sources: [] }), generatedAt: ago(0), engine: { stateAgeSeconds: 20, applying: 1 } } });
+    await flush();
+    expect(host.text()).toContain('Updated 20 s ago. Olympus is busy. Olympus received your change and is applying it.');
+    expect(host.text()).toContain(SOURCES[0]!.label);
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.working);
   }));
 });
 
