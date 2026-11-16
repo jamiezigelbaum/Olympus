@@ -1,5 +1,6 @@
+import { fetchStreamingModel } from './model-stream.ts';
 import { OperationError } from './operation-error.ts';
-import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
+import { isModelEndpointRedirectError } from './model-transport.ts';
 import {
   refuseLocalOnlyOnOrdinaryCloud,
   type AnalystModel,
@@ -23,7 +24,7 @@ export interface AnthropicAnalystModelOptions {
 
 const DEFAULT_MODEL = 'claude-sonnet-4-5';
 const DEFAULT_BASE_URL = 'https://api.anthropic.com';
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_TOKENS = 4096;
 const ANTHROPIC_VERSION = '2023-06-01';
 
@@ -49,10 +50,12 @@ export function createAnthropicAnalystModel(
       refuseLocalOnlyOnOrdinaryCloud(request, 'Anthropic analyst');
       const url = `${baseUrl}/v1/messages`;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const follow = () => controller.abort(request.signal?.reason);
+      if (request.signal?.aborted) follow();
+      else request.signal?.addEventListener('abort', follow, { once: true });
       let response: Response;
       try {
-        response = await fetchModelEndpoint(fetchImpl, url, {
+        response = await fetchStreamingModel(fetchImpl, url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -61,6 +64,7 @@ export function createAnthropicAnalystModel(
           },
           body: JSON.stringify({
             model,
+            stream: true,
             max_tokens: request.maxOutputChars !== undefined
               ? maxTokensForChars(request.maxOutputChars)
               : maxTokens,
@@ -68,8 +72,9 @@ export function createAnthropicAnalystModel(
             messages: [{ role: 'user', content: request.prompt }],
           }),
           signal: controller.signal,
-        });
+        }, model, timeoutMs);
       } catch (error) {
+        if (request.signal?.aborted) throw request.signal.reason;
         if (isModelEndpointRedirectError(error)) {
           throw new OperationError(
             'source_index_error',
@@ -83,7 +88,7 @@ export function createAnthropicAnalystModel(
           error instanceof Error ? error.message : 'Check the Anthropic endpoint and network.',
         );
       } finally {
-        clearTimeout(timer);
+        request.signal?.removeEventListener('abort', follow);
       }
 
       if (!response.ok) {

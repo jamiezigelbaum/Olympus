@@ -6351,6 +6351,9 @@ function unquoteEnvValue(value) {
   return trimmed;
 }
 
+// src/core/model-stream.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+
 // src/core/zkapi-consult-settings.ts
 import { readFileSync as readFileSync12, statSync as statSync7 } from "node:fs";
 import { lookup } from "node:dns/promises";
@@ -6649,11 +6652,7 @@ function isFetchRedirectRefusal(error) {
   return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
 }
 
-// src/core/read-wide.ts
-var matchingProvenances = new WeakSet;
-var wideProvenances = new WeakSet;
-
-// src/core/analyst.ts
+// src/core/source-answer-jobs.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 
 // node_modules/entities/dist/esm/decode-codepoint.js
@@ -7777,6 +7776,44 @@ var SHARED_SECRET_PATTERNS = [
   }
 ];
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+var chunkProvenance = new WeakMap;
+var storage = new AsyncLocalStorage;
+var withheldAnswers = new WeakSet;
+
+// src/core/source-answer-jobs.ts
+var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+var progressSink = new AsyncLocalStorage2;
+
+// src/core/model-stream.ts
+var progress = new AsyncLocalStorage3;
+
+// src/core/read-wide.ts
+var matchingProvenances = new WeakSet;
+var wideProvenances = new WeakSet;
+
+// src/core/analyst.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+
 // node_modules/n-gram/index.js
 var bigram = nGram(2);
 var trigram = nGram(3);
@@ -8163,14 +8200,14 @@ var stopwords_iso_default = {
 };
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-var context = new AsyncLocalStorage;
-var disabled = new AsyncLocalStorage;
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var context = new AsyncLocalStorage4;
+var disabled = new AsyncLocalStorage4;
 function keywordExpansionDisabled() {
   return disabled.getStore() === true;
 }
-var cachedOnly = new AsyncLocalStorage;
-var requestContext = new AsyncLocalStorage;
+var cachedOnly = new AsyncLocalStorage4;
+var requestContext = new AsyncLocalStorage4;
 function keywordAlternatives(query) {
   if (keywordExpansionDisabled())
     return;
@@ -8869,7 +8906,7 @@ function visibilityCheckTimeoutGap(corpusId) {
 var DOCUMENT_FAMILIES = new Set(["file", "note"]);
 
 // src/core/analyst.ts
-var analystAbortSignalStorage = new AsyncLocalStorage2;
+var analystAbortSignalStorage = new AsyncLocalStorage5;
 var CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.";
 var ANALYST_SYSTEM = [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
@@ -15935,10 +15972,10 @@ function overrideFromJson(json) {
 }
 
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-var progress = new AsyncLocalStorage3;
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+var progress2 = new AsyncLocalStorage6;
 function noteSourceIndexReadProgress() {
-  const report = progress.getStore();
+  const report = progress2.getStore();
   if (!report)
     return;
   report();
@@ -16190,7 +16227,7 @@ function readStoreWriteSequence(db) {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 import { createHash as createHash7 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -16330,7 +16367,7 @@ function contaminatedEmbeddingEpoch(modelId, epochId) {
 }
 
 // src/workers/source-index/embeddings.ts
-var priorityQueryEmbedding = new AsyncLocalStorage4;
+var priorityQueryEmbedding = new AsyncLocalStorage7;
 function priorityQueryEmbeddingRequested() {
   return priorityQueryEmbedding.getStore() === true;
 }
@@ -17310,38 +17347,7 @@ import { Database as Database2 } from "bun:sqlite";
 import { isMainThread as isMainThread3 } from "node:worker_threads";
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-
-// src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
-function chunkCoverageNote(result) {
-  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
-}
-async function checkReleaseChunks(check, inputs, options) {
-  try {
-    const result = await check?.chunks?.(inputs, options);
-    if (result && result.allowed.length === inputs.length)
-      return result;
-  } catch {}
-  return {
-    allowed: inputs.map(() => []),
-    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
-    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
-  };
-}
-var chunkProvenance = new WeakMap;
-var storage = new AsyncLocalStorage5;
-var withheldAnswers = new WeakSet;
-
-// src/core/source-answer-jobs.ts
-var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
-var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
-var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-var progressSink = new AsyncLocalStorage6;
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 
 // src/core/store-reclaim-admission.ts
 import { join as join17 } from "node:path";
@@ -17376,8 +17382,8 @@ function poolSqlSite(sql) {
 var SLOW_MAIN_THREAD_SQL_MS = 250;
 var SLOW_MAIN_THREAD_SQL_KEPT = 20;
 var SITE_TALLY_MS = 25;
-var storage2 = new AsyncLocalStorage7;
-var laneStorage = new AsyncLocalStorage7;
+var storage2 = new AsyncLocalStorage8;
+var laneStorage = new AsyncLocalStorage8;
 function beginSourceAnswerPoolRead(site) {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
@@ -19992,7 +19998,7 @@ function ensureOwnerOnlyDir(dir) {
 }
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 
 // src/core/source-item-read.ts
 var SOURCE_ITEM_READ_REFUSALS = [
@@ -20008,8 +20014,8 @@ var SOURCE_ITEM_READ_REFUSALS = [
 ];
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
-var storage3 = new AsyncLocalStorage8;
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+var storage3 = new AsyncLocalStorage9;
 var completedPrivateAnswers = new Set;
 var JOB_QUESTION_TTL_MS = 30 * 60000;
 var jobQuestions = new Map;
@@ -20469,7 +20475,7 @@ function currentAccess(authorized) {
     return "unavailable";
   }
 }
-var readAuthorization = new AsyncLocalStorage9;
+var readAuthorization = new AsyncLocalStorage10;
 function currentRemoteReadAccess() {
   const authorized = readAuthorization.getStore();
   return authorized ? currentAccess(authorized) : "active";

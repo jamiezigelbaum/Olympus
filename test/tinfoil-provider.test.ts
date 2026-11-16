@@ -245,3 +245,28 @@ test('SDK recovery verification errors keep their exact secret-free refusal reas
   await expect(model.complete(request)).rejects.toMatchObject({ reason: 'Recovery attestation bundle unavailable: [redacted]' });
   expect(readTinfoilStatus(env)?.reason).toBe('Recovery attestation bundle unavailable: [redacted]');
 });
+
+test('streaming Tinfoil inference outlives the attestation startup clock while bytes arrive', async () => {
+  const { env } = fixture();
+  const encoder = new TextEncoder();
+  const options = fake({ env, send: async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let sent = 0;
+    return new Response(new ReadableStream({
+      start(controller) {
+        const send = () => {
+          if (sent++ === 8) {
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+            return;
+          }
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"x"}}]}\n\n'));
+          timer = setTimeout(send, 20);
+        };
+        send();
+      },
+      cancel() { clearTimeout(timer); },
+    }), { headers: { 'content-type': 'text/event-stream' } });
+  } });
+  expect((await createTinfoilAnalystModel({ ...options, timeoutMs: 100 }).complete(request)).text).toBe('xxxxxxxx');
+});

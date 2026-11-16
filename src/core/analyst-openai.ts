@@ -1,3 +1,4 @@
+import { fetchStreamingModel, ModelIdleError } from './model-stream.ts';
 // OpenAI-compatible AnalystModel adapter.
 //
 // Maps the provider-agnostic AnalystModel seam (src/core/analyst.ts) onto an
@@ -14,7 +15,7 @@
 // routing layer can fall back to the stricter local analyst where appropriate.
 
 import { OperationError } from './operation-error.ts';
-import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
+import { isModelEndpointRedirectError } from './model-transport.ts';
 import {
   refuseLocalOnlyOnOrdinaryCloud,
   type AnalystModel,
@@ -69,7 +70,7 @@ const DEFAULT_MODEL = 'gpt-5.5';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_REASONING_EFFORT: OpenAIReasoningEffort = 'high';
 const DEFAULT_SERVICE_TIER: OpenAIServiceTier = 'priority';
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_REASONING_HEADROOM_TOKENS = 32_768;
 
 export function createOpenAICompatibleAnalystModel(
@@ -100,6 +101,7 @@ export function createOpenAICompatibleAnalystModel(
       const body: Record<string, unknown> = {
         ...(options.extraBody ?? {}),
         model,
+        stream: true,
         messages: [
           { role: 'system', content: request.system },
           { role: 'user', content: request.prompt },
@@ -122,18 +124,10 @@ export function createOpenAICompatibleAnalystModel(
       const abortFromCaller = () => controller.abort(request.signal?.reason);
       if (request.signal?.aborted) abortFromCaller();
       else request.signal?.addEventListener('abort', abortFromCaller, { once: true });
-      // Armed across the body reads too: headers arriving proves nothing about
-      // a peer that then stalls the body, and a cloud leg may carry no caller
-      // budget behind this one.
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, timeoutMs);
       try {
         let response: Response;
         try {
-          response = await fetchModelEndpoint(fetchImpl, url, {
+          response = await fetchStreamingModel(fetchImpl, url, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -141,8 +135,9 @@ export function createOpenAICompatibleAnalystModel(
             },
             body: JSON.stringify(body),
             signal: controller.signal,
-          });
+          }, model, timeoutMs);
         } catch (error) {
+          if (error instanceof ModelIdleError) throw new OperationError('source_index_error', error.message);
           if (error instanceof OperationError && error.code === 'source_index_policy_violation') throw error;
           if (request.signal?.aborted) throw callerAbortError(request.signal.reason);
           if (isModelEndpointRedirectError(error)) {
@@ -173,13 +168,6 @@ export function createOpenAICompatibleAnalystModel(
           data = await response.json();
         } catch (error) {
           if (request.signal?.aborted) throw callerAbortError(request.signal.reason);
-          if (timedOut) {
-            throw new OperationError(
-              'source_index_error',
-              `${providerLabel} (${model}) did not complete within ${timeoutMs}ms.`,
-              'The endpoint returned response headers but stalled the body; falling back to local.',
-            );
-          }
           throw new OperationError(
             'source_index_error',
             `${providerLabel} (${model}) returned a non-JSON response.`,
@@ -225,7 +213,6 @@ export function createOpenAICompatibleAnalystModel(
         // return the raw model text and the resolved model id.
         return { text, modelId: parsed.model || model };
       } finally {
-        clearTimeout(timer);
         request.signal?.removeEventListener('abort', abortFromCaller);
       }
     },
