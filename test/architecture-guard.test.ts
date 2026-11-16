@@ -253,6 +253,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/extractors/ocr-probe-fixture.ts',
   'src/workers/file-extraction/extractors/ocr.ts',
   'src/workers/file-extraction/extractors/openai-compatible-client.ts',
+  'src/workers/file-extraction/extractors/model-stream.ts',
   'src/workers/file-extraction/extractors/pdf-raster-ocr.ts',
   'src/workers/file-extraction/extractors/pdf-render.ts',
   'src/workers/file-extraction/extractors/remote-vlm.ts',

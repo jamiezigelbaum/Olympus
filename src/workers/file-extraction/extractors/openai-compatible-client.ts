@@ -15,6 +15,7 @@ import type {
   VlmProbeRequest,
 } from '../types.ts';
 import { normalizeExtractedText } from './bounded-text.ts';
+import { idleClock, readChatCompletion } from './model-stream.ts';
 import { requireLocalHttpBaseUrl, requireNonEmpty } from './remote-vlm.ts';
 import { assertLocalModelIdNotCloudForwarding } from '../../../core/local-model-policy.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from '../../../core/model-transport.ts';
@@ -26,6 +27,10 @@ import {
   vlmRouterErrorKind,
 } from './vlm.ts';
 
+/**
+ * The local vision call's stall window: it stops only after the model sends
+ * nothing (no headers, no streamed token) for this long (model-stream.ts).
+ */
 export const DEFAULT_LOCAL_VLM_TIMEOUT_MS = 180_000;
 
 export interface OpenAICompatibleVlmClientOptions {
@@ -56,15 +61,17 @@ export class OpenAICompatibleVlmClient implements VlmClient {
   }
 
   async describe(request: VlmDescribeRequest): Promise<VlmDescribeResult> {
-    const timeout = requestTimeout(this.timeoutMs);
+    const timeout = idleClock(this.timeoutMs);
     try {
       const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: this.headers(),
-        ...(timeout.signal ? { signal: timeout.signal } : {}),
+        signal: timeout.signal,
         body: JSON.stringify({
           model: this.model,
           temperature: 0,
+          // Streamed so the clock counts only silence, never a long answer still arriving.
+          stream: true,
           max_tokens: request.maxTokens ?? 700,
           chat_template_kwargs: { enable_thinking: false },
           messages: [
@@ -97,7 +104,7 @@ export class OpenAICompatibleVlmClient implements VlmClient {
         });
       }
       const text = normalizeExtractedText(
-        parseOpenAICompatibleResponseText(await response.json()),
+        parseOpenAICompatibleResponseText(await readChatCompletion(response, timeout)),
       ).slice(0, request.maxOutputChars);
       return {
         text,

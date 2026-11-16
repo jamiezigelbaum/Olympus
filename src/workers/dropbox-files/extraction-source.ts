@@ -31,7 +31,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { computeDropboxContentHash } from './dropbox-content-hash.ts';
 import { DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS } from './provider-client.ts';
-import { fetchWithBodyDeadline, isAbortError } from '../../core/http-timeout.ts';
+import { fetchWithIdleDeadline, isAbortError } from '../../core/http-timeout.ts';
 import {
   FileExtractionSourceError,
   splitScopedLocalItemId,
@@ -370,7 +370,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
         url,
         init as Parameters<DropboxExtractionFetch>[1],
       );
-      response = await fetchWithBodyDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
+      response = await fetchWithIdleDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${this.token}`,

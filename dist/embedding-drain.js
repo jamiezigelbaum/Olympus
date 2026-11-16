@@ -24808,7 +24808,10 @@ ${parentKey(ref)}`, { ref, origin });
     const version = this.db.query("PRAGMA data_version").get();
     return `${version.data_version}:${row.changes}`;
   }
-  exportItemCopy(identity) {
+  exportItemNames(identity) {
+    return this.itemNamesRow(identity)?.names;
+  }
+  itemNamesRow(identity) {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`).join(", ")}
       FROM items
@@ -24818,6 +24821,30 @@ ${parentKey(ref)}`, { ref, origin });
     if (!row)
       return;
     const columns = Object.fromEntries(CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => [column, row[column] ?? null]));
+    const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
+    const names = {
+      identity: {
+        family: String(columns.family),
+        provider: String(columns.provider),
+        accountScope: String(columns.account_scope),
+        providerItemId: String(columns.provider_item_id),
+        localItemId: String(columns.local_item_id),
+        ...optional("provider_thread_id") ? { providerThreadId: optional("provider_thread_id") } : {},
+        ...optional("provider_conversation_id") ? { providerConversationId: optional("provider_conversation_id") } : {},
+        ...optional("provider_file_id") ? { providerFileId: optional("provider_file_id") } : {},
+        ...optional("provider_event_id") ? { providerEventId: optional("provider_event_id") } : {},
+        ...optional("source_version") ? { sourceVersion: optional("source_version") } : {}
+      },
+      columns,
+      trustTier: trustTierFromRow(row.trust_tier)
+    };
+    return { itemPk: row.item_pk, names };
+  }
+  exportItemCopy(identity) {
+    const found = this.itemNamesRow(identity);
+    if (!found)
+      return;
+    const row = { item_pk: found.itemPk };
     const owners = this.db.query(`
       SELECT connector_id, ownership_kind, first_seen_at, last_seen_at
       FROM item_owners WHERE item_pk = ? ORDER BY connector_id
@@ -24859,22 +24886,8 @@ ${parentKey(ref)}`, { ref, origin });
       if (authority)
         vectorAuthorities.push(authority);
     }
-    const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
     return {
-      identity: {
-        family: String(columns.family),
-        provider: String(columns.provider),
-        accountScope: String(columns.account_scope),
-        providerItemId: String(columns.provider_item_id),
-        localItemId: String(columns.local_item_id),
-        ...optional("provider_thread_id") ? { providerThreadId: optional("provider_thread_id") } : {},
-        ...optional("provider_conversation_id") ? { providerConversationId: optional("provider_conversation_id") } : {},
-        ...optional("provider_file_id") ? { providerFileId: optional("provider_file_id") } : {},
-        ...optional("provider_event_id") ? { providerEventId: optional("provider_event_id") } : {},
-        ...optional("source_version") ? { sourceVersion: optional("source_version") } : {}
-      },
-      columns,
-      trustTier: trustTierFromRow(row.trust_tier),
+      ...found.names,
       owners,
       chunks,
       vectors,
@@ -35347,7 +35360,7 @@ var SOURCE_CODE_EXTENSIONS = new Set([
 ]);
 
 // src/workers/dropbox-files/provider-client.ts
-var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
+var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 2 * 60000;
 // src/workers/connector-store/file-ingestion-matcher.ts
 var POLICY_ADMITTED = Object.freeze({
   excluded: false,
@@ -36609,6 +36622,9 @@ var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
   ODP_MIME_TYPE,
   EPUB_MIME_TYPE
 ]);
+
+// src/workers/file-extraction/extractors/transcription.ts
+var DEFAULT_TRANSCRIBE_TIMEOUT_MS = 5 * 60000;
 // src/workers/telegram-messages/spool-lines.ts
 var CHUNK_BYTES2 = 1 << 20;
 var hints = new Map;

@@ -5452,7 +5452,7 @@ async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
     removeUpstreamAbortListener?.();
   }
 }
-async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
+async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs, mode = {}) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
     return fetchImpl(url, init);
   const controller = new AbortController;
@@ -5476,14 +5476,19 @@ async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
     removeUpstreamAbortListener = undefined;
   };
   const deadline = new AbortController;
-  timer = setTimeout(() => {
-    timer = undefined;
-    const error = new Error(`Request exceeded its ${timeoutMs}ms deadline.`);
-    error.name = "AbortError";
-    controller.abort(error);
-    deadline.abort(error);
-  }, timeoutMs);
-  timer.unref?.();
+  const arm = () => {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = undefined;
+      const error = new Error(mode.idle ? `Request made no progress for ${timeoutMs}ms.` : `Request exceeded its ${timeoutMs}ms deadline.`);
+      error.name = "AbortError";
+      controller.abort(error);
+      deadline.abort(error);
+    }, timeoutMs);
+    timer.unref?.();
+  };
+  arm();
   let response;
   try {
     response = await untilAborted(fetchImpl(url, { ...init, signal: controller.signal }), deadline.signal);
@@ -5507,6 +5512,8 @@ async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
         }
         if (value)
           stream.enqueue(value);
+        if (mode.idle && timer !== undefined)
+          arm();
       } catch (error) {
         settle();
         stream.error(error);
@@ -5528,6 +5535,9 @@ async function fetchWithBodyDeadline(fetchImpl, url, init, timeoutMs) {
     statusText: response.statusText,
     headers: response.headers
   });
+}
+function fetchWithIdleDeadline(fetchImpl, url, init, idleMs) {
+  return fetchWithBodyDeadline(fetchImpl, url, init, idleMs, { idle: true });
 }
 function isAbortError(error) {
   return error instanceof Error && error.name === "AbortError";
@@ -63895,7 +63905,10 @@ ${parentKey(ref)}`, { ref, origin });
       const version = this.db.query("PRAGMA data_version").get();
       return `${version.data_version}:${row.changes}`;
     }
-    exportItemCopy(identity) {
+    exportItemNames(identity) {
+      return this.itemNamesRow(identity)?.names;
+    }
+    itemNamesRow(identity) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`).join(", ")}
       FROM items
@@ -63905,6 +63918,30 @@ ${parentKey(ref)}`, { ref, origin });
       if (!row)
         return;
       const columns = Object.fromEntries(CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => [column, row[column] ?? null]));
+      const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
+      const names = {
+        identity: {
+          family: String(columns.family),
+          provider: String(columns.provider),
+          accountScope: String(columns.account_scope),
+          providerItemId: String(columns.provider_item_id),
+          localItemId: String(columns.local_item_id),
+          ...optional("provider_thread_id") ? { providerThreadId: optional("provider_thread_id") } : {},
+          ...optional("provider_conversation_id") ? { providerConversationId: optional("provider_conversation_id") } : {},
+          ...optional("provider_file_id") ? { providerFileId: optional("provider_file_id") } : {},
+          ...optional("provider_event_id") ? { providerEventId: optional("provider_event_id") } : {},
+          ...optional("source_version") ? { sourceVersion: optional("source_version") } : {}
+        },
+        columns,
+        trustTier: trustTierFromRow(row.trust_tier)
+      };
+      return { itemPk: row.item_pk, names };
+    }
+    exportItemCopy(identity) {
+      const found = this.itemNamesRow(identity);
+      if (!found)
+        return;
+      const row = { item_pk: found.itemPk };
       const owners = this.db.query(`
       SELECT connector_id, ownership_kind, first_seen_at, last_seen_at
       FROM item_owners WHERE item_pk = ? ORDER BY connector_id
@@ -63946,22 +63983,8 @@ ${parentKey(ref)}`, { ref, origin });
         if (authority)
           vectorAuthorities.push(authority);
       }
-      const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
       return {
-        identity: {
-          family: String(columns.family),
-          provider: String(columns.provider),
-          accountScope: String(columns.account_scope),
-          providerItemId: String(columns.provider_item_id),
-          localItemId: String(columns.local_item_id),
-          ...optional("provider_thread_id") ? { providerThreadId: optional("provider_thread_id") } : {},
-          ...optional("provider_conversation_id") ? { providerConversationId: optional("provider_conversation_id") } : {},
-          ...optional("provider_file_id") ? { providerFileId: optional("provider_file_id") } : {},
-          ...optional("provider_event_id") ? { providerEventId: optional("provider_event_id") } : {},
-          ...optional("source_version") ? { sourceVersion: optional("source_version") } : {}
-        },
-        columns,
-        trustTier: trustTierFromRow(row.trust_tier),
+        ...found.names,
         owners,
         chunks,
         vectors,
@@ -92627,6 +92650,12 @@ var tierSets;
 
 // src/workers/connector-store/stored-names.ts
 function storedCopyOf(set, identity, copies) {
+  return firstStored(set, copies, (store) => store.exportItemNames(identity));
+}
+function storedItemCopyOf(set, identity, copies) {
+  return firstStored(set, copies, (store) => store.exportItemCopy(identity));
+}
+function firstStored(set, copies, read) {
   const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
   const ordered = [
     ...names ? [names] : [],
@@ -92634,9 +92663,10 @@ function storedCopyOf(set, identity, copies) {
   ];
   for (const copy of ordered) {
     const domain = set.domainForCorpus(copy.corpusId);
-    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-    if (exported)
-      return exported;
+    const store = domain ? set.store(domain) : undefined;
+    const found = store ? read(store) : undefined;
+    if (found)
+      return found;
   }
   return;
 }
@@ -97783,7 +97813,7 @@ async function applyFloor(set, record) {
   const current = copies.filter((copy) => copy.state === "current");
   const serving = copyServingLayer(current, "content");
   const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
-  const exported = (domain ? set.store(domain)?.exportItemCopy(identity) : undefined) ?? storedCopyOf(set, identity, copies);
+  const exported = (domain ? set.store(domain)?.exportItemCopy(identity) : undefined) ?? storedItemCopyOf(set, identity, copies);
   if (!exported)
     return "failed";
   const signals = storedSignals(exported);
@@ -110227,7 +110257,7 @@ class DropboxApiContentDownloadClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
   }
   async download(request) {
-    const response = await fetchWithBodyDeadline(this.fetchImpl, `${this.contentBaseUrl}/files/download`, {
+    const response = await fetchWithIdleDeadline(this.fetchImpl, `${this.contentBaseUrl}/files/download`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -110373,7 +110403,7 @@ function required(value, label) {
 var DEFAULT_DROPBOX_MAX_RETRIES = 3, MAX_DROPBOX_RETRY_DELAY_MS = 30000, DROPBOX_METADATA_REQUEST_TIMEOUT_MS = 60000, DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS, DropboxApiError, DropboxPathNotFoundError, DropboxCursorResetError, DropboxRateLimitError, DropboxContentTooLargeError;
 var init_provider_client = __esm(() => {
   init_http_timeout();
-  DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
+  DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 2 * 60000;
   DropboxApiError = class DropboxApiError extends Error {
     status;
     tag;
@@ -116385,7 +116415,7 @@ class DropboxExtractionSource {
     let response;
     try {
       const fetchImpl = (url, init) => this.fetchImpl(url, init);
-      response = await fetchWithBodyDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
+      response = await fetchWithIdleDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.token}`,
@@ -126851,6 +126881,99 @@ var init_remote_vlm = __esm(() => {
   ].join(" ");
 });
 
+// src/workers/file-extraction/extractors/model-stream.ts
+function idleClock(windowMs) {
+  const controller = new AbortController;
+  let timer;
+  const usable = Number.isFinite(windowMs) && windowMs > 0;
+  const arm = () => {
+    if (!usable || controller.signal.aborted)
+      return;
+    if (timer !== undefined)
+      clearTimeout(timer);
+    timer = setTimeout(() => {
+      const error = new Error(`The model sent nothing for ${Math.round(windowMs / 1000)} s.`);
+      error.name = "AbortError";
+      controller.abort(error);
+    }, windowMs);
+    timer.unref?.();
+  };
+  arm();
+  return {
+    signal: controller.signal,
+    touch: arm,
+    clear: () => {
+      if (timer !== undefined)
+        clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+}
+async function readChatCompletion(response, clock) {
+  clock.touch();
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("text/event-stream") || !response.body)
+    return response.json();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder;
+  let buffered = "";
+  let content = "";
+  let finished = false;
+  const takeLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:"))
+      return;
+    const data = trimmed.slice(5).trim();
+    if (data === "[DONE]") {
+      finished = true;
+      return;
+    }
+    let event;
+    try {
+      event = JSON.parse(data);
+    } catch {
+      return;
+    }
+    const piece = event.choices?.[0]?.delta?.content ?? event.choices?.[0]?.message?.content;
+    if (typeof piece === "string")
+      content += piece;
+  };
+  while (!finished) {
+    let next;
+    try {
+      next = await untilAborted(reader.read(), clock.signal);
+    } catch (error) {
+      reader.cancel().catch(() => {
+        return;
+      });
+      throw error;
+    }
+    const { done, value } = next;
+    if (done)
+      break;
+    clock.touch();
+    buffered += decoder.decode(value, { stream: true });
+    let newline = buffered.indexOf(`
+`);
+    while (newline >= 0) {
+      takeLine(buffered.slice(0, newline));
+      buffered = buffered.slice(newline + 1);
+      newline = buffered.indexOf(`
+`);
+    }
+  }
+  if (buffered)
+    takeLine(buffered);
+  if (finished)
+    await reader.cancel().catch(() => {
+      return;
+    });
+  return { choices: [{ message: { content } }] };
+}
+var init_model_stream = __esm(() => {
+  init_http_timeout();
+});
+
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
 import { accessSync as accessSync8, constants as constants13, readFileSync as readFileSync59 } from "node:fs";
 import { delimiter as delimiter6, isAbsolute as isAbsolute31, join as join98 } from "node:path";
@@ -127349,33 +127472,39 @@ function createBuiltInTranscriber(options = {}) {
   };
 }
 async function transcribeChunk(fetchImpl, endpoint, wav, timeoutMs) {
-  const response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${endpoint.token}`,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      messages: [{
-        role: "user",
-        content: [{ type: "input_audio", input_audio: { data: Buffer.from(wav).toString("base64"), format: "wav" } }]
-      }],
-      temperature: 0,
-      max_tokens: MAX_TOKENS_PER_CHUNK
-    }),
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => {
-      return;
+  const clock = idleClock(timeoutMs);
+  try {
+    const response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${endpoint.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        messages: [{
+          role: "user",
+          content: [{ type: "input_audio", input_audio: { data: Buffer.from(wav).toString("base64"), format: "wav" } }]
+        }],
+        temperature: 0,
+        max_tokens: MAX_TOKENS_PER_CHUNK,
+        stream: true
+      }),
+      signal: clock.signal
     });
-    throw new Error(`The built-in transcription model returned HTTP ${response.status}.`);
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {
+        return;
+      });
+      throw new Error(`The built-in transcription model returned HTTP ${response.status}.`);
+    }
+    const payload = await readChatCompletion(response, clock);
+    const content = payload.choices?.[0]?.message?.content;
+    if (typeof content !== "string")
+      throw new Error("The built-in transcription model returned no text.");
+    return content;
+  } finally {
+    clock.clear();
   }
-  const payload = await response.json();
-  const content = payload.choices?.[0]?.message?.content;
-  if (typeof content !== "string")
-    throw new Error("The built-in transcription model returned no text.");
-  return content;
 }
 function runningBuiltInTranscriber() {
   return sharedTranscriber;
@@ -127396,6 +127525,7 @@ function sharedBuiltInTranscriber(env = process.env) {
 var TRANSCRIPT_TIME_BUDGET_WARNING = "transcript_time_budget_reached", DEFAULT_IDLE_SHUTDOWN_SECONDS2 = 180, DEFAULT_STARTUP_TIMEOUT_MS2 = 120000, DEFAULT_CHUNK_TIMEOUT_MS = 180000, DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS, DEFAULT_CHUNK_SECONDS = 30, MAX_TOKENS_PER_CHUNK = 512, SILENCE_LEVEL = 24, ASR_TEXT_MARKER = "<asr_text>", LANGUAGE_PREFIX = "language ", TARGET_SAMPLE_RATE = 16000, TEMP_DIR_PREFIX5 = "olympus-asr-", MACOS_AUDIO_CONVERTER = "/usr/bin/afconvert", TranscriberPendingError, TranscriberUnavailableError, AudioUndecodableError, sharedTranscriber;
 var init_built_in_transcriber = __esm(() => {
   init_model_transport();
+  init_model_stream();
   init_install();
   init_manifest2();
   init_server();
@@ -127650,12 +127780,13 @@ function normalizeTranscriptText(input) {
 
 `).trim();
 }
-var TRANSCRIPTION_EXTRACTOR_KIND = "whisper_transcription", TRANSCRIPTION_EXTRACTOR_VERSION = "2026-06-12", DEFAULT_TRANSCRIBE_TIMEOUT_MS = 1800000, MAX_TRANSCRIPT_CHARS = 200000, TRANSCRIPTION_REQUIRED_WARNING = "transcription_required", LEGACY_TRANSCRIBER_NOT_CONFIGURED_KIND = "transcriber_not_configured", TRANSCRIBER_SETTING_UP_WARNING = "transcriber_setting_up", TEMP_DIR_PREFIX6 = "olympus-transcribe-", TRANSCRIBE_TERMINAL_EXIT_KINDS, TranscriptionTerminalError, TRANSCRIPTION_AUDIO_MIME_TYPES, TRANSCRIPTION_AUDIO_EXTENSIONS;
+var TRANSCRIPTION_EXTRACTOR_KIND = "whisper_transcription", TRANSCRIPTION_EXTRACTOR_VERSION = "2026-06-12", DEFAULT_TRANSCRIBE_TIMEOUT_MS, MAX_TRANSCRIPT_CHARS = 200000, TRANSCRIPTION_REQUIRED_WARNING = "transcription_required", LEGACY_TRANSCRIBER_NOT_CONFIGURED_KIND = "transcriber_not_configured", TRANSCRIBER_SETTING_UP_WARNING = "transcriber_setting_up", TEMP_DIR_PREFIX6 = "olympus-transcribe-", TRANSCRIBE_TERMINAL_EXIT_KINDS, TranscriptionTerminalError, TRANSCRIPTION_AUDIO_MIME_TYPES, TRANSCRIPTION_AUDIO_EXTENSIONS;
 var init_transcription = __esm(() => {
   init_built_in_transcriber();
   init_bounded_text();
   init_command_runner();
   init_text();
+  DEFAULT_TRANSCRIBE_TIMEOUT_MS = 5 * 60000;
   TRANSCRIBE_TERMINAL_EXIT_KINDS = {
     64: "transcribe_command_usage",
     65: "transcribe_input_refused",
@@ -187754,7 +187885,7 @@ class VeniceVlmClient {
     if (!IMAGE_MIME_TYPES.has(request.mimeType)) {
       throw new Error("Venice extraction requires an image MIME type.");
     }
-    const timeout = requestTimeout(this.timeoutMs);
+    const timeout = idleClock(this.timeoutMs);
     try {
       assertSecureAnalystPoolModelIdAllowed("file-extraction-remote", this.model);
       const privacyCategory = await this.resolvePrivacyCategory(this.model, timeout.signal);
@@ -187764,6 +187895,7 @@ class VeniceVlmClient {
         throw new Error("Venice extraction model has no approved remote destination.");
       }
       await request.assertRemoteEgressAllowed?.();
+      timeout.touch();
       const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
@@ -187771,10 +187903,11 @@ class VeniceVlmClient {
           Connection: "close",
           Authorization: `Bearer ${this.apiKey}`
         },
-        ...timeout.signal ? { signal: timeout.signal } : {},
+        signal: timeout.signal,
         body: JSON.stringify({
           model: this.model,
           temperature: 0,
+          stream: true,
           max_completion_tokens: request.maxTokens ?? 900,
           venice_parameters: {
             enable_web_search: "off",
@@ -187809,7 +187942,7 @@ class VeniceVlmClient {
         const safeKind = classifyRemoteVlmEndpointError(response.status, body);
         throw new Error(`Venice extraction endpoint ${safeKind} (HTTP ${response.status}).`);
       }
-      const text = normalizeExtractedText(parseOpenAICompatibleResponseText(await response.json())).slice(0, request.maxOutputChars);
+      const text = normalizeExtractedText(parseOpenAICompatibleResponseText(await readChatCompletion(response, timeout))).slice(0, request.maxOutputChars);
       return {
         text,
         confidence: text ? 0.75 : 0.2,
@@ -187838,18 +187971,6 @@ function extractionWarning(category) {
   if (category === "e2ee")
     return "venice_e2ee_extraction";
   return "venice_unapproved_extraction";
-}
-function requestTimeout(timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-    return { clear: () => {
-      return;
-    } };
-  const controller = new AbortController;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  return {
-    signal: controller.signal,
-    clear: () => clearTimeout(timeout)
-  };
 }
 function parseOpenAICompatibleResponseText(value) {
   if (!value || typeof value !== "object") {
@@ -187889,6 +188010,7 @@ var init_venice_client = __esm(() => {
   init_sovereignty();
   init_model_transport();
   init_bounded_text();
+  init_model_stream();
   init_remote_vlm();
 });
 
@@ -242757,15 +242879,16 @@ class OpenAICompatibleVlmClient {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_LOCAL_VLM_TIMEOUT_MS;
   }
   async describe(request) {
-    const timeout = requestTimeout2(this.timeoutMs);
+    const timeout = idleClock(this.timeoutMs);
     try {
       const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
         method: "POST",
         headers: this.headers(),
-        ...timeout.signal ? { signal: timeout.signal } : {},
+        signal: timeout.signal,
         body: JSON.stringify({
           model: this.model,
           temperature: 0,
+          stream: true,
           max_tokens: request.maxTokens ?? 700,
           chat_template_kwargs: { enable_thinking: false },
           messages: [
@@ -242797,7 +242920,7 @@ class OpenAICompatibleVlmClient {
           message: `Local VLM endpoint returned HTTP ${response.status}.`
         });
       }
-      const text = normalizeExtractedText(parseOpenAICompatibleResponseText2(await response.json())).slice(0, request.maxOutputChars);
+      const text = normalizeExtractedText(parseOpenAICompatibleResponseText2(await readChatCompletion(response, timeout))).slice(0, request.maxOutputChars);
       return {
         text,
         confidence: text ? 0.65 : 0.2,
@@ -242812,7 +242935,7 @@ class OpenAICompatibleVlmClient {
     }
   }
   async probe(request = {}) {
-    const timeout = requestTimeout2(request.timeoutMs ?? DEFAULT_VLM_PDF_HEALTHCHECK_TIMEOUT_MS);
+    const timeout = requestTimeout(request.timeoutMs ?? DEFAULT_VLM_PDF_HEALTHCHECK_TIMEOUT_MS);
     try {
       const response = await fetchModelEndpoint(this.fetchImpl, `${this.baseUrl}/models`, {
         method: "GET",
@@ -242866,7 +242989,7 @@ function listedVlmProfileIds(payload) {
     return [];
   return data.map((entry) => entry && typeof entry === "object" ? entry.id : undefined).filter((id) => typeof id === "string" && id.length > 0);
 }
-function requestTimeout2(timeoutMs) {
+function requestTimeout(timeoutMs) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
     return { clear: () => {
       return;
@@ -242911,6 +243034,7 @@ function parseOpenAICompatibleResponseText2(value) {
 var DEFAULT_LOCAL_VLM_TIMEOUT_MS = 180000;
 var init_openai_compatible_client = __esm(() => {
   init_bounded_text();
+  init_model_stream();
   init_remote_vlm();
   init_local_model_policy();
   init_model_transport();

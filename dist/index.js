@@ -17686,7 +17686,7 @@ var init_file_mime = __esm(() => {
 var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
 var init_provider_client = __esm(() => {
   init_http_timeout();
-  DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 10 * 60000;
+  DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 2 * 60000;
 });
 
 // src/workers/dropbox-files/connector.ts
@@ -19691,6 +19691,11 @@ var init_remote_vlm = __esm(() => {
   ].join(" ");
 });
 
+// src/workers/file-extraction/extractors/model-stream.ts
+var init_model_stream = __esm(() => {
+  init_http_timeout();
+});
+
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
 var init_transcription_model = __esm(() => {
   init_olympus_layout();
@@ -19705,6 +19710,7 @@ var init_audio_wav = () => {};
 var DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS;
 var init_built_in_transcriber = __esm(() => {
   init_model_transport();
+  init_model_stream();
   init_install();
   init_manifest2();
   init_server();
@@ -19719,11 +19725,13 @@ var init_built_in_transcriber = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/transcription.ts
+var DEFAULT_TRANSCRIBE_TIMEOUT_MS;
 var init_transcription = __esm(() => {
   init_built_in_transcriber();
   init_bounded_text();
   init_command_runner();
   init_text();
+  DEFAULT_TRANSCRIBE_TIMEOUT_MS = 5 * 60000;
 });
 
 // src/workers/file-extraction/extractors/vlm.ts

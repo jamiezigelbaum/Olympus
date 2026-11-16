@@ -1545,6 +1545,9 @@ export interface ConnectorStoreItemCopy {
   vectorAuthorities: ReadonlyArray<ConnectorStoreEmbeddingAuthoritySnapshot>;
 }
 
+/** What a store keeps of an item's names: its identity and row, without its chunks or vectors. */
+export type ConnectorStoreItemNames = Pick<ConnectorStoreItemCopy, 'identity' | 'columns' | 'trustTier'>;
+
 /**
  * One active stored row for the tier migration's dry run: identity, the names
  * the classifier reads, the stored chunk text, and per-model vector counts.
@@ -6561,13 +6564,20 @@ export class LocalConnectorStore {
   }
 
   /**
-   * Read an item's ACTIVE stored copy for a tier move: the row, its owners,
-   * its chunks, and its current vectors with the authority they were minted
-   * under. Undefined when the store holds no active copy.
+   * An item's ACTIVE stored row only: what the store keeps of its names
+   * (title, locator, sender, folder keys) and its identity, never its chunks
+   * or vectors. A pass over stored names reads this: reading the whole copy
+   * of a large item held the loop 4.5 s per item on the lane 6 gate (16 Nov).
    */
-  exportItemCopy(
+  exportItemNames(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
-  ): ConnectorStoreItemCopy | undefined {
+  ): ConnectorStoreItemNames | undefined {
+    return this.itemNamesRow(identity)?.names;
+  }
+
+  private itemNamesRow(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): { itemPk: number; names: ConnectorStoreItemNames } | undefined {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS
         .map((column) => (this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column)
@@ -6587,6 +6597,38 @@ export class LocalConnectorStore {
     const columns = Object.fromEntries(
       CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => [column, row[column] ?? null]),
     ) as ConnectorStoreItemCopy['columns'];
+    const optional = (column: (typeof CONNECTOR_STORE_COPY_ITEM_COLUMNS)[number]): string | undefined =>
+      columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
+    const names: ConnectorStoreItemNames = {
+      identity: {
+        family: String(columns.family) as SourceFamily,
+        provider: String(columns.provider),
+        accountScope: String(columns.account_scope),
+        providerItemId: String(columns.provider_item_id),
+        localItemId: String(columns.local_item_id),
+        ...(optional('provider_thread_id') ? { providerThreadId: optional('provider_thread_id')! } : {}),
+        ...(optional('provider_conversation_id') ? { providerConversationId: optional('provider_conversation_id')! } : {}),
+        ...(optional('provider_file_id') ? { providerFileId: optional('provider_file_id')! } : {}),
+        ...(optional('provider_event_id') ? { providerEventId: optional('provider_event_id')! } : {}),
+        ...(optional('source_version') ? { sourceVersion: optional('source_version')! } : {}),
+      },
+      columns,
+      trustTier: trustTierFromRow(row.trust_tier),
+    };
+    return { itemPk: row.item_pk, names };
+  }
+
+  /**
+   * Read an item's ACTIVE stored copy for a tier move: the row, its owners,
+   * its chunks, and its current vectors with the authority they were minted
+   * under. Undefined when the store holds no active copy.
+   */
+  exportItemCopy(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): ConnectorStoreItemCopy | undefined {
+    const found = this.itemNamesRow(identity);
+    if (!found) return undefined;
+    const row = { item_pk: found.itemPk };
     const owners = (this.db.query(`
       SELECT connector_id, ownership_kind, first_seen_at, last_seen_at
       FROM item_owners WHERE item_pk = ? ORDER BY connector_id
@@ -6644,23 +6686,8 @@ export class LocalConnectorStore {
       const authority = this.embeddingWriteAuthoritySnapshot(modelId);
       if (authority) vectorAuthorities.push(authority);
     }
-    const optional = (column: (typeof CONNECTOR_STORE_COPY_ITEM_COLUMNS)[number]): string | undefined =>
-      columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
     return {
-      identity: {
-        family: String(columns.family) as SourceFamily,
-        provider: String(columns.provider),
-        accountScope: String(columns.account_scope),
-        providerItemId: String(columns.provider_item_id),
-        localItemId: String(columns.local_item_id),
-        ...(optional('provider_thread_id') ? { providerThreadId: optional('provider_thread_id')! } : {}),
-        ...(optional('provider_conversation_id') ? { providerConversationId: optional('provider_conversation_id')! } : {}),
-        ...(optional('provider_file_id') ? { providerFileId: optional('provider_file_id')! } : {}),
-        ...(optional('provider_event_id') ? { providerEventId: optional('provider_event_id')! } : {}),
-        ...(optional('source_version') ? { sourceVersion: optional('source_version')! } : {}),
-      },
-      columns,
-      trustTier: trustTierFromRow(row.trust_tier),
+      ...found.names,
       owners,
       chunks,
       vectors,

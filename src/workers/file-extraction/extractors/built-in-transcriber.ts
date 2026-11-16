@@ -36,6 +36,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fetchModelEndpoint } from '../../../core/model-transport.ts';
+import { idleClock, readChatCompletion } from './model-stream.ts';
 import {
   BuiltInReasoningInstallError,
   currentPlatform,
@@ -72,6 +73,7 @@ export const TRANSCRIPT_TIME_BUDGET_WARNING = 'transcript_time_budget_reached';
 
 const DEFAULT_IDLE_SHUTDOWN_SECONDS = 180;
 const DEFAULT_STARTUP_TIMEOUT_MS = 120_000;
+// A chunk's stall window: the call stops only after the model sends nothing for this long (model-stream.ts).
 const DEFAULT_CHUNK_TIMEOUT_MS = 180_000;
 // No whole-file clock (owner rule, 16 Nov 2026): a long recording is read chunk by chunk to the end while its lease is renewed.
 const DEFAULT_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
@@ -439,32 +441,39 @@ async function transcribeChunk(
   wav: Uint8Array,
   timeoutMs: number,
 ): Promise<string> {
-  // The audio and the server's bearer token ride this request to loopback
-  // only; a redirect is refused, never followed.
-  const response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${endpoint.token}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      messages: [{
-        role: 'user',
-        content: [{ type: 'input_audio', input_audio: { data: Buffer.from(wav).toString('base64'), format: 'wav' } }],
-      }],
-      temperature: 0,
-      max_tokens: MAX_TOKENS_PER_CHUNK,
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new Error(`The built-in transcription model returned HTTP ${response.status}.`);
+  // A stall clock: it restarts on the headers and on every streamed token.
+  const clock = idleClock(timeoutMs);
+  try {
+    // The audio and the server's bearer token ride this request to loopback
+    // only; a redirect is refused, never followed.
+    const response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${endpoint.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        messages: [{
+          role: 'user',
+          content: [{ type: 'input_audio', input_audio: { data: Buffer.from(wav).toString('base64'), format: 'wav' } }],
+        }],
+        temperature: 0,
+        max_tokens: MAX_TOKENS_PER_CHUNK,
+        stream: true,
+      }),
+      signal: clock.signal,
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`The built-in transcription model returned HTTP ${response.status}.`);
+    }
+    const payload = await readChatCompletion(response, clock) as { choices?: Array<{ message?: { content?: unknown } }> };
+    const content = payload.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') throw new Error('The built-in transcription model returned no text.');
+    return content;
+  } finally {
+    clock.clear();
   }
-  const payload = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
-  const content = payload.choices?.[0]?.message?.content;
-  if (typeof content !== 'string') throw new Error('The built-in transcription model returned no text.');
-  return content;
 }
 
 let sharedTranscriber: BuiltInTranscriptionEngine | undefined;
