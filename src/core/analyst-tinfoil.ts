@@ -130,7 +130,8 @@ export function createTinfoilFetch(options: TinfoilTransportOptions): OpenAIAnal
     // exact provider choice after verification and immediately before dispatch.
     // Only attestation readiness uses the startup bound above. The shared
     // streaming transport owns inference idleness and caller cancellation.
-    const response = await wrapped(url, init);
+    const streaming = typeof init.body === 'string' && JSON.parse(init.body).stream === true;
+    const response = await wrapped(url, { ...init, signal: streaming && init.signal ? init.signal : signal });
     if ([402, 403, 429].includes(response.status)) {
       const retry = normalizedRetryAfter(response.headers.get('retry-after'));
       if (retry) blockedUntil = Date.now() + Number(retry) * 1000;
