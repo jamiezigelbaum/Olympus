@@ -274634,7 +274634,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : snifferLane.kind === "tinfoil" ? { concurrentCalls: 4 } : snifferLane.kind === "venice" ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {},
-    ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind !== "local" && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
+    ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "local" || !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, "tier_sniffer") || remoteOwnerBusy(snifferResource)),
     ownerInFlight: () => standBack.holds("judge") || snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
     shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || standBack.holds("judge"),
