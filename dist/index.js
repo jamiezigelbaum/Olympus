@@ -224,7 +224,7 @@ var init_linux_desktop_entry = __esm(() => {
 
 // src/core/file-lease.ts
 import { execFileSync } from "node:child_process";
-import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2 } from "node:fs";
+import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { createRequire as createRequire2 } from "node:module";
 import { dirname as dirname3 } from "node:path";
 function withFileLeaseSync(targetPath, callback, options = {}) {
@@ -475,11 +475,24 @@ function normalizeOptions(options) {
   return {
     mode: options.mode ?? "exclusive",
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
-    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
+    ...options.heartbeat ? { heartbeat: {
+      stallMs: positiveInteger(options.heartbeat.stallMs, DEFAULT_OPTIONS.acquireTimeoutMs),
+      intervalMs: positiveInteger(options.heartbeat.intervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    } } : {},
+    timers: options.timers ?? {
+      now: () => Date.now(),
+      sleep,
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (timer) => clearInterval(timer)
+    }
   };
 }
 function positiveInteger(value, fallback) {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.floor(value);
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -3316,7 +3329,7 @@ import {
   renameSync as renameSync2,
   rmSync as rmSync2,
   statSync as statSync5,
-  writeFileSync as writeFileSync2,
+  writeFileSync as writeFileSync3,
   writeSync
 } from "node:fs";
 import { basename as basename2, dirname as dirname11, isAbsolute as isAbsolute7, join as join13 } from "node:path";
@@ -3363,7 +3376,7 @@ var init_assets = __esm(() => {
 
 // src/core/still-image-readiness.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { mkdtempSync, readFileSync as readFileSync9, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdtempSync, readFileSync as readFileSync9, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join14 } from "node:path";
 function spawnRun(command, args, timeoutMs) {
@@ -3411,7 +3424,7 @@ function probeStillImageReadiness(options = {}) {
       const inputPath = join14(directory, `probe-${format}${stillImageFileExtension(format)}`);
       const outputPath = join14(directory, `probe-${format}.jpg`);
       try {
-        writeFileSync3(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
+        writeFileSync4(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
         const result = run(preparer.command, preparer.decodeArgs(inputPath, outputPath), timeoutMs);
         decoded[format] = result.ok && looksLikeDecodedFixture(new Uint8Array(readFileSync9(outputPath)), format);
       } catch {
@@ -5861,7 +5874,7 @@ var init_remote_access = __esm(() => {
 });
 
 // src/core/descendant-groups.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname14, join as join18 } from "node:path";
 function descendantGroupsSupported(platform = process.platform) {
   return platform === "linux";
@@ -5909,7 +5922,7 @@ function writeRecord(path, owner, groups) {
     }
     mkdirSync8(dirname14(path), { recursive: true, mode: 448 });
     const temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync4(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}
+    writeFileSync5(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}
 `, { mode: 384 });
     renameSync3(temporary, path);
   } catch {}
@@ -7117,98 +7130,6 @@ var init_model_transport = __esm(() => {
   };
 });
 
-// src/core/local-model-policy.ts
-function isCloudForwardingModelId(modelId) {
-  const trimmed = modelId.trim().toLowerCase();
-  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
-  const colon = lastSegment.lastIndexOf(":");
-  if (colon < 0)
-    return false;
-  const tag = lastSegment.slice(colon + 1);
-  return tag === "cloud" || tag.endsWith("-cloud");
-}
-function assertLocalModelIdNotCloudForwarding(label, modelId) {
-  if (!isCloudForwardingModelId(modelId))
-    return;
-  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
-}
-var init_local_model_policy = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/source-item-read.ts
-function parseSourceItemReadResult(value) {
-  const fail = () => {
-    throw new OperationError("source_index_error", "Invalid source item read result.");
-  };
-  if (!value || typeof value !== "object")
-    return fail();
-  const r = value;
-  const integer = (n, min) => typeof n === "number" && Number.isSafeInteger(n) && n >= min ? n : fail();
-  if (!Array.isArray(r.pages) || r.pages.length > 3 || !Array.isArray(r.couldNotRead))
-    return fail();
-  const pages = r.pages.map((p) => {
-    if (!p || typeof p !== "object")
-      return fail();
-    const entry = p;
-    if (typeof entry.text !== "string" || entry.text.length > 12000)
-      return fail();
-    return { page: integer(entry.page, 1), text: entry.text };
-  });
-  const couldNotRead = r.couldNotRead.map((code) => typeof code === "string" && SOURCE_ITEM_READ_REFUSALS.includes(code) ? code : fail());
-  if (couldNotRead.some((code) => code !== "window_judging") && pages.length > 0)
-    return fail();
-  if (r.coverageNote !== undefined && typeof r.coverageNote !== "string")
-    return fail();
-  return {
-    pages,
-    totalPages: integer(r.totalPages, 0),
-    totalChars: integer(r.totalChars, 0),
-    couldNotRead,
-    ...r.coverageNote === undefined ? {} : { coverageNote: r.coverageNote },
-    ...r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) },
-    ...r.etaSeconds === undefined ? {} : { etaSeconds: integer(r.etaSeconds, 0) }
-  };
-}
-var SOURCE_ITEM_READ_REFUSALS;
-var init_source_item_read = __esm(() => {
-  init_operation_error();
-  SOURCE_ITEM_READ_REFUSALS = [
-    "held_until_judged",
-    "content_private",
-    "names_only",
-    "not_in_scope",
-    "extraction_pending",
-    "window_judging",
-    "not_personal",
-    "reading_on_demand",
-    "on_demand_capped"
-  ];
-});
-
-// src/core/release-manifest.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-function recordReleaseManifest(manifest) {
-  storage.getStore()?.manifests.push({
-    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
-    constraints: { ...manifest.constraints }
-  });
-}
-function isWithheldSourceAnswer(result) {
-  return withheldAnswers.has(result);
-}
-function withheldSourceAnswer(reason) {
-  const result = { answer: reason, evidence: [] };
-  withheldAnswers.add(result);
-  return result;
-}
-var chunkProvenance, storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
-var init_release_manifest = __esm(() => {
-  chunkProvenance = new WeakMap;
-  storage = new AsyncLocalStorage;
-  withheldAnswers = new WeakSet;
-});
-
 // src/core/secret-patterns.ts
 var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
@@ -7410,6 +7331,283 @@ var init_secret_patterns = __esm(() => {
 var init_opsec = __esm(() => {
   init_secret_patterns();
   init_types();
+});
+
+// src/core/release-manifest.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+function recordReleaseManifest(manifest) {
+  storage.getStore()?.manifests.push({
+    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
+    constraints: { ...manifest.constraints }
+  });
+}
+function isWithheldSourceAnswer(result) {
+  return withheldAnswers.has(result);
+}
+function withheldSourceAnswer(reason) {
+  const result = { answer: reason, evidence: [] };
+  withheldAnswers.add(result);
+  return result;
+}
+var chunkProvenance, storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
+var init_release_manifest = __esm(() => {
+  chunkProvenance = new WeakMap;
+  storage = new AsyncLocalStorage;
+  withheldAnswers = new WeakSet;
+});
+
+// src/core/source-answer-jobs.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+function noteSourceAnswerProgress(stage) {
+  progressSink.getStore()?.(stage);
+}
+var SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_IDLE_MS, SOURCE_ANSWER_MAX_RESULT_BYTES, progressSink;
+var init_source_answer_jobs = __esm(() => {
+  init_operation_error();
+  init_opsec();
+  init_release_manifest();
+  SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+  SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+  SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+  progressSink = new AsyncLocalStorage2;
+});
+
+// src/core/model-stream.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_IDLE_TIMEOUT_MS) {
+  const controller = new AbortController;
+  let timer;
+  let rejectStopped = () => {};
+  const stopped = new Promise((_, reject) => {
+    rejectStopped = reject;
+  });
+  stopped.catch(() => {});
+  const stop = (reason) => {
+    rejectStopped(reason);
+    controller.abort(reason);
+  };
+  const follow = () => stop(init.signal?.reason);
+  const arm = () => {
+    clearTimeout(timer);
+    if (idleMs > 0)
+      timer = setTimeout(() => stop(new ModelIdleError(model, idleMs)), idleMs);
+  };
+  if (init.signal?.aborted)
+    follow();
+  else
+    init.signal?.addEventListener("abort", follow, { once: true });
+  arm();
+  progress.getStore()?.(model);
+  let reader;
+  let lastNote = -Infinity;
+  const token = () => {
+    if (Date.now() - lastNote >= 1000) {
+      lastNote = Date.now();
+      noteSourceAnswerProgress("writing the answer");
+    }
+  };
+  try {
+    const response = await Promise.race([fetchModelEndpoint(fetchImpl, url, { ...init, signal: controller.signal }), stopped]);
+    if (!response.body)
+      return response;
+    reader = response.body.getReader();
+    const sse = response.ok && response.headers.get("content-type")?.includes("text/event-stream");
+    const decoder = new TextDecoder;
+    let buffer = "";
+    let raw = "";
+    let content = "";
+    let reasoning = "";
+    let resolvedModel = model;
+    let finish;
+    let usage;
+    let timings;
+    let done = false;
+    const event = (block) => {
+      const data = block.split(`
+`).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join(`
+`);
+      if (!data)
+        return;
+      if (data.trim() === "[DONE]") {
+        done = true;
+        return;
+      }
+      const parsed = JSON.parse(data);
+      if (parsed.error || parsed.type === "error")
+        throw new Error("Model stream reported an error.");
+      resolvedModel = parsed.model ?? parsed.message?.model ?? resolvedModel;
+      usage = parsed.usage ?? usage;
+      timings = parsed.timings ?? timings;
+      const choice = parsed.choices?.[0];
+      const delta = choice?.delta;
+      const text = delta?.content ?? (parsed.type === "content_block_delta" ? parsed.delta?.text : undefined);
+      const thought = delta?.reasoning_content ?? delta?.reasoning ?? parsed.delta?.thinking;
+      if (typeof text === "string") {
+        content += text;
+        if (text)
+          token();
+      }
+      if (typeof thought === "string") {
+        reasoning += thought;
+        if (thought)
+          token();
+      }
+      finish = choice?.finish_reason ?? finish;
+      if (parsed.type === "message_stop")
+        done = true;
+    };
+    while (!done) {
+      let next;
+      try {
+        next = await Promise.race([reader.read(), stopped]);
+      } catch (error) {
+        if (!response.ok && error instanceof ModelIdleError)
+          return new Response(null, { status: response.status });
+        throw error;
+      }
+      if (next.done)
+        break;
+      if (next.value.byteLength) {
+        arm();
+        progress.getStore()?.(model);
+      }
+      const text = decoder.decode(next.value, { stream: true });
+      if (!sse) {
+        raw += text;
+        continue;
+      }
+      buffer += text;
+      buffer = buffer.replace(/\r\n/g, `
+`);
+      let end;
+      while ((end = buffer.indexOf(`
+
+`)) >= 0) {
+        event(buffer.slice(0, end));
+        buffer = buffer.slice(end + 2);
+        if (done)
+          break;
+      }
+    }
+    const tail = decoder.decode();
+    if (sse) {
+      buffer += tail;
+      if (!done && buffer.trim())
+        event(buffer);
+      if (!done && finish == null)
+        throw new Error("Model stream ended before completion.");
+      raw = JSON.stringify({
+        model: resolvedModel,
+        usage,
+        timings,
+        choices: [{ message: { content, ...reasoning ? { reasoning } : {} }, finish_reason: finish }],
+        content: [{ type: "text", text: content }]
+      });
+    } else
+      raw += tail;
+    return new Response(raw, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: { "content-type": sse ? "application/json" : response.headers.get("content-type") ?? "application/json" }
+    });
+  } catch (error) {
+    if (reader && !controller.signal.aborted)
+      throw new ModelStreamError(model);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    init.signal?.removeEventListener("abort", follow);
+    if (reader)
+      reader.cancel().catch(() => {});
+  }
+}
+var MODEL_IDLE_TIMEOUT_MS = 60000, progress, ModelStreamError, ModelIdleError;
+var init_model_stream = __esm(() => {
+  init_model_transport();
+  init_source_answer_jobs();
+  progress = new AsyncLocalStorage3;
+  ModelStreamError = class ModelStreamError extends Error {
+    model;
+    constructor(model) {
+      super(`Model ${model} stream failed before completion.`);
+      this.model = model;
+    }
+  };
+  ModelIdleError = class ModelIdleError extends Error {
+    constructor(model, idleMs) {
+      super(`Model ${model} timed out: no progress for ${idleMs}ms.`);
+      this.name = "AbortError";
+    }
+  };
+});
+
+// src/core/local-model-policy.ts
+function isCloudForwardingModelId(modelId) {
+  const trimmed = modelId.trim().toLowerCase();
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  const colon = lastSegment.lastIndexOf(":");
+  if (colon < 0)
+    return false;
+  const tag = lastSegment.slice(colon + 1);
+  return tag === "cloud" || tag.endsWith("-cloud");
+}
+function assertLocalModelIdNotCloudForwarding(label, modelId) {
+  if (!isCloudForwardingModelId(modelId))
+    return;
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
+}
+var init_local_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/source-item-read.ts
+function parseSourceItemReadResult(value) {
+  const fail = () => {
+    throw new OperationError("source_index_error", "Invalid source item read result.");
+  };
+  if (!value || typeof value !== "object")
+    return fail();
+  const r = value;
+  const integer = (n, min) => typeof n === "number" && Number.isSafeInteger(n) && n >= min ? n : fail();
+  if (!Array.isArray(r.pages) || r.pages.length > 3 || !Array.isArray(r.couldNotRead))
+    return fail();
+  const pages = r.pages.map((p) => {
+    if (!p || typeof p !== "object")
+      return fail();
+    const entry = p;
+    if (typeof entry.text !== "string" || entry.text.length > 12000)
+      return fail();
+    return { page: integer(entry.page, 1), text: entry.text };
+  });
+  const couldNotRead = r.couldNotRead.map((code) => typeof code === "string" && SOURCE_ITEM_READ_REFUSALS.includes(code) ? code : fail());
+  if (couldNotRead.some((code) => code !== "window_judging") && pages.length > 0)
+    return fail();
+  if (r.coverageNote !== undefined && typeof r.coverageNote !== "string")
+    return fail();
+  return {
+    pages,
+    totalPages: integer(r.totalPages, 0),
+    totalChars: integer(r.totalChars, 0),
+    couldNotRead,
+    ...r.coverageNote === undefined ? {} : { coverageNote: r.coverageNote },
+    ...r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) },
+    ...r.etaSeconds === undefined ? {} : { etaSeconds: integer(r.etaSeconds, 0) }
+  };
+}
+var SOURCE_ITEM_READ_REFUSALS;
+var init_source_item_read = __esm(() => {
+  init_operation_error();
+  SOURCE_ITEM_READ_REFUSALS = [
+    "held_until_judged",
+    "content_private",
+    "names_only",
+    "not_in_scope",
+    "extraction_pending",
+    "window_judging",
+    "not_personal",
+    "reading_on_demand",
+    "on_demand_capped"
+  ];
 });
 
 // src/core/follow-up.ts
@@ -8434,23 +8632,10 @@ function isExecutableFile(path) {
 var init_openclaw_executable = () => {};
 
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-var progress;
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var progress2;
 var init_read_progress = __esm(() => {
-  progress = new AsyncLocalStorage2;
-});
-
-// src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-var SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_IDLE_MS, SOURCE_ANSWER_MAX_RESULT_BYTES, progressSink;
-var init_source_answer_jobs = __esm(() => {
-  init_operation_error();
-  init_opsec();
-  init_release_manifest();
-  SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
-  SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
-  SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-  progressSink = new AsyncLocalStorage3;
+  progress2 = new AsyncLocalStorage4;
 });
 
 // src/core/read-wide.ts
@@ -8475,13 +8660,13 @@ var init_partial_search = __esm(() => {
 });
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage4;
-  disabled = new AsyncLocalStorage4;
-  cachedOnly = new AsyncLocalStorage4;
-  requestContext = new AsyncLocalStorage4;
+  context = new AsyncLocalStorage5;
+  disabled = new AsyncLocalStorage5;
+  cachedOnly = new AsyncLocalStorage5;
+  requestContext = new AsyncLocalStorage5;
 });
 // src/core/store-reclaim-admission.ts
 var init_store_reclaim_admission = __esm(() => {
@@ -8490,14 +8675,14 @@ var init_store_reclaim_admission = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var poolSqlSites, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage5;
-  laneStorage = new AsyncLocalStorage5;
+  storage2 = new AsyncLocalStorage6;
+  laneStorage = new AsyncLocalStorage6;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -8564,10 +8749,10 @@ var init_router = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage6;
+  storage3 = new AsyncLocalStorage7;
   completedPrivateAnswers = new Set;
   JOB_QUESTION_TTL_MS = 30 * 60000;
   jobQuestions = new Map;
@@ -10166,7 +10351,7 @@ import {
   rmSync as rmSync8,
   statSync as statSync15,
   symlinkSync,
-  writeFileSync as writeFileSync5,
+  writeFileSync as writeFileSync6,
   chmodSync as chmodSync5
 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
@@ -10985,7 +11170,7 @@ var init_zkapi_confine_fetch = __esm(() => {
 
 // src/core/zkapi-confine-selftest.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { chmodSync as chmodSync6, readFileSync as readFileSync31, readlinkSync, readdirSync as readdirSync5, rmSync as rmSync9, writeFileSync as writeFileSync6 } from "node:fs";
+import { chmodSync as chmodSync6, readFileSync as readFileSync31, readlinkSync, readdirSync as readdirSync5, rmSync as rmSync9, writeFileSync as writeFileSync7 } from "node:fs";
 import { createServer, createConnection as createConnection2 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
@@ -11655,12 +11840,12 @@ main().catch(() => process.exit(1));
       const probePath = join35(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes4(4).toString("hex")}.cjs`);
       const watchdogPath = join35(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes4(4).toString("hex")}.cjs`);
       try {
-        writeFileSync6(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
+        writeFileSync7(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
         chmodSync6(probePath, 448);
         const transport = await Promise.resolve().then(() => (init_consult_transport_zkapi(), {}));
         const linux = await Promise.resolve().then(() => (init_zkapi_confinement_linux(), {}));
         const bridge = await Promise.resolve().then(() => (init_zkapi_confine_fetch(), {}));
-        writeFileSync6(watchdogPath, WATCHDOG_SCRIPT, { mode: 448 });
+        writeFileSync7(watchdogPath, WATCHDOG_SCRIPT, { mode: 448 });
         chmodSync6(watchdogPath, 448);
         let fixture;
         let control;
@@ -12141,7 +12326,7 @@ var init_zkapi_confinement_linux = __esm(() => {
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash3, randomUUID as randomUUID9 } from "node:crypto";
-import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync5, constants as constants5, existsSync as existsSync14, mkdirSync as mkdirSync16, mkdtempSync as mkdtempSync2, readdirSync as readdirSync7, readFileSync as readFileSync33, readlinkSync as readlinkSync3, realpathSync as realpathSync7, rmSync as rmSync10, statSync as statSync16, writeFileSync as writeFileSync7 } from "node:fs";
+import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync5, constants as constants5, existsSync as existsSync14, mkdirSync as mkdirSync16, mkdtempSync as mkdtempSync2, readdirSync as readdirSync7, readFileSync as readFileSync33, readlinkSync as readlinkSync3, realpathSync as realpathSync7, rmSync as rmSync10, statSync as statSync16, writeFileSync as writeFileSync8 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
 import { homedir as homedir14, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter5, dirname as dirname28, isAbsolute as isAbsolute20, join as join37, resolve as resolvePath } from "node:path";
@@ -12312,7 +12497,7 @@ function defaultZkapiConfinement(host = {}) {
           servers.push(other);
           const targets = JSON.stringify({ allowed, other: other.address().port });
           const script = join37(workDir, "confinement-self-test.cjs");
-          writeFileSync7(script, SELF_TEST_SCRIPT, { mode: 384 });
+          writeFileSync8(script, SELF_TEST_SCRIPT, { mode: 384 });
           const outside = runSelfTestProbe([process.execPath, script, targets], env);
           const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script, targets], env);
           const matches = (out, confined) => Boolean(out && confined) && allowed.every((port) => out["allowed" + port] === "connected" && confined["allowed" + port] === "connected") && ["other", "ipv6", "mapped", "resolver"].every((key) => out[key] === "connected" && confined[key] === "failed_fast") && ["udp", "loopbackUdp"].every((key) => out[key] === "sent" && confined[key] === "failed") && (out.tcp === "timeout" || out.tcp === "failed_slow") && confined.tcp === "failed_fast";
@@ -12559,7 +12744,7 @@ async function stopGroup2(pgid, stillOurs = () => true) {
   } catch {}
   const deadline = Date.now() + STOP_GRACE_MS;
   while (groupAlive(pgid) && Date.now() < deadline)
-    await sleep(POLL_MS2);
+    await sleep2(POLL_MS2);
   if (!groupAlive(pgid))
     return true;
   if (!stillOurs())
@@ -12569,7 +12754,7 @@ async function stopGroup2(pgid, stillOurs = () => true) {
   } catch {}
   const killDeadline = Date.now() + KILL_GRACE_MS;
   while (groupAlive(pgid) && Date.now() < killDeadline)
-    await sleep(POLL_MS2);
+    await sleep2(POLL_MS2);
   return !groupAlive(pgid);
 }
 function currentBootId() {
@@ -12716,7 +12901,7 @@ function resolveExecutable(name, explicit, env, platform = process.platform, tru
   }
   return;
 }
-function sleep(ms) {
+function sleep2(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function portAnswers(port) {
@@ -13895,7 +14080,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`, compactSystem = (notes = "off") => [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence below.",
   "Each evidence item starts with its number and name, then its date and source, then its text in source_data.",
@@ -13928,7 +14113,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage7;
+  analystAbortSignalStorage = new AsyncLocalStorage8;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -14172,6 +14357,7 @@ var init_analyst = __esm(() => {
 
 // src/core/analyst-openai.ts
 var init_analyst_openai = __esm(() => {
+  init_model_stream();
   init_operation_error();
   init_model_transport();
   init_analyst();
@@ -16015,7 +16201,7 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
@@ -16023,7 +16209,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage8;
+  priorityQueryEmbedding = new AsyncLocalStorage9;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -16413,11 +16599,11 @@ var init_media_cache = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage9;
+  readAuthorization = new AsyncLocalStorage10;
 });
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
@@ -17261,6 +17447,7 @@ var init_server = __esm(() => {
 // src/core/analyst-built-in.ts
 var GAP_GENERIC_WORDS, utf8;
 var init_analyst_built_in = __esm(() => {
+  init_model_stream();
   init_local_analyst_window();
   init_sniffer_decision();
   init_sniffer_lane();
@@ -17475,6 +17662,7 @@ var init_evidence_pack = __esm(() => {
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
+  init_model_stream();
   init_read_wide();
   init_analyst_built_in();
   init_local_analyst_window();
@@ -19831,7 +20019,7 @@ var init_remote_vlm = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/model-stream.ts
-var init_model_stream = __esm(() => {
+var init_model_stream2 = __esm(() => {
   init_http_timeout();
 });
 
@@ -19849,7 +20037,7 @@ var init_audio_wav = () => {};
 var DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS;
 var init_built_in_transcriber = __esm(() => {
   init_model_transport();
-  init_model_stream();
+  init_model_stream2();
   init_install();
   init_manifest2();
   init_server();
@@ -20655,7 +20843,7 @@ var init_source_delete_holds = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync21, mkdirSync as mkdirSync20, readFileSync as readFileSync39, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync21, mkdirSync as mkdirSync20, readFileSync as readFileSync39, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname35 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
@@ -20686,7 +20874,7 @@ function readIngestionHealthState(path) {
 }
 function writeIngestionHealthState(path, state) {
   mkdirSync20(dirname35(path), { recursive: true, mode: 448 });
-  writeFileSync10(path, `${JSON.stringify(state, null, 2)}
+  writeFileSync11(path, `${JSON.stringify(state, null, 2)}
 `);
 }
 function asRecord14(value) {
@@ -23081,6 +23269,7 @@ init_config();
 import { createHash as createHash7 } from "node:crypto";
 
 // src/core/delphi.ts
+init_model_stream();
 init_operation_error();
 init_local_model_policy();
 init_model_transport();
@@ -23156,6 +23345,7 @@ class DelphiClient {
       ...options.signal ? { signal: options.signal } : {},
       body: JSON.stringify({
         model,
+        stream: true,
         messages,
         temperature: options.temperature ?? 0.2,
         max_tokens: options.maxTokens ?? 2048,
@@ -23227,13 +23417,13 @@ function callerCancellation(signal) {
   return reason instanceof Error && reason.name === "AbortError" ? reason : undefined;
 }
 function createDelphiTransport(config) {
-  return new DirectHttpDelphiTransport(fetch, config.argus.requestTimeoutSeconds * 1000);
+  return new DirectHttpDelphiTransport(fetch, MODEL_IDLE_TIMEOUT_MS);
 }
 
 class DirectHttpDelphiTransport {
   fetchImpl;
   timeoutMs;
-  constructor(fetchImpl = fetch, timeoutMs = 0) {
+  constructor(fetchImpl = fetch, timeoutMs = MODEL_IDLE_TIMEOUT_MS) {
     this.fetchImpl = fetchImpl;
     this.timeoutMs = timeoutMs;
   }
@@ -23243,6 +23433,8 @@ class DirectHttpDelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      if (firstError instanceof ModelStreamError)
+        throw new OperationError("argus_error", firstError.message);
       if (isZkapiDaemonEndpointRefusal(firstError))
         throw firstError;
       if (isModelEndpointRedirectError(firstError))
@@ -23251,16 +23443,18 @@ class DirectHttpDelphiTransport {
       if (cancelled)
         throw cancelled;
       if (isAbortError2(firstError)) {
-        throw argusTimeoutError(lane, url, timeoutMs);
+        throw new OperationError("argus_unreachable", firstError instanceof Error ? firstError.message : `Argus ${lane} made no progress.`, undefined);
       }
       try {
         response = await this.fetchWithTimeout(url, init, timeoutMs);
       } catch (secondError) {
+        if (secondError instanceof ModelStreamError)
+          throw new OperationError("argus_error", secondError.message);
         const cancelledAgain = callerCancellation(init.signal);
         if (cancelledAgain)
           throw cancelledAgain;
         if (isAbortError2(secondError)) {
-          throw argusTimeoutError(lane, url, timeoutMs);
+          throw new OperationError("argus_unreachable", secondError instanceof Error ? secondError.message : `Argus ${lane} made no progress.`, undefined);
         }
         if (isModelEndpointRedirectError(secondError))
           throw argusRedirectError(lane, secondError);
@@ -23274,24 +23468,8 @@ class DirectHttpDelphiTransport {
     return response.json();
   }
   async fetchWithTimeout(url, init, timeoutMs) {
-    if (timeoutMs <= 0)
-      return fetchModelEndpoint(this.fetchImpl, url, init);
-    const controller = new AbortController;
-    const abortFromCaller = () => controller.abort(init.signal?.reason);
-    if (init.signal?.aborted)
-      abortFromCaller();
-    else
-      init.signal?.addEventListener("abort", abortFromCaller, { once: true });
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetchModelEndpoint(this.fetchImpl, url, {
-        ...init,
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timer);
-      init.signal?.removeEventListener("abort", abortFromCaller);
-    }
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+    return fetchStreamingModel(this.fetchImpl, url, init, body?.model ?? "model discovery", timeoutMs);
   }
 }
 function normalizeModel(item) {
@@ -23314,9 +23492,6 @@ function isAbortError2(error) {
 }
 function argusRedirectError(lane, error) {
   return new OperationError("argus_unreachable", `Argus ${lane} lane answered with a redirect, which is refused.`, error.message);
-}
-function argusTimeoutError(lane, url, timeoutMs) {
-  return new OperationError("argus_unreachable", `Argus ${lane} lane timed out at ${url} after ${timeoutMs}ms.`, "The local model lane did not complete within the configured request budget; failing closed instead of leaving the caller waiting indefinitely.");
 }
 
 // src/core/email.ts
@@ -26529,7 +26704,7 @@ init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { chmodSync as chmodSync8, closeSync as closeSync6, constants as constants6, copyFileSync, existsSync as existsSync16, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync16, linkSync as linkSync2, mkdirSync as mkdirSync17, openSync as openSync5, readFileSync as readFileSync35, readlinkSync as readlinkSync4, readdirSync as readdirSync9, realpathSync as realpathSync8, renameSync as renameSync6, rmSync as rmSync12, rmdirSync, statSync as statSync18, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
+import { chmodSync as chmodSync8, closeSync as closeSync6, constants as constants6, copyFileSync, existsSync as existsSync16, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync16, linkSync as linkSync2, mkdirSync as mkdirSync17, openSync as openSync5, readFileSync as readFileSync35, readlinkSync as readlinkSync4, readdirSync as readdirSync9, realpathSync as realpathSync8, renameSync as renameSync6, rmSync as rmSync12, rmdirSync, statSync as statSync18, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename7, dirname as dirname30, join as join39, relative as relative6, resolve as resolve10, sep as sep7 } from "node:path";
 init_linux_engine_layout();
@@ -27183,7 +27358,7 @@ init_linux_engine_layout();
 init_google_handle_compatibility();
 init_model_transport();
 init_zkapi_consult_settings();
-import { mkdirSync as mkdirSync19, readFileSync as readFileSync38, rmSync as rmSync13, writeFileSync as writeFileSync9 } from "node:fs";
+import { mkdirSync as mkdirSync19, readFileSync as readFileSync38, rmSync as rmSync13, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { dirname as dirname33, join as join42 } from "node:path";
 init_secret_store();

@@ -186,7 +186,7 @@ import {
   type SourceIndexActivationMode,
   type SourceIndexCorpusDefinition,
 } from '../../core/source-index/corpus.ts';
-import { FileLeaseBusyError, withFileLease } from '../../core/file-lease.ts';
+import { FileLeaseBusyError, withFileLease, type FileLeaseTimers } from '../../core/file-lease.ts';
 import {
   awaitStartingQueryEmbedding,
   cosineSimilarity,
@@ -829,6 +829,8 @@ export interface LocalConnectorStoreOptions {
   stillImagesRead?: StillImagesRead;
   /** Clock for owner observations compared with provider snapshot cutoffs. */
   now?: () => Date;
+  /** Clock for the embedding lease's heartbeat and stall detection. */
+  embeddingLeaseTimers?: FileLeaseTimers;
   /**
    * The event-loop turn a connector sync takes between items. Omitted: the
    * worker's shared control-path headroom. Tests inject one with a fake clock.
@@ -2062,7 +2064,7 @@ export const EMBEDDING_ITEMS_FAILED_REASON = 'embedding_items_failed';
 /** Suffix of the per-store embedding lease file (see LocalConnectorStore.embedChunks). */
 export const CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = '.embedding';
 
-/** How long an embedder waits for another to finish on the same store before giving up. */
+/** Maximum silence between holder heartbeats, never a total wait limit. */
 export const CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120_000;
 
 /** One store the sweep visits, and the identity it embeds with. */
@@ -2090,7 +2092,7 @@ export interface ConnectorStoreEmbedStoreRun {
   itemsOutOfScope: number;
   /** Set when the provider did not answer; the items stay pending. */
   deferredReason?: string;
-  /** Another embedder held this store's lease for the whole wait; nothing was lost. */
+  /** Another embedder still holds the lease but its heartbeat stalled; nothing was lost. */
   busy?: boolean;
   /** The pass reached its time budget with chunks still owed; they wait for the next pass. */
   stoppedAtDeadline?: boolean;
@@ -3732,6 +3734,7 @@ export class LocalConnectorStore {
   private db: Database;
   private readonly readOnly: boolean;
   private readonly now: () => Date;
+  private readonly embeddingLeaseTimers: FileLeaseTimers | undefined;
   private readonly controlPath: Pick<ControlPathHeadroom, 'ingestionTurn'>;
   /**
    * Completion latch for trust reconciliation lineages, keyed by connector id
@@ -3814,6 +3817,7 @@ export class LocalConnectorStore {
     this.family = options.family;
     this.trustDomain = options.trustDomain;
     this.now = options.now ?? (() => new Date());
+    this.embeddingLeaseTimers = options.embeddingLeaseTimers;
     this.controlPath = options.controlPath ?? controlPathHeadroom;
     this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
     // A read-only store judges by no ledger of its own, except in the engine
@@ -13376,14 +13380,23 @@ export class LocalConnectorStore {
    * cross-process file lease on this store, so two of them can never embed the
    * same chunks at once and pay twice. The chunks still pending are read under
    * the lease, so a caller that waited finds the other's work already done. A
-   * caller that cannot get the lease within the wait gets FileLeaseBusyError.
+   * holder pulses every 30 s while its event loop responds. Contenders wait
+   * through any number of pulses; only 120 s WITHOUT a pulse returns
+   * FileLeaseBusyError. A dead holder's kernel lock is released immediately;
+   * a live but stalled holder keeps its lock, so it cannot race a takeover.
    */
   async embedChunks(options: ConnectorStoreEmbedOptions): Promise<ConnectorStoreEmbedSummary> {
     if (this.dbPath === ':memory:') return this.embedChunksUnderLease(options);
     return withFileLease(
       `${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`,
       () => this.embedChunksUnderLease(options),
-      { acquireTimeoutMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS },
+      {
+        heartbeat: {
+          stallMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS,
+          intervalMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS / 4,
+        },
+        ...(this.embeddingLeaseTimers ? { timers: this.embeddingLeaseTimers } : {}),
+      },
     );
   }
 

@@ -599,15 +599,21 @@ var init_linux_desktop_entry = __esm(() => {
 
 // src/core/file-lease.ts
 import { execFileSync } from "node:child_process";
-import { closeSync as closeSync2, existsSync as existsSync3, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync3 } from "node:fs";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { closeSync as closeSync2, existsSync as existsSync3, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createRequire as createRequire3 } from "node:module";
 import { dirname as dirname3 } from "node:path";
 async function withFileLease(targetPath, callback, options = {}) {
-  const owner = await acquireFileLease(targetPath, normalizeOptions(options));
+  const normalized = normalizeOptions(options);
+  const owner = await acquireFileLease(targetPath, normalized);
+  let stopHeartbeat;
   try {
+    if (normalized.heartbeat)
+      stopHeartbeat = startLeaseHeartbeat(targetPath, normalized);
     return await callback(owner);
   } finally {
+    stopHeartbeat?.();
     owner.release();
   }
 }
@@ -671,16 +677,51 @@ class AsyncFileLeaseOwner {
 }
 async function acquireFileLease(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
+  const { timers } = options;
+  let lastProgressAt = timers.now();
+  let lastHeartbeat;
+  const deadline = lastProgressAt + options.acquireTimeoutMs;
   await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const lock = tryKernelLock(lockPath, options.mode);
     if (lock)
       return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
-    if (Date.now() >= deadline)
+    if (options.heartbeat) {
+      const heartbeat = readLeaseHeartbeat(targetPath);
+      if (heartbeat !== undefined && heartbeat !== lastHeartbeat) {
+        lastHeartbeat = heartbeat;
+        lastProgressAt = timers.now();
+      }
+      if (timers.now() - lastProgressAt >= options.heartbeat.stallMs)
+        throw new FileLeaseBusyError(targetPath);
+    } else if (timers.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
-    await sleep(options.pollIntervalMs);
+    await timers.sleep(options.pollIntervalMs);
   }
+}
+function readLeaseHeartbeat(targetPath) {
+  try {
+    return readFileSync3(`${targetPath}.lock`, "utf8");
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT"))
+      return;
+    throw error;
+  }
+}
+function startLeaseHeartbeat(targetPath, options) {
+  const owner = randomUUID2();
+  let sequence = 0;
+  const pulse = () => writeFileSync2(`${targetPath}.lock`, `${owner}:${sequence++}`, { mode: 384 });
+  pulse();
+  const timer = options.timers.setInterval(() => {
+    try {
+      pulse();
+    } catch {
+      options.timers.clearInterval(timer);
+    }
+  }, options.heartbeat.intervalMs);
+  timer?.unref?.();
+  return () => options.timers.clearInterval(timer);
 }
 function acquireFileLeaseSync(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
@@ -972,7 +1013,17 @@ function normalizeOptions(options) {
   return {
     mode: options.mode ?? "exclusive",
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
-    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
+    ...options.heartbeat ? { heartbeat: {
+      stallMs: positiveInteger(options.heartbeat.stallMs, DEFAULT_OPTIONS.acquireTimeoutMs),
+      intervalMs: positiveInteger(options.heartbeat.intervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    } } : {},
+    timers: options.timers ?? {
+      now: () => Date.now(),
+      sleep,
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (timer) => clearInterval(timer)
+    }
   };
 }
 function positiveInteger(value, fallback) {
@@ -6118,7 +6169,7 @@ var init_dashboard_launch = __esm(() => {
 
 // src/core/linux-owner-bridge.ts
 import { createHmac, createHash as createHash3, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
-import { closeSync as closeSync4, openSync as openSync4, writeFileSync as writeFileSync2, unlinkSync } from "node:fs";
+import { closeSync as closeSync4, openSync as openSync4, writeFileSync as writeFileSync3, unlinkSync } from "node:fs";
 import { dirname as dirname10, join as join11 } from "node:path";
 import { networkInterfaces } from "node:os";
 function randomOwnerHostname() {
@@ -6384,7 +6435,7 @@ class LinuxOwnerBridge {
 })();</script>`;
     const fd = openSync4(path, "wx", 384);
     try {
-      writeFileSync2(fd, html);
+      writeFileSync3(fd, html);
     } finally {
       closeSync4(fd);
     }
@@ -18405,8 +18456,8 @@ function isRealBrowser() {
 }
 
 // node_modules/tinfoil/dist/user-cache-secret-store.js
-import { closeSync as closeSync6, constants as constants3, fstatSync as fstatSync2, linkSync, lstatSync as lstatSync11, mkdirSync as mkdirSync6, openSync as openSync6, readFileSync as readFileSync12, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { closeSync as closeSync6, constants as constants3, fstatSync as fstatSync2, linkSync, lstatSync as lstatSync11, mkdirSync as mkdirSync6, openSync as openSync6, readFileSync as readFileSync12, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { homedir as homedir9 } from "node:os";
 import { join as join16 } from "node:path";
 function posixReadFlags() {
@@ -18504,9 +18555,9 @@ function loadOrPersistUserCacheSecret(generateSecret) {
   if (secret === "") {
     return "";
   }
-  const candidatePath = join16(dir, `${USER_CACHE_SECRET_FILE_NAME}.${process.pid}.${randomUUID2()}.tmp`);
+  const candidatePath = join16(dir, `${USER_CACHE_SECRET_FILE_NAME}.${process.pid}.${randomUUID3()}.tmp`);
   try {
-    writeFileSync3(candidatePath, secret, { encoding: "utf8", flag: "wx", mode: 384 });
+    writeFileSync4(candidatePath, secret, { encoding: "utf8", flag: "wx", mode: 384 });
     try {
       linkSync(candidatePath, path);
     } catch (err) {
@@ -22305,7 +22356,7 @@ var init_dist4 = __esm(() => {
 
 // src/core/owner-config-read.ts
 import { chmodSync as chmodSync2, linkSync as linkSync2, readFileSync as readFileSync13, statSync as statSync3, lstatSync as lstatSync12 } from "node:fs";
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname15, join as join17 } from "node:path";
 function linuxOwnerConfigPath(name, env = process.env) {
@@ -22360,7 +22411,7 @@ function publishOwnerCopy(path, text) {
     chmodSync2(path, 384);
     return;
   }
-  const temp = `${path}.${randomUUID3()}.tmp`;
+  const temp = `${path}.${randomUUID4()}.tmp`;
   try {
     writePrivateFileAtomicSync(temp, text);
     linkSync2(temp, path);
@@ -22854,36 +22905,6 @@ var init_model_transport = __esm(() => {
       this.status = status;
     }
   };
-});
-
-// src/core/read-wide.ts
-function readWideEnabled() {
-  return process.env.OLYMPUS_READ_WIDE === "1";
-}
-function scoresHaveNoLeader(scores) {
-  if (scores.length < 3 || scores.some((score) => score === undefined || !Number.isFinite(score)))
-    return false;
-  const ranked = scores.slice().sort((a, b) => b - a);
-  const scale = Math.max(Math.abs(ranked[0]), Math.abs(ranked[2]), 0.000000001);
-  return ranked[0] - ranked[2] <= scale * 0.2;
-}
-function isReadWideMatch(candidate) {
-  return matchingProvenances.has(candidate.provenance) && candidate.chunks.some((chunk) => chunk.length > 0);
-}
-function markReadWidePack(pack, matches = pack.candidates) {
-  for (const candidate of matches)
-    matchingProvenances.add(candidate.provenance);
-  for (const candidate of pack.candidates)
-    wideProvenances.add(candidate.provenance);
-  return pack;
-}
-function isReadWidePack(pack) {
-  return pack.candidates.length > 0 && pack.candidates.every((candidate) => wideProvenances.has(candidate.provenance));
-}
-var READ_WIDE_MATCH_LIMIT = 60, READ_WIDE_MIN_PASSAGE_BYTES = 400, matchingProvenances, wideProvenances;
-var init_read_wide = __esm(() => {
-  matchingProvenances = new WeakSet;
-  wideProvenances = new WeakSet;
 });
 
 // node_modules/entities/dist/esm/decode-codepoint.js
@@ -24199,6 +24220,998 @@ var init_opsec = __esm(() => {
   };
 });
 
+// src/core/release-manifest.ts
+import { createHash as createHash5 } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+function passagesWithheldAtReleasableTiers(inputs, verdicts, report) {
+  return inputs.reduce((total, input, index) => {
+    const verdict = verdicts[index];
+    if (input.layer === "names" || !verdict)
+      return total;
+    const releasable = verdict.tier === "public_or_personal" || verdict.tier === "legacy" && !input.privateAtAnswer;
+    if (!releasable)
+      return total;
+    const hashes = new Set(input.chunkHashes ?? []);
+    const allowed = verdict.tier === "legacy" ? 0 : (report.allowed[index] ?? []).filter((hash) => hashes.has(hash)).length;
+    return total + Math.max(0, Math.max(1, hashes.size) - allowed);
+  }, 0);
+}
+async function recheckSearchEvidence(raw, manifests, check) {
+  const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
+  if (!evidence.length)
+    return { raw, withheldAfter: false };
+  const inputs = manifests.flatMap((manifest) => manifest.inputs);
+  let report;
+  let verdicts = [];
+  try {
+    if (check && manifests.length) {
+      report = await checkReleaseChunks(check, inputs);
+      verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    }
+  } catch {}
+  const cleared = (index) => {
+    const input = inputs[index];
+    const verdict = verdicts[index];
+    return !!verdict && !verdict.gone && (input.layer === "names" ? ["public_or_personal", "legacy"].includes(verdict.tier) : verdict.tier === "public_or_personal" && !!input.chunkHashes?.length && input.chunkHashes.every((hash) => report?.allowed[index]?.includes(hash)));
+  };
+  const held = (index) => {
+    const input = inputs[index];
+    if (input.layer === "names")
+      return 0;
+    const hashes = new Set(input.chunkHashes ?? []);
+    return Math.max(1, hashes.size) - [...hashes].filter((hash) => report?.allowed[index]?.includes(hash)).length;
+  };
+  const parentsCleared = inputs.every((input, index) => input.dependency !== "parent_label" || cleared(index));
+  let droppedOtherwise = 0;
+  const kept = evidence.filter((value) => {
+    if (!value || typeof value !== "object") {
+      droppedOtherwise += 1;
+      return false;
+    }
+    const hit = value;
+    const matches = inputs.flatMap((input, index) => input.dependency !== "parent_label" && input.corpusId === hit.corpus_id && input.provider === hit.provider && input.accountScope === hit.account_scope && input.providerItemId === hit.provider_item_id && input.providerConversationId === hit.provider_conversation_id ? [index] : []);
+    const textBound = hit.excerpt === undefined || hit.excerpt === "" || typeof hit.excerpt === "string" && matches.some((index) => inputs[index].layer !== "names" && inputs[index].releasedTextDigest === releasedTextDigest(hit.excerpt));
+    if (parentsCleared && matches.length > 0 && matches.every(cleared) && textBound)
+      return true;
+    if (!report || !matches.some((index) => held(index) > 0))
+      droppedOtherwise += 1;
+    return false;
+  });
+  const dropped = evidence.length - kept.length;
+  if (!dropped)
+    return { raw, withheldAfter: false };
+  const coverage = raw.coverage && typeof raw.coverage === "object" ? raw.coverage : {};
+  const note = report && chunkCoverageNote(report);
+  const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
+  const withheld = typeof raw.withheld === "number" && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
+  return { raw: {
+    ...raw,
+    evidence: kept,
+    withheld: withheld + (report?.withheldPassages ?? 0) + droppedOtherwise,
+    ...note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}
+  }, withheldAfter: true };
+}
+function bindReleaseChunks(provenance, chunks, hashes) {
+  chunkProvenance.set(provenance, chunks.map((text, index) => ({ text, hashes: hashes[index] ?? [] })));
+}
+function copyReleaseChunks(from, into) {
+  const chunks = chunkProvenance.get(from);
+  if (chunks)
+    chunkProvenance.set(into, chunks);
+}
+function releasePassageHashes(provenance, text) {
+  return [...new Set((chunkProvenance.get(provenance) ?? []).filter((entry) => entry.text.includes(text)).flatMap((entry) => entry.hashes))];
+}
+function isUnprovedPassageMarker(hash) {
+  return hash.startsWith(UNPROVED_PASSAGE);
+}
+function releaseCandidateHashes(candidate, options = {}) {
+  const mapped = candidate.chunks.map((text) => releasePassageHashes(candidate.provenance, text));
+  const unmapped = options.holdUnmapped && mapped.some((hashes) => hashes.length > 0) ? mapped.filter((hashes) => hashes.length === 0).length + (candidate.tables?.length ?? 0) + (candidate.facts?.length ?? 0) : 0;
+  return [...new Set(mapped.flat()), ...Array.from({ length: unmapped }, (_, index) => `${UNPROVED_PASSAGE}${index}`)];
+}
+function releasedTextDigest(text) {
+  return createHash5("sha256").update(text).digest("hex");
+}
+function createReleaseManifestSink() {
+  return { manifests: [] };
+}
+function runWithReleaseManifestSink(sink, fn) {
+  return storage.run(sink, fn);
+}
+function currentReleaseManifestSink() {
+  return storage.getStore();
+}
+function recordReleaseManifest(manifest) {
+  storage.getStore()?.manifests.push({
+    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
+    constraints: { ...manifest.constraints }
+  });
+}
+function adoptReleaseManifests(into, from) {
+  into.manifests.push(...from.manifests);
+}
+function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
+  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
+  const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
+  if (input.layer === "names")
+    return !privateNow || input.privateAtAnswer && authorized;
+  return !privateNow || authorized;
+}
+async function answerReleaseWithheldReasonOffThread(manifests, check, ceiling = "private", options = {}) {
+  try {
+    const inputs = manifests.flatMap((manifest) => manifest.inputs);
+    const report = options.chunks ? await checkReleaseChunks(check, inputs) : undefined;
+    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    const reason = answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
+    if (reason)
+      return reason;
+    if (report && passagesWithheldAtReleasableTiers(inputs, verdicts, report) > 0)
+      return ANSWER_RELEASE_UNVERIFIED;
+    return;
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+}
+function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
+  if (manifests.length === 0)
+    return ANSWER_RELEASE_UNVERIFIED;
+  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
+  const inputs = entries.map(({ input }) => input);
+  try {
+    const verdicts = check.inputs(inputs);
+    if (verdicts.length !== inputs.length)
+      return ANSWER_RELEASE_UNVERIFIED;
+    const postureNow = check.secureDerivativeDefault();
+    for (const [index, verdict] of verdicts.entries()) {
+      if (verdict.tier === "unknown" || verdict.gone)
+        return ANSWER_RELEASE_UNVERIFIED;
+      if (verdict.tier === "secret")
+        return ANSWER_RELEASE_UNVERIFIED;
+      const { input, constraints } = entries[index];
+      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
+        return ANSWER_BECAME_PRIVATE;
+      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
+        return "Olympus withheld this answer because current settings require approval for Private content.";
+      }
+    }
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+  return;
+}
+function isWithheldSourceAnswer(result) {
+  return withheldAnswers.has(result);
+}
+function withheldSourceAnswer(reason) {
+  const result = { answer: reason, evidence: [] };
+  withheldAnswers.add(result);
+  return result;
+}
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000, chunkProvenance, UNPROVED_PASSAGE = "unproved:", storage, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
+var init_release_manifest = __esm(() => {
+  chunkProvenance = new WeakMap;
+  storage = new AsyncLocalStorage;
+  withheldAnswers = new WeakSet;
+});
+
+// src/core/source-answer-jobs.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { createHash as createHash6, randomBytes as randomBytes7, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+
+class SourceAnswerJobRegistry {
+  limits;
+  now;
+  isOwnerRevoked;
+  jobs = new Map;
+  running = new Map;
+  runningTotal = 0;
+  priority;
+  constructor(options = {}) {
+    const limits = {
+      handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
+      resultWaitMs: SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
+      ttlMs: SOURCE_ANSWER_JOB_TTL_MS,
+      idleMs: SOURCE_ANSWER_JOB_IDLE_MS,
+      maxRunningPerOwner: SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
+      maxRunningGlobal: SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
+      maxRetainedPerOwner: SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
+      maxResultBytes: SOURCE_ANSWER_MAX_RESULT_BYTES,
+      ...options.limits
+    };
+    limits.maxRunningPerOwner = Math.min(limits.maxRunningPerOwner, limits.maxRunningGlobal);
+    this.limits = limits;
+    this.now = options.now ?? Date.now;
+    this.isOwnerRevoked = options.isOwnerRevoked;
+    const priority = options.priority;
+    this.priority = priority ? {
+      isBackground: priority.isBackground,
+      interactive: priority.interactive,
+      maxQueuedPerOwner: Math.max(0, priority.maxQueuedPerOwner ?? SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER),
+      maxQueuedTotal: Math.max(0, priority.maxQueuedTotal ?? SOURCE_ANSWER_MAX_QUEUED_BACKGROUND),
+      maxWaitMs: Math.max(0, priority.maxWaitMs ?? SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS),
+      queues: new Map,
+      ownerQueue: [],
+      maxOwnerQueued: SOURCE_ANSWER_MAX_QUEUED_OWNER,
+      lastGrant: undefined,
+      lastServed: new Map,
+      ticks: 0,
+      queued: 0,
+      running: new Map,
+      runningTotal: 0,
+      timer: undefined
+    } : undefined;
+    priority?.interactive?.onIdle(() => this.dispatch());
+  }
+  async run(scope, work) {
+    this.sweep();
+    const startedAt = this.now();
+    const controller = new AbortController;
+    const turn = this.priority?.isBackground(scope.owner) ? this.enqueue(scope, controller.signal, "background") : this.ownerMustWait(scope.owner) ? this.enqueue(scope, controller.signal, "owner") : undefined;
+    if (!turn)
+      this.admit(scope.owner);
+    const release = turn ? turn.release : this.occupy(scope.owner);
+    const callerManifests = currentReleaseManifestSink();
+    const jobManifests = callerManifests ? createReleaseManifestSink() : undefined;
+    let lastProgressAt = startedAt;
+    let lastStage;
+    const onProgress = (stage) => {
+      lastProgressAt = this.now();
+      lastStage = stage;
+    };
+    let pending;
+    try {
+      const start = turn ? () => progressSink.run(onProgress, () => turn.ready.then(() => work(controller.signal))) : () => progressSink.run(onProgress, () => work(controller.signal));
+      pending = jobManifests ? runWithReleaseManifestSink(jobManifests, start) : start();
+    } catch (error) {
+      release();
+      throw error;
+    }
+    const outcome = pending.then((value) => ({ ok: true, value }), (error) => ({ ok: false, error }));
+    let timer;
+    const handoff = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("handoff"), this.limits.handoffMs);
+    });
+    const first = await Promise.race([outcome, handoff]);
+    clearTimeout(timer);
+    if (first !== "handoff") {
+      release();
+      if (callerManifests && jobManifests)
+        adoptReleaseManifests(callerManifests, jobManifests);
+      if (first.ok)
+        return first.value;
+      throw first.error;
+    }
+    turn?.detach();
+    scope.detachFromClient?.();
+    let wake;
+    const job = {
+      anonymousAsk: scope.anonymousAsk === true,
+      id: newJobId(),
+      owner: scope.owner,
+      startedAt,
+      done: new Promise((resolve) => {
+        wake = resolve;
+      }),
+      finish: (result) => {
+        if (job.outcome)
+          return;
+        clearTimeout(job.deadline);
+        job.outcome = this.bounded(result);
+        job.finishedAt = this.now();
+        release();
+        wake();
+      },
+      abort: (reason) => controller.abort(reason),
+      ...jobManifests ? { releaseManifests: jobManifests } : {}
+    };
+    const idleCheck = () => {
+      const quietMs = this.now() - lastProgressAt;
+      if (quietMs < this.limits.idleMs) {
+        job.deadline = setTimeout(idleCheck, this.limits.idleMs - quietMs);
+        job.deadline.unref?.();
+        return;
+      }
+      job.abort(callerAbortError("source_answer job stopped making progress"));
+      job.finish({ ok: false, error: sourceAnswerStalled(this.limits.idleMs, lastStage) });
+    };
+    job.deadline = setTimeout(idleCheck, Math.max(0, this.limits.idleMs - (this.now() - lastProgressAt)));
+    job.deadline.unref?.();
+    outcome.then((result) => job.finish(result));
+    this.jobs.set(job.id, job);
+    this.evictRetained(scope.owner);
+    return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
+  }
+  isAnonymousAsk(owner, jobId) {
+    const job = typeof jobId === "string" ? this.jobs.get(jobId) : undefined;
+    return job?.anonymousAsk === true && sameOwner(job.owner, owner);
+  }
+  async result(owner, jobId, signal) {
+    this.sweep();
+    const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
+    if (!job || !sameOwner(job.owner, owner))
+      throw sourceAnswerJobNotFound();
+    if (!job.outcome && this.limits.resultWaitMs > 0) {
+      let timer;
+      let onAbort;
+      const stop = new Promise((resolve) => {
+        timer = setTimeout(resolve, this.limits.resultWaitMs);
+        if (signal) {
+          onAbort = () => resolve();
+          if (signal.aborted)
+            resolve();
+          else
+            signal.addEventListener("abort", onAbort, { once: true });
+        }
+      });
+      await Promise.race([job.done, stop]);
+      clearTimeout(timer);
+      if (signal && onAbort)
+        signal.removeEventListener("abort", onAbort);
+    }
+    if (!this.jobs.has(job.id))
+      throw sourceAnswerJobNotFound();
+    if (!job.outcome)
+      return pendingResult(job.id, this.now() - job.startedAt, this.limits.resultWaitMs);
+    if (job.outcome.ok) {
+      const collecting = currentReleaseManifestSink();
+      if (collecting && job.releaseManifests)
+        adoptReleaseManifests(collecting, job.releaseManifests);
+      return job.outcome.value;
+    }
+    throw job.outcome.error;
+  }
+  whenFinished(owner, jobId) {
+    const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
+    if (!job || !sameOwner(job.owner, owner))
+      return;
+    return job.done.then(() => {
+      const outcome = job.outcome;
+      return outcome?.ok ? { ok: true, value: outcome.value, releaseManifests: [...job.releaseManifests?.manifests ?? []] } : { ok: false };
+    });
+  }
+  dropOwner(owner) {
+    this.cancelWaiting(owner, callerAbortError("source_answer connection revoked"));
+    for (const [id, job] of this.jobs) {
+      if (!sameOwner(job.owner, owner))
+        continue;
+      this.jobs.delete(id);
+      job.abort(callerAbortError("source_answer connection revoked"));
+      job.finish({ ok: false, error: sourceAnswerJobNotFound() });
+    }
+    this.dispatch();
+  }
+  sweep() {
+    const now = this.now();
+    const owners = new Map;
+    const revoked = (owner) => {
+      let known = owners.get(owner);
+      if (known === undefined) {
+        try {
+          known = this.isOwnerRevoked?.(owner) === true;
+        } catch {
+          known = false;
+        }
+        owners.set(owner, known);
+      }
+      return known;
+    };
+    for (const [id, job] of this.jobs) {
+      if (job.finishedAt !== undefined && now - job.finishedAt >= this.limits.ttlMs) {
+        this.jobs.delete(id);
+        continue;
+      }
+      if (this.isOwnerRevoked && revoked(job.owner))
+        this.dropOwner(job.owner);
+    }
+    const priority = this.priority;
+    if (priority && this.isOwnerRevoked) {
+      const waiting = new Set([...priority.queues.keys(), ...priority.ownerQueue.map((waiter) => waiter.owner)]);
+      for (const owner of waiting)
+        if (revoked(owner))
+          this.dropOwner(owner);
+    }
+  }
+  stats() {
+    this.sweep();
+    return { running: this.runningTotal, jobs: this.jobs.size };
+  }
+  queued() {
+    return (this.priority?.queued ?? 0) + (this.priority?.ownerQueue.length ?? 0);
+  }
+  ownerMustWait(owner) {
+    const priority = this.priority;
+    if (!priority)
+      return false;
+    if ((this.running.get(owner) ?? 0) + this.ownerWaiting(owner) >= this.limits.maxRunningPerOwner)
+      return false;
+    return priority.ownerQueue.length > 0 || this.runningTotal >= this.limits.maxRunningGlobal && priority.runningTotal > 0;
+  }
+  ownerWaiting(owner) {
+    return this.priority.ownerQueue.filter((waiter) => waiter.owner === owner).length;
+  }
+  enqueue(scope, jobSignal, kind) {
+    const priority = this.priority;
+    const owner = scope.owner;
+    if (kind === "owner") {
+      if (priority.ownerQueue.length >= priority.maxOwnerQueued)
+        throw sourceAnswerBusy();
+    } else {
+      const waiting = priority.queues.get(owner)?.length ?? 0;
+      if (waiting >= priority.maxQueuedPerOwner || priority.queued >= priority.maxQueuedTotal) {
+        if (waiting > 0 || !this.backgroundMayStart(owner, this.now(), this.now()))
+          throw sourceAnswerBusy();
+      }
+    }
+    let state = "queued";
+    let detached = false;
+    let resolve;
+    let reject;
+    const ready = new Promise((ok, fail) => {
+      resolve = ok;
+      reject = fail;
+    });
+    ready.catch(() => {
+      return;
+    });
+    const onClient = () => {
+      if (!detached)
+        waiter.cancel(callerAbortError("source_answer client disconnected"));
+    };
+    const onJob = () => waiter.cancel(jobSignal.reason ?? callerAbortError("source_answer job ended"));
+    const unlisten = () => {
+      scope.clientSignal?.removeEventListener("abort", onClient);
+      jobSignal.removeEventListener("abort", onJob);
+    };
+    const waiter = {
+      owner,
+      kind,
+      enqueuedAt: this.now(),
+      tick: ++priority.ticks,
+      grant: () => {
+        if (state !== "queued")
+          return;
+        state = "running";
+        unlisten();
+        if (kind === "background") {
+          priority.running.set(owner, (priority.running.get(owner) ?? 0) + 1);
+          priority.runningTotal += 1;
+          priority.ticks += 1;
+          priority.lastServed.set(owner, priority.ticks);
+        }
+        this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
+        this.runningTotal += 1;
+        priority.lastGrant = kind;
+        this.unqueue(waiter);
+        resolve();
+      },
+      cancel: (reason, wake = true) => {
+        if (state !== "queued")
+          return;
+        state = "done";
+        unlisten();
+        this.unqueue(waiter);
+        reject(reason);
+        if (wake)
+          this.dispatch();
+      }
+    };
+    if (kind === "owner") {
+      priority.ownerQueue.push(waiter);
+    } else {
+      const queue = priority.queues.get(owner);
+      if (queue)
+        queue.push(waiter);
+      else
+        priority.queues.set(owner, [waiter]);
+      priority.queued += 1;
+    }
+    if (scope.clientSignal?.aborted)
+      onClient();
+    else
+      scope.clientSignal?.addEventListener("abort", onClient, { once: true });
+    if (jobSignal.aborted)
+      onJob();
+    else
+      jobSignal.addEventListener("abort", onJob, { once: true });
+    this.dispatch();
+    const release = () => {
+      if (state === "queued") {
+        waiter.cancel(callerAbortError("source_answer released before it started"));
+        return;
+      }
+      if (state !== "running")
+        return;
+      state = "done";
+      if (kind === "background") {
+        const backgroundCount = (priority.running.get(owner) ?? 1) - 1;
+        if (backgroundCount <= 0)
+          priority.running.delete(owner);
+        else
+          priority.running.set(owner, backgroundCount);
+        priority.runningTotal -= 1;
+      }
+      const count = (this.running.get(owner) ?? 1) - 1;
+      if (count <= 0)
+        this.running.delete(owner);
+      else
+        this.running.set(owner, count);
+      this.runningTotal -= 1;
+      if (kind === "background")
+        this.forgetIdleOwner(owner);
+      this.dispatch();
+    };
+    return { ready, release, detach: () => {
+      detached = true;
+    } };
+  }
+  unqueue(waiter) {
+    const priority = this.priority;
+    if (waiter.kind === "owner") {
+      const index = priority.ownerQueue.indexOf(waiter);
+      if (index < 0)
+        return;
+      priority.ownerQueue.splice(index, 1);
+      return;
+    }
+    const queue = priority.queues.get(waiter.owner);
+    const index = queue?.indexOf(waiter) ?? -1;
+    if (!queue || index < 0)
+      return;
+    queue.splice(index, 1);
+    priority.queued -= 1;
+    if (queue.length === 0) {
+      priority.queues.delete(waiter.owner);
+      this.forgetIdleOwner(waiter.owner);
+    }
+  }
+  cancelWaiting(owner, reason) {
+    const priority = this.priority;
+    if (!priority)
+      return;
+    const waiting = [...priority.queues.get(owner) ?? [], ...priority.ownerQueue.filter((waiter) => waiter.owner === owner)];
+    for (const waiter of waiting)
+      waiter.cancel(reason, false);
+  }
+  forgetIdleOwner(owner) {
+    const priority = this.priority;
+    if (!priority.queues.has(owner) && !priority.running.has(owner))
+      priority.lastServed.delete(owner);
+  }
+  backgroundMayStart(owner, enqueuedAt, at) {
+    const priority = this.priority;
+    const overdue = at - enqueuedAt >= priority.maxWaitMs;
+    if (priority.ownerQueue.length > 0 && !(overdue && priority.lastGrant === "owner"))
+      return false;
+    if ((priority.running.get(owner) ?? 0) >= 1)
+      return false;
+    const backgroundCapacity = Math.max(1, this.limits.maxRunningGlobal - 1);
+    if (priority.runningTotal >= backgroundCapacity || this.runningTotal >= this.limits.maxRunningGlobal)
+      return false;
+    return !this.interactiveBusy() || at - enqueuedAt >= priority.maxWaitMs;
+  }
+  interactiveBusy() {
+    try {
+      return this.priority?.interactive?.busy() === true;
+    } catch {
+      return false;
+    }
+  }
+  stillAuthorized(owner) {
+    if (!this.isOwnerRevoked)
+      return true;
+    try {
+      return !this.isOwnerRevoked(owner);
+    } catch {
+      return false;
+    }
+  }
+  dispatch() {
+    const priority = this.priority;
+    if (!priority)
+      return;
+    for (;; ) {
+      const at = this.now();
+      let granted;
+      if (priority.ownerQueue.length > 0 && priority.lastGrant === "owner")
+        granted = this.nextBackground(at);
+      if (!granted) {
+        for (const waiter of priority.ownerQueue) {
+          if ((this.running.get(waiter.owner) ?? 0) >= this.limits.maxRunningPerOwner)
+            continue;
+          if (this.runningTotal >= this.limits.maxRunningGlobal)
+            break;
+          granted = waiter;
+          break;
+        }
+      }
+      granted ??= this.nextBackground(at);
+      if (!granted)
+        break;
+      if (!this.stillAuthorized(granted.owner)) {
+        this.cancelWaiting(granted.owner, callerAbortError("source_answer connection revoked"));
+        continue;
+      }
+      granted.grant();
+    }
+    this.scheduleWaitCheck();
+  }
+  nextBackground(at) {
+    const priority = this.priority;
+    let granted;
+    let grantedTurn = 0;
+    for (const [owner, queue] of priority.queues) {
+      const head = queue[0];
+      if (!this.backgroundMayStart(owner, head.enqueuedAt, at))
+        continue;
+      const turn = Math.max(priority.lastServed.get(owner) ?? 0, head.tick);
+      if (granted && turn >= grantedTurn)
+        continue;
+      granted = head;
+      grantedTurn = turn;
+    }
+    return granted;
+  }
+  scheduleWaitCheck() {
+    const priority = this.priority;
+    clearTimeout(priority.timer);
+    priority.timer = undefined;
+    if (priority.queues.size === 0 || !this.interactiveBusy())
+      return;
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const queue of priority.queues.values())
+      oldest = Math.min(oldest, queue[0].enqueuedAt);
+    const delay = Math.max(0, oldest + priority.maxWaitMs - this.now());
+    priority.timer = setTimeout(() => {
+      priority.timer = undefined;
+      this.dispatch();
+    }, delay);
+    priority.timer.unref?.();
+  }
+  occupy(owner) {
+    this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
+    this.runningTotal += 1;
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      const count = (this.running.get(owner) ?? 1) - 1;
+      if (count <= 0)
+        this.running.delete(owner);
+      else
+        this.running.set(owner, count);
+      this.runningTotal -= 1;
+      this.dispatch();
+    };
+  }
+  admit(owner) {
+    if ((this.running.get(owner) ?? 0) >= this.limits.maxRunningPerOwner || this.runningTotal >= this.limits.maxRunningGlobal) {
+      throw sourceAnswerBusy();
+    }
+  }
+  bounded(result) {
+    if (!result.ok)
+      return result;
+    let bytes;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(result.value) ?? "", "utf8");
+    } catch {
+      bytes = Number.POSITIVE_INFINITY;
+    }
+    if (bytes <= this.limits.maxResultBytes)
+      return result;
+    return {
+      ok: false,
+      error: new OperationError("source_answer_too_large", "The finished answer was too large for Olympus to hold for collection.", "Ask a narrower question with source_answer.")
+    };
+  }
+  evictRetained(owner) {
+    const finished = [...this.jobs.values()].filter((job) => job.owner === owner && job.finishedAt !== undefined).sort((a, b) => a.finishedAt - b.finishedAt);
+    const owned = [...this.jobs.values()].filter((job) => job.owner === owner).length;
+    let excess = owned - this.limits.maxRetainedPerOwner;
+    for (const job of finished) {
+      if (excess <= 0)
+        break;
+      this.jobs.delete(job.id);
+      excess -= 1;
+    }
+  }
+}
+function sameOwner(a, b) {
+  const left = createHash6("sha256").update(a).digest();
+  const right = createHash6("sha256").update(b).digest();
+  return timingSafeEqual2(left, right);
+}
+function callerAbortError(message) {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+function sourceAnswerBusy() {
+  return new OperationError("source_answer_busy", "Olympus is already answering as many questions as its analyst can take at once.", "Wait for the answers in progress (call source_answer_result with their job ids) before asking another question.");
+}
+function sourceAnswerStalled(idleMs, stage) {
+  const minutes = Math.round(idleMs / 60000);
+  return new OperationError("source_answer_deadline", `The answer made no progress for ${minutes} minute${minutes === 1 ? "" : "s"}${stage ? ` while ${stage}` : ""} and was stopped.`, "Try again later; if it stops again at the same step, that part of Olympus needs attention.");
+}
+function noteSourceAnswerProgress(stage) {
+  progressSink.getStore()?.(stage);
+}
+function sourceAnswerJobOwner(caller) {
+  if (!caller)
+    return;
+  if (caller.surface === "remote")
+    return caller.connectionId ? `remote:${caller.connectionId}` : undefined;
+  if (caller.surface === "mcp")
+    return "mcp:stdio";
+  return;
+}
+function sourceAnswerJobLimitsFromEnv(env, surface) {
+  const configured = surface === "stdio" ? env.OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS : env.OLYMPUS_SOURCE_ANSWER_HANDOFF_MS;
+  const handoffMs = clampedInteger(configured, SOURCE_ANSWER_HANDOFF_MIN_MS, SOURCE_ANSWER_HANDOFF_MAX_MS) ?? (surface === "stdio" ? SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS : SOURCE_ANSWER_HANDOFF_DEFAULT_MS);
+  const resultWaitMs = Math.min(clampedInteger(env.OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS, 0, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) ?? SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS, handoffMs);
+  const maxRunningGlobal = clampedInteger(env.OLYMPUS_SOURCE_ANSWER_MAX_RUNNING, 1, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING);
+  return { handoffMs, resultWaitMs, ...maxRunningGlobal !== undefined ? { maxRunningGlobal } : {} };
+}
+function pendingResult(jobId, elapsedMs, resultWaitMs) {
+  const wait = Math.round(resultWaitMs / 1000);
+  return {
+    status: "working",
+    job_id: jobId,
+    elapsed_ms: elapsedMs,
+    next_tool: "source_answer_result",
+    message: "Olympus is still preparing this answer and it keeps running. " + `Call source_answer_result with this job_id to get it${wait > 0 ? ` (each call waits up to ${wait} s)` : ""}; ` + "repeat while it says working. Do not ask the question again."
+  };
+}
+function newJobId() {
+  for (;; ) {
+    const id = `${JOB_ID_PREFIX}${randomBytes7(32).toString("base64url")}`;
+    if (secretLabelsInText(id).length === 0)
+      return id;
+  }
+}
+function clampedInteger(value, min, max) {
+  if (value === undefined || value.trim() === "")
+    return;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed))
+    return;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_IDLE_MS, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 2, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING = 16, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 2, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER = 2, SOURCE_ANSWER_MAX_QUEUED_BACKGROUND = 8, SOURCE_ANSWER_MAX_QUEUED_OWNER = 8, SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS = 30000, SOURCE_ANSWER_MAX_RESULT_BYTES, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN, progressSink;
+var init_source_answer_jobs = __esm(() => {
+  init_operation_error();
+  init_opsec();
+  init_release_manifest();
+  SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+  SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+  SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+  JOB_ID_PATTERN = /^saj_[A-Za-z0-9_-]{43}$/;
+  progressSink = new AsyncLocalStorage2;
+});
+
+// src/core/model-stream.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+function withModelProgress(listener, work) {
+  const parent = progress.getStore();
+  return progress.run((model) => {
+    parent?.(model);
+    listener(model);
+  }, work);
+}
+async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_IDLE_TIMEOUT_MS) {
+  const controller = new AbortController;
+  let timer;
+  let rejectStopped = () => {};
+  const stopped = new Promise((_, reject) => {
+    rejectStopped = reject;
+  });
+  stopped.catch(() => {});
+  const stop = (reason) => {
+    rejectStopped(reason);
+    controller.abort(reason);
+  };
+  const follow = () => stop(init.signal?.reason);
+  const arm = () => {
+    clearTimeout(timer);
+    if (idleMs > 0)
+      timer = setTimeout(() => stop(new ModelIdleError(model, idleMs)), idleMs);
+  };
+  if (init.signal?.aborted)
+    follow();
+  else
+    init.signal?.addEventListener("abort", follow, { once: true });
+  arm();
+  progress.getStore()?.(model);
+  let reader;
+  let lastNote = -Infinity;
+  const token = () => {
+    if (Date.now() - lastNote >= 1000) {
+      lastNote = Date.now();
+      noteSourceAnswerProgress("writing the answer");
+    }
+  };
+  try {
+    const response = await Promise.race([fetchModelEndpoint(fetchImpl, url, { ...init, signal: controller.signal }), stopped]);
+    if (!response.body)
+      return response;
+    reader = response.body.getReader();
+    const sse = response.ok && response.headers.get("content-type")?.includes("text/event-stream");
+    const decoder = new TextDecoder;
+    let buffer = "";
+    let raw = "";
+    let content = "";
+    let reasoning = "";
+    let resolvedModel = model;
+    let finish;
+    let usage;
+    let timings;
+    let done = false;
+    const event = (block) => {
+      const data = block.split(`
+`).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join(`
+`);
+      if (!data)
+        return;
+      if (data.trim() === "[DONE]") {
+        done = true;
+        return;
+      }
+      const parsed = JSON.parse(data);
+      if (parsed.error || parsed.type === "error")
+        throw new Error("Model stream reported an error.");
+      resolvedModel = parsed.model ?? parsed.message?.model ?? resolvedModel;
+      usage = parsed.usage ?? usage;
+      timings = parsed.timings ?? timings;
+      const choice = parsed.choices?.[0];
+      const delta = choice?.delta;
+      const text = delta?.content ?? (parsed.type === "content_block_delta" ? parsed.delta?.text : undefined);
+      const thought = delta?.reasoning_content ?? delta?.reasoning ?? parsed.delta?.thinking;
+      if (typeof text === "string") {
+        content += text;
+        if (text)
+          token();
+      }
+      if (typeof thought === "string") {
+        reasoning += thought;
+        if (thought)
+          token();
+      }
+      finish = choice?.finish_reason ?? finish;
+      if (parsed.type === "message_stop")
+        done = true;
+    };
+    while (!done) {
+      let next;
+      try {
+        next = await Promise.race([reader.read(), stopped]);
+      } catch (error) {
+        if (!response.ok && error instanceof ModelIdleError)
+          return new Response(null, { status: response.status });
+        throw error;
+      }
+      if (next.done)
+        break;
+      if (next.value.byteLength) {
+        arm();
+        progress.getStore()?.(model);
+      }
+      const text = decoder.decode(next.value, { stream: true });
+      if (!sse) {
+        raw += text;
+        continue;
+      }
+      buffer += text;
+      buffer = buffer.replace(/\r\n/g, `
+`);
+      let end;
+      while ((end = buffer.indexOf(`
+
+`)) >= 0) {
+        event(buffer.slice(0, end));
+        buffer = buffer.slice(end + 2);
+        if (done)
+          break;
+      }
+    }
+    const tail = decoder.decode();
+    if (sse) {
+      buffer += tail;
+      if (!done && buffer.trim())
+        event(buffer);
+      if (!done && finish == null)
+        throw new Error("Model stream ended before completion.");
+      raw = JSON.stringify({
+        model: resolvedModel,
+        usage,
+        timings,
+        choices: [{ message: { content, ...reasoning ? { reasoning } : {} }, finish_reason: finish }],
+        content: [{ type: "text", text: content }]
+      });
+    } else
+      raw += tail;
+    return new Response(raw, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: { "content-type": sse ? "application/json" : response.headers.get("content-type") ?? "application/json" }
+    });
+  } catch (error) {
+    if (reader && !controller.signal.aborted)
+      throw new ModelStreamError(model);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    init.signal?.removeEventListener("abort", follow);
+    if (reader)
+      reader.cancel().catch(() => {});
+  }
+}
+var MODEL_IDLE_TIMEOUT_MS = 60000, progress, ModelStreamError, ModelIdleError;
+var init_model_stream = __esm(() => {
+  init_model_transport();
+  init_source_answer_jobs();
+  progress = new AsyncLocalStorage3;
+  ModelStreamError = class ModelStreamError extends Error {
+    model;
+    constructor(model) {
+      super(`Model ${model} stream failed before completion.`);
+      this.model = model;
+    }
+  };
+  ModelIdleError = class ModelIdleError extends Error {
+    constructor(model, idleMs) {
+      super(`Model ${model} timed out: no progress for ${idleMs}ms.`);
+      this.name = "AbortError";
+    }
+  };
+});
+
+// src/core/read-wide.ts
+function readWideEnabled() {
+  return process.env.OLYMPUS_READ_WIDE === "1";
+}
+function scoresHaveNoLeader(scores) {
+  if (scores.length < 3 || scores.some((score) => score === undefined || !Number.isFinite(score)))
+    return false;
+  const ranked = scores.slice().sort((a, b) => b - a);
+  const scale = Math.max(Math.abs(ranked[0]), Math.abs(ranked[2]), 0.000000001);
+  return ranked[0] - ranked[2] <= scale * 0.2;
+}
+function isReadWideMatch(candidate) {
+  return matchingProvenances.has(candidate.provenance) && candidate.chunks.some((chunk) => chunk.length > 0);
+}
+function markReadWidePack(pack, matches = pack.candidates) {
+  for (const candidate of matches)
+    matchingProvenances.add(candidate.provenance);
+  for (const candidate of pack.candidates)
+    wideProvenances.add(candidate.provenance);
+  return pack;
+}
+function isReadWidePack(pack) {
+  return pack.candidates.length > 0 && pack.candidates.every((candidate) => wideProvenances.has(candidate.provenance));
+}
+var READ_WIDE_MATCH_LIMIT = 60, READ_WIDE_MIN_PASSAGE_BYTES = 400, matchingProvenances, wideProvenances;
+var init_read_wide = __esm(() => {
+  matchingProvenances = new WeakSet;
+  wideProvenances = new WeakSet;
+});
+
 // node_modules/n-gram/index.js
 function nGram(n) {
   if (typeof n !== "number" || Number.isNaN(n) || n < 1 || n === Number.POSITIVE_INFINITY) {
@@ -24608,7 +25621,7 @@ var init_stopwords_iso = __esm(() => {
 });
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 function withKeywordExpansionDisabled(run) {
   return disabled.run(true, run);
 }
@@ -24649,10 +25662,10 @@ function withKeywordAlternatives(query, alternatives, run) {
 }
 var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage;
-  disabled = new AsyncLocalStorage;
-  cachedOnly = new AsyncLocalStorage;
-  requestContext = new AsyncLocalStorage;
+  context = new AsyncLocalStorage4;
+  disabled = new AsyncLocalStorage4;
+  cachedOnly = new AsyncLocalStorage4;
+  requestContext = new AsyncLocalStorage4;
 });
 
 // src/core/source-index/keyword-stopwords.ts
@@ -25515,7 +26528,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel) {
   if (!request.localOnly)
     return;
@@ -26471,7 +27484,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage2;
+  analystAbortSignalStorage = new AsyncLocalStorage5;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -26764,6 +27777,7 @@ function createOpenAICompatibleAnalystModel(options) {
       const body = {
         ...options.extraBody ?? {},
         model,
+        stream: true,
         messages: [
           { role: "system", content: request.system },
           { role: "user", content: request.prompt }
@@ -26784,15 +27798,10 @@ function createOpenAICompatibleAnalystModel(options) {
         abortFromCaller();
       else
         request.signal?.addEventListener("abort", abortFromCaller, { once: true });
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, timeoutMs);
       try {
         let response;
         try {
-          response = await fetchModelEndpoint(fetchImpl, url, {
+          response = await fetchStreamingModel(fetchImpl, url, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -26800,12 +27809,14 @@ function createOpenAICompatibleAnalystModel(options) {
             },
             body: JSON.stringify(body),
             signal: controller.signal
-          });
+          }, model, timeoutMs);
         } catch (error) {
+          if (error instanceof ModelIdleError)
+            throw new OperationError("source_index_error", error.message);
           if (error instanceof OperationError && error.code === "source_index_policy_violation")
             throw error;
           if (request.signal?.aborted)
-            throw callerAbortError(request.signal.reason);
+            throw callerAbortError2(request.signal.reason);
           if (isModelEndpointRedirectError(error)) {
             throw new OperationError("source_index_error", `${providerLabel} (${model}) answered with a redirect, which is refused.`, error.message);
           }
@@ -26820,10 +27831,7 @@ function createOpenAICompatibleAnalystModel(options) {
           data = await response.json();
         } catch (error) {
           if (request.signal?.aborted)
-            throw callerAbortError(request.signal.reason);
-          if (timedOut) {
-            throw new OperationError("source_index_error", `${providerLabel} (${model}) did not complete within ${timeoutMs}ms.`, "The endpoint returned response headers but stalled the body; falling back to local.");
-          }
+            throw callerAbortError2(request.signal.reason);
           throw new OperationError("source_index_error", `${providerLabel} (${model}) returned a non-JSON response.`, error instanceof Error ? error.message : "The endpoint did not return JSON.");
         }
         const parsed = data;
@@ -26838,13 +27846,12 @@ function createOpenAICompatibleAnalystModel(options) {
         }
         return { text, modelId: parsed.model || model };
       } finally {
-        clearTimeout(timer);
         request.signal?.removeEventListener("abort", abortFromCaller);
       }
     }
   };
 }
-function callerAbortError(reason) {
+function callerAbortError2(reason) {
   if (reason instanceof Error && reason.name === "AbortError")
     return reason;
   const error = new Error("Analyst request was cancelled.");
@@ -26866,15 +27873,16 @@ async function safeText(response) {
     return "";
   }
 }
-var DEFAULT_MODEL = "gpt-5.5", DEFAULT_BASE_URL = "https://api.openai.com/v1", DEFAULT_REASONING_EFFORT = "high", DEFAULT_SERVICE_TIER = "priority", DEFAULT_TIMEOUT_MS = 120000, MAX_REASONING_HEADROOM_TOKENS = 32768;
+var DEFAULT_MODEL = "gpt-5.5", DEFAULT_BASE_URL = "https://api.openai.com/v1", DEFAULT_REASONING_EFFORT = "high", DEFAULT_SERVICE_TIER = "priority", DEFAULT_TIMEOUT_MS = 60000, MAX_REASONING_HEADROOM_TOKENS = 32768;
 var init_analyst_openai = __esm(() => {
+  init_model_stream();
   init_operation_error();
   init_model_transport();
   init_analyst();
 });
 
 // src/core/analyst-tinfoil.ts
-import { createHash as createHash5, randomBytes as randomBytes7 } from "node:crypto";
+import { createHash as createHash7, randomBytes as randomBytes8 } from "node:crypto";
 import { readFileSync as readFileSync15 } from "node:fs";
 function readTinfoilStatus(env = process.env) {
   try {
@@ -26904,10 +27912,10 @@ function tinfoilCacheSecret(env = process.env) {
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
-      seed = randomBytes7(32).toString("hex");
+      seed = randomBytes8(32).toString("hex");
       writePrivateFileAtomicSync(path, seed);
     }
-    return createHash5("sha256").update(`olympus:tinfoil:prompt-cache:v1:${seed}`).digest("hex");
+    return createHash7("sha256").update(`olympus:tinfoil:prompt-cache:v1:${seed}`).digest("hex");
   });
 }
 function createTinfoilFetch(options) {
@@ -26965,7 +27973,8 @@ function createTinfoilFetch(options) {
       report({ state: "refused", reason });
       throw new TinfoilRefusalError(reason);
     }
-    const response = await wrapped(url, { ...init, signal });
+    const streaming = typeof init.body === "string" && JSON.parse(init.body).stream === true;
+    const response = await wrapped(url, { ...init, signal: streaming && init.signal ? init.signal : signal });
     if ([402, 403, 429].includes(response.status)) {
       const retry = normalizedRetryAfter(response.headers.get("retry-after"));
       if (retry)
@@ -27071,7 +28080,7 @@ var init_analyst_tinfoil = __esm(() => {
 });
 
 // src/core/provider-account-identity.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 function isAccountBoundProvider(provider) {
   return ACCOUNT_BOUND_PROVIDERS.includes(provider);
 }
@@ -27080,14 +28089,14 @@ function dropboxAccountIdFromTokenPayload(payload) {
   return DROPBOX_ACCOUNT_ID.test(value) ? value : undefined;
 }
 function googleAccountIdFromAddress(address) {
-  return `google:${createHash6("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 40)}`;
+  return `google:${createHash8("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 40)}`;
 }
 function googleSubjectLabel(subject) {
-  return `google-sub:${createHash6("sha256").update(`sub
+  return `google-sub:${createHash8("sha256").update(`sub
 ${subject.trim()}`).digest("hex").slice(0, 32)}`;
 }
 function googlePermissionLabel(permissionId) {
-  return `google-perm:${createHash6("sha256").update(`perm
+  return `google-perm:${createHash8("sha256").update(`perm
 ${permissionId.trim()}`).digest("hex").slice(0, 32)}`;
 }
 function composeProviderAccountId(labels) {
@@ -27700,7 +28709,7 @@ var init_worker_auth = __esm(() => {
 });
 
 // src/core/worker-service.ts
-import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync9, lstatSync as lstatSync14, mkdirSync as mkdirSync7, openSync as openSync7, readFileSync as readFileSync18, readSync, rmSync as rmSync3, statSync as statSync7, writeFileSync as writeFileSync4 } from "node:fs";
+import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync9, lstatSync as lstatSync14, mkdirSync as mkdirSync7, openSync as openSync7, readFileSync as readFileSync18, readSync, rmSync as rmSync3, statSync as statSync7, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir13, platform as osPlatform, tmpdir } from "node:os";
 import { basename as basename2, dirname as dirname17, isAbsolute as isAbsolute11, join as join21, relative as relative6, sep as sep8 } from "node:path";
 import { spawnSync as spawnSync7 } from "node:child_process";
@@ -27948,7 +28957,7 @@ function holdLinuxWorkerStopped(options) {
   const paths = workerServicePaths("linux", options.homeDir);
   const hold = workerUpgradeHoldPath(paths.unitPath);
   mkdirSync7(dirname17(hold), { recursive: true, mode: 448 });
-  writeFileSync4(hold, `${process.pid}
+  writeFileSync5(hold, `${process.pid}
 `, { mode: 384 });
   const release = () => rmSync3(hold, { force: true });
   try {
@@ -28587,7 +29596,7 @@ var init_worker_service = __esm(() => {
 });
 
 // src/core/oauth-relay.ts
-import { createHmac as createHmac3, randomBytes as randomBytes8, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 function oauthRelayUrl(env = process.env) {
   const override = env.OLYMPUS_OAUTH_RELAY_URL?.trim();
   if (!override)
@@ -28622,10 +29631,10 @@ function googlePublisherExchangeRefreshUrl(env = process.env) {
   return `${googlePublisherExchangeUrl(env)}/refresh`;
 }
 function createOAuthRelayNonce() {
-  return randomBytes8(32).toString("base64url");
+  return randomBytes9(32).toString("base64url");
 }
 function createOAuthRelayStateKey() {
-  return randomBytes8(32).toString("base64url");
+  return randomBytes9(32).toString("base64url");
 }
 function createOAuthRelayStateKeys() {
   return { current: createOAuthRelayStateKey() };
@@ -28747,7 +29756,7 @@ function constantTimeEquals(left, right) {
   const b = Buffer.from(right, "utf8");
   if (a.length !== b.length)
     return false;
-  return timingSafeEqual2(a, b);
+  return timingSafeEqual3(a, b);
 }
 function refuse(reason) {
   return { ok: false, reason };
@@ -28908,7 +29917,7 @@ var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_JWT_B
 var init_google_service_account = () => {};
 
 // src/workers/credential-broker/index.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 import { mkdir as mkdir2, readFile } from "node:fs/promises";
 import { dirname as dirname18 } from "node:path";
 function isCredentialProvider(value) {
@@ -28956,7 +29965,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest = createHash7("sha256").update(handle).digest("hex");
+    const digest = createHash9("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest}`;
   }
   async save(handle, state) {
@@ -29655,7 +30664,7 @@ function bearerSessionFromMintedToken(options) {
 }
 function mintedSessionCacheKey(namespace, definition, capability, env) {
   const envRefreshToken = firstNonEmptyEnv(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
-  const envGrant = envRefreshToken ? createHash7("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  const envGrant = envRefreshToken ? createHash9("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
   return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
 ${envGrant}`;
 }
@@ -30744,7 +31753,7 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync19 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
 import { dirname as dirname19, join as join22 } from "node:path";
@@ -30775,7 +31784,7 @@ async function withConnectedHandleGrantCustody(registryPath, options, mutation) 
         throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
       }
       if (options.advanceEpoch === true) {
-        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID4() }, null, 2)}
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID5() }, null, 2)}
 `);
       }
       return await mutation();
@@ -31656,8 +32665,8 @@ var init_provider_account_history = __esm(() => {
 // src/core/connect.ts
 import { Buffer as Buffer2 } from "node:buffer";
 import { spawn as spawn2 } from "node:child_process";
-import { createHash as createHash8, randomBytes as randomBytes9 } from "node:crypto";
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync22, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { createHash as createHash10, randomBytes as randomBytes10 } from "node:crypto";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync22, rmSync as rmSync4, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer } from "node:http";
 import { homedir as homedir15 } from "node:os";
 import { dirname as dirname21, join as join24 } from "node:path";
@@ -31893,11 +32902,11 @@ async function finishOAuthSourceConnection(options) {
   }
 }
 function createOAuthPkceState() {
-  const verifier = base64Url2(randomBytes9(32));
+  const verifier = base64Url2(randomBytes10(32));
   return {
     verifier,
-    challenge: base64Url2(createHash8("sha256").update(verifier).digest()),
-    state: base64Url2(randomBytes9(24))
+    challenge: base64Url2(createHash10("sha256").update(verifier).digest()),
+    state: base64Url2(randomBytes10(24))
   };
 }
 function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPkceState()) {
@@ -33140,7 +34149,7 @@ function sanitizeDetachedOAuthState(input) {
 }
 function writePrivateJson(path, value) {
   mkdirSync9(dirname21(path), { recursive: true, mode: 448 });
-  writeFileSync5(path, `${JSON.stringify(value, null, 2)}
+  writeFileSync6(path, `${JSON.stringify(value, null, 2)}
 `, { mode: 384 });
 }
 function safeStatePathSegment(value) {
@@ -34640,11 +35649,11 @@ var init_control_path_headroom = __esm(() => {
 });
 
 // src/workers/source-index/pinned-download.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 import { closeSync as closeSync10, createReadStream, existsSync as existsSync16, openSync as openSync10, renameSync as renameSync2, rmSync as rmSync6, statSync as statSync9, writeSync as writeSync2 } from "node:fs";
 async function downloadPinnedFile(options) {
   const { fetchImpl, url, target, partial, expectedBytes, algorithm, encoding, noun, stallMs, error } = options;
-  let hash = createHash9(algorithm);
+  let hash = createHash11(algorithm);
   let received = 0;
   let fd;
   let discard = false;
@@ -34716,7 +35725,7 @@ async function downloadPinnedFile(options) {
           } catch (cause) {
             throw disk(cause);
           }
-          hash = createHash9(algorithm);
+          hash = createHash11(algorithm);
           options.onProgress(-received);
           received = 0;
         }
@@ -35065,7 +36074,7 @@ var init_zip = () => {};
 
 // src/workers/source-index/built-in-embedding/assets.ts
 import { isMainThread as isMainThread2 } from "node:worker_threads";
-import { createHash as createHash10, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash12, randomUUID as randomUUID6 } from "node:crypto";
 import {
   closeSync as closeSync11,
   createReadStream as createReadStream2,
@@ -35076,7 +36085,7 @@ import {
   renameSync as renameSync3,
   rmSync as rmSync7,
   statSync as statSync10,
-  writeFileSync as writeFileSync6,
+  writeFileSync as writeFileSync7,
   writeSync as writeSync3
 } from "node:fs";
 import { basename as basename4, dirname as dirname26, isAbsolute as isAbsolute13, join as join29 } from "node:path";
@@ -35152,7 +36161,7 @@ function reportBuiltInEmbeddingVision(vision, options = {}) {
     mkdirSync12(root, { recursive: true, mode: 448 });
     const path = join29(root, "vision.json");
     temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync6(temporary, `${JSON.stringify({
+    writeFileSync7(temporary, `${JSON.stringify({
       modelId: model.modelId,
       vision,
       checkedAt: (options.now?.() ?? new Date).toISOString()
@@ -35338,7 +36347,7 @@ async function liteRtLibraryIntact(runtimeDir, wheel) {
   return expected !== undefined && await sha256File(join29(runtimeDir, basename4(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID5()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID6()}`;
   ensureDirectory(staging);
   try {
     const archivePath = join29(staging, wheel.name);
@@ -35350,14 +36359,14 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
     const library = readZipEntry(readFileSync24(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
-    writeFileSync6(join29(staging, basename4(wheel.library)), library, { mode: 493 });
+    writeFileSync7(join29(staging, basename4(wheel.library)), library, { mode: 493 });
     rmSync7(archivePath, { force: true });
     const marker = {
       wheel: wheel.name,
       sha256: wheel.sha256,
-      librarySha256: createHash10("sha256").update(library).digest("hex")
+      librarySha256: createHash12("sha256").update(library).digest("hex")
     };
-    writeFileSync6(join29(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync7(join29(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync7(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -35410,7 +36419,7 @@ function runtimeInstalled(runtimeDir, packages) {
   }
 }
 async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID5()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID6()}`;
   ensureDirectory(staging);
   try {
     for (const pack of packages) {
@@ -35428,14 +36437,14 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
       for (const file of files) {
         const target = join29(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
         ensureDirectory(dirname26(target));
-        writeFileSync6(target, file.data, { mode: file.mode & 493 || 420 });
+        writeFileSync7(target, file.data, { mode: file.mode & 493 || 420 });
       }
       rmSync7(archivePath, { force: true });
     }
     const marker = {
       packages: packages.map((pack) => ({ name: pack.name, integrity: pack.integrity }))
     };
-    writeFileSync6(join29(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync7(join29(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync7(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -35460,7 +36469,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     fetchImpl,
     url,
     target,
-    partial: `${target}.partial-${process.pid}-${randomUUID5()}`,
+    partial: `${target}.partial-${process.pid}-${randomUUID6()}`,
     expectedBytes,
     algorithm,
     digest: expected.kind === "sha256" ? expected.expected : expected.expected.slice(algorithm.length + 1),
@@ -35483,7 +36492,7 @@ function integrityAlgorithm(integrity) {
 }
 function sha256File(path, timeoutMs = 10 * 60000) {
   return new Promise((resolve, reject) => {
-    const hash = createHash10("sha256");
+    const hash = createHash12("sha256");
     let settled = false;
     const stream = createReadStream2(path);
     const finish = (error) => {
@@ -35629,7 +36638,7 @@ class ProgressReporter {
     try {
       mkdirSync12(dirname26(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync6(temporary, `${JSON.stringify(this.status)}
+      writeFileSync7(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
       renameSync3(temporary, this.statusPath);
     } catch {}
@@ -35658,7 +36667,7 @@ var init_assets = __esm(() => {
 
 // src/core/still-image-readiness.ts
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { mkdtempSync, readFileSync as readFileSync25, rmSync as rmSync8, writeFileSync as writeFileSync7 } from "node:fs";
+import { mkdtempSync, readFileSync as readFileSync25, rmSync as rmSync8, writeFileSync as writeFileSync8 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { join as join30 } from "node:path";
 function spawnRun(command, args, timeoutMs) {
@@ -35706,7 +36715,7 @@ function probeStillImageReadiness(options = {}) {
       const inputPath = join30(directory, `probe-${format}${stillImageFileExtension(format)}`);
       const outputPath = join30(directory, `probe-${format}.jpg`);
       try {
-        writeFileSync7(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
+        writeFileSync8(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
         const result = run(preparer.command, preparer.decodeArgs(inputPath, outputPath), timeoutMs);
         decoded[format] = result.ok && looksLikeDecodedFixture(new Uint8Array(readFileSync25(outputPath)), format);
       } catch {
@@ -38517,7 +39526,7 @@ var init_sqlite_migrations = __esm(() => {
 });
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text = input.text?.trim() ?? "";
   if (!text) {
@@ -38586,7 +39595,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash11("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash13("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-10-13", REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -38620,7 +39629,7 @@ var init_content_policy = __esm(() => {
 });
 
 // src/workers/classification/engine.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 function classifyItemTier(input, options = {}) {
   const haystack = buildHaystack(input);
   const sensitive = detectSensitiveSignals(input, haystack);
@@ -38737,7 +39746,7 @@ function rememberSecretFindingKinds(text, kinds) {
     rememberScan(key, [...new Set(kinds)].filter((kind) => SECRET_FINDING_TYPES.has(kind)).sort());
 }
 function secretScanMemoKey(text) {
-  return secretScanReusable(text) ? createHash12("sha256").update(text).digest("hex") : undefined;
+  return secretScanReusable(text) ? createHash14("sha256").update(text).digest("hex") : undefined;
 }
 function rememberScan(key, kinds) {
   secretScanMemo ??= new Map;
@@ -39309,7 +40318,7 @@ function isBareShareLink(text) {
 }
 
 // src/workers/classification/tier-classifier.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 function tierRank(tier) {
   return TIER_RANK[tier];
 }
@@ -39344,14 +40353,14 @@ function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
 }
 function contentDigestReason(text) {
-  return `content:sha256:${createHash13("sha256").update(text.trim()).digest("hex")}`;
+  return `content:sha256:${createHash15("sha256").update(text.trim()).digest("hex")}`;
 }
 function contentJudgeVerdictReason(reason, tier, digest) {
-  return `content:judge_verdict:${tier}:${createHash13("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
+  return `content:judge_verdict:${tier}:${createHash15("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
 }
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
-  return `content:names:${createHash13("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
+  return `content:names:${createHash15("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
 }
 function snifferContentMaterial(names, excerpt, parentContext) {
   const trimmed = names.trim();
@@ -39383,7 +40392,7 @@ function splitParentContext(material) {
 }
 function tierSnifferInputHash(pass, signals, text, parentContext) {
   const context = parentContext?.replace(/\s+/g, " ").trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
-  return createHash13("sha256").update(JSON.stringify([
+  return createHash15("sha256").update(JSON.stringify([
     pass,
     signals.title ?? null,
     signals.path ?? null,
@@ -39420,7 +40429,7 @@ function textOnlyMime(mimeType) {
   return mimeType === undefined || ["text/plain", "text/markdown", "message/rfc822"].includes(mimeType.split(";")[0].trim().toLowerCase());
 }
 function normalizedContentHash(text) {
-  return createHash13("sha256").update(text.normalize("NFC").replace(/\r\n?/g, `
+  return createHash15("sha256").update(text.normalize("NFC").replace(/\r\n?/g, `
 `).trim()).digest("hex");
 }
 function frontMatterMarksPrivate(text) {
@@ -40048,7 +41057,7 @@ var init_tier_classifier = __esm(() => {
 
 // src/workers/classification/secret-locations.ts
 import { Database } from "bun:sqlite";
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 import { chmodSync as chmodSync5, closeSync as closeSync12, existsSync as existsSync22, mkdirSync as mkdirSync14, openSync as openSync12 } from "node:fs";
 import { dirname as dirname28 } from "node:path";
 function screenedSecretLocator(locator) {
@@ -40095,7 +41104,7 @@ class SecretLocationsIndex {
     const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
     const locator = screenedSecretLocator(input.locator);
     const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash14("sha256").update(input.text, "utf8").digest("hex") : null;
+    const contentHash = input.text !== undefined ? createHash16("sha256").update(input.text, "utf8").digest("hex") : null;
     const existing = this.get(input.identity);
     if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
       return false;
@@ -40215,10 +41224,10 @@ class SecretLocationsIndex {
   }
 }
 function secretLocationFingerprint(location) {
-  return createHash14("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
+  return createHash16("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
 }
 function secretLocationRef(location) {
-  return `secret:${createHash14("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+  return `secret:${createHash16("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
 }
 function secretLocationWithinScope(location, scope) {
   if (scope.accountScope && location.accountScope !== scope.accountScope)
@@ -40392,15 +41401,15 @@ function* iterateRows(db, sql, ...params) {
 
 // src/workers/classification/sniffer-store.ts
 import { Database as Database2 } from "bun:sqlite";
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 import { chmodSync as chmodSync6, existsSync as existsSync23, mkdirSync as mkdirSync15 } from "node:fs";
 import { dirname as dirname29 } from "node:path";
 function snifferMaterialHash(pass, material) {
-  return createHash15("sha256").update(`${pass}
+  return createHash17("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 function snifferSubjectKey(subject) {
-  return createHash15("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
+  return createHash17("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
 }
 function contentVerdictReusable(verdict, contentHash, subject) {
   return !verdict.failSafe && (verdict.contentHash === contentHash || subject !== undefined && verdict.modelSubject === snifferSubjectKey(subject));
@@ -40905,7 +41914,7 @@ var SQLITE_MMAP_BYTES = 2147418112;
 
 // src/workers/classification/tier-ledger.ts
 import { Database as Database3 } from "bun:sqlite";
-import { randomUUID as randomUUID6 } from "node:crypto";
+import { randomUUID as randomUUID7 } from "node:crypto";
 import { chmodSync as chmodSync7, closeSync as closeSync13, existsSync as existsSync24, mkdirSync as mkdirSync16, openSync as openSync13, statSync as statSync11 } from "node:fs";
 import { dirname as dirname30 } from "node:path";
 function isFailSafeMissingContentQuestion(reason) {
@@ -42142,7 +43151,7 @@ class TierLedger {
       if (cleared && before && settled && !this.itemIsSecret(identity) && before.metadataTier !== "secrets" && before.contentTier !== "secrets") {
         const generation = settled.state === "moving" ? settled.generation + 1 : settled.generation;
         this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
-          id: randomUUID6(),
+          id: randomUUID7(),
           generation,
           landing: settled.state === "moving",
           historyPk: this.latestHistoryPk(identity),
@@ -44889,23 +45898,23 @@ var init_tier_set_binding = __esm(() => {
 });
 
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 function withSourceIndexReadProgress(report, run) {
-  return progress.run(report, run);
+  return progress2.run(report, run);
 }
 function noteSourceIndexReadProgress() {
-  const report = progress.getStore();
+  const report = progress2.getStore();
   if (!report)
     return;
   report();
 }
-var progress;
+var progress2;
 var init_read_progress = __esm(() => {
-  progress = new AsyncLocalStorage3;
+  progress2 = new AsyncLocalStorage6;
 });
 
 // src/core/limit-stops.ts
-import { createHash as createHash16 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 function registerLimit(input) {
   const prior = limits.get(input.id);
   if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
@@ -44990,7 +45999,7 @@ function limitStopSubjects(stop) {
   return [stop.subject];
 }
 function limitStopReference(stop) {
-  return "limit:" + createHash16("sha256").update(stop.id).update("\x00").update(stop.subject).digest("hex");
+  return "limit:" + createHash18("sha256").update(stop.id).update("\x00").update(stop.subject).digest("hex");
 }
 function installLimitStopHooks(hooks) {
   stopHooks = hooks;
@@ -45095,12 +46104,12 @@ var init_owner_limit_settings = __esm(() => {
 });
 
 // src/core/source-size-limits.ts
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 function sourceSizeLimitForProvider(provider) {
   return SOURCE_SIZE_LIMITS.find((limit) => limit.providers.includes(provider));
 }
 function sizeHeldItemKey(ref) {
-  return createHash17("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
+  return createHash19("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
 }
 function sourceSizeBytes(policy, ref, now = new Date, fallback = policy.defaultBytes) {
   return Math.min(sourceSizeCeiling(policy, ref?.mimeType), readOwnerLimitOverride(policy.id, now, undefined, ref ? sizeHeldItemKey(ref) : undefined) ?? fallback);
@@ -45481,8 +46490,8 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
-import { createHash as createHash18 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { createHash as createHash20 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -46288,7 +47297,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash18("sha256").update(value).digest("hex");
+  return createHash20("sha256").update(value).digest("hex");
 }
 function memoizeQueryEmbeddings(provider) {
   const queries = new Map;
@@ -46331,7 +47340,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage4;
+  priorityQueryEmbedding = new AsyncLocalStorage7;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -46532,792 +47541,6 @@ var init_vector_digest = __esm(() => {
   init_embeddings();
 });
 
-// src/core/release-manifest.ts
-import { createHash as createHash19 } from "node:crypto";
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-function chunkCoverageNote(result) {
-  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
-}
-async function checkReleaseChunks(check, inputs, options) {
-  try {
-    const result = await check?.chunks?.(inputs, options);
-    if (result && result.allowed.length === inputs.length)
-      return result;
-  } catch {}
-  return {
-    allowed: inputs.map(() => []),
-    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
-    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
-  };
-}
-function passagesWithheldAtReleasableTiers(inputs, verdicts, report) {
-  return inputs.reduce((total, input, index) => {
-    const verdict = verdicts[index];
-    if (input.layer === "names" || !verdict)
-      return total;
-    const releasable = verdict.tier === "public_or_personal" || verdict.tier === "legacy" && !input.privateAtAnswer;
-    if (!releasable)
-      return total;
-    const hashes = new Set(input.chunkHashes ?? []);
-    const allowed = verdict.tier === "legacy" ? 0 : (report.allowed[index] ?? []).filter((hash) => hashes.has(hash)).length;
-    return total + Math.max(0, Math.max(1, hashes.size) - allowed);
-  }, 0);
-}
-async function recheckSearchEvidence(raw, manifests, check) {
-  const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
-  if (!evidence.length)
-    return { raw, withheldAfter: false };
-  const inputs = manifests.flatMap((manifest) => manifest.inputs);
-  let report;
-  let verdicts = [];
-  try {
-    if (check && manifests.length) {
-      report = await checkReleaseChunks(check, inputs);
-      verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    }
-  } catch {}
-  const cleared = (index) => {
-    const input = inputs[index];
-    const verdict = verdicts[index];
-    return !!verdict && !verdict.gone && (input.layer === "names" ? ["public_or_personal", "legacy"].includes(verdict.tier) : verdict.tier === "public_or_personal" && !!input.chunkHashes?.length && input.chunkHashes.every((hash) => report?.allowed[index]?.includes(hash)));
-  };
-  const held = (index) => {
-    const input = inputs[index];
-    if (input.layer === "names")
-      return 0;
-    const hashes = new Set(input.chunkHashes ?? []);
-    return Math.max(1, hashes.size) - [...hashes].filter((hash) => report?.allowed[index]?.includes(hash)).length;
-  };
-  const parentsCleared = inputs.every((input, index) => input.dependency !== "parent_label" || cleared(index));
-  let droppedOtherwise = 0;
-  const kept = evidence.filter((value) => {
-    if (!value || typeof value !== "object") {
-      droppedOtherwise += 1;
-      return false;
-    }
-    const hit = value;
-    const matches = inputs.flatMap((input, index) => input.dependency !== "parent_label" && input.corpusId === hit.corpus_id && input.provider === hit.provider && input.accountScope === hit.account_scope && input.providerItemId === hit.provider_item_id && input.providerConversationId === hit.provider_conversation_id ? [index] : []);
-    const textBound = hit.excerpt === undefined || hit.excerpt === "" || typeof hit.excerpt === "string" && matches.some((index) => inputs[index].layer !== "names" && inputs[index].releasedTextDigest === releasedTextDigest(hit.excerpt));
-    if (parentsCleared && matches.length > 0 && matches.every(cleared) && textBound)
-      return true;
-    if (!report || !matches.some((index) => held(index) > 0))
-      droppedOtherwise += 1;
-    return false;
-  });
-  const dropped = evidence.length - kept.length;
-  if (!dropped)
-    return { raw, withheldAfter: false };
-  const coverage = raw.coverage && typeof raw.coverage === "object" ? raw.coverage : {};
-  const note = report && chunkCoverageNote(report);
-  const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
-  const withheld = typeof raw.withheld === "number" && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
-  return { raw: {
-    ...raw,
-    evidence: kept,
-    withheld: withheld + (report?.withheldPassages ?? 0) + droppedOtherwise,
-    ...note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}
-  }, withheldAfter: true };
-}
-function bindReleaseChunks(provenance, chunks, hashes) {
-  chunkProvenance.set(provenance, chunks.map((text, index) => ({ text, hashes: hashes[index] ?? [] })));
-}
-function copyReleaseChunks(from, into) {
-  const chunks = chunkProvenance.get(from);
-  if (chunks)
-    chunkProvenance.set(into, chunks);
-}
-function releasePassageHashes(provenance, text) {
-  return [...new Set((chunkProvenance.get(provenance) ?? []).filter((entry) => entry.text.includes(text)).flatMap((entry) => entry.hashes))];
-}
-function isUnprovedPassageMarker(hash) {
-  return hash.startsWith(UNPROVED_PASSAGE);
-}
-function releaseCandidateHashes(candidate, options = {}) {
-  const mapped = candidate.chunks.map((text) => releasePassageHashes(candidate.provenance, text));
-  const unmapped = options.holdUnmapped && mapped.some((hashes) => hashes.length > 0) ? mapped.filter((hashes) => hashes.length === 0).length + (candidate.tables?.length ?? 0) + (candidate.facts?.length ?? 0) : 0;
-  return [...new Set(mapped.flat()), ...Array.from({ length: unmapped }, (_, index) => `${UNPROVED_PASSAGE}${index}`)];
-}
-function releasedTextDigest(text) {
-  return createHash19("sha256").update(text).digest("hex");
-}
-function createReleaseManifestSink() {
-  return { manifests: [] };
-}
-function runWithReleaseManifestSink(sink, fn) {
-  return storage.run(sink, fn);
-}
-function currentReleaseManifestSink() {
-  return storage.getStore();
-}
-function recordReleaseManifest(manifest) {
-  storage.getStore()?.manifests.push({
-    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
-    constraints: { ...manifest.constraints }
-  });
-}
-function adoptReleaseManifests(into, from) {
-  into.manifests.push(...from.manifests);
-}
-function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
-  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
-  const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
-  if (input.layer === "names")
-    return !privateNow || input.privateAtAnswer && authorized;
-  return !privateNow || authorized;
-}
-async function answerReleaseWithheldReasonOffThread(manifests, check, ceiling = "private", options = {}) {
-  try {
-    const inputs = manifests.flatMap((manifest) => manifest.inputs);
-    const report = options.chunks ? await checkReleaseChunks(check, inputs) : undefined;
-    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    const reason = answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
-    if (reason)
-      return reason;
-    if (report && passagesWithheldAtReleasableTiers(inputs, verdicts, report) > 0)
-      return ANSWER_RELEASE_UNVERIFIED;
-    return;
-  } catch {
-    return ANSWER_RELEASE_UNVERIFIED;
-  }
-}
-function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
-  if (manifests.length === 0)
-    return ANSWER_RELEASE_UNVERIFIED;
-  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
-  const inputs = entries.map(({ input }) => input);
-  try {
-    const verdicts = check.inputs(inputs);
-    if (verdicts.length !== inputs.length)
-      return ANSWER_RELEASE_UNVERIFIED;
-    const postureNow = check.secureDerivativeDefault();
-    for (const [index, verdict] of verdicts.entries()) {
-      if (verdict.tier === "unknown" || verdict.gone)
-        return ANSWER_RELEASE_UNVERIFIED;
-      if (verdict.tier === "secret")
-        return ANSWER_RELEASE_UNVERIFIED;
-      const { input, constraints } = entries[index];
-      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
-        return ANSWER_BECAME_PRIVATE;
-      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
-        return "Olympus withheld this answer because current settings require approval for Private content.";
-      }
-    }
-  } catch {
-    return ANSWER_RELEASE_UNVERIFIED;
-  }
-  return;
-}
-function isWithheldSourceAnswer(result) {
-  return withheldAnswers.has(result);
-}
-function withheldSourceAnswer(reason) {
-  const result = { answer: reason, evidence: [] };
-  withheldAnswers.add(result);
-  return result;
-}
-var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000, chunkProvenance, UNPROVED_PASSAGE = "unproved:", storage, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
-var init_release_manifest = __esm(() => {
-  chunkProvenance = new WeakMap;
-  storage = new AsyncLocalStorage5;
-  withheldAnswers = new WeakSet;
-});
-
-// src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-import { createHash as createHash20, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
-
-class SourceAnswerJobRegistry {
-  limits;
-  now;
-  isOwnerRevoked;
-  jobs = new Map;
-  running = new Map;
-  runningTotal = 0;
-  priority;
-  constructor(options = {}) {
-    const limits = {
-      handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
-      resultWaitMs: SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
-      ttlMs: SOURCE_ANSWER_JOB_TTL_MS,
-      idleMs: SOURCE_ANSWER_JOB_IDLE_MS,
-      maxRunningPerOwner: SOURCE_ANSWER_MAX_RUNNING_PER_OWNER,
-      maxRunningGlobal: SOURCE_ANSWER_MAX_RUNNING_GLOBAL,
-      maxRetainedPerOwner: SOURCE_ANSWER_MAX_RETAINED_PER_OWNER,
-      maxResultBytes: SOURCE_ANSWER_MAX_RESULT_BYTES,
-      ...options.limits
-    };
-    limits.maxRunningPerOwner = Math.min(limits.maxRunningPerOwner, limits.maxRunningGlobal);
-    this.limits = limits;
-    this.now = options.now ?? Date.now;
-    this.isOwnerRevoked = options.isOwnerRevoked;
-    const priority = options.priority;
-    this.priority = priority ? {
-      isBackground: priority.isBackground,
-      interactive: priority.interactive,
-      maxQueuedPerOwner: Math.max(0, priority.maxQueuedPerOwner ?? SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER),
-      maxQueuedTotal: Math.max(0, priority.maxQueuedTotal ?? SOURCE_ANSWER_MAX_QUEUED_BACKGROUND),
-      maxWaitMs: Math.max(0, priority.maxWaitMs ?? SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS),
-      queues: new Map,
-      ownerQueue: [],
-      maxOwnerQueued: SOURCE_ANSWER_MAX_QUEUED_OWNER,
-      lastGrant: undefined,
-      lastServed: new Map,
-      ticks: 0,
-      queued: 0,
-      running: new Map,
-      runningTotal: 0,
-      timer: undefined
-    } : undefined;
-    priority?.interactive?.onIdle(() => this.dispatch());
-  }
-  async run(scope, work) {
-    this.sweep();
-    const startedAt = this.now();
-    const controller = new AbortController;
-    const turn = this.priority?.isBackground(scope.owner) ? this.enqueue(scope, controller.signal, "background") : this.ownerMustWait(scope.owner) ? this.enqueue(scope, controller.signal, "owner") : undefined;
-    if (!turn)
-      this.admit(scope.owner);
-    const release = turn ? turn.release : this.occupy(scope.owner);
-    const callerManifests = currentReleaseManifestSink();
-    const jobManifests = callerManifests ? createReleaseManifestSink() : undefined;
-    let lastProgressAt = startedAt;
-    let lastStage;
-    const onProgress = (stage) => {
-      lastProgressAt = this.now();
-      lastStage = stage;
-    };
-    let pending;
-    try {
-      const start = turn ? () => progressSink.run(onProgress, () => turn.ready.then(() => work(controller.signal))) : () => progressSink.run(onProgress, () => work(controller.signal));
-      pending = jobManifests ? runWithReleaseManifestSink(jobManifests, start) : start();
-    } catch (error) {
-      release();
-      throw error;
-    }
-    const outcome = pending.then((value) => ({ ok: true, value }), (error) => ({ ok: false, error }));
-    let timer;
-    const handoff = new Promise((resolve) => {
-      timer = setTimeout(() => resolve("handoff"), this.limits.handoffMs);
-    });
-    const first = await Promise.race([outcome, handoff]);
-    clearTimeout(timer);
-    if (first !== "handoff") {
-      release();
-      if (callerManifests && jobManifests)
-        adoptReleaseManifests(callerManifests, jobManifests);
-      if (first.ok)
-        return first.value;
-      throw first.error;
-    }
-    turn?.detach();
-    scope.detachFromClient?.();
-    let wake;
-    const job = {
-      anonymousAsk: scope.anonymousAsk === true,
-      id: newJobId(),
-      owner: scope.owner,
-      startedAt,
-      done: new Promise((resolve) => {
-        wake = resolve;
-      }),
-      finish: (result) => {
-        if (job.outcome)
-          return;
-        clearTimeout(job.deadline);
-        job.outcome = this.bounded(result);
-        job.finishedAt = this.now();
-        release();
-        wake();
-      },
-      abort: (reason) => controller.abort(reason),
-      ...jobManifests ? { releaseManifests: jobManifests } : {}
-    };
-    const idleCheck = () => {
-      const quietMs = this.now() - lastProgressAt;
-      if (quietMs < this.limits.idleMs) {
-        job.deadline = setTimeout(idleCheck, this.limits.idleMs - quietMs);
-        job.deadline.unref?.();
-        return;
-      }
-      job.abort(callerAbortError2("source_answer job stopped making progress"));
-      job.finish({ ok: false, error: sourceAnswerStalled(this.limits.idleMs, lastStage) });
-    };
-    job.deadline = setTimeout(idleCheck, Math.max(0, this.limits.idleMs - (this.now() - lastProgressAt)));
-    job.deadline.unref?.();
-    outcome.then((result) => job.finish(result));
-    this.jobs.set(job.id, job);
-    this.evictRetained(scope.owner);
-    return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
-  }
-  isAnonymousAsk(owner, jobId) {
-    const job = typeof jobId === "string" ? this.jobs.get(jobId) : undefined;
-    return job?.anonymousAsk === true && sameOwner(job.owner, owner);
-  }
-  async result(owner, jobId, signal) {
-    this.sweep();
-    const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
-    if (!job || !sameOwner(job.owner, owner))
-      throw sourceAnswerJobNotFound();
-    if (!job.outcome && this.limits.resultWaitMs > 0) {
-      let timer;
-      let onAbort;
-      const stop = new Promise((resolve) => {
-        timer = setTimeout(resolve, this.limits.resultWaitMs);
-        if (signal) {
-          onAbort = () => resolve();
-          if (signal.aborted)
-            resolve();
-          else
-            signal.addEventListener("abort", onAbort, { once: true });
-        }
-      });
-      await Promise.race([job.done, stop]);
-      clearTimeout(timer);
-      if (signal && onAbort)
-        signal.removeEventListener("abort", onAbort);
-    }
-    if (!this.jobs.has(job.id))
-      throw sourceAnswerJobNotFound();
-    if (!job.outcome)
-      return pendingResult(job.id, this.now() - job.startedAt, this.limits.resultWaitMs);
-    if (job.outcome.ok) {
-      const collecting = currentReleaseManifestSink();
-      if (collecting && job.releaseManifests)
-        adoptReleaseManifests(collecting, job.releaseManifests);
-      return job.outcome.value;
-    }
-    throw job.outcome.error;
-  }
-  whenFinished(owner, jobId) {
-    const job = typeof jobId === "string" && JOB_ID_PATTERN.test(jobId) ? this.jobs.get(jobId) : undefined;
-    if (!job || !sameOwner(job.owner, owner))
-      return;
-    return job.done.then(() => {
-      const outcome = job.outcome;
-      return outcome?.ok ? { ok: true, value: outcome.value, releaseManifests: [...job.releaseManifests?.manifests ?? []] } : { ok: false };
-    });
-  }
-  dropOwner(owner) {
-    this.cancelWaiting(owner, callerAbortError2("source_answer connection revoked"));
-    for (const [id, job] of this.jobs) {
-      if (!sameOwner(job.owner, owner))
-        continue;
-      this.jobs.delete(id);
-      job.abort(callerAbortError2("source_answer connection revoked"));
-      job.finish({ ok: false, error: sourceAnswerJobNotFound() });
-    }
-    this.dispatch();
-  }
-  sweep() {
-    const now = this.now();
-    const owners = new Map;
-    const revoked = (owner) => {
-      let known = owners.get(owner);
-      if (known === undefined) {
-        try {
-          known = this.isOwnerRevoked?.(owner) === true;
-        } catch {
-          known = false;
-        }
-        owners.set(owner, known);
-      }
-      return known;
-    };
-    for (const [id, job] of this.jobs) {
-      if (job.finishedAt !== undefined && now - job.finishedAt >= this.limits.ttlMs) {
-        this.jobs.delete(id);
-        continue;
-      }
-      if (this.isOwnerRevoked && revoked(job.owner))
-        this.dropOwner(job.owner);
-    }
-    const priority = this.priority;
-    if (priority && this.isOwnerRevoked) {
-      const waiting = new Set([...priority.queues.keys(), ...priority.ownerQueue.map((waiter) => waiter.owner)]);
-      for (const owner of waiting)
-        if (revoked(owner))
-          this.dropOwner(owner);
-    }
-  }
-  stats() {
-    this.sweep();
-    return { running: this.runningTotal, jobs: this.jobs.size };
-  }
-  queued() {
-    return (this.priority?.queued ?? 0) + (this.priority?.ownerQueue.length ?? 0);
-  }
-  ownerMustWait(owner) {
-    const priority = this.priority;
-    if (!priority)
-      return false;
-    if ((this.running.get(owner) ?? 0) + this.ownerWaiting(owner) >= this.limits.maxRunningPerOwner)
-      return false;
-    return priority.ownerQueue.length > 0 || this.runningTotal >= this.limits.maxRunningGlobal && priority.runningTotal > 0;
-  }
-  ownerWaiting(owner) {
-    return this.priority.ownerQueue.filter((waiter) => waiter.owner === owner).length;
-  }
-  enqueue(scope, jobSignal, kind) {
-    const priority = this.priority;
-    const owner = scope.owner;
-    if (kind === "owner") {
-      if (priority.ownerQueue.length >= priority.maxOwnerQueued)
-        throw sourceAnswerBusy();
-    } else {
-      const waiting = priority.queues.get(owner)?.length ?? 0;
-      if (waiting >= priority.maxQueuedPerOwner || priority.queued >= priority.maxQueuedTotal) {
-        if (waiting > 0 || !this.backgroundMayStart(owner, this.now(), this.now()))
-          throw sourceAnswerBusy();
-      }
-    }
-    let state = "queued";
-    let detached = false;
-    let resolve;
-    let reject;
-    const ready = new Promise((ok, fail) => {
-      resolve = ok;
-      reject = fail;
-    });
-    ready.catch(() => {
-      return;
-    });
-    const onClient = () => {
-      if (!detached)
-        waiter.cancel(callerAbortError2("source_answer client disconnected"));
-    };
-    const onJob = () => waiter.cancel(jobSignal.reason ?? callerAbortError2("source_answer job ended"));
-    const unlisten = () => {
-      scope.clientSignal?.removeEventListener("abort", onClient);
-      jobSignal.removeEventListener("abort", onJob);
-    };
-    const waiter = {
-      owner,
-      kind,
-      enqueuedAt: this.now(),
-      tick: ++priority.ticks,
-      grant: () => {
-        if (state !== "queued")
-          return;
-        state = "running";
-        unlisten();
-        if (kind === "background") {
-          priority.running.set(owner, (priority.running.get(owner) ?? 0) + 1);
-          priority.runningTotal += 1;
-          priority.ticks += 1;
-          priority.lastServed.set(owner, priority.ticks);
-        }
-        this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
-        this.runningTotal += 1;
-        priority.lastGrant = kind;
-        this.unqueue(waiter);
-        resolve();
-      },
-      cancel: (reason, wake = true) => {
-        if (state !== "queued")
-          return;
-        state = "done";
-        unlisten();
-        this.unqueue(waiter);
-        reject(reason);
-        if (wake)
-          this.dispatch();
-      }
-    };
-    if (kind === "owner") {
-      priority.ownerQueue.push(waiter);
-    } else {
-      const queue = priority.queues.get(owner);
-      if (queue)
-        queue.push(waiter);
-      else
-        priority.queues.set(owner, [waiter]);
-      priority.queued += 1;
-    }
-    if (scope.clientSignal?.aborted)
-      onClient();
-    else
-      scope.clientSignal?.addEventListener("abort", onClient, { once: true });
-    if (jobSignal.aborted)
-      onJob();
-    else
-      jobSignal.addEventListener("abort", onJob, { once: true });
-    this.dispatch();
-    const release = () => {
-      if (state === "queued") {
-        waiter.cancel(callerAbortError2("source_answer released before it started"));
-        return;
-      }
-      if (state !== "running")
-        return;
-      state = "done";
-      if (kind === "background") {
-        const backgroundCount = (priority.running.get(owner) ?? 1) - 1;
-        if (backgroundCount <= 0)
-          priority.running.delete(owner);
-        else
-          priority.running.set(owner, backgroundCount);
-        priority.runningTotal -= 1;
-      }
-      const count = (this.running.get(owner) ?? 1) - 1;
-      if (count <= 0)
-        this.running.delete(owner);
-      else
-        this.running.set(owner, count);
-      this.runningTotal -= 1;
-      if (kind === "background")
-        this.forgetIdleOwner(owner);
-      this.dispatch();
-    };
-    return { ready, release, detach: () => {
-      detached = true;
-    } };
-  }
-  unqueue(waiter) {
-    const priority = this.priority;
-    if (waiter.kind === "owner") {
-      const index = priority.ownerQueue.indexOf(waiter);
-      if (index < 0)
-        return;
-      priority.ownerQueue.splice(index, 1);
-      return;
-    }
-    const queue = priority.queues.get(waiter.owner);
-    const index = queue?.indexOf(waiter) ?? -1;
-    if (!queue || index < 0)
-      return;
-    queue.splice(index, 1);
-    priority.queued -= 1;
-    if (queue.length === 0) {
-      priority.queues.delete(waiter.owner);
-      this.forgetIdleOwner(waiter.owner);
-    }
-  }
-  cancelWaiting(owner, reason) {
-    const priority = this.priority;
-    if (!priority)
-      return;
-    const waiting = [...priority.queues.get(owner) ?? [], ...priority.ownerQueue.filter((waiter) => waiter.owner === owner)];
-    for (const waiter of waiting)
-      waiter.cancel(reason, false);
-  }
-  forgetIdleOwner(owner) {
-    const priority = this.priority;
-    if (!priority.queues.has(owner) && !priority.running.has(owner))
-      priority.lastServed.delete(owner);
-  }
-  backgroundMayStart(owner, enqueuedAt, at) {
-    const priority = this.priority;
-    const overdue = at - enqueuedAt >= priority.maxWaitMs;
-    if (priority.ownerQueue.length > 0 && !(overdue && priority.lastGrant === "owner"))
-      return false;
-    if ((priority.running.get(owner) ?? 0) >= 1)
-      return false;
-    const backgroundCapacity = Math.max(1, this.limits.maxRunningGlobal - 1);
-    if (priority.runningTotal >= backgroundCapacity || this.runningTotal >= this.limits.maxRunningGlobal)
-      return false;
-    return !this.interactiveBusy() || at - enqueuedAt >= priority.maxWaitMs;
-  }
-  interactiveBusy() {
-    try {
-      return this.priority?.interactive?.busy() === true;
-    } catch {
-      return false;
-    }
-  }
-  stillAuthorized(owner) {
-    if (!this.isOwnerRevoked)
-      return true;
-    try {
-      return !this.isOwnerRevoked(owner);
-    } catch {
-      return false;
-    }
-  }
-  dispatch() {
-    const priority = this.priority;
-    if (!priority)
-      return;
-    for (;; ) {
-      const at = this.now();
-      let granted;
-      if (priority.ownerQueue.length > 0 && priority.lastGrant === "owner")
-        granted = this.nextBackground(at);
-      if (!granted) {
-        for (const waiter of priority.ownerQueue) {
-          if ((this.running.get(waiter.owner) ?? 0) >= this.limits.maxRunningPerOwner)
-            continue;
-          if (this.runningTotal >= this.limits.maxRunningGlobal)
-            break;
-          granted = waiter;
-          break;
-        }
-      }
-      granted ??= this.nextBackground(at);
-      if (!granted)
-        break;
-      if (!this.stillAuthorized(granted.owner)) {
-        this.cancelWaiting(granted.owner, callerAbortError2("source_answer connection revoked"));
-        continue;
-      }
-      granted.grant();
-    }
-    this.scheduleWaitCheck();
-  }
-  nextBackground(at) {
-    const priority = this.priority;
-    let granted;
-    let grantedTurn = 0;
-    for (const [owner, queue] of priority.queues) {
-      const head = queue[0];
-      if (!this.backgroundMayStart(owner, head.enqueuedAt, at))
-        continue;
-      const turn = Math.max(priority.lastServed.get(owner) ?? 0, head.tick);
-      if (granted && turn >= grantedTurn)
-        continue;
-      granted = head;
-      grantedTurn = turn;
-    }
-    return granted;
-  }
-  scheduleWaitCheck() {
-    const priority = this.priority;
-    clearTimeout(priority.timer);
-    priority.timer = undefined;
-    if (priority.queues.size === 0 || !this.interactiveBusy())
-      return;
-    let oldest = Number.POSITIVE_INFINITY;
-    for (const queue of priority.queues.values())
-      oldest = Math.min(oldest, queue[0].enqueuedAt);
-    const delay = Math.max(0, oldest + priority.maxWaitMs - this.now());
-    priority.timer = setTimeout(() => {
-      priority.timer = undefined;
-      this.dispatch();
-    }, delay);
-    priority.timer.unref?.();
-  }
-  occupy(owner) {
-    this.running.set(owner, (this.running.get(owner) ?? 0) + 1);
-    this.runningTotal += 1;
-    let released = false;
-    return () => {
-      if (released)
-        return;
-      released = true;
-      const count = (this.running.get(owner) ?? 1) - 1;
-      if (count <= 0)
-        this.running.delete(owner);
-      else
-        this.running.set(owner, count);
-      this.runningTotal -= 1;
-      this.dispatch();
-    };
-  }
-  admit(owner) {
-    if ((this.running.get(owner) ?? 0) >= this.limits.maxRunningPerOwner || this.runningTotal >= this.limits.maxRunningGlobal) {
-      throw sourceAnswerBusy();
-    }
-  }
-  bounded(result) {
-    if (!result.ok)
-      return result;
-    let bytes;
-    try {
-      bytes = Buffer.byteLength(JSON.stringify(result.value) ?? "", "utf8");
-    } catch {
-      bytes = Number.POSITIVE_INFINITY;
-    }
-    if (bytes <= this.limits.maxResultBytes)
-      return result;
-    return {
-      ok: false,
-      error: new OperationError("source_answer_too_large", "The finished answer was too large for Olympus to hold for collection.", "Ask a narrower question with source_answer.")
-    };
-  }
-  evictRetained(owner) {
-    const finished = [...this.jobs.values()].filter((job) => job.owner === owner && job.finishedAt !== undefined).sort((a, b) => a.finishedAt - b.finishedAt);
-    const owned = [...this.jobs.values()].filter((job) => job.owner === owner).length;
-    let excess = owned - this.limits.maxRetainedPerOwner;
-    for (const job of finished) {
-      if (excess <= 0)
-        break;
-      this.jobs.delete(job.id);
-      excess -= 1;
-    }
-  }
-}
-function sameOwner(a, b) {
-  const left = createHash20("sha256").update(a).digest();
-  const right = createHash20("sha256").update(b).digest();
-  return timingSafeEqual3(left, right);
-}
-function callerAbortError2(message) {
-  const error = new Error(message);
-  error.name = "AbortError";
-  return error;
-}
-function sourceAnswerBusy() {
-  return new OperationError("source_answer_busy", "Olympus is already answering as many questions as its analyst can take at once.", "Wait for the answers in progress (call source_answer_result with their job ids) before asking another question.");
-}
-function sourceAnswerStalled(idleMs, stage) {
-  const minutes = Math.round(idleMs / 60000);
-  return new OperationError("source_answer_deadline", `The answer made no progress for ${minutes} minute${minutes === 1 ? "" : "s"}${stage ? ` while ${stage}` : ""} and was stopped.`, "Try again later; if it stops again at the same step, that part of Olympus needs attention.");
-}
-function noteSourceAnswerProgress(stage) {
-  progressSink.getStore()?.(stage);
-}
-function sourceAnswerJobOwner(caller) {
-  if (!caller)
-    return;
-  if (caller.surface === "remote")
-    return caller.connectionId ? `remote:${caller.connectionId}` : undefined;
-  if (caller.surface === "mcp")
-    return "mcp:stdio";
-  return;
-}
-function sourceAnswerJobLimitsFromEnv(env, surface) {
-  const configured = surface === "stdio" ? env.OLYMPUS_SOURCE_ANSWER_STDIO_HANDOFF_MS : env.OLYMPUS_SOURCE_ANSWER_HANDOFF_MS;
-  const handoffMs = clampedInteger(configured, SOURCE_ANSWER_HANDOFF_MIN_MS, SOURCE_ANSWER_HANDOFF_MAX_MS) ?? (surface === "stdio" ? SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS : SOURCE_ANSWER_HANDOFF_DEFAULT_MS);
-  const resultWaitMs = Math.min(clampedInteger(env.OLYMPUS_SOURCE_ANSWER_RESULT_WAIT_MS, 0, SOURCE_ANSWER_RESULT_WAIT_MAX_MS) ?? SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS, handoffMs);
-  const maxRunningGlobal = clampedInteger(env.OLYMPUS_SOURCE_ANSWER_MAX_RUNNING, 1, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING);
-  return { handoffMs, resultWaitMs, ...maxRunningGlobal !== undefined ? { maxRunningGlobal } : {} };
-}
-function pendingResult(jobId, elapsedMs, resultWaitMs) {
-  const wait = Math.round(resultWaitMs / 1000);
-  return {
-    status: "working",
-    job_id: jobId,
-    elapsed_ms: elapsedMs,
-    next_tool: "source_answer_result",
-    message: "Olympus is still preparing this answer and it keeps running. " + `Call source_answer_result with this job_id to get it${wait > 0 ? ` (each call waits up to ${wait} s)` : ""}; ` + "repeat while it says working. Do not ask the question again."
-  };
-}
-function newJobId() {
-  for (;; ) {
-    const id = `${JOB_ID_PREFIX}${randomBytes10(32).toString("base64url")}`;
-    if (secretLabelsInText(id).length === 0)
-      return id;
-  }
-}
-function clampedInteger(value, min, max) {
-  if (value === undefined || value.trim() === "")
-    return;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed))
-    return;
-  return Math.min(max, Math.max(min, Math.round(parsed)));
-}
-var SOURCE_ANSWER_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS = 45000, SOURCE_ANSWER_HANDOFF_MAX_MS = 230000, SOURCE_ANSWER_HANDOFF_MIN_MS = 1000, SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS = 60000, SOURCE_ANSWER_RESULT_WAIT_MAX_MS = 120000, SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_IDLE_MS, SOURCE_ANSWER_MAX_RUNNING_GLOBAL = 2, SOURCE_ANSWER_MAX_RUNNING_GLOBAL_CEILING = 16, SOURCE_ANSWER_MAX_RUNNING_PER_OWNER = 2, SOURCE_ANSWER_MAX_RETAINED_PER_OWNER = 16, SOURCE_ANSWER_MAX_QUEUED_PER_BACKGROUND_OWNER = 2, SOURCE_ANSWER_MAX_QUEUED_BACKGROUND = 8, SOURCE_ANSWER_MAX_QUEUED_OWNER = 8, SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS = 30000, SOURCE_ANSWER_MAX_RESULT_BYTES, JOB_ID_PREFIX = "saj_", JOB_ID_PATTERN, progressSink;
-var init_source_answer_jobs = __esm(() => {
-  init_operation_error();
-  init_opsec();
-  init_release_manifest();
-  SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
-  SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
-  SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-  JOB_ID_PATTERN = /^saj_[A-Za-z0-9_-]{43}$/;
-  progressSink = new AsyncLocalStorage6;
-});
-
 // src/core/store-reclaim-admission.ts
 import { join as join37 } from "node:path";
 import { closeSync as closeSync14, openSync as openSync14, futimesSync, statSync as statSync13 } from "node:fs";
@@ -47374,8 +47597,8 @@ var init_store_reclaim_admission = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-import { createHash as createHash21, randomUUID as randomUUID7 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { createHash as createHash21, randomUUID as randomUUID8 } from "node:crypto";
 function poolSqlSite(sql) {
   return sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "?").replace(/\b\d+(?:\.\d+)?\b/g, "N").replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)").replace(/\s+/g, " ").trim().slice(0, POOL_SQL_SITE_CHARS);
 }
@@ -47454,7 +47677,7 @@ function beginSourceAnswerPoolRead(site) {
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
   return {
-    correlationId: randomUUID7(),
+    correlationId: randomUUID8(),
     receivedAt: received.toISOString(),
     receivedAtMs: received.getTime(),
     sqliteRetryCount: 0,
@@ -47817,8 +48040,8 @@ var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage7;
-  laneStorage = new AsyncLocalStorage7;
+  storage2 = new AsyncLocalStorage8;
+  laneStorage = new AsyncLocalStorage8;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -49218,7 +49441,7 @@ import { chmodSync as chmodSync8, existsSync as existsSync27, mkdirSync as mkdir
 import { dirname as dirname33, join as join38, resolve as resolve11 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { randomUUID as randomUUID8 } from "node:crypto";
+import { randomUUID as randomUUID9 } from "node:crypto";
 function isStandaloneEngineProcess(env) {
   const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
   return (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine");
@@ -49662,7 +49885,7 @@ function migratePrivateMeaningSearch(path) {
       }
     };
     validateSovereigntyConfig(next);
-    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID8()}`;
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID9()}`;
     lease.commit(() => {
       writePrivateFileAtomicSync(backup, original);
       writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}
@@ -53118,7 +53341,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash25, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash25, randomUUID as randomUUID10 } from "node:crypto";
 import {
   chmodSync as chmodSync9,
   closeSync as closeSync15,
@@ -53134,7 +53357,7 @@ import {
   rmSync as rmSync10,
   rmdirSync,
   statSync as statSync15,
-  writeFileSync as writeFileSync8
+  writeFileSync as writeFileSync9
 } from "node:fs";
 import { basename as basename8, dirname as dirname37, isAbsolute as isAbsolute16, join as join42, resolve as resolve13 } from "node:path";
 function mediaCacheDir(env = process.env) {
@@ -53181,11 +53404,11 @@ function writeMediaCacheFile(dir, bytes, mimeType) {
   const sha256 = createHash25("sha256").update(bytes).digest("hex");
   const path = join42(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
   ensureOwnerOnlyDir(dir);
-  const stagingHolder = `staging:${randomUUID9()}`;
+  const stagingHolder = `staging:${randomUUID10()}`;
   addMarker(path, stagingHolder);
   if (!existsSync30(path)) {
-    const temporary = join42(dir, `.${sha256}.${randomUUID9()}.tmp`);
-    writeFileSync8(temporary, bytes, { mode: 384 });
+    const temporary = join42(dir, `.${sha256}.${randomUUID10()}.tmp`);
+    writeFileSync9(temporary, bytes, { mode: 384 });
     chmodSync9(temporary, 384);
     renameSync4(temporary, path);
   }
@@ -53280,7 +53503,7 @@ function addMarker(path, holder) {
   const marker = join42(refs, holderName(holder));
   const name = mediaHolderName(holder);
   if (readMarker(marker) !== name)
-    writeFileSync8(marker, name, { mode: 384 });
+    writeFileSync9(marker, name, { mode: 384 });
   const legacy = legacyHolderName(holder);
   if (legacy)
     rmSync10(join42(refs, legacy), { force: true });
@@ -53453,7 +53676,7 @@ var init_source_item_read = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 function privateQuestionKey(ref) {
   if (!ref || typeof ref !== "object")
     return;
@@ -53616,7 +53839,7 @@ function recordRemoteOperation(input) {
 }
 var storage3, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage8;
+  storage3 = new AsyncLocalStorage9;
   PROVIDER_APP_NAMES = {
     openai: "ChatGPT",
     anthropic: "Claude",
@@ -55024,7 +55247,7 @@ var init_remote_result = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 function currentAccess(authorized) {
   try {
     return authorized();
@@ -55046,7 +55269,7 @@ function currentRemoteReadAccess() {
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage9;
+  readAuthorization = new AsyncLocalStorage10;
 });
 
 // src/workers/classification/installed-tier-classification-registry.ts
@@ -58223,7 +58446,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash30, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash30, randomUUID as randomUUID11 } from "node:crypto";
 import { closeSync as closeSync16, existsSync as existsSync35, fsyncSync as fsyncSync3, lstatSync as lstatSync22, mkdirSync as mkdirSync23, openSync as openSync16, statSync as statSync16, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { dirname as dirname41 } from "node:path";
@@ -62330,6 +62553,7 @@ var init_local_index = __esm(() => {
     db;
     readOnly;
     now;
+    embeddingLeaseTimers;
     controlPath;
     trustReconciliationReadyCursors;
     exclusions;
@@ -62351,7 +62575,7 @@ var init_local_index = __esm(() => {
     embeddingDeferral;
     constructor(options) {
       installMainThreadSqlTrace();
-      this.visibilityOwner = randomUUID10();
+      this.visibilityOwner = randomUUID11();
       this.visibilityNow = () => Date.now();
       this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
       this.visibilityTimers = {
@@ -62363,12 +62587,13 @@ var init_local_index = __esm(() => {
       this.readOnly = options.readOnly === true;
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID10()}` : options.mediaHolder ?? this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID11()}` : options.mediaHolder ?? this.dbPath;
       const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
       this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
       this.family = options.family;
       this.trustDomain = options.trustDomain;
       this.now = options.now ?? (() => new Date);
+      this.embeddingLeaseTimers = options.embeddingLeaseTimers;
       this.controlPath = options.controlPath ?? controlPathHeadroom;
       this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
       if (options.tierLedger === null || options.readOnly === true && !writableStoreOpensForbidden()) {
@@ -64304,7 +64529,7 @@ ${parentKey(ref)}`, { ref, origin });
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID10()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID11()}`;
       const startedAt = nowIso();
       try {
         return this.db.transaction(() => {
@@ -64337,7 +64562,7 @@ ${parentKey(ref)}`, { ref, origin });
           return "held";
         if (!row && options.record !== true)
           return "none";
-        const syncRunId = `connector-secret-retired-${randomUUID10()}`;
+        const syncRunId = `connector-secret-retired-${randomUUID11()}`;
         const now = nowIso();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -64427,7 +64652,7 @@ ${parentKey(ref)}`, { ref, origin });
           }
           if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
             return "stale_claim";
-          const syncRunId = `connector-secrets-extraction-${randomUUID10()}`;
+          const syncRunId = `connector-secrets-extraction-${randomUUID11()}`;
           const startedAt = nowIso();
           this.db.query(`
           INSERT INTO sync_runs (
@@ -64548,7 +64773,7 @@ ${parentKey(ref)}`, { ref, origin });
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID10()}`;
+      const syncRunId = `connector-tier-move-${randomUUID11()}`;
       const now = nowIso();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -65011,7 +65236,7 @@ ${parentKey(ref)}`, { ref, origin });
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID10()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID11()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
@@ -66343,7 +66568,7 @@ ${parentKey(ref)}`, { ref, origin });
       }
       const tierLedgerForWrite = this.visibilityLedger();
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID10()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID11()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -66696,7 +66921,7 @@ ${parentKey(ref)}`, { ref, origin });
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID10()}`;
+        const syncRunId = `connector-relinquish-${randomUUID11()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -66835,7 +67060,7 @@ ${parentKey(ref)}`, { ref, origin });
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID10()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID11()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -67518,7 +67743,7 @@ ${parentKey(ref)}`, { ref, origin });
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID10()}`;
+      const syncRunId = `connector-sync-${randomUUID11()}`;
       const startedAt = nowIso();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -68752,7 +68977,13 @@ ${parentKey(ref)}`, { ref, origin });
     async embedChunks(options) {
       if (this.dbPath === ":memory:")
         return this.embedChunksUnderLease(options);
-      return withFileLease(`${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`, () => this.embedChunksUnderLease(options), { acquireTimeoutMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS });
+      return withFileLease(`${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`, () => this.embedChunksUnderLease(options), {
+        heartbeat: {
+          stallMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS,
+          intervalMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS / 4
+        },
+        ...this.embeddingLeaseTimers ? { timers: this.embeddingLeaseTimers } : {}
+      });
     }
     async embedChunksUnderLease(options) {
       const provider = options.provider;
@@ -73015,7 +73246,7 @@ var init_messaging_capture = __esm(() => {
 });
 
 // src/core/descendant-groups.ts
-import { existsSync as existsSync40, mkdirSync as mkdirSync27, readFileSync as readFileSync37, renameSync as renameSync6, rmSync as rmSync14, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync40, mkdirSync as mkdirSync27, readFileSync as readFileSync37, renameSync as renameSync6, rmSync as rmSync14, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname44, join as join49 } from "node:path";
 function descendantGroupsSupported(platform = process.platform) {
   return platform === "linux";
@@ -73063,7 +73294,7 @@ function writeRecord(path, owner, groups) {
     }
     mkdirSync27(dirname44(path), { recursive: true, mode: 448 });
     const temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync9(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}
+    writeFileSync10(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}
 `, { mode: 384 });
     renameSync6(temporary, path);
   } catch {}
@@ -74060,7 +74291,7 @@ var init_worker_front_proxy = __esm(() => {
 
 // src/core/native-worker-service.ts
 import { homedir as homedir24 } from "node:os";
-import { randomUUID as randomUUID11 } from "node:crypto";
+import { randomUUID as randomUUID12 } from "node:crypto";
 import { statSync as statSync20 } from "node:fs";
 import { createServer as createNetServer2 } from "node:net";
 import { basename as basename10, delimiter as delimiter3, isAbsolute as isAbsolute20, join as join51 } from "node:path";
@@ -74319,7 +74550,7 @@ function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
   if (!authToken) {
     throw new Error("Olympus worker service requires a configured worker auth token.");
   }
-  const instanceId = randomUUID11();
+  const instanceId = randomUUID12();
   env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
   return {
     runtimePath: resolveBunRuntimePath(service.runtimePath, env),
@@ -75804,7 +76035,7 @@ var init_mac_engine_daemon = __esm(() => {
 // src/workers/archive-import/state.ts
 import { existsSync as existsSync43, mkdirSync as mkdirSync30, readFileSync as readFileSync40 } from "node:fs";
 import { dirname as dirname48 } from "node:path";
-import { randomUUID as randomUUID13 } from "node:crypto";
+import { randomUUID as randomUUID14 } from "node:crypto";
 function defaultArchiveImportStatePath(env = process.env) {
   return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID2, "archive-imports.json", env);
 }
@@ -75871,7 +76102,7 @@ class ArchiveImportStateStore {
     const at = this.now().toISOString();
     const { skipped, ...rest } = input;
     const record = {
-      archive_id: randomUUID13(),
+      archive_id: randomUUID14(),
       ...rest,
       status: "importing",
       created_at: at,
@@ -77182,7 +77413,7 @@ var init_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash36, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash36, randomUUID as randomUUID15 } from "node:crypto";
 import { chmodSync as chmodSync16, mkdirSync as mkdirSync32 } from "node:fs";
 import { dirname as dirname50 } from "node:path";
 import { Database as Database14 } from "bun:sqlite";
@@ -77242,7 +77473,7 @@ class LocalXBookmarksReconcileStateStore {
     const nowDate = validDate(input.now ?? new Date);
     const now = nowDate.toISOString();
     const leaseExpiresAt = new Date(nowDate.getTime() + FOLDER_FACET_REFRESH_LEASE_MS).toISOString();
-    const runToken = randomUUID14();
+    const runToken = randomUUID15();
     return this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT *
@@ -77467,7 +77698,7 @@ class LocalXBookmarksReconcileStateStore {
           membership_pages, coverage_scope, window_boundary_algorithm_version,
           started_at, updated_at
         ) VALUES (?, ?, ?, ?, 'global', 0, 0, 0, 0, 0, ?, ?, ?, ?)
-      `).run(account, randomUUID14(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
+      `).run(account, randomUUID15(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
     }
     return { progress: this.progress(account), warnings };
   }
@@ -83188,7 +83419,7 @@ var init_manifest3 = __esm(() => {
 // src/workers/archive-import/requests.ts
 import { existsSync as existsSync46, mkdirSync as mkdirSync33, readFileSync as readFileSync41 } from "node:fs";
 import { dirname as dirname51, join as join57 } from "node:path";
-import { randomUUID as randomUUID15 } from "node:crypto";
+import { randomUUID as randomUUID16 } from "node:crypto";
 function archiveImportRequestsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-import-requests.json");
 }
@@ -83341,7 +83572,7 @@ class ArchiveImportRequestStore {
   entry(kind, origin, path, status, removal) {
     const at = this.now().toISOString();
     return {
-      request_id: randomUUID15(),
+      request_id: randomUUID16(),
       kind,
       origin,
       path,
@@ -83658,7 +83889,7 @@ var init_engine_children = __esm(() => {
 
 // src/core/data-root-snapshot.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { chmodSync as chmodSync17, existsSync as existsSync48, lstatSync as lstatSync30, mkdirSync as mkdirSync35, readdirSync as readdirSync10, readFileSync as readFileSync43, readlinkSync, realpathSync as realpathSync13, renameSync as renameSync8, rmSync as rmSync17, statfsSync as statfsSync2, statSync as statSync23, writeFileSync as writeFileSync11 } from "node:fs";
+import { chmodSync as chmodSync17, existsSync as existsSync48, lstatSync as lstatSync30, mkdirSync as mkdirSync35, readdirSync as readdirSync10, readFileSync as readFileSync43, readlinkSync, realpathSync as realpathSync13, renameSync as renameSync8, rmSync as rmSync17, statfsSync as statfsSync2, statSync as statSync23, writeFileSync as writeFileSync12 } from "node:fs";
 import { basename as basename11, dirname as dirname53, join as join59, relative as relative9, resolve as resolve16, sep as sep12 } from "node:path";
 function samePlace(a, b) {
   return a === b || join59(realOrSelf(dirname53(a)), basename11(a)) === join59(realOrSelf(dirname53(b)), basename11(b));
@@ -84030,7 +84261,7 @@ function defaultClones(directory) {
     return macFileSystem(directory) === "apfs";
   const probe = join59(directory, `.olympus-clone-probe-${process.pid}`);
   try {
-    writeFileSync11(probe, "probe", { mode: 384 });
+    writeFileSync12(probe, "probe", { mode: 384 });
     return spawnSync11("cp", ["--reflink=always", probe, `${probe}.clone`], { stdio: "ignore" }).status === 0;
   } catch {
     return false;
@@ -84227,7 +84458,7 @@ var init_data_root_snapshot = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash39, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash39, randomUUID as randomUUID17 } from "node:crypto";
 import {
   chmodSync as chmodSync18,
   existsSync as existsSync49,
@@ -84330,7 +84561,7 @@ class LocalSourceWatchStore {
     requireOwnerContext(ownerContext);
     assertOnlyFields(input, CREATE_WATCH_FIELDS, "create watch");
     const now = this.now();
-    const watchId = input.watchId === undefined ? randomUUID16() : requireId(input.watchId, "watchId");
+    const watchId = input.watchId === undefined ? randomUUID17() : requireId(input.watchId, "watchId");
     const corpusId = requireId(input.corpusId, "corpusId");
     const queryText = requireQuery(input.queryText);
     const mode = requireMode(input.mode);
@@ -84625,7 +84856,7 @@ class LocalSourceWatchStore {
       `).all(now, limit);
       const leases = [];
       for (const candidate of candidates) {
-        const leaseToken = randomUUID16();
+        const leaseToken = randomUUID17();
         const result = this.db.query(`
           UPDATE source_watch_outbox
           SET status = 'leased', lease_owner = ?, lease_token = ?,
@@ -85472,7 +85703,7 @@ var init_source_watch = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync50, mkdirSync as mkdirSync37, readFileSync as readFileSync44, writeFileSync as writeFileSync12 } from "node:fs";
+import { existsSync as existsSync50, mkdirSync as mkdirSync37, readFileSync as readFileSync44, writeFileSync as writeFileSync13 } from "node:fs";
 import { dirname as dirname55 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
@@ -85503,7 +85734,7 @@ function readIngestionHealthState(path) {
 }
 function writeIngestionHealthState(path, state) {
   mkdirSync37(dirname55(path), { recursive: true, mode: 448 });
-  writeFileSync12(path, `${JSON.stringify(state, null, 2)}
+  writeFileSync13(path, `${JSON.stringify(state, null, 2)}
 `);
 }
 function forgetIngestionHealthState(path, ledgerSourceIds, options = {}) {
@@ -85651,7 +85882,7 @@ var init_file_scope_sources = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash40, randomUUID as randomUUID17 } from "node:crypto";
+import { createHash as createHash40, randomUUID as randomUUID18 } from "node:crypto";
 import { existsSync as existsSync51, readFileSync as readFileSync45 } from "node:fs";
 import { dirname as dirname56, join as join61 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -85771,7 +86002,7 @@ function approveFileSourceScope(input) {
     }
     const existing = readState2(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
-    const revision = randomUUID17();
+    const revision = randomUUID18();
     approvals.push({
       source_id: input.sourceId,
       account_generation: input.accountGeneration,
@@ -85935,7 +86166,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash41, randomUUID as randomUUID18 } from "node:crypto";
+import { createHash as createHash41, randomUUID as randomUUID19 } from "node:crypto";
 import { existsSync as existsSync52, readFileSync as readFileSync46 } from "node:fs";
 import { dirname as dirname57, join as join62 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -86030,7 +86261,7 @@ function approveMailSourceScope(input) {
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
     const existing = readState3(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
-    const revision = randomUUID18();
+    const revision = randomUUID19();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
     approvals.push({
       source_id: MAIL_SOURCE_SCOPE_ID,
@@ -86539,7 +86770,7 @@ var init_forget = __esm(() => {
 // src/core/this-computer.ts
 import { spawnSync as spawnSync12 } from "node:child_process";
 import { existsSync as existsSync54, readFileSync as readFileSync47 } from "node:fs";
-import { createHash as createHash42, randomUUID as randomUUID19 } from "node:crypto";
+import { createHash as createHash42, randomUUID as randomUUID20 } from "node:crypto";
 import { dirname as dirname58, join as join64 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
   const identity = hostIdentity();
@@ -86619,7 +86850,7 @@ function connectThisComputerSource(handleRegistryPath, sourceId, now = new Date,
   const path = defaultThisComputerStatePath(handleRegistryPath);
   withFileLeaseSync(path, (lease) => {
     const current = readStateForHost(path, hostIdentity) ?? (() => {
-      const machineId = randomUUID19();
+      const machineId = randomUUID20();
       const binding = hostBinding(machineId, hostIdentity);
       return {
         version: 1,
@@ -100744,7 +100975,7 @@ var init_sniffer_decision = __esm(() => {
 // src/workers/source-index/built-in-reasoning/install.ts
 import { isMainThread as isMainThread6 } from "node:worker_threads";
 import { spawn as spawn4 } from "node:child_process";
-import { createHash as createHash53, randomUUID as randomUUID20 } from "node:crypto";
+import { createHash as createHash53, randomUUID as randomUUID21 } from "node:crypto";
 import {
   closeSync as closeSync19,
   createReadStream as createReadStream3,
@@ -100757,7 +100988,7 @@ import {
   rmSync as rmSync19,
   statSync as statSync25,
   statfsSync as statfsSync3,
-  writeFileSync as writeFileSync13,
+  writeFileSync as writeFileSync14,
   writeSync as writeSync4
 } from "node:fs";
 import { dirname as dirname66, isAbsolute as isAbsolute24, join as join72 } from "node:path";
@@ -101024,7 +101255,7 @@ function runtimeInstalled2(runtimeDir, archive) {
   return marker !== undefined && marker.sha256 === archive.sha256 && existsSync59(join72(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
-  const staging = `${runtimeDir}.staging-${randomUUID20()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID21()}`;
   ensureDirectory2(staging);
   try {
     const archivePath = join72(staging, archive.name);
@@ -101044,7 +101275,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync13(join72(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync14(join72(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync19(runtimeDir, { recursive: true, force: true });
     renameSync10(staging, runtimeDir);
@@ -101186,7 +101417,7 @@ async function sha256File2(path, stallMs, onProgress) {
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
   const deadline = Date.now() + waitMs;
-  const token = randomUUID20();
+  const token = randomUUID21();
   for (;; ) {
     if (tryAcquireLock2(lockPath, token))
       break;
@@ -101217,7 +101448,7 @@ function refreshLock(lockPath, token) {
     return;
   try {
     const temporary = `${lockPath}.${process.pid}.tmp`;
-    writeFileSync13(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
+    writeFileSync14(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
     renameSync10(temporary, lockPath);
   } catch {}
 }
@@ -101329,7 +101560,7 @@ class ProgressReporter2 {
     try {
       mkdirSync41(dirname66(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync13(temporary, `${JSON.stringify(this.status)}
+      writeFileSync14(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
       renameSync10(temporary, this.statusPath);
     } catch {}
@@ -101363,7 +101594,7 @@ var init_install = __esm(() => {
 import { isMainThread as isMainThread7 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
 import { randomBytes as randomBytes20 } from "node:crypto";
-import { mkdtempSync as mkdtempSync3, rmSync as rmSync20, writeFileSync as writeFileSync14 } from "node:fs";
+import { mkdtempSync as mkdtempSync3, rmSync as rmSync20, writeFileSync as writeFileSync15 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
 import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir3 } from "node:os";
 import { join as join73 } from "node:path";
@@ -101562,7 +101793,7 @@ function createLlamaServerHandle(launch, options = {}) {
     const tokenFile = join73(tokenDir, "token");
     let spawnedProcess;
     try {
-      writeFileSync14(tokenFile, `${token}
+      writeFileSync15(tokenFile, `${token}
 `, { mode: 384 });
       spawnedProcess = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
         stdio: ["ignore", "ignore", "pipe"],
@@ -102041,17 +102272,17 @@ function unavailable2(error) {
   return new OperationError("argus_unreachable", error instanceof BuiltInReasoningInstallError ? `The built-in private model could not be installed: ${message}` : `The built-in private model is not available: ${message}`, "Check the dashboard for the built-in model status.");
 }
 async function chatCompletion(fetchImpl, endpoint, spec, request, timeoutMs) {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const signal = request.signal ? AbortSignal.any([timeout, request.signal]) : timeout;
+  const signal = request.signal;
   let response;
   try {
-    response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
+    response = await fetchStreamingModel(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${endpoint.token}`,
         "content-type": "application/json"
       },
       body: JSON.stringify({
+        stream: true,
         messages: [
           { role: "system", content: request.system },
           { role: "user", content: request.prompt }
@@ -102060,8 +102291,8 @@ async function chatCompletion(fetchImpl, endpoint, spec, request, timeoutMs) {
         max_tokens: builtInAnalystMaxTokensForChars(request.maxOutputChars),
         response_format: request.responseSchema ? { type: "json_schema", json_schema: { name: "reply", schema: request.responseSchema } } : { type: "json_object" }
       }),
-      signal
-    });
+      ...signal ? { signal } : {}
+    }, spec.modelId, timeoutMs);
   } catch (error) {
     if (request.signal?.aborted)
       throw error;
@@ -102070,7 +102301,7 @@ async function chatCompletion(fetchImpl, endpoint, spec, request, timeoutMs) {
     if (isModelEndpointRedirectError(error)) {
       throw new OperationError("argus_unreachable", "The built-in private model answered with a redirect, which is refused.", error.message);
     }
-    throw new OperationError("argus_unreachable", `The built-in private model did not answer${error instanceof Error && error.name === "TimeoutError" ? ` within ${Math.round(timeoutMs / 1000)}s` : ""}.`, "It runs on this computer; a busy machine answers slowly.");
+    throw new OperationError("argus_unreachable", `The built-in private model (${spec.modelId}) did not answer: ${error instanceof Error ? error.message : "request failed"}`, "It runs on this computer; a busy machine answers slowly.");
   }
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -102330,8 +102561,9 @@ function privateEvidencePack(question, evidence) {
     builtAt: new Date().toISOString()
   };
 }
-var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS = 600, DEFAULT_STARTUP_TIMEOUT_MS = 120000, DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES = 28000, MIN_PRIVATE_PASSAGE_BYTES = 600, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel, DEFAULT_PRIVATE_ANSWER_CHARS = 1600, GAP_GENERIC_WORDS, utf8;
+var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 60000, DEFAULT_IDLE_SHUTDOWN_SECONDS = 600, DEFAULT_STARTUP_TIMEOUT_MS = 120000, DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES = 28000, MIN_PRIVATE_PASSAGE_BYTES = 600, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel, DEFAULT_PRIVATE_ANSWER_CHARS = 1600, GAP_GENERIC_WORDS, utf8;
 var init_analyst_built_in = __esm(() => {
+  init_model_stream();
   init_local_analyst_window();
   init_sniffer_decision();
   init_sniffer_lane();
@@ -102557,22 +102789,22 @@ function onDemandFailedCoverageNote(count) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
 function runPrivacyReleaseInference(work) {
-  privacyReleaseInference ??= new AsyncLocalStorage10;
-  localInferencePriority ??= new AsyncLocalStorage10;
+  privacyReleaseInference ??= new AsyncLocalStorage11;
+  localInferencePriority ??= new AsyncLocalStorage11;
   return privacyReleaseInference.run(true, () => localInferencePriority.run("owner", work));
 }
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage10;
+  localInferenceGuards ??= new AsyncLocalStorage11;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage10;
+  localInferencePriority ??= new AsyncLocalStorage11;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage10;
+  localInferencePriority ??= new AsyncLocalStorage11;
   return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
 }
 function currentLocalInferencePriority() {
@@ -104597,12 +104829,12 @@ function nonNegativeInteger2(value, fallback) {
     return fallback;
   return Math.max(0, Math.floor(value));
 }
-var DEFAULT_SECURE_ANALYST_POOL_SLO_MS = 60000, DEFAULT_SECURE_ANALYST_POOL_RESERVE_MS = 1000, DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_POOL_COOLDOWN_MS = 30000, DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 600000, MIN_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 30000, MAX_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 1800000, SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_ENV = "OLYMPUS_SOURCE_ANSWER_LAST_LEG_TIMEOUT_MS";
+var DEFAULT_SECURE_ANALYST_POOL_SLO_MS = 60000, DEFAULT_SECURE_ANALYST_POOL_RESERVE_MS = 1000, DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_POOL_COOLDOWN_MS = 30000, DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 60000, MIN_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 30000, MAX_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 1800000, SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_ENV = "OLYMPUS_SOURCE_ANSWER_LAST_LEG_TIMEOUT_MS";
 
 // src/workers/source-index/analyst-answer.ts
-import { randomUUID as randomUUID21 } from "node:crypto";
+import { randomUUID as randomUUID22 } from "node:crypto";
 async function readNamesOnlyMatches(detail, read, waitMs) {
-  const questionId = randomUUID21();
+  const questionId = randomUUID22();
   const requests = new Map;
   for (const index of [...new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []])].sort((a, b) => a - b)) {
     if (index >= 3)
@@ -105772,7 +106004,7 @@ async function routeAnalysisThroughSovereignty(input) {
   let lastFallback;
   const legOutcomes = [];
   const legReasons = [];
-  const secureLegBudgets = input.trustDomain === "secure_local" ? deriveSecureAnalystPoolLegBudgets(input.route.map((step) => ({ id: step.profile.id, backend: step.backend })), {
+  const secureLegBudgets = input.trustDomain === "secure_local" && input.secureAnalystPoolSloMs !== undefined ? deriveSecureAnalystPoolLegBudgets(input.route.map((step) => ({ id: step.profile.id, backend: step.backend })), {
     trustedAnalystTimeoutMs: input.trustedAnalystTimeoutMs,
     localAnalystTimeoutMs: input.localAnalystTimeoutMs,
     ...input.secureAnalystPoolSloMs !== undefined ? { sloMs: input.secureAnalystPoolSloMs } : {},
@@ -105868,14 +106100,18 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
   let timedOut = false;
   let settled = false;
   const cancellationSettleMs = timeoutMs >= 2 ? Math.min(10, Math.max(1, Math.floor(timeoutMs / 10))) : 0;
-  const executionTimeoutMs = Math.max(1, timeoutMs - cancellationSettleMs);
+  const executionTimeoutMs = Math.max(1, timeoutMs);
   const callerSignal = currentAnalystAbortSignal();
   const followCaller = () => controller.abort(callerSignal?.reason);
   if (callerSignal?.aborted)
     followCaller();
   else
     callerSignal?.addEventListener("abort", followCaller, { once: true });
-  const analysis = runWithAnalystAbortSignal(controller.signal, () => analyst.analyze(pack, options)).finally(() => {
+  let activeModel = "analyst";
+  const analysis = withModelProgress((model) => {
+    activeModel = model;
+    timeout?.refresh();
+  }, () => runWithAnalystAbortSignal(controller.signal, () => analyst.analyze(pack, options))).finally(() => {
     settled = true;
   });
   analysis.catch(() => {});
@@ -105885,9 +106121,9 @@ async function analyzeWithTimeout(analyst, pack, options, timeoutMs) {
       new Promise((_, reject) => {
         timeout = setTimeout(() => {
           timedOut = true;
-          const timeoutError = new TrustedAnalystTimeoutError(timeoutMs, Date.now() - startedAt);
+          const timeoutError = new TrustedAnalystTimeoutError(timeoutMs, Date.now() - startedAt, activeModel);
           reject(timeoutError);
-          const abortError = new Error("Analyst leg budget expired.");
+          const abortError = new Error(`Model ${activeModel} made no progress for ${timeoutMs}ms.`);
           abortError.name = "AbortError";
           controller.abort(abortError);
         }, executionTimeoutMs);
@@ -106850,8 +107086,9 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 60000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 60000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 60000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
+  init_model_stream();
   init_read_wide();
   init_analyst_built_in();
   init_local_analyst_window();
@@ -106882,8 +107119,8 @@ var init_analyst_answer = __esm(() => {
   TrustedAnalystTimeoutError = class TrustedAnalystTimeoutError extends Error {
     timeoutMs;
     elapsedMs;
-    constructor(timeoutMs, elapsedMs) {
-      super(`analyst timed out after ${timeoutMs}ms`);
+    constructor(timeoutMs, elapsedMs, model = "analyst") {
+      super(`Model ${model} made no progress for ${timeoutMs}ms (analyst timed out).`);
       this.name = "TrustedAnalystTimeoutError";
       this.timeoutMs = timeoutMs;
       this.elapsedMs = elapsedMs;
@@ -107314,7 +107551,7 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash54, randomUUID as randomUUID22 } from "node:crypto";
+import { createHash as createHash54, randomUUID as randomUUID23 } from "node:crypto";
 import { chmodSync as chmodSync20, existsSync as existsSync60, lstatSync as lstatSync32, mkdirSync as mkdirSync42 } from "node:fs";
 import { dirname as dirname67 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
@@ -107621,7 +107858,7 @@ class LocalXBookmarksApiUsageStore {
       }
       const maxResources = routine ? Math.min(requestedMaxResources, input.preserveHeadReserve ? backgroundRemainingReads : remainingReads, input.preserveHeadReserve ? backgroundRemainingCostUnits : remainingCostUnits) : requestedMaxResources;
       const reservation = {
-        reservationId: randomUUID22(),
+        reservationId: randomUUID23(),
         account,
         utcDay,
         maxResources,
@@ -109660,7 +109897,7 @@ var init_archive_import = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash56, randomUUID as randomUUID23 } from "node:crypto";
+import { createHash as createHash56, randomUUID as randomUUID24 } from "node:crypto";
 import {
   chmodSync as chmodSync21,
   existsSync as existsSync62,
@@ -109668,7 +109905,7 @@ import {
   renameSync as renameSync11,
   statSync as statSync26,
   unlinkSync as unlinkSync4,
-  writeFileSync as writeFileSync15
+  writeFileSync as writeFileSync16
 } from "node:fs";
 import { dirname as dirname68 } from "node:path";
 async function runXBookmarksWindowDiagnostic(options) {
@@ -109911,9 +110148,9 @@ function writePrivateReport(pathValue, contents) {
     throw new TypeError("X bookmark diagnostic report path is required.");
   const parent = dirname68(reportPath);
   mkdirSync43(parent, { recursive: true, mode: 448 });
-  const temporaryPath = `${reportPath}.tmp-${randomUUID23()}`;
+  const temporaryPath = `${reportPath}.tmp-${randomUUID24()}`;
   try {
-    writeFileSync15(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
+    writeFileSync16(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
     chmodSync21(temporaryPath, 384);
     renameSync11(temporaryPath, reportPath);
     chmodSync21(reportPath, 384);
@@ -110479,12 +110716,12 @@ var init_scheduler_limit_stops = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash57, randomUUID as randomUUID24 } from "node:crypto";
+import { createHash as createHash57, randomUUID as randomUUID25 } from "node:crypto";
 import {
   chmodSync as chmodSync22,
   renameSync as renameSync12,
   rmSync as rmSync21,
-  writeFileSync as writeFileSync16
+  writeFileSync as writeFileSync17
 } from "node:fs";
 import { resolve as resolve18 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
@@ -110821,9 +111058,9 @@ function buildReceipt(status, counts, retryAt) {
 }
 function writeReceipt(pathValue, receipt) {
   const path = resolve18(pathValue);
-  const temporary = `${path}.tmp-${randomUUID24()}`;
+  const temporary = `${path}.tmp-${randomUUID25()}`;
   try {
-    writeFileSync16(temporary, `${JSON.stringify(receipt, null, 2)}
+    writeFileSync17(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
       encoding: "utf8",
       flag: "wx",
@@ -116912,7 +117149,7 @@ var init_size_limit_stops = __esm(() => {
 });
 
 // src/workers/file-extraction/on-demand-read.ts
-import { createHash as createHash68, randomUUID as randomUUID25 } from "node:crypto";
+import { createHash as createHash68, randomUUID as randomUUID26 } from "node:crypto";
 async function requestOnDemandRead(request, context) {
   if (!["owner", "remote_app", "analyst"].includes(request.requester))
     return { state: "refused", reason: "invalid_requester" };
@@ -116924,7 +117161,7 @@ async function requestOnDemandRead(request, context) {
     return { state: "refused", reason: "item_not_found" };
   return context.jobs.enqueueOnDemandRead({
     ...request,
-    questionId: request.questionId?.trim() || randomUUID25(),
+    questionId: request.questionId?.trim() || randomUUID26(),
     itemRef: { corpusId: ref.corpusId, providerItemId: ref.providerItemId }
   }, target.job, target.grant, context.limits);
 }
@@ -117660,7 +117897,7 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/connector-source.ts
-import { rmSync as rmSync25, writeFileSync as writeFileSync17 } from "node:fs";
+import { rmSync as rmSync25, writeFileSync as writeFileSync18 } from "node:fs";
 import { basename as basename13, join as join83, resolve as resolve21, sep as sep18 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
@@ -117701,7 +117938,7 @@ async function readItemToFile(connector, localItemId, options) {
       if (!served())
         refuseGone();
       makeExtractionSpoolOwnerDir(options.spoolDir, options.spoolAnchor);
-      writeFileSync17(path, bytes, { mode: 384 });
+      writeFileSync18(path, bytes, { mode: 384 });
       break;
     } catch (error) {
       if (attempt >= 3 || error.code !== "ENOENT")
@@ -121339,7 +121576,7 @@ var init_extraction_factory = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync27, mkdirSync as mkdirSync46 } from "node:fs";
-import { createHash as createHash73, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash73, randomUUID as randomUUID27 } from "node:crypto";
 import { dirname as dirname74 } from "node:path";
 import { Database as Database22 } from "bun:sqlite";
 function settleUnreadable(candidates, classify) {
@@ -121690,7 +121927,7 @@ class LocalFileExtractionJobStore {
     const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
     const now = nowIso4();
     const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const leaseToken = randomUUID26();
+    const leaseToken = randomUUID27();
     const workerHash = hashString6(workerId);
     const claimed = [];
     this.db.transaction(() => {
@@ -122769,7 +123006,7 @@ function fileExtractionJobMigrations() {
       db.query(`
         INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
         VALUES (1, ?, 0)
-      `).run(randomUUID26());
+      `).run(randomUUID27());
     }
   }, {
     version: 4,
@@ -123033,7 +123270,7 @@ function clampInteger(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 function makeJobId() {
-  return `fx_${randomUUID26()}`;
+  return `fx_${randomUUID27()}`;
 }
 function hashString6(value) {
   return createHash73("sha256").update(value).digest("hex");
@@ -127880,7 +128117,7 @@ async function readChatCompletion(response, clock) {
     });
   return { choices: [{ message: { content } }] };
 }
-var init_model_stream = __esm(() => {
+var init_model_stream2 = __esm(() => {
   init_http_timeout();
 });
 
@@ -128435,7 +128672,7 @@ function sharedBuiltInTranscriber(env = process.env) {
 var TRANSCRIPT_TIME_BUDGET_WARNING = "transcript_time_budget_reached", DEFAULT_IDLE_SHUTDOWN_SECONDS2 = 180, DEFAULT_STARTUP_TIMEOUT_MS2 = 120000, DEFAULT_CHUNK_TIMEOUT_MS = 180000, DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS, DEFAULT_CHUNK_SECONDS = 30, MAX_TOKENS_PER_CHUNK = 512, SILENCE_LEVEL = 24, ASR_TEXT_MARKER = "<asr_text>", LANGUAGE_PREFIX = "language ", TARGET_SAMPLE_RATE = 16000, TEMP_DIR_PREFIX5 = "olympus-asr-", MACOS_AUDIO_CONVERTER = "/usr/bin/afconvert", TranscriberPendingError, TranscriberUnavailableError, AudioUndecodableError, sharedTranscriber;
 var init_built_in_transcriber = __esm(() => {
   init_model_transport();
-  init_model_stream();
+  init_model_stream2();
   init_install();
   init_manifest2();
   init_server();
@@ -139915,7 +140152,7 @@ var init_source_dispositions = __esm(() => {
 
 // src/data-lifecycle.ts
 import { spawnSync as spawnSync13 } from "node:child_process";
-import { createHash as createHash80, randomUUID as randomUUID27 } from "node:crypto";
+import { createHash as createHash80, randomUUID as randomUUID28 } from "node:crypto";
 import {
   chmodSync as chmodSync32,
   closeSync as closeSync29,
@@ -140168,7 +140405,7 @@ function exportReferencedMedia(refs, destination, durabilityBoundary, files, art
       continue;
     }
     const target = join108(mediaRoot, basename16(path));
-    const staging = `${target}.${randomUUID27()}.partial`;
+    const staging = `${target}.${randomUUID28()}.partial`;
     try {
       copyFileSync2(path, staging);
       chmodSync32(staging, 384);
@@ -140426,7 +140663,7 @@ function moveAccountFolderToTrash(folder, env, options) {
     mkdirSync54(trash, { recursive: true, mode: 448 });
     const dataRoot = olympusDataRoot(env);
     if (lstatSync40(trash).isDirectory() && canonicalPath2(trash) === join108(canonicalPath2(dataRoot), relative17(resolve24(dataRoot), resolve24(trash)))) {
-      renameSync14(folder, accountTrashEntry(randomUUID27(), env));
+      renameSync14(folder, accountTrashEntry(randomUUID28(), env));
       moved = true;
     }
   } catch {
@@ -140963,7 +141200,7 @@ function exportSqliteStore(options) {
     return;
   }
   const destination = join108(destinationRoot, basename16(sqlitePath));
-  const staging = `${destination}.${randomUUID27()}.partial`;
+  const staging = `${destination}.${randomUUID28()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
     try {
@@ -141547,6 +141784,7 @@ class DelphiClient {
       ...options.signal ? { signal: options.signal } : {},
       body: JSON.stringify({
         model,
+        stream: true,
         messages,
         temperature: options.temperature ?? 0.2,
         max_tokens: options.maxTokens ?? 2048,
@@ -141618,13 +141856,13 @@ function callerCancellation(signal) {
   return reason instanceof Error && reason.name === "AbortError" ? reason : undefined;
 }
 function createDelphiTransport(config) {
-  return new DirectHttpDelphiTransport(fetch, config.argus.requestTimeoutSeconds * 1000);
+  return new DirectHttpDelphiTransport(fetch, MODEL_IDLE_TIMEOUT_MS);
 }
 
 class DirectHttpDelphiTransport {
   fetchImpl;
   timeoutMs;
-  constructor(fetchImpl = fetch, timeoutMs = 0) {
+  constructor(fetchImpl = fetch, timeoutMs = MODEL_IDLE_TIMEOUT_MS) {
     this.fetchImpl = fetchImpl;
     this.timeoutMs = timeoutMs;
   }
@@ -141634,6 +141872,8 @@ class DirectHttpDelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      if (firstError instanceof ModelStreamError)
+        throw new OperationError("argus_error", firstError.message);
       if (isZkapiDaemonEndpointRefusal(firstError))
         throw firstError;
       if (isModelEndpointRedirectError(firstError))
@@ -141642,16 +141882,18 @@ class DirectHttpDelphiTransport {
       if (cancelled)
         throw cancelled;
       if (isAbortError2(firstError)) {
-        throw argusTimeoutError(lane, url, timeoutMs);
+        throw new OperationError("argus_unreachable", firstError instanceof Error ? firstError.message : `Argus ${lane} made no progress.`, undefined);
       }
       try {
         response = await this.fetchWithTimeout(url, init, timeoutMs);
       } catch (secondError) {
+        if (secondError instanceof ModelStreamError)
+          throw new OperationError("argus_error", secondError.message);
         const cancelledAgain = callerCancellation(init.signal);
         if (cancelledAgain)
           throw cancelledAgain;
         if (isAbortError2(secondError)) {
-          throw argusTimeoutError(lane, url, timeoutMs);
+          throw new OperationError("argus_unreachable", secondError instanceof Error ? secondError.message : `Argus ${lane} made no progress.`, undefined);
         }
         if (isModelEndpointRedirectError(secondError))
           throw argusRedirectError(lane, secondError);
@@ -141665,24 +141907,8 @@ class DirectHttpDelphiTransport {
     return response.json();
   }
   async fetchWithTimeout(url, init, timeoutMs) {
-    if (timeoutMs <= 0)
-      return fetchModelEndpoint(this.fetchImpl, url, init);
-    const controller = new AbortController;
-    const abortFromCaller = () => controller.abort(init.signal?.reason);
-    if (init.signal?.aborted)
-      abortFromCaller();
-    else
-      init.signal?.addEventListener("abort", abortFromCaller, { once: true });
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetchModelEndpoint(this.fetchImpl, url, {
-        ...init,
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timer);
-      init.signal?.removeEventListener("abort", abortFromCaller);
-    }
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+    return fetchStreamingModel(this.fetchImpl, url, init, body?.model ?? "model discovery", timeoutMs);
   }
 }
 function normalizeModel(item) {
@@ -141706,10 +141932,8 @@ function isAbortError2(error) {
 function argusRedirectError(lane, error) {
   return new OperationError("argus_unreachable", `Argus ${lane} lane answered with a redirect, which is refused.`, error.message);
 }
-function argusTimeoutError(lane, url, timeoutMs) {
-  return new OperationError("argus_unreachable", `Argus ${lane} lane timed out at ${url} after ${timeoutMs}ms.`, "The local model lane did not complete within the configured request budget; failing closed instead of leaving the caller waiting indefinitely.");
-}
 var init_delphi = __esm(() => {
+  init_model_stream();
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
@@ -143632,7 +143856,7 @@ var init_update_check = __esm(() => {
 
 // src/core/managed-tools.ts
 import { execFile as execFile3 } from "node:child_process";
-import { createHash as createHash81, randomUUID as randomUUID28 } from "node:crypto";
+import { createHash as createHash81, randomUUID as randomUUID29 } from "node:crypto";
 import {
   accessSync as accessSync9,
   constants as constants14,
@@ -143645,7 +143869,7 @@ import {
   rmSync as rmSync33,
   statSync as statSync36,
   symlinkSync,
-  writeFileSync as writeFileSync18,
+  writeFileSync as writeFileSync19,
   chmodSync as chmodSync33
 } from "node:fs";
 import { open as open4 } from "node:fs/promises";
@@ -143981,7 +144205,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     return { tool, version: pin.version, outcome: "already_installed", executable: existing };
   const toolDir = join112(root, tool);
   const versionDir = join112(toolDir, pin.version);
-  const id = randomUUID28();
+  const id = randomUUID29();
   const download = join112(toolDir, `.download-${id}`);
   const staging = join112(toolDir, `.staging-${id}`);
   try {
@@ -144031,7 +144255,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
       installedAt: (options.now ?? (() => new Date))().toISOString(),
       ...adhocSigned.length > 0 ? { adhocSigned } : {}
     };
-    writeFileSync18(join112(staging, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}
+    writeFileSync19(join112(staging, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}
 `, { mode: 384, flag: "wx" });
     await commit(async () => {
       let old;
@@ -144344,7 +144568,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
       continue;
     mkdirs(posix3.dirname(entry.target));
     const destination = join112(staging, entry.target);
-    writeFileSync18(destination, entry.data ?? Buffer.alloc(0), { flag: "wx", mode: entry.mode & 64 ? 448 : 384 });
+    writeFileSync19(destination, entry.data ?? Buffer.alloc(0), { flag: "wx", mode: entry.mode & 64 ? 448 : 384 });
     chmodSync33(destination, entry.mode & 64 ? 448 : 384);
   }
   for (const entry of planned) {
@@ -144380,7 +144604,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
       ""
     ].join(`
 `);
-    writeFileSync18(join112(staging, asset.launcher.path), launcher, { flag: "wx", mode: 448 });
+    writeFileSync19(join112(staging, asset.launcher.path), launcher, { flag: "wx", mode: 448 });
     chmodSync33(join112(staging, asset.launcher.path), 448);
   }
   for (const entry of planned) {
@@ -145072,7 +145296,7 @@ var init_zkapi_confine_fetch = __esm(() => {
 
 // src/core/zkapi-confine-selftest.ts
 import { randomBytes as randomBytes23 } from "node:crypto";
-import { chmodSync as chmodSync34, readFileSync as readFileSync71, readlinkSync as readlinkSync3, readdirSync as readdirSync24, rmSync as rmSync34, writeFileSync as writeFileSync19 } from "node:fs";
+import { chmodSync as chmodSync34, readFileSync as readFileSync71, readlinkSync as readlinkSync3, readdirSync as readdirSync24, rmSync as rmSync34, writeFileSync as writeFileSync20 } from "node:fs";
 import { createServer as createServer3, createConnection as createConnection3 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces as networkInterfaces2 } from "node:os";
@@ -145742,12 +145966,12 @@ main().catch(() => process.exit(1));
       const probePath = join113(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes23(4).toString("hex")}.cjs`);
       const watchdogPath = join113(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes23(4).toString("hex")}.cjs`);
       try {
-        writeFileSync19(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
+        writeFileSync20(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
         chmodSync34(probePath, 448);
         const transport = await Promise.resolve().then(() => (init_consult_transport_zkapi(), {}));
         const linux = await Promise.resolve().then(() => (init_zkapi_confinement_linux(), {}));
         const bridge = await Promise.resolve().then(() => (init_zkapi_confine_fetch(), {}));
-        writeFileSync19(watchdogPath, WATCHDOG_SCRIPT, { mode: 448 });
+        writeFileSync20(watchdogPath, WATCHDOG_SCRIPT, { mode: 448 });
         chmodSync34(watchdogPath, 448);
         let fixture;
         let control;
@@ -146227,8 +146451,8 @@ var init_zkapi_confinement_linux = __esm(() => {
 
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn7, execFileSync as execFileSync5 } from "node:child_process";
-import { createHash as createHash83, randomUUID as randomUUID29 } from "node:crypto";
-import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync30, constants as constants15, existsSync as existsSync81, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync4, readdirSync as readdirSync26, readFileSync as readFileSync73, readlinkSync as readlinkSync5, realpathSync as realpathSync22, rmSync as rmSync35, statSync as statSync37, writeFileSync as writeFileSync20 } from "node:fs";
+import { createHash as createHash83, randomUUID as randomUUID30 } from "node:crypto";
+import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync30, constants as constants15, existsSync as existsSync81, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync4, readdirSync as readdirSync26, readFileSync as readFileSync73, readlinkSync as readlinkSync5, realpathSync as realpathSync22, rmSync as rmSync35, statSync as statSync37, writeFileSync as writeFileSync21 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir32, tmpdir as tmpdir12 } from "node:os";
 import { delimiter as delimiter7, dirname as dirname90, isAbsolute as isAbsolute33, join as join115, resolve as resolvePath } from "node:path";
@@ -146444,7 +146668,7 @@ function defaultZkapiConfinement(host = {}) {
           servers.push(other);
           const targets = JSON.stringify({ allowed, other: other.address().port });
           const script = join115(workDir, "confinement-self-test.cjs");
-          writeFileSync20(script, SELF_TEST_SCRIPT, { mode: 384 });
+          writeFileSync21(script, SELF_TEST_SCRIPT, { mode: 384 });
           const outside = runSelfTestProbe([process.execPath, script, targets], env);
           const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script, targets], env);
           const matches = (out, confined) => Boolean(out && confined) && allowed.every((port) => out["allowed" + port] === "connected" && confined["allowed" + port] === "connected") && ["other", "ipv6", "mapped", "resolver"].every((key) => out[key] === "connected" && confined[key] === "failed_fast") && ["udp", "loopbackUdp"].every((key) => out[key] === "sent" && confined[key] === "failed") && (out.tcp === "timeout" || out.tcp === "failed_slow") && confined.tcp === "failed_fast";
@@ -147589,7 +147813,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
     return refuse("tor_port_busy");
   if (sessionSignal.aborted)
     return refuse(abortCause);
-  const sessionId = randomUUID29();
+  const sessionId = randomUUID30();
   const workDir = mkdtempSync4(join115(tmpdir12(), "olympus-zkapi-"));
   chmodSync35(workDir, 448);
   const watchdog = join115(workDir, "watchdog.cjs");
@@ -147621,7 +147845,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
   let sendDeadline;
   result = await (async () => {
     try {
-      writeFileSync20(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
+      writeFileSync21(watchdog, WATCHDOG_SCRIPT, { mode: 384 });
       const supervisorInstance = processInstanceIdentity(process.pid);
       activeSessionId = sessionId;
       updateState(statePath, now(), (state) => ({
@@ -150090,11 +150314,11 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync15 } from "node:child_process";
-import { chmodSync as chmodSync36, closeSync as closeSync31, constants as constants16, copyFileSync as copyFileSync3, existsSync as existsSync83, fstatSync as fstatSync7, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync45, linkSync as linkSync4, mkdirSync as mkdirSync57, openSync as openSync30, readFileSync as readFileSync75, readlinkSync as readlinkSync6, readdirSync as readdirSync28, realpathSync as realpathSync23, renameSync as renameSync17, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync21 } from "node:fs";
+import { chmodSync as chmodSync36, closeSync as closeSync31, constants as constants16, copyFileSync as copyFileSync3, existsSync as existsSync83, fstatSync as fstatSync7, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync45, linkSync as linkSync4, mkdirSync as mkdirSync57, openSync as openSync30, readFileSync as readFileSync75, readlinkSync as readlinkSync6, readdirSync as readdirSync28, realpathSync as realpathSync23, renameSync as renameSync17, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync22 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename18, dirname as dirname92, join as join117, relative as relative19, resolve as resolve25, sep as sep23 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
-import { randomBytes as randomBytes25, createHash as createHash85, randomUUID as randomUUID30 } from "node:crypto";
+import { randomBytes as randomBytes25, createHash as createHash85, randomUUID as randomUUID31 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync15(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -150636,7 +150860,7 @@ function writeSnapshot(backupDir, index, text, mode = 384) {
   return { present: true, backupPath, sha256: hashFile(backupPath), mode };
 }
 function createInstallTransaction(input) {
-  const backupDir = join117(input.layout.stateDir, `.install-backup-${randomUUID30()}`);
+  const backupDir = join117(input.layout.stateDir, `.install-backup-${randomUUID31()}`);
   createLinuxPrivateDirectory(backupDir);
   const root = lstatSync45(backupDir);
   const files = {};
@@ -150653,7 +150877,7 @@ function createInstallTransaction(input) {
     priorUnitLinks,
     action: input.action,
     phase: input.phase,
-    stagingPath: join117(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID30()}`),
+    stagingPath: join117(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID31()}`),
     backupDir,
     backupDevice: root.dev,
     backupInode: root.ino,
@@ -150938,7 +151162,7 @@ function migrateLegacySettings(layout, transaction, options) {
     const temporary = legacyMigrationTemporary(layout, transaction, name);
     const fd = openSync30(temporary, constants16.O_WRONLY | constants16.O_CREAT | constants16.O_EXCL | constants16.O_NOFOLLOW, 384);
     try {
-      writeFileSync21(fd, snapshotBytes(snapshots[name]));
+      writeFileSync22(fd, snapshotBytes(snapshots[name]));
       fsyncSync8(fd);
     } finally {
       closeSync31(fd);
@@ -158715,7 +158939,7 @@ var init_installed_sniffer_runtime = __esm(() => {
 
 // src/workers/classification/tier-migration.ts
 import { createHash as createHash90 } from "node:crypto";
-import { chmodSync as chmodSync38, existsSync as existsSync91, mkdirSync as mkdirSync59, readFileSync as readFileSync83, renameSync as renameSync19, writeFileSync as writeFileSync23 } from "node:fs";
+import { chmodSync as chmodSync38, existsSync as existsSync91, mkdirSync as mkdirSync59, readFileSync as readFileSync83, renameSync as renameSync19, writeFileSync as writeFileSync24 } from "node:fs";
 import { dirname as dirname96, join as join125 } from "node:path";
 function domainTier(domain) {
   return domain === "public_safe" ? "public" : domain === "internal" ? "private" : "secure";
@@ -158739,7 +158963,7 @@ function writeTierMigrationState(statePath, state) {
 function writeOwnerOnlyFile(path, text) {
   mkdirSync59(dirname96(path), { recursive: true, mode: 448 });
   const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync23(temp, text, { mode: 384 });
+  writeFileSync24(temp, text, { mode: 384 });
   chmodSync38(temp, 384);
   renameSync19(temp, path);
 }
@@ -161454,7 +161678,7 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-import-allowance.ts
-import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
 function withGmailImportRunOnce(run) {
   const permission = { active: true };
   return operatorImport.run(permission, async () => {
@@ -161540,7 +161764,7 @@ var init_gmail_import_allowance = __esm(() => {
   init_limit_stops();
   registerLimit({ id: "gmail.import_allowance", kind: "requests", scope: "source", label: "Gmail import request allowance reached", unit: "requests", continue: "run_once" });
   GMAIL_IMPORT_LIMIT_SUBJECT = JSON.stringify(["gmail.email", "internal.email", "gmail.import_allowance"]);
-  operatorImport = new AsyncLocalStorage11;
+  operatorImport = new AsyncLocalStorage12;
   GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
   GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
   GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
@@ -162913,7 +163137,7 @@ var init_owner_limits = __esm(() => {
 // src/data-restore.ts
 import { closeSync as closeSync34, copyFileSync as copyFileSync4, existsSync as existsSync96, fsyncSync as fsyncSync10, openSync as openSync33, readFileSync as readFileSync86, renameSync as renameSync20, rmSync as rmSync39, statSync as statSync42, chmodSync as chmodSync39 } from "node:fs";
 import { dirname as dirname99, join as join126, resolve as resolve26 } from "node:path";
-import { randomUUID as randomUUID33 } from "node:crypto";
+import { randomUUID as randomUUID34 } from "node:crypto";
 import { Database as Database29 } from "bun:sqlite";
 function restoreOlympusData(options) {
   const input = resolve26(options.input);
@@ -163175,7 +163399,7 @@ function writeRestoredIdentities(identities, bindingsPath, env) {
 }
 function copyPrivate(from, to, prepare) {
   makeDurableDirectory(dirname99(to), exportDurabilityBoundary(dirname99(to)));
-  const staging = `${to}.${randomUUID33()}.restoring`;
+  const staging = `${to}.${randomUUID34()}.restoring`;
   try {
     copyFileSync4(from, staging);
     chmodSync39(staging, 384);
@@ -163328,7 +163552,7 @@ var init_data_restore = __esm(() => {
 });
 
 // src/data-backup.ts
-import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash93, createHmac as createHmac5, randomBytes as randomBytes26, randomUUID as randomUUID34, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash93, createHmac as createHmac5, randomBytes as randomBytes26, randomUUID as randomUUID35, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 import { closeSync as closeSync35, existsSync as existsSync97, lstatSync as lstatSync49, mkdirSync as mkdirSync62, openSync as openSync34, readdirSync as readdirSync30, readSync as readSync12, renameSync as renameSync21, rmSync as rmSync40, statSync as statSync43, unlinkSync as unlinkSync6, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync11 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename21, dirname as dirname100, join as join127, resolve as resolve27, sep as sep24 } from "node:path";
@@ -163479,7 +163703,7 @@ async function writeBackupFile(options) {
   for (let n = 2;existsSync97(join127(folder, name)); n += 1)
     name = backupFileName(now).replace(BACKUP_FILE_EXTENSION, `-${n}${BACKUP_FILE_EXTENSION}`);
   const target = join127(folder, name);
-  const staging = join127(folder, `.${name}.${randomUUID34()}.partial`);
+  const staging = join127(folder, `.${name}.${randomUUID35()}.partial`);
   const nonce = options.key ? randomBytes26(12) : undefined;
   const header = encodeHeader({
     kind: "olympus_backup",
@@ -163832,7 +164056,7 @@ function backupStagingDir(env) {
   const root = sharedDataPath("backup-staging", env);
   mkdirSync62(root, { recursive: true, mode: 448 });
   chmodSync40(root, 448);
-  return join127(root, randomUUID34());
+  return join127(root, randomUUID35());
 }
 async function backupOlympusData(options) {
   const folder = resolve27(options.folder);
@@ -179437,7 +179661,7 @@ var init_server4 = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync64, readFileSync as readFileSync92, rmSync as rmSync42, writeFileSync as writeFileSync24 } from "node:fs";
+import { mkdirSync as mkdirSync64, readFileSync as readFileSync92, rmSync as rmSync42, writeFileSync as writeFileSync25 } from "node:fs";
 import { dirname as dirname103, join as join131 } from "node:path";
 import { homedir as homedir42 } from "node:os";
 function guardStateDir(env) {
@@ -179486,7 +179710,7 @@ function writeEmbeddingOperatorOverride(path, on) {
     return;
   }
   mkdirSync64(dirname103(path), { recursive: true, mode: 448 });
-  writeFileSync24(path, `${EMBEDDING_PRIORITY_TOKEN}
+  writeFileSync25(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
 function asRecord16(value) {
@@ -179693,7 +179917,7 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/core/native-embedding-drain-service.ts
-import { randomUUID as randomUUID35 } from "node:crypto";
+import { randomUUID as randomUUID36 } from "node:crypto";
 import { readFileSync as readFileSync93, statSync as statSync45 } from "node:fs";
 import { delimiter as delimiter8, dirname as dirname104, isAbsolute as isAbsolute38, join as join132 } from "node:path";
 import { fileURLToPath as fileURLToPath13 } from "node:url";
@@ -179744,7 +179968,7 @@ async function prepareEmbeddingDrainStart(input, options) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join132(dirname104(reportPath), READINESS_FILE);
-  const instanceId = randomUUID35();
+  const instanceId = randomUUID36();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
   return {
@@ -180586,7 +180810,7 @@ var init_protocol3 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync41, existsSync as existsSync103, lstatSync as lstatSync51, mkdirSync as mkdirSync66, readFileSync as readFileSync94, renameSync as renameSync23, writeFileSync as writeFileSync25 } from "node:fs";
+import { chmodSync as chmodSync41, existsSync as existsSync103, lstatSync as lstatSync51, mkdirSync as mkdirSync66, readFileSync as readFileSync94, renameSync as renameSync23, writeFileSync as writeFileSync26 } from "node:fs";
 import { join as join134 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync66(stateDir, { recursive: true, mode: 448 });
@@ -180601,7 +180825,7 @@ function ensureStateDir(stateDir) {
 }
 function writePrivateFile(path, contents) {
   const temporary = `${path}.tmp.${process.pid}`;
-  writeFileSync25(temporary, contents, { mode: 384 });
+  writeFileSync26(temporary, contents, { mode: 384 });
   chmodSync41(temporary, 384);
   renameSync23(temporary, path);
 }
@@ -184868,7 +185092,7 @@ var init_built_in_reranker = __esm(() => {
 });
 
 // src/workers/classification/judge-pacing.ts
-import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
 import { createHash as createHash95 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
@@ -184885,7 +185109,7 @@ class JudgeRateLimitPacer {
   lastSeq = 0;
   reportSeq = 0;
   blockedUntil = 0;
-  calls = new AsyncLocalStorage12;
+  calls = new AsyncLocalStorage13;
   constructor(clock = realClock) {
     this.clock = clock;
   }
@@ -188558,9 +188782,9 @@ import {
   readFileSync as readFileSync99,
   renameSync as renameSync24,
   rmSync as rmSync44,
-  writeFileSync as writeFileSync26
+  writeFileSync as writeFileSync27
 } from "node:fs";
-import { randomUUID as randomUUID36 } from "node:crypto";
+import { randomUUID as randomUUID37 } from "node:crypto";
 import { homedir as homedir43 } from "node:os";
 import { dirname as dirname107, isAbsolute as isAbsolute40, join as join139 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir43(), type = "text") {
@@ -188770,11 +188994,11 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID36()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID37()}.tmp`;
   try {
     mkdirSync69(dirname107(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync26(tempPath, `${JSON.stringify({
+    writeFileSync27(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
@@ -189075,7 +189299,7 @@ var init_venice_client = __esm(() => {
   init_sovereignty();
   init_model_transport();
   init_bounded_text();
-  init_model_stream();
+  init_model_stream2();
   init_remote_vlm();
 });
 
@@ -210518,7 +210742,7 @@ var init_cli_operations = __esm(() => {
 });
 
 // src/workers/settings-proposal-holder.ts
-import { randomUUID as randomUUID37 } from "node:crypto";
+import { randomUUID as randomUUID38 } from "node:crypto";
 function modeLabel(id) {
   return PRIVACY_PRESET_LABELS[id] ?? id;
 }
@@ -210597,7 +210821,7 @@ function createSettingsProposalHolder(targets, now = () => new Date) {
   return {
     async propose(input, from) {
       const proposal = {
-        id: randomUUID37(),
+        id: randomUUID38(),
         created_at: now().toISOString(),
         ...from ? { from } : {},
         input,
@@ -221419,7 +221643,7 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash108, randomUUID as randomUUID38 } from "node:crypto";
+import { createHash as createHash108, randomUUID as randomUUID39 } from "node:crypto";
 import { realpathSync as realpathSync27, rmSync as rmSync47, readdirSync as readdirSync36 } from "node:fs";
 import { join as join150, posix as posix4 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
@@ -221811,7 +222035,7 @@ function createLocalFilesSourceConnector(options) {
           const deletedSeen = new Set;
           const priorGen = cursor?.startsWith(LOCAL_FILES_CURSOR_PREFIX) ? cursor.slice(LOCAL_FILES_CURSOR_PREFIX.length) : undefined;
           const replay = priorGen !== undefined && priorGen !== "poll";
-          const nextGen = randomUUID38();
+          const nextGen = randomUUID39();
           let wroteSnapshot = false;
           if (options.watch) {
             try {
@@ -237047,9 +237271,9 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/engine/runtime/source-answer-lanes.ts
-import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
-  const context = new AsyncLocalStorage13;
+  const context = new AsyncLocalStorage14;
   let inFlight = 0;
   let lastEndedAt;
   const release = () => {
@@ -238506,9 +238730,9 @@ var init_sqlite_checkpointer = __esm(() => {
 });
 
 // src/workers/engine-split/commands.ts
-import { randomUUID as randomUUID39 } from "node:crypto";
+import { randomUUID as randomUUID40 } from "node:crypto";
 function newEngineCommandId() {
-  return randomUUID39();
+  return randomUUID40();
 }
 function asRecord19(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -242574,7 +242798,7 @@ var init_sniffer_service = __esm(() => {
 });
 
 // src/workers/engine-split/client.ts
-import { randomUUID as randomUUID40 } from "node:crypto";
+import { randomUUID as randomUUID41 } from "node:crypto";
 
 class EngineCommandClient {
   options;
@@ -242692,7 +242916,7 @@ class OwnerBusyRelay {
   constructor(client, log = () => {}, options = {}) {
     this.client = client;
     this.log = log;
-    this.front = options.front ?? randomUUID40();
+    this.front = options.front ?? randomUUID41();
     this.renewEveryMs = options.renewEveryMs ?? 3 * 60000;
     this.setTimer = options.setInterval ?? ((callback, ms) => {
       const timer = setInterval(callback, ms);
@@ -242817,8 +243041,8 @@ var init_snapshot = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
-import { randomUUID as randomUUID41 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
+import { randomUUID as randomUUID42 } from "node:crypto";
 import { lstatSync as lstatSync57, rmSync as rmSync49 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
@@ -242830,7 +243054,7 @@ function engineStatusSnapshotPath(env) {
   return sharedDataPath("engine-status", env);
 }
 function startEngineBackgroundServer(input) {
-  const instanceId = input.instanceId ?? randomUUID41();
+  const instanceId = input.instanceId ?? randomUUID42();
   prepareEngineBackgroundSocketDirectory(input.socketPath);
   let present = false;
   try {
@@ -242957,7 +243181,7 @@ function restartingResponse(request) {
 function createFrontGate() {
   let open = true;
   let generation = 0;
-  const current = new AsyncLocalStorage14;
+  const current = new AsyncLocalStorage15;
   return {
     isOpen: () => open,
     close() {
@@ -244827,7 +245051,7 @@ function parseOpenAICompatibleResponseText2(value) {
 var DEFAULT_LOCAL_VLM_TIMEOUT_MS = 180000;
 var init_openai_compatible_client = __esm(() => {
   init_bounded_text();
-  init_model_stream();
+  init_model_stream2();
   init_remote_vlm();
   init_local_model_policy();
   init_model_transport();
@@ -246186,10 +246410,14 @@ function createAnthropicAnalystModel(options) {
       refuseLocalOnlyOnOrdinaryCloud(request, "Anthropic analyst");
       const url = `${baseUrl}/v1/messages`;
       const controller = new AbortController;
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const follow = () => controller.abort(request.signal?.reason);
+      if (request.signal?.aborted)
+        follow();
+      else
+        request.signal?.addEventListener("abort", follow, { once: true });
       let response;
       try {
-        response = await fetchModelEndpoint(fetchImpl, url, {
+        response = await fetchStreamingModel(fetchImpl, url, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -246198,19 +246426,22 @@ function createAnthropicAnalystModel(options) {
           },
           body: JSON.stringify({
             model,
+            stream: true,
             max_tokens: request.maxOutputChars !== undefined ? maxTokensForChars3(request.maxOutputChars) : maxTokens,
             system: request.system,
             messages: [{ role: "user", content: request.prompt }]
           }),
           signal: controller.signal
-        });
+        }, model, timeoutMs);
       } catch (error) {
+        if (request.signal?.aborted)
+          throw request.signal.reason;
         if (isModelEndpointRedirectError(error)) {
           throw new OperationError("source_index_error", `Anthropic analyst (${model}) answered with a redirect, which is refused.`, error.message);
         }
         throw new OperationError("source_index_error", `Anthropic analyst (${model}) was unreachable at ${url}.`, error instanceof Error ? error.message : "Check the Anthropic endpoint and network.");
       } finally {
-        clearTimeout(timer);
+        request.signal?.removeEventListener("abort", follow);
       }
       if (!response.ok) {
         const detail = await safeText4(response);
@@ -246251,8 +246482,9 @@ async function safeText4(response) {
     return "";
   }
 }
-var DEFAULT_MODEL2 = "claude-sonnet-4-5", DEFAULT_BASE_URL4 = "https://api.anthropic.com", DEFAULT_TIMEOUT_MS5 = 120000, DEFAULT_MAX_TOKENS = 4096, ANTHROPIC_VERSION = "2023-06-01";
+var DEFAULT_MODEL2 = "claude-sonnet-4-5", DEFAULT_BASE_URL4 = "https://api.anthropic.com", DEFAULT_TIMEOUT_MS5 = 60000, DEFAULT_MAX_TOKENS = 4096, ANTHROPIC_VERSION = "2023-06-01";
 var init_analyst_anthropic = __esm(() => {
+  init_model_stream();
   init_operation_error();
   init_model_transport();
   init_analyst();
@@ -265805,7 +266037,13 @@ class PrivateAnswerJobs {
     const question = analysis.question ?? "";
     const cached = analysis.evidence ?? [];
     let evidence = [];
-    const work = (async () => {
+    const work = withModelProgress(() => {
+      if (freed)
+        return;
+      deadlineTimer.refresh();
+      for (const job of analysis.jobs)
+        job.modelProgress?.();
+    }, async () => {
       if (abort.signal.aborted)
         throw new AnalysisStop("aborted");
       if (cached.length === 0)
@@ -265843,7 +266081,7 @@ class PrivateAnswerJobs {
       } finally {
         analysis.stats.modelMs = this.now() - modelStarted;
       }
-    })();
+    });
     work.catch(() => {
       return;
     });
@@ -265896,6 +266134,7 @@ class PrivateAnswerJobs {
         return;
       settled = true;
       clearTimeout(deadlineTimer);
+      job.modelProgress = undefined;
       if (this.jobs.get(job.id) === job)
         job.outcome = outcome;
       this.detach(job);
@@ -265919,6 +266158,12 @@ class PrivateAnswerJobs {
         this.resetInBackground();
     }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
+    job.modelProgress = () => {
+      if (settled)
+        return;
+      deadlineTimer.refresh();
+      job.expiresAt = Math.max(job.expiresAt, this.now() + this.claimLifetimeFor(job.detail));
+    };
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
     const stopped = new Promise((resolve) => {
       if (abort.signal.aborted)
@@ -266309,10 +266554,11 @@ async function boundedText(request, max) {
 }
 var AnalysisStop, defaultLog = (line) => {
   console.log(line);
-}, MAX_QUESTION_CHARS3 = 4000, OPEN_TOKEN_PATTERN, ACK_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 1e5, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, PRIVATE_ANSWER_CLAIM_COLLECT_MS, defaultAudit = (event) => {
+}, MAX_QUESTION_CHARS3 = 4000, OPEN_TOKEN_PATTERN, ACK_TOKEN_PATTERN, MAX_EVIDENCE_ITEMS = 50, PENDING_RETRY_SECONDS = 2, PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 60000, PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 60000, PRIVATE_ANSWER_DEDUPE_MS, PRIVATE_ANSWER_PRECOMPUTE_WINDOW_MS, PRIVATE_ANSWER_CLAIM_HOLD_MS = 1500, PRIVATE_ANSWER_CLAIM_COLLECT_MS, defaultAudit = (event) => {
   console.warn(`[olympus] private answer audit: ${event === "claimed_by_other_key" ? "a second key tried to open a private answer that was already claimed" : "a private analysis hit its deadline and was stopped"}`);
 }, IDENTITY_FIELDS, SOURCE_ITEM_FIELDS;
 var init_private_answer_jobs = __esm(() => {
+  init_model_stream();
   init_remote_result();
   init_app_release_capture();
   init_private_answer();
@@ -274852,7 +275098,7 @@ init_worker_auth();
 init_worker_shutdown();
 init_worker_front_proxy();
 init_worker_transport();
-import { randomUUID as randomUUID12 } from "node:crypto";
+import { randomUUID as randomUUID13 } from "node:crypto";
 var STOP_GRACE_MS = WORKER_SHUTDOWN_DEADLINE_MS + 5000;
 var STARTUP_TIMEOUT_MS = 180000;
 var STABLE_UPTIME_MS = 30000;
@@ -274897,7 +275143,7 @@ async function superviseWorkerServiceSplit(input) {
     label: "background engine",
     descendantGroupsPath: descendantGroupsPath(ENGINE_BACKGROUND_SERVICE_ID, input.env),
     prepareStart: async () => {
-      const instanceId = randomUUID12();
+      const instanceId = randomUUID13();
       const env = launchEnv();
       return engineBackgroundLaunch({
         env: { ...env, [ENGINE_BACKGROUND_INSTANCE_ENV]: instanceId },
@@ -274975,7 +275221,7 @@ init_open_targets();
 init_package_root();
 init_linux_engine_layout();
 import { spawnSync as spawnSync9 } from "node:child_process";
-import { existsSync as existsSync41, lstatSync as lstatSync26, mkdirSync as mkdirSync28, readFileSync as readFileSync38, renameSync as renameSync7, rmSync as rmSync16, statSync as statSync22, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync41, lstatSync as lstatSync26, mkdirSync as mkdirSync28, readFileSync as readFileSync38, renameSync as renameSync7, rmSync as rmSync16, statSync as statSync22, writeFileSync as writeFileSync11 } from "node:fs";
 import { homedir as homedir25, platform as osPlatform2 } from "node:os";
 import { dirname as dirname46, isAbsolute as isAbsolute21, join as join53 } from "node:path";
 var OPEN_HANDLER_BUNDLE_ID = "ai.olympusplugin.open";
@@ -275095,7 +275341,7 @@ function installMac(options) {
   const staging = join53(support, ".Olympus-next.app");
   const scriptPath = join53(support, ".open-handler.applescript");
   rmSync16(staging, { recursive: true, force: true });
-  writeFileSync10(scriptPath, script, { mode: 384 });
+  writeFileSync11(scriptPath, script, { mode: 384 });
   try {
     must(exec("/usr/bin/osacompile", ["-o", staging, scriptPath]), "build the link handler");
   } finally {
@@ -275260,7 +275506,7 @@ function home(options) {
 }
 function writeAtomic(path, text, mode) {
   const next = `${path}.olympus-next`;
-  writeFileSync10(next, text, { mode });
+  writeFileSync11(next, text, { mode });
   renameSync7(next, path);
 }
 function must(result, what) {
@@ -275310,7 +275556,7 @@ import { dirname as dirname95, isAbsolute as isAbsolute36, join as join124 } fro
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash88, randomUUID as randomUUID31 } from "node:crypto";
+import { createHash as createHash88, randomUUID as randomUUID32 } from "node:crypto";
 import { spawnSync as spawnSync17 } from "node:child_process";
 import {
   chmodSync as chmodSync37,
@@ -275325,7 +275571,7 @@ import {
   renameSync as renameSync18,
   rmSync as rmSync38,
   statSync as statSync41,
-  writeFileSync as writeFileSync22
+  writeFileSync as writeFileSync23
 } from "node:fs";
 import { tmpdir as tmpdir13 } from "node:os";
 import { basename as basename20, isAbsolute as isAbsolute35, join as join122 } from "node:path";
@@ -275343,7 +275589,7 @@ function prepareWorkerUpgradeArtifact(options) {
   const artifactPath = join122(snapshotDir, "artifact.tgz");
   const descriptor = openSync32(artifactPath, "wx", 384);
   try {
-    writeFileSync22(descriptor, artifactBytes);
+    writeFileSync23(descriptor, artifactBytes);
     fsyncSync9(descriptor);
   } finally {
     closeSync33(descriptor);
@@ -275615,7 +275861,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let published = false;
   try {
     if (existsSync88(workingDirectory)) {
-      replacedPath = join122(versionsDir, `.olympus-replaced-${basename20(workingDirectory)}-${randomUUID31()}`);
+      replacedPath = join122(versionsDir, `.olympus-replaced-${basename20(workingDirectory)}-${randomUUID32()}`);
       renameSync18(workingDirectory, replacedPath);
       syncDirectory(versionsDir);
     }
@@ -275657,7 +275903,7 @@ function removeStagingTree(root) {
 init_atomic_file();
 init_file_lease();
 init_operation_error();
-import { randomUUID as randomUUID32 } from "node:crypto";
+import { randomUUID as randomUUID33 } from "node:crypto";
 import { existsSync as existsSync89, linkSync as linkSync5, lstatSync as lstatSync47, readFileSync as readFileSync81 } from "node:fs";
 import { join as join123 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
@@ -275673,7 +275919,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       schema_version: 1,
       pid: process.pid,
       process_instance: ownerProcessInstance,
-      nonce: randomUUID32(),
+      nonce: randomUUID33(),
       action,
       started_at: now().toISOString()
     };

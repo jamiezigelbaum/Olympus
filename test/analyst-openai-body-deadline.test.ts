@@ -1,5 +1,4 @@
-// The adapter's timeoutMs must bound the whole exchange, not only the header
-// phase. A peer that returns 200 headers and then stalls the body is the case
+// The adapter's timeoutMs is an idle limit over headers and body bytes. A peer that returns 200 headers and then stalls the body is the case
 // that hangs a cloud analyst leg with no caller budget behind it.
 
 import { describe, expect, test } from 'bun:test';
@@ -51,7 +50,7 @@ describe('OpenAI-compatible analyst deadline', () => {
     const outcome = await settledWithin(model.complete(BASE_REQUEST), 2_000);
 
     expect(outcome).toBeInstanceOf(OperationError);
-    expect((outcome as OperationError).message).toContain('did not complete within 50ms');
+    expect((outcome as OperationError).message).toContain('Model gpt-5.5 timed out: no progress for 50ms');
   });
 
   test('a stalled error-detail body still fails at timeoutMs', async () => {

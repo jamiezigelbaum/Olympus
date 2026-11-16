@@ -1,7 +1,8 @@
+import { fetchStreamingModel, ModelStreamError, MODEL_IDLE_TIMEOUT_MS } from './model-stream.ts';
 import type { ArgusLane, ArgusModelProfile, OlympusConfig } from './config.ts';
 import { OperationError } from './operation-error.ts';
 import { assertLocalModelIdNotCloudForwarding } from './local-model-policy.ts';
-import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
+import { isModelEndpointRedirectError } from './model-transport.ts';
 import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
 import { resolveSecretRefValue } from './secret-store.ts';
 
@@ -158,6 +159,7 @@ export class DelphiClient {
         ...(options.signal ? { signal: options.signal } : {}),
         body: JSON.stringify({
           model,
+          stream: true,
           messages,
           temperature: options.temperature ?? 0.2,
           max_tokens: options.maxTokens ?? 2048,
@@ -255,14 +257,14 @@ function callerCancellation(signal: AbortSignal | null | undefined): Error | und
 }
 
 export function createDelphiTransport(config: OlympusConfig): DelphiTransport {
-  return new DirectHttpDelphiTransport(fetch, config.argus.requestTimeoutSeconds * 1000);
+  return new DirectHttpDelphiTransport(fetch, MODEL_IDLE_TIMEOUT_MS);
 }
 
 export class DirectHttpDelphiTransport implements DelphiTransport {
   private fetchImpl: DelphiFetch;
   private timeoutMs: number;
 
-  constructor(fetchImpl: DelphiFetch = fetch, timeoutMs = 0) {
+  constructor(fetchImpl: DelphiFetch = fetch, timeoutMs = MODEL_IDLE_TIMEOUT_MS) {
     this.fetchImpl = fetchImpl;
     this.timeoutMs = timeoutMs;
   }
@@ -278,6 +280,7 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
     try {
       response = await this.fetchWithTimeout(url, init, timeoutMs);
     } catch (firstError) {
+      if (firstError instanceof ModelStreamError) throw new OperationError('argus_error', firstError.message);
       // A zkAPI daemon port is refused before anything is sent: not an outage.
       if (isZkapiDaemonEndpointRefusal(firstError)) throw firstError;
       // A redirect is the endpoint's answer, not a stale socket: no retry,
@@ -290,7 +293,7 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
       const cancelled = callerCancellation(init.signal);
       if (cancelled) throw cancelled;
       if (isAbortError(firstError)) {
-        throw argusTimeoutError(lane, url, timeoutMs);
+        throw new OperationError('argus_unreachable', firstError instanceof Error ? firstError.message : `Argus ${lane} made no progress.`, undefined);
       }
       // A restarted model server leaves stale keep-alive sockets in this
       // process's connection pool; the first reuse fails at the connection
@@ -299,10 +302,11 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
       try {
         response = await this.fetchWithTimeout(url, init, timeoutMs);
       } catch (secondError) {
+        if (secondError instanceof ModelStreamError) throw new OperationError('argus_error', secondError.message);
         const cancelledAgain = callerCancellation(init.signal);
         if (cancelledAgain) throw cancelledAgain;
         if (isAbortError(secondError)) {
-          throw argusTimeoutError(lane, url, timeoutMs);
+          throw new OperationError('argus_unreachable', secondError instanceof Error ? secondError.message : `Argus ${lane} made no progress.`, undefined);
         }
         if (isModelEndpointRedirectError(secondError)) throw argusRedirectError(lane, secondError);
         throw new OperationError(
@@ -326,21 +330,8 @@ export class DirectHttpDelphiTransport implements DelphiTransport {
   }
 
   private async fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-    if (timeoutMs <= 0) return fetchModelEndpoint(this.fetchImpl, url, init);
-    const controller = new AbortController();
-    const abortFromCaller = () => controller.abort(init.signal?.reason);
-    if (init.signal?.aborted) abortFromCaller();
-    else init.signal?.addEventListener('abort', abortFromCaller, { once: true });
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetchModelEndpoint(this.fetchImpl, url, {
-        ...init,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-      init.signal?.removeEventListener('abort', abortFromCaller);
-    }
+    const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined;
+    return fetchStreamingModel(this.fetchImpl, url, init, body?.model ?? 'model discovery', timeoutMs);
   }
 }
 
@@ -369,13 +360,5 @@ function argusRedirectError(lane: string, error: Error): OperationError {
     'argus_unreachable',
     `Argus ${lane} lane answered with a redirect, which is refused.`,
     error.message,
-  );
-}
-
-function argusTimeoutError(lane: string, url: string, timeoutMs: number): OperationError {
-  return new OperationError(
-    'argus_unreachable',
-    `Argus ${lane} lane timed out at ${url} after ${timeoutMs}ms.`,
-    'The local model lane did not complete within the configured request budget; failing closed instead of leaving the caller waiting indefinitely.',
   );
 }

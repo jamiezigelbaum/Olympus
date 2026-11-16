@@ -217,7 +217,8 @@ import { dirname as dirname4, isAbsolute as isAbsolute3, join as join3, relative
 
 // src/core/file-lease.ts
 import { execFileSync } from "node:child_process";
-import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2 } from "node:fs";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createRequire as createRequire3 } from "node:module";
 import { dirname as dirname3 } from "node:path";
@@ -247,10 +248,15 @@ class FileLeaseLostError extends Error {
   }
 }
 async function withFileLease(targetPath, callback, options = {}) {
-  const owner = await acquireFileLease(targetPath, normalizeOptions(options));
+  const normalized = normalizeOptions(options);
+  const owner = await acquireFileLease(targetPath, normalized);
+  let stopHeartbeat;
   try {
+    if (normalized.heartbeat)
+      stopHeartbeat = startLeaseHeartbeat(targetPath, normalized);
     return await callback(owner);
   } finally {
+    stopHeartbeat?.();
     owner.release();
   }
 }
@@ -308,16 +314,51 @@ class AsyncFileLeaseOwner {
 }
 async function acquireFileLease(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
+  const { timers } = options;
+  let lastProgressAt = timers.now();
+  let lastHeartbeat;
+  const deadline = lastProgressAt + options.acquireTimeoutMs;
   await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const lock = tryKernelLock(lockPath, options.mode);
     if (lock)
       return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
-    if (Date.now() >= deadline)
+    if (options.heartbeat) {
+      const heartbeat = readLeaseHeartbeat(targetPath);
+      if (heartbeat !== undefined && heartbeat !== lastHeartbeat) {
+        lastHeartbeat = heartbeat;
+        lastProgressAt = timers.now();
+      }
+      if (timers.now() - lastProgressAt >= options.heartbeat.stallMs)
+        throw new FileLeaseBusyError(targetPath);
+    } else if (timers.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
-    await sleep(options.pollIntervalMs);
+    await timers.sleep(options.pollIntervalMs);
   }
+}
+function readLeaseHeartbeat(targetPath) {
+  try {
+    return readFileSync2(`${targetPath}.lock`, "utf8");
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT"))
+      return;
+    throw error;
+  }
+}
+function startLeaseHeartbeat(targetPath, options) {
+  const owner = randomUUID2();
+  let sequence = 0;
+  const pulse = () => writeFileSync2(`${targetPath}.lock`, `${owner}:${sequence++}`, { mode: 384 });
+  pulse();
+  const timer = options.timers.setInterval(() => {
+    try {
+      pulse();
+    } catch {
+      options.timers.clearInterval(timer);
+    }
+  }, options.heartbeat.intervalMs);
+  timer?.unref?.();
+  return () => options.timers.clearInterval(timer);
 }
 function acquireFileLeaseSync(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
@@ -409,7 +450,17 @@ function normalizeOptions(options) {
   return {
     mode: options.mode ?? "exclusive",
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
-    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
+    ...options.heartbeat ? { heartbeat: {
+      stallMs: positiveInteger(options.heartbeat.stallMs, DEFAULT_OPTIONS.acquireTimeoutMs),
+      intervalMs: positiveInteger(options.heartbeat.intervalMs, DEFAULT_OPTIONS.pollIntervalMs)
+    } } : {},
+    timers: options.timers ?? {
+      now: () => Date.now(),
+      sleep,
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (timer) => clearInterval(timer)
+    }
   };
 }
 function positiveInteger(value, fallback) {
@@ -2328,7 +2379,7 @@ function withSqliteFiles(path) {
 
 // scripts/source-embedding-drain.ts
 import { createHash as createHash13 } from "node:crypto";
-import { existsSync as existsSync23, lstatSync as lstatSync12, mkdirSync as mkdirSync14, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync12, mkdirSync as mkdirSync14, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname25, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
@@ -2338,7 +2389,7 @@ import { isAbsolute as isAbsolutePath2, join as join13, resolve as resolve5 } fr
 
 // src/core/owner-config-read.ts
 import { chmodSync, linkSync, readFileSync as readFileSync6, statSync as statSync2, lstatSync as lstatSync5 } from "node:fs";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname7, join as join7 } from "node:path";
 function linuxOwnerConfigPath(name, env = process.env) {
@@ -2393,7 +2444,7 @@ function publishOwnerCopy(path, text) {
     chmodSync(path, 384);
     return;
   }
-  const temp = `${path}.${randomUUID2()}.tmp`;
+  const temp = `${path}.${randomUUID3()}.tmp`;
   try {
     writePrivateFileAtomicSync(temp, text);
     linkSync(temp, path);
@@ -2443,7 +2494,7 @@ function ownedByThisUser(stat) {
 
 // src/core/still-image-readiness.ts
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync as readFileSync9, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdtempSync, readFileSync as readFileSync9, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join12 } from "node:path";
 
@@ -3473,7 +3524,7 @@ function message(cause) {
 }
 
 // src/workers/source-index/built-in-embedding/assets.ts
-import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
 import {
   closeSync as closeSync5,
   createReadStream as createReadStream2,
@@ -3484,7 +3535,7 @@ import {
   renameSync as renameSync3,
   rmSync as rmSync3,
   statSync as statSync5,
-  writeFileSync as writeFileSync2,
+  writeFileSync as writeFileSync3,
   writeSync as writeSync2
 } from "node:fs";
 import { basename as basename2, dirname as dirname10, isAbsolute as isAbsolute7, join as join11 } from "node:path";
@@ -3793,7 +3844,7 @@ function reportBuiltInEmbeddingVision(vision, options = {}) {
     mkdirSync5(root, { recursive: true, mode: 448 });
     const path = join11(root, "vision.json");
     temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync2(temporary, `${JSON.stringify({
+    writeFileSync3(temporary, `${JSON.stringify({
       modelId: model.modelId,
       vision,
       checkedAt: (options.now?.() ?? new Date).toISOString()
@@ -3934,7 +3985,7 @@ async function liteRtLibraryIntact(runtimeDir, wheel) {
   return expected !== undefined && await sha256File(join11(runtimeDir, basename2(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID3()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID4()}`;
   ensureDirectory(staging);
   try {
     const archivePath = join11(staging, wheel.name);
@@ -3946,14 +3997,14 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
     const library = readZipEntry(readFileSync8(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
-    writeFileSync2(join11(staging, basename2(wheel.library)), library, { mode: 493 });
+    writeFileSync3(join11(staging, basename2(wheel.library)), library, { mode: 493 });
     rmSync3(archivePath, { force: true });
     const marker = {
       wheel: wheel.name,
       sha256: wheel.sha256,
       librarySha256: createHash2("sha256").update(library).digest("hex")
     };
-    writeFileSync2(join11(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync3(join11(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -4005,7 +4056,7 @@ function runtimeInstalled(runtimeDir, packages) {
   }
 }
 async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID3()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID4()}`;
   ensureDirectory(staging);
   try {
     for (const pack of packages) {
@@ -4023,14 +4074,14 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
       for (const file of files) {
         const target = join11(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
         ensureDirectory(dirname10(target));
-        writeFileSync2(target, file.data, { mode: file.mode & 493 || 420 });
+        writeFileSync3(target, file.data, { mode: file.mode & 493 || 420 });
       }
       rmSync3(archivePath, { force: true });
     }
     const marker = {
       packages: packages.map((pack) => ({ name: pack.name, integrity: pack.integrity }))
     };
-    writeFileSync2(join11(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync3(join11(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -4055,7 +4106,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     fetchImpl,
     url,
     target,
-    partial: `${target}.partial-${process.pid}-${randomUUID3()}`,
+    partial: `${target}.partial-${process.pid}-${randomUUID4()}`,
     expectedBytes,
     algorithm,
     digest: expected.kind === "sha256" ? expected.expected : expected.expected.slice(algorithm.length + 1),
@@ -4224,7 +4275,7 @@ class ProgressReporter {
     try {
       mkdirSync5(dirname10(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync2(temporary, `${JSON.stringify(this.status)}
+      writeFileSync3(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
       renameSync3(temporary, this.statusPath);
     } catch {}
@@ -4278,7 +4329,7 @@ function probeStillImageReadiness(options = {}) {
       const inputPath = join12(directory, `probe-${format}${stillImageFileExtension(format)}`);
       const outputPath = join12(directory, `probe-${format}.jpg`);
       try {
-        writeFileSync3(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
+        writeFileSync4(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
         const result = run(preparer.command, preparer.decodeArgs(inputPath, outputPath), timeoutMs);
         decoded[format] = result.ok && looksLikeDecodedFixture(new Uint8Array(readFileSync9(outputPath)), format);
       } catch {
@@ -6300,6 +6351,9 @@ function unquoteEnvValue(value) {
   return trimmed;
 }
 
+// src/core/model-stream.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+
 // src/core/zkapi-consult-settings.ts
 import { readFileSync as readFileSync12, statSync as statSync7 } from "node:fs";
 import { lookup } from "node:dns/promises";
@@ -6598,11 +6652,7 @@ function isFetchRedirectRefusal(error) {
   return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
 }
 
-// src/core/read-wide.ts
-var matchingProvenances = new WeakSet;
-var wideProvenances = new WeakSet;
-
-// src/core/analyst.ts
+// src/core/source-answer-jobs.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 
 // node_modules/entities/dist/esm/decode-codepoint.js
@@ -7726,6 +7776,44 @@ var SHARED_SECRET_PATTERNS = [
   }
 ];
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+var chunkProvenance = new WeakMap;
+var storage = new AsyncLocalStorage;
+var withheldAnswers = new WeakSet;
+
+// src/core/source-answer-jobs.ts
+var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+var progressSink = new AsyncLocalStorage2;
+
+// src/core/model-stream.ts
+var progress = new AsyncLocalStorage3;
+
+// src/core/read-wide.ts
+var matchingProvenances = new WeakSet;
+var wideProvenances = new WeakSet;
+
+// src/core/analyst.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+
 // node_modules/n-gram/index.js
 var bigram = nGram(2);
 var trigram = nGram(3);
@@ -8112,14 +8200,14 @@ var stopwords_iso_default = {
 };
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-var context = new AsyncLocalStorage;
-var disabled = new AsyncLocalStorage;
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var context = new AsyncLocalStorage4;
+var disabled = new AsyncLocalStorage4;
 function keywordExpansionDisabled() {
   return disabled.getStore() === true;
 }
-var cachedOnly = new AsyncLocalStorage;
-var requestContext = new AsyncLocalStorage;
+var cachedOnly = new AsyncLocalStorage4;
+var requestContext = new AsyncLocalStorage4;
 function keywordAlternatives(query) {
   if (keywordExpansionDisabled())
     return;
@@ -8818,7 +8906,7 @@ function visibilityCheckTimeoutGap(corpusId) {
 var DOCUMENT_FAMILIES = new Set(["file", "note"]);
 
 // src/core/analyst.ts
-var analystAbortSignalStorage = new AsyncLocalStorage2;
+var analystAbortSignalStorage = new AsyncLocalStorage5;
 var CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.";
 var ANALYST_SYSTEM = [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
@@ -9096,9 +9184,9 @@ import {
   readFileSync as readFileSync13,
   renameSync as renameSync4,
   rmSync as rmSync5,
-  writeFileSync as writeFileSync4
+  writeFileSync as writeFileSync5
 } from "node:fs";
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { homedir as homedir8 } from "node:os";
 import { dirname as dirname12, isAbsolute as isAbsolute8, join as join15 } from "node:path";
 
@@ -9432,11 +9520,11 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID4()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID5()}.tmp`;
   try {
     mkdirSync7(dirname12(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync4(tempPath, `${JSON.stringify({
+    writeFileSync5(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
@@ -11962,7 +12050,7 @@ function applySqliteMmap(db, env = process.env) {
 
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
-import { randomUUID as randomUUID5 } from "node:crypto";
+import { randomUUID as randomUUID6 } from "node:crypto";
 import { chmodSync as chmodSync3, closeSync as closeSync7, existsSync as existsSync12, mkdirSync as mkdirSync9, openSync as openSync7, statSync as statSync8 } from "node:fs";
 import { dirname as dirname14 } from "node:path";
 var TIER_LEDGER_SCHEMA_VERSION = 16;
@@ -13294,7 +13382,7 @@ class TierLedger {
       if (cleared && before && settled && !this.itemIsSecret(identity) && before.metadataTier !== "secrets" && before.contentTier !== "secrets") {
         const generation = settled.state === "moving" ? settled.generation + 1 : settled.generation;
         this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
-          id: randomUUID5(),
+          id: randomUUID6(),
           generation,
           landing: settled.state === "moving",
           historyPk: this.latestHistoryPk(identity),
@@ -15884,10 +15972,10 @@ function overrideFromJson(json) {
 }
 
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-var progress = new AsyncLocalStorage3;
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+var progress2 = new AsyncLocalStorage6;
 function noteSourceIndexReadProgress() {
-  const report = progress.getStore();
+  const report = progress2.getStore();
   if (!report)
     return;
   report();
@@ -16139,7 +16227,7 @@ function readStoreWriteSequence(db) {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 import { createHash as createHash7 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -16279,7 +16367,7 @@ function contaminatedEmbeddingEpoch(modelId, epochId) {
 }
 
 // src/workers/source-index/embeddings.ts
-var priorityQueryEmbedding = new AsyncLocalStorage4;
+var priorityQueryEmbedding = new AsyncLocalStorage7;
 function priorityQueryEmbeddingRequested() {
   return priorityQueryEmbedding.getStore() === true;
 }
@@ -17259,38 +17347,7 @@ import { Database as Database2 } from "bun:sqlite";
 import { isMainThread as isMainThread3 } from "node:worker_threads";
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-
-// src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
-function chunkCoverageNote(result) {
-  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
-}
-async function checkReleaseChunks(check, inputs, options) {
-  try {
-    const result = await check?.chunks?.(inputs, options);
-    if (result && result.allowed.length === inputs.length)
-      return result;
-  } catch {}
-  return {
-    allowed: inputs.map(() => []),
-    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
-    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
-  };
-}
-var chunkProvenance = new WeakMap;
-var storage = new AsyncLocalStorage5;
-var withheldAnswers = new WeakSet;
-
-// src/core/source-answer-jobs.ts
-var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
-var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
-var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-var progressSink = new AsyncLocalStorage6;
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 
 // src/core/store-reclaim-admission.ts
 import { join as join17 } from "node:path";
@@ -17325,8 +17382,8 @@ function poolSqlSite(sql) {
 var SLOW_MAIN_THREAD_SQL_MS = 250;
 var SLOW_MAIN_THREAD_SQL_KEPT = 20;
 var SITE_TALLY_MS = 25;
-var storage2 = new AsyncLocalStorage7;
-var laneStorage = new AsyncLocalStorage7;
+var storage2 = new AsyncLocalStorage8;
+var laneStorage = new AsyncLocalStorage8;
 function beginSourceAnswerPoolRead(site) {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
@@ -19410,14 +19467,14 @@ function hasImmutableAccountLabel(id) {
 }
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash11, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash11, randomUUID as randomUUID8 } from "node:crypto";
 import { closeSync as closeSync10, existsSync as existsSync20, fsyncSync as fsyncSync3, lstatSync as lstatSync10, mkdirSync as mkdirSync13, openSync as openSync10, statSync as statSync12, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { dirname as dirname21 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
-import { createHash as createHash10, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash10, randomUUID as randomUUID7 } from "node:crypto";
 import {
   chmodSync as chmodSync5,
   closeSync as closeSync9,
@@ -19433,7 +19490,7 @@ import {
   rmSync as rmSync7,
   rmdirSync,
   statSync as statSync11,
-  writeFileSync as writeFileSync5
+  writeFileSync as writeFileSync6
 } from "node:fs";
 import { basename as basename5, dirname as dirname17, isAbsolute as isAbsolute11, join as join19, resolve as resolve8 } from "node:path";
 
@@ -19829,7 +19886,7 @@ function addMarker(path, holder) {
   const marker = join19(refs, holderName(holder));
   const name = mediaHolderName(holder);
   if (readMarker(marker) !== name)
-    writeFileSync5(marker, name, { mode: 384 });
+    writeFileSync6(marker, name, { mode: 384 });
   const legacy = legacyHolderName(holder);
   if (legacy)
     rmSync7(join19(refs, legacy), { force: true });
@@ -19941,7 +19998,7 @@ function ensureOwnerOnlyDir(dir) {
 }
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 
 // src/core/source-item-read.ts
 var SOURCE_ITEM_READ_REFUSALS = [
@@ -19957,8 +20014,8 @@ var SOURCE_ITEM_READ_REFUSALS = [
 ];
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
-var storage3 = new AsyncLocalStorage8;
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+var storage3 = new AsyncLocalStorage9;
 var completedPrivateAnswers = new Set;
 var JOB_QUESTION_TTL_MS = 30 * 60000;
 var jobQuestions = new Map;
@@ -20438,7 +20495,7 @@ function currentAccess(authorized) {
     return "unavailable";
   }
 }
-var readAuthorization = new AsyncLocalStorage9;
+var readAuthorization = new AsyncLocalStorage10;
 function currentRemoteReadAccess() {
   const authorized = readAuthorization.getStore();
   return authorized ? currentAccess(authorized) : "active";
@@ -22836,6 +22893,7 @@ class LocalConnectorStore {
   db;
   readOnly;
   now;
+  embeddingLeaseTimers;
   controlPath;
   trustReconciliationReadyCursors;
   exclusions;
@@ -22857,7 +22915,7 @@ class LocalConnectorStore {
   embeddingDeferral;
   constructor(options) {
     installMainThreadSqlTrace();
-    this.visibilityOwner = randomUUID7();
+    this.visibilityOwner = randomUUID8();
     this.visibilityNow = () => Date.now();
     this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
     this.visibilityTimers = {
@@ -22869,12 +22927,13 @@ class LocalConnectorStore {
     this.readOnly = options.readOnly === true;
     this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
     this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-    this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID7()}` : options.mediaHolder ?? this.dbPath;
+    this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID8()}` : options.mediaHolder ?? this.dbPath;
     const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
     this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
     this.family = options.family;
     this.trustDomain = options.trustDomain;
     this.now = options.now ?? (() => new Date);
+    this.embeddingLeaseTimers = options.embeddingLeaseTimers;
     this.controlPath = options.controlPath ?? controlPathHeadroom;
     this.exclusions = options.exclusions ?? createSourceExclusionMatcherFromPrefixes([]);
     if (options.tierLedger === null || options.readOnly === true && !writableStoreOpensForbidden()) {
@@ -24810,7 +24869,7 @@ ${parentKey(ref)}`, { ref, origin });
     this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
   }
   tombstoneCopy(identity, options) {
-    const syncRunId = `connector-tier-copy-${randomUUID7()}`;
+    const syncRunId = `connector-tier-copy-${randomUUID8()}`;
     const startedAt = nowIso();
     try {
       return this.db.transaction(() => {
@@ -24843,7 +24902,7 @@ ${parentKey(ref)}`, { ref, origin });
         return "held";
       if (!row && options.record !== true)
         return "none";
-      const syncRunId = `connector-secret-retired-${randomUUID7()}`;
+      const syncRunId = `connector-secret-retired-${randomUUID8()}`;
       const now = nowIso();
       this.db.query(`
         INSERT INTO sync_runs (
@@ -24933,7 +24992,7 @@ ${parentKey(ref)}`, { ref, origin });
         }
         if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
           return "stale_claim";
-        const syncRunId = `connector-secrets-extraction-${randomUUID7()}`;
+        const syncRunId = `connector-secrets-extraction-${randomUUID8()}`;
         const startedAt = nowIso();
         this.db.query(`
           INSERT INTO sync_runs (
@@ -25054,7 +25113,7 @@ ${parentKey(ref)}`, { ref, origin });
     if (options.vectorProvider) {
       assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
     }
-    const syncRunId = `connector-tier-move-${randomUUID7()}`;
+    const syncRunId = `connector-tier-move-${randomUUID8()}`;
     const now = nowIso();
     const imported = this.db.transaction(() => {
       this.db.query(`
@@ -25517,7 +25576,7 @@ ${parentKey(ref)}`, { ref, origin });
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID7()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID8()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
       }
     } finally {
       this.releaseUnreferencedChunkMedia();
@@ -26849,7 +26908,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
     const tierLedgerForWrite = this.visibilityLedger();
     const summary = this.db.transaction(() => {
-      const syncRunId = `connector-representation-restore-${randomUUID7()}`;
+      const syncRunId = `connector-representation-restore-${randomUUID8()}`;
       const startedAt = this.now().toISOString();
       this.db.query(`
         INSERT INTO sync_runs (
@@ -27202,7 +27261,7 @@ ${parentKey(ref)}`, { ref, origin });
         };
       }
       const now = this.now().toISOString();
-      const syncRunId = `connector-relinquish-${randomUUID7()}`;
+      const syncRunId = `connector-relinquish-${randomUUID8()}`;
       this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -27341,7 +27400,7 @@ ${parentKey(ref)}`, { ref, origin });
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID7()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID8()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
     if (complete)
       (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
   }
@@ -28024,7 +28083,7 @@ ${parentKey(ref)}`, { ref, origin });
       windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
     });
     await connector.authenticate();
-    const syncRunId = `connector-sync-${randomUUID7()}`;
+    const syncRunId = `connector-sync-${randomUUID8()}`;
     const startedAt = nowIso();
     this.db.query(`
       INSERT INTO sync_runs (
@@ -29258,7 +29317,13 @@ ${parentKey(ref)}`, { ref, origin });
   async embedChunks(options) {
     if (this.dbPath === ":memory:")
       return this.embedChunksUnderLease(options);
-    return withFileLease(`${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`, () => this.embedChunksUnderLease(options), { acquireTimeoutMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS });
+    return withFileLease(`${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`, () => this.embedChunksUnderLease(options), {
+      heartbeat: {
+        stallMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS,
+        intervalMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS / 4
+      },
+      ...this.embeddingLeaseTimers ? { timers: this.embeddingLeaseTimers } : {}
+    });
   }
   async embedChunksUnderLease(options) {
     const provider = options.provider;
@@ -38455,7 +38520,7 @@ if (__require.main == __require.module) {
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
       mkdirSync14(dirname25(args.reportPath), { recursive: true });
-      writeFileSync6(args.reportPath, `${json}
+      writeFileSync7(args.reportPath, `${json}
 `);
     }
     console.log(json);
@@ -38466,7 +38531,7 @@ if (__require.main == __require.module) {
     if (args.reportPath) {
       mkdirSync14(dirname25(args.reportPath), { recursive: true });
       options.onProgress = (report) => {
-        writeFileSync6(args.reportPath, `${JSON.stringify(report, null, 2)}
+        writeFileSync7(args.reportPath, `${JSON.stringify(report, null, 2)}
 `);
       };
     }
@@ -38474,7 +38539,7 @@ if (__require.main == __require.module) {
     const report = await runSourceEmbeddingDrain(options);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath)
-      writeFileSync6(args.reportPath, `${json}
+      writeFileSync7(args.reportPath, `${json}
 `);
     console.log(json);
     if (process.env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION === "true" && report.status === "attention") {

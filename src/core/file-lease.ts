@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
@@ -13,12 +14,26 @@ export interface FileLeaseOptions {
   staleAfterMs?: number;
   /** Accepted for compatibility and ignored: a kernel lock needs no heartbeat. */
   heartbeatIntervalMs?: number;
+  /** Async only: wait on this holder's heartbeat instead of a total acquire timeout.
+   * A missing heartbeat for stallMs returns busy; it never revokes a live kernel lock. */
+  heartbeat?: { stallMs: number; intervalMs: number };
+  /** Clock seam for the asynchronous wait and opt-in heartbeat. */
+  timers?: FileLeaseTimers;
+}
+
+export interface FileLeaseTimers {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+  setInterval(callback: () => void, ms: number): unknown;
+  clearInterval(timer: unknown): void;
 }
 
 interface NormalizedFileLeaseOptions {
   mode?: 'shared' | 'exclusive';
   acquireTimeoutMs: number;
   pollIntervalMs: number;
+  heartbeat?: { stallMs: number; intervalMs: number };
+  timers: FileLeaseTimers;
 }
 
 export interface ProcessInstanceIdentity {
@@ -38,7 +53,7 @@ export interface ProcessInstanceIdentity {
 
 type ProcessInstanceIdentityComparison = 'same' | 'different' | 'unknown';
 
-const DEFAULT_OPTIONS: NormalizedFileLeaseOptions = {
+const DEFAULT_OPTIONS: Pick<NormalizedFileLeaseOptions, 'acquireTimeoutMs' | 'pollIntervalMs'> = {
   acquireTimeoutMs: 10_000,
   pollIntervalMs: 25,
 };
@@ -86,10 +101,12 @@ export interface SyncFileLease {
  * By default the lease is an exclusive SQLite lock (`BEGIN EXCLUSIVE`) on `<target>.lock.db`,
  * taken on an open connection and kept until release. SQLite takes it with the
  * kernel's advisory file locks, which the kernel drops the instant the holder
- * dies (SIGKILL included). So there is no owner record, no process-liveness
- * judgement, no staleness bound and no reclaim: a lease is held exactly while
+ * dies (SIGKILL included). So ownership needs no process-liveness judgement,
+ * staleness bound or reclaim: a lease is held exactly while
  * its holder is alive and has not released it, and a contender is either given
- * it or told it is busy. Because ownership cannot be taken away, lease.commit()
+ * it or told it is busy. An opt-in heartbeat only lets an async contender wait
+ * while the holder responds, however long that takes. It cannot transfer ownership.
+ * Because ownership cannot be taken away, lease.commit()
  * only has to confirm the lease has not been released before it writes.
  * `mode: 'shared'` instead holds a read transaction: other readers coexist,
  * while exclusive maintenance still excludes them, including across processes.
@@ -105,10 +122,14 @@ export async function withFileLease<T>(
   callback: (lease: FileLease) => Promise<T>,
   options: FileLeaseOptions = {},
 ): Promise<T> {
-  const owner = await acquireFileLease(targetPath, normalizeOptions(options));
+  const normalized = normalizeOptions(options);
+  const owner = await acquireFileLease(targetPath, normalized);
+  let stopHeartbeat: (() => void) | undefined;
   try {
+    if (normalized.heartbeat) stopHeartbeat = startLeaseHeartbeat(targetPath, normalized);
     return await callback(owner);
   } finally {
+    stopHeartbeat?.();
     owner.release();
   }
 }
@@ -129,8 +150,8 @@ export function withFileLeaseSync<T>(
 
 /**
  * True when `name` is one of the files a lease on `target` keeps beside it: the
- * lock database and SQLite's journal for it, or the `.lock` / `.lock.commit`
- * files engines from before the kernel lock left behind. Inventories that must
+ * lock database and SQLite's journal for it, the opt-in `.lock` heartbeat, or
+ * `.lock` / `.lock.commit` files older engines left behind. Inventories that must
  * refuse unknown files use this, so a lease file is never mistaken for foreign
  * data.
  */
@@ -201,14 +222,52 @@ async function acquireFileLease(
   options: NormalizedFileLeaseOptions,
 ): Promise<AsyncFileLeaseOwner> {
   const lockPath = lockPathFor(targetPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
+  const { timers } = options;
+  let lastProgressAt = timers.now();
+  let lastHeartbeat: string | undefined;
+  const deadline = lastProgressAt + options.acquireTimeoutMs;
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
     const lock = tryKernelLock(lockPath, options.mode);
     if (lock) return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
-    if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
-    await sleep(options.pollIntervalMs);
+    if (options.heartbeat) {
+      const heartbeat = readLeaseHeartbeat(targetPath);
+      if (heartbeat !== undefined && heartbeat !== lastHeartbeat) {
+        lastHeartbeat = heartbeat;
+        lastProgressAt = timers.now();
+      }
+      if (timers.now() - lastProgressAt >= options.heartbeat.stallMs) throw new FileLeaseBusyError(targetPath);
+    } else if (timers.now() >= deadline) throw new FileLeaseBusyError(targetPath);
+    await timers.sleep(options.pollIntervalMs);
   }
+}
+
+function readLeaseHeartbeat(targetPath: string): string | undefined {
+  try { return readFileSync(`${targetPath}.lock`, 'utf8'); }
+  catch (error) {
+    if (isNodeErrorWithCode(error, 'ENOENT')) return undefined;
+    throw error;
+  }
+}
+
+function startLeaseHeartbeat(targetPath: string, options: NormalizedFileLeaseOptions): () => void {
+  // Content-free observation, separate from SQLite's kernel lock. Never open
+  // the lock database with another file descriptor: closing it could drop locks.
+  // The existing .lock sidecar name is already recognized by lease inventories.
+  const owner = randomUUID();
+  let sequence = 0;
+  const pulse = () => writeFileSync(`${targetPath}.lock`, `${owner}:${sequence++}`, { mode: 0o600 });
+  pulse();
+  const timer = options.timers.setInterval(() => {
+    try { pulse(); }
+    catch {
+      // Unable to renew: contenders can report a stall. The actual holder
+      // keeps its kernel lock until its work returns or its process dies.
+      options.timers.clearInterval(timer);
+    }
+  }, options.heartbeat!.intervalMs);
+  (timer as { unref?: () => void })?.unref?.();
+  return () => options.timers.clearInterval(timer);
 }
 
 function acquireFileLeaseSync(
@@ -618,6 +677,16 @@ function normalizeOptions(options: FileLeaseOptions): NormalizedFileLeaseOptions
     mode: options.mode ?? 'exclusive',
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
     pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
+    ...(options.heartbeat ? { heartbeat: {
+      stallMs: positiveInteger(options.heartbeat.stallMs, DEFAULT_OPTIONS.acquireTimeoutMs),
+      intervalMs: positiveInteger(options.heartbeat.intervalMs, DEFAULT_OPTIONS.pollIntervalMs),
+    } } : {}),
+    timers: options.timers ?? {
+      now: () => Date.now(),
+      sleep,
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (timer) => clearInterval(timer as ReturnType<typeof setInterval>),
+    },
   };
 }
 
