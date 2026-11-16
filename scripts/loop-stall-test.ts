@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { Database } from 'bun:sqlite';
+import type { Database } from 'bun:sqlite';
 import type { AnalystModel } from '../src/core/analyst.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
@@ -359,29 +359,33 @@ function walSizes(dir: string): Record<string, number> {
 const WAL_END_LIMIT_BYTES = 64 * 1024 * 1024;
 /** A background-lane read held open longer than this fails the gate; shared-lane ones are listed only. */
 const BACKGROUND_READ_LIMIT_MS = 2_000;
-/** Folds every fixture WAL into its database and truncates it to zero. */
+/** Folds the stores' and the ledger's WALs into their databases and truncates them to zero, through the product's own opens. */
 function truncateWals(dir: string) {
-  for (const name of readdirSync(dataDir(dir)).filter(entry => entry.endsWith('.sqlite'))) {
-    const handle = new Database(join(dataDir(dir), name));
-    try { handle.exec('PRAGMA busy_timeout = 60000'); handle.query('PRAGMA wal_checkpoint(TRUNCATE)').all(); } finally { handle.close(); }
-  }
+  const { ledger, stores } = openStores(dir);
+  try { for (const handle of [ledger, ...stores]) db(handle).query('PRAGMA wal_checkpoint(TRUNCATE)').all(); }
+  finally { for (const store of stores) store.close(); ledger.close(); }
 }
 /**
- * "First boot after an upgrade": leaves bytes of committed, uncheckpointed WAL on a store, the way an update that rewrote
- * a store leaves it. A child writes and drops a pad table with checkpoints off, then is killed so close never folds it in.
+ * "First boot after an upgrade": leaves bytes of committed, uncheckpointed WAL on the ledger, the way an update that rewrote
+ * a store leaves it. A child (the pad-wal command) writes and drops a pad table with checkpoints off, then is killed so
+ * close never folds it in.
  */
-function leaveLargeWal(file: string, bytes: number) {
-  const code = `import { Database } from 'bun:sqlite';
-const db = new Database(process.env.LOOP_STALL_WAL_FILE);
-db.exec('PRAGMA busy_timeout = 60000'); db.exec('PRAGMA wal_autocheckpoint = 0');
-db.exec('CREATE TABLE IF NOT EXISTS loop_stall_wal_pad (b BLOB)');
-const insert = db.prepare('INSERT INTO loop_stall_wal_pad VALUES (randomblob(1048576))');
-for (let i = 0; i < Math.ceil(Number(process.env.LOOP_STALL_WAL_BYTES) / 1048576); i++) insert.run();
-db.exec('DROP TABLE loop_stall_wal_pad');
-process.kill(process.pid, 'SIGKILL');`;
-  spawnSync(process.execPath, ['-e', code], { env: { ...process.env, LOOP_STALL_WAL_FILE: file, LOOP_STALL_WAL_BYTES: String(bytes) }, stdio: 'inherit' });
-  const size = statSync(`${file}-wal`).size;
-  if (size < bytes) throw new Error(`Could not leave a ${bytes}-byte WAL on ${file} (have ${size})`);
+function leaveLargeWal(dir: string, bytes: number) {
+  spawnSync(process.execPath, [import.meta.path, 'pad-wal', '--dir', dir, '--wal-mb', String(Math.ceil(bytes / 1048576))], { stdio: 'inherit' });
+  const size = statSync(`${ledgerPath(dir)}-wal`).size;
+  if (size < bytes) throw new Error(`Could not leave a ${bytes}-byte WAL on the ledger (have ${size})`);
+}
+function padWal(dir: string, megabytes: number): never {
+  const { ledger, stores } = openStores(dir);
+  for (const store of stores) store.close();
+  const handle = db(ledger);
+  handle.exec('PRAGMA wal_autocheckpoint = 0');
+  handle.exec('CREATE TABLE IF NOT EXISTS loop_stall_wal_pad (b BLOB)');
+  const insert = handle.prepare('INSERT INTO loop_stall_wal_pad VALUES (randomblob(1048576))');
+  for (let i = 0; i < megabytes; i++) insert.run();
+  handle.exec('DROP TABLE loop_stall_wal_pad');
+  process.kill(process.pid, 'SIGKILL');
+  throw new Error('unreachable');
 }
 /**
  * The IO floor: waits until the host's full IO stall averages under limitMs per second over 10 seconds, so a run measures
@@ -475,7 +479,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const requestErrors: string[] = [];
   // Steady: every run starts with the WALs folded in, as on a box in use. Boot after upgrade: one large WAL left on the ledger.
   truncateWals(dir);
-  if (options.runCase === 'boot-after-upgrade') leaveLargeWal(ledgerPath(dir), options.walBytes);
+  if (options.runCase === 'boot-after-upgrade') leaveLargeWal(dir, options.walBytes);
   const host = await waitForQuietHost(options.ioFloorMs, options.ioWaitSeconds);
   if (!host.quiet) {
     const receipt = { phase: 'run', case: options.runCase, sha: spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(), pass: false, host_busy: true, host, qualified: isCapped, memory_max: memoryMax };
@@ -569,6 +573,7 @@ if (import.meta.main) {
   const flag = (name: string, fallback?: string) => { const at = args.indexOf(`--${name}`); return at < 0 ? fallback : args[at + 1]; };
   const dir = flag('dir');
   const number = (name: string, fallback: string) => { const n = Number(flag(name, fallback)); if (!Number.isSafeInteger(n) || n < 1) throw new Error(`Invalid --${name}`); return n; };
+  if (dir && command === 'pad-wal') padWal(resolve(dir), number('wal-mb', '2048'));
   if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case steady|boot-after-upgrade] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600]');
   const runCase = flag('case', 'steady') as RunCase;
   if (!['steady', 'boot-after-upgrade'].includes(runCase)) throw new Error('Invalid --case; use steady or boot-after-upgrade');
