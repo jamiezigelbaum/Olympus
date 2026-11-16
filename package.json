@@ -83,6 +83,7 @@
     "typecheck": "tsc --noEmit && bun run typecheck:exchange && bun run typecheck:connect-relay",
     "typecheck:exchange": "tsc --noEmit -p exchange/tsconfig.json",
     "typecheck:connect-relay": "tsc --noEmit -p connect-relay/tsconfig.json",
+    "guards": "bun scripts/guards.ts",
     "verify": "bun run typecheck && bun run test:fast && bun run dist:check",
     "verify:full": "bun run typecheck && bun run test && bun run dist:check",
     "eval": "bun eval/run.ts",

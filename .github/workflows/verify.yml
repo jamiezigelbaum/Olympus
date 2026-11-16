@@ -9,8 +9,11 @@ on:
 permissions:
   contents: read
 
+# Every push to main gets its own finished verdict: a newer push never
+# cancels or replaces a main run, so each head an rc build might take has
+# one. Pull requests still cancel their own superseded runs.
 concurrency:
-  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
