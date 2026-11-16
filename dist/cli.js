@@ -35583,10 +35583,17 @@ function summarizeCpuSamples(traces, top = CPU_SAMPLE_TOP, sources = []) {
   const rank = (map) => [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, top);
   return { samples: traces.length, self: rank(self), total: rank(total) };
 }
+function freezeLogLine(at, role, freezes) {
+  const product = (frame) => / \S+\.ts:\d+/.test(frame) && !frame.includes("main-thread-sql-trace") && !frame.includes("bun:");
+  const site = freezes.total.find(([frame]) => product(frame))?.[0] ?? freezes.self[0]?.[0] ?? "no sample";
+  const frames = freezes.total.filter(([frame]) => product(frame)).slice(0, 8).map(([frame, n]) => `${frame} x${n}`).join(" | ");
+  return `${at} [olympus:control-path] freeze frames role=${role} count=${freezes.count} total_ms=${freezes.totalMs} max_ms=${freezes.maxMs} site=${JSON.stringify(site)} leaf=${JSON.stringify(freezes.self[0]?.[0] ?? "no sample")} frames=${JSON.stringify(frames)}`;
+}
 async function startCpuSampleLog(env = process.env) {
-  const path = env[CPU_SAMPLE_LOG_ENV]?.trim();
-  if (!path)
+  const configured = env[CPU_SAMPLE_LOG_ENV]?.trim();
+  if (configured === "off")
     return;
+  const path = configured || undefined;
   const role = env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() || "single";
   const jsc = await import("bun:jsc");
   if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces)
@@ -35627,8 +35634,11 @@ async function startCpuSampleLog(env = process.env) {
         maxMs: Math.round(window2.reduce((max, stall) => Math.max(max, stall.endMs - stall.startMs), 0)),
         ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? [])
       };
-      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
+      if (path)
+        appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
 `, { mode: 384 });
+      else if (freezes.count > 0)
+        console.error(freezeLogLine(new Date(now).toISOString(), role, freezes));
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : "error"}`);
     }
@@ -35636,7 +35646,8 @@ async function startCpuSampleLog(env = process.env) {
   };
   const timer = setInterval(flush, CPU_SAMPLE_FLUSH_MS);
   timer.unref?.();
-  console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
+  if (path)
+    console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
   return () => {
     clearInterval(timer);
     clearInterval(lag);
@@ -94137,12 +94148,12 @@ function moveTieredItemsLowering(moves, options = {}) {
     return [];
   const set = moves[0].set;
   if (moves.some((move) => move.set !== set))
-    throw new TierMoveRefusedError("A lowering batch belongs to one set.");
+    throw new TierMoveRefusedError("A lowering batch belongs to one set.", "mixed_sets");
   const timings = moves[0].timings;
   for (const move of moves) {
     const target = move.decision ?? move.target;
     if (!target || target.metadataTier === "secrets" || target.contentTier === "secrets") {
-      throw new TierMoveRefusedError("Secrets cannot enter a lowering batch.");
+      throw new TierMoveRefusedError("Secrets cannot enter a lowering batch.", "secrets_in_lowering");
     }
     for (const tier of [target.metadataTier, target.contentTier]) {
       set.store(tier === "public" ? "public_safe" : tier === "private" ? "internal" : "secure_local", { create: true });
@@ -94232,7 +94243,7 @@ function moveTieredItemsLowering(moves, options = {}) {
 function promoteLowerTierContent(options, source) {
   const record = options.set.ledger.getCurrent(options.identity);
   if (!record || record.state === "moving" || record.contentTier !== "secure" || record.metadataTier === "secrets" || source.trustDomain === "secure_local") {
-    throw new TierMoveRefusedError("Only a settled Private placement can repair lower content.");
+    throw new TierMoveRefusedError("Only a settled Private placement can repair lower content.", "repair_not_settled_private");
   }
   return moveTieredItemNow({ ...options, target: { metadataTier: record.metadataTier, contentTier: record.contentTier } }, source);
 }
@@ -94259,7 +94270,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     throw new TierLedgerGenerationConflictError;
   }
   if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
-    throw new TierMoveRefusedError("Secrets cannot use the content repair path.");
+    throw new TierMoveRefusedError("Secrets cannot use the content repair path.", "secrets_in_repair");
   }
   const receiptKey = purgeReceiptKey(identity);
   let receiptToResume = readVerifiedMove(ledger, identity);
@@ -94272,7 +94283,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     if ((receipt.result?.generation ?? receipt.generation) !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
     if (loweringOnly && receipt.raise)
-      throw new TierMoveRefusedError("Raises cannot enter a lowering batch.");
+      throw new TierMoveRefusedError("Raises cannot enter a lowering batch.", "resumed_raise_in_lowering");
     return () => receipt;
   }
   const ownerOverride = !decision && record.decidedBy === "override";
@@ -94292,11 +94303,11 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
   if (repairSource && !sources.some((copy) => copy.corpusId === repairSource.corpusId))
     sources.push(repairSource);
   if (repairSource && placement.copies.some((copy) => copy.trustDomain !== "secure_local" && !sources.some((source) => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
-    throw new TierMoveRefusedError("Repair cannot write a lower destination.");
+    throw new TierMoveRefusedError("Repair cannot write a lower destination.", "repair_lower_destination");
   }
   const raise = !!repairSource || placementIsRaise(sources, placement.copies);
   if (loweringOnly && raise)
-    throw new TierMoveRefusedError("Raises cannot enter a lowering batch.");
+    throw new TierMoveRefusedError("Raises cannot enter a lowering batch.", "raise_in_lowering");
   const exports = new Map;
   const exportFrom = (copy) => {
     if (!exports.has(copy.corpusId)) {
@@ -94316,7 +94327,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
       if (!raise && record.state === "moving") {
         ledger.abandonMove(identity, { expectedGeneration: record.generation });
       }
-      throw new TierMoveContentChangedError("Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.");
+      throw new TierMoveContentChangedError("Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.", !digest ? "content_no_copy" : evidence.contentPending ? "content_still_pending" : receipts.length === 0 ? "content_no_receipt" : receipts.length > 1 ? "content_several_receipts" : "content_receipt_mismatch");
     }
   }
   const kept = ledger.copies(identity);
@@ -94335,7 +94346,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
       replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
       continue;
     }
-    throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.");
+    throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.", "superseded_copy_kept");
   }
   timed(options.timings, "stageMs", () => ledger.stageMove(identity, {
     expectedGeneration: record.generation,
@@ -94793,7 +94804,7 @@ function layersCover(held, wanted) {
 }
 function fullIdentity(identity) {
   if (!identity.family || !identity.localItemId)
-    throw new TierMoveRefusedError("Secrets requires a full source identity.");
+    throw new TierMoveRefusedError("Secrets requires a full source identity.", "secrets_identity");
   return {
     family: identity.family,
     provider: identity.provider,
@@ -94814,12 +94825,17 @@ var init_tier_move = __esm(() => {
   init_job_names();
   init_tier_placement();
   TierMoveRefusedError = class TierMoveRefusedError extends Error {
-    constructor(message) {
+    code;
+    constructor(message, code = "refused") {
       super(message);
       this.name = "TierMoveRefusedError";
+      this.code = code;
     }
   };
   TierMoveContentChangedError = class TierMoveContentChangedError extends TierMoveRefusedError {
+    constructor(message, code = "content_changed") {
+      super(message, code);
+    }
   };
 });
 
@@ -241246,6 +241262,8 @@ class TierSnifferService {
   backlogRefresh;
   waiting;
   moveFailures = new Map;
+  movesRefusedNow = new Map;
+  moveRefusalAttempts = 0;
   abort;
   lastTick;
   stopped = false;
@@ -241428,6 +241446,7 @@ class TierSnifferService {
     return {
       ...counts,
       summary: checkingItems === 0 ? this.unreadable.size > 0 ? `No items counted as waiting.${this.unreadableNote()}` : "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : "") + this.unreadableNote(),
+      ...this.movesRefusedNow.size > 0 ? { movesRefused: this.movesRefused() } : {},
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
       ...this.lastTick?.state === "awaiting_owner_approval" ? { awaitingApproval: {
         lane: this.lastTick.lane,
@@ -241438,6 +241457,12 @@ class TierSnifferService {
       ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {},
       ...this.unreadable.size > 0 ? { unreadableSources: this.unreadableSources() } : {}
     };
+  }
+  movesRefused() {
+    const byReason = {};
+    for (const why of this.movesRefusedNow.values())
+      byReason[why] = (byReason[why] ?? 0) + 1;
+    return { items: this.movesRefusedNow.size, attempts: this.moveRefusalAttempts, byReason };
   }
   unreadableNote() {
     if (this.unreadable.size === 0)
@@ -242593,6 +242618,12 @@ class TierSnifferService {
         report.failed += 1;
         const why = moveFailureName(error);
         report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
+        const refusedKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}`;
+        if (error instanceof TierMoveRefusedError) {
+          this.moveRefusalAttempts += 1;
+          this.movesRefusedNow.set(refusedKey, why);
+        } else
+          this.movesRefusedNow.delete(refusedKey);
         if (error instanceof TierMoveContentChangedError) {
           if (set.ledger.getCurrent(identity)?.state === "moving") {
             try {
@@ -242626,7 +242657,9 @@ class TierSnifferService {
       };
       const succeeded = (record) => {
         report.moved++;
-        this.moveFailures.delete(`${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}\x00${record.generation}`);
+        const key = `${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}\x00${record.generation}`;
+        this.moveFailures.delete(key);
+        this.movesRefusedNow.delete(`${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}`);
       };
       const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
       for (let offset = 0;offset < queued.length && budget > 0 && !shouldStop(); ) {
@@ -242660,12 +242693,14 @@ class TierSnifferService {
             const results = moveTieredItemsLowering(pending.map((entry) => entry.move), {
               shouldStop: () => shouldStop() || copied++ > 0 && this.monotonicNow() >= batchDeadline
             });
-            results.forEach((result, index) => {
-              if ("error" in result)
-                failure(pending[index].record, result.error);
-              else
-                succeeded(pending[index].record);
-            });
+            for (const [index, result] of results.entries()) {
+              const entry = pending[index];
+              if (!("error" in result)) {
+                succeeded(entry.record);
+                continue;
+              }
+              failure(entry.record, result.error);
+            }
             offset -= pending.length - results.length;
             budget += pending.length - results.length;
           } catch (error) {
@@ -242770,6 +242805,8 @@ function positiveInteger8(value, fallback, minimum) {
 function moveFailureName(error) {
   if (!(error instanceof Error))
     return "unknown";
+  if (error instanceof TierMoveRefusedError && error.code !== "refused")
+    return `${error.name}:${error.code}`;
   if (error.constructor !== Error)
     return error.name || error.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : "Error";

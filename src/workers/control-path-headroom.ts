@@ -247,6 +247,22 @@ export function summarizeCpuSamples(
 }
 
 /**
+ * One log line for an interval's freezes: how many, how long, and the code
+ * positions sampled inside them (function names and file:line, never data).
+ * `site` is the first frame in the product's own source, which names the caller
+ * where the leaf names only SQLite or the runtime.
+ */
+export function freezeLogLine(
+  at: string, role: string,
+  freezes: { count: number; totalMs: number; maxMs: number; self: [string, number][]; total: [string, number][] },
+): string {
+  const product = (frame: string) => / \S+\.ts:\d+/.test(frame) && !frame.includes('main-thread-sql-trace') && !frame.includes('bun:');
+  const site = freezes.total.find(([frame]) => product(frame))?.[0] ?? freezes.self[0]?.[0] ?? 'no sample';
+  const frames = freezes.total.filter(([frame]) => product(frame)).slice(0, 8).map(([frame, n]) => `${frame} x${n}`).join(' | ');
+  return `${at} [olympus:control-path] freeze frames role=${role} count=${freezes.count} total_ms=${freezes.totalMs} max_ms=${freezes.maxMs} site=${JSON.stringify(site)} leaf=${JSON.stringify(freezes.self[0]?.[0] ?? 'no sample')} frames=${JSON.stringify(frames)}`;
+}
+
+/**
  * When OLYMPUS_CPU_SAMPLE_LOG names a file, samples the worker's JavaScript
  * thread and appends a summary every 30 s. `bun --cpu-prof` writes only at a
  * clean exit, which a saturated worker never reaches (Sparta, 2026-11-03), and
@@ -254,8 +270,12 @@ export function summarizeCpuSamples(
  * thread did not turn at all for that long.
  */
 export async function startCpuSampleLog(env: Record<string, string | undefined> = process.env): Promise<(() => void) | undefined> {
-  const path = env[CPU_SAMPLE_LOG_ENV]?.trim();
-  if (!path) return undefined;
+  const configured = env[CPU_SAMPLE_LOG_ENV]?.trim();
+  if (configured === 'off') return undefined;
+  // Without a file, the sampler still runs and writes one line to the engine's
+  // own log for each interval that held a freeze: where a freeze on a real
+  // install was is then in its log, not only in a test run's.
+  const path = configured || undefined;
   // Front and background write one file: each line names its process.
   const role = env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() || 'single';
   const jsc = await import('bun:jsc') as unknown as {
@@ -304,7 +324,8 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
         maxMs: Math.round(window.reduce((max, stall) => Math.max(max, stall.endMs - stall.startMs), 0)),
         ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? []),
       };
-      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}\n`, { mode: 0o600 });
+      if (path) appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}\n`, { mode: 0o600 });
+      else if (freezes.count > 0) console.error(freezeLogLine(new Date(now).toISOString(), role, freezes));
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : 'error'}`);
     }
@@ -312,6 +333,6 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
   };
   const timer = setInterval(flush, CPU_SAMPLE_FLUSH_MS);
   timer.unref?.();
-  console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
+  if (path) console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
   return () => { clearInterval(timer); clearInterval(lag); };
 }
