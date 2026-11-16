@@ -21970,6 +21970,7 @@ var EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000;
 var MISSING_EMBEDDING_CHUNK_WINDOW = 20000;
 var SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 var HIDDEN_CHILD_PARENT_SLICE = 500;
+var EMBEDDING_WORK_PAGE_ROWS = 5000;
 var VISIBILITY_HOLD_WAITS = 100;
 var VISIBILITY_HOLD_WAIT_MS = 10;
 function visibilityFlagged(row) {
@@ -29656,7 +29657,9 @@ ${parentKey(ref)}`, { ref, origin });
         ${tierExclusion.filter}
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
+        AND c.chunk_pk > ?
       ORDER BY c.chunk_pk ASC
+      LIMIT ${EMBEDDING_WORK_PAGE_ROWS}
     `;
     const params = [
       modelId,
@@ -29665,7 +29668,15 @@ ${parentKey(ref)}`, { ref, origin });
       ...selectedAccount ? [selectedAccount] : [],
       ...selectedFilters.params
     ];
-    const rows = await readInBackground(this.dbPath, { sql, params, mode: "all" });
+    const rows = [];
+    for (let after = 0;; ) {
+      const page = await readInBackground(this.dbPath, { sql, params: [...params, after], mode: "all" });
+      for (const row of page)
+        rows.push(row);
+      if (page.length < EMBEDDING_WORK_PAGE_ROWS)
+        break;
+      after = page[page.length - 1].chunk_pk;
+    }
     return rows.map((row) => ({
       ...row,
       bounded_text: "",
