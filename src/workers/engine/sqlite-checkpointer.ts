@@ -102,7 +102,7 @@ self.onmessage = ({ data }) => {
 
 export interface SqliteCheckpointFile { label: string; dbPath: string }
 
-export interface SqliteCheckpointRoomStats { waits: number; totalMs: number; worstMs: number; rewinds: number; rewindsMissed: number }
+export interface SqliteCheckpointRoomStats { passes: number; waits: number; totalMs: number; worstMs: number; rewinds: number; rewindsMissed: number }
 
 export interface SqliteCheckpointer {
   /** The files to keep checkpointed; called whenever the set may have changed. */
@@ -161,7 +161,7 @@ export function startSqliteCheckpointer(options: {
   let stopped = false;
   let needRoom: FileState | undefined;
   let gate: Promise<void> | undefined;
-  const stats: SqliteCheckpointRoomStats = { waits: 0, totalMs: 0, worstMs: 0, rewinds: 0, rewindsMissed: 0 };
+  const stats: SqliteCheckpointRoomStats = { passes: 0, waits: 0, totalMs: 0, worstMs: 0, rewinds: 0, rewindsMissed: 0 };
   let summarized = { ...stats };
   let summarizedAt = now();
 
@@ -250,10 +250,11 @@ export function startSqliteCheckpointer(options: {
   function record(state: FileState, reply: PassReply, madeRoom: boolean): void {
     state.lastPassAt = now();
     if (!reply.ok) {
-      log(`[olympus] sqlite checkpoint: ${state.label} failed (${reply.error ?? 'Error'}); tried again at the next pass.`);
+      if (!stopped) log(`[olympus] sqlite checkpoint: ${state.label} failed (${reply.error ?? 'Error'}); tried again at the next pass.`);
       return;
     }
     if (reply.lost) return;
+    stats.passes += 1;
     const expectedRewind = state.awaitRewind;
     state.awaitRewind = madeRoom;
     state.firstDone = true;
