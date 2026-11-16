@@ -50772,6 +50772,20 @@ var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 function readInBackground(dbPath, query) {
   return withOffThreadSnapshot(dbPath, async (read) => read(query), BACKGROUND_READS);
 }
+function readPoolDiagnostics() {
+  const stores = {};
+  for (const path of new Set([...storeOpens.keys(), ...queues.keys(), ...threads.flatMap((t) => t.executingStore ? [t.executingStore] : [])])) {
+    const running = threads.filter((t) => t.executingStore === path);
+    stores[path] = {
+      inFlight: running.length,
+      abandoned: running.filter((t) => t.retired || t.job?.settled).length,
+      queued: queues.get(path)?.length ?? 0,
+      opens: storeOpens.get(path)?.opens ?? 0,
+      openMs: storeOpens.get(path)?.openMs ?? 0
+    };
+  }
+  return { ...counters, threads: threads.length, stores };
+}
 function live() {
   return threads.filter((reader) => !reader.retired);
 }
@@ -50808,8 +50822,10 @@ function startThread(store, lane = "shared") {
       }
       started.executingStore = undefined;
       const waiting = started.pending.get(message.id);
-      if (!waiting)
+      if (!waiting) {
+        counters.lateReplies += 1;
         return;
+      }
       started.pending.delete(message.id);
       if (waiting.timer !== undefined)
         clock2.clearTimeout(waiting.timer);
@@ -50861,7 +50877,10 @@ function send(reader, message, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS, sqlMs) {
   const id = nextId++;
   return new Promise((resolve, reject) => {
     const timer = timeoutMs === null ? undefined : clock2.setTimeout(() => {
-      retire(reader, new Error("off-thread read timed out"));
+      if (reader.retired)
+        return;
+      counters.timeouts += 1;
+      retire(reader, new OffThreadReadTimeoutError);
     }, timeoutMs);
     reader.pending.set(id, { resolve, reject, ...timer !== undefined ? { timer } : {}, ...sqlMs ? { sqlMs } : {} });
     try {
@@ -50886,17 +50905,42 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
     throw new OffThreadReadBusyError;
   if (free)
     free.snapshots += 1;
-  const reader = free ?? await snapshotThread(dbPath, lane);
-  if ((releases.get(dbPath) ?? 0) !== generation) {
-    reader.snapshots -= 1;
-    dispatch();
-    throw new OffThreadReadBusyError;
-  }
-  const snapshot = nextId++;
-  let reserveWaitMs = clock2.now() - askedAtMs;
-  const perRead = lane === "background" || options.perRead === true;
+  let reader = free ?? await snapshotThread(dbPath, lane);
   try {
-    await send(reader, { op: "open", snapshot, path: dbPath, perRead });
+    if ((releases.get(dbPath) ?? 0) !== generation)
+      throw new OffThreadReadBusyError;
+    let snapshot = nextId++;
+    let reserveWaitMs = clock2.now() - askedAtMs;
+    const perRead = lane === "background" || options.perRead === true;
+    const open = async () => {
+      await send(reader, { op: "open", snapshot, path: dbPath, perRead }, snapshotControlTimeoutMs);
+    };
+    let retryLeft = true;
+    let moving;
+    const moveToFreshWorker = () => {
+      if (moving)
+        return moving;
+      retryLeft = false;
+      counters.retries += 1;
+      moving = (async () => {
+        reader.snapshots -= 1;
+        reader = undefined;
+        dispatch();
+        reader = await snapshotThread(dbPath, lane);
+        if ((releases.get(dbPath) ?? 0) !== generation)
+          throw new OffThreadReadBusyError;
+        snapshot = nextId++;
+        await open();
+      })();
+      return moving;
+    };
+    try {
+      await open();
+    } catch (error) {
+      if (!(error instanceof OffThreadReadTimeoutError) || !retryLeft)
+        throw error;
+      await moveToFreshWorker();
+    }
     if (!perRead)
       markRead(dbPath, snapshot, { atMs: clock2.now(), lane, site });
     try {
@@ -50911,10 +50955,23 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         const queueWaitMs = reserveWaitMs;
         reserveWaitMs = 0;
         let sqlMs = 0;
-        try {
-          const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
+        const once = async () => {
+          if (moving)
+            await moving;
+          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, perRead ? perReadTimeoutMs : undefined, (ms) => {
             sqlMs = ms;
           });
+        };
+        try {
+          let rows;
+          try {
+            rows = await once();
+          } catch (error) {
+            if (!perRead || !(error instanceof OffThreadReadTimeoutError) || !retryLeft && !moving)
+              throw error;
+            await moveToFreshWorker();
+            rows = await once();
+          }
           report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
@@ -50927,13 +50984,18 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         }
       });
     } finally {
-      await send(reader, { op: "close", snapshot }).catch(() => {
+      await moving?.catch(() => {
         return;
       });
+      if (reader)
+        await send(reader, { op: "close", snapshot }, snapshotControlTimeoutMs).catch(() => {
+          return;
+        });
       unmarkRead(dbPath, snapshot);
     }
   } finally {
-    reader.snapshots -= 1;
+    if (reader)
+      reader.snapshots -= 1;
     dispatch();
   }
 }
@@ -51140,7 +51202,7 @@ function dispatch() {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null, (ms) => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, Math.max(0, job.deadlineAtMs - clock2.now()) + OFF_THREAD_READ_TIMEOUT_MS, (ms) => {
       job.sqlMs = ms;
     }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
       if (reader.job === job)
@@ -51149,7 +51211,7 @@ function dispatch() {
     });
   }
 }
-var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/", mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "", WORKER_SOURCE = `
+var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, snapshotControlTimeoutMs = 1e4, perReadTimeoutMs = 30000, OffThreadReadTimeoutError, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/", mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "", WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
@@ -51242,6 +51304,12 @@ self.onmessage = (event) => {
 var init_off_thread_reads = __esm(() => {
   init_answer_latency_trace();
   BACKGROUND_READS = { lane: "background" };
+  OffThreadReadTimeoutError = class OffThreadReadTimeoutError extends Error {
+    constructor() {
+      super("off-thread read timed out");
+      this.name = "OffThreadReadTimeoutError";
+    }
+  };
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
     code = SOURCE_INDEX_LANE_BUSY_CODE;
     constructor() {
@@ -51256,7 +51324,7 @@ var init_off_thread_reads = __esm(() => {
   };
   clock2 = REAL_CLOCK;
   threads = [];
-  counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
+  counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0, timeouts: 0, retries: 0, lateReplies: 0 };
   startedStores = new Set;
   storeOpens = new Map;
   queues = new Map;
@@ -271507,7 +271575,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
         ...statusRecount ? { status_recount: statusRecount.health() } : {},
         ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth()),
-        ...((files) => files ? { sqlite_files: files } : {})(sqliteFilesHealth())
+        ...((files) => files ? { sqlite_files: files } : {})(sqliteFilesHealth()),
+        read_pool: (({ timeouts, retries, lateReplies, terminations }) => ({ timeouts, retries, late_replies: lateReplies, retired: terminations }))(readPoolDiagnostics())
       })
     });
     restartForDelete = (request) => {
@@ -271837,6 +271906,7 @@ var init_server5 = __esm(async () => {
   init_unreadable_locators();
   init_child_visibility();
   init_sqlite_wal_sampler();
+  init_off_thread_reads();
   init_sqlite_checkpointer();
   init_tier_ledger_path();
   init_tier_visibility();

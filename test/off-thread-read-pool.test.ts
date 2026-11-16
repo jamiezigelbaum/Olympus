@@ -24,6 +24,7 @@ import {
   releaseOffThreadReads,
   setReadPoolClockForTests,
   setReadPoolObserverForTests,
+  setReadPoolReplyDeadlinesForTests,
   setReadPoolWorkerFactoryForTests,
   shutdownReadPool,
   withOffThreadSnapshot,
@@ -36,6 +37,7 @@ afterEach(async () => {
   setReadPoolClockForTests();
   setReadPoolObserverForTests();
   setReadPoolWorkerFactoryForTests();
+  setReadPoolReplyDeadlinesForTests();
   shutdownReadPool();
   await waitFor(() => readPoolThreadsForTests().live + readPoolThreadsForTests().stopping === 0, { description: 'the pool stopped' });
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -59,6 +61,31 @@ const SLOW: StoreRead = {
   params: [],
 };
 const COUNT: StoreRead = { mode: 'get', sql: 'SELECT COUNT(*) AS c FROM items', params: [] };
+
+// A real reader thread whose replies this thread never receives while
+// `drop` says so: Bun can lose a Worker's reply this way (16 Nov trace: the
+// reader posted reply 145, the request thread never got it).
+function losingReplies(drop: (reply: { id?: number; diagnostic?: string; rows?: unknown }, worker: number) => boolean): () => void {
+  let made = 0;
+  setReadPoolWorkerFactoryForTests((url) => {
+    const real = new Worker(url);
+    const worker = made++;
+    return new Proxy(real, {
+      set(target, key, value) {
+        if (key === 'onmessage') {
+          target.onmessage = (event: MessageEvent) => { if (!drop(event.data, worker)) value(event); };
+          return true;
+        }
+        return Reflect.set(target, key, value);
+      },
+      get(target, key) {
+        const field = Reflect.get(target, key);
+        return typeof field === 'function' ? field.bind(target) : field;
+      },
+    });
+  });
+  return () => setReadPoolWorkerFactoryForTests();
+}
 
 describe('read pool', () => {
   test('a scan snapshot runs on its own worker of the store, never queued behind a slow shared read', async () => {
@@ -363,5 +390,54 @@ describe('read transactions and checkpoints', () => {
     // An Ask's visibility reads ask for a transaction per read.
     expect(await checkpointBetweenReads('shared', true)).toBe(0);
     writer.close();
+  });
+
+  test('a lost reply to a snapshot open or a background read is retried once on a fresh worker, and counted', async () => {
+    const path = storeFile();
+    setReadPoolReplyDeadlinesForTests({ controlMs: 200, perReadMs: 200 });
+    const before = readPoolDiagnostics();
+    // The first worker never answers its first open.
+    let lost = 0;
+    losingReplies((reply, worker) => worker === 0 && reply.diagnostic === undefined && lost++ === 0);
+    expect(((await readInBackground(path, COUNT)) as { c: number }).c).toBe(3);
+    // The second walk's worker loses a read's reply between reads.
+    let reads = 0;
+    losingReplies((reply, worker) => worker === 0 && reply.diagnostic === undefined && reply.rows !== null && reads++ === 1);
+    // Another store, so its walk starts a worker of its own.
+    const other = storeFile();
+    const counts = await withOffThreadSnapshot(other, async (read) => [await read(COUNT), await read(COUNT), await read(COUNT)], BACKGROUND_READS);
+    expect(counts.map((row) => (row as { c: number }).c)).toEqual([3, 3, 3]);
+    const after = readPoolDiagnostics();
+    expect(after.timeouts - before.timeouts).toBe(2);
+    expect(after.retries - before.retries).toBe(2);
+    expect(after.lateReplies - before.lateReplies).toBe(0);
+  });
+
+  test('a held snapshot whose read reply is lost fails at the deadline instead of moving to another state', async () => {
+    const path = storeFile();
+    setReadPoolReplyDeadlinesForTests({ controlMs: 200, perReadMs: 200 });
+    const clock = createTestClock();
+    setReadPoolClockForTests(clock);
+    let reads = 0;
+    losingReplies((reply) => reply.diagnostic === undefined && reply.rows !== null && reads++ === 0);
+    const failed = withOffThreadSnapshot(path, async (read) => read(COUNT)).then(() => 'answered', (error) => error);
+    await waitFor(() => reads > 0, { description: 'the read sent' });
+    await clock.advance(120_000);
+    expect(String(await failed)).toContain('timed out');
+  });
+
+  test("a pool query whose reply is lost frees its store's executor 120 s past the caller's deadline", async () => {
+    const path = storeFile();
+    const clock = createTestClock();
+    setReadPoolClockForTests(clock);
+    let lost = 0;
+    losingReplies((reply, worker) => worker === 0 && reply.diagnostic === undefined && lost++ === 0);
+    const first = readOnPool(path, COUNT, { deadlineAtMs: clock.now() + 1_000 }).then(() => 'answered', (error) => error);
+    await waitFor(() => lost > 0, { description: 'the first reply lost' });
+    await clock.advance(1_000);
+    expect(await first).toBeInstanceOf(OffThreadReadBusyError);
+    const next = readOnPool(path, COUNT, { deadlineAtMs: clock.now() + 600_000 });
+    await clock.advance(120_000);
+    expect(((await next) as { c: number }).c).toBe(3);
   });
 });

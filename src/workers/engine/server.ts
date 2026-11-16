@@ -294,6 +294,7 @@ import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
 import { sqliteFilesHealth, startSqliteWalSampler } from './sqlite-wal-sampler.ts';
+import { readPoolDiagnostics } from '../connector-store/off-thread-reads.ts';
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
 import { setSqliteCheckpointsOffLoop } from '../../core/sqlite-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
@@ -6702,6 +6703,8 @@ export async function main(): Promise<void> {
         ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
         ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
         ...((files) => (files ? { sqlite_files: files } : {}))(sqliteFilesHealth()),
+        // Read workers retired for a reply that missed its deadline, requests run again on a fresh one, and replies that came for nothing.
+        read_pool: (({ timeouts, retries, lateReplies, terminations }) => ({ timeouts, retries, late_replies: lateReplies, retired: terminations }))(readPoolDiagnostics()),
       }),
     });
     // A delete the front forwarded: stop answering ready (so no new front

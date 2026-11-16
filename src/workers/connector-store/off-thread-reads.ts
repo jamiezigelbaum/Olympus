@@ -75,6 +75,24 @@ export const READ_POOL_QUEUE_PER_STORE = 8;
 // pool query whose caller gives none.
 const OFF_THREAD_READ_TIMEOUT_MS = 120_000;
 
+// A Bun Worker can lose a reply: the reader posts it and this thread never
+// receives it (traced 16 Nov: reply 145 posted after its open, never
+// delivered; 3 of 40 runs of one test). Waiting out 120 s for a reply that
+// will never come stalls the caller, so the requests that are quick by
+// nature get short deadlines, and a request that can safely run again does,
+// once, on a fresh worker. Opening and closing a snapshot are quick by
+// nature; so is a background or per-read query, each a page of a walk.
+let snapshotControlTimeoutMs = 10_000;
+let perReadTimeoutMs = 30_000;
+
+/** A request whose reply did not come by its deadline: its worker is retired. */
+export class OffThreadReadTimeoutError extends Error {
+  constructor() {
+    super('off-thread read timed out');
+    this.name = 'OffThreadReadTimeoutError';
+  }
+}
+
 /** A pool query that missed its deadline or found no room: the lane is busy, not empty. */
 export class OffThreadReadBusyError extends Error {
   readonly code = SOURCE_INDEX_LANE_BUSY_CODE;
@@ -112,6 +130,12 @@ export function setReadPoolClockForTests(testClock?: ReadPoolClock): void {
 export function setReadPoolObserverForTests(observe?: (dbPath: string, read: StoreRead, seen?: ObservedRead) => void, options: { snapshots?: boolean } = {}): void {
   observer = observe;
   observeSnapshots = options.snapshots === true;
+}
+
+/** Tests only: the reply deadlines of snapshot opens and closes, and of per-read queries. Left out, the defaults. */
+export function setReadPoolReplyDeadlinesForTests(deadlines: { controlMs?: number; perReadMs?: number } = {}): void {
+  snapshotControlTimeoutMs = deadlines.controlMs ?? 10_000;
+  perReadTimeoutMs = deadlines.perReadMs ?? 30_000;
 }
 
 /** Tests only: how a thread is made (to fail a start). Left out, a Bun Worker. */
@@ -266,7 +290,10 @@ interface PoolJob {
 // Every thread the pool started that has not stopped, retired ones included.
 const threads: ReaderThread[] = [];
 let nextId = 1;
-const counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
+// timeouts: workers retired because a reply missed its deadline (a lost
+// reply or a stuck statement); retries: requests run again on a fresh
+// worker after one; late_replies: replies that came for no waiting request.
+const counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0, timeouts: 0, retries: 0, lateReplies: 0 };
 const startedStores = new Set<string>();
 const storeOpens = new Map<string, { opens: number; openMs: number }>();
 
@@ -324,7 +351,10 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
       }
       started.executingStore = undefined;
       const waiting = started.pending.get(message.id);
-      if (!waiting) return;
+      if (!waiting) {
+        counters.lateReplies += 1;
+        return;
+      }
       started.pending.delete(message.id);
       if (waiting.timer !== undefined) clock.clearTimeout(waiting.timer);
       if (typeof message.ms === 'number') waiting.sqlMs?.(message.ms);
@@ -388,7 +418,9 @@ function send(
   return new Promise((resolve, reject) => {
     // Left referenced: a one-shot command waiting on a count must not exit first.
     const timer = timeoutMs === null ? undefined : clock.setTimeout(() => {
-      retire(reader, new Error('off-thread read timed out'));
+      if (reader.retired) return;
+      counters.timeouts += 1;
+      retire(reader, new OffThreadReadTimeoutError());
     }, timeoutMs);
     reader.pending.set(id, { resolve, reject, ...(timer !== undefined ? { timer } : {}), ...(sqlMs ? { sqlMs } : {}) });
     try {
@@ -423,25 +455,51 @@ export async function withOffThreadSnapshot<T>(
   const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
   if (options.noWait && !free) throw new OffThreadReadBusyError();
   if (free) free.snapshots += 1;
-  const reader = free ?? await snapshotThread(dbPath, lane);
-  if ((releases.get(dbPath) ?? 0) !== generation) {
-    reader.snapshots -= 1;
-    dispatch();
-    throw new OffThreadReadBusyError();
-  }
-  const snapshot = nextId++;
-  // The wait for the store's worker, counted once, on the snapshot's first
-  // read: a lane's time behind other snapshots shows in its queue wait.
-  let reserveWaitMs = clock.now() - askedAtMs;
-  // The background lane's readers are finders: what they find is written by
-  // key and checked again there, so they need no one snapshot across their
-  // reads. Each of their reads is its own read transaction. A snapshot held
-  // across a whole walk pinned the WAL: no checkpoint could reset it, and
-  // tier-ledger-1's WAL stood at 6 GB through a gate run (16 Nov). A caller
-  // that checks for writes across the whole read itself asks for the same.
-  const perRead = lane === 'background' || options.perRead === true;
+  // The reserved worker; undefined only while a fresh one is being taken.
+  let reader: ReaderThread | undefined = free ?? await snapshotThread(dbPath, lane);
   try {
-    await send(reader, { op: 'open', snapshot, path: dbPath, perRead });
+    if ((releases.get(dbPath) ?? 0) !== generation) throw new OffThreadReadBusyError();
+    let snapshot = nextId++;
+    // The wait for the store's worker, counted once, on the snapshot's first
+    // read: a lane's time behind other snapshots shows in its queue wait.
+    let reserveWaitMs = clock.now() - askedAtMs;
+    // The background lane's readers are finders: what they find is written by
+    // key and checked again there, so they need no one snapshot across their
+    // reads. Each of their reads is its own read transaction. A snapshot held
+    // across a whole walk pinned the WAL: no checkpoint could reset it, and
+    // tier-ledger-1's WAL stood at 6 GB through a gate run (16 Nov). A caller
+    // that checks for writes across the whole read itself asks for the same.
+    const perRead = lane === 'background' || options.perRead === true;
+    const open = async (): Promise<void> => {
+      await send(reader!, { op: 'open', snapshot, path: dbPath, perRead }, snapshotControlTimeoutMs);
+    };
+    // One retry on a fresh worker per snapshot, after a reply that did not
+    // come: before the first read, or between reads of a per-read walk,
+    // where no read depends on the one before it. A held snapshot's reads
+    // must see one state, so they never move.
+    let retryLeft = true;
+    let moving: Promise<void> | undefined;
+    const moveToFreshWorker = (): Promise<void> => {
+      if (moving) return moving;
+      retryLeft = false;
+      counters.retries += 1;
+      moving = (async () => {
+        reader!.snapshots -= 1;
+        reader = undefined;
+        dispatch();
+        reader = await snapshotThread(dbPath, lane);
+        if ((releases.get(dbPath) ?? 0) !== generation) throw new OffThreadReadBusyError();
+        snapshot = nextId++;
+        await open();
+      })();
+      return moving;
+    };
+    try {
+      await open();
+    } catch (error) {
+      if (!(error instanceof OffThreadReadTimeoutError) || !retryLeft) throw error;
+      await moveToFreshWorker();
+    }
     if (!perRead) markRead(dbPath, snapshot, { atMs: clock.now(), lane, site });
     try {
       return await work(async (query) => {
@@ -454,10 +512,21 @@ export async function withOffThreadSnapshot<T>(
         const queueWaitMs = reserveWaitMs;
         reserveWaitMs = 0;
         let sqlMs = 0;
-        try {
-          const rows = await send(reader, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
+        const once = async (): Promise<unknown> => {
+          if (moving) await moving;
+          return send(reader!, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }, perRead ? perReadTimeoutMs : undefined, (ms) => {
             sqlMs = ms;
           });
+        };
+        try {
+          let rows: unknown;
+          try {
+            rows = await once();
+          } catch (error) {
+            if (!perRead || !(error instanceof OffThreadReadTimeoutError) || (!retryLeft && !moving)) throw error;
+            await moveToFreshWorker();
+            rows = await once();
+          }
           report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows', snapshot: true });
           return rows;
         } catch (error) {
@@ -470,11 +539,12 @@ export async function withOffThreadSnapshot<T>(
         }
       });
     } finally {
-      await send(reader, { op: 'close', snapshot }).catch(() => undefined);
+      await moving?.catch(() => undefined);
+      if (reader) await send(reader, { op: 'close', snapshot }, snapshotControlTimeoutMs).catch(() => undefined);
       unmarkRead(dbPath, snapshot);
     }
   } finally {
-    reader.snapshots -= 1;
+    if (reader) reader.snapshots -= 1;
     dispatch();
   }
 }
@@ -715,7 +785,12 @@ function dispatch(): void {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null, (ms) => {
+    // The caller gives up at its own deadline; the executor is kept until
+    // SQLite answers, but not forever: a reply lost on its way back would
+    // otherwise hold the store's executor for good. Past the caller's
+    // deadline and 120 s more, the worker is retired (it keeps its slot
+    // until it has stopped).
+    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, Math.max(0, job.deadlineAtMs - clock.now()) + OFF_THREAD_READ_TIMEOUT_MS, (ms) => {
       job.sqlMs = ms;
     })
       .then(

@@ -18687,6 +18687,15 @@ function readInBackground(dbPath, query) {
 var READ_POOL_RESCORE_READERS = 3;
 var READ_POOL_QUEUE_PER_STORE = 8;
 var OFF_THREAD_READ_TIMEOUT_MS = 120000;
+var snapshotControlTimeoutMs = 1e4;
+var perReadTimeoutMs = 30000;
+
+class OffThreadReadTimeoutError extends Error {
+  constructor() {
+    super("off-thread read timed out");
+    this.name = "OffThreadReadTimeoutError";
+  }
+}
 
 class OffThreadReadBusyError extends Error {
   code = SOURCE_INDEX_LANE_BUSY_CODE;
@@ -18798,7 +18807,7 @@ self.onmessage = (event) => {
 `;
 var threads = [];
 var nextId = 1;
-var counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
+var counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0, timeouts: 0, retries: 0, lateReplies: 0 };
 var startedStores = new Set;
 var storeOpens = new Map;
 var queues = new Map;
@@ -18839,8 +18848,10 @@ function startThread(store, lane = "shared") {
       }
       started.executingStore = undefined;
       const waiting = started.pending.get(message.id);
-      if (!waiting)
+      if (!waiting) {
+        counters.lateReplies += 1;
         return;
+      }
       started.pending.delete(message.id);
       if (waiting.timer !== undefined)
         clock2.clearTimeout(waiting.timer);
@@ -18892,7 +18903,10 @@ function send(reader, message, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS, sqlMs) {
   const id = nextId++;
   return new Promise((resolve, reject) => {
     const timer = timeoutMs === null ? undefined : clock2.setTimeout(() => {
-      retire(reader, new Error("off-thread read timed out"));
+      if (reader.retired)
+        return;
+      counters.timeouts += 1;
+      retire(reader, new OffThreadReadTimeoutError);
     }, timeoutMs);
     reader.pending.set(id, { resolve, reject, ...timer !== undefined ? { timer } : {}, ...sqlMs ? { sqlMs } : {} });
     try {
@@ -18917,17 +18931,42 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
     throw new OffThreadReadBusyError;
   if (free)
     free.snapshots += 1;
-  const reader = free ?? await snapshotThread(dbPath, lane);
-  if ((releases.get(dbPath) ?? 0) !== generation) {
-    reader.snapshots -= 1;
-    dispatch();
-    throw new OffThreadReadBusyError;
-  }
-  const snapshot = nextId++;
-  let reserveWaitMs = clock2.now() - askedAtMs;
-  const perRead = lane === "background" || options.perRead === true;
+  let reader = free ?? await snapshotThread(dbPath, lane);
   try {
-    await send(reader, { op: "open", snapshot, path: dbPath, perRead });
+    if ((releases.get(dbPath) ?? 0) !== generation)
+      throw new OffThreadReadBusyError;
+    let snapshot = nextId++;
+    let reserveWaitMs = clock2.now() - askedAtMs;
+    const perRead = lane === "background" || options.perRead === true;
+    const open = async () => {
+      await send(reader, { op: "open", snapshot, path: dbPath, perRead }, snapshotControlTimeoutMs);
+    };
+    let retryLeft = true;
+    let moving;
+    const moveToFreshWorker = () => {
+      if (moving)
+        return moving;
+      retryLeft = false;
+      counters.retries += 1;
+      moving = (async () => {
+        reader.snapshots -= 1;
+        reader = undefined;
+        dispatch();
+        reader = await snapshotThread(dbPath, lane);
+        if ((releases.get(dbPath) ?? 0) !== generation)
+          throw new OffThreadReadBusyError;
+        snapshot = nextId++;
+        await open();
+      })();
+      return moving;
+    };
+    try {
+      await open();
+    } catch (error) {
+      if (!(error instanceof OffThreadReadTimeoutError) || !retryLeft)
+        throw error;
+      await moveToFreshWorker();
+    }
     if (!perRead)
       markRead(dbPath, snapshot, { atMs: clock2.now(), lane, site });
     try {
@@ -18942,10 +18981,23 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         const queueWaitMs = reserveWaitMs;
         reserveWaitMs = 0;
         let sqlMs = 0;
-        try {
-          const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
+        const once = async () => {
+          if (moving)
+            await moving;
+          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, perRead ? perReadTimeoutMs : undefined, (ms) => {
             sqlMs = ms;
           });
+        };
+        try {
+          let rows;
+          try {
+            rows = await once();
+          } catch (error) {
+            if (!perRead || !(error instanceof OffThreadReadTimeoutError) || !retryLeft && !moving)
+              throw error;
+            await moveToFreshWorker();
+            rows = await once();
+          }
           report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
@@ -18958,13 +19010,18 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         }
       });
     } finally {
-      await send(reader, { op: "close", snapshot }).catch(() => {
+      await moving?.catch(() => {
         return;
       });
+      if (reader)
+        await send(reader, { op: "close", snapshot }, snapshotControlTimeoutMs).catch(() => {
+          return;
+        });
       unmarkRead(dbPath, snapshot);
     }
   } finally {
-    reader.snapshots -= 1;
+    if (reader)
+      reader.snapshots -= 1;
     dispatch();
   }
 }
@@ -19164,7 +19221,7 @@ function dispatch() {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null, (ms) => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, Math.max(0, job.deadlineAtMs - clock2.now()) + OFF_THREAD_READ_TIMEOUT_MS, (ms) => {
       job.sqlMs = ms;
     }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
       if (reader.job === job)
