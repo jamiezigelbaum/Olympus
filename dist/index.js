@@ -3131,6 +3131,7 @@ class ControlPathHeadroom {
   log;
   freezeLogMs;
   freezeSubject;
+  roomGate;
   constructor(options = {}) {
     this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
     this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
@@ -3163,6 +3164,16 @@ class ControlPathHeadroom {
     this.ensureHeartbeat();
     if (this.pendingTurn)
       return this.pendingTurn;
+    const room = this.roomGate?.();
+    if (room) {
+      this.turns += 1;
+      const waiting = room.then(() => this.turn(0)).then(() => {
+        this.pendingTurn = undefined;
+        this.lastTurnAt = this.now();
+      });
+      this.pendingTurn = waiting;
+      return waiting;
+    }
     const now = this.now();
     if (now - this.lastTurnAt < this.sliceMs)
       return;
@@ -3176,6 +3187,9 @@ class ControlPathHeadroom {
     });
     this.pendingTurn = pending;
     return pending;
+  }
+  setRoomGate(gate) {
+    this.roomGate = gate;
   }
   snapshot() {
     return {
