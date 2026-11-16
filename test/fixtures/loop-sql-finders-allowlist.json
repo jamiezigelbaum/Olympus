@@ -22,11 +22,6 @@
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
     },
     {
-      "site": "<anonymous> local-index.ts < purgeAccountScope local-index.ts",
-      "table": "sync_runs",
-      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
-    },
-    {
       "site": "<anonymous> local-index.ts < restoreItemRepresentations local-index.ts",
       "table": "item_owners",
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
@@ -130,11 +125,6 @@
       "site": "embeddingWorkRows local-index.ts < embedChunksUnderLease local-index.ts",
       "table": "chunks",
       "reason": "a store the read pool never reads (in memory): on disk the work list is read on the read worker without text (embeddingWorkRows)"
-    },
-    {
-      "site": "lastCompletedSyncRun local-index.ts < pull provider-store-sync.ts",
-      "table": "sync_runs",
-      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
     },
     {
       "site": "lastSyncRun local-index.ts < statusSteps local-index.ts",

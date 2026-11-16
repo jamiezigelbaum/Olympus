@@ -65942,6 +65942,10 @@ ${parentKey(ref)}`, { ref, origin });
       -- to use it.
       CREATE INDEX IF NOT EXISTS idx_sync_runs_last_sync ON sync_runs(started_at)
         WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL};
+      -- lastCompletedSyncRun and lastTerminalSyncRun: a seek to one
+      -- connector's newest run in a state, not a walk of every run (about
+      -- 14% of the background's CPU on Sparta, rc.20, 16 Nov).
+      CREATE INDEX IF NOT EXISTS idx_sync_runs_connector_state ON sync_runs(connector_id, status, started_at);
     `);
       createConversationScopedItemsTable(db, "items", true);
       db.exec(`
