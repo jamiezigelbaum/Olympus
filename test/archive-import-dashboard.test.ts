@@ -1180,7 +1180,9 @@ describe('held counts against the engine', () => {
 describe('a dropped archive', () => {
   // Where Olympus keeps the copy it reads a dropped file from.
   const staging = (f: ReturnType<typeof fixture>): string => archiveStateSiblingPath(defaultArchiveImportStatePath(f.env), 'archive-staging');
-  const copies = (f: ReturnType<typeof fixture>): string[] => (existsSync(staging(f)) ? readdirSync(staging(f)) : []);
+  // A folder a sweep set aside is deleted in the background: it is no copy any more.
+  const copies = (f: ReturnType<typeof fixture>): string[] => (existsSync(staging(f))
+    ? readdirSync(staging(f)).filter((name) => !name.startsWith('.removing-')) : []);
 
   test('is imported from Olympus\'s own copy, never changing the original, and the copy stays until the import is removed', async () => {
     const f = fixture();
