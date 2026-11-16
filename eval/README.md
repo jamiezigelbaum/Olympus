@@ -613,3 +613,72 @@ and `negativeChecksDegraded` counts each incomplete lane as
 `store:lane:reason` (codes only; free text becomes `other`).
 Negatives count only toward negative seat counts, never toward a pass or a
 fail. Do not tune on sealed questions.
+
+## Deep-read eval (1.5 item 8)
+
+Does reading a whole conversation or document (`core/deep-read.ts`) answer
+what the ordinary Ask misses? Each question's answer sits in the back half
+(past 50%) of a long set: a message of a chat conversation with at least 300
+messages, or a passage of a file with at least 8 stored passages.
+
+On **Sparta**, draft the set through the local model:
+
+```sh
+bun run eval:draft-deep-read -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data --conversations 6 --documents 6 --seed 42
+```
+
+It writes `eval/private/deep-read-questions.json` (0600; `--output` must stay
+under `eval/private/`). Conversations are counted across every store of their
+family (each tier's copy), largest first; documents by stored passages,
+largest first, one per item across tier copies. Each set is listed and read
+exactly as a deep read job does (`readDeepReadSet` in
+`engine/runtime/deep-read-jobs.ts`). The seed picks up to `--attempts 3`
+targets past the middle with at least `--min-words 25` words; the first draft
+that passes `draftOne` (the passage drafter's quote, paraphrase and
+specificity checks) is kept, and at most three sets are tried per wanted
+question. Each row holds the question, quote, set (a search hit's
+`selected_item` ids and `whole`), every tier copy of the expected item, and
+the target's index. `--min-messages`, `--min-chunks`,
+`--conversation-families` (default `chat`) and `--document-families`
+(default `file`) change the selection. Stdout gives counts and ids only,
+including `sectionsAtCeiling`: the sections the kept sets take at the largest
+local prompt (27,000 bytes), a lower bound on the run's sections.
+
+Then run both arms with the local Analyst:
+
+```sh
+bun run eval:deep-read -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data --judge-answers \
+  --output eval/private/deep-read.latest.json
+```
+
+- **Baseline** is run-passages' own computation (`runPassageEval` on the one
+  question): Ask's pack (`--max-results`, default 24), fitted to the prompt
+  budget, answered by the same Analyst as `eval:passages --answer`.
+- **Deep read** lists the set with `readDeepReadSet` and runs `runDeepRead`
+  with the same Analyst in the compact format, at the budget the engine gives
+  a deep read: the model's served window through `localAnalystPromptBudget`
+  (13,500 bytes when the window is unknown, at most 27,000).
+  `--deep-prompt-bytes` overrides it. The baseline uses the same budget unless
+  `--prompt-bytes` (or `OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES`)
+  names one.
+
+Per row and in total, for each arm: **found** (baseline: the expected item is
+seated in the fitted pack; deep: the passage holding the quote is in the set
+as read), **read** (baseline: the answer cites the expected item; deep: a
+reading note cites that passage, with `readItem` for any note on the item),
+and **right** (run-passages' rule: cites the expected item and states 80% of
+the quote's content words), plus `meaning` from `answer-judge.ts` with
+`--judge-answers`. The deep arm also records sections, failed sections, notes,
+`setSeconds`, `readingSeconds`, `secondsPerSection` and `answerSeconds`.
+`summary.overall` and `summary.byKind` give totals and paired wins, losses and
+ties (deep yes and baseline no is a win). The receipt is rewritten after every
+row and holds ids, numbers and timings only. `--only d001,d004` runs some
+rows; `--no-baseline` runs the deep read alone. No clock cuts a deep read; a
+set that cannot be listed is a failed row with a `DEEP_READ_*` code.
+
+Run length is about the sum of sections times seconds per section, plus one
+baseline Ask per row. Run a couple of rows first (`--only`) to measure seconds
+per section. `test/eval-deep-read.test.ts` runs both scripts end to end on
+fixture stores with a fake model.
