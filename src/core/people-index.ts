@@ -29,6 +29,7 @@
  * A name seen only on Private rows is never used as that display name.
  */
 import { Database } from 'bun:sqlite';
+import { PeopleReadWorker } from './people-read-worker.ts';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -726,7 +727,9 @@ export class LocalPeopleIndex {
   private bySender: Map<string, PeoplePerson>;
   private readonly now: () => Date;
   private readonly readOnly: boolean;
-  private loadedDataVersion: number | undefined;
+  private readonly dbPath: string;
+  private readWorker: PeopleReadWorker | undefined;
+  private closed: boolean;
   private reloading: Promise<void> | undefined;
 
   /**
@@ -739,13 +742,15 @@ export class LocalPeopleIndex {
     this.bySender = new Map();
     this.now = options.now ?? (() => new Date());
     this.readOnly = options.readOnly === true;
-    this.loadedDataVersion = undefined;
+    this.dbPath = options.dbPath;
+    this.readWorker = undefined;
+    this.closed = false;
     this.reloading = undefined;
     if (this.readOnly) {
       this.db = new Database(options.dbPath, { readonly: true, create: false, strict: true });
       try {
         this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;');
-        this.reload();
+        this.loadPeople();
       } catch (error) {
         closeSqliteStore(this.db, { checkpoint: false });
         throw error;
@@ -770,21 +775,22 @@ export class LocalPeopleIndex {
   }
 
   close(): void {
+    this.closed = true;
+    this.readWorker?.close();
+    this.readWorker = undefined;
     closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : {});
   }
 
-  /** Read the people again from the file: a read-only open follows the writer's rebuilds. */
+  /** Synchronous reload for the writable index and callers outside the front. */
   reload(): void {
     if (!this.readOnly) {
       this.loadPeople();
       return;
     }
-    const version = this.dataVersion();
     this.db.exec('BEGIN');
     try {
       this.loadPeople();
       this.db.exec('COMMIT');
-      this.loadedDataVersion = version;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
@@ -792,75 +798,71 @@ export class LocalPeopleIndex {
   }
 
   /**
-   * The front follows writer commits without blocking its loop on the whole
-   * index. Callers share one reload, including any commit made while it read.
-   * Recheck after COMMIT: data_version inside the read transaction is pinned
-   * to its snapshot, and must never mark a newer, unread commit as loaded.
+   * The front follows writer commits with SQLite entirely on its reader thread.
+   * Callers share one reload, including any commit made while it read. The
+   * worker rechecks data_version outside each completed snapshot, never using
+   * an in-snapshot version to mark a newer, unread commit as loaded.
    */
   reloadIfChanged(): Promise<void> {
     if (this.reloading) return this.reloading;
     this.reloading = Promise.resolve().then(async () => {
-      if (!this.readOnly) throw new Error('Cooperative people reload requires a read-only index');
-      let version = this.dataVersion();
-      while (version !== this.loadedDataVersion) {
-        await this.loadPeopleInTurns();
-        this.loadedDataVersion = version;
-        version = this.dataVersion();
+      if (!this.readOnly) throw new Error('Off-thread people reload requires a read-only index');
+      if (this.closed) throw new Error('People index is closed');
+      const reader = this.readWorker ??= new PeopleReadWorker(this.dbPath);
+      try {
+        // At most one catch-up pass: under a writer that never stops committing,
+        // a refresh ends and the next refresh reads the rest. A count, not a clock.
+        for (let pass = 0; pass < 2 && await reader.beginIfChanged(); pass += 1) await this.loadPeopleInTurns(reader);
+      } catch (error) {
+        await reader.close();
+        if (this.readWorker === reader) this.readWorker = undefined;
+        throw error;
       }
     }).finally(() => { this.reloading = undefined; });
     return this.reloading;
   }
 
-  private dataVersion(): number {
-    return (this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
-  }
-
-  private async loadPeopleInTurns(): Promise<void> {
+  private async loadPeopleInTurns(reader: PeopleReadWorker): Promise<void> {
     const people: PeoplePerson[] = [];
     const byPerson = new Map<string, PeoplePerson>();
     const bySender = new Map<string, PeoplePerson>();
-    this.db.exec('BEGIN');
-    try {
-      let afterPerson: number | undefined;
-      for (;;) {
-        // Rowid preserves the synchronous loader's person order. Both tables
-        // use keyset seeks, so later pages never scan earlier rows again.
-        const statement = this.db.query(`SELECT rowid AS cursor, ${PERSON_COLUMNS} FROM people_persons
-          ${afterPerson === undefined ? '' : 'WHERE rowid > ?'} ORDER BY rowid LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`);
-        const rows = (afterPerson === undefined ? statement.all() : statement.all(afterPerson)) as Array<PersonRow & { cursor: number }>;
-        if (rows.length === 0) break;
-        for (const row of rows) {
-          const person = personFromRow(row, []);
-          people.push(person);
-          byPerson.set(person.personId, person);
-        }
-        afterPerson = rows[rows.length - 1]!.cursor;
-        // Unlike ingestionTurn (which can return undefined within its shared
-        // slice), this always gives front requests a turn after every page.
-        await new Promise<void>((resolve) => { setImmediate(resolve); });
+    let afterPerson: number | undefined;
+    for (;;) {
+      // Rowid preserves the synchronous loader's person order. Both tables
+      // use keyset seeks, so later pages never scan earlier rows again.
+      const rows = await reader.read<PersonRow & { cursor: number }>(`SELECT rowid AS cursor, ${PERSON_COLUMNS} FROM people_persons
+        ${afterPerson === undefined ? '' : 'WHERE rowid > ?'} ORDER BY rowid LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`,
+      afterPerson === undefined ? [] : [afterPerson]);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const person = personFromRow(row, []);
+        people.push(person);
+        byPerson.set(person.personId, person);
       }
-      let afterIdentity: string | undefined;
-      for (;;) {
-        const statement = this.db.query(`SELECT ${IDENTITY_COLUMNS} FROM people_identities
-          ${afterIdentity === undefined ? '' : 'WHERE identity_key > ?'} ORDER BY identity_key LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`);
-        const rows = (afterIdentity === undefined ? statement.all() : statement.all(afterIdentity)) as IdentityRow[];
-        if (rows.length === 0) break;
-        for (const row of rows) {
-          const person = byPerson.get(row.person_id);
-          if (!person) continue;
-          const identity = identityFromRow(row);
-          person.identities.push(identity);
-          if (identity.senderId) bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
-          else if (identity.senderLabel) bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
-        }
-        afterIdentity = rows[rows.length - 1]!.identity_key;
-        await new Promise<void>((resolve) => { setImmediate(resolve); });
-      }
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      afterPerson = rows[rows.length - 1]!.cursor;
+      // Backpressure: only one small raw page is in flight, and requests get
+      // a loop turn between pages even when the reader replies immediately.
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
     }
+    let afterIdentity: string | undefined;
+    for (;;) {
+      const rows = await reader.read<IdentityRow>(`SELECT ${IDENTITY_COLUMNS} FROM people_identities
+        ${afterIdentity === undefined ? '' : 'WHERE identity_key > ?'} ORDER BY identity_key LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`,
+      afterIdentity === undefined ? [] : [afterIdentity]);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const person = byPerson.get(row.person_id);
+        if (!person) continue;
+        const identity = identityFromRow(row);
+        person.identities.push(identity);
+        if (identity.senderId) bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
+        else if (identity.senderLabel) bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
+      }
+      afterIdentity = rows[rows.length - 1]!.identity_key;
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+    }
+    await reader.finish();
+    if (this.closed) throw new Error('People index is closed');
     // Readers retain the entire old snapshot until these references swap.
     this.setPeople(people, bySender);
   }

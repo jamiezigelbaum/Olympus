@@ -80793,6 +80793,141 @@ var init_dashboard_opening = __esm(() => {
   init_operation_error();
 });
 
+// src/core/people-read-worker.ts
+class PeopleReadWorker {
+  dbPath;
+  worker;
+  pending;
+  stopped;
+  closed;
+  resolveClosed;
+  constructor(dbPath) {
+    this.dbPath = dbPath;
+    this.closed = new Promise((resolve) => {
+      this.resolveClosed = resolve;
+    });
+    const url = URL.createObjectURL(new Blob([WORKER_SOURCE2], { type: "application/javascript" }));
+    try {
+      this.worker = new Worker(url);
+    } catch (error) {
+      URL.revokeObjectURL(url);
+      throw error;
+    }
+    this.worker.unref?.();
+    this.worker.onmessage = (event) => {
+      const waiting = this.pending;
+      if (!waiting)
+        return;
+      this.pending = undefined;
+      this.worker.unref?.();
+      if (event.data.ok)
+        waiting.resolve(event.data.result);
+      else {
+        const error = new Error(event.data.error ?? "People reader failed");
+        this.close(error);
+        waiting.reject(error);
+      }
+    };
+    this.worker.onerror = (event) => {
+      this.close(new Error(event.message || "People reader failed"));
+      this.worker.terminate();
+    };
+    this.worker.addEventListener("close", () => {
+      URL.revokeObjectURL(url);
+      this.stopped ??= new Error("People reader stopped");
+      this.pending?.reject(this.stopped);
+      this.pending = undefined;
+      this.resolveClosed();
+    });
+  }
+  beginIfChanged() {
+    return this.request({ op: "beginIfChanged" });
+  }
+  read(sql, params = []) {
+    return this.request({ op: "read", sql, params });
+  }
+  finish() {
+    return this.request({ op: "finish" });
+  }
+  close(error = new Error("People reader closed")) {
+    if (this.stopped)
+      return this.closed;
+    this.stopped = error;
+    this.pending?.reject(error);
+    this.pending = undefined;
+    this.worker.ref?.();
+    try {
+      this.worker.postMessage({ op: "close" });
+    } catch (error) {
+      this.worker.terminate();
+    }
+    return this.closed;
+  }
+  request(message) {
+    if (this.stopped)
+      return Promise.reject(this.stopped);
+    if (this.pending)
+      return Promise.reject(new Error("People reader already has a request"));
+    return new Promise((resolve, reject) => {
+      this.pending = { resolve, reject };
+      this.worker.ref?.();
+      try {
+        this.worker.postMessage({ ...message, path: this.dbPath });
+      } catch (error) {
+        this.close(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+}
+var WORKER_SOURCE2 = `
+import { Database } from 'bun:sqlite';
+let db;
+let loadedVersion;
+let snapshotVersion;
+self.onmessage = (event) => {
+  const { path, op, sql, params } = event.data;
+  try {
+    if (op === 'close') {
+      try {
+        if (db?.inTransaction) db.exec('ROLLBACK');
+        db?.close();
+      } finally {
+        process.exit(0);
+      }
+      return;
+    }
+    if (!db) {
+      db = new Database(path, { readonly: true, create: false, strict: true });
+      db.exec('PRAGMA busy_timeout = 5000; PRAGMA query_only = ON');
+    }
+    let result;
+    if (op === 'beginIfChanged') {
+      // Read BEFORE BEGIN: data_version inside the snapshot can stay pinned
+      // while a writer commits. Only this pre-snapshot version is marked read.
+      const version = db.query('PRAGMA data_version').get().data_version;
+      result = version !== loadedVersion;
+      if (result) {
+        db.exec('BEGIN');
+        snapshotVersion = version;
+      }
+    } else if (op === 'finish') {
+      db.exec('COMMIT');
+      loadedVersion = snapshotVersion;
+      result = null;
+    } else if (op === 'read') {
+      result = db.query(sql).all(...params);
+    } else {
+      throw new Error('Unknown people reader request');
+    }
+    postMessage({ ok: true, result });
+  } catch (error) {
+    // The caller retires this worker on any failure. Its connection and any
+    // unfinished transaction go with it; a retry starts without a baseline.
+    postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+};
+`;
+
 // src/core/people-index.ts
 import { Database as Database12 } from "bun:sqlite";
 import { createHash as createHash36 } from "node:crypto";
@@ -81297,20 +81432,24 @@ class LocalPeopleIndex {
   bySender;
   now;
   readOnly;
-  loadedDataVersion;
+  dbPath;
+  readWorker;
+  closed;
   reloading;
   constructor(options) {
     this.people = [];
     this.bySender = new Map;
     this.now = options.now ?? (() => new Date);
     this.readOnly = options.readOnly === true;
-    this.loadedDataVersion = undefined;
+    this.dbPath = options.dbPath;
+    this.readWorker = undefined;
+    this.closed = false;
     this.reloading = undefined;
     if (this.readOnly) {
       this.db = new Database12(options.dbPath, { readonly: true, create: false, strict: true });
       try {
         this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;");
-        this.reload();
+        this.loadPeople();
       } catch (error) {
         closeSqliteStore(this.db, { checkpoint: false });
         throw error;
@@ -81336,6 +81475,9 @@ class LocalPeopleIndex {
     this.loadPeople();
   }
   close() {
+    this.closed = true;
+    this.readWorker?.close();
+    this.readWorker = undefined;
     closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : {});
   }
   reload() {
@@ -81343,12 +81485,10 @@ class LocalPeopleIndex {
       this.loadPeople();
       return;
     }
-    const version = this.dataVersion();
     this.db.exec("BEGIN");
     try {
       this.loadPeople();
       this.db.exec("COMMIT");
-      this.loadedDataVersion = version;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -81359,72 +81499,69 @@ class LocalPeopleIndex {
       return this.reloading;
     this.reloading = Promise.resolve().then(async () => {
       if (!this.readOnly)
-        throw new Error("Cooperative people reload requires a read-only index");
-      let version = this.dataVersion();
-      while (version !== this.loadedDataVersion) {
-        await this.loadPeopleInTurns();
-        this.loadedDataVersion = version;
-        version = this.dataVersion();
+        throw new Error("Off-thread people reload requires a read-only index");
+      if (this.closed)
+        throw new Error("People index is closed");
+      const reader = this.readWorker ??= new PeopleReadWorker(this.dbPath);
+      try {
+        for (let pass = 0;pass < 2 && await reader.beginIfChanged(); pass += 1)
+          await this.loadPeopleInTurns(reader);
+      } catch (error) {
+        await reader.close();
+        if (this.readWorker === reader)
+          this.readWorker = undefined;
+        throw error;
       }
     }).finally(() => {
       this.reloading = undefined;
     });
     return this.reloading;
   }
-  dataVersion() {
-    return this.db.query("PRAGMA data_version").get().data_version;
-  }
-  async loadPeopleInTurns() {
+  async loadPeopleInTurns(reader) {
     const people = [];
     const byPerson = new Map;
     const bySender = new Map;
-    this.db.exec("BEGIN");
-    try {
-      let afterPerson;
-      for (;; ) {
-        const statement = this.db.query(`SELECT rowid AS cursor, ${PERSON_COLUMNS} FROM people_persons
-          ${afterPerson === undefined ? "" : "WHERE rowid > ?"} ORDER BY rowid LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`);
-        const rows = afterPerson === undefined ? statement.all() : statement.all(afterPerson);
-        if (rows.length === 0)
-          break;
-        for (const row of rows) {
-          const person = personFromRow(row, []);
-          people.push(person);
-          byPerson.set(person.personId, person);
-        }
-        afterPerson = rows[rows.length - 1].cursor;
-        await new Promise((resolve) => {
-          setImmediate(resolve);
-        });
+    let afterPerson;
+    for (;; ) {
+      const rows = await reader.read(`SELECT rowid AS cursor, ${PERSON_COLUMNS} FROM people_persons
+        ${afterPerson === undefined ? "" : "WHERE rowid > ?"} ORDER BY rowid LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`, afterPerson === undefined ? [] : [afterPerson]);
+      if (rows.length === 0)
+        break;
+      for (const row of rows) {
+        const person = personFromRow(row, []);
+        people.push(person);
+        byPerson.set(person.personId, person);
       }
-      let afterIdentity;
-      for (;; ) {
-        const statement = this.db.query(`SELECT ${IDENTITY_COLUMNS} FROM people_identities
-          ${afterIdentity === undefined ? "" : "WHERE identity_key > ?"} ORDER BY identity_key LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`);
-        const rows = afterIdentity === undefined ? statement.all() : statement.all(afterIdentity);
-        if (rows.length === 0)
-          break;
-        for (const row of rows) {
-          const person = byPerson.get(row.person_id);
-          if (!person)
-            continue;
-          const identity = identityFromRow2(row);
-          person.identities.push(identity);
-          if (identity.senderId)
-            bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
-          else if (identity.senderLabel)
-            bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
-        }
-        afterIdentity = rows[rows.length - 1].identity_key;
-        await new Promise((resolve) => {
-          setImmediate(resolve);
-        });
-      }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
+      afterPerson = rows[rows.length - 1].cursor;
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
     }
+    let afterIdentity;
+    for (;; ) {
+      const rows = await reader.read(`SELECT ${IDENTITY_COLUMNS} FROM people_identities
+        ${afterIdentity === undefined ? "" : "WHERE identity_key > ?"} ORDER BY identity_key LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`, afterIdentity === undefined ? [] : [afterIdentity]);
+      if (rows.length === 0)
+        break;
+      for (const row of rows) {
+        const person = byPerson.get(row.person_id);
+        if (!person)
+          continue;
+        const identity = identityFromRow2(row);
+        person.identities.push(identity);
+        if (identity.senderId)
+          bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
+        else if (identity.senderLabel)
+          bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
+      }
+      afterIdentity = rows[rows.length - 1].identity_key;
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
+    }
+    await reader.finish();
+    if (this.closed)
+      throw new Error("People index is closed");
     this.setPeople(people, bySender);
   }
   rebuild(observations) {
@@ -240495,7 +240632,7 @@ function startSqliteCheckpointer(options = {}) {
   };
   try {
     for (let n = 0;n < WORKERS; n += 1) {
-      const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SOURCE2], { type: "text/javascript" })));
+      const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SOURCE3], { type: "text/javascript" })));
       worker.unref?.();
       const entry = { worker, finished: undefined, job: undefined };
       if (typeof SharedArrayBuffer === "function") {
@@ -240763,7 +240900,7 @@ function startSqliteCheckpointer(options = {}) {
     }
   };
 }
-var SQLITE_CHECKPOINT_AT_BYTES, SQLITE_WAL_ROOM_BYTES, SQLITE_CHECKPOINT_HOT_MS = 1000, SQLITE_CHECKPOINT_IDLE_MS = 5000, SQLITE_WAL_ROOM_READER_WAIT_MS = 2000, READER_POLL_MS = 20, WORKERS = 2, CHECKPOINT_NOTABLE_MS = 1000, CHECKPOINT_NOTABLE_BYTES, ROOM_PASSES = 8, HELD_AFTER_PASSES = 3, ROOM_NOTABLE_MS = 1000, ROOM_SUMMARY_MS = 60000, WORKER_SOURCE2 = `
+var SQLITE_CHECKPOINT_AT_BYTES, SQLITE_WAL_ROOM_BYTES, SQLITE_CHECKPOINT_HOT_MS = 1000, SQLITE_CHECKPOINT_IDLE_MS = 5000, SQLITE_WAL_ROOM_READER_WAIT_MS = 2000, READER_POLL_MS = 20, WORKERS = 2, CHECKPOINT_NOTABLE_MS = 1000, CHECKPOINT_NOTABLE_BYTES, ROOM_PASSES = 8, HELD_AFTER_PASSES = 3, ROOM_NOTABLE_MS = 1000, ROOM_SUMMARY_MS = 60000, WORKER_SOURCE3 = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const connections = new Map();
