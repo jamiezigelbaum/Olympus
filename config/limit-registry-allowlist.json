@@ -138,6 +138,18 @@
     "retire_when": "Remove when the bounded input/output clamp OAUTH_CALLBACK_URL_MAX_BYTES is removed or becomes a registered work stop."
   },
   {
+    "path": "src/core/follow-up.ts",
+    "symbol": "FOLLOW_UP_MAX_OPTIONS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded output clamp FOLLOW_UP_MAX_OPTIONS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/follow-up.ts",
+    "symbol": "LABEL_NAME_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded output clamp LABEL_NAME_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
     "path": "src/core/interactive-secret.ts",
     "symbol": "SECRET_MAX_BYTES",
     "reason": "clamp",

@@ -56,6 +56,12 @@ Use Olympus source tools, not raw stores.
 - Treat `source_answer.answer` as answer-ready. When it directly answers the
   user's question, pass it through with its citations and coverage notes
   instead of re-analyzing the audit or re-synthesizing the source evidence.
+- When the result carries `follow_up` (`question`, `options[].label`,
+  `options[].narrow`), the first search was weak. Give what was found, ask the
+  user `follow_up.question` with the option labels, and on their pick call
+  `source_answer` again with the same question and that option's `narrow`,
+  unchanged and with no other scope filter. Ask it once: a narrowed answer
+  never carries another follow-up.
 - `source_answer.audit.self_heal` reports automatic local repair for incomplete
   source text. If `outcome` is `in_progress`, tell the user Olympus found the
   document but part of it is missing from the local index and is re-ingesting it

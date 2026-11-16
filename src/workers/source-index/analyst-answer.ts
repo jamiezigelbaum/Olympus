@@ -70,6 +70,8 @@ import {
 import { parentLabelReleaseInputs, type ParentLabelResolver } from '../../core/parent-label.ts';
 import { answerReleaseWithheldReasonOffThread, recordReleaseManifest, checkReleaseChunks, chunkCoverageNote, releaseCandidateHashes, releasedTextDigest, releasePassageHashes, type ChunkReleaseResult, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
+import { buildFollowUp, searchCutShort, weakSearch, type FollowUpCandidate, type SourceAnswerFollowUp } from '../../core/follow-up.ts';
+import { sourceLabel } from '../../core/remote-result.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
 import { withCachedKeywordExpansion, type CachedKeywordExpansion } from '../../core/source-index/keyword-context.ts';
@@ -849,11 +851,16 @@ export function createAnalystSourceIndexAnswerHandler(
         total_ms: totalLatencyMs,
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
+      // One follow-up per question: a narrowed ask never asks again.
+      const followUp = released && stillReading === 0 && !policyDeniedEmptyPack && !requestNarrowed(request)
+        ? weakSearchFollowUp(detail, analystResult.citations.length)
+        : undefined;
       // Every item the analysed pack held, cited or not.
       recordReleaseManifest({ inputs: [
         ...analyzedInputs,
         ...unreadableMatchedReleaseInputs(detail, releaseSecureContent),
         ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? []),
+        ...(followUp?.names ?? []),
       ], constraints: releaseConstraints });
       return {
         answer,
@@ -873,6 +880,7 @@ export function createAnalystSourceIndexAnswerHandler(
               })),
             }
           : {}),
+        ...(followUp ? { follow_up: followUp.followUp } : {}),
         audit: {
           searched_corpora: [...pack.coverage.searchedCorpora],
           skipped_corpora: detail.skippedCorpora.map((skip) => ({
@@ -949,6 +957,65 @@ export function createAnalystSourceIndexAnswerHandler(
       };
   };
   return { answer: (request, local) => answerOnce(request, local, false) };
+}
+
+// Whether the ask already names a scope: a narrowed ask gets no follow-up.
+function requestNarrowed(request: SourceIndexAnswerRequest): boolean {
+  return Boolean(request.corpus_id?.trim() || request.corpus_ids?.length || request.conversation_id?.trim()
+    || request.sender_id?.trim() || request.sender_label?.trim() || request.authored_after?.trim()
+    || request.authored_before?.trim() || request.chat_scope?.trim() || request.approved_scope_key?.trim()
+    || request.selected_items?.length);
+}
+
+/**
+ * The follow-up for a weak search (core/follow-up.ts), from the analysed
+ * pack's metadata, and the names it shows as release inputs of the answer.
+ * A candidate's names may appear only when they may go wherever its
+ * citation goes on every surface: a Public or Personal item that is not
+ * secure by tier. A Private item is left out of every option, counts
+ * included.
+ */
+export function weakSearchFollowUp(
+  detail: EvidencePackBuildDetail,
+  citations: number,
+): { followUp: SourceAnswerFollowUp; names: ReleaseInput[] } | undefined {
+  const verdict = weakSearch({
+    citations,
+    ...(detail.strength ? { strength: detail.strength } : {}),
+    cutShort: searchCutShort({
+      skippedReasons: detail.skippedCorpora.map((skip) => skip.reason),
+      degradationReasons: detail.degradations.map((degradation) => degradation.reason),
+    }),
+  });
+  if (!verdict.weak) return undefined;
+  const candidates = followUpCandidates(detail);
+  const built = buildFollowUp(candidates);
+  if (!built) return undefined;
+  const names = built.contributors.map((index) => {
+    const candidate = detail.pack.candidates[index]!;
+    const { chunkHashes: _hashes, ...input } = candidateReleaseInput(candidate, detail.candidateCorpusIds[index] ?? '');
+    return { ...input, layer: 'names' as const };
+  });
+  return { followUp: built.followUp, names };
+}
+
+// The pack's candidates as the follow-up may read them: metadata only.
+export function followUpCandidates(detail: EvidencePackBuildDetail): FollowUpCandidate[] {
+  return detail.pack.candidates.map((candidate, index) => {
+    const item = candidate.provenance.sourceItem;
+    const cite = candidate.provenance.citation;
+    return {
+      corpusId: detail.candidateCorpusIds[index] ?? '',
+      source: sourceLabel(item.provider, item.family),
+      ...(item.providerConversationId ? { conversationId: item.providerConversationId } : {}),
+      ...(cite?.conversationLabel ? { conversationLabel: cite.conversationLabel } : {}),
+      ...(cite?.authorLabel ? { authorLabel: cite.authorLabel } : {}),
+      ...(cite?.authoredAt ? { authoredAt: cite.authoredAt } : {}),
+      namesReleasable: !isSecureSensitivity(candidate)
+        && (candidate.trustDomain === 'public_safe' || candidate.trustDomain === 'internal')
+        && Boolean(detail.candidateCorpusIds[index]),
+    };
+  });
 }
 
 /**

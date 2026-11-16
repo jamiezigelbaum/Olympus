@@ -3,6 +3,7 @@ import type { OperationCallerWire } from '../../../core/operation-caller.ts';
 import { selectedItemContentFieldPath } from '../../../core/source-index/selected-item-safety.ts';
 import { normalizeVeniceAnalystModelId } from '../../../core/venice-models.ts';
 import type { SourceIndexAnswerRequest, SourceAnswerSelectedItem } from '../../source-index/answer-types.ts';
+import { resolveNarrowHandle } from '../../../core/follow-up.ts';
 import type { SourceIndexStatusRequest } from '../../source-index/status.ts';
 import { READWISE_LIBRARY_CORPUS_ID } from '../../readwise/index.ts';
 import { X_BOOKMARKS_CORPUS_ID } from '../../x-bookmarks/index.ts';
@@ -66,6 +67,34 @@ export async function parseSourceIndexAnswerRequest(request: Request): Promise<S
   if (typeof record.question !== 'string' || record.question.trim().length === 0) {
     throw new EmailSourceWorkerError(400, 'invalid_request', 'question must be a non-empty string.');
   }
+  return parseSourceIndexAnswerRecord(narrowedAnswerRecord(record), request);
+}
+
+/**
+ * A follow-up option's `narrow` (core/follow-up.ts) becomes the filters it
+ * stands for. It is the whole scope: passing a filter beside it is refused,
+ * and an unknown or expired handle is refused rather than searched whole.
+ */
+function narrowedAnswerRecord(record: Record<string, unknown>): Record<string, unknown> {
+  if (record.narrow === undefined || record.narrow === null || record.narrow === '') return record;
+  const scope = resolveNarrowHandle(record.narrow);
+  if (!scope) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', 'narrow is unknown or has expired; ask the question again without it.');
+  }
+  const clash = NARROW_EXCLUSIVE_FIELDS.find((field) => record[field] !== undefined && record[field] !== null && record[field] !== '');
+  if (clash) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', `narrow already sets the search scope; remove ${clash}.`);
+  }
+  const { narrow: _narrow, ...rest } = record;
+  return { ...rest, ...scope };
+}
+
+const NARROW_EXCLUSIVE_FIELDS = [
+  'corpus_id', 'corpus_ids', 'conversation_id', 'sender_id', 'sender_label', 'authored_after', 'authored_before',
+  'chat_scope', 'chat_title', 'chat_title_hint', 'approved_scope_key', 'selected_items',
+] as const;
+
+function parseSourceIndexAnswerRecord(record: Record<string, unknown>, request: Request): SourceIndexAnswerRequest {
   const query = asOptionalString(record.query);
   const account = asOptionalString(record.account);
   const corpusId = asOptionalString(record.corpus_id);
@@ -123,7 +152,7 @@ export async function parseSourceIndexAnswerRequest(request: Request): Promise<S
   }
   const caller = parseRequestCaller(record, request);
   return {
-    question: record.question,
+    question: String(record.question),
     ...(query !== undefined ? { query } : {}),
     ...(account !== undefined ? { account } : {}),
     ...(corpusId !== undefined ? { corpus_id: corpusId } : {}),

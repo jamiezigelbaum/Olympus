@@ -70,10 +70,10 @@ function analyst(packs: EvidencePack[]): Analyst {
 const set = { selected_item: { corpus_id: 'telegram.internal', family: 'chat', provider: 'telegram', account_scope: 'me', provider_item_id: 'm3', local_item_id: 'l3', provider_conversation_id: 'wellness', conversation_label: 'Wellness' }, whole: 'conversation' as const };
 
 async function settled(jobs: ReturnType<typeof createDeepReadJobs>, id: string) {
-  await waitFor(() => ['done', 'failed', 'cancelled'].includes(jobs.status(id)[0]!.state), {
-    description: 'deep read settles',
-  });
-  return jobs.status(id)[0]!;
+  return waitFor(() => {
+    const view = jobs.status(id)[0]!;
+    return view.state === 'done' || view.state === 'failed' || view.state === 'cancelled' ? view : undefined;
+  }, { description: 'deep read settled' });
 }
 
 describe('deep read jobs', () => {
