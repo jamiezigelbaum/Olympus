@@ -308,6 +308,11 @@ export interface FileExtractionRunnerOptions {
   workerId?: string;
   healthProbes?: ExtractionHealthProbeMap;
   /**
+   * How often a job still being read renews its lease;
+   * EXTRACTION_LEASE_RENEW_MS when absent. Tests shorten it.
+   */
+  leaseRenewMs?: number;
+  /**
    * Pause the lane when a probe rejects, rather than running the batch anyway.
    *
    * This knob exists because of the incident that motivated the probe: a
@@ -944,6 +949,8 @@ export function createFileExtractionRunner(
           },
           ...(spoolDir !== undefined ? { spoolDir } : {}),
           ...(spoolAnchor !== undefined ? { spoolAnchor } : {}),
+          leaseRenewMs: options.leaseRenewMs ?? EXTRACTION_LEASE_RENEW_MS,
+          ...(request.leaseSeconds !== undefined ? { leaseSeconds: request.leaseSeconds } : {}),
           now,
         });
 
@@ -1065,6 +1072,8 @@ interface SettleOneJobInput {
   resolveSource: () => Promise<FileExtractionSource>;
   spoolDir?: string;
   spoolAnchor?: string;
+  leaseRenewMs?: number;
+  leaseSeconds?: number;
   now: () => Date;
 }
 
@@ -1076,6 +1085,9 @@ interface SettleOneJobInput {
 async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
   const staged: { media?: ExtractedMedia; file?: FetchedFile } = {};
   let outcome: JobOutcome;
+  // A file that keeps being read keeps its lease: no whole-file clock cuts it (owner rule, 16 Nov 2026).
+  const renewal = setInterval(() => renewJobLease(input), input.leaseRenewMs ?? EXTRACTION_LEASE_RENEW_MS);
+  renewal.unref?.();
   try {
     outcome = await settleOneJobHeld(input, staged);
   } catch (error) {
@@ -1087,6 +1099,8 @@ async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
       + `reason=${boundedLogErrorMessage(error)}`,
     );
     outcome = retryable(EXTRACTION_ERROR_KIND_INTERNAL_ERROR, error);
+  } finally {
+    clearInterval(renewal);
   }
   try {
     // A file the source wrote for a reader (a spooled member of an archive) is removed on every path.
@@ -1107,6 +1121,22 @@ async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
     );
   }
   return outcome;
+}
+
+/**
+ * How often a job still being read renews its lease: well inside the
+ * 15-minute lease.
+ */
+export const EXTRACTION_LEASE_RENEW_MS = 60_000;
+
+function renewJobLease(input: SettleOneJobInput): void {
+  try {
+    const until = input.jobs.renewLease(input.job.jobId, input.job.leaseToken, input.leaseSeconds);
+    if (until) input.job.leaseExpiresAt = until;
+  } catch (error) {
+    // The lease then ends at its old time and the lost-lease check settles the job as before.
+    console.error(`[olympus:file-extraction] lease_renew_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error)}`);
+  }
 }
 
 async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: ExtractedMedia; file?: FetchedFile }): Promise<JobOutcome> {

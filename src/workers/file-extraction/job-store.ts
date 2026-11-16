@@ -847,6 +847,21 @@ export class LocalFileExtractionJobStore {
   /**
    * A fetch may learn a size that listing did not supply. The lease fences that fact too.
    */
+  /**
+   * Extends a lease this worker still holds, while its extraction keeps
+   * working: a big scan or a long recording is never cut by its lease (owner
+   * rule, 16 Nov 2026). Returns the new expiry, or undefined when the lease is
+   * no longer this worker's.
+   */
+  renewLease(jobId: string, leaseToken: string, leaseSeconds: number = DEFAULT_EXTRACTION_LEASE_SECONDS): string | undefined {
+    this.assertWritable('lease renew');
+    const seconds = clampInteger(leaseSeconds, 1, MAX_EXTRACTION_LEASE_SECONDS);
+    const until = new Date(Date.now() + seconds * 1_000).toISOString();
+    const changed = this.db.query(`UPDATE extraction_jobs SET leased_until = ?
+      WHERE job_id = ? AND lease_token = ? AND status = 'leased'`).run(until, jobId, leaseToken).changes;
+    return changed > 0 ? until : undefined;
+  }
+
   recordSizeRefusal(jobId: string, leaseToken: string, amounts: { sizeBytes?: number; maxBytes?: number }): void {
     this.assertWritable('size_refusal');
     if (amounts.sizeBytes !== undefined) requireSafeInteger(amounts.sizeBytes, 'sizeBytes');

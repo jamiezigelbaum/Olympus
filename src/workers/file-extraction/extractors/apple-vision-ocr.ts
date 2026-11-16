@@ -49,7 +49,12 @@ export const DEFAULT_APPLE_VISION_MAX_PAGES = 100;
 export const DEFAULT_APPLE_VISION_PAGES_PER_RUN = 8;
 export const DEFAULT_APPLE_VISION_PDF_MAX_PIXEL_EDGE = 3000;
 export const DEFAULT_APPLE_VISION_IMAGE_MAX_PIXEL_EDGE = 4096;
-export const DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = 600_000;
+/**
+ * No whole-file clock (owner rule, 16 Nov 2026): a long scan reads page batch
+ * by page batch, each stopped only by a stall, and its lease is renewed while
+ * it works. An explicit `fileDeadlineMs` still stops between batches.
+ */
+export const DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
 
 /**
  * The script's exit codes, mirrored from the header of

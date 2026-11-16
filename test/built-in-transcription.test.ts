@@ -26,7 +26,6 @@ import {
   parseAsrOutput,
   runningBuiltInTranscriber,
   sharedBuiltInTranscriber,
-  transcriptionDeadlineFromLease,
   wireBuiltInTranscriptionAtBoot,
   type AudioConverter,
 } from '../src/workers/file-extraction/extractors/built-in-transcriber.ts';
@@ -133,8 +132,8 @@ describe('engine selection', () => {
     expect(builtIn.calls).toBe(1);
   });
 
-  test('the job lease, less a margin, is the transcription deadline', async () => {
-    let seen: number | undefined;
+  test('the job lease is no transcription deadline: the runner renews it while the recording is read', async () => {
+    let seen: number | undefined = 0;
     const builtIn = engineStub({
       async transcribe(input) {
         seen = input.deadlineAt;
@@ -144,8 +143,7 @@ describe('engine selection', () => {
     const input = audioInput();
     const leaseExpiresAt = new Date(Date.now() + 900_000).toISOString();
     await createTranscriptionExtractor({ builtIn }).extract({ ...input, job: { ...input.job, leaseExpiresAt } });
-    expect(seen).toBe(Date.parse(leaseExpiresAt) - 60_000);
-    expect(transcriptionDeadlineFromLease('not a time')).toBeUndefined();
+    expect(seen).toBeUndefined();
   });
 
   test('with neither, audio is a named gap and the lane has no reread policy', async () => {

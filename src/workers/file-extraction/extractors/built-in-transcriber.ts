@@ -73,7 +73,8 @@ export const TRANSCRIPT_TIME_BUDGET_WARNING = 'transcript_time_budget_reached';
 const DEFAULT_IDLE_SHUTDOWN_SECONDS = 180;
 const DEFAULT_STARTUP_TIMEOUT_MS = 120_000;
 const DEFAULT_CHUNK_TIMEOUT_MS = 180_000;
-const DEFAULT_FILE_DEADLINE_MS = 30 * 60_000;
+// No whole-file clock (owner rule, 16 Nov 2026): a long recording is read chunk by chunk to the end while its lease is renewed.
+const DEFAULT_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
 const DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_INSTALL_RETRY_MS = 15 * 60_000;
 const DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60_000;
@@ -82,10 +83,6 @@ const DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60_000;
  * checksum pass (about a second per gigabyte) before it settles unread.
  */
 const DEFAULT_VERIFY_WAIT_MS = 5 * 60_000;
-/**
- * Time kept back from a lease for the runner to record the result.
- */
-const LEASE_MARGIN_MS = 60_000;
 const DEFAULT_CHUNK_SECONDS = 30;
 const MAX_TOKENS_PER_CHUNK = 512;
 /**
@@ -500,15 +497,6 @@ export function wireBuiltInTranscriptionAtBoot(input: {
   if (input.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() || input.env.NODE_ENV === 'test' || !input.engine) return undefined;
   if (input.wake) input.engine.onReady?.(input.wake);
   return input.engine;
-}
-
-/**
- * The lease-derived deadline for one job: its lease expiry less a margin for
- * recording the result, or undefined when the expiry is not a time.
- */
-export function transcriptionDeadlineFromLease(leaseExpiresAt: string | undefined): number | undefined {
-  const at = leaseExpiresAt ? Date.parse(leaseExpiresAt) : Number.NaN;
-  return Number.isFinite(at) ? at - LEASE_MARGIN_MS : undefined;
 }
 
 /**
