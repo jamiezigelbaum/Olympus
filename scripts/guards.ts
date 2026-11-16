@@ -20,6 +20,7 @@ const REST = [
   'email-source-connector-store-mount-guards', 'embedding-path-guard', 'engine-split-route-guard',
   'local-files-deletion-guard', 'private-move-answer-guards', 'source-account-guard',
   'tier-hold-until-judged-guard', 'tier-path-guard', 'toolchain-version-pin-guard', 'venice-policy-drift-guard',
+  'olympus-layout', // holds the data root guard
 ];
 
 const root = join(import.meta.dir, '..');
