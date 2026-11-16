@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { processesWithFilesUnder } from '../src/core/data-root-snapshot.ts';
@@ -149,6 +149,36 @@ describe('what the owner is told, and what is kept', () => {
     expect(existsSync(join(`${m.root}.before-update`, 'models'))).toBe(false);
     m.putBack();
     expect(readFileSync(join(m.root, 'models', 'weights.bin'), 'utf8')).toBe('w');
+  }, 30_000);
+
+  test('program versions and tools in the legacy folder are not copied, stay live, and read-only copies are removed', () => {
+    const m = machine();
+    const capture = legacyCaptureDataRoot(m.env);
+    const version = join(capture, 'versions', '0.4.9');
+    mkdirSync(version, { recursive: true });
+    writeFileSync(join(version, 'cli.js'), 'old');
+    mkdirSync(join(capture, 'whatsapp-live'), { recursive: true });
+    writeFileSync(join(capture, 'whatsapp-live', 'state.json'), '"before"');
+    // An installed version is read-only, as the lifecycle leaves it.
+    chmodSync(version, 0o555);
+    mkdirSync(join(capture, 'state-ro'), { recursive: true });
+    writeFileSync(join(capture, 'state-ro', 'x'), 'x');
+    chmodSync(join(capture, 'state-ro'), 0o555);
+    try {
+      m.update();
+      expect(existsSync(join(`${capture}.before-update`, 'versions'))).toBe(false);
+      writeFileSync(join(capture, 'whatsapp-live', 'state.json'), '"after"');
+      mkdirSync(join(capture, 'versions', '0.4.10'));
+      m.putBack();
+      expect(readFileSync(join(capture, 'whatsapp-live', 'state.json'), 'utf8')).toBe('"before"');
+      expect(readFileSync(join(version, 'cli.js'), 'utf8')).toBe('old');
+      expect(existsSync(join(capture, 'versions', '0.4.10'))).toBe(true);
+      m.update();
+      expect(() => commitEngineStores(m.env)).not.toThrow();
+      expect(readdirSync(join(capture, '..')).filter((name) => name.startsWith('olympus.'))).toEqual([]);
+    } finally {
+      for (const path of [version, join(capture, 'state-ro')]) { try { chmodSync(path, 0o755); } catch { /* gone */ } }
+    }
   }, 30_000);
 
   test('a disk without room for the copy stops the update before anything changed', () => {

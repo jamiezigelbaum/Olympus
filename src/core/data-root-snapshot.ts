@@ -18,7 +18,7 @@
  * moves it.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { removeFileDurablySync, syncDirectorySync, writePrivateFileAtomicSync } from './atomic-file.ts';
 import { engineChildrenPath, reapRecordedEngineChildren } from './engine-children.ts';
@@ -30,8 +30,37 @@ const RECORD_SCHEMA = 'olympus.update-snapshot.v1';
 /** Room kept free on the disk beyond a real copy: a share of it, and a floor. */
 const SPACE_MARGIN_SHARE = 0.05;
 const SPACE_MARGIN_BYTES = 64 * 1024 ** 2;
-/** Top-level folders of the root that are not cloned: they stay with the live root. */
-const NOT_CLONED = new Set(['models', 'backup-staging']);
+/**
+ * Top-level folders that are program files or caches, not data: they are not cloned and stay with the live folder.
+ * The data root's models and backup staging; and in the legacy folder ~/.local/share/olympus (also where Linux keeps
+ * the installed program versions and managed tools, whose own rollback is the lifecycle's), versions and tools.
+ */
+const ROOT_KEPT = new Set(['models', 'backup-staging', 'tools']);
+const CAPTURE_KEPT = new Set(['versions', 'tools']);
+function keptWithLive(folder: string, env: LayoutEnv): Set<string> {
+  if (folder === olympusDataRoot(env) || realOrSelf(folder) === realOrSelf(olympusDataRoot(env))) return ROOT_KEPT;
+  if (realOrSelf(folder) === realOrSelf(legacyCaptureDataRoot(env))) return CAPTURE_KEPT;
+  return new Set();
+}
+
+/** Removes a tree this module made, read-only folders in it too (a copy keeps the modes of what it copied). */
+function removeTree(path: string): void {
+  try { rmSync(path, { recursive: true, force: true }); return; } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EACCES' && code !== 'EPERM') throw error;
+  }
+  const writable = (directory: string): void => {
+    try { chmodSync(directory, 0o700); } catch { return; }
+    let names: string[];
+    try { names = readdirSync(directory); } catch { return; }
+    for (const name of names) {
+      const child = join(directory, name);
+      try { if (lstatSync(child).isDirectory()) writable(child); } catch { /* gone */ }
+    }
+  };
+  writable(path);
+  rmSync(path, { recursive: true, force: true });
+}
 /** How long the proof that no process has a file open waits for a reader that opens one for a moment. */
 const HOLDER_PROOF_MS = 5_000;
 
@@ -174,7 +203,7 @@ export function foldersOutsideRoot(env: LayoutEnv): string[] {
     try { names = readdirSync(directory); } catch { return; }
     for (const name of names) {
       const path = join(directory, name);
-      if (directory === top && top === root && NOT_CLONED.has(name)) continue;
+      if (directory === top && keptWithLive(top, env).has(name)) continue;
       let stat;
       try { stat = lstatSync(path); } catch { continue; }
       if (stat.isDirectory()) { walk(path, top); continue; }
@@ -267,15 +296,23 @@ function holdsOnlyLocks(path: string, env: LayoutEnv): boolean {
 }
 
 /**
- * Renames `snapshot` into `live`'s place. The lock files the caller holds are in `lockHolder` (the root set aside, or a
- * root the locks alone made again): they are moved into the clone first, over its copies, so the locks held stay the
+ * Renames `snapshot` into `live`'s place. `holder` is the folder set aside, or a root the locks alone made again. First
+ * the folders not cloned (models, program versions, tools) move from it into the clone, so they stay with the live
+ * folder, and in the data root the lock files the caller holds move over the clone's copies, so the locks held stay the
  * locks at the live path and no other process can take them while this step runs. `live` is then gone, or holds only
  * locks, which is removed.
  */
-function swapIn(pair: SnapshotPair, lockHolder: string | undefined, env: LayoutEnv): void {
-  if (lockHolder !== undefined) {
+function swapIn(pair: SnapshotPair, failed: string, env: LayoutEnv): void {
+  // The folders not cloned are in the folder set aside; the locks held are at the live path when the locks made it again.
+  const locksFrom = existsSync(pair.live) ? pair.live : failed;
+  for (const name of keptWithLive(pair.live, env)) {
+    for (const from of [failed, pair.live]) {
+      if (existsSync(join(from, name)) && !existsSync(join(pair.snapshot, name))) renameSync(join(from, name), join(pair.snapshot, name));
+    }
+  }
+  if (pair.live === olympusDataRoot(env)) {
     for (const name of lockNames(env)) {
-      if (existsSync(join(lockHolder, name))) renameSync(join(lockHolder, name), join(pair.snapshot, name));
+      if (existsSync(join(locksFrom, name))) renameSync(join(locksFrom, name), join(pair.snapshot, name));
     }
   }
   if (existsSync(pair.live)) {
@@ -289,16 +326,16 @@ function swapIn(pair: SnapshotPair, lockHolder: string | undefined, env: LayoutE
 }
 
 /** Bytes a real copy of `directory` takes, the folders not cloned left out. */
-function treeBytes(directory: string, top = true): number {
+function treeBytes(directory: string, kept: Set<string> = new Set()): number {
   let total = 0;
   let names: string[];
   try { names = readdirSync(directory); } catch { return 0; }
   for (const name of names) {
-    if (top && NOT_CLONED.has(name)) continue;
+    if (kept.has(name)) continue;
     const path = join(directory, name);
     let stat;
     try { stat = lstatSync(path); } catch { continue; }
-    if (stat.isDirectory()) total += treeBytes(path, false);
+    if (stat.isDirectory()) total += treeBytes(path);
     else total += stat.isFile() ? Math.max(stat.size, stat.blocks * 512) : 0;
   }
   return total;
@@ -345,12 +382,12 @@ function formatBytes(bytes: number): string {
 }
 
 /** Clones `live` to `target`, the folders not cloned left out when `live` is the data root. */
-function cloneTree(live: string, target: string, isRoot: boolean, clones: boolean): void {
+function cloneTree(live: string, target: string, kept: Set<string>, clones: boolean): void {
   const partial = `${target}.partial`;
   const mode = statSync(live).mode & 0o777;
   mkdirSync(partial, { mode });
   try {
-    const names = readdirSync(live).filter((name) => !(isRoot && NOT_CLONED.has(name)));
+    const names = readdirSync(live).filter((name) => !kept.has(name));
     if (names.length > 0) {
       const flags = process.platform === 'darwin' ? [clones ? '-pPRc' : '-pPR'] : ['-a', '--reflink=auto'];
       const result = spawnSync('cp', [...flags, ...names.map((name) => join(live, name)), `${partial}/`], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
@@ -364,7 +401,7 @@ function cloneTree(live: string, target: string, isRoot: boolean, clones: boolea
     renameSync(partial, target);
     syncDirectorySync(dirname(target));
   } catch (error) {
-    rmSync(partial, { recursive: true, force: true });
+    removeTree(partial);
     throw error;
   }
 }
@@ -372,7 +409,7 @@ function cloneTree(live: string, target: string, isRoot: boolean, clones: boolea
 /** Finishes a removal a committed update or a forget began: each copy it named goes before anything else runs. */
 function finishRemoving(env: LayoutEnv, record: UpdateRecord): void {
   if (!record.removing?.length) return;
-  for (const copy of record.removing) rmSync(copy, { recursive: true, force: true });
+  for (const copy of record.removing) removeTree(copy);
   delete record.removing;
   writeRecord(env, record);
 }
@@ -392,19 +429,19 @@ export function snapshotDataRoot(env: LayoutEnv, options: { log?: (line: string)
   if (flight?.state === 'cloning') {
     // A crash while cloning: the update never ran, and these copies are this module's own, incomplete.
     for (const pair of flight.roots) {
-      rmSync(`${pair.snapshot}.partial`, { recursive: true, force: true });
-      rmSync(pair.snapshot, { recursive: true, force: true });
+      removeTree(`${pair.snapshot}.partial`);
+      removeTree(pair.snapshot);
     }
     delete record.in_flight;
     writeRecord(env, record);
   } else if (flight) {
     const startedMs = Date.parse(flight.started_at);
-    for (const [index, pair] of flight.roots.entries()) {
+    for (const pair of flight.roots) {
       if (!existsSync(pair.snapshot)) continue;
       if (holdsOnlyLocks(pair.live, env)) {
         // A put-back cut short between its renames: the failed root is aside, and taking the locks for this step made the
         // root again, empty but for them.
-        swapIn(pair, index === 0 ? pair.live : undefined, env);
+        swapIn(pair, failedRootPathOf(pair.live, startedMs), env);
         log(`Finished putting ${pair.live} back as it was before the update of ${flight.started_at}.`);
         continue;
       }
@@ -442,7 +479,7 @@ export function snapshotDataRoot(env: LayoutEnv, options: { log?: (line: string)
     if (cloning) continue;
     const device = String(statSync(parent).dev);
     const entry = needed.get(device) ?? { bytes: SPACE_MARGIN_BYTES, directory: parent };
-    entry.bytes += Math.ceil(treeBytes(folder) * (1 + SPACE_MARGIN_SHARE));
+    entry.bytes += Math.ceil(treeBytes(folder, keptWithLive(folder, env)) * (1 + SPACE_MARGIN_SHARE));
     needed.set(device, entry);
   }
   for (const { bytes, directory } of needed.values()) {
@@ -456,10 +493,10 @@ export function snapshotDataRoot(env: LayoutEnv, options: { log?: (line: string)
   const roots: SnapshotPair[] = live.map((folder) => ({ live: folder, snapshot: snapshotPathOf(folder) }));
   writeRecord(env, { ...record, in_flight: { started_at: startedAt, state: 'cloning', roots } });
   try {
-    for (const [index, pair] of roots.entries()) cloneTree(pair.live, pair.snapshot, index === 0, clones.get(pair.live) ?? false);
+    for (const pair of roots) cloneTree(pair.live, pair.snapshot, keptWithLive(pair.live, env), clones.get(pair.live) ?? false);
     writeRecord(env, { ...record, in_flight: { started_at: startedAt, state: 'ready', roots } });
   } catch (error) {
-    for (const pair of roots) rmSync(pair.snapshot, { recursive: true, force: true });
+    for (const pair of roots) removeTree(pair.snapshot);
     writeRecord(env, record);
     throw error;
   }
@@ -479,8 +516,8 @@ export function putDataRootBack(env: LayoutEnv, options: { deps?: DataRootDeps }
   if (flight.state === 'cloning') {
     // The clones were never whole, so the update never ran: nothing to put back.
     for (const pair of flight.roots) {
-      rmSync(`${pair.snapshot}.partial`, { recursive: true, force: true });
-      rmSync(pair.snapshot, { recursive: true, force: true });
+      removeTree(`${pair.snapshot}.partial`);
+      removeTree(pair.snapshot);
     }
     delete record.in_flight;
     writeRecord(env, record);
@@ -489,37 +526,25 @@ export function putDataRootBack(env: LayoutEnv, options: { deps?: DataRootDeps }
   const startedMs = Date.parse(flight.started_at);
   proveNoHolders(flight.roots.map((pair) => pair.live).filter(existsSync).map(realOrSelf), 'a process of the new version still has Olympus data open, so it was not put back', options.deps ?? {});
   const kept: FailedRoot[] = [];
-  for (const [index, pair] of flight.roots.entries()) {
+  for (const pair of flight.roots) {
     const failed = failedRootPathOf(pair.live, startedMs);
     if (existsSync(pair.snapshot)) {
-      let lockHolder: string | undefined;
+      // A live folder holding only locks is a put-back cut short after the failed folder went aside: the locks made it again.
       if (existsSync(pair.live) && !holdsOnlyLocks(pair.live, env)) {
         if (existsSync(failed)) {
           throw new OperationError('config_error', `${pair.live} could not be set aside: ${failed} is already there.`, 'Move one of them away by hand, then run the installer again.');
         }
         renameSync(pair.live, failed);
-        lockHolder = failed;
-      } else if (existsSync(pair.live)) {
-        // Cut short after the failed root went aside: the locks made the root again.
-        lockHolder = pair.live;
-      } else if (existsSync(failed)) {
-        lockHolder = failed;
       }
-      swapIn(pair, index === 0 ? lockHolder : undefined, env);
+      swapIn(pair, failed, env);
     }
     if (existsSync(failed)) kept.push({ live: pair.live, failed, at: flight.started_at });
   }
-  // Model files were not cloned: they stay with the root that is live.
-  const root = olympusDataRoot(env);
-  const failedRoot = failedRootPathOf(root, startedMs);
-  const models = sharedDataPath('models', env);
-  const failedModels = `${failedRoot}${models.slice(root.length)}`;
-  if (existsSync(failedModels) && !existsSync(models)) renameSync(failedModels, models);
   writeRecord(env, { schema: RECORD_SCHEMA, failed: [...record.failed.filter((entry) => !kept.some((now) => now.failed === entry.failed)), ...kept] });
   if (kept.length === 0) return ['The Olympus data was put back as it was before the update.'];
   return [
     'The Olympus data was put back as it was before the update.',
-    ...kept.map((entry) => `The data as the failed update left it is kept at ${entry.failed} (${formatBytes(treeBytes(entry.failed, false))}): anything imported while the update ran is there, not in the data Olympus uses now. It is removed at the next update that succeeds.`),
+    ...kept.map((entry) => `The data as the failed update left it is kept at ${entry.failed} (${formatBytes(treeBytes(entry.failed))}): anything imported while the update ran is there, not in the data Olympus uses now. It is removed at the next update that succeeds.`),
   ];
 }
 
