@@ -12038,38 +12038,50 @@ var AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending 
               OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`;
 var PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1 AND state != 'moving'
         AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
+var WINDOW_SLICE_ROWS = 2000;
 function* windowSteps(where, params, options) {
   const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
   const examine = Math.max(limit, options.examine ?? 20000);
-  const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : undefined;
-  const keyAfter = after ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "";
-  const rows = yield {
-    sql: `
-      SELECT * FROM (
-        SELECT * FROM tier_items ${keyAfter}
+  const keyOf = (identity) => [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
+  let after = options.after ? keyOf(options.after) : undefined;
+  const records = [];
+  let lastEnd;
+  for (let examined = 0;examined < examine; ) {
+    const slice = Math.min(WINDOW_SLICE_ROWS, examine - examined);
+    const keyAfter = after ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "";
+    const rows = yield {
+      sql: `
+        SELECT * FROM (
+          SELECT * FROM tier_items ${keyAfter}
+          ORDER BY provider, account_scope, conversation_key, provider_item_id
+          LIMIT ?
+        )
+        WHERE ${where}
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
-      )
-      WHERE ${where}
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT ?
-    `,
-    params: [...after ?? [], examine, ...params, limit],
-    mode: "all"
-  };
-  const records = rows.map(recordFromRow);
-  if (rows.length >= limit)
-    return { records, resumeAfter: identityOfRow(rows[rows.length - 1]) };
-  const windowEnd = yield {
-    sql: `
-      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT 1 OFFSET ?
-    `,
-    params: [...after ?? [], examine - 1],
-    mode: "get"
-  };
-  return windowEnd ? { records, resumeAfter: identityOfRow(windowEnd) } : { records };
+      `,
+      params: [...after ?? [], slice, ...params, limit - records.length],
+      mode: "all"
+    };
+    records.push(...rows.map(recordFromRow));
+    if (records.length >= limit)
+      return { records, resumeAfter: identityOfRow(rows[rows.length - 1]) };
+    const sliceEnd = yield {
+      sql: `
+        SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+        LIMIT 1 OFFSET ?
+      `,
+      params: [...after ?? [], slice - 1],
+      mode: "get"
+    };
+    if (!sliceEnd)
+      return { records };
+    lastEnd = sliceEnd;
+    after = [sliceEnd.provider, sliceEnd.account_scope, sliceEnd.conversation_key, sliceEnd.provider_item_id];
+    examined += slice;
+  }
+  return lastEnd ? { records, resumeAfter: identityOfRow(lastEnd) } : { records };
 }
 function listMovingRead(options) {
   const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));

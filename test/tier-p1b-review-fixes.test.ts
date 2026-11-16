@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite';
+import { waitFor } from './helpers/test-clock.ts';
 // Critical-review fixes for P1b (#78 at d371a174):
 // D1 — the conversation is part of every tier identity: chat message ids
 //      repeat across chats, and a collision must never route, hide or lose a
@@ -231,8 +232,12 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
         const [callBefore, turnsBefore] = [inCall, inTurns];
         store.status(undefined, options);
         const call = inCall - callBefore;
-        for (let i = 0; i < 40 && inTurns === turnsBefore; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
-        return { call, turns: inTurns - turnsBefore };
+        await waitFor(() => inTurns !== turnsBefore, { timeoutMs: 5_000, intervalMs: 5, description: 'a recount in turns' });
+        const turns = inTurns - turnsBefore;
+        // Until it ends, a later call finds it running and starts none.
+        await waitFor(() => ((store as unknown as { settledUnreadableCountRefresh?: Set<string> }).settledUnreadableCountRefresh?.size ?? 0) === 0,
+          { timeoutMs: 5_000, intervalMs: 5, description: 'the recount finished' });
+        return { call, turns };
       };
       for (const options of [{ countsMaxAgeMs: 60_000 }, undefined, { countsMaxAgeMs: 0 }]) {
         ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
@@ -272,7 +277,7 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
       // The first call too reads nothing itself; the set is built in turns.
       const first = reads;
       expect(readsFor()).toBe(0);
-      for (let i = 0; i < 40 && reads === first; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      await waitFor(() => reads !== first, { timeoutMs: 5_000, intervalMs: 5, description: 'the set built in turns' });
       expect(reads).toBeGreaterThan(first);
       ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -280,7 +285,7 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
       const before = reads;
       expect(readsFor()).toBe(0);
       // The rebuild runs in later turns.
-      for (let i = 0; i < 40 && reads === before; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      await waitFor(() => reads !== before, { timeoutMs: 5_000, intervalMs: 5, description: 'the rebuild in turns' });
       expect(reads).toBeGreaterThan(before);
     } finally {
       ledger.corpusCopyIdentities = real;

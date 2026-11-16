@@ -35,4 +35,32 @@ describe('listAwaitingTextWindow', () => {
     expect(calls).toBe(6);
     ledger.close();
   });
+
+  test('a window larger than a slice is read a slice at a time and still finds every waiting row once', () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const db = (ledger as unknown as { db: import('bun:sqlite').Database }).db;
+    const now = new Date().toISOString();
+    const insert = db.prepare(`INSERT INTO tier_items (provider, account_scope, conversation_key, provider_item_id, family, metadata_tier,
+      content_tier, generation, decided_by, reasons_json, engine_version, map_revision, state, decided_at, routed, content_read, content_pending)
+      VALUES ('drive', 'a', '', ?, 'file', 'private', 'private', 1, 'sniffer', '[]', 'v', 'r', ?, ?, 1, ?, ?)`);
+    const waiting: string[] = [];
+    db.transaction(() => {
+      for (let i = 0; i < 9_000; i += 1) {
+        const id = `item-${String(i).padStart(5, '0')}`;
+        const awaits = i % 997 === 3;
+        if (awaits) waiting.push(id);
+        insert.run(id, awaits ? 'pending' : 'current', now, awaits ? 0 : 1, awaits ? 1 : 0);
+      }
+    })();
+    const seen: string[] = [];
+    let after: TierLedgerIdentity | undefined;
+    for (let calls = 0; calls < 10; calls += 1) {
+      const page = ledger.listAwaitingTextWindow({ limit: 3, examine: 5_000, ...(after ? { after } : {}) });
+      seen.push(...page.records.map((record) => record.providerItemId));
+      if (!page.resumeAfter) break;
+      after = page.resumeAfter;
+    }
+    expect(seen).toEqual(waiting);
+    ledger.close();
+  });
 });

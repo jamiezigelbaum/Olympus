@@ -330,9 +330,14 @@ const AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pendin
 const PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1 AND state != 'moving'
         AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
 
+/** Rows a window looks at per read: each read stays short on a cold disk (plan thread, 16 Nov: no background read over 1 s). */
+const WINDOW_SLICE_ROWS = 2_000;
+
 /**
  * At most `examine` rows in key order after `after` are looked at, matching
- * `where` or not, and the result says where the next call resumes.
+ * `where` or not, and the result says where the next call resumes. They are
+ * read WINDOW_SLICE_ROWS at a time, each slice its own read: one read of
+ * 20,000 whole rows took 7.8 s on the lane 6 gate (16 Nov).
  */
 function* windowSteps(
   where: string,
@@ -341,34 +346,43 @@ function* windowSteps(
 ): Generator<LedgerRead, TierLedgerWindow, unknown> {
   const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
   const examine = Math.max(limit, options.examine ?? 20_000);
-  const after = options.after
-    ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
-    : undefined;
-  const keyAfter = after ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : '';
-  const rows = (yield {
-    sql: `
-      SELECT * FROM (
-        SELECT * FROM tier_items ${keyAfter}
+  const keyOf = (identity: TierLedgerIdentity) => [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
+  let after = options.after ? keyOf(options.after) : undefined;
+  const records: TierLedgerRecord[] = [];
+  let lastEnd: Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'> | undefined;
+  for (let examined = 0; examined < examine;) {
+    const slice = Math.min(WINDOW_SLICE_ROWS, examine - examined);
+    const keyAfter = after ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : '';
+    const rows = (yield {
+      sql: `
+        SELECT * FROM (
+          SELECT * FROM tier_items ${keyAfter}
+          ORDER BY provider, account_scope, conversation_key, provider_item_id
+          LIMIT ?
+        )
+        WHERE ${where}
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
-      )
-      WHERE ${where}
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT ?
-    `,
-    params: [...(after ?? []), examine, ...params, limit], mode: 'all',
-  }) as TierItemRow[];
-  const records = rows.map(recordFromRow);
-  if (rows.length >= limit) return { records, resumeAfter: identityOfRow(rows[rows.length - 1]!) };
-  const windowEnd = (yield {
-    sql: `
-      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
-      ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT 1 OFFSET ?
-    `,
-    params: [...(after ?? []), examine - 1], mode: 'get',
-  }) as Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'> | null;
-  return windowEnd ? { records, resumeAfter: identityOfRow(windowEnd) } : { records };
+      `,
+      params: [...(after ?? []), slice, ...params, limit - records.length], mode: 'all',
+    }) as TierItemRow[];
+    records.push(...rows.map(recordFromRow));
+    if (records.length >= limit) return { records, resumeAfter: identityOfRow(rows[rows.length - 1]!) };
+    const sliceEnd = (yield {
+      sql: `
+        SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+        LIMIT 1 OFFSET ?
+      `,
+      params: [...(after ?? []), slice - 1], mode: 'get',
+    }) as Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'> | null;
+    // The ledger ends inside this slice: nothing to resume after.
+    if (!sliceEnd) return { records };
+    lastEnd = sliceEnd;
+    after = [sliceEnd.provider, sliceEnd.account_scope, sliceEnd.conversation_key, sliceEnd.provider_item_id];
+    examined += slice;
+  }
+  return lastEnd ? { records, resumeAfter: identityOfRow(lastEnd) } : { records };
 }
 
 function listMovingRead(options: { limit?: number; direction?: 'raise' | 'lower' }): LedgerRead {
