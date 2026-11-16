@@ -208,6 +208,13 @@ The reranker is released after 10 idle minutes and loads again when needed.
 Set `OLYMPUS_SOURCE_RERANKER=off` to turn it off, or `built-in` to enable it
 on a computer with less memory.
 
+For experimental wider reading, set `OLYMPUS_READ_WIDE=1` (off by default).
+Ask draws up to 60 relevant matches across stores (each store currently returns
+at most 50), before adding the reserved semantic seats.
+When scores have no clear leader, it fits more items with shorter passages
+inside the served model's prompt budget and reports how many matching items
+were read and left out. Clear leaders keep the ordinary deep reading path.
+
 ### The private answer panel
 
 When some of the items that match your question are Private, a small Olympus

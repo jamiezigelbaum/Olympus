@@ -1,4 +1,5 @@
 import { withModelProgress } from '../../core/model-stream.ts';
+import { isReadWideMatch, isReadWidePack, READ_WIDE_MIN_PASSAGE_BYTES } from '../../core/read-wide.ts';
 import { builtInAnalystMaxTokensForChars } from '../../core/analyst-built-in.ts';
 import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitLocalAnalystRoutes, localAnalystWindow, localAnalystPromptBudget, type LocalAnalystPromptBudget } from './local-analyst-window.ts';
 import { maxTokensForChars } from '../../core/analyst-delphi.ts';
@@ -1219,7 +1220,7 @@ function fitPackPassagesToPromptBytes(
   evidenceFormat: AnalystEvidenceFormat = 'full',
   minimumPack?: EvidencePack,
 ): EvidencePack {
-  if (evidenceFormat === 'compact' && !minimumPack) {
+  if (evidenceFormat === 'compact' && !minimumPack && !isReadWidePack(pack)) {
     const selected = fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats);
     const kept = new Set(selected.candidates.map((candidate) => candidate.provenance));
     pack = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus);
@@ -1242,7 +1243,8 @@ function fitPackPassagesToPromptBytes(
     (headSet.has(candidate.provenance) && candidate.chunks.length > 1 ? HEAD_SEAT_SHARES : 1);
   // The extra shares never cost a seat: where they would leave a share under
   // the floor, the same seats are tried at equal shares before one is dropped.
-  const modes = [headShares, () => 1];
+  const wide = isReadWidePack(pack);
+  const modes = wide ? [() => 1] : [headShares, () => 1];
   for (let keep = order.length; keep >= (minimumPack ? order.length : 1); keep -= 1) {
     const kept = new Set(order.slice(0, keep));
     const base = pack.candidates.filter((candidate) => kept.has(candidate));
@@ -1264,7 +1266,7 @@ function fitPackPassagesToPromptBytes(
       const totalShares = base.reduce((sum, candidate) => sum + shares(candidate), 0);
       let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / totalShares));
       for (let attempt = 0; attempt < 6; attempt += 1) {
-        if (!minimumPack && share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1) break;
+        if (!minimumPack && share < (wide ? READ_WIDE_MIN_PASSAGE_BYTES : MIN_FITTED_BYTES_PER_CANDIDATE) && keep > 1) break;
         const fitted = restatePack(
           pack,
           base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share * shares(candidate))) })),
@@ -1361,6 +1363,7 @@ function restatePack(
   )));
   const inEvidence = new Map<string, number>();
   for (const original of originals) {
+    if (isReadWidePack(pack) && !isReadWideMatch(candidates.find(candidate => candidate.provenance === original.provenance)!)) continue;
     const corpusId = candidateCorpus.get(original) ?? '';
     inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
   }
