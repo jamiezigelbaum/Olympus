@@ -727,6 +727,18 @@ baseline Ask per row. Run a couple of rows first (`--only`) to measure seconds
 per section. `test/eval-deep-read.test.ts` runs both scripts end to end on
 fixture stores with a fake model.
 
+## Keyword expansion arm
+
+`eval:passages --keyword-expansion owner|built-in` chooses which model
+translates a question's search words into the owner's other languages: `owner`
+is the local Analyst profile (the product switch is
+`OLYMPUS_KEYWORD_EXPANSION_MODEL=owner`), `built-in` the built-in model. Without
+the flag no model is registered and only the static word list is used. The
+search waits for the translation (`OLYMPUS_KEYWORD_PREPARE_WAIT_MS`, 10 minutes
+here) so found-the-document shows its effect, and a `keywordExpansion` line
+reports the mode, calls, failed calls and total milliseconds. Compare the two
+arms on found-the-document and on milliseconds per question.
+
 ## Private panel answer eval
 
 `run-panel.ts` runs the ChatGPT private panel's own answer model, using

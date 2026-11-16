@@ -51830,6 +51830,26 @@ var init_built_in_sniffer = __esm(() => {
 });
 
 // src/core/source-index/keyword-expansion.ts
+function registerOwnerKeywordModel(resolve) {
+  ownerKeywordModel = resolve;
+}
+function ownerKeywordExpansionEnabled() {
+  return process.env.OLYMPUS_KEYWORD_EXPANSION_MODEL === "owner";
+}
+function keywordPrepareWaitMs() {
+  const set = Number(process.env.OLYMPUS_KEYWORD_PREPARE_WAIT_MS);
+  return Number.isFinite(set) && set > 0 ? set : KEYWORD_PREPARE_WAIT_MS;
+}
+async function expansionModel() {
+  if (ownerKeywordExpansionEnabled() && ownerKeywordModel) {
+    const chosen = await ownerKeywordModel().catch(() => "unavailable");
+    if (chosen === "unavailable")
+      return { available: () => false, down: true };
+    if (chosen)
+      return { model: chosen, available: () => true, owner: true };
+  }
+  return registeredBuiltInPrivateModel();
+}
 async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   if (keywordExpansionDisabled())
     return EMPTY2;
@@ -51846,8 +51866,8 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   const once = typeof profile === "function" ? () => read ??= Promise.resolve(profile()).then((value) => languages = value) : profile;
   const full = expandCachedSourceIndexKeywords(query, once, cachedKeywordExpansion());
   full.catch(() => {});
-  const builtIn = registeredBuiltInPrivateModel();
-  const lastMs = builtIn ? lastTranslationMs.get(builtIn.model) : undefined;
+  const builtIn = await expansionModel();
+  const lastMs = builtIn?.model ? lastTranslationMs.get(builtIn.model) : undefined;
   if (lastMs !== undefined && lastMs > (options.waitMs ?? 0)) {
     if (languages === undefined && read) {
       await Promise.race([read.catch(() => {}), new Promise((resolve) => {
@@ -51878,7 +51898,7 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   return alternatives;
 }
 async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
-  const builtIn = registeredBuiltInPrivateModel();
+  const builtIn = await expansionModel();
   if (!query.trim() || query.length > 8000)
     return EMPTY2;
   const sources = sourceIndexFtsTermGroups(query).map((group) => group[0]).filter((term) => !/\p{N}/u.test(term));
@@ -51886,7 +51906,7 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
   const keyOf = (word) => stemmer(word.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase());
   const concepts = sources.map((source) => Object.values(vocabulary).find((row) => Object.values(row).some((words) => words.some((word) => !word.includes(" ") && keyOf(word) === keyOf(source)))));
   if (!builtIn?.available() && !concepts.some(Boolean))
-    return EMPTY2;
+    return builtIn?.down ? failedCopy(EMPTY2) : EMPTY2;
   const detectedLanguage = sourceIndexQueryLanguage(query);
   const knownLanguages = concepts.every(Boolean) && concepts.length > 0 ? Object.keys(concepts[0]).filter((language) => concepts.every((row, index) => row?.[language]?.some((word) => !word.includes(" ") && keyOf(word) === keyOf(sources[index])))) : [];
   const sourceLanguages = detectedLanguage === "und" ? knownLanguages : [detectedLanguage];
@@ -51903,12 +51923,18 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
     return [[source, row[language] ?? []]];
   }))]));
   const fallback = parseKeywordExpansion(JSON.stringify(seeded), sources, languages);
-  if (!builtIn?.available() || concepts.every(Boolean))
+  if (concepts.every(Boolean))
     return fallback;
-  let cache = caches2.get(builtIn.model);
+  if (builtIn?.down)
+    return failedCopy(fallback);
+  const expander = builtIn?.available() ? builtIn.model : undefined;
+  if (!expander)
+    return fallback;
+  const waitsItsTurn = builtIn.owner === true;
+  let cache = caches2.get(expander);
   if (!cache) {
     cache = new Map;
-    caches2.set(builtIn.model, cache);
+    caches2.set(expander, cache);
   }
   const key = JSON.stringify([query, languages]);
   const existing = cache.get(key);
@@ -51922,7 +51948,7 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
     return existing.pending;
   const startedAt = Date.now();
   const pending = translate();
-  const model = builtIn.model;
+  const model = expander;
   pending.finally(() => {
     lastTranslationMs.set(model, Date.now() - startedAt);
   }).catch(() => {});
@@ -51936,13 +51962,13 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
   return pending;
   async function translate() {
     try {
-      const completion = await builtIn.model.complete({
+      const completion = await expander.complete({
         system: SYSTEM + `
 Target languages: ` + languages.map((code) => code + " = " + new Intl.DisplayNames(["en"], { type: "language" }).of(code)).join("; "),
         prompt: JSON.stringify({ context: query, concepts: sources.map((term, index) => ({ id: String(index), term })), languages, languageNames: Object.fromEntries(languages.map((code) => [code, new Intl.DisplayNames(["en"], { type: "language" }).of(code) ?? code])) }),
         localOnly: true,
         maxOutputChars: 6000,
-        signal: AbortSignal.timeout(20000),
+        ...waitsItsTurn ? {} : { signal: AbortSignal.timeout(20000) },
         responseSchema: {
           type: "object",
           properties: Object.fromEntries(languages.map((language) => [language, {
@@ -51960,7 +51986,7 @@ Target languages: ` + languages.map((code) => code + " = " + new Intl.DisplayNam
       });
       let generated;
       try {
-        generated = JSON.parse(completion.text);
+        generated = JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, ""));
       } catch {
         return failedCopy(fallback);
       }
@@ -52044,7 +52070,7 @@ async function withExpandedSourceIndexKeywords(query, languages, run, owner) {
   const alternatives = await expandSourceIndexKeywords(query, languages, owner);
   return await withKeywordAlternatives(query, alternatives, run);
 }
-var caches2, EMPTY2, failedTranslations, failedCopy = (fallback) => {
+var caches2, ownerKeywordModel, EMPTY2, failedTranslations, failedCopy = (fallback) => {
   const copy = new Map(fallback);
   failedTranslations.add(copy);
   return copy;
@@ -65211,7 +65237,7 @@ function createConnectorStoreCorpusAdapter(options) {
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
-    await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: KEYWORD_PREPARE_WAIT_MS, status });
+    await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: keywordPrepareWaitMs(), status });
     return status;
   };
   expanded.hybridAvailability = adapter.hybridAvailability;
@@ -270597,6 +270623,12 @@ async function main() {
   } : undefined);
   const answerBuiltInModel = workerBuiltInModel ? localModelActivity.track("built_in", workerBuiltInModel.model) : undefined;
   let localPrivateRoute;
+  registerOwnerKeywordModel(async () => {
+    const route = await localPrivateRoute?.();
+    if (!route)
+      return;
+    return "unavailable" in route ? "unavailable" : route.model;
+  });
   registerBuiltInPrivateModel(workerBuiltInModel ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle } : undefined);
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
   let localWorkPending = () => false;
@@ -275645,6 +275677,7 @@ var init_server5 = __esm(async () => {
   init_source_scope_browser();
   init_chunk_release();
   init_installed_tier_classification();
+  init_keyword_expansion();
   init_built_in_sniffer();
   init_answer_activity();
   init_privacy_profile();
