@@ -124,8 +124,13 @@ async function build(dir: string, items: number, chunks: number): Promise<void> 
     // Versioned homes rebuild automatically without deleting an older fixture.
     console.error(`Rebuilding shape v${saved.shape.version} as v${VERSION}; retaining the previous synthetic home.`);
   }
+  // A build stopped part way (two gate runs were stopped 10 minutes in, 15-16 Nov 2026) leaves this version's synthetic home
+  // without its marker. It holds only this script's own seed, so it is cleared and built again rather than blocking every run.
+  if (existsSync(storePath(dir, 'internal'))) {
+    console.error(`Clearing an unfinished v${VERSION} synthetic home and building it again.`);
+    rmSync(environment(dir).HOME!, { recursive: true, force: true });
+  }
   mkdirSync(dataDir(dir), { recursive: true });
-  if (existsSync(storePath(dir, 'internal'))) throw new Error('Unfinished build; use a new folder or explicitly remove the unfinished synthetic fixture.');
   const started = Date.now();
   const { stores, ledger } = openStores(dir);
   const jobs = new LocalFileExtractionJobStore(defaultFileExtractionJobsDbPath(environment(dir)));

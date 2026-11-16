@@ -10,19 +10,24 @@ import { waitFor } from './helpers/test-clock.ts';
 
 const enabled = process.env.CJ_JOB === 'test-focus';
 const script = join(import.meta.dir, '../scripts/loop-stall-test.ts');
-const dir = join(userInfo().homedir, 'olympus-prof/loop-stall');
+// The account's real home from the password database: test:focus sets HOME to a temporary folder, which a cloud job puts
+// in /dev/shm, and an 8-10 GB fixture there is shared memory inside the job's 6G cap (memory-cgroup OOM at 6.18 GB of shmem,
+// cloud-job 43781010883, 16 Nov 2026). On disk the fixture also survives between runs and is reused by its shape.
+const passwdHome = spawnSync('getent', ['passwd', String(process.getuid?.() ?? '')], { encoding: 'utf8' }).stdout?.split(':')[5]?.trim();
+const dir = join(passwdHome || userInfo().homedir, 'olympus-prof/loop-stall');
 // SQLite's temporary files (index builds and sorts on a store of several GB) go to TMPDIR, which a cloud job points at
 // /dev/shm: there they are shared memory inside the job's 6G cap, and the cgroup OOM killer stopped the first build at
 // 6.0 GB of shmem (cloud-job 43775223716, 15 Nov 2026). The gate's processes keep them on disk, beside the fixture.
 const diskTmp = join(dir, 'tmp');
 function invoke(args: string[], timeout = 10 * 60_000, env: NodeJS.ProcessEnv = process.env) {
-  const result = spawnSync(args[0]!, args.slice(1), { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout, env });
+  // Progress goes straight to the job's log, so a run stopped part way still shows how far it got.
+  const result = spawnSync(args[0]!, args.slice(1), { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout, env, stdio: ['ignore', 'pipe', 'inherit'] });
   console.log(result.stdout);
-  if (result.stderr) console.error(result.stderr);
   if (result.error) throw result.error;
   return result.status;
 }
 test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-thread SQLite budgets', () => {
+  expect(dir.startsWith('/dev/shm') || dir.startsWith(tmpdir())).toBe(false);
   mkdirSync(diskTmp, { recursive: true });
   const onDisk = { ...process.env, TMPDIR: diskTmp, SQLITE_TMPDIR: diskTmp };
   expect(invoke(['bun', script, 'build', '--dir', dir], 60 * 60_000, onDisk)).toBe(0);
