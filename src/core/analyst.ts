@@ -157,9 +157,10 @@ const ANALYST_SYSTEM = [
 // are whatever the evidence says about the question, and nothing here reads
 // the question's content.
 export type AnalystReadingNotes = 'off' | 'first' | 'pass';
+const NOTES_MAX = 12;
 const NOTES_FACT_KINDS = 'each value, amount, date, name, condition or exception';
 const NOTES_FIRST_RULE =
-  `- Before "answer", write "notes": every fact in the items that answers any part of the question (${NOTES_FACT_KINDS}), copied exactly as the item gives it, one fact per note with its item number. Read each item to its end first. Then write "answer" from the notes: it gives every noted fact that answers the question. Drop words to stay short, never facts.`;
+  `- Before "answer", write "notes": every fact in the items that answers any part of the question (${NOTES_FACT_KINDS}), copied exactly as the item gives it, one fact per note with its item number, at most ${NOTES_MAX} notes. Read each item to its end first. Then write "answer" from the notes: it gives every noted fact that answers the question. Drop words to stay short, never facts.`;
 const NOTES_GIVEN_RULE =
   '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.';
 // How the notes call's system text starts, so a caller that counts model
@@ -175,7 +176,6 @@ const ANALYST_NOTES_SYSTEM = [
   'Return ONLY a single JSON object shaped exactly as:',
   '{"notes": [{"evidence": number, "fact": string}]}',
 ].join('\n');
-const NOTES_MAX = 12;
 const NOTES_FACT_CHARS = 200;
 // Room the notes take in a reply, on top of the answer's own budget.
 const NOTES_OUTPUT_CHARS = 1_600;
@@ -1753,24 +1753,58 @@ export function analystOutputAnswer(text: string): string | undefined {
 }
 
 // The one JSON object a model reply carries, whatever prose or code fence
-// surrounds it; null when there is none.
-function parseModelJsonObject(text: string): Record<string, unknown> | null {
+// surrounds it; null when there is none. With `cut`, a reply that stopped
+// mid-object (it ran out of output room) is read up to its last finished
+// object or list.
+function parseModelJsonObject(text: string, cut = false): Record<string, unknown> | null {
   const stripped = stripCodeFences(text);
   const start = stripped.indexOf('{');
+  if (start === -1) return null;
   const end = stripped.lastIndexOf('}');
-  if (start === -1 || end === -1 || end < start) return null;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(stripped.slice(start, end + 1));
-  } catch {
-    return null;
+  const closed = cut ? closeCutJson(stripped.slice(start)) : null;
+  for (const candidate of [end > start ? stripped.slice(start, end + 1) : null, closed]) {
+    if (candidate === null) continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (typeof raw === 'object' && raw !== null) return raw as Record<string, unknown>;
   }
-  return typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : null;
+  return null;
+}
+
+// JSON that stops mid-value, cut back to the last object or list it finished
+// inside the outer object, with what is still open closed. null when nothing
+// inside the outer object was finished.
+function closeCutJson(text: string): string | null {
+  const open: string[] = [];
+  let inString = false;
+  let kept: { at: number; closers: string } | null = null;
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at]!;
+    if (inString) {
+      if (char === '\\') at += 1;
+      else if (char === '"') inString = false;
+    } else if (char === '"') inString = true;
+    else if (char === '{' || char === '[') open.push(char === '{' ? '}' : ']');
+    else if (char === '}' || char === ']') {
+      if (open.pop() !== char) return null;
+      if (open.length === 0) return null;
+      kept = { at: at + 1, closers: [...open].reverse().join('') };
+    }
+  }
+  return kept ? text.slice(0, kept.at) + kept.closers : null;
 }
 
 function parseAnalystModelOutput(text: string): ParsedModelOutput | null {
-  const obj = parseModelJsonObject(text);
+  const whole = parseModelJsonObject(text);
+  // A reply cut at its output limit after the answer was written keeps the
+  // answer and the citations it finished (#1590): the rest was never sent.
+  const obj = whole ?? parseModelJsonObject(text, true);
   if (!obj) return null;
+  if (!whole && (typeof obj.answer !== 'string' || !obj.answer.trim())) return null;
   return {
     answer: typeof obj.answer === 'string' ? obj.answer : '',
     citations: Array.isArray(obj.citations) ? obj.citations.flatMap(coerceCitation) : [],
