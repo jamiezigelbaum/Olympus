@@ -240501,17 +240501,20 @@ class EngineCommandClient {
   }
   async send(command, options = {}) {
     const id = options.id ?? this.newId();
-    const deadline = this.now() + (options.timeoutMs ?? 60000);
+    const silenceMs = options.timeoutMs ?? 60000;
+    let deadline = this.now() + silenceMs;
     let receipt = await this.postUntil(id, command, deadline);
+    deadline = this.now() + silenceMs;
     let attempt = 0;
     while (receipt.state === "received") {
       if (this.now() >= deadline)
-        throw new EngineCommandUnavailableError("The background engine has not finished this command yet.");
+        throw new EngineCommandUnavailableError(`The background engine stopped answering for ${Math.round(silenceMs / 1000)} s while it ran this command (${command.kind}); it may still finish.`);
       const wait = Math.max(0, Math.min(RESULT_WAIT_MS, deadline - this.now()));
       const answer = await this.request(`${ENGINE_COMMANDS_PATH}/${encodeURIComponent(id)}?wait=${wait}`, { method: "GET" }, deadline, wait);
       if (answer?.status === 200) {
         receipt = answer.body;
         attempt = 0;
+        deadline = this.now() + silenceMs;
         continue;
       }
       if (answer?.status === 404) {
@@ -240908,7 +240911,7 @@ function createEngineFrontRoutes(input) {
     const forwarded = await requestToForwarded(request);
     let receipt;
     try {
-      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : 120000) });
+      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : OWNER_ACTION_WAIT_MS) });
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : "The background engine is not answering." };
     }
@@ -241138,7 +241141,7 @@ function frontModelReload(options) {
     if (pending)
       return true;
     options.closeGate?.();
-    pending = options.client.send({ kind: "reload", target: "models", frontPid: options.pid ?? process.pid }, { timeoutMs: 30000 }).then((receipt) => {
+    pending = options.client.send({ kind: "reload", target: "models", frontPid: options.pid ?? process.pid }, { timeoutMs: OWNER_ACTION_WAIT_MS }).then((receipt) => {
       if (receipt.state !== "done" || receipt.result?.restarting !== true) {
         log("[engine-split] the background did not confirm it is restarting for the model change; restart Olympus if the new model does not take effect.");
       }
@@ -270059,7 +270062,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
       let invalidatedJobs = 0;
       if (engineFront && approval.replayed !== true) {
-        await engineFront.client.send({ kind: "reload", target: "scope", corpora: [...definition.corpusIdsToInvalidate] }, { timeoutMs: 30000 });
+        await engineFront.client.send({ kind: "reload", target: "scope", corpora: [...definition.corpusIdsToInvalidate] }, { timeoutMs: OWNER_ACTION_WAIT_MS });
       } else if (fileExtractionRuntime && approval.replayed !== true) {
         invalidatedJobs = definition.corpusIdsToInvalidate.reduce((total, corpusId) => total + fileExtractionRuntime.jobs.invalidateUnsettledForCorpus(corpusId), 0);
       }

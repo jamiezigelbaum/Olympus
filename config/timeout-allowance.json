@@ -122,12 +122,12 @@
     "src/workers/dropbox-files/provider-client.ts#DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS": "a/L5",
     "src/workers/dropbox-files/provider-client.ts#DROPBOX_METADATA_REQUEST_TIMEOUT_MS": "c",
     "src/workers/email-source/gogcli.ts#COMMAND_TIMEOUT_KILL_GRACE_MS": "c",
-    "src/workers/engine-split/client.ts#REQUEST_GRACE_MS": "a/L1",
-    "src/workers/engine-split/client.ts#RESULT_WAIT_MS": "a/L1",
+    "src/workers/engine-split/client.ts#REQUEST_GRACE_MS": "c",
+    "src/workers/engine-split/client.ts#RESULT_WAIT_MS": "d",
     "src/workers/engine-split/rss-restart.ts#ENGINE_RSS_RESTART_MAX_WAIT_MS": "c",
-    "src/workers/engine-split/runtime.ts#DATA_EXPORT_WAIT_MS": "a/L1",
-    "src/workers/engine-split/runtime.ts#OWNER_ACTION_WAIT_MS": "a/L1",
-    "src/workers/engine-split/runtime.ts#SOURCE_SYNC_WAIT_MS": "a/L1",
+    "src/workers/engine-split/runtime.ts#DATA_EXPORT_WAIT_MS": "c",
+    "src/workers/engine-split/runtime.ts#OWNER_ACTION_WAIT_MS": "c",
+    "src/workers/engine-split/runtime.ts#SOURCE_SYNC_WAIT_MS": "c",
     "src/workers/engine/server.ts#FRONT_VISIBILITY_READY_BOUND_MS": "a/L1",
     "src/workers/file-extraction/extractors/apple-vision-ocr.ts#DEFAULT_APPLE_VISION_FILE_DEADLINE_MS": "a/L5",
     "src/workers/file-extraction/extractors/built-in-transcriber.ts#DEFAULT_CHUNK_TIMEOUT_MS": "a/L5",
@@ -312,11 +312,10 @@
       "c": 1
     },
     "src/workers/engine-split/client.ts": {
-      "a/L1": 1
+      "c": 1
     },
     "src/workers/engine-split/front-state.ts": {
-      "c": 1,
-      "a/L1": 1
+      "c": 1
     },
     "src/workers/engine/dashboard/dashboard-messaging-service.ts": {
       "c": 1
@@ -329,8 +328,7 @@
       "c": 2
     },
     "src/workers/engine/server.ts": {
-      "c": 5,
-      "a/L1": 1
+      "c": 5
     },
     "src/workers/first-run-privacy-gate.ts": {
       "c": 1
