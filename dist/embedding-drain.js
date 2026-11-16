@@ -1646,6 +1646,8 @@ var V0_4_PUBLIC_NATIVE_TOOLS = [
   "source_answer",
   "source_index_status",
   "source_item_read",
+  "source_deep_read",
+  "source_deep_read_status",
   "source_index_search",
   "source_watch_create",
   "source_watches",
@@ -1667,6 +1669,8 @@ var V0_4_PUBLIC_MCP_TOOLS = [
   "source_answer_result",
   "source_index_status",
   "source_item_read",
+  "source_deep_read",
+  "source_deep_read_status",
   "source_index_search",
   "olympus_doctor",
   "olympus_setup_status",
@@ -1683,6 +1687,8 @@ var V0_4_PUBLIC_CLI_OPERATIONS = [
   "source_answer",
   "source_index_status",
   "source_item_read",
+  "source_deep_read",
+  "source_deep_read_status",
   "source_index_search",
   "olympus_doctor",
   "olympus_setup_status",
@@ -24103,6 +24109,32 @@ class LocalConnectorStore {
       ORDER BY item_pk
     `).all(parentLocalItemId);
     return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 }));
+  }
+  conversationItems(key) {
+    const clauses = ["tombstoned = 0", "provider = ?", "account_scope = ?", "normalized_conversation = ?"];
+    const params = [key.provider, key.accountScope, normalizeConversationId(key.providerConversationId)];
+    if (key.providerThreadId) {
+      clauses.push("provider_thread_id = ?");
+      params.push(key.providerThreadId);
+    }
+    if (key.after) {
+      clauses.push("authored_at >= ?");
+      params.push(key.after);
+    }
+    if (key.before) {
+      clauses.push("authored_at < ?");
+      params.push(key.before);
+    }
+    const rows = this.db.query(`
+      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, authored_at
+      FROM items WHERE ${clauses.join(" AND ")}
+      ORDER BY authored_at, item_pk
+    `).all(...params);
+    return rows.map((row) => ({
+      sourceItem: sourceItemFromRow({ ...row, rank: 0 }),
+      ...row.authored_at ? { authoredAt: row.authored_at } : {}
+    }));
   }
   parentLocalItemIdOf(identity) {
     if (!this.childItemColumnsPresent)

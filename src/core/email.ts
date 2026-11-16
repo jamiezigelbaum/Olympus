@@ -779,6 +779,32 @@ export class EmailClient {
     return data;
   }
 
+  /**
+   * Deep read (1.5 item 8): the owner's private model reads a whole document
+   * or conversation in the background; the answer lands in Private answers.
+   * Returns the job's progress view only, never source text.
+   */
+  async sourceDeepRead(options: {
+    action: 'start' | 'status' | 'cancel'; question?: string; selectedItem?: SourceAnswerSelectedItemOption;
+    whole?: 'item' | 'conversation'; after?: string; before?: string; id?: string;
+  }): Promise<Record<string, unknown>> {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) throw new OperationError('source_index_not_enabled', 'Source-index read is disabled.');
+    if (!this.config.email.enabled) throw new OperationError('email_not_configured', 'Private source worker is disabled.');
+    const path = options.action === 'start' ? '' : `/${options.action}`;
+    const body = options.action === 'start'
+      ? { question: options.question, set: {
+        selected_item: sourceItemReadSelectedItem(options.selectedItem), whole: options.whole ?? 'item',
+        ...(options.after ? { after: options.after } : {}), ...(options.before ? { before: options.before } : {}),
+      } }
+      : { ...(options.id ? { id: options.id } : {}) };
+    const response = asRecord(await this.transport.requestJson(`${this.config.email.baseUrl}/source/deep-read${path}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }));
+    assertNoRawEmailFields(response);
+    assertNoSourceIndexOperationalLeakFields(response);
+    return response;
+  }
+
   async sourceItemRead(options: { selectedItem: SourceAnswerSelectedItemOption; page?: number; pages?: number }): Promise<SourceItemReadResult> {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) throw new OperationError('source_index_not_enabled', 'Source-index read is disabled.');
     if (!this.config.email.enabled) throw new OperationError('email_not_configured', 'Private source worker is disabled.');

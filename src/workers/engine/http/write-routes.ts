@@ -42,6 +42,9 @@ const WORKER_POST_PATHS: readonly string[] = [
   '/source/index/dropbox/content/export-eval-shard',
   '/source/index/search',
   '/source/item/read',
+  '/source/deep-read',
+  '/source/deep-read/status',
+  '/source/deep-read/cancel',
   '/source/index/embed',
   // Family-scoped aliases of the extraction routes (index.ts rewrites them).
   '/source/index/dropbox/content/extract',

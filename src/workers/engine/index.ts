@@ -1,5 +1,6 @@
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { sourceItemReadSelectedItem, sourceItemReadPage } from '../../core/source-index/selected-items.ts';
+import { DeepReadRefused } from './runtime/deep-read-jobs.ts';
 import { itemReadOnDemand } from '../file-extraction/on-demand-read.ts';
 import { assertNoSourceIndexOperationalLeakFields } from '../../core/email.ts';
 import { JUDGE_CHOICES, type JudgeChoice } from '../classification/judge-spending.ts';
@@ -357,6 +358,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
    */
   close(): void;
 } {
+  const deepReadJobsOrFail = () => {
+    const jobs = options.deepRead?.();
+    if (!jobs) throw new EmailSourceWorkerError(503, 'deep_read_unavailable', 'Deep read is not running on this engine.');
+    return jobs;
+  };
   const connector = options.connector ?? new GogcliEmailConnectorStub();
   const agentConnections = options.agentConnections;
   const sourceAnswer = options.sourceAnswer;
@@ -3510,6 +3516,38 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           assertNoRawEmailFields(result);
           assertNoSourceIndexOperationalLeakFields(result);
           return json(result);
+        }
+
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/deep-read/status`) {
+          const record = await parseObjectBody(request);
+          return json({ jobs: deepReadJobsOrFail().status(typeof record.id === 'string' ? record.id : undefined) });
+        }
+
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/deep-read/cancel`) {
+          const record = await parseObjectBody(request);
+          if (typeof record.id !== 'string') throw new OperationError('invalid_params', 'id is required.');
+          return json({ cancelled: deepReadJobsOrFail().cancel(record.id) });
+        }
+
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/deep-read`) {
+          const jobs = deepReadJobsOrFail();
+          const record = await parseObjectBody(request);
+          const set = record.set as Record<string, unknown> | undefined;
+          if (typeof record.question !== 'string' || !set || typeof set !== 'object') throw new OperationError('invalid_params', 'question and set are required.');
+          const selected = sourceItemReadSelectedItem(set.selected_item);
+          const whole = set.whole === 'conversation' ? 'conversation' : 'item';
+          try {
+            const job = await jobs.start(record.question, {
+              selected_item: Object.fromEntries(Object.entries(selected).filter((entry): entry is [string, string] => typeof entry[1] === 'string')),
+              whole,
+              ...(typeof set.after === 'string' ? { after: set.after } : {}),
+              ...(typeof set.before === 'string' ? { before: set.before } : {}),
+            });
+            return json({ job });
+          } catch (error) {
+            if (error instanceof DeepReadRefused) throw new EmailSourceWorkerError(409, error.code, error.message);
+            throw error;
+          }
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/search`) {
