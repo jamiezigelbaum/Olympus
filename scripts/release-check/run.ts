@@ -478,7 +478,7 @@ export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean, archiv
 export function phaseBudgetMs(name: string): number {
   const minutes: Record<string, number> = {
     provision: 25, 'restore-provision': 25, install: 25, 'reranker-ready': 16, 'restore-zig': 5, prepare: 7, 'prepare-source': 7,
-    ingest: 10, settle: 10, 'front-seed': 6, 'front-steady': 10, 'front-watch': 5,
+    ingest: 4, 'ingest-earlier-release': 10, settle: 10, 'front-seed': 6, 'front-steady': 10, 'front-watch': 5,
     'archive-beside-live': 8, 'archive-import': 12, 'archive-changed': 12,
     'archive-drain': 8, 'archive-remove': 5, 'archive-model': 7,
     'archive-scale-mbox': 30, 'archive-scale-readwise': 20,
@@ -584,18 +584,21 @@ function expectedTierCounts(): { personal: number; private: number; secrets: num
 }
 
 /**
- * The settle agent's own limit inside the ingest phase. The bound is the product's promise that a new item is searchable within
- * about 10 minutes (ops#222). A dashboard's embedding count can trail the vectors by up to STORE_STATUS_REUSE_MS (5 minutes), so a
- * 5-minute bound failed a healthy install whose items the stand-in judge had moved to Personal (run 43777041779).
+ * The settle phase: how long ingest of the fixture items should take with the stand-in judge (a few minutes), and the agent's own
+ * limit 30 s inside it, so a slow settle reports what it waited on instead of being killed with nothing to say (run 43777041779).
+ * An earlier release keeps its dashboard counts up to 5 minutes after embedding writes (STORE_STATUS_REUSE_MS; brought forward by
+ * live totals since b16f7bdc), so its settle gets the product's 10-minute searchable promise (ops#222) instead.
  */
-export const SETTLE_BOUND_S = Math.min(phaseBudgetMs('ingest'), phaseBudgetMs('settle')) / 1000 - 30;
+export function settlePhase(earlierRelease: boolean): { name: string; boundS: number } {
+  const name = earlierRelease ? 'ingest-earlier-release' : 'ingest';
+  return { name, boundS: Math.min(phaseBudgetMs(name), phaseBudgetMs('settle')) / 1000 - 30 };
+}
 
 /** Waits for ingest to settle on the machine and checks that every item landed in its intended tier. */
-async function settleIngest(run: Run): Promise<{ settled: boolean; snap?: Record<string, number | string> }> {
-  // The agent stops 30 s inside the phase's bound, so a slow settle still reports its last snapshot (what is missing)
-  // instead of being killed with nothing to say (run 43777041779).
-  const timeoutS = Math.min(run.options.config.settleTimeoutS ?? 900, SETTLE_BOUND_S);
-  const settled = await run.phase('ingest', () => run.agent('settle', `--timeout-s ${timeoutS}`, (timeoutS + 60) * 1000));
+async function settleIngest(run: Run, earlierRelease = false): Promise<{ settled: boolean; snap?: Record<string, number | string> }> {
+  const phase = settlePhase(earlierRelease);
+  const timeoutS = Math.min(run.options.config.settleTimeoutS ?? 900, phase.boundS);
+  const settled = await run.phase(phase.name, () => run.agent('settle', `--timeout-s ${timeoutS}`, (timeoutS + 60) * 1000));
   const snap = settled.result?.snapshot as Record<string, number | string> | null | undefined;
   run.add({
     id: 'ingest.settled',
@@ -624,7 +627,7 @@ async function installedBridges(run: Run): Promise<string[] | undefined> {
   return Array.isArray(files.result?.whatsappBridges) ? (files.result.whatsappBridges as unknown[]).map(String) : undefined;
 }
 
-async function setupMachine(run: Run, workDir: string, bundlePath: string, installTitle = 'The candidate installed and the engine is running'): Promise<boolean> {
+async function setupMachine(run: Run, workDir: string, bundlePath: string, installTitle = 'The candidate installed and the engine is running', earlierRelease = false): Promise<boolean> {
   const machine = run.machine!;
   const configPath = join(workDir, 'config.json');
   writeFileSync(configPath, JSON.stringify(agentConfig(run.options)));
@@ -666,7 +669,7 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
   // Connecting starts the first sync. No Sync now press follows (there was one until 2026-10-25): its line ("Checking Readwise…",
   // then what it found) stays on the card for ten minutes, about when the screens are taken, so the pictures varied by the clock.
 
-  return (await settleIngest(run)).settled;
+  return (await settleIngest(run, earlierRelease)).settled;
 }
 
 /** The install check's line: the build, how long the engine took to answer healthy, and the worker's state if it never did. */
@@ -1686,7 +1689,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   const machine = run.machine!;
 
   run.use('before');
-  const ready = await setupMachine(run, workDir, bundlePath, `The earlier release${expected.from ? ` (${expected.from})` : ''} installed fresh and the engine is running`);
+  const ready = await setupMachine(run, workDir, bundlePath, `The earlier release${expected.from ? ` (${expected.from})` : ''} installed fresh and the engine is running`, true);
   if (!ready) { run.errors.push('the earlier release did not reach a settled install, so the update was not attempted'); return; }
   const bridgesBefore = { expected: bundleWhatsAppBridgeName(options.upgradeFromDir!), installed: await installedBridges(run) };
   if (Date.now() >= deadline) { run.errors.push('the run exceeded its time budget before the earlier release\'s suite'); return; }
