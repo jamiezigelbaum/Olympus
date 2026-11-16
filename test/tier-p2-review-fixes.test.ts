@@ -66,6 +66,7 @@ import {
   tempDir,
   type FixtureSpec,
 } from './helpers/tier-fixtures.ts';
+import { waitFor } from './helpers/test-clock.ts';
 
 const LANE: SnifferLane = {
   kind: 'local',
@@ -300,8 +301,7 @@ describe('2. an answer preempts the sniffer', () => {
     let clock = Date.parse('2026-11-16T12:00:00Z');
     let alive: (() => void) | undefined;
     let finish: (() => void) | undefined;
-    let inCall: () => void = () => {};
-    const called = new Promise<void>((resolve) => { inCall = resolve; });
+    let calls = 0;
     const lines: string[] = [];
     const service = new TierSnifferService({
       installed, lane: LANE, now: () => new Date(clock), log: (line) => lines.push(line),
@@ -310,7 +310,7 @@ describe('2. an answer preempts the sniffer', () => {
       maxPassMs: 60_000,
       model: { complete(request) {
         alive = (request as SnifferModelRequest).onAlive;
-        inCall();
+        calls += 1;
         return new Promise((resolve, reject) => {
           finish = () => resolve(answering(() => ({ tier: 'personal', category: 'other', confidence: 0.9 })).complete(request));
           request.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
@@ -319,7 +319,7 @@ describe('2. an answer preempts the sniffer', () => {
     });
     cleanups.push(() => service.stop());
     const pass = service.runOnce();
-    await called;
+    await waitFor(() => calls === 1, { description: 'the first judge call' });
     // Twenty minutes of a slow call whose server keeps answering: still in progress.
     for (let m = 0; m < 20; m += 1) {
       clock += 59_000;
@@ -333,7 +333,7 @@ describe('2. an answer preempts the sniffer', () => {
     ledger.recordDecision(subject(1), classifyItemTiers({ signals: { title: 'bank 1', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(1) }, { sniffer: new CachedTierSniffer(store, LANE) }));
     clock += 1_000;
     const quiet = service.runOnce();
-    await Bun.sleep(10);
+    await waitFor(() => calls === 2, { description: 'the quiet judge call' });
     clock += 61_000;
     expect((await service.runOnce()).state).toBe('skipped_running');
     expect(lines.some((line) => line.includes('made no progress for 1 min while waiting on the judge model'))).toBe(true);
