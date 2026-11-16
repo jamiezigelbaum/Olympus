@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
-import { comparePassageReceipts, recallGroups, runPassageEval, type LaneProbe } from '../eval/run-passages.ts';
+import { comparePassageReceipts, recallGroups, runPassageEval, signTestP, type LaneProbe } from '../eval/run-passages.ts';
 import { fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
 import type { EvalDataset } from '../eval/types.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -347,4 +347,36 @@ test('without an answer callback the serialized receipt is byte-identical to the
     const receipt = await runPassageEval({ dataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail() });
     expect(createHash('sha256').update(JSON.stringify(receipt)).digest('hex')).toBe('56f12eb867b6dce832872531b0387a32ff5b3955e45b415f184184e307ec6ead');
   } finally { now.mockRestore(); }
+});
+
+test('answer arms answer the same fitted pack, repeat, and are paired against the first arm', async () => {
+  const packs = new Set<unknown>();
+  const order: string[] = [];
+  const arm = (name: string, texts: readonly string[]) => {
+    let run = 0;
+    return { name, answer: async (_question: unknown, pack: unknown) => { packs.add(pack); order.push(name); return answered(texts[run++ % texts.length]!); } };
+  };
+  const receipt = await runPassageEval({ dataset: answerDataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
+    answerRepeats: 3,
+    answerArms: [arm('off', ['cafe amber', 'cafe amber violet silver cedar', 'cafe']), arm('first', ['cafe amber violet silver cedar', 'cafe amber violet silver', 'cafe'])],
+    judgeAnswer: async (_question, _expected, answer) => answer.includes('cedar') ? 'correct' : 'partial' });
+  expect(packs.size).toBe(1);
+  // The arm that answers first rotates with the repeat.
+  expect(order).toEqual(['off', 'first', 'first', 'off', 'off', 'first']);
+  const row = receipt.questions![0]!;
+  expect(row.arms!.off!.map(run => run.right)).toEqual([false, true, false]);
+  expect(row.arms!.first!.map(run => run.right)).toEqual([true, true, false]);
+  expect(row.answer).toBe(row.arms!.off![0]);
+  const { off, first } = receipt.summary.overall.arms!;
+  expect(off).toMatchObject({ asked: 1, runs: 3, failedRuns: 0, right: 0, rightRuns: 1, correctByMeaning: 0, correctByMeaningRuns: 1 });
+  expect(off!.paired).toBeUndefined();
+  expect(first).toMatchObject({ asked: 1, runs: 3, right: 1, rightRuns: 2, correctByMeaning: 0, correctByMeaningRuns: 1, paired: { wins: 1, losses: 0, p: 1, meaning: { wins: 0, losses: 0, p: 1 } } });
+  expect(receipt.summary.byFamily[row.families[0]!]!.arms!.first!.right).toBe(1);
+});
+
+test('the sign test is exact and two-sided', () => {
+  expect(signTestP(0, 0)).toBe(1);
+  expect(signTestP(3, 1)).toBe(0.625);
+  expect(signTestP(6, 0)).toBe(0.03125);
+  expect(signTestP(0, 6)).toBe(0.03125);
 });
