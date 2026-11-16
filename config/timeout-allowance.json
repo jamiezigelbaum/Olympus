@@ -120,6 +120,8 @@
     "src/workers/dropbox-files/provider-client.ts#DROPBOX_METADATA_REQUEST_TIMEOUT_MS": "c",
     "src/workers/email-source/gogcli.ts#COMMAND_TIMEOUT_KILL_GRACE_MS": "c",
     "src/workers/engine-split/client.ts#REQUEST_GRACE_MS": "c",
+    "src/workers/engine-split/control-plane.ts#CONTROL_START_WAIT_MS": "c",
+    "src/workers/engine-split/control-plane.ts#CONTROL_STOP_WAIT_MS": "c",
     "src/workers/engine-split/client.ts#RESULT_WAIT_MS": "d",
     "src/workers/engine-split/rss-restart.ts#ENGINE_RSS_RESTART_MAX_WAIT_MS": "c",
     "src/workers/engine-split/runtime.ts#DATA_EXPORT_WAIT_MS": "c",
