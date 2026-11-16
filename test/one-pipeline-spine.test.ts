@@ -18,6 +18,7 @@ import { HELD_UNTIL_JUDGED_REASON, type TierSniffer } from '../src/workers/class
 import { archiveConnectorId } from '../src/workers/archive-import/state.ts';
 import { archiveImportTaskId, createArchiveImportsSchedulerSource } from '../src/workers/archive-import/scheduler-source.ts';
 import { defaultConfig } from '../src/core/config.ts';
+import { flushMicrotasks } from './helpers/test-clock.ts';
 import {
   FIXTURE_LIVE_INPUT_ID,
   FIXTURE_SOURCE_ID,
@@ -415,17 +416,22 @@ describe('the source\'s lock', () => {
     const order: string[] = [];
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
-    h.gate.before = async () => { order.push('page'); await held; };
+    let entered!: () => void;
+    const inside = new Promise<void>((resolve) => { entered = resolve; });
+    h.gate.before = async () => { order.push('page'); entered(); await held; };
     const pulling = h.pull(id);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const guarded = h.exclusive(async () => { order.push('guarded'); });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    // The pass is waiting inside the runner; the guarded task has not started.
-    expect(order).toEqual(['page']);
-    h.gate.before = undefined;
-    release();
-    await pulling;
-    await guarded;
+    let guarded = Promise.resolve();
+    try {
+      await inside;
+      guarded = h.exclusive(async () => { order.push('guarded'); });
+      await flushMicrotasks();
+      // The pass is waiting inside the runner; the guarded task has not started.
+      expect(order).toEqual(['page']);
+    } finally {
+      h.gate.before = undefined;
+      release();
+      await Promise.all([pulling, guarded]);
+    }
     expect(order).toEqual(['page', 'guarded']);
   });
 

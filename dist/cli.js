@@ -237295,14 +237295,14 @@ function createArchiveImportDashboard(options) {
         for (const file of prepared.record.files) {
           const steps = archiveFileDigestSteps(prepared.root, file);
           for (;; ) {
+            if (closed || !stillChecking(requestId)) {
+              steps.return("");
+              return;
+            }
             const step = steps.next();
             if (step.done) {
               digests.push(step.value);
               break;
-            }
-            if (closed || cancelled.has(requestId)) {
-              steps.return("");
-              return;
             }
             await pause();
           }
@@ -238757,6 +238757,9 @@ var init_sync = __esm(() => {
 function archiveImportTaskId(archiveId) {
   return `${SCHEDULER_SOURCE_IDS.archiveImports}_pull.${schedulerScopeHash(archiveId)}`;
 }
+function archiveRemovalTaskId(archiveId) {
+  return `${SCHEDULER_SOURCE_IDS.archiveImports}_remove.${schedulerScopeHash(archiveId)}`;
+}
 function archiveExtractionTaskId(archiveId) {
   return `${SCHEDULER_SOURCE_IDS.archiveImports}_extract.${schedulerScopeHash(archiveId)}`;
 }
@@ -238794,7 +238797,7 @@ function createArchiveImportsSchedulerSource(input) {
     const targets = input.targets ?? input.runtime.targets;
     const sourceKey = record.target ? targets.forSource(record.target.source_id)?.concurrencyKey : undefined;
     tasks.push({
-      id: archiveImportTaskId(archiveId),
+      id: record.status === "removing" ? archiveRemovalTaskId(archiveId) : archiveImportTaskId(archiveId),
       kind: "sync",
       writer: true,
       concurrencyKey: sourceKey ?? ARCHIVE_IMPORTS_CONCURRENCY_KEY,

@@ -34,6 +34,7 @@ import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/wo
 import {
   ARCHIVE_IMPORTS_CONCURRENCY_KEY,
   archiveImportTaskId,
+  archiveRemovalTaskId,
   createArchiveImportsSchedulerSource,
 } from '../src/workers/archive-import/scheduler-source.ts';
 import { archiveConnectorId } from '../src/workers/archive-import/state.ts';
@@ -694,7 +695,7 @@ describe('archive imports in the scheduler', () => {
 
     requestArchiveRemoval(f.runtime.state, finished);
     const removing = createArchiveImportsSchedulerSource({ runtime: f.runtime, config: defaultConfig() })!;
-    expect(removing.tasks.map((task) => task.id)).toEqual([archiveImportTaskId(finished)]);
+    expect(removing.tasks.map((task) => task.id)).toEqual([archiveRemovalTaskId(finished)]);
     const removal = await removing.tasks[0]!.run();
     expect(removal.counts?.removal_complete).toBe(1);
     expect(f.runtime.state.get(finished)).toBeUndefined();

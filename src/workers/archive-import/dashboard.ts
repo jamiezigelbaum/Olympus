@@ -422,9 +422,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     }
   };
 
-  // A removal shares its archive's scheduler task, whose schedule says the
-  // next pass is 30 minutes after the import's last: tell the scheduler there
-  // is work now, once it has the task (after refresh).
+  // Tell the scheduler there is work now, once refresh has handed it the
+  // removal task: the owner does not wait for the next polling tick.
   const wakeScheduler = (): void => {
     try {
       options.runtime.notifyWork();
@@ -515,14 +514,17 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         for (const file of prepared.record.files) {
           const steps = archiveFileDigestSteps(prepared.root, file);
           for (;;) {
+            // The split's front cancels in the request file, not in this
+            // process's set. Stop before reading another range so an
+            // abandoned check does not hold later checks behind it.
+            if (closed || !stillChecking(requestId)) {
+              steps.return('');
+              return;
+            }
             const step = steps.next();
             if (step.done) {
               digests.push(step.value);
               break;
-            }
-            if (closed || cancelled.has(requestId)) {
-              steps.return('');
-              return;
             }
             await pause();
           }

@@ -40,7 +40,7 @@ import {
   verifyArchiveMediaBindings,
 } from '../src/workers/archive-import/media-bindings.ts';
 import { requestArchiveRemoval, runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
-import { archiveImportTaskId, createArchiveImportsSchedulerSource } from '../src/workers/archive-import/scheduler-source.ts';
+import { archiveImportTaskId, archiveRemovalTaskId, createArchiveImportsSchedulerSource } from '../src/workers/archive-import/scheduler-source.ts';
 import { archiveConnectorId, defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
 import {
   FIXTURE_MEDIA_LOCATOR_PREFIX,
@@ -648,7 +648,7 @@ describe('removing an archive forgets its bindings', () => {
 
     requestArchiveRemoval(h.runtime.state, archiveId);
     const removing = createArchiveImportsSchedulerSource({ runtime: h.runtime, config: defaultConfig() })!;
-    const removalTask = removing.tasks.find((task) => task.id === archiveImportTaskId(archiveId))!;
+    const removalTask = removing.tasks.find((task) => task.id === archiveRemovalTaskId(archiveId))!;
     for (let pass = 0; pass < 20 && h.runtime.state.get(archiveId); pass += 1) await removalTask.run({} as never);
     expect(h.runtime.state.get(archiveId)).toBeUndefined();
     expect(bindingRows(h.runtime.media.path, archiveId)).toEqual([]);
