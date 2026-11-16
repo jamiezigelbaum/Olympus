@@ -392,6 +392,22 @@ function samplePressure(): { samples: Array<{ at: string } & Record<string, numb
   }, 1000);
   return { samples, stop: () => clearInterval(timer) };
 }
+/** Peak anonymous memory per engine role, sampled each second from /proc (Linux only), with the second it peaked: a burst and a climb read differently. */
+export function sampleAnonMemory(pids: () => Array<{ role: string; pid: number }>, startedAt: () => number): { peaks: Record<string, { peak_anon_mib: number; at_s: number; last_anon_mib: number }>; stop(): void } {
+  const peaks: Record<string, { peak_anon_mib: number; at_s: number; last_anon_mib: number }> = {};
+  const timer = setInterval(() => {
+    for (const { role, pid } of pids()) {
+      let kib: number | undefined;
+      try { kib = Number(/^RssAnon:\s+(\d+) kB/m.exec(readFileSync(`/proc/${pid}/status`, 'utf8'))?.[1]); } catch { continue; }
+      if (!Number.isFinite(kib)) continue;
+      const mib = Math.round(kib! / 1024);
+      const entry = peaks[role] ??= { peak_anon_mib: 0, at_s: 0, last_anon_mib: 0 };
+      entry.last_anon_mib = mib;
+      if (mib > entry.peak_anon_mib) { entry.peak_anon_mib = mib; entry.at_s = Math.round((Date.now() - startedAt()) / 1000); }
+    }
+  }, 1000);
+  return { peaks, stop: () => clearInterval(timer) };
+}
 /** The worst second and the seconds with any stall at or over 100 ms, per key. */
 function pressureSummary(samples: Array<{ at: string } & Record<string, number | string>>) {
   const keys = [...new Set(samples.flatMap(sample => Object.keys(sample).filter(key => key !== 'at')))];
@@ -617,6 +633,8 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const started = Date.now();
   let finished = false;
   const pressureSampler = samplePressure();
+  const roles: Array<{ role: string; pid: number }> = [];
+  const anonSampler = sampleAnonMemory(() => roles, () => enginesStartedAt ?? Date.now());
   let walAtOpen: Record<string, number> = {};
   try {
     walAtOpen = walSizes(dir);
@@ -625,6 +643,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
       enginesStartedAt ??= Date.now();
       const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], { env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_MAIN_THREAD_SQL_LOG: join(metrics, `${role}.sql.jsonl`), OLYMPUS_CPU_SAMPLE_LOG: join(metrics, `${role}.cpu.jsonl`) }, stdout: 'pipe', stderr: 'pipe' });
       children.push(child);
+      roles.push({ role, pid: child.pid });
       writeFileSync(pidFile, JSON.stringify(children.map(entry => entry.pid)));
       for (const stream of [child.stdout, child.stderr]) pumps.push((async () => { for await (const chunk of stream as ReadableStream<Uint8Array>) { const text = new TextDecoder().decode(chunk); keepSqliteLines(role, text); output[role] = (output[role]! + text).slice(-100_000); } })());
     }
@@ -691,6 +710,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
   finally {
     pressureSampler.stop();
+    anonSampler.stop();
     for (const child of children) child.kill('SIGKILL');
     await Promise.all(children.map(child => child.exited)); await Promise.all(pumps);
     await Promise.allSettled(requests);
@@ -746,7 +766,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000),
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -778,6 +798,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     console.log(`${options.runCase} ${role}: p95 beat ${p95 === undefined ? 'n/a' : `<= ${p95} ms`}, worst ${Math.round(loop.max_ms)} ms at ${worst?.site ?? 'no sample'}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s${role === 'background' ? `; beats over 1 s, reported not gated: ${siteTable.background.reduce((sum, entry) => sum + entry.count, 0)}` : ''})`);
   }
   console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ackGates ? `${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s)` : `reported, not gated (${ack_ok ? 'under' : 'over'} 1 s)`}`);
+  console.log(`${options.runCase} anonymous memory (reported): ${Object.entries(anonSampler.peaks).map(([role, entry]) => `${role} peak ${entry.peak_anon_mib} MiB at ${entry.at_s} s, last ${entry.last_anon_mib} MiB`).join('; ') || 'not sampled'}`);
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
   // Report only for 1.5 (plan, 16 Nov 2026): the allowance list is incomplete, so an unlisted site is usually one no run had reached.
   // A site matters to the gate only as the named frame of a front beat over 1 s (the per-site table above).
