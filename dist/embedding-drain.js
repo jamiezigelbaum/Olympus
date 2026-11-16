@@ -2898,6 +2898,10 @@ class ModelThread {
         pending.embeddingProgress?.(reply.embeddingProgress);
         return;
       }
+      if (reply.rerankProgress) {
+        pending.rerankProgress?.();
+        return;
+      }
       if (reply.progress) {
         pending.progress?.(reply.progress);
         return;
@@ -2952,7 +2956,7 @@ class ModelThread {
         options.signal?.removeEventListener("abort", abort);
       };
       options.signal?.addEventListener("abort", abort, { once: true });
-      this.pending.set(id, { resolve: (result) => resolve(result), reject, cleanup, progress: options.progress, log: options.log, embeddingProgress: options.embeddingProgress });
+      this.pending.set(id, { resolve: (result) => resolve(result), reject, cleanup, progress: options.progress, log: options.log, embeddingProgress: options.embeddingProgress, rerankProgress: options.rerankProgress });
       this.worker.ref();
       try {
         this.worker.postMessage({ id, request });
@@ -34542,6 +34546,22 @@ function truncatePair(a, b, room, tiePolicy = "wordpiece") {
   }
   return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
 }
+function pairWindows(a, b, room, overlap, tiePolicy = "wordpiece") {
+  const first = truncatePair(a, b, room, tiePolicy);
+  const size = first.b.length;
+  if (size === 0 || size >= b.length)
+    return { a: first.a, windows: [first.b], truncated: first.truncated };
+  const step = Math.max(1, size - Math.max(0, Math.min(Math.floor(overlap), size - 1)));
+  const windows = [];
+  for (let start = 0;; start += step) {
+    if (start + size >= b.length) {
+      windows.push(b.slice(b.length - size));
+      break;
+    }
+    windows.push(b.slice(start, start + size));
+  }
+  return { a: first.a, windows, truncated: first.a.length < a.length };
+}
 
 // src/workers/source-index/built-in-embedding/wordpiece.ts
 var MAX_INPUT_CHARS_PER_WORD = 100;
@@ -34591,6 +34611,13 @@ class WordPieceTokenizer {
     const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
     const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
     return { ids, typeIds, truncated };
+  }
+  encodePairWindows(first, second, maxLength, overlap) {
+    const { a, windows, truncated } = pairWindows(this.tokenize(first), this.tokenize(second), maxLength - 3, overlap);
+    return windows.map((b) => {
+      const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+      return { ids, typeIds: ids.map((_, index) => index < a.length + 2 ? 0 : 1), truncated };
+    });
   }
   wordPiece(word, out) {
     const chars = Array.from(word);

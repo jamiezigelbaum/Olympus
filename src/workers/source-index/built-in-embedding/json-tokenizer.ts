@@ -2,7 +2,7 @@
 // access, tokenizer_config.json or runtime model download is needed.
 import { Tokenizer, PrecompiledNormalizer, SequenceNormalizer, type Normalizer } from '@huggingface/tokenizers';
 import { CharsmapNormalizer } from './precompiled-charsmap.ts';
-import { truncatePair, type PairEncoding, type PairTokenizer } from './pair-tokenizer.ts';
+import { pairWindows, truncatePair, type PairEncoding, type PairTokenizer } from './pair-tokenizer.ts';
 
 function exactCharsmaps(normalizer: Normalizer | null): Normalizer | null {
   if (normalizer instanceof PrecompiledNormalizer) return new CharsmapNormalizer(normalizer.charsmap);
@@ -50,5 +50,15 @@ export class JsonPairTokenizer implements PairTokenizer {
       this.tokenizer.tokenize(first), this.tokenizer.tokenize(second), maxLength - this.specialCount, 'huggingface',
     );
     return { ...this.postProcess(a, b), truncated };
+  }
+
+  encodePairWindows(first: string, second: string, maxLength: number, overlap: number): PairEncoding[] {
+    if (!Number.isSafeInteger(maxLength) || maxLength < this.specialCount) {
+      throw new Error('The reranker token window cannot hold its pair template.');
+    }
+    const { a, windows, truncated } = pairWindows(
+      this.tokenizer.tokenize(first), this.tokenizer.tokenize(second), maxLength - this.specialCount, overlap, 'huggingface',
+    );
+    return windows.map((b) => ({ ...this.postProcess(a, b), truncated }));
   }
 }

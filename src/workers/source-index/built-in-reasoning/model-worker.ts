@@ -83,7 +83,7 @@ port.on('message', async (message: { id: number; request: ModelThreadRequest; ca
       case 'reranker-run': {
         const reranker = rerankers.get(request.handle);
         if (!reranker) throw new Error('The built-in reranker is not loaded.');
-        result = await reranker.score({ ...request.request, signal: controller.signal });
+        result = await reranker.score({ ...request.request, signal: controller.signal, onProgress: () => send({ id, rerankProgress: true }) });
         break;
       }
       case 'install':
