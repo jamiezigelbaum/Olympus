@@ -12,6 +12,8 @@ tools:
   - source_answer
   - source_index_search
   - source_item_read
+  - source_deep_read
+  - source_deep_read_status
   - source_index_status
 mutating: false
 ---
@@ -73,6 +75,7 @@ Use Olympus source tools, not raw stores.
   sources say, call the Olympus source tools directly.
 After a search, read a long hit with `source_item_read` before answering from it, passing its `selected_item` and following `nextPage` as needed.
 For a Private hit, ask `source_answer` with `selected_items` instead.
+When the answer needs a whole long document or a long stretch of a chat (a topic discussed over many messages, days or years), start `source_deep_read` with the question and a search hit's `selected_item` (`whole: "conversation"` for its whole group or channel, with `after`/`before` to narrow years). The owner's private model reads all of it in the background and the answer lands in Olympus Private answers; tell the user the estimate and where to find it, and check with `source_deep_read_status`. Don't start one for a question a search already answers.
 If the read says `reading_on_demand`, Olympus only had the file's name and is reading it now; read again after `etaSeconds`. `on_demand_capped` means this item's on-demand reads are used up; say so.
 
 - `source_index_search` is for safe result cards, locator lookups, and

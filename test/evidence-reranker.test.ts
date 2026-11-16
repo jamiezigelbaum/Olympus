@@ -75,7 +75,7 @@ describe('rerankCandidates', () => {
     }
   });
 
-  test('a reranker that does not answer in time is abandoned and the fused order stands', async () => {
+  test('a reranker that goes silent is abandoned and the fused order stands', async () => {
     const fake = timers();
     let aborted = false;
     const hanging: EvidenceReranker = {
@@ -85,7 +85,7 @@ describe('rerankCandidates', () => {
       }),
     };
     const pending = rerankCandidates({
-      reranker: hanging, query: 'q', items: ['a', 'b', 'c'], passageOf: () => 'text', keep: 2, timeoutMs: 1_000, timers: fake,
+      reranker: hanging, query: 'q', items: ['a', 'b', 'c'], passageOf: () => 'text', keep: 2, stallMs: 1_000, timers: fake,
     });
     await fake.clock.advance(1_000);
     const result = await pending;
@@ -93,6 +93,40 @@ describe('rerankCandidates', () => {
     expect(result.audit.outcome).toBe('timed_out');
     expect(aborted).toBe(true);
     expect(fake.clock.pendingTimers()).toBe(0);
+  });
+
+  test('a reranker that keeps reporting progress is never abandoned, however long it takes', async () => {
+    const fake = timers();
+    let progress!: () => void;
+    let finish!: (scores: number[]) => void;
+    const slow: EvidenceReranker = {
+      id: 'slow', localOnly: true, poolSize: 10,
+      score: ({ onProgress }) => new Promise((resolve) => { progress = onProgress!; finish = resolve; }),
+    };
+    const pending = rerankCandidates({
+      reranker: slow, query: 'q', items: ['a', 'b', 'c'], passageOf: () => 'text', keep: 2, stallMs: 1_000, timers: fake,
+    });
+    // Thirty times the stall allowance in total, never silent for all of it.
+    for (let step = 0; step < 40; step += 1) {
+      await fake.clock.advance(750);
+      progress();
+    }
+    finish([1, 2, 3]);
+    const result = await pending;
+    expect(result.audit.outcome).toBe('applied');
+    expect(result.kept).toEqual(['c', 'b']);
+    expect(fake.clock.pendingTimers()).toBe(0);
+  });
+
+  test('the reranker is handed the whole candidate text, not its opening', async () => {
+    const calls: string[][] = [];
+    const long = `${'filler '.repeat(700)}invoice total due`;
+    const result = await rerankCandidates({
+      reranker: overlapReranker(30, calls), query: 'invoice total due', items: ['head', 'tail'],
+      passageOf: (item) => (item === 'tail' ? long : 'invoice'), keep: 1, timers: timers(),
+    });
+    expect(calls[0]![1]!.endsWith('invoice total due')).toBe(true);
+    expect(result.kept).toEqual(['tail']);
   });
 
   test('the pool is never smaller than the cut and never above the ceiling', () => {

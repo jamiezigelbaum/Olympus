@@ -4,7 +4,7 @@
 // plugin ships as a bundled file with no node_modules, and the algorithm is
 // small, frozen, and pinned by a parity test against the reference output.
 
-import { truncatePair, type TokenEncoding, type PairEncoding } from './pair-tokenizer.ts';
+import { pairWindows, truncatePair, type TokenEncoding, type PairEncoding } from './pair-tokenizer.ts';
 
 export type WordPieceEncoding = TokenEncoding;
 export type WordPiecePairEncoding = PairEncoding;
@@ -64,6 +64,15 @@ export class WordPieceTokenizer {
     const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
     const typeIds = ids.map((_, index) => (index < a.length + 2 ? 0 : 1));
     return { ids, typeIds, truncated };
+  }
+
+  /** `encodePair` once per window of `second`: a text past the window is read whole. */
+  encodePairWindows(first: string, second: string, maxLength: number, overlap: number): WordPiecePairEncoding[] {
+    const { a, windows, truncated } = pairWindows(this.tokenize(first), this.tokenize(second), maxLength - 3, overlap);
+    return windows.map((b) => {
+      const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+      return { ids, typeIds: ids.map((_, index) => (index < a.length + 2 ? 0 : 1)), truncated };
+    });
   }
 
   private wordPiece(word: string, out: number[]): void {

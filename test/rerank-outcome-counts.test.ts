@@ -24,7 +24,7 @@ test('every rerank outcome is counted since start', async () => {
   await run(reranker(async () => { throw Error('model gone'); }));
   const clock = createTestClock();
   const pending = run(reranker(() => new Promise(() => {})), clock);
-  await clock.advance(5_000);
+  await clock.advance(10_000);
   expect((await pending).audit.outcome).toBe('timed_out');
   const after = rerankOutcomeCounts();
   expect(after.applied - before.applied).toBe(1);

@@ -691,6 +691,8 @@ describe('native OpenClaw plugin adapter', () => {
       'source_answer',
       'source_index_status',
       'source_item_read',
+      'source_deep_read',
+      'source_deep_read_status',
       'source_index_search',
       'source_watch_create',
       'source_watches',

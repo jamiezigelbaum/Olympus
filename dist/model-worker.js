@@ -42,6 +42,10 @@ class ModelThread {
         pending.embeddingProgress?.(reply.embeddingProgress);
         return;
       }
+      if (reply.rerankProgress) {
+        pending.rerankProgress?.();
+        return;
+      }
       if (reply.progress) {
         pending.progress?.(reply.progress);
         return;
@@ -96,7 +100,7 @@ class ModelThread {
         options.signal?.removeEventListener("abort", abort);
       };
       options.signal?.addEventListener("abort", abort, { once: true });
-      this.pending.set(id, { resolve: (result) => resolve(result), reject, cleanup, progress: options.progress, log: options.log, embeddingProgress: options.embeddingProgress });
+      this.pending.set(id, { resolve: (result) => resolve(result), reject, cleanup, progress: options.progress, log: options.log, embeddingProgress: options.embeddingProgress, rerankProgress: options.rerankProgress });
       this.worker.ref();
       try {
         this.worker.postMessage({ id, request });
@@ -3768,6 +3772,22 @@ function truncatePair(a, b, room, tiePolicy = "wordpiece") {
   }
   return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
 }
+function pairWindows(a, b, room, overlap, tiePolicy = "wordpiece") {
+  const first = truncatePair(a, b, room, tiePolicy);
+  const size = first.b.length;
+  if (size === 0 || size >= b.length)
+    return { a: first.a, windows: [first.b], truncated: first.truncated };
+  const step = Math.max(1, size - Math.max(0, Math.min(Math.floor(overlap), size - 1)));
+  const windows = [];
+  for (let start = 0;; start += step) {
+    if (start + size >= b.length) {
+      windows.push(b.slice(b.length - size));
+      break;
+    }
+    windows.push(b.slice(start, start + size));
+  }
+  return { a: first.a, windows, truncated: first.a.length < a.length };
+}
 
 // src/workers/source-index/built-in-embedding/wordpiece.ts
 var MAX_INPUT_CHARS_PER_WORD = 100;
@@ -3817,6 +3837,13 @@ class WordPieceTokenizer {
     const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
     const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
     return { ids, typeIds, truncated };
+  }
+  encodePairWindows(first, second, maxLength, overlap) {
+    const { a, windows, truncated } = pairWindows(this.tokenize(first), this.tokenize(second), maxLength - 3, overlap);
+    return windows.map((b) => {
+      const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+      return { ids, typeIds: ids.map((_, index) => index < a.length + 2 ? 0 : 1), truncated };
+    });
   }
   wordPiece(word, out) {
     const chars = Array.from(word);
@@ -6855,6 +6882,13 @@ class JsonPairTokenizer {
     const { a, b, truncated } = truncatePair(this.tokenizer.tokenize(first), this.tokenizer.tokenize(second), maxLength - this.specialCount, "huggingface");
     return { ...this.postProcess(a, b), truncated };
   }
+  encodePairWindows(first, second, maxLength, overlap) {
+    if (!Number.isSafeInteger(maxLength) || maxLength < this.specialCount) {
+      throw new Error("The reranker token window cannot hold its pair template.");
+    }
+    const { a, windows, truncated } = pairWindows(this.tokenizer.tokenize(first), this.tokenizer.tokenize(second), maxLength - this.specialCount, overlap, "huggingface");
+    return windows.map((b) => ({ ...this.postProcess(a, b), truncated }));
+  }
 }
 
 // src/workers/source-index/built-in-reranker.ts
@@ -6867,6 +6901,7 @@ var SOURCE_RERANKER_MAX_TOKENS_ENV = "OLYMPUS_SOURCE_RERANKER_MAX_TOKENS";
 var MAX_PAIR_TOKENS = 512;
 var BATCH_SIZE = 8;
 var DEFAULT_PAIR_TOKENS = 256;
+var WINDOW_OVERLAP_FRACTION = 8;
 var IDLE_RELEASE_MS = 10 * 60000;
 var DEFAULT_ON_MIN_MEMORY_BYTES = 16 * 1024 ** 3;
 function createCrossEncoderReranker(options) {
@@ -6935,11 +6970,18 @@ function createCrossEncoderReranker(options) {
       lastActivity = timers.now();
       try {
         const model = await session();
-        const scores = [];
-        for (let start = 0;start < request.passages.length; start += batchSize) {
+        const owners = [];
+        const windows = request.passages.flatMap((passage, index) => {
+          const pairs = options.tokenizer.encodePairWindows(request.query, passage, maxPairTokens, Math.floor(maxPairTokens / WINDOW_OVERLAP_FRACTION));
+          for (let count = 0;count < pairs.length; count += 1)
+            owners.push(index);
+          return pairs;
+        });
+        const scores = request.passages.map(() => Number.NEGATIVE_INFINITY);
+        for (let start = 0;start < windows.length; start += batchSize) {
           if (request.signal.aborted)
             throw new Error("Reranking was abandoned.");
-          const pairs = request.passages.slice(start, start + batchSize).map((passage) => options.tokenizer.encodePair(request.query, passage, maxPairTokens));
+          const pairs = windows.slice(start, start + batchSize);
           const sequenceLength = Math.max(...pairs.map((pair) => pair.ids.length));
           const size = pairs.length * sequenceLength;
           const inputIds = new BigInt64Array(size).fill(BigInt(options.tokenizer.padId));
@@ -6957,7 +6999,13 @@ function createCrossEncoderReranker(options) {
           if (output.dims.length !== 2 || output.dims[0] !== pairs.length || output.dims[1] !== 1) {
             throw new Error("The reranker model returned an unexpected output.");
           }
-          scores.push(...output.data);
+          for (let row = 0;row < pairs.length; row += 1) {
+            const owner = owners[start + row];
+            const score = output.data[row];
+            if (Number.isNaN(score) || score > scores[owner])
+              scores[owner] = score;
+          }
+          request.onProgress?.();
         }
         return scores;
       } finally {
@@ -7002,11 +7050,12 @@ function builtInRerankerFromEnv(options = {}) {
       localOnly: true,
       poolSize: positiveInteger2(env[SOURCE_RERANKER_POOL_ENV]) ?? DEFAULT_RERANK_POOL_SIZE,
       prepare,
-      async score({ signal, ...request }) {
+      async score({ signal, onProgress, ...request }) {
         if (signal.aborted)
           throw new Error("Reranking was abandoned.");
         await prepare();
-        return modelThread().call({ kind: "reranker-run", handle, request }, { signal });
+        onProgress?.();
+        return modelThread().call({ kind: "reranker-run", handle, request }, { signal, rerankProgress: onProgress });
       }
     };
   }
@@ -8308,7 +8357,7 @@ port.on("message", async (message) => {
         const reranker = rerankers.get(request.handle);
         if (!reranker)
           throw new Error("The built-in reranker is not loaded.");
-        result = await reranker.score({ ...request.request, signal: controller.signal });
+        result = await reranker.score({ ...request.request, signal: controller.signal, onProgress: () => send({ id, rerankProgress: true }) });
         break;
       }
       case "install":

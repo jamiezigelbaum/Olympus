@@ -53,6 +53,7 @@ import { BACKGROUND_READS, OffThreadReadBusyError, offThreadReadsSupported, open
 import { compareProviderAccounts } from '../../core/provider-account-identity.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, statSync, statfsSync } from 'node:fs';
+import { open as openFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
@@ -5570,6 +5571,36 @@ export class LocalConnectorStore {
       'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
       | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'>>;
     return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 } as ItemRow));
+  }
+
+  /**
+   * Every active item of one conversation (and topic, when given) in authored
+   * order, for a deep read of the whole conversation (core/deep-read.ts).
+   * Identities and times only, never text: content is read afterwards through
+   * the store's content provider, which applies the owner's scope and tiers.
+   * `after` is inclusive and `before` exclusive, compared as stored ISO times.
+   */
+  conversationItems(key: {
+    provider: string; accountScope: string; providerConversationId: string;
+    providerThreadId?: string; after?: string; before?: string;
+  }): Array<{ sourceItem: SourceItemIdentity; authoredAt?: string }> {
+    const clauses = ['tombstoned = 0', 'provider = ?', 'account_scope = ?', 'normalized_conversation = ?'];
+    const params: string[] = [key.provider, key.accountScope, normalizeConversationId(key.providerConversationId)];
+    if (key.providerThreadId) { clauses.push('provider_thread_id = ?'); params.push(key.providerThreadId); }
+    if (key.after) { clauses.push('authored_at >= ?'); params.push(key.after); }
+    if (key.before) { clauses.push('authored_at < ?'); params.push(key.before); }
+    const rows = this.db.query(`
+      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, authored_at
+      FROM items WHERE ${clauses.join(' AND ')}
+      ORDER BY authored_at, item_pk
+    `).all(...params) as Array<Pick<ItemRow,
+      'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
+      | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'> & { authored_at: string | null }>;
+    return rows.map(row => ({
+      sourceItem: sourceItemFromRow({ ...row, rank: 0 } as ItemRow),
+      ...(row.authored_at ? { authoredAt: row.authored_at } : {}),
+    }));
   }
 
   /**
@@ -16328,6 +16359,25 @@ export class LocalConnectorStore {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     } finally {
       if (fd !== undefined) closeSync(fd);
+    }
+  }
+
+  /**
+   * durabilityBarrier with the fsync on libuv's thread pool, for a caller
+   * that can await it outside a transaction: the loop never waits on the disk
+   * (an fsync held the loop for seconds on a busy disk, lane 6 gate, 16 Nov).
+   * It covers every write committed before the call.
+   */
+  async durabilityBarrierOffLoop(): Promise<void> {
+    if (this.dbPath === ':memory:' || this.readOnly) return;
+    let handle: Awaited<ReturnType<typeof openFile>> | undefined;
+    try {
+      handle = await openFile(`${this.dbPath}-wal`, 'r');
+      await handle.sync();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    } finally {
+      await handle?.close();
     }
   }
 
