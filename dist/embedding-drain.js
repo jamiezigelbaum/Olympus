@@ -17529,6 +17529,8 @@ function installMainThreadSqlTrace() {
     if (planRecorder && !planRecorder.explaining && typeof args[0] === "string" && SINGLE_WRITE.test(args[0])) {
       recordPlan({ [SQL]: args[0], [DB]: this });
     }
+    if (siteCounts)
+      countSite();
     if (!sliceTiming && !slowLog)
       return exec.apply(this, args);
     const started = performance.now();
@@ -17566,6 +17568,8 @@ function timeStatement(statement) {
     held[method] = function(...args) {
       if (planRecorder && !planRecorder.explaining)
         recordPlan(held);
+      if (siteCounts)
+        countSite();
       const answer = sourceAnswerTraceActive();
       if (!answer && !sliceTiming && !slowLog)
         return call.apply(this, args);
@@ -17691,6 +17695,11 @@ function sourceSite() {
 `).slice(1).map((line) => line.trim().replace(/^at /, ""));
   const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace"));
   return mine.slice(0, 2).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
+}
+var siteCounts;
+function countSite() {
+  const site = sourceSite() || "(no source frame)";
+  siteCounts.set(site, (siteCounts.get(site) ?? 0) + 1);
 }
 var slowLog;
 var SLOW_RECENT = 10;

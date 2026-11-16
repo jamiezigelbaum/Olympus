@@ -48131,6 +48131,8 @@ function installMainThreadSqlTrace() {
     if (planRecorder && !planRecorder.explaining && typeof args[0] === "string" && SINGLE_WRITE.test(args[0])) {
       recordPlan({ [SQL]: args[0], [DB]: this });
     }
+    if (siteCounts)
+      countSite();
     if (!sliceTiming && !slowLog)
       return exec.apply(this, args);
     const started = performance.now();
@@ -48168,6 +48170,8 @@ function timeStatement(statement) {
     held[method] = function(...args) {
       if (planRecorder && !planRecorder.explaining)
         recordPlan(held);
+      if (siteCounts)
+        countSite();
       const answer = sourceAnswerTraceActive();
       if (!answer && !sliceTiming && !slowLog)
         return call.apply(this, args);
@@ -48291,6 +48295,22 @@ function sourceSite() {
   const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace"));
   return mine.slice(0, 2).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
 }
+function countSite() {
+  const site = sourceSite() || "(no source frame)";
+  siteCounts.set(site, (siteCounts.get(site) ?? 0) + 1);
+}
+function startMainThreadSqlSiteCount() {
+  installMainThreadSqlTrace();
+  const counts = new Map;
+  siteCounts = counts;
+  return {
+    sites: () => [...counts.entries()].map(([site, statements]) => ({ site, statements })).sort((a, b) => b.statements - a.statements),
+    stop() {
+      if (siteCounts === counts)
+        siteCounts = undefined;
+    }
+  };
+}
 function startSlowMainThreadSqlLog(thresholdMs, log = (line) => console.warn(line)) {
   installMainThreadSqlTrace();
   if (!isMainThread3)
@@ -48341,7 +48361,7 @@ function shortFrame(frame) {
   const [file, line] = where.split(":");
   return `${name} ${file}${line ? `:${line}` : ""}`;
 }
-var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, SINGLE_WRITE, sliceTiming, SQL = "__olympusMainThreadSql", DB = "__olympusMainThreadSqlDb", planRecorder, LOOP_SLOW_SQL_MS = 100, slowLog, SLOW_RECENT = 10;
+var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, SINGLE_WRITE, sliceTiming, SQL = "__olympusMainThreadSql", DB = "__olympusMainThreadSqlDb", planRecorder, siteCounts, LOOP_SLOW_SQL_MS = 100, slowLog, SLOW_RECENT = 10;
 var init_main_thread_sql_trace = __esm(() => {
   init_answer_latency_trace();
   STATEMENT_METHODS = ["all", "get", "run", "values"];
@@ -269615,7 +269635,7 @@ __export(exports_server, {
 });
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile6 } from "node:child_process";
-import { appendFileSync, existsSync as existsSync126, readFileSync as readFileSync115 } from "node:fs";
+import { appendFileSync, existsSync as existsSync126, readFileSync as readFileSync115, writeFileSync as writeFileSync29 } from "node:fs";
 import { dirname as dirname121, join as join154 } from "node:path";
 async function startWorkerWithLaunch(launch) {
   workerLaunch = { ...launch };
@@ -269646,7 +269666,16 @@ async function main() {
   }
   if (engineRole !== "front")
     beginBootProgress(process.env);
-  else {
+  const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
+  if (sqlSitesDir) {
+    const sqlSites = startMainThreadSqlSiteCount();
+    const writeSqlSites = () => {
+      try {
+        writeFileSync29(join154(sqlSitesDir, `${engineRole}.sql-sites.json`), JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() }));
+      } catch {}
+    };
+    setInterval(writeSqlSites, 1e4).unref?.();
+  } else {
     beginFrontProgress(process.env);
     const exitOnError = (error) => {
       failFrontProgress(error);
