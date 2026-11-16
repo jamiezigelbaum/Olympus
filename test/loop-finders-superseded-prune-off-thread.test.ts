@@ -135,3 +135,16 @@ test('a slice asked for while one runs does nothing', async () => {
   expect(await sweepAutomaticSupersededCopiesInTurns(f.set, { limit: 1, embeddingLedger })).toMatchObject({ checked: 0, complete: false });
   expect(await first).toMatchObject({ checked: 1, purged: 1 });
 });
+
+test('a slow turn between items does not spend the slice: its budget is the time it holds the loop (rc.20 copy compare)', async () => {
+  const here = await fixture();
+  const hereReport = sweepAutomaticSupersededCopies(here.f.set, { embeddingLedger: here.embeddingLedger });
+  const loop = await fixture();
+  // A busy engine: each turn between items takes a second; the slice's own stretches take no time.
+  let clock = 0;
+  const report = await sweepAutomaticSupersededCopiesInTurns(loop.f.set, { budgetMs: 100, now: () => clock,
+    embeddingLedger: loop.embeddingLedger, turn: async () => { clock += 1_000; } });
+  expect(report).toEqual(hereReport);
+  expect(report).toMatchObject({ checked: 3, purged: 3, complete: true });
+  expect(outcome(loop.f)).toEqual({ state: true, superseded: [], privateCopies: [] });
+});

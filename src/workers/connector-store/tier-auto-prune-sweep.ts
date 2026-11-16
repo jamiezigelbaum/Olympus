@@ -95,7 +95,13 @@ export async function reclaimAutomaticSupersededCopies(set: TieredStoreSet, recl
 
 type SweepReport = { checked: number; purged: number; kept: number; failed: number; complete: boolean };
 /** maxItemMs covers one generation-fenced bounded prune attempt, including its commits. */
-type SliceTiming = { pruneMs: number; maxItemMs: number; maxStatementMs: number; cut: boolean };
+type SliceTiming = {
+  pruneMs: number; maxItemMs: number; maxStatementMs: number; cut: boolean;
+  /** Time the slice has held its thread so far: its synchronous stretches, never its turns or finder reads. */
+  heldMs: number;
+  /** When the stretch running now began, on the slice's clock. */
+  stretchAt?: number | undefined;
+};
 
 const emptyReport = (): SweepReport => ({ checked: 0, purged: 0, kept: 0, failed: 0, complete: false });
 type SweepOptions = {
@@ -106,9 +112,16 @@ type SweepOptions = {
 };
 
 /** Each synchronous stretch of the sweep: its statements timed, and the ledger never waiting on a busy writer. */
-function sweepWrap(set: TieredStoreSet, timing: SliceTiming): LoopPassWrap {
-  return (stretch) => withMainThreadSqlTiming(timing, () => set.ledger.withoutBusyWait(stretch));
+function sweepWrap(set: TieredStoreSet, timing: SliceTiming, now: () => number): LoopPassWrap {
+  return (stretch) => {
+    const at = now();
+    timing.stretchAt = at;
+    try { return withMainThreadSqlTiming(timing, () => set.ledger.withoutBusyWait(stretch)); }
+    finally { timing.heldMs += now() - at; timing.stretchAt = undefined; }
+  };
 }
+
+const newTiming = (): SliceTiming => ({ pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false, heldMs: 0 });
 
 /**
  * Bounded pages at worker startup and on maintenance ticks; a failed item
@@ -117,8 +130,8 @@ function sweepWrap(set: TieredStoreSet, timing: SliceTiming): LoopPassWrap {
  * Here, on the caller's connections (a direct caller, not the engine's loop).
  */
 export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: SweepOptions = {}): SweepReport {
-  const timing: SliceTiming = { pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false };
-  return runPassHere(sweepPass(set, options, timing), { wrap: sweepWrap(set, timing) });
+  const timing = newTiming();
+  return runPassHere(sweepPass(set, options, timing), { wrap: sweepWrap(set, timing, options.now ?? (() => performance.now())) });
 }
 
 const sweeping = new WeakSet<TieredStoreSet>();
@@ -137,8 +150,8 @@ export async function sweepAutomaticSupersededCopiesInTurns(set: TieredStoreSet,
   if (sweeping.has(set)) return emptyReport();
   sweeping.add(set);
   try {
-    const timing: SliceTiming = { pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false };
-    return await runPassOffThread(sweepPass(set, options, timing), { wrap: sweepWrap(set, timing), turn: options.turn ?? ingestionTurn });
+    const timing = newTiming();
+    return await runPassOffThread(sweepPass(set, options, timing), { wrap: sweepWrap(set, timing, options.now ?? (() => performance.now())), turn: options.turn ?? ingestionTurn });
   } finally { sweeping.delete(set); }
 }
 
@@ -147,8 +160,14 @@ function* sweepPass(set: TieredStoreSet, options: SweepOptions, timing: SliceTim
   const started = now();
   const budget = options.budgetMs ?? 0;
   // A budget is checked between items, not only between pages: one page of
-  // large items must not hold the thread for seconds.
-  const spent = budget > 0 ? () => now() - started >= budget : () => false;
+  // large items must not hold the thread for seconds. It is the time the
+  // slice holds the thread, as when the sweep ran in one stretch (rc.19):
+  // the turns between items and the finder's reads on the worker are not
+  // the loop's time, and counting them cut a slice on a busy engine to an
+  // item or two (rc.20 copy compare, 16 Nov: about 220 Telegram copies
+  // behind rc.19 over the same run).
+  const held = (): number => timing.heldMs + (timing.stretchAt === undefined ? 0 : now() - timing.stretchAt);
+  const spent = budget > 0 ? () => held() >= budget : () => false;
   const total = yield* sweepPage(set, options, spent, now, timing);
   const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
   let last = total.checked;
@@ -164,7 +183,7 @@ function* sweepPass(set: TieredStoreSet, options: SweepOptions, timing: SliceTim
   // something (pruned, even part of an item) or crossed the Ask bar.
   if (timing.pruneMs > 0 || total.purged > 0 || total.failed > 0 || timing.maxStatementMs >= SWEEP_LOG_STATEMENT_MS) {
     console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}`
-      + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete} max_statement_ms=${timing.maxStatementMs.toFixed(3)}`);
+      + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete} max_statement_ms=${timing.maxStatementMs.toFixed(3)} held_ms=${Math.round(timing.heldMs)}`);
   }
   return total;
 }

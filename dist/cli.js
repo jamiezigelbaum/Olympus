@@ -92343,16 +92343,25 @@ async function reclaimAutomaticSupersededCopies(set, reclaimStore = (_store, wor
     return true;
   }) ?? false;
 }
-function sweepWrap(set, timing) {
-  return (stretch) => withMainThreadSqlTiming(timing, () => set.ledger.withoutBusyWait(stretch));
+function sweepWrap(set, timing, now) {
+  return (stretch) => {
+    const at = now();
+    timing.stretchAt = at;
+    try {
+      return withMainThreadSqlTiming(timing, () => set.ledger.withoutBusyWait(stretch));
+    } finally {
+      timing.heldMs += now() - at;
+      timing.stretchAt = undefined;
+    }
+  };
 }
 async function sweepAutomaticSupersededCopiesInTurns(set, options = {}) {
   if (sweeping.has(set))
     return emptyReport();
   sweeping.add(set);
   try {
-    const timing = { pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false };
-    return await runPassOffThread(sweepPass(set, options, timing), { wrap: sweepWrap(set, timing), turn: options.turn ?? ingestionTurn });
+    const timing = newTiming();
+    return await runPassOffThread(sweepPass(set, options, timing), { wrap: sweepWrap(set, timing, options.now ?? (() => performance.now())), turn: options.turn ?? ingestionTurn });
   } finally {
     sweeping.delete(set);
   }
@@ -92361,7 +92370,8 @@ function* sweepPass(set, options, timing) {
   const now = options.now ?? (() => performance.now());
   const started = now();
   const budget = options.budgetMs ?? 0;
-  const spent = budget > 0 ? () => now() - started >= budget : () => false;
+  const held = () => timing.heldMs + (timing.stretchAt === undefined ? 0 : now() - timing.stretchAt);
+  const spent = budget > 0 ? () => held() >= budget : () => false;
   const total = yield* sweepPage(set, options, spent, now, timing);
   const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
   let last = total.checked;
@@ -92375,7 +92385,7 @@ function* sweepPass(set, options, timing) {
     last = page.checked;
   }
   if (timing.pruneMs > 0 || total.purged > 0 || total.failed > 0 || timing.maxStatementMs >= SWEEP_LOG_STATEMENT_MS) {
-    console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}` + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete} max_statement_ms=${timing.maxStatementMs.toFixed(3)}`);
+    console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}` + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete} max_statement_ms=${timing.maxStatementMs.toFixed(3)} held_ms=${Math.round(timing.heldMs)}`);
   }
   return total;
 }
@@ -92666,7 +92676,7 @@ function startSupersededSweepTicker(options = {}) {
     cancel();
   };
 }
-var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, SUPERSEDED_SWEEP_IDLE_TICK_MS = 250, SUPERSEDED_SWEEP_IDLE_AFTER_MS = 60000, SWEEP_LOG_STATEMENT_MS = 250, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3, RECLAIM_MAX_RETAINED_FREE_BYTES, RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1, emptyReport = () => ({ checked: 0, purged: 0, kept: 0, failed: 0, complete: false }), sweeping;
+var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, SUPERSEDED_SWEEP_IDLE_TICK_MS = 250, SUPERSEDED_SWEEP_IDLE_AFTER_MS = 60000, SWEEP_LOG_STATEMENT_MS = 250, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3, RECLAIM_MAX_RETAINED_FREE_BYTES, RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1, emptyReport = () => ({ checked: 0, purged: 0, kept: 0, failed: 0, complete: false }), newTiming = () => ({ pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false, heldMs: 0 }), sweeping;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
