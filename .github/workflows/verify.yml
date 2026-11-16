@@ -156,7 +156,7 @@ jobs:
           bun scripts/loop-stall-test.ts build --dir "$RUNNER_TEMP/ls" --items 40000
           sudo systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" -p MemoryMax=400M -p MemorySwapMax=0 \
             --setenv=HOME="$HOME" --setenv=PATH="$PATH" -- \
-            bun scripts/loop-stall-test.ts run --dir "$RUNNER_TEMP/ls" --seconds 120 --memory-max 400M --io-floor-ms 200 --io-wait-seconds 60 --quick
+            "$(command -v bun)" scripts/loop-stall-test.ts run --dir "$RUNNER_TEMP/ls" --seconds 120 --memory-max 400M --io-floor-ms 200 --io-wait-seconds 60 --quick
 
   put-back-mac:
     # The put-back must hold on APFS too (step-back, 16 Nov 2026). Not a required check.
