@@ -35386,7 +35386,9 @@ class SourceStorageUnavailableError extends Error {
   }
 }
 var adoptionEnabled = false;
+var storeOpens2 = 0;
 function frontReadOnly(options) {
+  storeOpens2 += 1;
   return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
 }
 function openConnectorStore(account, requested, env = process.env) {
@@ -37102,6 +37104,7 @@ var SCHEDULER_SOURCE_IDS = {
   archiveImports: "archive.imports",
   evernote: "evernote.notes"
 };
+var SOURCE_ARRIVAL_TARGET_MS = 10 * 60000;
 var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60000;
 var EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60000;
 var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;

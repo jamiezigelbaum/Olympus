@@ -70736,7 +70736,11 @@ import { basename as basename9, join as join45, resolve as resolve14, sep as sep
 function enableSourceRegistryAdoption() {
   adoptionEnabled = true;
 }
+function storeOpensSoFar() {
+  return storeOpens2;
+}
 function frontReadOnly(options) {
+  storeOpens2 += 1;
   return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
 }
 function openConnectorStore(account, requested, env = process.env) {
@@ -71144,7 +71148,7 @@ function storeFileCheckpoint(path, busyTimeoutMs = 2000) {
       closeSqliteStore(db, { checkpoint: false });
   }
 }
-var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, CAPTURE_CLAIM_RECLAIM_AGE_MS, busyWait = (ms) => Math.max(0, Math.floor(ms));
+var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, storeOpens2 = 0, CAPTURE_CLAIM_RECLAIM_AGE_MS, busyWait = (ms) => Math.max(0, Math.floor(ms));
 var init_source_storage = __esm(() => {
   init_store_write_guard();
   init_secret_locations();
@@ -99927,7 +99931,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
       }).finally(() => {
         probing = false;
       });
-    }, Math.min(LIVENESS_PROBE_MS, Math.max(1000, Math.floor(idleMs / 4))));
+    }, Math.min(LIVENESS_PROBE_MS, Math.max(50, Math.floor(idleMs / 4))));
     try {
       const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}${path}`, {
         method: "POST",
@@ -101475,19 +101479,21 @@ function builtInAnalystMaxTokensForChars(chars) {
     return 1024;
   return Math.max(512, Math.ceil(chars / 2));
 }
-function withBuiltInFallback(primary, builtIn) {
+function withBuiltInFallback(primary, builtIn, seen = { answered: false }) {
   const analyst = withEvidenceFormatOf({
     async analyze(pack, options) {
       try {
-        return await primary.analyze(pack, options);
+        const result = await primary.analyze(pack, options);
+        seen.answered = true;
+        return result;
       } catch (error) {
-        if (!isLocalServiceDown(error))
+        if (!isLocalServiceDown(error) || seen.answered)
           throw error;
         return builtIn.analyze(pack, options);
       }
     }
   }, primary, builtIn);
-  return registerLocalAnalystFallback(analyst, (fit) => withBuiltInFallback(fit(primary), fit(builtIn)));
+  return registerLocalAnalystFallback(analyst, (fit) => withBuiltInFallback(fit(primary), fit(builtIn), seen));
 }
 function isLocalServiceDown(error) {
   return error instanceof OperationError && error.code === "argus_unreachable" && !/timed out/i.test(error.message);
@@ -136099,14 +136105,23 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
   }
   return walks.length === 0 ? unreported ? false : undefined : walks.every(Boolean);
 }
+function changeWatchNote(scheduler) {
+  const watch = scheduler?.change_watch;
+  if (!watch || watch.state !== "polling")
+    return "";
+  const minutes = Math.max(1, Math.round(watch.poll_interval_seconds / 60));
+  const every = `checking every ${minutes} min because it can't watch for changes`;
+  return watch.meets_arrival_target ? `; ${every}` : `; ${every}, slower than the 10-minute target for new items`;
+}
 function freshnessFrom(corpus, scheduler) {
   const hours = scheduler?.freshness_hours;
   const threshold = scheduler?.freshness_threshold_hours;
   const stale = scheduler?.stale_sync_anomaly === true;
+  const polling = changeWatchNote(scheduler);
   if (hours !== undefined) {
     const checked = `Last checked ${relativeDurationFromHours(hours)}`;
     return {
-      label: stale ? `${checked}; refresh is late` : checked,
+      label: `${stale ? `${checked}; refresh is late` : checked}${polling}`,
       hours,
       ...threshold !== undefined ? { threshold_hours: threshold } : {},
       stale
@@ -184506,11 +184521,11 @@ var init_private_answer_contract = __esm(() => {
 // src/workers/chatgpt/private-answer-model.ts
 function createBuiltInPrivateAnswerModel(options) {
   const { model } = options;
-  const limits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
+  const baseLimits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
   return {
     status() {
       if (!model)
-        return { state: "no_model" };
+        return options.route ? { state: "ready" } : { state: "no_model" };
       if (options.available())
         return { state: "ready" };
       let status;
@@ -184526,8 +184541,15 @@ function createBuiltInPrivateAnswerModel(options) {
     },
     async answerPrivately(question, evidence, signal, observe, request) {
       const full = request?.detail === "full";
-      if (!model)
+      const chosen = await options.route?.().catch(() => {
+        return;
+      });
+      if (chosen && "unavailable" in chosen)
+        throw new PrivateRouteUnavailableError(chosen.modelId);
+      const route = chosen;
+      if (!model && !route)
         throw new Error("no private answer model");
+      const limits = baseLimits;
       const read = privateEvidence(evidence, limits.maxPassageChars);
       let unreadable = read.unreadable;
       const readableHits = new Set(read.sources);
@@ -184614,12 +184636,13 @@ function createBuiltInPrivateAnswerModel(options) {
       }
       const prompted = picked.map(hitOf);
       let revoked = false;
+      const answering = route?.model ?? model;
       const guarded = {
-        name: model.name,
-        spec: model.spec,
-        prepare: () => model.prepare(),
-        status: () => model.status(),
-        stop: () => model.stop(),
+        name: BUILT_IN_ANALYST_NAME,
+        spec: route ? { ...model?.spec ?? {}, modelId: route.modelId } : model.spec,
+        prepare: () => model?.prepare() ?? Promise.resolve(),
+        status: () => model?.status() ?? { state: "ready" },
+        stop: () => model?.stop() ?? Promise.resolve(),
         async complete(modelRequest) {
           const guard = async () => {
             const ok = await checkPrivateEvidence(options.eligible, prompted);
@@ -184631,7 +184654,7 @@ function createBuiltInPrivateAnswerModel(options) {
           return runWithLocalInferenceGuard(guard, async () => {
             await guard();
             observe?.modelStarting?.();
-            return model.complete(modelRequest);
+            return answering.complete(modelRequest);
           });
         }
       };
@@ -185047,12 +185070,22 @@ function record5(value) {
 function string4(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
-var PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MIN_REPEAT_WORDS = 3, MAX_PASSAGE_CHARS = 6000;
+var PrivateRouteUnavailableError, PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEVANCE_TEXT_CHARS = 400, MIN_REPEAT_WORDS = 3, MAX_PASSAGE_CHARS = 6000;
 var init_private_answer_model = __esm(() => {
   init_answer_activity();
+  init_analyst_built_in();
+  init_local_analyst_window();
   init_source_model_policy();
   init_evidence_versions();
   init_private_answer_contract();
+  PrivateRouteUnavailableError = class PrivateRouteUnavailableError extends Error {
+    modelId;
+    constructor(modelId) {
+      super(`The Private answer model ${modelId} is not answering right now.`);
+      this.name = "PrivateRouteUnavailableError";
+      this.modelId = modelId;
+    }
+  };
   PANEL_ANSWER_LIMITS = {
     maxItems: 4,
     relevanceMargin: 0.04,
@@ -185350,6 +185383,7 @@ function createLocalAnswerPath(options) {
     model: options.model,
     eligible,
     available: options.available,
+    ...options.route ? { route: options.route } : {},
     answer: answerPrivately,
     relevance: embeddingPanelRelevance(options.relevanceEmbedding),
     readItem: (item, request) => readLocalEvidenceItem({ lanes, item, ...request }),
@@ -221285,6 +221319,7 @@ class SourceScheduler {
   continueWake;
   changeDebounceMs;
   changeWakes = new Map;
+  changeWatchFailures = new Map;
   holdForAsk;
   constructor(options) {
     this.enabled = options.enabled;
@@ -221359,6 +221394,7 @@ class SourceScheduler {
   stop() {
     this.stops += 1;
     this.closeChangeSubscriptions(() => true);
+    this.changeWatchFailures.clear();
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
       this.timer = undefined;
@@ -221380,6 +221416,10 @@ class SourceScheduler {
       return;
     const wanted = new Map(this.sources.filter((source) => source.subscribeChanges !== undefined).map((source) => [source.sourceId, source]));
     this.closeChangeSubscriptions((sourceId, entry) => wanted.get(sourceId)?.subscribeChanges !== entry.subscribe);
+    for (const [sourceId, failure] of [...this.changeWatchFailures]) {
+      if (wanted.get(sourceId)?.subscribeChanges !== failure.subscribe)
+        this.changeWatchFailures.delete(sourceId);
+    }
     for (const [sourceId, source] of wanted) {
       if (this.changeWakes.has(sourceId))
         continue;
@@ -221390,13 +221430,20 @@ class SourceScheduler {
       };
       try {
         entry.unsubscribe = source.subscribeChanges(() => this.signalChange(sourceId, entry));
-      } catch {
+      } catch (error) {
         entry.closed = true;
         if (entry.timer)
           this.clearTimeoutImpl(entry.timer);
         delete entry.timer;
+        const known = this.changeWatchFailures.get(sourceId);
+        this.changeWatchFailures.set(sourceId, { subscribe: entry.subscribe, reason: changeWatchFailureReason(error) });
+        if (!known) {
+          const watch = this.changeWatchStatus(source);
+          console.warn(`[olympus:source-scheduler] change_watch_unavailable source_id=${sourceId} error_kind=${safeSchedulerErrorKind(error)} poll_interval_seconds=${watch.poll_interval_seconds} meets_arrival_target=${watch.meets_arrival_target}`);
+        }
         continue;
       }
+      this.changeWatchFailures.delete(sourceId);
       this.changeWakes.set(sourceId, entry);
     }
   }
@@ -222085,7 +222132,20 @@ ${request.taskId}`);
       freshness_threshold_hours: source.freshnessThresholdHours,
       ...freshnessHours !== undefined ? { freshness_hours: freshnessHours } : {},
       stale_sync_anomaly: source.cadence === "continuous" && (source.lastSyncCompletedAt ? freshnessHours === undefined || freshnessHours > source.freshnessThresholdHours : taskStatuses.some((task) => task.kind === "sync" && task.stale_anomaly === true)),
+      ...source.subscribeChanges ? { change_watch: this.changeWatchStatus(source) } : {},
       tasks: taskStatuses
+    };
+  }
+  changeWatchStatus(source) {
+    const failure = this.changeWatchFailures.get(source.sourceId);
+    const syncIntervals = this.states.filter((state) => state.source === source && state.task.kind === "sync").map((state) => taskIntervalMs(source, state.task));
+    const pollingMs = syncIntervals.length > 0 ? Math.min(...syncIntervals) : source.intervalMs;
+    const watching = this.changeWakes.has(source.sourceId) && !failure;
+    return {
+      state: watching ? "watching" : "polling",
+      ...watching ? {} : { reason: failure?.reason ?? "Change watching has not started yet." },
+      poll_interval_seconds: Math.round(pollingMs / 1000),
+      meets_arrival_target: watching || pollingMs <= SOURCE_ARRIVAL_TARGET_MS
     };
   }
   taskStatus(state, now) {
@@ -223146,6 +223206,14 @@ function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
 function utcDayOf(timestamp) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString().slice(0, 10) : undefined;
 }
+function changeWatchFailureReason(error) {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const firstLine = message.split(`
+`)[0]?.trim() ?? "";
+  if (!firstLine)
+    return "Change watching could not start.";
+  return firstLine.length > 200 ? `${firstLine.slice(0, 199)}…` : firstLine;
+}
 function safeSchedulerErrorKind(error) {
   if (error instanceof SourceSchedulerTaskFailure)
     return mapExplicitSchedulerErrorKind(error.errorKind);
@@ -223272,7 +223340,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_ASK_RECHECK_MS = 1000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_ASK_RECHECK_MS = 1000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SOURCE_ARRIVAL_TARGET_MS, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_provider_rate_limits();
   init_api();
@@ -223310,6 +223378,7 @@ var init_source_scheduler = __esm(() => {
     archiveImports: "archive.imports",
     evernote: "evernote.notes"
   };
+  SOURCE_ARRIVAL_TARGET_MS = 10 * 60000;
   SourceSchedulerTaskDeferral = class SourceSchedulerTaskDeferral extends Error {
     retryAt;
     counts;
@@ -236833,13 +236902,12 @@ self.onmessage = ({ data }) => {
       connections.set(path, held);
     }
     const started = performance.now();
-    let row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
-    // All copied and nothing reading: a large file is cut back now, since an
-    // idle store's writer may not commit again for a long time. With no
-    // busy wait it gives up at once if a reader or writer is there.
-    if (row.busy === 0 && row.log === row.checkpointed && data.walBytes > 67108864) {
-      row = held.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
-    }
+    // PASSIVE only. TRUNCATE takes the writer lock and holds it through its
+    // fsync and truncate, which on a busy disk outlasted a loop writer's 10 s
+    // busy wait: syncs failed with "database is locked" on the lane 6 gate
+    // (16 Nov). After a complete PASSIVE pass the writer's next commit
+    // rewinds the WAL, and journal_size_limit cuts the file back to 64 MB.
+    const row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
     postMessage({ id, ok: true, ms: performance.now() - started, busy: row.busy, log: row.log, checkpointed: row.checkpointed });
   } catch (error) {
     postMessage({ id, ok: false, error: error && error.name ? error.name : 'Error' });
@@ -244608,9 +244676,9 @@ function builtInBacksPrivateAnalyst(id, state, members, _availableIds) {
     return false;
   return members.some((member) => member.id === id && member.profile.provider === "local-openai-compatible");
 }
-async function probeLocalAnalystService(olympusConfig) {
+async function probeLocalAnalystService(olympusConfig, client = new DelphiClient(olympusConfig)) {
   try {
-    await new DelphiClient(olympusConfig).listModelsForProfile("source_answer", AbortSignal.timeout(3000));
+    await client.listModelsForProfile("source_answer", AbortSignal.timeout(3000));
     return true;
   } catch {
     return false;
@@ -244721,6 +244789,15 @@ function createAnalystForSovereigntyProfile(input) {
   const { profile } = input;
   const profileId = input.profileId ?? profile.model ?? profile.provider;
   if (profile.provider === "local-openai-compatible") {
+    const model = createLocalSovereigntyAnalystModel(input);
+    return model ? createAnalyst(model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" }) : undefined;
+  }
+  return createRemoteAnalystForSovereigntyProfile(input, profileId);
+}
+function createLocalSovereigntyAnalystModel(input) {
+  const { profile } = input;
+  const profileId = input.profileId ?? profile.model ?? profile.provider;
+  {
     if (!profile.baseUrl?.trim()) {
       throw new Error("Local sovereignty analyst profiles require baseUrl.");
     }
@@ -244738,8 +244815,11 @@ function createAnalystForSovereigntyProfile(input) {
     const model = createDelphiAnalystModel(new DelphiClient(config, undefined, {
       resolveSecretRef: () => apiKey
     }), { profile: "source_answer", preflightTimeoutMs: 0 });
-    return createAnalyst(input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" });
+    return input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model;
   }
+}
+function createRemoteAnalystForSovereigntyProfile(input, profileId) {
+  const { profile } = input;
   if (profile.provider === "openclaw-infer") {
     return createAnalyst(createOpenClawInferAnalystModel({
       model: profile.model,
@@ -244805,6 +244885,68 @@ function analystRouteTrustDomain(pack, localOnly) {
   }
   return "internal";
 }
+function createLocalPrivateRoute(input) {
+  const now = input.now ?? Date.now;
+  const models = new Map;
+  let checked;
+  const seenUp = new Set;
+  return async () => {
+    let member;
+    try {
+      member = input.firstMember();
+    } catch {
+      return;
+    }
+    if (!member || member.profile.provider !== "local-openai-compatible")
+      return;
+    if (!models.has(member.id)) {
+      try {
+        models.set(member.id, input.model(member));
+      } catch {
+        models.set(member.id, undefined);
+      }
+    }
+    const entry = models.get(member.id);
+    if (!entry)
+      return;
+    if (!checked || checked.id !== member.id || now() - checked.atMs >= PRIVATE_ROUTE_REACHABLE_TTL_MS) {
+      let up = false;
+      try {
+        up = await input.reachable(member);
+      } catch {
+        up = false;
+      }
+      checked = { id: member.id, atMs: now(), up };
+      if (up)
+        seenUp.add(member.id);
+    }
+    if (!checked.up) {
+      let standsIn = false;
+      try {
+        standsIn = !seenUp.has(member.id) && input.builtInStandsIn?.(member) === true;
+      } catch {
+        standsIn = false;
+      }
+      return standsIn ? undefined : { unavailable: true, modelId: entry.modelId };
+    }
+    const window2 = await input.window(entry.modelId, entry.baseUrl).catch(() => {
+      return;
+    });
+    return { model: entry.model, modelId: entry.modelId, windowTokens: window2?.windowTokens ?? 0 };
+  };
+}
+async function probeLocalSovereigntyProfile(olympusConfig, profile, apiKey) {
+  const config = structuredClone(olympusConfig);
+  config.argus.modelProfiles.source_answer = {
+    ...config.argus.modelProfiles.source_answer,
+    baseUrl: profile.baseUrl,
+    model: profile.model,
+    ...profile.secretRef ? { secretRef: profile.secretRef } : {},
+    purpose: "text_reasoning"
+  };
+  return probeLocalAnalystService(config, new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }));
+}
+var PRIVATE_ROUTE_REACHABLE_TTL_MS = 30000;
 var init_private_analysts = __esm(() => {
   init_analyst_tinfoil();
   init_local_analyst_window();
@@ -267498,6 +267640,7 @@ async function main() {
     }
   } : undefined);
   const answerBuiltInModel = workerBuiltInModel ? localModelActivity.track("built_in", workerBuiltInModel.model) : undefined;
+  let localPrivateRoute;
   registerBuiltInPrivateModel(workerBuiltInModel ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle } : undefined);
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
   let localWorkPending = () => false;
@@ -267702,6 +267845,15 @@ async function main() {
     canRestart: () => workerRestartsItself(workerLaunch, process.env),
     requestRestart: () => modelReloadInstalled && requestModelReload()
   });
+  const builtInAnswersFor = (id) => {
+    try {
+      const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" }).members;
+      const available = new Set(members.filter((member) => member.profile.provider !== "venice" || bootModelCredentials.get(member.id)).map((member) => member.id));
+      return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, members, available);
+    } catch {
+      return false;
+    }
+  };
   const modelSetup = new ModelSetupService({
     config: sovereigntyEngine.config,
     credentialState: modelCredentialState,
@@ -267715,15 +267867,7 @@ async function main() {
         return internalPolicyEmbeddingProvider?.dimension;
       return;
     },
-    builtInAnswers: (id) => {
-      try {
-        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" }).members;
-        const available = new Set(members.filter((member) => member.profile.provider !== "venice" || bootModelCredentials.get(member.id)).map((member) => member.id));
-        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, members, available);
-      } catch {
-        return false;
-      }
-    }
+    builtInAnswers: (id) => builtInAnswersFor(id)
   });
   const localModelDiscovery = new LocalModelDiscovery;
   const getModelSetup = () => {
@@ -269497,6 +269641,19 @@ ${key}`;
       });
     }
     const defaultLocalAnalyst = sovereigntyAnalysts.get("local-source-answer")?.analyst ?? defaultLocal;
+    localPrivateRoute = createLocalPrivateRoute({
+      firstMember: () => {
+        const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" });
+        return (pool.explicitOrder ?? pool.members)[0];
+      },
+      model: (member) => sovereigntyEngine.source === "env_bridge" && member.id === "local-source-answer" ? { model: localSourceAnswerModel, modelId: localEndpoint.model, ...!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {} } : (() => {
+        const model = createLocalSovereigntyAnalystModel({ profile: member.profile, profileId: member.id, localModelActivity, olympusConfig, env: process.env, bootSecretResolver });
+        return model ? { model, modelId: member.profile.model ?? member.id, ...!member.profile.secretRef && member.profile.baseUrl ? { baseUrl: member.profile.baseUrl } : {} } : undefined;
+      })(),
+      reachable: (member) => sovereigntyEngine.source === "env_bridge" && member.id === "local-source-answer" ? probeLocalAnalystService(olympusConfig) : probeLocalSovereigntyProfile(olympusConfig, member.profile),
+      window: (model, baseUrl) => resolveLocalAnalystWindow({ model, ...baseUrl ? { baseUrl } : {} }),
+      builtInStandsIn: (member) => builtInAnswersFor(member.id)
+    });
     const sourceReranker = createBuiltInRerankerResolver();
     sourceReranker();
     return createAnalystSourceIndexAnswerHandler({
@@ -270983,6 +271140,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const openCitedFile = process.platform === "darwin" || process.platform === "linux" ? (path, eligible) => openLocalFile(path, eligible, [...localDropboxRoots(), ...localFilesOpenableRoots()]) : undefined;
   const privateAnswerModel = createBuiltInPrivateAnswerModel({
     model: answerBuiltInModel,
+    route: () => localPrivateRoute?.() ?? Promise.resolve(undefined),
     eligible: privateEvidenceEligible,
     available: () => workerBuiltInModel?.available() ?? false,
     answer: answerPrivately,
@@ -271058,6 +271216,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       lanes: sourceAnswerLanes,
       model: answerBuiltInModel,
       available: () => workerBuiltInModel?.available() ?? false,
+      route: () => localPrivateRoute?.() ?? Promise.resolve(undefined),
       relevanceEmbedding: () => builtInEmbeddingOnly(secureLocalPolicyEmbeddingProvider ?? sourceIndexEmbeddingProvider, loadedBuiltInEmbedding),
       sourceLinks: (item) => {
         const provenance = item.provenance;
@@ -271890,7 +272049,22 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
-  const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2000) : undefined;
+  let frontMountsSeen;
+  let frontMountsLookUntil = 0;
+  let frontMountsLastLook = 0;
+  const frontMountRetry = engineFront ? setInterval(() => {
+    const snapshot = engineFront.status()?.snapshot;
+    const seen = `${snapshot?.instance_id ?? ""}:${snapshot?.stores_opened ?? ""}`;
+    const now = Date.now();
+    if (seen !== frontMountsSeen) {
+      frontMountsSeen = seen;
+      frontMountsLookUntil = now + FRONT_MOUNT_LOOK_AFTER_CHANGE_MS;
+    }
+    if (now >= frontMountsLookUntil && now - frontMountsLastLook < FRONT_MOUNT_LOOK_QUIET_MS)
+      return;
+    frontMountsLastLook = now;
+    refreshFrontMounts();
+  }, 2000) : undefined;
   frontMountRetry?.unref?.();
   if (!engineFront)
     keepVisibilityCurrent("after start");
@@ -272071,6 +272245,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts(),
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
+        stores_opened: storeOpensSoFar(),
         ...statusRecount ? { status_recount: statusRecount.health() } : {},
         ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth()),
         ...((files) => files ? { sqlite_files: files } : {})(sqliteFilesHealth()),
@@ -272269,7 +272444,7 @@ function workerListenPort(port) {
 function resolveEmailSourceBindHostFromEnv(env = process.env) {
   return resolveWorkerBindHost(env, ["OLYMPUS_EMAIL_SOURCE_HOST"]);
 }
-var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
+var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_MOUNT_LOOK_AFTER_CHANGE_MS = 60000, FRONT_MOUNT_LOOK_QUIET_MS = 60000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
 var init_server5 = __esm(async () => {
   init_analyst_tinfoil();
   init_evidence_reranker();
