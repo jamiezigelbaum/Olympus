@@ -16039,9 +16039,9 @@ function readStoreTotals(db) {
   if (!state)
     return;
   const rows = db.query("SELECT name, n FROM store_totals").all();
-  return totalsFromRows(rows, state.reconciled_at);
+  return storeTotalsFromRows(rows, state.reconciled_at);
 }
-function totalsFromRows(rows, reconciledAt) {
+function storeTotalsFromRows(rows, reconciledAt) {
   const totals = { items: 0, tombstonedItems: 0, chunks: 0, syncRuns: 0, vectorsByModel: {}, reconciledAt };
   for (const { name, n } of rows) {
     const value = Number(n);
@@ -30641,6 +30641,8 @@ ${parentKey(ref)}`, { ref, origin });
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
     const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
+    const kept = this.totals();
+    const countedTotals = kept ? storeTotalsFromRows(yield { sql: "SELECT name, n FROM store_totals", params: [], mode: "all" }, kept.reconciledAt) : undefined;
     const currentTier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
     const tier = {
       ...currentTier,
@@ -30878,7 +30880,8 @@ ${parentKey(ref)}`, { ref, origin });
         ...digestPresent ? { fastSearchReady: digestByModel.get(row.model_id) ?? 0 } : {}
       })),
       ...tierStatus ? { tier: tierStatus } : {},
-      ...last ? { lastSyncRun: last } : {}
+      ...last ? { lastSyncRun: last } : {},
+      ...countedTotals ? { countedTotals } : {}
     };
   }
   lastSyncRun() {

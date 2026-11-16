@@ -133,10 +133,11 @@ export function readStoreTotals(db: Database): StoreTotals | undefined {
   const state = db.query('SELECT reconciled_at FROM store_totals_state WHERE id = 1').get() as { reconciled_at: string } | null;
   if (!state) return undefined;
   const rows = db.query('SELECT name, n FROM store_totals').all() as Array<{ name: string; n: number }>;
-  return totalsFromRows(rows, state.reconciled_at);
+  return storeTotalsFromRows(rows, state.reconciled_at);
 }
 
-function totalsFromRows(rows: Array<{ name: string; n: number }>, reconciledAt: string): StoreTotals {
+/** The kept totals from `SELECT name, n FROM store_totals` rows (read in another snapshot, such as a status count's). */
+export function storeTotalsFromRows(rows: Array<{ name: string; n: number }>, reconciledAt: string): StoreTotals {
   const totals: StoreTotals = { items: 0, tombstonedItems: 0, chunks: 0, syncRuns: 0, vectorsByModel: {}, reconciledAt };
   for (const { name, n } of rows) {
     const value = Number(n);

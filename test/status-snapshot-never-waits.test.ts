@@ -12,7 +12,7 @@ import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { defineDropboxFilesCorpus } from '../src/workers/dropbox-files/index.ts';
 import { flushMicrotasks } from './helpers/test-clock.ts';
-import { DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
+import { DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, bringCountsForward, createSourceIndexStatusHandler, type SourceIndexConnectorStoreStatus } from '../src/workers/source-index/status.ts';
 import { STATUS_RECOUNT_MIN_GAP_MS, STATUS_RECOUNT_PACE_FACTOR, startPacedStatusRecount } from '../src/workers/engine/status-recount.ts';
 import { createTestClock, waitFor } from './helpers/test-clock.ts';
 
@@ -167,13 +167,39 @@ describe('live totals beside kept counts', () => {
       expect(after).not.toBe('waited');
       const shown = after as Awaited<ReturnType<typeof front.status>>;
       expect((shown.corpora[0] as typeof before).totals).toMatchObject({ items: 2, sync_runs: 2 });
-      expect((shown.corpora[0] as typeof before).counts.indexed_items).toBe(before.counts.indexed_items);
+      // The counts an import moves are brought forward by the totals at once;
+      // the snapshot keeps its age for what only a recount can say.
+      expect((shown.corpora[0] as typeof before).counts.indexed_items).toBe(before.counts.indexed_items + 1);
+      expect((shown.corpora[0] as typeof before).counts.chunks).toBe(before.counts.chunks + 1);
+      expect((shown.corpora[0] as { counts_brought_forward?: unknown }).counts_brought_forward).toEqual({ items: 1, chunks: 1, embedded_chunks: 0 });
       expect(shown.snapshot_age_ms).toBe(2_000);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+test('finished embedding shows at once: the parity follows the live vectors on the serving model', () => {
+  const counted = {
+    configured: true, corpus_id: CORPUS_ID, retrieval: { declared_mode: 'hybrid', servable_mode: 'hybrid', state: 'ready', model_id: 'm1' },
+    counts: { indexed_items: 3, tombstoned_items: 0, chunks: 3, embedded_chunks: 1, sync_runs: 1 },
+    embedding_parity: { required: true, chunks: 3, embedded_chunks: 1, missing_chunks: 2, refresh_needed: true,
+      backlog_estimate: { model_id: 'm1', missing_chunks: 2, estimated_tokens: 40, estimated_cost_usd: 0, price_source: 'config' } },
+    totals_at_count: { items: 3, tombstoned_items: 0, chunks: 3, sync_runs: 1, vectors_by_model: { m1: 1, old: 3 } },
+  } as unknown as SourceIndexConnectorStoreStatus;
+  // Lane 6 run 43777041779: both remaining chunks embedded right after the count.
+  const live = { items: 3, tombstoned_items: 0, chunks: 3, sync_runs: 1, vectors_by_model: { m1: 3, old: 3 }, reconciled_at: 'x' };
+  const shown = bringCountsForward(counted, live);
+  expect(shown.embedding_parity).toMatchObject({ chunks: 3, embedded_chunks: 3, missing_chunks: 0, refresh_needed: false });
+  expect(shown.embedding_parity!.backlog_estimate!.missing_chunks).toBe(0);
+  expect(shown.counts.embedded_chunks).toBe(3);
+  // Another model's vectors never count for the serving one; nothing moved, nothing changes.
+  expect(bringCountsForward(counted, { ...live, vectors_by_model: { m1: 1, old: 9 } })).toBe(counted);
+  // A new item with two chunks, not yet embedded: two more waiting.
+  const grown = bringCountsForward(counted, { ...live, items: 4, chunks: 5, vectors_by_model: { m1: 1 } });
+  expect(grown.counts).toMatchObject({ indexed_items: 4, chunks: 5 });
+  expect(grown.embedding_parity).toMatchObject({ chunks: 5, embedded_chunks: 1, missing_chunks: 4 });
 });
 
 describe("the background's paced status recount", () => {

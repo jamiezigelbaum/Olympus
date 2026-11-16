@@ -264,6 +264,16 @@ export interface SourceIndexConnectorStoreStatus extends SourceIndexCorpusStatus
   configured: true;
   /** Live plain totals; absent until the background's first reconcile of this store. */
   totals?: SourceIndexStoreTotals;
+  /**
+   * The totals as of the counts below (same snapshot). Each read brings the
+   * counts an import moves (items, chunks, vectors on the serving model, and
+   * the embedding parity built from them) forward by what the totals moved
+   * since, so finished work shows at once; the scope- and tier-adjusted
+   * counts stay as counted until the next recount.
+   */
+  totals_at_count?: Omit<SourceIndexStoreTotals, 'reconciled_at'>;
+  /** Present when the counts above were brought forward by the live totals. */
+  counts_brought_forward?: { items: number; chunks: number; embedded_chunks: number };
   /** Opaque approval revision binding these counts to one file-source scope. */
   scope_revision?: string;
   counts: {
@@ -635,10 +645,11 @@ export function createSourceIndexStatusHandler(
       const totals = totalsStores.get(corpus.corpus_id)?.totals?.();
       if (!totals) return corpus;
       changed = true;
-      return { ...corpus, totals: {
+      const live: SourceIndexStoreTotals = {
         items: totals.items, tombstoned_items: totals.tombstonedItems, chunks: totals.chunks, sync_runs: totals.syncRuns,
         vectors_by_model: totals.vectorsByModel, reconciled_at: totals.reconciledAt,
-      } };
+      };
+      return { ...bringCountsForward(corpus, live), totals: live };
     });
     return changed ? { ...result, corpora } : result;
   };
@@ -1085,6 +1096,59 @@ function connectorStoreStatus(
       : {}),
     skipped_item_metadata_reason: 'connector_store_item_metadata_not_exposed_to_castor',
     ...(extractionThroughput ? { content_extraction_throughput: extractionThroughput } : {}),
+    ...(status.countedTotals ? { totals_at_count: {
+      items: status.countedTotals.items, tombstoned_items: status.countedTotals.tombstonedItems, chunks: status.countedTotals.chunks,
+      sync_runs: status.countedTotals.syncRuns, vectors_by_model: status.countedTotals.vectorsByModel,
+    } } : {}),
+  };
+}
+
+/**
+ * Brings a corpus's import-moved counts forward from the totals at its count
+ * to the live totals (store-totals.ts): live items, chunks and vectors on the
+ * serving model, and the embedding parity built from them. A reused count
+ * otherwise showed finished embedding as still waiting for up to its reuse
+ * window (lane 6 run 43777041779: "embedded 1, missing 2" minutes after both
+ * chunks were embedded). Deltas only: the scope and tier filtering of the
+ * count stays, and the next recount replaces the estimate with a count.
+ */
+export function bringCountsForward(corpus: SourceIndexConnectorStoreStatus, live: SourceIndexStoreTotals): SourceIndexConnectorStoreStatus {
+  const at = corpus.totals_at_count;
+  if (!at) return corpus;
+  const model = corpus.retrieval?.model_id;
+  const items = (live.items - live.tombstoned_items) - (at.items - at.tombstoned_items);
+  const chunks = live.chunks - at.chunks;
+  const vectors = model === undefined ? 0 : (live.vectors_by_model[model] ?? 0) - (at.vectors_by_model[model] ?? 0);
+  if (items === 0 && chunks === 0 && vectors === 0 && live.tombstoned_items === at.tombstoned_items) return corpus;
+  const floor = (n: number) => Math.max(0, n);
+  const counts = {
+    ...corpus.counts,
+    indexed_items: floor(corpus.counts.indexed_items + items),
+    tombstoned_items: floor(corpus.counts.tombstoned_items + live.tombstoned_items - at.tombstoned_items),
+    chunks: floor(corpus.counts.chunks + chunks),
+    embedded_chunks: floor(corpus.counts.embedded_chunks + vectors),
+  };
+  const parity = corpus.embedding_parity;
+  const embedding_parity = parity === undefined ? undefined : (() => {
+    const total = floor(parity.chunks + chunks);
+    const embedded = Math.min(total, floor(parity.embedded_chunks + vectors));
+    const missing = parity.required ? floor(parity.missing_chunks + chunks - vectors) : 0;
+    const withheld = parity.private_tier_withheld?.chunks ?? 0;
+    return {
+      ...parity,
+      chunks: total,
+      embedded_chunks: embedded,
+      missing_chunks: missing,
+      refresh_needed: parity.required && missing > withheld,
+      ...(parity.backlog_estimate ? { backlog_estimate: { ...parity.backlog_estimate,
+        missing_chunks: Math.min(missing, floor(parity.backlog_estimate.missing_chunks + chunks - vectors)) } } : {}),
+    };
+  })();
+  return {
+    ...corpus,
+    counts,
+    ...(embedding_parity ? { embedding_parity } : {}),
+    counts_brought_forward: { items, chunks, embedded_chunks: vectors },
   };
 }
 

@@ -1,7 +1,7 @@
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
-  applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreWriteSequence, storeTotalsCountSql, storeTotalsInstalled,
+  applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreWriteSequence, storeTotalsCountSql, storeTotalsFromRows, storeTotalsInstalled,
   type StoreTotals, type StoreTotalsCount,
 } from './store-totals.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
@@ -1836,6 +1836,12 @@ export interface ConnectorStoreStatus {
     fastSearchReady?: number;
   }>;
   lastSyncRun?: ConnectorStoreSyncRun;
+  /**
+   * The store's kept totals (store-totals.ts) as of these counts, read in the
+   * same snapshot: a caller that reuses the counts adds what the totals moved
+   * since, so what an import changes shows at once.
+   */
+  countedTotals?: StoreTotals;
 }
 
 export interface ConnectorStoreStatusScope {
@@ -16050,6 +16056,12 @@ export class LocalConnectorStore {
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
     const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
+    // The kept totals in this count's own snapshot (one small read), so a
+    // reused count can be brought forward by exactly what was written since.
+    const kept = this.totals();
+    const countedTotals = kept
+      ? storeTotalsFromRows((yield { sql: 'SELECT name, n FROM store_totals', params: [], mode: 'all' }) as Array<{ name: string; n: number }>, kept.reconciledAt)
+      : undefined;
     // Tier ledger (design section 4.3): superseded and staged copies are
     // never counted, and neither they nor items pending classification are in
     // the parity denominator. A store without routed copies gets exactly the
@@ -16370,6 +16382,7 @@ export class LocalConnectorStore {
       })),
       ...(tierStatus ? { tier: tierStatus } : {}),
       ...(last ? { lastSyncRun: last } : {}),
+      ...(countedTotals ? { countedTotals } : {}),
     };
   }
 

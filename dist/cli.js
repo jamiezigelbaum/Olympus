@@ -45300,9 +45300,9 @@ function readStoreTotals(db) {
   if (!state)
     return;
   const rows = db.query("SELECT name, n FROM store_totals").all();
-  return totalsFromRows(rows, state.reconciled_at);
+  return storeTotalsFromRows(rows, state.reconciled_at);
 }
-function totalsFromRows(rows, reconciledAt) {
+function storeTotalsFromRows(rows, reconciledAt) {
   const totals = { items: 0, tombstonedItems: 0, chunks: 0, syncRuns: 0, vectorsByModel: {}, reconciledAt };
   for (const { name, n } of rows) {
     const value = Number(n);
@@ -69197,6 +69197,8 @@ ${parentKey(ref)}`, { ref, origin });
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
       const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
+      const kept = this.totals();
+      const countedTotals = kept ? storeTotalsFromRows(yield { sql: "SELECT name, n FROM store_totals", params: [], mode: "all" }, kept.reconciledAt) : undefined;
       const currentTier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
       const tier = {
         ...currentTier,
@@ -69434,7 +69436,8 @@ ${parentKey(ref)}`, { ref, origin });
           ...digestPresent ? { fastSearchReady: digestByModel.get(row.model_id) ?? 0 } : {}
         })),
         ...tierStatus ? { tier: tierStatus } : {},
-        ...last ? { lastSyncRun: last } : {}
+        ...last ? { lastSyncRun: last } : {},
+        ...countedTotals ? { countedTotals } : {}
       };
     }
     lastSyncRun() {
@@ -131151,14 +131154,15 @@ function createSourceIndexStatusHandler(options = {}) {
       if (!totals)
         return corpus;
       changed = true;
-      return { ...corpus, totals: {
+      const live = {
         items: totals.items,
         tombstoned_items: totals.tombstonedItems,
         chunks: totals.chunks,
         sync_runs: totals.syncRuns,
         vectors_by_model: totals.vectorsByModel,
         reconciled_at: totals.reconciledAt
-      } };
+      };
+      return { ...bringCountsForward(corpus, live), totals: live };
     });
     return changed ? { ...result, corpora } : result;
   };
@@ -131487,7 +131491,57 @@ function connectorStoreStatus(corpus, status, readinessCounts, extractionThrough
     },
     ...status.lastSyncRun ? { last_refresh: lastRefreshFromConnectorStoreSync(status.lastSyncRun) } : {},
     skipped_item_metadata_reason: "connector_store_item_metadata_not_exposed_to_castor",
-    ...extractionThroughput ? { content_extraction_throughput: extractionThroughput } : {}
+    ...extractionThroughput ? { content_extraction_throughput: extractionThroughput } : {},
+    ...status.countedTotals ? { totals_at_count: {
+      items: status.countedTotals.items,
+      tombstoned_items: status.countedTotals.tombstonedItems,
+      chunks: status.countedTotals.chunks,
+      sync_runs: status.countedTotals.syncRuns,
+      vectors_by_model: status.countedTotals.vectorsByModel
+    } } : {}
+  };
+}
+function bringCountsForward(corpus, live) {
+  const at = corpus.totals_at_count;
+  if (!at)
+    return corpus;
+  const model = corpus.retrieval?.model_id;
+  const items = live.items - live.tombstoned_items - (at.items - at.tombstoned_items);
+  const chunks = live.chunks - at.chunks;
+  const vectors = model === undefined ? 0 : (live.vectors_by_model[model] ?? 0) - (at.vectors_by_model[model] ?? 0);
+  if (items === 0 && chunks === 0 && vectors === 0 && live.tombstoned_items === at.tombstoned_items)
+    return corpus;
+  const floor = (n) => Math.max(0, n);
+  const counts = {
+    ...corpus.counts,
+    indexed_items: floor(corpus.counts.indexed_items + items),
+    tombstoned_items: floor(corpus.counts.tombstoned_items + live.tombstoned_items - at.tombstoned_items),
+    chunks: floor(corpus.counts.chunks + chunks),
+    embedded_chunks: floor(corpus.counts.embedded_chunks + vectors)
+  };
+  const parity = corpus.embedding_parity;
+  const embedding_parity = parity === undefined ? undefined : (() => {
+    const total = floor(parity.chunks + chunks);
+    const embedded = Math.min(total, floor(parity.embedded_chunks + vectors));
+    const missing = parity.required ? floor(parity.missing_chunks + chunks - vectors) : 0;
+    const withheld = parity.private_tier_withheld?.chunks ?? 0;
+    return {
+      ...parity,
+      chunks: total,
+      embedded_chunks: embedded,
+      missing_chunks: missing,
+      refresh_needed: parity.required && missing > withheld,
+      ...parity.backlog_estimate ? { backlog_estimate: {
+        ...parity.backlog_estimate,
+        missing_chunks: Math.min(missing, floor(parity.backlog_estimate.missing_chunks + chunks - vectors))
+      } } : {}
+    };
+  })();
+  return {
+    ...corpus,
+    counts,
+    ...embedding_parity ? { embedding_parity } : {},
+    counts_brought_forward: { items, chunks, embedded_chunks: vectors }
   };
 }
 function configuredCorpusStatus(corpus) {
