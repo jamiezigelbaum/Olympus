@@ -6703,8 +6703,8 @@ export async function main(): Promise<void> {
         ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
         ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
         ...((files) => (files ? { sqlite_files: files } : {}))(sqliteFilesHealth()),
-        // Read workers retired for a reply that missed its deadline, requests run again on a fresh one, and replies that came for nothing.
-        read_pool: (({ timeouts, retries, lateReplies, terminations }) => ({ timeouts, retries, late_replies: lateReplies, retired: terminations }))(readPoolDiagnostics()),
+        // Read workers retired for a reply they finished and never delivered, requests run again on a fresh one, and replies that came for nothing.
+        read_pool: (({ lostReplies, retries, lateReplies, terminations }) => ({ lost_replies: lostReplies, retries, late_replies: lateReplies, retired: terminations }))(readPoolDiagnostics()),
       }),
     });
     // A delete the front forwarded: stop answering ready (so no new front
