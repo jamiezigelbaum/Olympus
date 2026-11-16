@@ -250,7 +250,7 @@ describe('OpenAPI document', () => {
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
     const allRemote = exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name);
     expect([...allRemote].sort()).toEqual([...V0_4_PUBLIC_REMOTE_MCP_TOOLS].sort());
-    const remote = allRemote.filter(name => name !== 'source_item_read');
+    const remote = allRemote.filter(name => name !== 'source_item_read' && name !== 'source_deep_read' && name !== 'source_deep_read_status');
     expect(spec.paths['/api/v1/tools/source_item_read']).toBeUndefined();
     expect(Object.keys(spec.paths).sort()).toEqual(remote.map((name) => `/api/v1/tools/${name}`).sort());
     expect(Object.values(spec.paths as Record<string, any>).map((item) => Object.keys(item))).toEqual(remote.map(() => ['post']));

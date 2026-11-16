@@ -753,7 +753,7 @@ describe('remote evidence search', () => {
     const client = await searchClient(token);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status', 'source_item_read']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_deep_read', 'source_deep_read_status', 'source_index_status', 'source_item_read']);
       const search = tools.tools.find((tool) => tool.name === 'olympus_search')!;
       expect(search.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 
@@ -846,7 +846,7 @@ describe('remote evidence search', () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort())
-        .toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status', 'source_item_read']);
+        .toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_deep_read', 'source_deep_read_status', 'source_index_status', 'source_item_read']);
       const answer = await client.callTool({ name: 'source_answer', arguments: { question: 'what changed?' } });
       expect(answer.isError).toBeFalsy();
       expect(answered).toBe(1);

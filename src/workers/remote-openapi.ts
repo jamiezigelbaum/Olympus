@@ -170,7 +170,7 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
   const operation = findOperationByName(name);
   // A demo grant reaches only its read-only tools, answered like any unknown name.
   const demoRefused = options.demoGrant?.(verification.connection) === true && !DEMO_GRANT_REMOTE_TOOLS.includes(name);
-  if (name === 'source_item_read' || demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: 'remote' })) {
+  if (name === 'source_item_read' || name === 'source_deep_read' || name === 'source_deep_read_status' || demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: 'remote' })) {
     return failure(404, remoteSurfaceErrorOutput('unknown_operation'));
   }
   // On the published list, but this install has it switched off.
@@ -335,7 +335,7 @@ export function buildRemoteOpenApiSpec(options: { serverUrl?: string } = {}): Re
   const rendering = neutralSpecConfig();
   // Read handles belong to the live MCP handler, never to the REST surface.
   const exposed = exposedOperations(operations, { config: rendering, surface: 'remote' })
-    .filter(operation => operation.name !== 'source_item_read');
+    .filter(operation => operation.name !== 'source_item_read' && operation.name !== 'source_deep_read' && operation.name !== 'source_deep_read_status');
   const paths = Object.fromEntries(exposed.map((operation) => [
     `${REMOTE_OPENAPI_TOOLS_PREFIX}${operation.name}`,
     { post: openApiOperation(operation, rendering) },
