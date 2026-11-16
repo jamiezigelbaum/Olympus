@@ -594,7 +594,9 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   // One line per run (plan, 16 Nov 2026): worst stall and its site on each engine, then pass or fail.
   const worstSite = (role: string) => {
     const worst = cpuFreezes.filter(row => row.role === role).sort((a, b) => (b.freezes as { maxMs?: number }).maxMs! - (a.freezes as { maxMs?: number }).maxMs!)[0]?.freezes as { self?: [string, number][]; total?: [string, number][] } | undefined;
-    return worst?.self?.[0]?.[0] ?? worst?.total?.[0]?.[0] ?? 'no sample';
+    // The leaf ("run", "all") names only SQLite; the first product frame on the stack names the caller.
+    const product = worst?.total?.find(([frame]) => / \S+\.ts:\d+/.test(frame) && !frame.includes('main-thread-sql-trace') && !frame.includes('bun:'))?.[0];
+    return product ?? worst?.self?.[0]?.[0] ?? 'no sample';
   };
   console.log(`${options.runCase}: background worst ${Math.round(background.max_ms)} ms at ${worstSite('background')}; front worst ${Math.round(front.max_ms)} ms at ${worstSite('front')}; ${pass ? 'PASS' : 'FAIL'}`
     + ` (bar ${LOOP_STALL_LIMIT_MS} ms; over 250/100 ms: ${background.over_budget}/${front.over_budget}; slow SQL ${slow_sql.length}; workloads ${workload_ok ? 'complete' : 'INCOMPLETE'}; WALs over 64 MB at end ${guards.wal_over_limit.length}; background reads over 2 s ${guards.background_reads_over_2s.length})`);

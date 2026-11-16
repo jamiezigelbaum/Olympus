@@ -18686,7 +18686,14 @@ function readInBackground(dbPath, query) {
 }
 var READ_POOL_RESCORE_READERS = 3;
 var READ_POOL_QUEUE_PER_STORE = 8;
-var OFF_THREAD_READ_TIMEOUT_MS = 120000;
+var lostReplyCheckMs = 2000;
+
+class OffThreadReadLostError extends Error {
+  constructor() {
+    super("off-thread read reply was lost");
+    this.name = "OffThreadReadLostError";
+  }
+}
 
 class OffThreadReadBusyError extends Error {
   code = SOURCE_INDEX_LANE_BUSY_CODE;
@@ -18711,6 +18718,8 @@ import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
 const connections = new Map();
+// [request running, last request finished], read by the request thread.
+let progress;
 const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
@@ -18752,6 +18761,7 @@ const connection = (path) => {
 };
 self.onmessage = (event) => {
   const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
+  if (op === 'progress') { progress = new Int32Array(event.data.buffer); return; }
   if (op === 'release') {
     const held = connections.get(path);
     connections.delete(path);
@@ -18762,6 +18772,7 @@ self.onmessage = (event) => {
     for (const open of snapshots.values()) if (open.path === path) open.discard = true;
     return;
   }
+  if (progress) Atomics.store(progress, 0, id);
   try {
     if (op === 'open') {
       const held = snapshotConnection(path);
@@ -18793,12 +18804,15 @@ self.onmessage = (event) => {
   } catch (error) {
     const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
+  } finally {
+    // After the reply is posted: finished, so a reply missing past here was lost.
+    if (progress) { Atomics.store(progress, 1, id); Atomics.store(progress, 0, 0); }
   }
 };
 `;
 var threads = [];
 var nextId = 1;
-var counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
+var counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0, lostReplies: 0, retries: 0, lateReplies: 0 };
 var startedStores = new Set;
 var storeOpens = new Map;
 var queues = new Map;
@@ -18825,6 +18839,11 @@ function startThread(store, lane = "shared") {
       counters.restarts += 1;
     startedStores.add(store);
     const started = { store, lane, worker, pending: new Map, snapshots: 0 };
+    if (typeof SharedArrayBuffer === "function") {
+      const buffer = new SharedArrayBuffer(8);
+      started.progress = new Int32Array(buffer);
+      worker.postMessage({ op: "progress", buffer });
+    }
     worker.onmessage = (event) => {
       const message = event.data;
       const diagnostic = message;
@@ -18839,11 +18858,11 @@ function startThread(store, lane = "shared") {
       }
       started.executingStore = undefined;
       const waiting = started.pending.get(message.id);
-      if (!waiting)
+      if (!waiting) {
+        counters.lateReplies += 1;
         return;
+      }
       started.pending.delete(message.id);
-      if (waiting.timer !== undefined)
-        clock2.clearTimeout(waiting.timer);
       if (typeof message.ms === "number")
         waiting.sqlMs?.(message.ms);
       if (message.ok)
@@ -18873,11 +18892,8 @@ function retire(stopped, error) {
     return;
   stopped.retired = true;
   counters.terminations += 1;
-  for (const waiting of stopped.pending.values()) {
-    if (waiting.timer !== undefined)
-      clock2.clearTimeout(waiting.timer);
+  for (const waiting of stopped.pending.values())
     waiting.reject(error);
-  }
   stopped.pending.clear();
   try {
     stopped.worker.terminate();
@@ -18886,24 +18902,47 @@ function retire(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS, sqlMs) {
+function send(reader, message, sqlMs) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    const timer = timeoutMs === null ? undefined : clock2.setTimeout(() => {
-      retire(reader, new Error("off-thread read timed out"));
-    }, timeoutMs);
-    reader.pending.set(id, { resolve, reject, ...timer !== undefined ? { timer } : {}, ...sqlMs ? { sqlMs } : {} });
+    reader.pending.set(id, { resolve, reject, ...sqlMs ? { sqlMs } : {} });
+    armLostReplyCheck();
     try {
       reader.worker.postMessage({ ...message, id });
     } catch (error) {
       reader.pending.delete(id);
-      if (timer !== undefined)
-        clock2.clearTimeout(timer);
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
+}
+var lostReplyCheck;
+function armLostReplyCheck() {
+  if (lostReplyCheck !== undefined)
+    return;
+  lostReplyCheck = clock2.setTimeout(checkLostReplies, lostReplyCheckMs);
+}
+function checkLostReplies() {
+  lostReplyCheck = undefined;
+  for (const reader of live()) {
+    if (!reader.progress)
+      continue;
+    const finished = Atomics.load(reader.progress, 1);
+    for (const [id, waiting] of reader.pending) {
+      if (id > finished)
+        continue;
+      if (!waiting.finishedSeen) {
+        waiting.finishedSeen = true;
+        continue;
+      }
+      counters.lostReplies += 1;
+      retire(reader, new OffThreadReadLostError);
+      break;
+    }
+  }
+  if (threads.some((reader) => !reader.retired && reader.pending.size > 0))
+    armLostReplyCheck();
 }
 async function withOffThreadSnapshot(dbPath, work, options = {}) {
   const lane = options.lane ?? "shared";
@@ -18917,17 +18956,42 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
     throw new OffThreadReadBusyError;
   if (free)
     free.snapshots += 1;
-  const reader = free ?? await snapshotThread(dbPath, lane);
-  if ((releases.get(dbPath) ?? 0) !== generation) {
-    reader.snapshots -= 1;
-    dispatch();
-    throw new OffThreadReadBusyError;
-  }
-  const snapshot = nextId++;
-  let reserveWaitMs = clock2.now() - askedAtMs;
-  const perRead = lane === "background" || options.perRead === true;
+  let reader = free ?? await snapshotThread(dbPath, lane);
   try {
-    await send(reader, { op: "open", snapshot, path: dbPath, perRead });
+    if ((releases.get(dbPath) ?? 0) !== generation)
+      throw new OffThreadReadBusyError;
+    let snapshot = nextId++;
+    let reserveWaitMs = clock2.now() - askedAtMs;
+    const perRead = lane === "background" || options.perRead === true;
+    const open = async () => {
+      await send(reader, { op: "open", snapshot, path: dbPath, perRead });
+    };
+    let retryLeft = true;
+    let moving;
+    const moveToFreshWorker = () => {
+      if (moving)
+        return moving;
+      retryLeft = false;
+      counters.retries += 1;
+      moving = (async () => {
+        reader.snapshots -= 1;
+        reader = undefined;
+        dispatch();
+        reader = await snapshotThread(dbPath, lane);
+        if ((releases.get(dbPath) ?? 0) !== generation)
+          throw new OffThreadReadBusyError;
+        snapshot = nextId++;
+        await open();
+      })();
+      return moving;
+    };
+    try {
+      await open();
+    } catch (error) {
+      if (!(error instanceof OffThreadReadLostError) || !retryLeft)
+        throw error;
+      await moveToFreshWorker();
+    }
     if (!perRead)
       markRead(dbPath, snapshot, { atMs: clock2.now(), lane, site });
     try {
@@ -18942,10 +19006,23 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         const queueWaitMs = reserveWaitMs;
         reserveWaitMs = 0;
         let sqlMs = 0;
-        try {
-          const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
+        const once = async () => {
+          if (moving)
+            await moving;
+          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, (ms) => {
             sqlMs = ms;
           });
+        };
+        try {
+          let rows;
+          try {
+            rows = await once();
+          } catch (error) {
+            if (!perRead || !(error instanceof OffThreadReadLostError) || !retryLeft && !moving)
+              throw error;
+            await moveToFreshWorker();
+            rows = await once();
+          }
           report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
@@ -18958,13 +19035,18 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         }
       });
     } finally {
-      await send(reader, { op: "close", snapshot }).catch(() => {
+      await moving?.catch(() => {
         return;
       });
+      if (reader)
+        await send(reader, { op: "close", snapshot }).catch(() => {
+          return;
+        });
       unmarkRead(dbPath, snapshot);
     }
   } finally {
-    reader.snapshots -= 1;
+    if (reader)
+      reader.snapshots -= 1;
     dispatch();
   }
 }
@@ -19026,12 +19108,7 @@ function snapshotThread(store, lane) {
       lane,
       resolve,
       reject,
-      timer: setTimeout(() => {
-        const at = snapshotWaiters.indexOf(waiter);
-        if (at >= 0)
-          snapshotWaiters.splice(at, 1);
-        reject(new Error("off-thread reads are busy"));
-      }, OFF_THREAD_READ_TIMEOUT_MS)
+      timer: undefined
     };
     snapshotWaiters.push(waiter);
   });
@@ -19048,7 +19125,7 @@ function serveSnapshotWaiters() {
   }
 }
 function readOnPool(dbPath, read, options = {}) {
-  const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
+  const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
   const waiting = queues.get(dbPath) ?? [];
   const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
@@ -19057,7 +19134,8 @@ function readOnPool(dbPath, read, options = {}) {
   }
   return new Promise((resolve, reject) => {
     const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, enqueuedAtMs: clock2.now(), report };
-    job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
+    if (Number.isFinite(deadlineAtMs))
+      job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
       queues.set(dbPath, waiting);
@@ -19164,9 +19242,24 @@ function dispatch() {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null, (ms) => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
       job.sqlMs = ms;
-    }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
+    }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
+      if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
+        job.retried = true;
+        counters.retries += 1;
+        job.thread = undefined;
+        job.sentAtMs = undefined;
+        const waiting = queues.get(job.store) ?? [];
+        waiting.unshift(job);
+        if (!queues.has(job.store)) {
+          queues.set(job.store, waiting);
+          turns.push(job.store);
+        }
+        return;
+      }
+      settle(job, { error: reader.retired ? new OffThreadReadBusyError : error });
+    }).finally(() => {
       if (reader.job === job)
         reader.job = undefined;
       dispatch();
@@ -30871,7 +30964,7 @@ ${parentKey(ref)}`, { ref, origin });
   }
   embeddingInputHashesChecked = false;
   embeddingInputHashWalk;
-  async repairEmbeddingInputHashes(pageKeys = 20000, pages = 10) {
+  async repairEmbeddingInputHashes(pageKeys = 2000, pages = 50) {
     if (this.readOnly || this.embeddingInputHashesChecked)
       return 0;
     const pool = offThreadReadsSupported(this.dbPath);
