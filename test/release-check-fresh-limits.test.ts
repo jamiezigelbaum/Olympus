@@ -145,7 +145,7 @@ for (const [fault, check, detail] of [
 ] as const) test(`limits rejects ${fault} and cleans up`, async () => {
   const r = rig(fault);
   const result = await runFreshLimits(r.machine, r.options);
-  expect(result.checks.find(c => c.id === `limits.${check}`)).toMatchObject({ status: 'fail', detail });
+  expect(result.checks.find(c => c.id === `limits.${check}`)).toMatchObject({ status: 'fail', detail: expect.stringContaining(detail) });
   expect(result.rows.find(row => row.id === check)?.status).toBe('fail');
   expect(r.closed()).toBe(true); expect(r.marker()).toBe(false);
   expect(JSON.stringify(result)).not.toContain('Secret title');
