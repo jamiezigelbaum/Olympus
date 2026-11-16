@@ -8908,6 +8908,7 @@ var DOCUMENT_FAMILIES = new Set(["file", "note"]);
 // src/core/analyst.ts
 var analystAbortSignalStorage = new AsyncLocalStorage5;
 var CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.";
+var CLAIM_RULE = `Each citation's "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.`;
 var ANALYST_SYSTEM = [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
   "Rules:",
@@ -8969,6 +8970,7 @@ var compactSystem = (notes = "off") => [
   "Return ONLY a single JSON object shaped exactly as:",
   `{"parts": string[], ${notes === "first" ? '"notes": [{"evidence": number, "fact": string}], ' : ""}"answer": string, "citations": [{"evidence": number, "claim": string}], "unanswered": string[], "sufficient": boolean}`,
   `"parts" lists each thing the question asks for, in the question's words, before you write "answer"; "answer" then gives every part the cited items hold.`,
+  CLAIM_RULE,
   '"sufficient" is true only when the evidence fully answers the question.'
 ].join(`
 `);
@@ -8985,6 +8987,7 @@ var ANALYST_AUDIT_SYSTEM = [
   "If the draft omitted or misstated any requested item, or missed a citation for a contributing candidate, replace it with a complete corrected JSON object even when the draft claimed it was sufficient.",
   'Set "sufficient" to true only when every requested item is answered and every contributing candidate is cited.',
   "Every claim you cite must be about something the corrected answer states; never cite a fact the answer leaves out.",
+  CLAIM_RULE,
   CONFLICT_RULE.slice(2),
   "Keep the corrected answer under six short sentences unless the question explicitly asks for a longer list, each citation claim to one short sentence, and every unanswered entry brief.",
   "Do not repeat the draft, evidence blocks, or source metadata in the corrected JSON.",
@@ -19181,6 +19184,8 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
             sqlMs = ms;
           });
         };
+        const laneProgress = currentSourceIndexReadProgress();
+        laneProgress?.began?.();
         try {
           let rows;
           try {
@@ -19198,6 +19203,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
           report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
           throw error;
         } finally {
+          laneProgress?.ended?.();
           if (perRead)
             unmarkRead(dbPath, readId);
           dispatch();
@@ -19302,7 +19308,7 @@ function readOnPool(dbPath, read, options = {}) {
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve, reject) => {
-    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, started: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
+    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
     if (Number.isFinite(deadlineAtMs))
       job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
@@ -19344,6 +19350,10 @@ function settle(job, outcome) {
     return;
   job.settled = true;
   clock2.clearTimeout(job.timer);
+  if (job.running) {
+    job.running = false;
+    job.lane?.ended?.();
+  }
   if (job.report) {
     const now = clock2.now();
     const sentAtMs = job.sentAtMs;
@@ -19411,7 +19421,11 @@ function dispatch() {
       queues.delete(store);
     job.thread = reader;
     job.sentAtMs = clock2.now();
-    job.started?.();
+    if (job.lane) {
+      job.lane();
+      job.lane.began?.();
+      job.running = true;
+    }
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
@@ -19423,6 +19437,10 @@ function dispatch() {
         counters.retries += 1;
         job.thread = undefined;
         job.sentAtMs = undefined;
+        if (job.running) {
+          job.running = false;
+          job.lane?.ended?.();
+        }
         const waiting = queues.get(job.store) ?? [];
         waiting.unshift(job);
         if (!queues.has(job.store)) {

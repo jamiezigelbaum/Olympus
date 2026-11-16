@@ -58,7 +58,8 @@ model directory; otherwise it uses
 Missing model or tokenizer files leave reranking off, with no wait or error.
 `OLYMPUS_SOURCE_RERANKER_POOL` overrides the default pool of 24 candidates;
 `OLYMPUS_SOURCE_RERANKER_MAX_TOKENS` overrides the default 256 tokens per pair
-(up to 512).
+(up to 512). `OLYMPUS_SOURCE_RERANKER_WINDOWS=all` scores every window of a long
+passage instead of its first (slower; an eval setting).
 
 The preset prerequisites are:
 

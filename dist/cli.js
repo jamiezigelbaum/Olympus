@@ -26678,6 +26678,7 @@ function createAnalyst(model, createOptions = {}) {
       if (arm === "first")
         notes = parseReadingNotes(completion.text, (number) => number >= 1 && number <= pack.candidates.length).notes;
       let parsed = parseAnalystModelOutput(completion.text);
+      let citedBeforeFold = false;
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
         const unseen = amountsMissingFrom(parsed?.answer ?? "", evidencePrompt.replace(`Question: ${pack.question}`, "").replace(restatedQuestion(pack), ""));
         const auditCompletion = await model.complete({
@@ -26688,6 +26689,7 @@ function createAnalyst(model, createOptions = {}) {
           ...bounded ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {}
         });
         parsed = parseAnalystModelOutput(auditCompletion.text) ?? parsed;
+        citedBeforeFold = hasGroundedPartialAnswer(parsed, pack);
         parsed = parsed ? foldCitationClaimsIntoAnswer(parsed, pack.candidates.length) : null;
       }
       const citations = mapCitations(parsed?.citations ?? [], pack.candidates);
@@ -26696,7 +26698,7 @@ function createAnalyst(model, createOptions = {}) {
         ...batchesCut > 0 ? [`Olympus carried ${NOTES_MAX} facts from each batch of items into this answer; ${batchesCut} of ${batches.length} batches held more, so some facts may be missing.`] : []
       ]);
       const sufficient = parsed?.sufficient ?? false;
-      if (localOnly && !sufficient && !hasGroundedPartialAnswer(parsed, pack) && !isUnsupportedNoContentAnswer(parsed)) {
+      if (localOnly && !sufficient && !citedBeforeFold && !hasGroundedPartialAnswer(parsed, pack) && !isUnsupportedNoContentAnswer(parsed)) {
         const reason = unanswered.length > 0 ? `Local evidence was insufficient: ${unanswered.join("; ")}` : "Local analysis could not confidently answer from the available evidence.";
         return {
           answer: "Local evidence was insufficient to fully answer this securely. " + "A redacted escalation has been prepared for approval before any cloud model is used.",
@@ -26775,9 +26777,17 @@ function buildCompactAnalystPrompt(pack, notes = [], closing = restatedQuestion(
 `);
 }
 function parseReadingNotes(text, shown) {
-  const listed = parseModelJsonObject(text)?.notes;
+  const lastWhole = text.lastIndexOf("}");
+  const whole = parseModelJsonObject(text);
+  const mended = whole ?? (lastWhole > 0 ? parseModelJsonObject(`${text.slice(0, lastWhole + 1)}]}`) : null);
+  const listed = mended?.notes;
   if (!Array.isArray(listed))
     return { notes: [], cut: false };
+  if (!whole)
+    return { notes: keepNotes(listed, shown).notes, cut: true };
+  return keepNotes(listed, shown);
+}
+function keepNotes(listed, shown) {
   const seen = new Set;
   const notes = [];
   for (const entry of listed) {
@@ -27152,7 +27162,7 @@ function mapCitations(raw, candidates) {
 }
 function foldCitationClaimsIntoAnswer(draft, candidateCount) {
   const lead = draft.answer.trim();
-  const stated = statedSentences(lead);
+  const stated = statedText(lead);
   const plans = [];
   for (const citation of draft.citations) {
     if (citation.evidence < 1 || citation.evidence > candidateCount)
@@ -27161,11 +27171,13 @@ function foldCitationClaimsIntoAnswer(draft, candidateCount) {
     if (!claim)
       continue;
     const rescuesEmptyAnswer = lead === "" && plans.length === 0;
-    if (!rescuesEmptyAnswer && !claimAddsToAnswer(claim, stated))
-      continue;
-    const plan = { sentence: asSentence(claim), shape: claimShape(claim) };
-    plans.push(plan);
-    absorbStatedSentences(stated, plan.sentence);
+    for (const sentence of sentenceTexts(claim)) {
+      if (!rescuesEmptyAnswer && sentenceIsStated(sentence, stated))
+        continue;
+      const plan = { sentence: asSentence(sentence), shape: claimShape(sentence) };
+      plans.push(plan);
+      absorbStatedText(stated, plan.sentence);
+    }
   }
   return reconcileCitations(draft, seatClaims(lead, plans), candidateCount);
 }
@@ -27190,17 +27202,17 @@ function seatClaims(lead, plans) {
   return enumerated ? seatAll() : answer;
 }
 function reconcileCitations(draft, answer, candidateCount) {
-  const stated = statedSentences(answer);
+  const stated = statedText(answer);
   const citations = [];
   const gaps = [];
   for (const citation of draft.citations) {
     const claim = citation.claim.trim();
     const inRange = citation.evidence >= 1 && citation.evidence <= candidateCount;
-    if (!inRange || !claim || !claimAddsToAnswer(claim, stated)) {
+    const sentences = inRange && claim ? sentenceTexts(claim) : [];
+    const unstated = sentences.filter((sentence) => !sentenceIsStated(sentence, stated));
+    if (unstated.length < sentences.length || sentences.length === 0)
       citations.push(citation);
-      continue;
-    }
-    gaps.push(`Cited but not stated in the answer: ${claim}`);
+    gaps.push(...unstated.length === sentences.length ? unstated.length > 0 ? [`Cited but not stated in the answer: ${claim}`] : [] : unstated.map((sentence) => `Cited but not stated in the answer: ${sentence}`));
   }
   if (gaps.length === 0) {
     return answer === draft.answer ? draft : { ...draft, answer };
@@ -27216,14 +27228,14 @@ function asSentence(claim) {
   const hasSentenceEnd = [".", "!", "?"].some((suffix) => claim.endsWith(suffix));
   return hasSentenceEnd ? claim : `${claim}.`;
 }
-function statedSentences(text) {
-  return new Set(sentenceKeys(text));
+function statedText(text) {
+  return { sentences: new Set(sentenceKeys(text)) };
 }
-function absorbStatedSentences(stated, text) {
+function absorbStatedText(stated, text) {
   for (const key of sentenceKeys(text))
-    stated.add(key);
+    stated.sentences.add(key);
 }
-function sentenceKeys(text) {
+function sentenceTexts(text) {
   const sentences = [];
   let sentenceInitial = true;
   for (const rawToken of compactSourceText(text).split(" ")) {
@@ -27234,13 +27246,13 @@ function sentenceKeys(text) {
     sentences[sentences.length - 1].push(rawToken);
     sentenceInitial = endsSentence(rawToken);
   }
-  return sentences.map((tokens) => {
-    const key = tokens.join(" ");
-    return key.endsWith(".") ? key.slice(0, -1) : key;
-  });
+  return sentences.map((tokens) => tokens.join(" "));
 }
-function claimAddsToAnswer(claim, stated) {
-  return sentenceKeys(claim).some((key) => !stated.has(key));
+function sentenceKeys(text) {
+  return sentenceTexts(text).map((key) => key.endsWith(".") ? key.slice(0, -1) : key);
+}
+function sentenceIsStated(sentence, stated) {
+  return stated.sentences.has(sentence.endsWith(".") ? sentence.slice(0, -1) : sentence);
 }
 function claimShape(claim) {
   const shape = { frame: new Set, facts: new Set };
@@ -27452,7 +27464,7 @@ function coerceCitation(value) {
 function stripCodeFences(text) {
   return text.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, NOTES_MAX = 12, NOTES_FACT_CHARS = 200, NOTES_OUTPUT_CHARS = 1600, NOTES_HEADING = "Reading notes (facts copied from the evidence; check each against its item):", AUDIT_NOTES_TAIL = "The corrected answer states every reading note that the evidence supports and that answers the question.", NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`, NOTES_BATCHED_HEADING = "Reading notes (facts copied from each item's text, which is not shown here):", AUDIT_BATCHED_NOTES_TAIL = "The candidates' text is not shown: the reading notes are the facts copied from it. The corrected answer states every reading note that answers the question, cited to its candidate.", compactSystem = (notes = "off") => [
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', CLAIM_RULE = `Each citation's "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.`, ANALYST_SYSTEM, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, NOTES_MAX = 12, NOTES_FACT_CHARS = 200, NOTES_OUTPUT_CHARS = 1600, NOTES_HEADING = "Reading notes (facts copied from the evidence; check each against its item):", AUDIT_NOTES_TAIL = "The corrected answer states every reading note that the evidence supports and that answers the question.", NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`, NOTES_BATCHED_HEADING = "Reading notes (facts copied from each item's text, which is not shown here):", AUDIT_BATCHED_NOTES_TAIL = "The candidates' text is not shown: the reading notes are the facts copied from it. The corrected answer states every reading note that answers the question, cited to its candidate.", compactSystem = (notes = "off") => [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence below.",
   "Each evidence item starts with its number and name, then its date and source, then its text in source_data.",
   "Rules:",
@@ -27472,6 +27484,7 @@ var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values
   "Return ONLY a single JSON object shaped exactly as:",
   `{"parts": string[], ${notes === "first" ? '"notes": [{"evidence": number, "fact": string}], ' : ""}"answer": string, "citations": [{"evidence": number, "claim": string}], "unanswered": string[], "sufficient": boolean}`,
   `"parts" lists each thing the question asks for, in the question's words, before you write "answer"; "answer" then gives every part the cited items hold.`,
+  CLAIM_RULE,
   '"sufficient" is true only when the evidence fully answers the question.'
 ].join(`
 `), ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, NOTES_SCHEMA, ANALYST_SCHEMA_MAX_PARTS = 4, ANALYST_SCHEMA_PART_CHARS = 60, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, packEvidenceBatches, promptEncoder, restatedQuestion = (pack) => `Answer this question from the evidence above: ${pack.question}`, notesQuestion = (pack) => `List the facts in the evidence above that answer this question: ${pack.question}`, notesBlock = (notes, heading = NOTES_HEADING) => notes.length > 0 ? ["", heading, ...notes.map((note) => `- [${note.evidence}] ${note.fact}`)] : [], AUDIT_DRAFT_HEADING = "Draft JSON:", AUDIT_UNSEEN_AMOUNTS = "Amounts in the draft that appear nowhere in the evidence:", AUDIT_UNSEEN_AMOUNTS_TAIL = ". Remove each from the answer unless the answer shows how it is computed from cited values.", AUDIT_EVIDENCE_HEADING = "Audit evidence:", ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
@@ -27535,6 +27548,7 @@ var init_analyst = __esm(() => {
     "If the draft omitted or misstated any requested item, or missed a citation for a contributing candidate, replace it with a complete corrected JSON object even when the draft claimed it was sufficient.",
     'Set "sufficient" to true only when every requested item is answered and every contributing candidate is cited.',
     "Every claim you cite must be about something the corrected answer states; never cite a fact the answer leaves out.",
+    CLAIM_RULE,
     CONFLICT_RULE.slice(2),
     "Keep the corrected answer under six short sentences unless the question explicitly asks for a longer list, each citation claim to one short sentence, and every unanswered entry brief.",
     "Do not repeat the draft, evidence blocks, or source metadata in the corrected JSON.",
@@ -52243,6 +52257,8 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
             sqlMs = ms;
           });
         };
+        const laneProgress = currentSourceIndexReadProgress();
+        laneProgress?.began?.();
         try {
           let rows;
           try {
@@ -52260,6 +52276,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
           report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
           throw error;
         } finally {
+          laneProgress?.ended?.();
           if (perRead)
             unmarkRead(dbPath, readId);
           dispatch();
@@ -52371,7 +52388,7 @@ function readOnPool(dbPath, read, options = {}) {
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve, reject) => {
-    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, started: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
+    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
     if (Number.isFinite(deadlineAtMs))
       job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
@@ -52413,6 +52430,10 @@ function settle(job, outcome) {
     return;
   job.settled = true;
   clock2.clearTimeout(job.timer);
+  if (job.running) {
+    job.running = false;
+    job.lane?.ended?.();
+  }
   if (job.report) {
     const now = clock2.now();
     const sentAtMs = job.sentAtMs;
@@ -52480,7 +52501,11 @@ function dispatch() {
       queues.delete(store);
     job.thread = reader;
     job.sentAtMs = clock2.now();
-    job.started?.();
+    if (job.lane) {
+      job.lane();
+      job.lane.began?.();
+      job.running = true;
+    }
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
@@ -52492,6 +52517,10 @@ function dispatch() {
         counters.retries += 1;
         job.thread = undefined;
         job.sentAtMs = undefined;
+        if (job.running) {
+          job.running = false;
+          job.lane?.ended?.();
+        }
         const waiting = queues.get(job.store) ?? [];
         waiting.unshift(job);
         if (!queues.has(job.store)) {
@@ -103955,12 +103984,22 @@ async function runCorpusLaneUntilIdle(run, timeoutMs, corpusId, clock = REAL_LAN
   const startedAt = Date.now();
   let active = true;
   let lastProgressAt = clock.now();
-  const report = () => {
+  let reading = 0;
+  const report = Object.assign(() => {
     if (!active)
       return;
     lastProgressAt = clock.now();
     noteSourceAnswerProgress("searching");
-  };
+  }, {
+    began: () => {
+      reading += 1;
+      report();
+    },
+    ended: () => {
+      reading = Math.max(0, reading - 1);
+      report();
+    }
+  });
   const runValidated = async () => {
     const response = await run(report);
     assertSafeCorpusSearchResponse(response);
@@ -104000,6 +104039,8 @@ async function runCorpusLaneUntilIdle(run, timeoutMs, corpusId, clock = REAL_LAN
     const arm = (delayMs) => {
       const dueAtMs = clock.now() + delayMs;
       timer = clock.setTimeout(() => {
+        if (reading > 0)
+          report();
         const now = clock.now();
         const remaining = timeoutMs - (now - lastProgressAt);
         if (remaining > 0) {
@@ -185105,6 +185146,8 @@ function createCrossEncoderReranker(options) {
         const owners = [];
         const windows = request.passages.flatMap((passage, index) => {
           const pairs = options.tokenizer.encodePairWindows(request.query, passage, maxPairTokens, Math.floor(maxPairTokens / WINDOW_OVERLAP_FRACTION));
+          if (!options.everyWindow)
+            pairs.length = Math.min(pairs.length, 1);
           for (let count = 0;count < pairs.length; count += 1)
             owners.push(index);
           return pairs;
@@ -185211,14 +185254,15 @@ function builtInRerankerFromEnv(options = {}) {
     session: () => runtime.createSession(modelPath, { threads }),
     tokenizer: existsSync104(vocabularyPath) ? new WordPieceTokenizer(readFileSync95(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync95(tokenizerPath, "utf8")),
     ...poolSize !== undefined ? { poolSize } : {},
-    ...maxPairTokens !== undefined ? { maxPairTokens } : {}
+    ...maxPairTokens !== undefined ? { maxPairTokens } : {},
+    ...env[SOURCE_RERANKER_WINDOWS_ENV]?.trim().toLowerCase() === "all" ? { everyWindow: true } : {}
   });
 }
 function positiveInteger7(value) {
   const parsed = Number(value?.trim());
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
-var SOURCE_RERANKER_ENV = "OLYMPUS_SOURCE_RERANKER", SOURCE_RERANKER_MODEL_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_MODEL_DIR", SOURCE_RERANKER_POOL_ENV = "OLYMPUS_SOURCE_RERANKER_POOL", SOURCE_RERANKER_THREADS_ENV = "OLYMPUS_SOURCE_RERANKER_THREADS", SOURCE_RERANKER_RUNTIME_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR", SOURCE_RERANKER_MAX_TOKENS_ENV = "OLYMPUS_SOURCE_RERANKER_MAX_TOKENS", MAX_PAIR_TOKENS = 512, BATCH_SIZE = 8, DEFAULT_PAIR_TOKENS = 256, WINDOW_OVERLAP_FRACTION = 8, IDLE_RELEASE_MS, DEFAULT_ON_MIN_MEMORY_BYTES;
+var SOURCE_RERANKER_ENV = "OLYMPUS_SOURCE_RERANKER", SOURCE_RERANKER_MODEL_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_MODEL_DIR", SOURCE_RERANKER_POOL_ENV = "OLYMPUS_SOURCE_RERANKER_POOL", SOURCE_RERANKER_THREADS_ENV = "OLYMPUS_SOURCE_RERANKER_THREADS", SOURCE_RERANKER_RUNTIME_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR", SOURCE_RERANKER_MAX_TOKENS_ENV = "OLYMPUS_SOURCE_RERANKER_MAX_TOKENS", SOURCE_RERANKER_WINDOWS_ENV = "OLYMPUS_SOURCE_RERANKER_WINDOWS", MAX_PAIR_TOKENS = 512, BATCH_SIZE = 8, DEFAULT_PAIR_TOKENS = 256, WINDOW_OVERLAP_FRACTION = 8, IDLE_RELEASE_MS, DEFAULT_ON_MIN_MEMORY_BYTES;
 var init_built_in_reranker = __esm(() => {
   init_off_thread();
   init_evidence_reranker();

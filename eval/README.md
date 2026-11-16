@@ -742,6 +742,8 @@ bun eval/run-panel.ts --data-root <offline-copy> \
   --limits today <passage-dataset.json>
 ```
 
+`--only id,id` scores only those questions (the quick screen: the ones that fail today plus a few that pass). The receipt also carries `minutes`, `answerModelCalls` and `judgeCalls`. The panel picks and fits its own evidence, so it cannot reuse an Ask baseline's answers (`--answers`); run `today` and `window` on the same ids instead.
+
 `--limits today` (default) uses the panel's current limits. `--limits window`
 uses `panelLimitsForWindow` with the route's served window, and fails if that
 window cannot be determined. The window and effective item/prompt budgets are

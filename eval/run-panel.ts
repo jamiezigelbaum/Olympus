@@ -23,6 +23,8 @@ export interface PanelEvalOptions {
   model: string;
   limits: 'today' | 'window';
   split?: 'open' | 'sealed';
+  /** Score only these question ids (a screen on the questions that matter). */
+  only?: readonly string[];
 }
 
 interface PanelRow {
@@ -49,12 +51,20 @@ export async function runPanelEval(options: PanelEvalOptions) {
     provider: 'local-openai-compatible', trust: 'local', purpose: 'analyst',
     baseUrl: options.modelBaseUrl, model: options.model,
   } };
+  let modelCalls = 0;
+  const startedAt = Date.now();
   const route = createLocalPrivateRoute({
     log: () => console.error(JSON.stringify({ routeErrors: 1 })),
     firstMember: () => member,
     model: () => {
       const model = createLocalSovereigntyAnalystModel({ profile: member.profile, olympusConfig: config, env: {} });
-      return model ? { model, modelId: options.model, baseUrl: options.modelBaseUrl } : undefined;
+      if (!model) return undefined;
+      // Count every call the panel makes to the answer model (numbers only).
+      const counted = new Proxy(model, { get: (target, key, receiver) => {
+        const value = Reflect.get(target, key, receiver);
+        return typeof value === 'function' ? (...args: unknown[]) => { modelCalls += 1; return (value as (...a: unknown[]) => unknown).apply(target, args); } : value;
+      } });
+      return { model: counted, modelId: options.model, baseUrl: options.modelBaseUrl };
     },
     reachable: () => probeLocalSovereigntyProfile(config, member.profile),
     window: (model, baseUrl) => resolveLocalAnalystWindow({ model, ...(baseUrl ? { baseUrl } : {}) }),
@@ -70,7 +80,8 @@ export async function runPanelEval(options: PanelEvalOptions) {
     const embedding = await prepareEvalEmbedding({ configured: {} });
     const lanes = createEvalPrivateLanes({ ...opened, embeddingFor: embedding.embeddingFor });
     const rows: PanelRow[] = [];
-    for (const question of options.dataset.questions.filter(q => (q.split ?? 'open') === (options.split ?? 'open'))) {
+    let judgeCalls = 0;
+    for (const question of options.dataset.questions.filter(q => (q.split ?? 'open') === (options.split ?? 'open') && (!options.only || options.only.includes(q.id)))) {
       opened.checkFileDescriptors();
       const evidence = await searchPrivateEvidence({ lanes, question: question.question });
       const matches = (expected: { corpusId: string; providerItemId?: string }, hit: typeof evidence.candidates[number]) =>
@@ -96,6 +107,7 @@ export async function runPanelEval(options: PanelEvalOptions) {
       }
 
       const expected = (question.expectedEvidence ?? []).map(item => item.quote).filter(Boolean).join('\n') || (question.expectedAnswerContains ?? []).join('; ');
+      if (expected && answer) judgeCalls += 1;
       const meaning = expected && answer ? await judge(question.question, expected, answer.answer) : null;
       const needed = [...new Map((question.neededFiles ?? []).map(file => [JSON.stringify([file.corpusId, file.providerItemId]), file])).values()];
       rows.push({ id: question.id, matched: evidence.matched, foundDoc: Number(foundDoc), foundParagraph: Number(foundParagraph),
@@ -106,6 +118,7 @@ export async function runPanelEval(options: PanelEvalOptions) {
     }
     const sum = (key: Exclude<keyof typeof rows[number], 'id'>) => rows.reduce((n, row) => n + row[key], 0);
     return { windowTokens: chosen.windowTokens, maxItems: limits.maxItems, maxPromptBytes: limits.maxPromptBytes, retrievalHybrid: 0,
+      minutes: Math.round((Date.now() - startedAt) / 6_000) / 10, answerModelCalls: modelCalls, judgeCalls,
       stores: opened.stores.length, skippedStores: opened.skipped.length, questions: rows.length,
       foundDoc: sum('foundDoc'), foundParagraph: sum('foundParagraph'), answeredCorrectly: sum('answeredCorrectly'),
       answeredPartially: sum('answeredPartially'), judgeUnknown: sum('judgeUnknown'), noEvidence: sum('noEvidence'), neededFiles: sum('neededFiles'), neededFilesRead: sum('neededFilesRead'),
@@ -123,7 +136,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (!arg.startsWith('--')) { if (datasetPath) throw new Error('One dataset required.'); datasetPath = arg; continue; }
     const separator = arg.indexOf('=');
     const key = separator < 0 ? arg : arg.slice(0, separator);
-    if (!['--limits', '--model-base-url', '--model', '--split'].includes(key)) throw new Error('Unsupported panel eval option.');
+    if (!['--limits', '--model-base-url', '--model', '--split', '--only'].includes(key)) throw new Error('Unsupported panel eval option.');
     const value = separator < 0 ? rest[++i] : arg.slice(separator + 1);
     if (!value || value.startsWith('--')) throw new Error('Option value required.');
     values.set(key, value);
@@ -133,7 +146,8 @@ export async function main(argv = process.argv.slice(2)) {
   if (!datasetPath || !modelBaseUrl || !model || !['today', 'window'].includes(limits) || !['open', 'sealed'].includes(split)) throw new Error('Invalid panel eval arguments.');
   const dataset: unknown = JSON.parse(readFileSync(datasetPath, 'utf8'));
   validatePassageDataset(dataset);
-  const receipt = await runPanelEval({ isolation, dataset, modelBaseUrl, model, limits: limits as 'today' | 'window', split: split as 'open' | 'sealed' });
+  const receipt = await runPanelEval({ isolation, dataset, modelBaseUrl, model, limits: limits as 'today' | 'window', split: split as 'open' | 'sealed',
+    ...(values.get('--only') ? { only: values.get('--only')!.split(',').map(id => id.trim()).filter(Boolean) } : {}) });
   console.log(JSON.stringify(receipt));
 }
 

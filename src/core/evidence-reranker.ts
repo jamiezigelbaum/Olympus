@@ -59,8 +59,8 @@ export interface EvidenceRerankAudit {
   elapsedMs: number;
 }
 
-// Characters of one candidate's text handed to the reranker, which reads all
-// of it in windows. A candidate is hydrated to its seat's share of the
+// Characters of one candidate's text handed to the reranker, which reads its
+// first window, or all of it in windows when set to score every window. A candidate is hydrated to its seat's share of the
 // evidence budget, which is below this at the shipped budgets, so this bounds
 // one request, not what is read.
 export const RERANK_PASSAGE_CHARS = 12_000;

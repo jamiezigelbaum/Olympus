@@ -59,7 +59,7 @@ function poolAdapter(path: string, reads: StoreRead[]): SourceIndexCorpusSearchA
   };
 }
 
-test('each lane reports its pool reads; a lane dropped for silence is a timeout, and its read is not cut by a clock', async () => {
+test('each lane reports its pool reads; a lane whose statement outruns the silence limit is waited for, not dropped', async () => {
   const path = storeFile();
   const registry = buildSourceIndexCorpusRegistry([
     defineSourceIndexCorpus({ corpusId: 'public_safe.quick', family: 'file', trustDomain: 'public_safe' }),
@@ -82,12 +82,13 @@ test('each lane reports its pool reads; a lane dropped for silence is a timeout,
   const quick = byCorpus.get('public_safe.quick')!;
   expect(quick.outcome).toBe('success');
   expect(quick.pool).toMatchObject({ reads: 2, refused: 0, dropped_queued: 0, past_deadline_running: 0, errors: 0 });
+  // A statement running on a read worker is work in progress (owner rule,
+  // 2026-11-16): the lane is waited for well past its 400 ms silence limit,
+  // and nothing is given up at a deadline.
   const stuck = byCorpus.get('public_safe.stuck')!;
-  expect(stuck.outcome).toBe('timeout');
-  // No deadline rides the read any more (owner rule, 2026-11-16): the lane is
-  // named as unfinished after 400 ms of silence, and the read itself runs on
-  // its worker, so nothing was given up at a deadline.
-  expect(stuck.pool?.past_deadline_running ?? 0).toBe(0);
+  expect(stuck.outcome).toBe('success');
+  expect(stuck.elapsed_ms).toBeGreaterThan(400);
+  expect(stuck.pool).toMatchObject({ reads: 1, past_deadline_running: 0, dropped_queued: 0, errors: 0 });
 });
 
 test('a read made outside a traced Ask lane is not counted', async () => {
