@@ -25,7 +25,7 @@ import { answerMeaningJudge } from './answer-judge.ts';
 import { enterStage, failureCode, runEvalCli, type EvalStage } from './cli-failure.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { calibratedSemanticRelevanceBar } from '../src/workers/connector-store/local-index.ts';
+import { calibratedSemanticRelevanceBar, CONNECTOR_STORE_CONVERSATION_INDEX_SQL } from '../src/workers/connector-store/local-index.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
@@ -96,6 +96,7 @@ export interface PassageRow {
   questionId: string; shape: string; families: string[]; tiers: string[];
   seatsFilled: number; answerable: boolean; object: HitScore; passage: HitScore;
   funnel?: FunnelRow; judge?: QuestionJudgement;
+  neededEvidence?: { needed: number; packed: number; seated: number; cited?: number; packedIds: number[]; seatedIds: number[]; citedIds?: number[] };
   answer?: PassageAnswer;
   /** Each answer arm's runs on this row's fitted pack (answerArms), in run order. */
   arms?: Record<string, PassageAnswer[]>;
@@ -248,13 +249,20 @@ function gradePassageAnswer(question: EvalQuestion, result: AnalystResult, detai
   const copy = !itself && result.citations.some(citation => expected.some(item =>
     citedCopyOfExpected(item, citation.provenance, corpusOf(citation), citationItemChunks(citation.provenance, detail.pack.candidates))));
   const cited = itself || copy;
-  const words = new Set(passageWords(result.answer));
-  const coverage = Math.max(0, ...expected.map(item => {
-    const content = passageWords(item.quote ?? '').filter(word => /^\p{L}{3,}$/u.test(word) && !ANSWER_STOP_WORDS.has(word));
+  const coverage = answerQuoteCoverage(expected.map(item => item.quote ?? ''), result.answer);
+  return { cited, coverage, right: cited && coverage >= ANSWER_RIGHT_COVERAGE, ...(cited ? { citedBy: itself ? 'item' as const : 'copy' as const } : {}) };
+}
+
+/** The share of an expected quote's content words the answer states, best quote first: the word half of the grading rule. */
+export function answerQuoteCoverage(quotes: readonly string[], answer: string): number {
+  const words = new Set(passageWords(answer));
+  return Math.max(0, ...quotes.map(quote => {
+    const content = passageWords(quote).filter(word => /^\p{L}{3,}$/u.test(word) && !ANSWER_STOP_WORDS.has(word));
     return content.length ? content.filter(word => words.has(word)).length / content.length : 0;
   }));
-  return { cited, coverage, right: cited && coverage >= 0.8, ...(cited ? { citedBy: itself ? 'item' as const : 'copy' as const } : {}) };
 }
+/** An answer is right when it cites the expected item and states this share of its quote's content words. */
+export const ANSWER_RIGHT_COVERAGE = 0.8;
 function grouped(rows: readonly PassageRow[], ks: readonly number[], groups: (row: PassageRow) => string[]): Record<string, PassageSummary> {
   const buckets = new Map<string, PassageRow[]>();
   for (const row of rows) for (const group of new Set(groups(row))) buckets.set(group, [...(buckets.get(group) ?? []), row]);
@@ -338,14 +346,30 @@ export async function runPassageEval(input: {
     }
     // Retrieval and fitting end here; answer and diagnostic calls have separate timings.
     const finished = performance.now();
+    // Expected-entry indexes are safe receipt ids; never print source ids or text.
+    const needed = question.expectedEvidence ?? [];
+    const matchingExpected = (candidate: EvidencePack['candidates'][number], index: number) => {
+      const expected = needed[index]!;
+      const corpus = resolveCitationCorpusId(candidate.provenance, detail.pack.candidates, detail.candidateCorpusIds);
+      return [expected, ...(expected.alternates ?? [])].some(item => item.corpusId === corpus && item.providerItemId === candidate.provenance.sourceItem.providerItemId);
+    };
+    const packedIds = needed.flatMap((_, index) => original.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
+    const seatedIds = needed.flatMap((_, index) => pack.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
+    const citedByAnswer = new WeakMap<PassageAnswer, number[]>();
     const answerWith = async (ask: AnswerFn): Promise<PassageAnswer> => {
       const answerStarted = performance.now();
       try {
         const result = await ask(question, pack);
+        const citedIds = needed.flatMap((_, index) => result.citations.some(citation =>
+          pack.candidates.some(candidate => candidate.provenance.sourceItem.providerItemId === citation.provenance.sourceItem.providerItemId
+            && resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds)
+              === resolveCitationCorpusId(candidate.provenance, detail.pack.candidates, detail.candidateCorpusIds)
+            && matchingExpected(candidate, index))) ? [index + 1] : []);
         const answerMs = performance.now() - answerStarted;
         const graded: PassageAnswer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs, answerChars: result.answer.length, citations: result.citations.length, ...(seated ? { seat: seated } : {}) };
         const expectedText = (question.expectedEvidence ?? []).map(item => item.quote).filter(Boolean).join('\n') || (question.expectedAnswerContains ?? []).join('; ');
         if (input.judgeAnswer && expectedText) graded.meaning = await input.judgeAnswer(question.question, expectedText, result.answer);
+        citedByAnswer.set(graded, citedIds);
         return graded;
       } catch (error) { return { outcome: 'failed', code: failureCode(error) ?? 'UNKNOWN' }; }
     };
@@ -367,6 +391,7 @@ export async function runPassageEval(input: {
       step('answer');
       answer = await answerWith(input.answer);
     }
+    const citedIds = answer ? citedByAnswer.get(answer) : undefined;
     const expectedStores = (question.expectedEvidence ?? []).map(e => stores.get(e.corpusId));
     const answerable = question.shape !== 'coverage_negative';
     const identities = (question.expectedEvidence ?? []).flatMap(expected => [expected, ...(expected.alternates ?? [])]);
@@ -394,6 +419,8 @@ export async function runPassageEval(input: {
       seatsFilled: pack.candidates.length, answerable, object: score(objectRank, ks), passage: score(passageRank, ks),
       ...(funnel ? { funnel } : {}), ...(judge ? { judge } : {}),
       ...(answer ? { answer } : {}), ...(arms ? { arms } : {}),
+      ...(needed.length > 1 ? { neededEvidence: { needed: needed.length, packed: packedIds.length, seated: seatedIds.length, packedIds, seatedIds,
+        ...(citedIds ? { cited: citedIds.length, citedIds } : {}) } } : {}),
       ...(detail.rerank ? { rerank: { outcome: detail.rerank.outcome, scored: detail.rerank.scored, promoted: detail.rerank.promoted, elapsedMs: detail.rerank.elapsedMs } } : {}),
       ...(degraded.length ? { degraded } : {}),
       timings: { buildPackMs: builtAt - started, fitMs: finished - builtAt, totalMs: finished - started, storeSearchMs: (detail.corpusTimings ?? []).reduce((n, t) => n + t.elapsedMs, 0) },
@@ -627,6 +654,15 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   const promptBytes = provider === 'local' ? positiveInteger(values.get('--prompt-bytes') ?? process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES) : undefined;
   enter('open_data_root');
   const opened = openEvalDataRoot(isolation);
+  // Conversation windows need their index, which no open creates; on an eval
+  // copy it is built here, up front, outside any timed question.
+  if (conversationWindowPerSide() > 0) {
+    enter('conversation_index');
+    for (const store of opened.stores) {
+      const db = new Database(store.dbPath);
+      try { db.exec(CONNECTOR_STORE_CONVERSATION_INDEX_SQL); } finally { db.close(); }
+    }
+  }
   const cleanups: Array<() => void> = [];
   try {
     const config = loadConfig();
@@ -696,6 +732,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     writeFileSync(output, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
     // Store counts lead the line, so a short open never reads as a retrieval miss (#1576).
     console.log(JSON.stringify({ storesOpened: opened.stores.length, storesSkipped: opened.skipped.length, ...receipt.summary }));
+    const multiItemEvidence = receipt.questions?.flatMap(row => row.neededEvidence ? [{ questionId: row.questionId, ...row.neededEvidence }] : []);
+    if (multiItemEvidence?.length) console.log(JSON.stringify({ multiItemEvidence }));
     if (probe && receipt.questions) console.log(JSON.stringify({ recallGroups: recallGroups(receipt.questions) }));
     if (storeTimes) console.log(JSON.stringify({ storeTimes: storeTimes.summary() }));
     if (values.has('--compare')) enter('compare');

@@ -270,6 +270,15 @@ const EMBEDDING_BATCH_SIZE = 32;
 const MAX_SELECTED_EMBED_ITEM_IDS = 25_000;
 const MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 const MIN_VECTOR_SCORE = 0.18;
+/**
+ * A conversation's messages by authored time, which conversationNeighbours
+ * needs. Not created at open: on a store of hundreds of thousands of rows the
+ * build is seconds of synchronous work. Eval copies create it up front
+ * (eval/run-passages.ts); the shipped build path is to be built off the loop.
+ */
+export const CONNECTOR_STORE_CONVERSATION_INDEX = 'idx_connector_store_items_conversation_time';
+export const CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
+  ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
 // How many of its nearest vector rows a store offers a reranked pool's
 // semantic seats (router withSemanticPoolSeats), whatever the bar.
 const CONNECTOR_STORE_SEMANTIC_ROWS = 3;
@@ -15638,6 +15647,13 @@ export class LocalConnectorStore {
   ): ConnectorStoreSearchRow[] {
     const side = Math.max(0, Math.min(Math.floor(perSide), 10));
     if (side === 0) return [];
+    // Without its index the read scans the whole items table, a stall on a
+    // big chat store, so windows stay off until the index exists. Nothing
+    // creates it at open (open cost, step-back 16 Nov); see
+    // CONNECTOR_STORE_CONVERSATION_INDEX_SQL.
+    this.conversationIndexReady ||= this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?")
+      .get(CONNECTOR_STORE_CONVERSATION_INDEX) !== null;
+    if (!this.conversationIndexReady) return [];
     const anchor = this.db.query(`
       SELECT item_pk, provider_conversation_id AS conversation, authored_at, account_scope
       FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
@@ -15673,6 +15689,8 @@ export class LocalConnectorStore {
     }
     return this.visibleRecentRows(ordered);
   }
+
+  private conversationIndexReady: boolean | undefined;
 
   private visibleRecentRows(rows: ItemRow[]): ConnectorStoreSearchRow[] {
     return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
@@ -21380,13 +21398,6 @@ const PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id)
  * when a writer of this build first opens the store.
  */
 function createConnectorStorePeopleIndex(db: Database): void {
-  // A conversation's messages by authored time, for the messages either side
-  // of a hit (conversationNeighbours). Additive, like the people index below.
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_connector_store_items_conversation_time
-      ON items(provider_conversation_id, authored_at)
-      WHERE provider_conversation_id IS NOT NULL;
-  `);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
       ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)

@@ -428,6 +428,21 @@ describe('answerPrivately', () => {
     for (let index = 0; index < 8; index += 1) expect(body[1]!.content).toContain(`MARKER_${index}`);
   });
 
+  test('the eval read receipt excludes items dropped by prompt fitting', async () => {
+    const { model, requests } = stubModel(JSON.stringify({ answer: 'No result.', citations: [], unanswered: [], sufficient: false }));
+    const items = Array.from({ length: 8 }, (_, index) => ({
+      id: `synthetic-${index}`, title: `Synthetic ${index}`,
+      text: `SYNTHETIC_MARKER_${index} ${'invented sample passage '.repeat(400)}`,
+    }));
+    let retained: readonly string[] = [];
+    await answerPrivately('Summarize the synthetic records.', items, { model, audit: false, maxPromptBytes: 5_000, onEvidence: ids => { retained = ids; } });
+    const body = requests[0]!.body.messages as Array<{ content: string }>;
+    const sent = items.filter((_, index) => body[1]!.content.includes(`SYNTHETIC_MARKER_${index}`)).map(item => item.id);
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.length).toBeLessThan(items.length);
+    expect(retained).toEqual(sent);
+  });
+
   test('every evidence item is Private and local-only', () => {
     const pack = privateEvidencePack('q', evidence);
     expect(pack.candidates.every((candidate) => candidate.trustDomain === 'secure_local' && candidate.trustTier === 'S4')).toBe(true);

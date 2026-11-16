@@ -491,6 +491,14 @@ dropped. Sealed receipts carry no rows, so two sealed runs compare only when
 they left out the same questions. Inspect skipped-store counts before comparing
 runs.
 
+For questions with several expected evidence entries, open receipt rows also
+record `neededEvidence`: needed, packed, seated (after prompt fitting), and
+cited counts. Id lists are one-based indexes into the expected entries, with
+alternates counted once per entry and repeated citations deduplicated. Citation
+counts are absent unless an answer completed. No item text or source identifiers
+are printed. This reports multi-item coverage separately from the existing
+first-hit metric.
+
 Each answerable question also gets a funnel stage, the first place its expected
 item dropped out: `not_found` (no lane found it), `found_not_returned` (a lane
 ranked it but its store did not return it), `not_returned` (its store did not
@@ -625,3 +633,124 @@ and `negativeChecksDegraded` counts each incomplete lane as
 `store:lane:reason` (codes only; free text becomes `other`).
 Negatives count only toward negative seat counts, never toward a pass or a
 fail. Do not tune on sealed questions.
+
+## Deep-read eval (1.5 item 8)
+
+Does reading a whole conversation or document (`core/deep-read.ts`) answer
+what the ordinary Ask misses? Each question's answer sits in the back half
+(past 50%) of a long set: a message of a chat conversation with at least 300
+messages, or a passage of a file with at least 8 stored passages.
+
+On **Sparta**, draft the set through the local model:
+
+```sh
+bun run eval:draft-deep-read -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data --conversations 6 --documents 6 --seed 42
+```
+
+It writes `eval/private/deep-read-questions.json` (0600; `--output` must stay
+under `eval/private/`). Conversations are counted across every store of their
+family (each tier's copy), largest first; documents by stored passages,
+largest first, one per item across tier copies. Each set is listed and read
+exactly as a deep read job does (`readDeepReadSet` in
+`engine/runtime/deep-read-jobs.ts`). The seed picks up to `--attempts 3`
+targets past the middle with at least `--min-words 25` words; the first draft
+that passes `draftOne` (the passage drafter's quote, paraphrase and
+specificity checks) is kept, and at most three sets are tried per wanted
+question. Each row holds the question, quote, set (a search hit's
+`selected_item` ids and `whole`), every tier copy of the expected item, and
+the target's index. `--min-messages`, `--min-chunks`,
+`--conversation-families` (default `chat`) and `--document-families`
+(default `file`) change the selection. Stdout gives counts and ids only,
+including `sectionsAtCeiling`: the sections the kept sets take at the largest
+local prompt (27,000 bytes), a lower bound on the run's sections.
+
+Then run both arms with the local Analyst:
+
+```sh
+bun run eval:deep-read -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data --judge-answers \
+  --output eval/private/deep-read.latest.json
+```
+
+- **Baseline** is run-passages' own computation (`runPassageEval` on the one
+  question): Ask's pack (`--max-results`, default 24), fitted to the prompt
+  budget, answered by the same Analyst as `eval:passages --answer`.
+- **Deep read** lists the set with `readDeepReadSet` and runs `runDeepRead`
+  with the same Analyst in the compact format, at the budget the engine gives
+  a deep read: the model's served window through `localAnalystPromptBudget`
+  (13,500 bytes when the window is unknown, at most 27,000).
+  `--deep-prompt-bytes` overrides it. The baseline uses the same budget unless
+  `--prompt-bytes` (or `OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES`)
+  names one.
+
+Per row and in total, for each arm: **found** (baseline: the expected item is
+seated in the fitted pack; deep: the passage holding the quote is in the set
+as read), **read** (baseline: the answer cites the expected item; deep: a
+reading note cites that passage, with `readItem` for any note on the item),
+and **right** (run-passages' rule: cites the expected item and states 80% of
+the quote's content words), plus `meaning` from `answer-judge.ts` with
+`--judge-answers`. The deep arm also records sections, failed sections, notes,
+`setSeconds`, `readingSeconds`, `secondsPerSection` and `answerSeconds`.
+`summary.overall` and `summary.byKind` give totals and paired wins, losses and
+ties (deep yes and baseline no is a win). The receipt is rewritten after every
+row and holds ids, numbers and timings only. `--only d001,d004` runs some
+rows; `--no-baseline` runs the deep read alone. No clock cuts a deep read; a
+set that cannot be listed is a failed row with a `DEEP_READ_*` code.
+
+Run length is about the sum of sections times seconds per section, plus one
+baseline Ask per row. Run a couple of rows first (`--only`) to measure seconds
+per section. `test/eval-deep-read.test.ts` runs both scripts end to end on
+fixture stores with a fake model.
+
+## Private panel answer eval
+
+`run-panel.ts` runs the ChatGPT private panel's own answer model, using
+`createLocalPrivateRoute` for the explicitly selected local OpenAI-compatible
+model. It requires an offline `--data-root` copy and a passage dataset; it never
+opens the live data root. The usual `--forbid-root`, `--allow-no-fd-check` and
+`--allow-unreadable-stores` isolation flags apply. On macOS the explicit
+`--allow-no-fd-check` waiver is needed because `/proc/self/fd` is unavailable.
+
+```sh
+bun eval/run-panel.ts --data-root <offline-copy> \
+  --model-base-url http://127.0.0.1:8080/v1 --model <served-model-id> \
+  --limits today <passage-dataset.json>
+```
+
+`--limits today` (default) uses the panel's current limits. `--limits window`
+uses `panelLimitsForWindow` with the route's served window, and fails if that
+window cannot be determined. The window and effective item/prompt budgets are
+numbers in the receipt. No answer deadline is added; synthesis waits while the
+model works. Judging uses the existing local `answerMeaningJudge`, on the same
+endpoint/model, with the same expected quote text as `run-passages.ts
+--judge-answers`. The existing judge's request deadline still applies; an
+unavailable/unreadable judgement increments `judgeUnknown`.
+
+The runner calls the engine's `searchPrivateEvidence` directly, with the same
+request and defaults as `chatgptPrivateMatchProbe`, and reuses the engine lane
+factory, eligibility checks and document rereads. This offline mode uses the
+keyword lane without starting any installed embedding service (`retrievalHybrid:
+0`); panel selection retains retrieval order when relevance embeddings are
+unavailable. It therefore measures that explicit configuration, rather than a
+live install's embedding quality.
+
+Each question may optionally add `neededFiles: [{corpusId, providerItemId}]`.
+Existing datasets remain valid. Duplicate file identities count once. Per-row
+`foundDoc` and `foundParagraph` are 0/1 for any expected identity (including
+alternates) in the search candidates and its expected quote in that candidate's
+passages. `answeredCorrectly` and `answeredPartially` are the meaning judge's
+0/1 verdicts, reported separately from retrieval. `neededFilesRead` counts the
+needed identities retained by the panel and prompt fitting, not merely found
+or cited. `filesRead` counts all retained items. Expected quotes are joined for
+judging; `expectedAnswerContains` is the fallback when there are no quotes.
+
+Stdout is one JSON receipt containing only dataset ids and numeric counts and
+budgets, with aggregate counts and open-split rows. `--split sealed` runs only
+sealed questions and omits rows. No item, question, answer, endpoint, model name
+or local path is printed. Questions with no readable evidence increment `noEvidence` and `judgeUnknown`
+and do not stop later questions. Route diagnostics print `{"routeErrors":1}`; other failures print only
+`{"errors":1}` and exit nonzero.
+The synthetic CLI acceptance run is `bun run test:focus -- test/eval-panel.test.ts`; its
+loopback stub implements `/models`, `/props` and `/chat/completions` and uses no
+private data or installed services.

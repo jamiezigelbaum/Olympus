@@ -22856,6 +22856,36 @@ var init_model_transport = __esm(() => {
   };
 });
 
+// src/core/read-wide.ts
+function readWideEnabled() {
+  return process.env.OLYMPUS_READ_WIDE === "1";
+}
+function scoresHaveNoLeader(scores) {
+  if (scores.length < 3 || scores.some((score) => score === undefined || !Number.isFinite(score)))
+    return false;
+  const ranked = scores.slice().sort((a, b) => b - a);
+  const scale = Math.max(Math.abs(ranked[0]), Math.abs(ranked[2]), 0.000000001);
+  return ranked[0] - ranked[2] <= scale * 0.2;
+}
+function isReadWideMatch(candidate) {
+  return matchingProvenances.has(candidate.provenance) && candidate.chunks.some((chunk) => chunk.length > 0);
+}
+function markReadWidePack(pack, matches = pack.candidates) {
+  for (const candidate of matches)
+    matchingProvenances.add(candidate.provenance);
+  for (const candidate of pack.candidates)
+    wideProvenances.add(candidate.provenance);
+  return pack;
+}
+function isReadWidePack(pack) {
+  return pack.candidates.length > 0 && pack.candidates.every((candidate) => wideProvenances.has(candidate.provenance));
+}
+var READ_WIDE_MATCH_LIMIT = 60, READ_WIDE_MIN_PASSAGE_BYTES = 400, matchingProvenances, wideProvenances;
+var init_read_wide = __esm(() => {
+  matchingProvenances = new WeakSet;
+  wideProvenances = new WeakSet;
+});
+
 // node_modules/entities/dist/esm/decode-codepoint.js
 function replaceCodePoint(codePoint) {
   var _a;
@@ -25626,7 +25656,7 @@ function createAnalyst(model, createOptions = {}) {
       const evidencePrompt = compact ? buildCompactAnalystPrompt(pack) : buildAnalystPrompt(pack, localOnly);
       const request = {
         ...base,
-        system: compact ? compactSystem(arm) : ANALYST_SYSTEM,
+        system: analystSystem(pack, compact, arm),
         prompt: `${compact ? buildCompactAnalystPrompt(pack, notes, restatedQuestion(pack), batched ? { bare: true } : {}) : evidencePrompt}${bounded ? answerLengthLine(analystSchemaAnswerChars(maxOutputChars)) : ""}`,
         maxOutputChars: maxOutputChars + (arm === "first" ? NOTES_OUTPUT_CHARS : 0),
         ...bounded ? { responseSchema: analystResponseSchema(maxOutputChars, arm === "first") } : {}
@@ -25673,14 +25703,19 @@ function createAnalyst(model, createOptions = {}) {
 function analystPromptBytes(pack, options, evidenceFormat = "full", boundedOutputChars) {
   const bound = boundedOutputChars !== undefined ? answerLengthLine(analystSchemaAnswerChars(boundedOutputChars)) : "";
   if (evidenceFormat === "compact") {
-    return promptEncoder.encode(`${ANALYST_COMPACT_SYSTEM}
+    return promptEncoder.encode(`${analystSystem(pack, true)}
 
 ${buildCompactAnalystPrompt(pack)}${bound}`).length;
   }
   const localOnly = options.localOnly || evidencePackRequiresLocalOnly(pack);
-  return promptEncoder.encode(`${ANALYST_SYSTEM}
+  return promptEncoder.encode(`${analystSystem(pack, false)}
 
 ${buildAnalystPrompt(pack, localOnly)}${bound}`).length;
+}
+function analystSystem(pack, compact, notes = "off") {
+  const system = compact ? compactSystem(notes) : ANALYST_SYSTEM;
+  return isReadWidePack(pack) ? `${system}
+State reading coverage from Coverage matches: read N of M matching items, with M minus N left out; a + marks a lower bound. In evidence means supplied passages, not every page of a file.` : system;
 }
 function evidencePackRequiresLocalOnly(pack) {
   return pack.candidates.some((candidate) => isSecureSensitivity(candidate));
@@ -26428,6 +26463,7 @@ var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values
 ].join(`
 `), ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, NOTES_SCHEMA, ANALYST_SCHEMA_MAX_PARTS = 4, ANALYST_SCHEMA_PART_CHARS = 60, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, packEvidenceBatches, promptEncoder, restatedQuestion = (pack) => `Answer this question from the evidence above: ${pack.question}`, notesQuestion = (pack) => `List the facts in the evidence above that answer this question: ${pack.question}`, notesBlock = (notes, heading = NOTES_HEADING) => notes.length > 0 ? ["", heading, ...notes.map((note) => `- [${note.evidence}] ${note.fact}`)] : [], AUDIT_DRAFT_HEADING = "Draft JSON:", AUDIT_UNSEEN_AMOUNTS = "Amounts in the draft that appear nowhere in the evidence:", AUDIT_UNSEEN_AMOUNTS_TAIL = ". Remove each from the answer unless the answer shows how it is computed from cited values.", AUDIT_EVIDENCE_HEADING = "Audit evidence:", ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
+  init_read_wide();
   init_opsec();
   init_chunk_selection();
   init_source_model_policy();
@@ -61493,11 +61529,6 @@ function createConnectorStoreSenderIndexes(db) {
 }
 function createConnectorStorePeopleIndex(db) {
   db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_connector_store_items_conversation_time
-      ON items(provider_conversation_id, authored_at)
-      WHERE provider_conversation_id IS NOT NULL;
-  `);
-  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
       ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)
       WHERE ${PEOPLE_SENDER_PREDICATE.replaceAll("i.", "")};
@@ -61823,7 +61854,7 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, CONNECTOR_STORE_SEMANTIC_ROWS = 3, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_SEMANTIC_ROWS = 3, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -61943,6 +61974,8 @@ var init_local_index = __esm(() => {
   init_media_judge();
   init_types();
   CONCEPT_COUNT_MAX_AGE_MS = 5 * 60000;
+  CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
+  ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
@@ -69831,6 +69864,9 @@ ${parentKey(ref)}`, { ref, origin });
       const side = Math.max(0, Math.min(Math.floor(perSide), 10));
       if (side === 0)
         return [];
+      this.conversationIndexReady ||= this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(CONNECTOR_STORE_CONVERSATION_INDEX) !== null;
+      if (!this.conversationIndexReady)
+        return [];
       const anchor = this.db.query(`
       SELECT item_pk, provider_conversation_id AS conversation, authored_at, account_scope
       FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
@@ -69867,6 +69903,7 @@ ${parentKey(ref)}`, { ref, origin });
       }
       return this.visibleRecentRows(ordered);
     }
+    conversationIndexReady;
     visibleRecentRows(rows) {
       return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
     }
@@ -101845,6 +101882,7 @@ async function answerPrivately(question, evidence, options = {}) {
   const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
   const maxPromptBytes = options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES;
   const pack = withPromptBudget(fitPrivatePack(privateEvidencePack(question, evidence), maxPromptBytes, options.evidenceFormat ?? "full", options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS), maxPromptBytes);
+  options.onEvidence?.(pack.candidates.filter((item) => item.chunks.some((text) => text.trim())).map((item) => item.provenance.sourceItem.providerItemId));
   const verdict = { sufficient: undefined };
   const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
     auditSuspiciousDrafts: options.audit ?? true,
@@ -102943,6 +102981,7 @@ async function routePreparedSourceIndexSearch(options) {
   }));
   const lanesStartedAt = Date.now();
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
+  const matchingIds = new Set;
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
     let progress = () => {};
@@ -102957,8 +102996,11 @@ async function routePreparedSourceIndexSearch(options) {
         assertSafeCorpusSearchResponse(response);
         const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId}`;
         const hits = new Map((partial?.hits ?? []).map((hit) => [key(hit), hit]));
-        for (const hit of response.hits)
+        for (const hit of response.hits) {
           hits.set(key(hit), hit);
+          if (request.readWide)
+            matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+        }
         partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
       }
     };
@@ -102967,9 +103009,18 @@ async function routePreparedSourceIndexSearch(options) {
     const outcome = await runCorpusLaneUntilIdle((report) => {
       progress = report;
       return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
-        if (metadataMatches)
-          return metadataMatches(corpusRequest);
+        if (metadataMatches) {
+          const response = await metadataMatches(corpusRequest);
+          if (request.readWide)
+            for (const hit of response.hits)
+              matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+          return response;
+        }
         const response = await adapter(corpusRequest);
+        if (request.readWide)
+          for (const hit of response.hits) {
+            matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+          }
         const depth = request.poolAllocation?.storeDepth;
         const neighbours = response.semanticNeighbourHits;
         if (depth === undefined || !neighbours?.length || response.hits.length >= depth)
@@ -103046,6 +103097,7 @@ async function routePreparedSourceIndexSearch(options) {
     lanes.push({
       name: corpus.corpusId,
       ...response.storeRelevance ? { relevance: response.storeRelevance } : {},
+      ...request.readWide ? { matchingIds } : {},
       items: response.hits.map((hit) => ({
         ...hit,
         corpusId: corpus.corpusId,
@@ -103082,6 +103134,7 @@ async function routePreparedSourceIndexSearch(options) {
   const { hits: fused, degradations: budgetDegradations } = recency;
   const result = {
     hits: fused,
+    ...request.readWide ? { matchingCandidateIds: [...matchingIds] } : {},
     searchedCorpora,
     skippedCorpora,
     laneAudits,
@@ -103138,6 +103191,23 @@ function seatRoutedLanes(lanes, options) {
   const pool = fusedAll.map((candidate) => candidate.item);
   const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
   const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
+  if (options.readWide) {
+    const taken = new Set(recency.hits.map(routedHitCandidateId));
+    const matches = fusedAll.map((candidate) => candidate.item).filter((hit) => lanes.some((lane) => lane.name === hit.corpusId && (!lane.matchingIds || lane.matchingIds.has(routedHitCandidateId(hit)))));
+    let matching = recency.hits.filter((hit) => matches.some((match) => routedHitCandidateId(match) === routedHitCandidateId(hit))).length;
+    for (const hit of matches) {
+      if (matching >= READ_WIDE_MATCH_LIMIT)
+        break;
+      const id = routedHitCandidateId(hit);
+      if (taken.has(id))
+        continue;
+      taken.add(id);
+      recency.hits.push(hit);
+      matching += 1;
+    }
+    const represented = new Set(recency.hits.map((hit) => hit.corpusId));
+    recency.degradations = recency.degradations.filter((loss) => loss.reason !== "lane_budget_cut" || !represented.has(loss.laneName));
+  }
   const seats = options.poolAllocation?.semanticSeats ?? 0;
   if (seats <= 0)
     return recency;
@@ -103451,6 +103521,7 @@ var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_
 var init_router = __esm(() => {
   init_read_progress();
   init_source_answer_jobs();
+  init_read_wide();
   init_partial_search();
   init_keyword_context();
   init_types();
@@ -103501,12 +103572,21 @@ async function buildEvidencePackDetailed(input) {
 }
 async function buildPreparedEvidencePackDetailed(input) {
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
+  const readWide = readWideEnabled() && !input.selectedItems?.length;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
-  const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
+  const storeScores = new Map;
+  for (const hit of visibleHits) {
+    const scores = storeScores.get(hit.corpusId) ?? [];
+    scores.push(hit.score);
+    storeScores.set(hit.corpusId, scores);
+  }
+  let wide = readWide && [...storeScores.values()].some(scoresHaveNoLeader) && [...storeScores.values()].every((scores) => scores.length < 3 || scoresHaveNoLeader(scores));
+  const routedHits = input.selectedItems?.length ? routed.hits : readWide && !reranker && !wide ? visibleHits.slice(0, input.maxResults) : visibleHits;
   const candidates = [];
   const candidateCorpusIds = [];
+  const candidateHitIds = [];
   const candidateExtractionGapIndexes = [];
   const extractionGaps = laneCutShortGaps(routed.degradations, input);
   const searched = new Set(routed.searchedCorpora);
@@ -103539,7 +103619,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   let unreadCandidates = 0;
   let encounteredSecureLocal = input.excludeSecureSensitivity ? false : routed.encounteredSecureLocal;
   const hydrationStartedAt = Date.now();
-  const maxBytesPerCandidate = evidenceBytesPerCandidate(reranker ? Math.min(routedHits.length, input.maxResults) : routedHits.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
+  let maxBytesPerCandidate = evidenceBytesPerCandidate(reranker ? Math.min(routedHits.length, input.maxResults) : routedHits.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
   const maxCharsPerCandidate = maxBytesPerCandidate;
   const pool = await Promise.all(routedHits.map(async (hit) => {
     const provenance = hitProvenance(hit);
@@ -103589,17 +103669,27 @@ async function buildPreparedEvidencePackDetailed(input) {
       query: literalSearchQuery(input),
       items: scorable,
       passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
-      keep: input.maxResults,
+      keep: readWide ? scorable.length : input.maxResults,
       ...input.rerankTimers ? { timers: input.rerankTimers } : {},
-      ...input.onRerankScores ? { onScores: (entries, outcome) => input.onRerankScores(entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome) } : {}
+      onScores: (entries, outcome) => {
+        if (readWide && outcome === "applied")
+          wide = scoresHaveNoLeader(entries.map((entry) => entry.score));
+        input.onRerankScores?.(entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome);
+      }
     });
-    hydrated = [...denied, ...reranked.kept];
-    rerank = reranked.audit;
+    hydrated = [...denied, ...readWide && wide ? reranked.kept : reranked.kept.slice(0, input.maxResults)];
+    rerank = readWide ? {
+      ...reranked.audit,
+      kept: hydrated.length - denied.length,
+      promoted: reranked.audit.outcome === "applied" ? hydrated.filter((entry) => !entry.policyDenied && scorable.indexOf(entry) >= hydrated.length - denied.length).length : 0
+    } : reranked.audit;
   }
   const windowSide = conversationWindowPerSide();
   if (windowSide > 0 && !input.selectedItems?.length) {
     hydrated = await withConversationWindows(hydrated, input, windowSide, maxCharsPerCandidate);
   }
+  if (wide)
+    maxBytesPerCandidate = evidenceBytesPerCandidate(hydrated.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
       encounteredSecureLocal = true;
@@ -103640,13 +103730,16 @@ async function buildPreparedEvidencePackDetailed(input) {
       unreadCandidates += 1;
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
+    candidateHitIds.push(routedHitCandidateId(hit));
     const sizeHeld = content?.sizeHeld === true && content.chunks.length === 0;
     const gap = !sizeHeld ? extractionGapFor(hit, provider !== undefined, content) : sizeNoticeCorpora.has(hit.corpusId) ? undefined : `A file (${hit.corpusId}) was located but is too large to read; not read.`;
     candidateExtractionGapIndexes.push(gap ? [extractionGaps.length] : []);
     if (gap)
       extractionGaps.push(gap);
   }
-  const matchCounts = coverageMatchCounts(routed.matchCounts, candidateCorpusIds, candidates.some((candidate) => isSecureSensitivity(candidate)));
+  const matchingIds = new Set(routed.matchingCandidateIds ?? routed.hits.map(routedHitCandidateId));
+  const readMatchingIndexes = candidates.flatMap((candidate, index) => candidate.chunks.some((chunk) => chunk.length > 0) && matchingIds.has(candidateHitIds[index]) ? [index] : []);
+  const matchCounts = coverageMatchCounts(routed.matchCounts, wide ? readMatchingIndexes.map((index) => candidateCorpusIds[index]) : candidateCorpusIds, candidates.some((candidate) => isSecureSensitivity(candidate)));
   const coverage = {
     searchedCorpora: routed.searchedCorpora,
     skippedCorpora: routed.skippedCorpora.map((skip) => ({ corpusId: skip.corpusId, reason: skip.reason })),
@@ -103667,7 +103760,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const secureRouted = new Set(routed.secureLaneAudits);
   const secureLaneAudits = laneAudits.filter((_, index) => secureRouted.has(routed.laneAudits[index]));
   return {
-    pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
+    pack: wide ? markReadWidePack({ question: input.question, candidates: labelled.candidates, coverage, builtAt }, readMatchingIndexes.map((index) => labelled.candidates[index])) : { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
     candidateExtractionGapIndexes,
     ...routed.recencySeats ? { recencySeats: routed.recencySeats } : {},
@@ -103859,11 +103952,17 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
   }
   if (runs.length === 1)
     return literalRun;
-  const recency = seatRoutedQueryRuns(runs.map((run) => run.hits), retrievalLimit, questionHasTemporalIntent(input));
+  const drawRuns = readWideEnabled() ? runs.map((run) => {
+    const semantic = new Set((run.semanticSeats ?? []).map((seat) => routedHitCandidateId(seat.hit)));
+    const matches = new Set(run.matchingCandidateIds ?? []);
+    return run.hits.filter((hit) => !semantic.has(routedHitCandidateId(hit)) || matches.has(routedHitCandidateId(hit)));
+  }) : runs.map((run) => run.hits);
+  const recency = seatRoutedQueryRuns(drawRuns, readWideEnabled() ? Math.max(READ_WIDE_MATCH_LIMIT, retrievalLimit) : retrievalLimit, questionHasTemporalIntent(input));
   const { degradations: budgetDegradations } = recency;
   const fused = withRunSemanticSeats(recency.hits, runs, poolAllocation?.semanticSeats ?? 0);
   return {
     hits: fused,
+    ...readWideEnabled() ? { matchingCandidateIds: [...new Set(runs.flatMap((run) => run.matchingCandidateIds ?? []))] } : {},
     searchedCorpora: literalRun.searchedCorpora,
     skippedCorpora: mergeRoutedSkippedCorpora(runs),
     laneAudits: runs.flatMap((run) => [...run.laneAudits]),
@@ -103975,11 +104074,12 @@ function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, poolA
       ...input.corpusIds ? { corpusIds: input.corpusIds } : {},
       context: input.searchContext,
       ...questionHasTemporalIntent(input) ? { temporalIntent: true } : {},
-      ...poolAllocation ? { poolAllocation } : {}
+      ...poolAllocation ? { poolAllocation } : {},
+      ...readWideEnabled() ? { readWide: true } : {}
     },
     laneTimeoutMs,
     ...input.onSeatingLanes ? { onSeatingLanes: (lanes) => input.onSeatingLanes(lanes, ordinal) } : {},
-    ...input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {},
+    ...readWideEnabled() ? { storeSearchDepth: Math.max(READ_WIDE_MATCH_LIMIT, input.storeSearchDepth ?? 0) } : input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {},
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
   }));
 }
@@ -104091,6 +104191,7 @@ function trustDomainRank2(trustDomain) {
 }
 var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf82, MAX_SEARCH_QUERIES = 3, CONVERSATION_WINDOW_ENV = "OLYMPUS_CONVERSATION_WINDOW", CONVERSATION_WINDOW_HITS = 3, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
+  init_read_wide();
   init_keyword_context();
   init_release_manifest();
   init_partial_search();
@@ -104853,7 +104954,7 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
   return fitPackPassagesToPromptBytes(seated, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, minimumPack);
 }
 function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0, evidenceFormat = "full", minimumPack) {
-  if (evidenceFormat === "compact" && !minimumPack) {
+  if (evidenceFormat === "compact" && !minimumPack && !isReadWidePack(pack)) {
     const selected = fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats);
     const kept = new Set(selected.candidates.map((candidate) => candidate.provenance));
     pack = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus);
@@ -104868,7 +104969,8 @@ function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, ana
   let fallback;
   const headSet = new Set(pack.candidates.slice(0, RESERVED_HEAD_SEATS).map((candidate) => candidate.provenance));
   const headShares = (candidate) => headSet.has(candidate.provenance) && candidate.chunks.length > 1 ? HEAD_SEAT_SHARES : 1;
-  const modes = [headShares, () => 1];
+  const wide = isReadWidePack(pack);
+  const modes = wide ? [() => 1] : [headShares, () => 1];
   for (let keep = order.length;keep >= (minimumPack ? order.length : 1); keep -= 1) {
     const kept = new Set(order.slice(0, keep));
     const base = pack.candidates.filter((candidate) => kept.has(candidate));
@@ -104882,7 +104984,7 @@ function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, ana
       const totalShares = base.reduce((sum, candidate) => sum + shares(candidate), 0);
       let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / totalShares));
       for (let attempt = 0;attempt < 6; attempt += 1) {
-        if (!minimumPack && share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
+        if (!minimumPack && share < (wide ? READ_WIDE_MIN_PASSAGE_BYTES : MIN_FITTED_BYTES_PER_CANDIDATE) && keep > 1)
           break;
         const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share * shares(candidate))) })), candidateCorpus);
         const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
@@ -104948,6 +105050,8 @@ function restatePack(pack, candidates, candidateCorpus, gapOwners) {
   const originals = pack.candidates.filter((original) => candidates.some((candidate) => candidate.provenance === original.provenance));
   const inEvidence = new Map;
   for (const original of originals) {
+    if (isReadWidePack(pack) && !isReadWideMatch(candidates.find((candidate) => candidate.provenance === original.provenance)))
+      continue;
     const corpusId = candidateCorpus.get(original) ?? "";
     inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
   }
@@ -106437,6 +106541,7 @@ async function readPrivateEvidenceItem(input) {
 }
 var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
+  init_read_wide();
   init_analyst_built_in();
   init_local_analyst_window();
   init_analyst_delphi();
@@ -188912,89 +189017,90 @@ var init_deep_read = __esm(() => {
 
 // src/workers/engine/runtime/deep-read-jobs.ts
 import { randomBytes as randomBytes32 } from "node:crypto";
+async function readDeepReadSet(set, storesOf, lanesOf) {
+  const selected = set.selected_item;
+  const provider = selected.provider;
+  const accountScope = selected.account_scope;
+  if (!provider || !accountScope || !selected.local_item_id || !selected.corpus_id)
+    throw new DeepReadRefused("invalid_set", "The set must be a selected_item from a search hit.");
+  const lanes = lanesOf();
+  if (!lanes)
+    throw new DeepReadRefused("not_found", "Source search is not running.");
+  const stores = storesOf();
+  const anchorStore = stores.find((store) => store.corpusId === selected.corpus_id);
+  if (!anchorStore)
+    throw new DeepReadRefused("not_found", "That source is not on this computer.");
+  const family = anchorStore.family;
+  let members;
+  if (set.whole === "conversation") {
+    const conversationId = selected.provider_conversation_id;
+    if (!conversationId)
+      throw new DeepReadRefused("invalid_set", "That item is not part of a conversation.");
+    members = stores.filter((store) => store.family === family).flatMap((store) => store.conversationItems({
+      provider,
+      accountScope,
+      providerConversationId: conversationId,
+      ...selected.provider_thread_id ? { providerThreadId: selected.provider_thread_id } : {},
+      ...set.after ? { after: set.after } : {},
+      ...set.before ? { before: set.before } : {}
+    }).map((member) => ({ corpusId: store.corpusId, ...member })));
+    members.sort((a, b) => (a.authoredAt ?? "").localeCompare(b.authoredAt ?? ""));
+  } else {
+    if (!anchorStore.activeLocalItemRow(selected.local_item_id))
+      throw new DeepReadRefused("not_found", "That item is no longer stored.");
+    members = [{ corpusId: selected.corpus_id, sourceItem: {
+      family,
+      provider,
+      accountScope,
+      providerItemId: selected.provider_item_id ?? "",
+      localItemId: selected.local_item_id,
+      ...selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {},
+      ...selected.provider_thread_id ? { providerThreadId: selected.provider_thread_id } : {},
+      ...selected.provider_file_id ? { providerFileId: selected.provider_file_id } : {},
+      ...selected.source_version ? { sourceVersion: selected.source_version } : {}
+    } }];
+  }
+  const candidates = [];
+  const corpusIds = new Set;
+  const readItems = new Set;
+  const seen = new Set;
+  let unreadable = 0;
+  for (const member of members) {
+    const key = JSON.stringify([member.sourceItem.providerConversationId ?? "", member.sourceItem.providerItemId]);
+    seen.add(key);
+    if (readItems.has(key))
+      continue;
+    const trustDomain = lanes.registry.get(member.corpusId)?.trustDomain;
+    const contentProvider = lanes.contentProviders[member.corpusId];
+    if (!trustDomain || !contentProvider)
+      continue;
+    const content = await contentProvider.fetchLocalContent({ provenance: { sourceItem: member.sourceItem }, trustDomain, maxChars: Number.MAX_SAFE_INTEGER });
+    if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
+      continue;
+    readItems.add(key);
+    corpusIds.add(member.corpusId);
+    const citation = {
+      ...selected.conversation_label && set.whole === "conversation" ? { title: selected.conversation_label } : selected.title ? { title: selected.title } : {},
+      ...member.authoredAt ? { authoredAt: member.authoredAt } : {}
+    };
+    for (const chunk of content.chunks) {
+      candidates.push({
+        provenance: { sourceItem: member.sourceItem, ...Object.keys(citation).length ? { citation } : {} },
+        trustTier: content.sensitivity.trustTier,
+        trustDomain,
+        chunks: [chunk]
+      });
+    }
+  }
+  unreadable = [...seen].filter((key) => !readItems.has(key)).length;
+  const label = set.whole === "conversation" ? `${selected.conversation_label ?? "the conversation"}${set.after || set.before ? ` (${set.after?.slice(0, 10) ?? "start"} to ${set.before?.slice(0, 10) ?? "now"})` : ""}` : selected.title ?? "the document";
+  return { candidates, corpusIds: [...corpusIds], unreadable, items: seen.size, label };
+}
 function createDeepReadJobs(options) {
   const now = options.now ?? (() => new Date);
   const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const jobs = new Map;
-  async function readSet(set) {
-    const selected = set.selected_item;
-    const provider = selected.provider;
-    const accountScope = selected.account_scope;
-    if (!provider || !accountScope || !selected.local_item_id || !selected.corpus_id)
-      throw new DeepReadRefused("invalid_set", "The set must be a selected_item from a search hit.");
-    const lanes = options.lanes();
-    if (!lanes)
-      throw new DeepReadRefused("not_found", "Source search is not running.");
-    const stores = options.stores();
-    const anchorStore = stores.find((store) => store.corpusId === selected.corpus_id);
-    if (!anchorStore)
-      throw new DeepReadRefused("not_found", "That source is not on this computer.");
-    const family = anchorStore.family;
-    let members;
-    if (set.whole === "conversation") {
-      const conversationId = selected.provider_conversation_id;
-      if (!conversationId)
-        throw new DeepReadRefused("invalid_set", "That item is not part of a conversation.");
-      members = stores.filter((store) => store.family === family).flatMap((store) => store.conversationItems({
-        provider,
-        accountScope,
-        providerConversationId: conversationId,
-        ...selected.provider_thread_id ? { providerThreadId: selected.provider_thread_id } : {},
-        ...set.after ? { after: set.after } : {},
-        ...set.before ? { before: set.before } : {}
-      }).map((member) => ({ corpusId: store.corpusId, ...member })));
-      members.sort((a, b) => (a.authoredAt ?? "").localeCompare(b.authoredAt ?? ""));
-    } else {
-      if (!anchorStore.activeLocalItemRow(selected.local_item_id))
-        throw new DeepReadRefused("not_found", "That item is no longer stored.");
-      members = [{ corpusId: selected.corpus_id, sourceItem: {
-        family,
-        provider,
-        accountScope,
-        providerItemId: selected.provider_item_id ?? "",
-        localItemId: selected.local_item_id,
-        ...selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {},
-        ...selected.provider_thread_id ? { providerThreadId: selected.provider_thread_id } : {},
-        ...selected.provider_file_id ? { providerFileId: selected.provider_file_id } : {},
-        ...selected.source_version ? { sourceVersion: selected.source_version } : {}
-      } }];
-    }
-    const candidates = [];
-    const corpusIds = new Set;
-    const readItems = new Set;
-    const seen = new Set;
-    let unreadable = 0;
-    for (const member of members) {
-      const key = JSON.stringify([member.sourceItem.providerConversationId ?? "", member.sourceItem.providerItemId]);
-      seen.add(key);
-      if (readItems.has(key))
-        continue;
-      const trustDomain = lanes.registry.get(member.corpusId)?.trustDomain;
-      const contentProvider = lanes.contentProviders[member.corpusId];
-      if (!trustDomain || !contentProvider)
-        continue;
-      const content = await contentProvider.fetchLocalContent({ provenance: { sourceItem: member.sourceItem }, trustDomain, maxChars: Number.MAX_SAFE_INTEGER });
-      if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
-        continue;
-      readItems.add(key);
-      corpusIds.add(member.corpusId);
-      const citation = {
-        ...selected.conversation_label && set.whole === "conversation" ? { title: selected.conversation_label } : selected.title ? { title: selected.title } : {},
-        ...member.authoredAt ? { authoredAt: member.authoredAt } : {}
-      };
-      for (const chunk of content.chunks) {
-        candidates.push({
-          provenance: { sourceItem: member.sourceItem, ...Object.keys(citation).length ? { citation } : {} },
-          trustTier: content.sensitivity.trustTier,
-          trustDomain,
-          chunks: [chunk]
-        });
-      }
-    }
-    unreadable = [...seen].filter((key) => !readItems.has(key)).length;
-    const label = set.whole === "conversation" ? `${selected.conversation_label ?? "the conversation"}${set.after || set.before ? ` (${set.after?.slice(0, 10) ?? "start"} to ${set.before?.slice(0, 10) ?? "now"})` : ""}` : selected.title ?? "the document";
-    return { candidates, corpusIds: [...corpusIds], unreadable, items: seen.size, label };
-  }
+  const readSet = (set) => readDeepReadSet(set, options.stores, options.lanes);
   function land(view, result, candidates, corpusIds) {
     const store = options.inbox();
     if (!store)
@@ -240434,6 +240540,7 @@ class TierSnifferService {
         queued += opened.db.query(`SELECT COUNT(*) AS n FROM (
           SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
         ) AS tier_items WHERE 1 ${tierMovingDirectionClause("lower")}`).get(MOVES_SCAN_BOUND).n;
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its queued privacy moves");
       } finally {
@@ -240530,8 +240637,6 @@ class TierSnifferService {
       const hasQueue = existsSync120(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
-      db.query("SELECT 1 FROM tier_items LIMIT 1").get();
-      this.noteReadable(ledgerPath);
       return { db, hasQueue };
     } catch {
       db?.close();
@@ -240549,6 +240654,7 @@ class TierSnifferService {
         rows += opened.db.query("SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items").get().n;
         if (opened.hasQueue)
           rows += opened.db.query("SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions").get().n;
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
       } finally {
@@ -240568,6 +240674,7 @@ class TierSnifferService {
         pendingItems += opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get().n;
         if (opened.hasQueue)
           remainingQuestions += opened.db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
       } finally {
@@ -240586,6 +240693,7 @@ class TierSnifferService {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue)
           this.addQuestionSlice(counts, opened.db, undefined);
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
       } finally {
@@ -240659,6 +240767,7 @@ class TierSnifferService {
               return;
           }
         }
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
       } finally {
