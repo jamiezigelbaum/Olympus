@@ -302,6 +302,17 @@ the cause).
     report they rest on.
   `test/engine-control-plane.test.ts` holds a real background's loop in
   one SQLite call for 60 s and checks all of it.
+- **SQLite still on the front's loop is counted (16 Nov 2026).** The
+  front is read-only but still opens stores and runs statements on its
+  loop, and how long one takes is the disk's to decide. Every such
+  statement is counted and reported in `/v1/health` as `front_loop_sql`
+  (`src/core/front-loop-sql-guard.ts`). Run from source, each call site
+  is checked against `config/front-loop-sql-allowance.json`, a list that
+  only shrinks (`test/front-loop-sql-guard.test.ts` holds its ceilings);
+  a site off the list is logged, shown in health as `unlisted`, and
+  fails `test/engine-split-boot.test.ts` and the loop-stall gate. The
+  product never throws. Whether the front ends up holding no SQLite
+  handle at all is decided with the database review after 1.5.
 - **Stores the front keeps writing.** Its own files stay its own: remote
   connections, waiting private questions, answer jobs, dashboard
   sessions, settings files. Nothing else writes them.
