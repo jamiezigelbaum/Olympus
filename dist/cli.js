@@ -240438,7 +240438,7 @@ self.onmessage = ({ data }) => {
 var init_sqlite_checkpointer = __esm(() => {
   init_off_thread_reads();
   SQLITE_CHECKPOINT_AT_BYTES = 4 * 1024 * 1024;
-  SQLITE_WAL_ROOM_BYTES = 24 * 1024 * 1024;
+  SQLITE_WAL_ROOM_BYTES = 16 * 1024 * 1024;
   CHECKPOINT_NOTABLE_BYTES = 32 * 1024 * 1024;
 });
 
