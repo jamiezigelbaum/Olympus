@@ -1,3 +1,4 @@
+import { fetchStreamingModel } from './model-stream.ts';
 import { registerLocalAnalystFallback } from '../workers/source-index/local-analyst-window.ts';
 // The built-in private analyst (`built_in`): a small local LLM that ships
 // inside Olympus with zero setup. It answers Private-tier questions from
@@ -33,7 +34,7 @@ import {
 import type { Analyst, EvidenceCandidate, EvidencePack } from './contracts.ts';
 import type { SourceFamily } from './source-index/types.ts';
 import { OperationError } from './operation-error.ts';
-import { fetchModelEndpoint, isModelEndpointRedirectError } from './model-transport.ts';
+import { isModelEndpointRedirectError } from './model-transport.ts';
 import { isZkapiDaemonEndpointRefusal } from './zkapi-consult-settings.ts';
 import {
   installBuiltInReasoning,
@@ -64,7 +65,7 @@ export const BUILT_IN_ANALYST_ENV = 'OLYMPUS_BUILT_IN_ANALYST';
 /** `auto` (default), `small`, `standard`, `large`, or an exact model id. */
 export const BUILT_IN_ANALYST_MODEL_ENV = 'OLYMPUS_BUILT_IN_ANALYST_MODEL';
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_IDLE_SHUTDOWN_SECONDS = 600;
 const DEFAULT_STARTUP_TIMEOUT_MS = 120_000;
 
@@ -332,19 +333,19 @@ async function chatCompletion(
   request: AnalystModelRequest,
   timeoutMs: number,
 ): Promise<AnalystModelCompletion> {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const signal = request.signal ? AbortSignal.any([timeout, request.signal]) : timeout;
+  const signal = request.signal;
   let response: Response;
   try {
     // Evidence and the server's bearer token ride this request: a redirect
     // is refused, never followed.
-    response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
+    response = await fetchStreamingModel(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${endpoint.token}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify({
+        stream: true,
         messages: [
           { role: 'system', content: request.system },
           { role: 'user', content: request.prompt },
@@ -359,8 +360,8 @@ async function chatCompletion(
           ? { type: 'json_schema', json_schema: { name: 'reply', schema: request.responseSchema } }
           : { type: 'json_object' },
       }),
-      signal,
-    });
+      ...(signal ? { signal } : {}),
+    }, spec.modelId, timeoutMs);
   } catch (error) {
     if (request.signal?.aborted) throw error;
     // A zkAPI-daemon refusal is a configuration problem, not a slow machine.
@@ -374,7 +375,7 @@ async function chatCompletion(
     }
     throw new OperationError(
       'argus_unreachable',
-      `The built-in private model did not answer${error instanceof Error && error.name === 'TimeoutError' ? ` within ${Math.round(timeoutMs / 1000)}s` : ''}.`,
+      `The built-in private model (${spec.modelId}) did not answer: ${error instanceof Error ? error.message : 'request failed'}`,
       'It runs on this computer; a busy machine answers slowly.',
     );
   }

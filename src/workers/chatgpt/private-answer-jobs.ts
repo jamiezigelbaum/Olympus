@@ -1,3 +1,4 @@
+import { withModelProgress } from '../../core/model-stream.ts';
 import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
 /**
  * One-time private-answer jobs and the engine's `/private/<id>` endpoint.
@@ -61,12 +62,11 @@ import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
  *    rendered, not that a person read it. A lost acknowledgment leaves the
  *    question waiting; a replayed one, or one for another job, is refused.
  *
- * A hard deadline, counted from the claim, settles every claimed job as
- * ready or failed. Each analysis has its own deadline from its start, which
- * frees the analysis slot even when a model ignores its abort signal: the
- * analysis fails and the slot is freed first, then the model's `reset` (when
- * it has one) runs in the background, with its own timeout, to kill or reset
- * its runtime. Inference never starts for a claim after its deadline, even
+ * A claim and its analysis stop after the idle limit with no model bytes.
+ * Model progress refreshes both clocks and the claim's collect lifetime.
+ * A stalled analysis frees its slot even if the model ignores cancellation;
+ * the model's reset runs in the background with its own bound. Inference
+ * never starts for a claim that already stalled, including
  * when the evidence refresh finishes late. While an analysis runs, and from a
  * claim until it settles, the job counts as answer activity, so background
  * model work (the tier sniffer) yields to it, and each settled claim logs
@@ -152,7 +152,7 @@ export interface PrivateAnswerJobsOptions {
   /** Claims across all jobs: burst and refill per second. */
   claimRate?: { capacity: number; refillPerSecond: number };
   /**
-   * Hard deadline for one claim (evidence refresh, any wait for the
+   * Model-progress idle limit for one claim (evidence refresh, any wait for the
    * analysis, and sealing), enforced outside the model; also the bound on
    * one analysis's run, from its start.
    */
@@ -324,6 +324,7 @@ interface Job {
    * before the TTL still synthesizes, is collected and is acknowledged.
    */
   expiresAt: number;
+  modelProgress?: (() => void) | undefined;
   readonly caller: string | undefined;
   readonly detail: PrivateAnswerDetail;
   question: string | undefined;
@@ -387,20 +388,10 @@ const OPEN_TOKEN_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${PRIVATE_ANSWER_PAYLOAD_L
 const ACK_TOKEN_PATTERN = OPEN_TOKEN_PATTERN;
 const MAX_EVIDENCE_ITEMS = 50;
 const PENDING_RETRY_SECONDS = 2;
-/**
- * Inside the panel's own two-minute wait (CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS),
- * so the panel always sees `ready` or `failed`, never gives up on a job the
- * engine is still running.
- */
-export const PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 100_000;
-/**
- * A `detail: "full"` job reads its leading items whole and writes a longer
- * answer, which a busy Mac can take well past the summary bound to finish
- * (2026-10-02: 179.4 s of a 180 s bound, prefill 64 s and 2.8 tokens/s on a
- * loaded Mac). The job's `_meta` says `detail: "full"`, so the panel waits
- * a little longer than this (CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS).
- */
-export const PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 240_000;
+/** No model bytes for this long stops a summary analysis and its claims. */
+export const PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS = 60_000;
+/** Full answers use the same idle limit; active generation has no total limit. */
+export const PRIVATE_ANSWER_FULL_ANALYSIS_TIMEOUT_MS = 60_000;
 /** An identical question asked again within this long reuses the answer. */
 export const PRIVATE_ANSWER_DEDUPE_MS = 3 * 60_000;
 /** An unclaimed job's precompute not started within this long of its search is abandoned. */
@@ -1030,8 +1021,8 @@ export class PrivateAnswerJobs {
       if (this.running === analysis) this.running = undefined;
       this.pump();
     };
-    // Bounded from its start: the slot is freed when it fires, even if the
-    // model ignores its abort signal, and the model is reset in the background.
+    // Model bytes refresh the idle clock. A silent model frees its slot even
+    // if it ignores cancellation; reset remains bounded in the background.
     let timedOut = false;
     const deadlineTimer = setTimeout(() => {
       if (freed) return;
@@ -1046,7 +1037,11 @@ export class PrivateAnswerJobs {
     const question = analysis.question ?? '';
     const cached = analysis.evidence ?? [];
     let evidence: readonly PrivateEvidenceItem[] = [];
-    const work = (async () => {
+    const work = withModelProgress(() => {
+      if (freed) return;
+      deadlineTimer.refresh();
+      for (const job of analysis.jobs) job.modelProgress?.();
+    }, async () => {
       if (abort.signal.aborted) throw new AnalysisStop('aborted');
       if (cached.length === 0) throw new AnalysisStop('no_evidence');
       // Dispatch: only items the live guard vouches for now go on to the
@@ -1081,7 +1076,7 @@ export class PrivateAnswerJobs {
       } finally {
         analysis.stats.modelMs = this.now() - modelStarted;
       }
-    })();
+    });
     work.catch(() => undefined);
     const stopped = new Promise<void>((resolve) => {
       if (abort.signal.aborted) resolve();
@@ -1134,6 +1129,7 @@ export class PrivateAnswerJobs {
       if (settled) return;
       settled = true;
       clearTimeout(deadlineTimer);
+      job.modelProgress = undefined;
       if (this.jobs.get(job.id) === job) job.outcome = outcome;
       // The sealed bytes (or the failure) are all the job keeps.
       this.detach(job);
@@ -1144,9 +1140,8 @@ export class PrivateAnswerJobs {
       this.logTiming(timing);
       claimSettled();
     };
-    // The deadline runs from the claim, so every claimed job is ready or
-    // failed within analysisTimeoutMs whatever the queue, the evidence
-    // refresh or the model do.
+    // No model progress for the idle limit settles the claim. Bytes from its
+    // shared analysis refresh both this clock and the collect lifetime.
     const deadlineTimer = setTimeout(() => {
       if (settled) return;
       this.audit('analysis_deadline');
@@ -1160,6 +1155,11 @@ export class PrivateAnswerJobs {
       if (hung) this.resetInBackground();
     }, this.timeoutFor(job.detail));
     (deadlineTimer as { unref?: () => void }).unref?.();
+    job.modelProgress = () => {
+      if (settled) return;
+      deadlineTimer.refresh();
+      job.expiresAt = Math.max(job.expiresAt, this.now() + this.claimLifetimeFor(job.detail));
+    };
     // A job dropped (expired) while it waits settles at once.
     abort.signal.addEventListener('abort', () => settle({ kind: 'failed' }, 'aborted'), { once: true });
     const stopped = new Promise<void>((resolve) => {
@@ -1305,7 +1305,7 @@ export class PrivateAnswerJobs {
     return this.timeoutFor(detail) + PRIVATE_ANSWER_CLAIM_COLLECT_MS;
   }
 
-  /** The hard deadline for an analysis (and a claim) of this detail. */
+  /** The model-progress idle limit for an analysis and its claims. */
   private timeoutFor(detail: PrivateAnswerDetail): number {
     return detail === 'full' ? Math.max(this.analysisTimeoutMs, this.fullAnalysisTimeoutMs) : this.analysisTimeoutMs;
   }

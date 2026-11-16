@@ -912,6 +912,13 @@ Policies written by earlier releases keep `"model": "openai/gpt-5.5"`; on a
 host without OpenAI auth in OpenClaw, remove that line to use the default (see
 the changelog upgrade note).
 
+OpenAI-compatible local, Delphi, built-in and cloud analysts request SSE
+streaming. Anthropic uses its message stream. Token progress reports
+“writing the answer” at most once a second and keeps source-answer jobs,
+private analyses and their claims alive. Silent streams stop with a model-named
+error. The OpenClaw infer CLI returns one JSON result rather than token events;
+its existing total command limit remains until that API exposes progress.
+
 Hard invariants remain enforced outside user control:
 
 - Venice S4 routing follows the
@@ -919,11 +926,12 @@ Hard invariants remain enforced outside user control:
 - secure-pool profiles are loopback local or Venice only; standard cloud,
   other self-declared encrypted-cloud providers, Venice Anonymized models, and
   E2EE model ids while the local-key gate stands are refused
-- non-final secure-pool leg budgets are sized inside the 60-second interactive
-  SLO; under the later 2026-07-24 owner ruling, the final available member gets
-  a separately bounded completion budget rather than being interrupted while
-  finishing. Timed-out legs receive a shared abort signal through catalog and
-  chat fetch, and residual non-cooperative orphans are counted content-free
+- streaming model requests and analyst legs default to a 60-second idle
+  limit, refreshed on response bytes. Generating tokens can continue without
+  a total time limit; an explicit pool SLO can shorten earlier legs' idle
+  limits. The final member uses the configured last-leg idle limit. Caller
+  cancellation still stops work, and stalled legs receive a shared abort
+  signal through catalog and chat fetch
 - consecutive member failures open a worker-local cooldown breaker; skipped
   members are recorded in the analyst-leg trace without source content
 - Private embeddings use the built-in model, loopback local providers, or an

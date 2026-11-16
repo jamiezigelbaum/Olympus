@@ -1,3 +1,4 @@
+import { fetchStreamingModel } from '../src/core/model-stream.ts';
 import { provedContent, provedReleaseCheck } from './helpers/scripted-search-release.ts';
 // The handler bounds every analyst leg it dispatches — except, before this,
 // the ordinary-cloud one. `local-first` routes internal/public_safe questions
@@ -45,6 +46,34 @@ test('a sovereignty cloud leg is bounded and falls back to local', async () => {
     to: 'local',
     reason: 'timeout',
   });
+});
+
+test('model bytes keep an outer analyst leg alive past its former total budget', async () => {
+  const handler = createAnalystSourceIndexAnswerHandler({
+    analyst: scriptedAnalyst('fallback').analyst,
+    lanes: () => lanesFixture(),
+    releaseCheck: provedReleaseCheck,
+    cloudAnalystTimeoutMs: 100,
+    sovereigntyAnalystRoute: () => [cloudStep({
+      async analyze(pack) {
+        await fetchStreamingModel(async () => new Response(new ReadableStream({
+          start(controller) {
+            let count = 0;
+            const send = () => {
+              if (count++ === 10) { controller.close(); return; }
+              controller.enqueue(new TextEncoder().encode('x'));
+              setTimeout(send, 20);
+            };
+            send();
+          },
+        })), 'http://127.0.0.1/v1/chat/completions', {}, 'synthetic-model', 100);
+        return { answer: 'streamed result', citations: [{ provenance: pack.candidates[0]!.provenance, claim: 'claim' }], unanswered: [] };
+      },
+    })],
+  });
+  const result = await handler.answer({ question: 'Synthetic input.' });
+  expect(result.answer).toContain('streamed result');
+  expect(result.audit.answer_synthesis.analyst_backend).toBe('cloud');
 });
 
 test('a bounded cloud leg gives the client an abort signal to honour', async () => {

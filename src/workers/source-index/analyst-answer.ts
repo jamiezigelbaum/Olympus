@@ -1,3 +1,4 @@
+import { withModelProgress } from '../../core/model-stream.ts';
 import { builtInAnalystMaxTokensForChars } from '../../core/analyst-built-in.ts';
 import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitLocalAnalystRoutes, localAnalystWindow, localAnalystPromptBudget, type LocalAnalystPromptBudget } from './local-analyst-window.ts';
 import { maxTokensForChars } from '../../core/analyst-delphi.ts';
@@ -211,25 +212,10 @@ export interface AnalystSourceIndexAnswerHandlerOptions {
   // per-question approval (frontier-max posture). 'approval': legacy strict
   // gating (needs_approval/s4_release for unreleased secure facts).
   secureDerivativeDefault?: 'allow' | 'approval';
-  // Bound optional trusted/private analyst lanes (for example Venice) so they
-  // cannot consume the whole OpenClaw tool watchdog before local Argus fallback.
-  // NOTE: this is the trusted/encrypted-cloud bound only. It is deliberately
-  // decoupled from the tool-level watchdog budget (request.timeout_ms): the
-  // watchdog budget and the analyst budget are different quantities, and the
-  // watchdog budget must never inflate this bound.
+  // No model bytes for this long stops a leg; active streams keep going.
+  // These idle limits are independent of the caller's cancellation signal.
   trustedAnalystTimeoutMs?: number;
-  // Bound the LOCAL analyst (Argus on Delphi) too, but generously: slow useful
-  // local work is product posture, so this is a safety ceiling (default
-  // DEFAULT_LOCAL_ANALYST_TIMEOUT_MS), NOT the ~20s trusted-cloud bound. It is
-  // its own quantity, independent of both the watchdog budget and the trusted
-  // bound. A hung local model surfaces an honest timeout instead of silently
-  // riding the watchdog to its full length.
   localAnalystTimeoutMs?: number;
-  // Bound for an ordinary (standard_cloud) analyst leg. Its own quantity again:
-  // shorter than the local ceiling because a cloud leg that is not answering is
-  // a leg to leave for the next route step, and every cloud transport already
-  // self-bounds around this value — this is the bound the HANDLER can enforce,
-  // and the one the trace reports.
   cloudAnalystTimeoutMs?: number;
   selfHeal?: (input: {
     request: SourceIndexAnswerRequest;
@@ -304,16 +290,10 @@ const CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 10_000;
 // Candidate floor for temporal questions - see maxResults derivation below.
 const TEMPORAL_INTENT_MIN_RESULTS = 8;
 export const DEFAULT_MAX_CHARS_PER_CANDIDATE = 3_000;
-const DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20_000;
-// Generous local-analyst ceiling. Decoupled from the OpenClaw tool watchdog
-// (which the skill passes as request.timeout_ms, e.g. 600s): local reasoning
-// gets its own honest budget so a wedged local model fails cleanly instead of
-// masquerading as a watchdog kill. Slow-but-useful local work stays allowed.
-const DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600_000;
-// Matches what every cloud transport already enforces for itself, so making it
-// the handler's bound changes no timing — it makes the bound interruptible,
-// abort-aware, and honest in the trace.
-const DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120_000;
+const DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 60_000;
+// Model bytes refresh these idle limits; active generation has no total clock.
+const DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 60_000;
+const DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 60_000;
 const DEFAULT_SELF_HEAL_MAX_MS = 20_000;
 const DEFAULT_ON_DEMAND_READ_WAIT_MS = 20_000;
 const ON_DEMAND_READ_POLL_MS = 1_000;
@@ -1978,7 +1958,7 @@ async function routeAnalysisThroughSovereignty(input: {
   let lastFallback: SourceIndexAnalystFallback | undefined;
   const legOutcomes: string[] = [];
   const legReasons: string[] = [];
-  const secureLegBudgets = input.trustDomain === 'secure_local'
+  const secureLegBudgets = input.trustDomain === 'secure_local' && input.secureAnalystPoolSloMs !== undefined
     ? deriveSecureAnalystPoolLegBudgets(
         input.route.map((step) => ({ id: step.profile.id, backend: step.backend })),
         {
@@ -1998,10 +1978,9 @@ async function routeAnalysisThroughSovereignty(input: {
     const isLastAvailableSecureLeg =
       input.trustDomain === 'secure_local'
       && routeIndex === input.route.length - 1;
-    // A failed non-final attempt can move cheaply to the next member. Once the
-    // dispatch plan reaches its final available member, interruption would
-    // turn otherwise-finishing work into route exhaustion, so use the separate
-    // completion budget. Breaker-open members were removed before this route.
+    // Every leg defaults to a 60-second idle limit. An explicit pool SLO may
+    // shorten earlier idle limits; bytes still refresh every leg's clock.
+    // Breaker-open members were removed before this route.
     const budgetMs = isLastAvailableSecureLeg
       ? input.secureAnalystPoolLastLegTimeoutMs
       : secureLegBudgets?.get(step.profile.id)
@@ -2066,10 +2045,7 @@ async function routeAnalysisThroughSovereignty(input: {
         }
         return { result: attempt.result, backend: step.backend, ...(lastFallback ? { fallback: lastFallback } : {}) };
       }
-      // Every non-venice backend takes the same bounded helper: local on the
-      // generous local ceiling, ordinary cloud on the cloud bound. The helper
-      // no-ops on a non-positive budget, so a step that computes no budget
-      // keeps its unbounded behaviour rather than acquiring a surprise one.
+      // Every other backend observes the same model-progress idle helper.
       const result = await observeSourceAnswerAnalystLeg({
         ...traceStep,
         budgetMs,
@@ -2147,10 +2123,9 @@ class TrustedAnalystTimeoutError extends Error {
   readonly timeoutMs: number;
   readonly elapsedMs: number;
 
-  constructor(timeoutMs: number, elapsedMs: number) {
-    // Backend-agnostic message: analyzeWithTimeout now bounds both the trusted
-    // (Venice) lane and the local Argus lane, each with its own budget.
-    super(`analyst timed out after ${timeoutMs}ms`);
+  constructor(timeoutMs: number, elapsedMs: number, model = 'analyst') {
+    // Name the model whose bytes stopped, across every analyst backend.
+    super(`Model ${model} made no progress for ${timeoutMs}ms (analyst timed out).`);
     this.name = 'TrustedAnalystTimeoutError';
     this.timeoutMs = timeoutMs;
     this.elapsedMs = elapsedMs;
@@ -2171,17 +2146,21 @@ async function analyzeWithTimeout(
   const cancellationSettleMs = timeoutMs >= 2
     ? Math.min(10, Math.max(1, Math.floor(timeoutMs / 10)))
     : 0;
-  const executionTimeoutMs = Math.max(1, timeoutMs - cancellationSettleMs);
+  const executionTimeoutMs = Math.max(1, timeoutMs);
   // The leg's own budget signal also follows the caller's cancellation, so a
   // caller that goes away stops the model call instead of only the leg timer.
   const callerSignal = currentAnalystAbortSignal();
   const followCaller = () => controller.abort(callerSignal?.reason);
   if (callerSignal?.aborted) followCaller();
   else callerSignal?.addEventListener('abort', followCaller, { once: true });
-  const analysis = runWithAnalystAbortSignal(
+  let activeModel = 'analyst';
+  const analysis = withModelProgress(model => {
+    activeModel = model;
+    timeout?.refresh();
+  }, () => runWithAnalystAbortSignal(
     controller.signal,
     () => analyst.analyze(pack, options),
-  ).finally(() => {
+  )).finally(() => {
     settled = true;
   });
   // A non-cooperative adapter can still outlive the bounded cancellation
@@ -2197,9 +2176,10 @@ async function analyzeWithTimeout(
           const timeoutError = new TrustedAnalystTimeoutError(
             timeoutMs,
             Date.now() - startedAt,
+            activeModel,
           );
           reject(timeoutError);
-          const abortError = new Error('Analyst leg budget expired.');
+          const abortError = new Error(`Model ${activeModel} made no progress for ${timeoutMs}ms.`);
           abortError.name = 'AbortError';
           controller.abort(abortError);
         }, executionTimeoutMs);
