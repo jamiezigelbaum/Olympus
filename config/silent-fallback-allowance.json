@@ -205,6 +205,7 @@
     "src/workers/evernote/live-sync.ts": 1,
     "src/workers/file-extraction/extractors/built-in-transcriber.ts": 3,
     "src/workers/file-extraction/extractors/command-runner.ts": 3,
+    "src/workers/file-extraction/extractors/model-stream.ts": 3,
     "src/workers/file-extraction/extractors/openai-compatible-client.ts": 1,
     "src/workers/file-extraction/extractors/remote-vlm.ts": 1,
     "src/workers/file-extraction/extractors/venice-client.ts": 1,
