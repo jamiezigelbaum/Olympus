@@ -63,11 +63,22 @@ describe('long passages', () => {
     return { data, dims: [batch.batchSize, 1] };
   } });
 
-  test('a passage is scored by its best window, so the deciding words count wherever they sit', async () => {
+  test('by default a passage is scored on its first window only', async () => {
+    const batches: EmbeddingBatch[] = [];
+    const reranker = createCrossEncoderReranker({
+      id: 'first', session: async () => session(batches), tokenizer: new WordPieceTokenizer(vocabulary), maxPairTokens: 32, batchSize: 4,
+    });
+    const filler = Array(100).fill('filler').join(' ');
+    const scores = await reranker.score({ query: 'hello', passages: [`${filler} invoice`, 'invoice'], signal: new AbortController().signal });
+    expect(scores).toEqual([-9, 9]);
+    expect(batches.reduce((sum, batch) => sum + batch.batchSize, 0)).toBe(2);
+  });
+
+  test('with everyWindow a passage is scored by its best window, so the deciding words count wherever they sit', async () => {
     const batches: EmbeddingBatch[] = [];
     const ticks: number[] = [];
     const reranker = createCrossEncoderReranker({
-      id: 'windows', session: async () => session(batches), tokenizer: new WordPieceTokenizer(vocabulary), maxPairTokens: 32, batchSize: 4,
+      id: 'windows', session: async () => session(batches), tokenizer: new WordPieceTokenizer(vocabulary), maxPairTokens: 32, batchSize: 4, everyWindow: true,
     });
     const filler = Array(100).fill('filler').join(' ');
     const scores = await reranker.score({

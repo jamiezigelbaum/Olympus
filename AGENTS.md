@@ -108,14 +108,19 @@ Enforcement is mechanical, so this survives any thread or tool:
 - Focused local checks are the normal edit loop. `bun run verify` and
   `bun run verify:full` are available when uncertainty or release risk merits
   them; neither is a push prerequisite.
-- **`bun run guards` before every push to `main`** (about a minute, after
-  merging `main` in). It runs the mechanical guards other threads' pushes
-  keep tripping: timeouts, silent fallbacks, model choice, loop and pool SQL
-  finders, limit registry, raw sleeps, spawn timeouts, lane split, design
-  digest, store open, architecture, privacy-per-item, public surface and the
-  rest. A failure is fixed in the change, never by loosening the guard; a
-  new timeout, catch or built-in-model reference is listed in its allowance
-  in the same commit. Codex briefs include this step.
+- **`bun run prepush` after merging `main` and before every push to `main`**
+  (about three minutes). It runs `bun run guards` (the mechanical guards other
+  threads' pushes keep tripping: timeouts, silent fallbacks, model choice,
+  loop and pool SQL finders, limit registry, raw sleeps, spawn timeouts, lane
+  split, design digest, store open, data root, architecture, privacy-per-item,
+  public surface and the rest) beside the fast-lane tests that import the
+  files this push changes, nearest in the import graph first, and the
+  connect-relay tests when the relay changed. It prints how many reached
+  tests it left to CI; `--all` runs them too. A failure is fixed in the
+  change, never by loosening a guard or test; a new timeout, catch or
+  built-in-model reference is listed in its allowance in the same commit.
+  Codex briefs include this step, and a Codex builder runs it before it
+  pushes.
 - `test/architecture-guard.test.ts` fails the build if the deleted template
   path reappears or if template/regex answer code appears anywhere in src.
   Do not weaken the guard to make a change pass.
