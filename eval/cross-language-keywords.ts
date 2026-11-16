@@ -50,7 +50,8 @@ try {
       const search = () => routeSourceIndexSearch({request,registry:buildSourceIndexCorpusRegistry([corpus]),adapters:{[store.corpusId]:adapter}});
       registerBuiltInPrivateModel(undefined);
       const before = await withKeywordExpansionDisabled(search);
-      registerBuiltInPrivateModel({model,available:()=>true});
+      // Each case is its own install: a fresh model handle, so the languages one case's store holds are not asked for in the next.
+      registerBuiltInPrivateModel({model:{complete:request=>model.complete(request)},available:()=>true});
       const after = await search();
       const isFound = (hits: typeof after.hits) => hits.some(hit=>item.expectedIds.includes(hit.sourceItem.localItemId));
       const foundBefore = isFound(before.hits), foundAfter = isFound(after.hits);
