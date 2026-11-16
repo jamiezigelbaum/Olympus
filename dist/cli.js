@@ -102815,7 +102815,8 @@ function createDelphiAnalystModel(delphi, options) {
         ...request.signal ? { signal: request.signal } : {}
       };
       const result = await delphi.complete(completeOptions);
-      return { text: result.text, modelId: result.model };
+      const usage = delphiUsage(result.timings, result.usage);
+      return { text: result.text, modelId: result.model, ...usage ? { usage } : {} };
     }
   };
 }
@@ -102831,6 +102832,20 @@ async function assertRouteAnswers(delphi, options, timeoutMs, signal) {
   } finally {
     clearTimeout(timer);
   }
+}
+function delphiUsage(timings, usage) {
+  const count = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+  const t = timings ?? {};
+  const u = usage ?? {};
+  const fields = [
+    ["promptTokens", count(t.prompt_n) ?? count(u.prompt_tokens)],
+    ["promptMs", count(t.prompt_ms)],
+    ["outputTokens", count(t.predicted_n) ?? count(u.completion_tokens)],
+    ["outputMs", count(t.predicted_ms)],
+    ["cachedTokens", count(t.cache_n) ?? count(u.prompt_tokens_details?.cached_tokens)]
+  ];
+  const kept = fields.filter((field) => field[1] !== undefined);
+  return kept.length > 0 ? Object.fromEntries(kept) : undefined;
 }
 function maxTokensForChars2(chars) {
   return Math.max(256, Math.ceil(chars / 3));
@@ -141867,7 +141882,8 @@ class DelphiClient {
       ...options.lane ? { lane: options.lane } : {},
       ...options.profile ? { profile: options.profile } : {},
       model: data.model || model,
-      ...data.usage !== undefined ? { usage: data.usage } : {}
+      ...data.usage !== undefined ? { usage: data.usage } : {},
+      ...data.timings != null ? { timings: data.timings } : {}
     };
   }
   resolveRoute(options) {
