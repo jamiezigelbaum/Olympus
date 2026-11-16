@@ -473,6 +473,18 @@ function requestOf(key: string): Record<string, unknown> | undefined {
   }
 }
 
+/** Each store's scope a status snapshot key was kept under, by corpus id. */
+function scopesOf(key: string): Map<string, string> {
+  try {
+    const parsed = JSON.parse(key) as unknown;
+    const stores = Array.isArray(parsed) && Array.isArray(parsed[2]) ? parsed[2] as unknown[] : [];
+    return new Map(stores.filter((entry): entry is [string, unknown] => Array.isArray(entry) && typeof entry[0] === 'string')
+      .map(([id, scope]) => [id, JSON.stringify(scope ?? null)]));
+  } catch {
+    return new Map();
+  }
+}
+
 export function createSourceIndexStatusHandler(
   options: SourceIndexStatusHandlerOptions = {},
 ): SourceIndexStatusHandler {
@@ -674,7 +686,14 @@ export function createSourceIndexStatusHandler(
       };
     }
     const canonical = typeof corpusId === 'string' ? canonicalSourceCorpusId(corpusId) : undefined;
-    const corpora = canonical === undefined ? kept.result.corpora : kept.result.corpora.filter((corpus) => corpus.corpus_id === canonical);
+    // A store whose scope has moved since that count is left out until the
+    // background counts it under the new scope: rows the owner just took out
+    // of scope are never shown from an older count.
+    const keptKey = [...(published?.entries ?? [])].find(([, entry]) => entry === kept)?.[0];
+    const now = scopesOf(key);
+    const then = keptKey ? scopesOf(keptKey) : new Map<string, string>();
+    const moved = (id: string): boolean => now.has(id) && then.has(id) && now.get(id) !== then.get(id);
+    const corpora = kept.result.corpora.filter((corpus) => (canonical === undefined || corpus.corpus_id === canonical) && !moved(corpus.corpus_id));
     return { ...kept.result, corpora, snapshot_age_ms: Math.max(0, nowMs() - kept.atMs) };
   };
   const persistSnapshots = (): void => {

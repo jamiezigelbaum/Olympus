@@ -131021,6 +131021,15 @@ function requestOf2(key) {
     return;
   }
 }
+function scopesOf(key) {
+  try {
+    const parsed = JSON.parse(key);
+    const stores = Array.isArray(parsed) && Array.isArray(parsed[2]) ? parsed[2] : [];
+    return new Map(stores.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string").map(([id, scope]) => [id, JSON.stringify(scope ?? null)]));
+  } catch {
+    return new Map;
+  }
+}
 function createSourceIndexStatusHandler(options = {}) {
   const staticRegistry = typeof options.corpusDefinitions === "function" ? undefined : buildSourceIndexCorpusRegistry(options.corpusDefinitions ?? defaultCorpusDefinitions());
   const currentRegistry = () => staticRegistry ?? buildSourceIndexCorpusRegistry(options.corpusDefinitions());
@@ -131174,7 +131183,11 @@ function createSourceIndexStatusHandler(options = {}) {
       };
     }
     const canonical = typeof corpusId === "string" ? canonicalSourceCorpusId(corpusId) : undefined;
-    const corpora = canonical === undefined ? kept.result.corpora : kept.result.corpora.filter((corpus) => corpus.corpus_id === canonical);
+    const keptKey = [...published?.entries ?? []].find(([, entry]) => entry === kept)?.[0];
+    const now = scopesOf(key);
+    const then = keptKey ? scopesOf(keptKey) : new Map;
+    const moved = (id) => now.has(id) && then.has(id) && now.get(id) !== then.get(id);
+    const corpora = kept.result.corpora.filter((corpus) => (canonical === undefined || corpus.corpus_id === canonical) && !moved(corpus.corpus_id));
     return { ...kept.result, corpora, snapshot_age_ms: Math.max(0, nowMs() - kept.atMs) };
   };
   const persistSnapshots = () => {
