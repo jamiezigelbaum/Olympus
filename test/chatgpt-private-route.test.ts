@@ -87,6 +87,23 @@ describe('the owner\'s Private route for the panel', () => {
     expect(await route()).toBeUndefined();
   });
 
+  test('once the owner model has answered, the built-in model never stands in for it', async () => {
+    let at = 0;
+    let up = true;
+    const route = createLocalPrivateRoute({
+      firstMember: () => localMember,
+      model: () => ({ model: fakeModel, modelId: 'big-local' }),
+      reachable: async () => up,
+      window: async () => ({ windowTokens: 32_768 }),
+      builtInStandsIn: () => true,
+      now: () => at,
+    });
+    expect(await route()).toMatchObject({ modelId: 'big-local' });
+    up = false;
+    at = 31_000;
+    expect(await route()).toEqual({ unavailable: true, modelId: 'big-local' });
+  });
+
   test('an unknown window still routes, within the default budget', async () => {
     const route = createLocalPrivateRoute({
       firstMember: () => localMember,

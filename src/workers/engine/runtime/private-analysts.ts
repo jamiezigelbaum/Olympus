@@ -536,7 +536,7 @@ const PRIVATE_ROUTE_REACHABLE_TTL_MS = 30_000;
  * but not answering, `unavailable` (the answer says so; no silent drop to the
  * built-in model), unless the built-in model is what stands in for that
  * member (`builtInStandsIn`: a computer whose only local model is the
- * built-in one). Undefined when the first member is not local: the panel
+ * built-in one) and the member has not answered since this process started. Undefined when the first member is not local: the panel
  * never takes a cloud route of its own. Reachability is asked at most every
  * 30 s.
  */
@@ -552,6 +552,9 @@ export function createLocalPrivateRoute(input: {
   const now = input.now ?? Date.now;
   const models = new Map<string, { model: AnalystModel; modelId: string; baseUrl?: string } | undefined>();
   let checked: { id: string; atMs: number; up: boolean } | undefined;
+  // A member that has answered is the owner's real model: once seen up, the
+  // built-in model never stands in for it, however long it is down.
+  const seenUp = new Set<string>();
   return async () => {
     let member: SovereigntyResolvedProfile | undefined;
     try { member = input.firstMember(); } catch { return undefined; }
@@ -565,10 +568,11 @@ export function createLocalPrivateRoute(input: {
       let up = false;
       try { up = await input.reachable(member); } catch { up = false; }
       checked = { id: member.id, atMs: now(), up };
+      if (up) seenUp.add(member.id);
     }
     if (!checked.up) {
       let standsIn = false;
-      try { standsIn = input.builtInStandsIn?.(member) === true; } catch { standsIn = false; }
+      try { standsIn = !seenUp.has(member.id) && input.builtInStandsIn?.(member) === true; } catch { standsIn = false; }
       return standsIn ? undefined : { unavailable: true, modelId: entry.modelId };
     }
     const window = await input.window(entry.modelId, entry.baseUrl).catch(() => undefined);
