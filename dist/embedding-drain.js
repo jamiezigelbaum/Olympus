@@ -35386,7 +35386,9 @@ class SourceStorageUnavailableError extends Error {
   }
 }
 var adoptionEnabled = false;
+var storeOpens2 = 0;
 function frontReadOnly(options) {
+  storeOpens2 += 1;
   return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
 }
 function openConnectorStore(account, requested, env = process.env) {
