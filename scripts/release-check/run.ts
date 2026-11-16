@@ -651,7 +651,9 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
   });
   if (build.result?.ok !== true) return false;
 
-  const prepare = await run.phase('prepare', () => run.agent('prepare-source', '', 420_000));
+  // An earlier release answers the privacy question as it shipped (1.4.4 always recommends local-first), so only the
+  // candidate is held to the memory-based recommendation (linux-upgrade 43858223532 on a 12 GB VM, 16 Nov 2026).
+  const prepare = await run.phase('prepare', () => run.agent('prepare-source', earlierRelease ? 'earlier' : '', 420_000));
   run.add({
     id: 'source.prepare',
     title: 'The test life is wired in (stand-in source, tier rules, engine restart)',
