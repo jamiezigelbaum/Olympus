@@ -185,7 +185,7 @@ test('reranker observer reports failures and timeouts exactly once with no score
     const seen: unknown[] = [];
     const pending = rerankCandidates({ reranker: { id: 'failure', localOnly: true, poolSize: 2,
       score: async () => { if (fail) throw new Error('fixture'); return new Promise<never>(() => {}); },
-    }, query, items: ['a', 'b'], passageOf: () => text, keep: 1, timers, timeoutMs: 20,
+    }, query, items: ['a', 'b'], passageOf: () => text, keep: 1, timers, stallMs: 20,
       onScores: (entries, outcome) => seen.push({ entries, outcome }),
     });
     if (!fail) await clock.advance(20);

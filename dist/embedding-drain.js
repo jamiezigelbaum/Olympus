@@ -1705,7 +1705,9 @@ var V0_4_HERMES_MCP_TOOLS = [
 ];
 var V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
   ...V0_4_HERMES_MCP_TOOLS,
-  "source_item_read"
+  "source_item_read",
+  "source_deep_read",
+  "source_deep_read_status"
 ];
 var V0_4_PUBLIC_SOURCE_IDS = [
   "gmail.email",
@@ -2896,6 +2898,10 @@ class ModelThread {
         pending.embeddingProgress?.(reply.embeddingProgress);
         return;
       }
+      if (reply.rerankProgress) {
+        pending.rerankProgress?.();
+        return;
+      }
       if (reply.progress) {
         pending.progress?.(reply.progress);
         return;
@@ -2950,7 +2956,7 @@ class ModelThread {
         options.signal?.removeEventListener("abort", abort);
       };
       options.signal?.addEventListener("abort", abort, { once: true });
-      this.pending.set(id, { resolve: (result) => resolve(result), reject, cleanup, progress: options.progress, log: options.log, embeddingProgress: options.embeddingProgress });
+      this.pending.set(id, { resolve: (result) => resolve(result), reject, cleanup, progress: options.progress, log: options.log, embeddingProgress: options.embeddingProgress, rerankProgress: options.rerankProgress });
       this.worker.ref();
       try {
         this.worker.postMessage({ id, request });
@@ -20088,6 +20094,13 @@ var NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
 var CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
 var OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
 var REMOTE_DESCRIPTIONS = {
+  source_deep_read: [
+    "Read ALL of one document, or one whole group, channel or chat, with the owner's private model on their computer, then answer the question from it.",
+    "For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.",
+    'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+    "It runs in the background; the answer lands in Olympus Private answers on the owner's computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status."
+  ].join(" "),
+  source_deep_read_status: "Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner's computer.",
   source_item_read: "Read more of a found Personal item. Pass its read_handle from olympus_search or source_answer. Handles expire after 30 minutes and work only on this connection. Each page is judged before release.",
   source_index_status: [
     "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
@@ -20310,6 +20323,21 @@ var REMOTE_ERROR_SCHEMA = {
     }
   }
 };
+var DEEP_READ_STATES = ["reading", "answering", "done", "failed", "cancelled"];
+var DEEP_READ_JOB_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "state", "sectionsTotal", "sectionsDone"],
+  properties: {
+    id: { type: "string", pattern: "^dr_[A-Za-z0-9_-]{8,}$" },
+    state: { type: "string", enum: [...DEEP_READ_STATES] },
+    sectionsTotal: { type: "integer", minimum: 0 },
+    sectionsDone: { type: "integer", minimum: 0 },
+    estimateSecondsLeft: { type: "integer", minimum: 0 },
+    waitingOn: { type: "string", enum: ["privacy checks"] },
+    failure: { type: "string" }
+  }
+};
 var REMOTE_OUTPUT_SCHEMAS = {
   source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
   source_answer_result: {
@@ -20317,6 +20345,18 @@ var REMOTE_OUTPUT_SCHEMAS = {
   },
   ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
   source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+  source_deep_read: {
+    type: "object",
+    additionalProperties: false,
+    required: ["job", "answerLandsIn"],
+    properties: { job: DEEP_READ_JOB_SCHEMA, answerLandsIn: { type: "string" } }
+  },
+  source_deep_read_status: {
+    oneOf: [
+      { type: "object", additionalProperties: false, required: ["jobs"], properties: { jobs: { type: "array", items: DEEP_READ_JOB_SCHEMA } } },
+      { type: "object", additionalProperties: false, required: ["cancelled"], properties: { cancelled: { type: "boolean" } } }
+    ]
+  },
   source_item_read: {
     type: "object",
     additionalProperties: false,
@@ -34508,6 +34548,22 @@ function truncatePair(a, b, room, tiePolicy = "wordpiece") {
   }
   return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
 }
+function pairWindows(a, b, room, overlap, tiePolicy = "wordpiece") {
+  const first = truncatePair(a, b, room, tiePolicy);
+  const size = first.b.length;
+  if (size === 0 || size >= b.length)
+    return { a: first.a, windows: [first.b], truncated: first.truncated };
+  const step = Math.max(1, size - Math.max(0, Math.min(Math.floor(overlap), size - 1)));
+  const windows = [];
+  for (let start = 0;; start += step) {
+    if (start + size >= b.length) {
+      windows.push(b.slice(b.length - size));
+      break;
+    }
+    windows.push(b.slice(start, start + size));
+  }
+  return { a: first.a, windows, truncated: first.a.length < a.length };
+}
 
 // src/workers/source-index/built-in-embedding/wordpiece.ts
 var MAX_INPUT_CHARS_PER_WORD = 100;
@@ -34557,6 +34613,13 @@ class WordPieceTokenizer {
     const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
     const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
     return { ids, typeIds, truncated };
+  }
+  encodePairWindows(first, second, maxLength, overlap) {
+    const { a, windows, truncated } = pairWindows(this.tokenize(first), this.tokenize(second), maxLength - 3, overlap);
+    return windows.map((b) => {
+      const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+      return { ids, typeIds: ids.map((_, index) => index < a.length + 2 ? 0 : 1), truncated };
+    });
   }
   wordPiece(word, out) {
     const chars = Array.from(word);
