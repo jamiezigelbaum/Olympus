@@ -62,6 +62,8 @@ test('fixture rebuilds an old shape with substantial embedded Personal and Priva
     expect(receipt.shape.version).toBeGreaterThan(4);
     expect(receipt.shape.chunksPerItem).toBe(1);
     expect(readFileSync(old, 'utf8')).toBe('previous fixture');
+    // Each run starts from this copy, so every run has judging to do.
+    expect(existsSync(join(fixture, `pristine-v${receipt.shape.version}`, 'set.tier-ledger.sqlite'))).toBe(true);
     const database = (name: string) => new Database(join(fixture, receipt.files.find((path: string) => path.endsWith(`/${name}.sqlite`))), { readonly: true });
     for (const [name, count] of [['internal', 120], ['secure_local', 80]] as const) {
       const store = database(name);

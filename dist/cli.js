@@ -47658,6 +47658,58 @@ var init_vector_digest = __esm(() => {
   init_embeddings();
 });
 
+// src/core/front-loop-sql-guard.ts
+function watchFrontLoopSql(options) {
+  watch = {
+    mode: options.mode,
+    statements: 0,
+    seen: new Map,
+    unlisted: [],
+    ...options.allowed ? { allowed: new Set(options.allowed) } : {},
+    log: options.log ?? ((line) => console.warn(line))
+  };
+}
+function frontLoopSqlWatched() {
+  return watch !== undefined;
+}
+function noteFrontLoopStatement(dbPath, site) {
+  const state = watch;
+  if (!state || dbPath === ":memory:" || dbPath === "" || dbPath?.startsWith("file::memory:"))
+    return;
+  if (state.mode === "throw")
+    throw new FrontLoopSqlError(site());
+  state.statements += 1;
+  if (!state.allowed)
+    return;
+  const at = site() || "(no source frame)";
+  const count = state.seen.get(at);
+  state.seen.set(at, (count ?? 0) + 1);
+  if (count !== undefined || state.allowed.has(at))
+    return;
+  if (state.unlisted.length < UNLISTED_KEPT)
+    state.unlisted.push(at);
+  state.log(`[olympus] front loop sql: unlisted site ${at}`);
+}
+function frontLoopSqlHealth() {
+  if (!watch)
+    return;
+  return {
+    mode: watch.mode,
+    statements: watch.statements,
+    ...watch.allowed ? { sites: watch.seen.size, unlisted: watch.unlisted.slice() } : {}
+  };
+}
+var FrontLoopSqlError, UNLISTED_KEPT = 50, watch;
+var init_front_loop_sql_guard = __esm(() => {
+  FrontLoopSqlError = class FrontLoopSqlError extends Error {
+    code = "front_loop_sql";
+    constructor(site) {
+      super(`The engine front ran SQLite on its loop${site ? ` (${site})` : ""}; the front reads through the read pool and writes through its stores thread.`);
+      this.name = "FrontLoopSqlError";
+    }
+  };
+});
+
 // src/core/store-reclaim-admission.ts
 import { join as join37 } from "node:path";
 import { closeSync as closeSync14, openSync as openSync14, futimesSync, statSync as statSync13 } from "node:fs";
@@ -48199,6 +48251,8 @@ function installMainThreadSqlTrace() {
     if (planRecorder && !planRecorder.explaining && typeof args[0] === "string" && SINGLE_WRITE.test(args[0])) {
       recordPlan({ [SQL]: args[0], [DB]: this });
     }
+    if (frontLoopSqlWatched())
+      noteFrontLoopStatement(this.filename, sourceSite);
     if (siteCounts)
       countSite();
     if (!sliceTiming && !slowLog)
@@ -48238,6 +48292,8 @@ function timeStatement(statement) {
     held[method] = function(...args) {
       if (planRecorder && !planRecorder.explaining)
         recordPlan(held);
+      if (frontLoopSqlWatched())
+        noteFrontLoopStatement(held[DB]?.filename, sourceSite);
       if (siteCounts)
         countSite();
       const answer = sourceAnswerTraceActive();
@@ -48357,18 +48413,19 @@ function tableAliases(sql) {
   }
   return aliases;
 }
-function sourceSite() {
+function sourceSite(depth = 2) {
   const frames = (new Error().stack ?? "").split(`
 `).slice(1).map((line) => line.trim().replace(/^at /, ""));
-  const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace"));
-  return mine.slice(0, 2).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
+  const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace") && !frame.includes("front-loop-sql-guard"));
+  return mine.slice(0, depth).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
 }
 function countSite() {
-  const site = sourceSite() || "(no source frame)";
+  const site = sourceSite(siteDepth) || "(no source frame)";
   siteCounts.set(site, (siteCounts.get(site) ?? 0) + 1);
 }
-function startMainThreadSqlSiteCount() {
+function startMainThreadSqlSiteCount(frames = 2) {
   installMainThreadSqlTrace();
+  siteDepth = Math.max(1, Math.min(8, Math.floor(frames) || 2));
   const counts = new Map;
   siteCounts = counts;
   return {
@@ -48429,8 +48486,9 @@ function shortFrame(frame) {
   const [file, line] = where.split(":");
   return `${name} ${file}${line ? `:${line}` : ""}`;
 }
-var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, SINGLE_WRITE, sliceTiming, SQL = "__olympusMainThreadSql", DB = "__olympusMainThreadSqlDb", planRecorder, siteCounts, LOOP_SLOW_SQL_MS = 100, slowLog, SLOW_RECENT = 10;
+var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, SINGLE_WRITE, sliceTiming, SQL = "__olympusMainThreadSql", DB = "__olympusMainThreadSqlDb", planRecorder, siteCounts, siteDepth = 2, LOOP_SLOW_SQL_MS = 100, slowLog, SLOW_RECENT = 10;
 var init_main_thread_sql_trace = __esm(() => {
+  init_front_loop_sql_guard();
   init_answer_latency_trace();
   STATEMENT_METHODS = ["all", "get", "run", "values"];
   SINGLE_WRITE = /^\s*(UPDATE|DELETE|INSERT)\b[^;]*;?\s*$/i;
@@ -187877,7 +187935,7 @@ var init_local_model_discovery = __esm(() => {
 });
 
 // src/workers/messaging-spool-wake.ts
-import { existsSync as existsSync105, watch } from "node:fs";
+import { existsSync as existsSync105, watch as watch2 } from "node:fs";
 import { dirname as dirname105, resolve as resolve29 } from "node:path";
 function createSpoolChangeSubscription(spoolDir, options = {}) {
   const target = resolve29(spoolDir);
@@ -187887,7 +187945,7 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
     let timer;
     let delay = options.retryInitialMs ?? 1000;
     const maxDelay = options.retryMaxMs ?? 60000;
-    const watchDir = options.watch ?? watch;
+    const watchDir = options.watch ?? watch2;
     const retry = () => {
       if (closed || timer)
         return;
@@ -270517,6 +270575,7 @@ __export(exports_server, {
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile6 } from "node:child_process";
 import { appendFileSync, existsSync as existsSync127, readFileSync as readFileSync115, writeFileSync as writeFileSync29 } from "node:fs";
+import { fileURLToPath as fileURLToPath15 } from "node:url";
 import { dirname as dirname122, join as join155 } from "node:path";
 async function startWorkerWithLaunch(launch) {
   workerLaunch = { ...launch };
@@ -270551,7 +270610,7 @@ async function main() {
     beginBootProgress(process.env);
   const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
   if (sqlSitesDir) {
-    const sqlSites = startMainThreadSqlSiteCount();
+    const sqlSites = startMainThreadSqlSiteCount(Number(process.env.OLYMPUS_MAIN_THREAD_SQL_SITE_FRAMES) || 2);
     const writeSqlSites = () => {
       try {
         writeFileSync29(join155(sqlSitesDir, `${engineRole}.sql-sites.json`), JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() }));
@@ -270576,6 +270635,7 @@ async function main() {
     if (!frontToken)
       throw new Error("The engine front needs the worker auth token.");
     forbidWritableStoreOpens();
+    watchFrontLoopSql({ mode: "record", ...frontLoopSqlAllowance() });
     frontStarting = listenWhileStarting({
       env: process.env,
       hostname: resolveEmailSourceBindHostFromEnv(process.env),
@@ -274887,6 +274947,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         ...statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {},
         loop_lag: loopLag,
         ...backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {},
+        ...frontLoopSqlHealth() ? { front_loop_sql: frontLoopSqlHealth() } : {},
         ...backgroundStatus && !backgroundStatus.stale ? {
           background_state_age_ms: Math.round(backgroundStatus.state_age_ms ?? backgroundStatus.age_ms),
           ...typeof backgroundSnapshot?.loop_held_ms === "number" ? { background_loop_held_ms: backgroundSnapshot.loop_held_ms } : {},
@@ -275512,6 +275573,15 @@ function workerListenPort(port) {
 function resolveEmailSourceBindHostFromEnv(env = process.env) {
   return resolveWorkerBindHost(env, ["OLYMPUS_EMAIL_SOURCE_HOST"]);
 }
+function frontLoopSqlAllowance() {
+  if (!import.meta.url.endsWith("/src/workers/engine/server.ts"))
+    return {};
+  const path = fileURLToPath15(new URL("../../../config/front-loop-sql-allowance.json", import.meta.url));
+  if (!existsSync127(path))
+    return {};
+  const sections = JSON.parse(readFileSync115(path, "utf8")).sites;
+  return { allowed: Object.values(sections).flat() };
+}
 var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_MOUNT_LOOK_AFTER_CHANGE_MS = 60000, FRONT_MOUNT_LOOK_QUIET_MS = 60000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
 var init_server5 = __esm(async () => {
   init_analyst_tinfoil();
@@ -275710,6 +275780,7 @@ var init_server5 = __esm(async () => {
   init_boot_progress();
   init_engine_split();
   init_store_write_guard();
+  init_front_loop_sql_guard();
   init_runtime4();
   init_commands();
   init_front_state();

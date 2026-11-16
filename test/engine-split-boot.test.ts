@@ -92,6 +92,11 @@ describe('the engine split boots as two processes', () => {
     expect(forwarded.status).toBe(409);
     expect(JSON.stringify(await forwarded.json())).toContain('did not say which Olympus data');
 
+    // The front's loop is to run no SQLite: every statement it still runs is counted, and a call site
+    // that is not on the shrink-only list (config/front-loop-sql-allowance.json) fails here.
+    const watched = (await (await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json()) as { front_loop_sql?: { mode: string; statements: number; unlisted?: string[] } };
+    expect(watched.front_loop_sql).toMatchObject({ mode: 'record', unlisted: [] });
+
     const backgroundFetch = createUnixSocketFetch(env.OLYMPUS_ENGINE_BACKGROUND_SOCKET);
     const posted = await backgroundFetch(`${ENGINE_BACKGROUND_ORIGIN}/engine/commands`, {
       method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` },

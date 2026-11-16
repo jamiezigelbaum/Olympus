@@ -16622,8 +16622,12 @@ var init_vector_digest = __esm(() => {
   init_embeddings();
 });
 
+// src/core/front-loop-sql-guard.ts
+var init_front_loop_sql_guard = () => {};
+
 // src/workers/connector-store/main-thread-sql-trace.ts
 var init_main_thread_sql_trace = __esm(() => {
+  init_front_loop_sql_guard();
   init_answer_latency_trace();
 });
 
