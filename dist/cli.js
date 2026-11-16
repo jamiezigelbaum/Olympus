@@ -34520,7 +34520,7 @@ async function downloadPinnedFile(options) {
     if (existsSync16(partial)) {
       const size = statSync9(partial).size;
       if (size > 0 && size < expectedBytes) {
-        await hashPartial(partial, hash, options.verifyTimeoutMs);
+        await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
         options.onProgress(size);
       } else
@@ -34658,12 +34658,19 @@ function writeDownloadChunk(fd, bytes) {
     offset += written;
   }
 }
-async function hashPartial(path, hash, timeoutMs) {
+async function hashPartial(path, hash, stallMs) {
   const stream = createReadStream(path);
-  const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
+  let timer;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} stopped reading for ${Math.round(stallMs / 1000)} s.`)), stallMs);
+  };
+  arm();
   try {
-    for await (const bytes of stream)
+    for await (const bytes of stream) {
+      arm();
       hash.update(bytes);
+    }
   } finally {
     clearTimeout(timer);
     stream.destroy();
@@ -35311,7 +35318,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     encoding: expected.kind === "sha256" ? "hex" : "base64",
     noun: "built-in search model",
     stallMs,
-    verifyTimeoutMs: 10 * 60000,
+    verifyStallMs: 2 * 60000,
     keepPartial: false,
     error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
     onStart: () => reporter.set("downloading", label),
@@ -99567,7 +99574,7 @@ async function installPinnedModel(options) {
   const log = options.log ?? ((line) => console.log(line));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS2,
-    verifyTimeoutMs: options.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS
+    verifyStallMs: options.verifyStallMs ?? VERIFY_STALL_MS
   };
   const lockWaitMs = options.lockWaitMs ?? STALE_LOCK_MS2;
   const lockRefreshMs = options.lockRefreshMs ?? LOCK_REFRESH_MS;
@@ -99586,7 +99593,7 @@ async function installPinnedModel(options) {
   };
   const verifyAll = async () => {
     for (const { file, path } of files)
-      await verifyPinnedFile(path, file, noun, reporter, timing.verifyTimeoutMs);
+      await verifyPinnedFile(path, file, noun, reporter, timing.verifyStallMs);
   };
   const finished = () => reporter.set("ready", `${capitalize(noun)} ready`, 100);
   try {
@@ -99777,22 +99784,41 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
 }
 function extractWithTar(archivePath, targetDir) {
   return new Promise((resolve, reject) => {
-    const child = spawn4("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn4("tar", ["-xzf", "-", "-C", targetDir], { stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
     child.stderr?.on("data", (chunk) => {
       if (stderr.length < 4000)
         stderr += chunk.toString();
     });
-    const timer = setTimeout(() => {
+    let timer;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`tar took no data for ${Math.round(EXTRACT_STALL_MS / 60000)} min`));
+      }, EXTRACT_STALL_MS);
+    };
+    arm();
+    const archive = createReadStream3(archivePath);
+    archive.on("data", arm);
+    archive.on("error", (error) => {
+      clearTimeout(timer);
       child.kill("SIGKILL");
-      reject(new Error(`tar did not finish within ${Math.round(EXTRACT_TIMEOUT_MS / 60000)} min`));
-    }, EXTRACT_TIMEOUT_MS);
+      reject(error);
+    });
+    child.stdin?.on("error", () => {
+      return;
+    });
+    if (child.stdin)
+      archive.pipe(child.stdin);
     child.on("error", (error) => {
       clearTimeout(timer);
+      archive.destroy();
       reject(error);
     });
     child.on("close", (status, signal) => {
       clearTimeout(timer);
+      archive.destroy();
       if (status === 0)
         resolve();
       else
@@ -99842,7 +99868,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     encoding: "hex",
     noun: space.noun,
     stallMs,
-    verifyTimeoutMs: VERIFY_TIMEOUT_MS,
+    verifyStallMs: VERIFY_STALL_MS,
     keepPartial: true,
     error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
     diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname66(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
@@ -99851,7 +99877,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     onProgress: (bytes) => reporter.advance(bytes, label)
   });
 }
-function hashInto(path, hash, timeoutMs, onProgress) {
+function hashInto(path, hash, stallMs, onProgress) {
   return new Promise((resolve, reject) => {
     let done = 0;
     let settled = false;
@@ -99868,17 +99894,23 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         resolve();
       }
     };
-    const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
+    let timer;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} read nothing for ${Math.round(stallMs / 1000)} s.`)), stallMs);
+    };
+    arm();
     stream.on("data", (chunk) => {
+      arm();
       hash.update(chunk);
       done += chunk.length;
       onProgress?.(done);
     }).on("error", (error) => finish(error)).on("end", () => finish()).on("close", () => finish(new Error(`Reading ${path} stopped before the end.`)));
   });
 }
-async function sha256File2(path, timeoutMs, onProgress) {
+async function sha256File2(path, stallMs, onProgress) {
   const hash = createHash52("sha256");
-  await hashInto(path, hash, timeoutMs, onProgress);
+  await hashInto(path, hash, stallMs, onProgress);
   return hash.digest("hex");
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
@@ -100032,7 +100064,7 @@ class ProgressReporter2 {
     } catch {}
   }
 }
-var BUILT_IN_REASONING_DIR_ENV = "OLYMPUS_BUILT_IN_REASONING_DIR", REASONING_NOUN = "built-in private model", STALE_LOCK_MS2, LOCK_REFRESH_MS = 30000, LOCK_POLL_MS2 = 1000, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, RUNTIME_UNPACK_FACTOR = 4, SPACE_BACKOFF_MS, PROGRESS_WRITE_INTERVAL_MS2 = 500, DOWNLOAD_STALL_MS2, VERIFY_TIMEOUT_MS, EXTRACT_TIMEOUT_MS, LOG_PREFIX = "[built-in-model]", RUNTIME_MARKER2 = "olympus-runtime.json", SERVER_BINARY = "llama-server", BuiltInReasoningInstallError, verifiedThisProcess2;
+var BUILT_IN_REASONING_DIR_ENV = "OLYMPUS_BUILT_IN_REASONING_DIR", REASONING_NOUN = "built-in private model", STALE_LOCK_MS2, LOCK_REFRESH_MS = 30000, LOCK_POLL_MS2 = 1000, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, RUNTIME_UNPACK_FACTOR = 4, SPACE_BACKOFF_MS, PROGRESS_WRITE_INTERVAL_MS2 = 500, DOWNLOAD_STALL_MS2, VERIFY_STALL_MS, EXTRACT_STALL_MS, LOG_PREFIX = "[built-in-model]", RUNTIME_MARKER2 = "olympus-runtime.json", SERVER_BINARY = "llama-server", BuiltInReasoningInstallError, verifiedThisProcess2;
 var init_install = __esm(() => {
   init_pinned_download();
   init_olympus_layout();
@@ -100042,8 +100074,8 @@ var init_install = __esm(() => {
   BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   SPACE_BACKOFF_MS = 15 * 60000;
   DOWNLOAD_STALL_MS2 = 2 * 60000;
-  VERIFY_TIMEOUT_MS = 15 * 60000;
-  EXTRACT_TIMEOUT_MS = 5 * 60000;
+  VERIFY_STALL_MS = 2 * 60000;
+  EXTRACT_STALL_MS = 2 * 60000;
   BuiltInReasoningInstallError = class BuiltInReasoningInstallError extends Error {
     reason;
     shortfall;
@@ -142402,8 +142434,21 @@ function verifyPinnedFiles(staging, asset, uid, label, tool) {
 }
 async function downloadTo(path, asset, options, onBytes, tool, label) {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  const stall = new AbortController;
+  let stallTimer;
+  const stillArriving = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => stall.abort(), DOWNLOAD_STALL_MS3);
+  };
+  stillArriving();
+  const signal = options.signal ? AbortSignal.any([options.signal, stall.signal]) : stall.signal;
+  try {
+    return await downloadStream(path, asset, fetchImpl, signal, stillArriving, onBytes, tool, label);
+  } finally {
+    clearTimeout(stallTimer);
+  }
+}
+async function downloadStream(path, asset, fetchImpl, signal, stillArriving, onBytes, tool, label) {
   let response;
   try {
     response = await fetchImpl(asset.url, { signal, redirect: "follow" });
@@ -142432,6 +142477,7 @@ async function downloadTo(path, asset, options, onBytes, tool, label) {
       });
       if (chunk.done)
         break;
+      stillArriving();
       received += chunk.value.byteLength;
       if (received > asset.bytes) {
         await reader.cancel().catch(() => {
@@ -142692,7 +142738,7 @@ function createManagedToolsJob(options = {}) {
     settled: () => current
   };
 }
-var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_TIMEOUT_MS, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve) => {
+var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANAGED_TOOL_ORDER, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_STALL_MS3, VERSION_CHECK_TIMEOUT_MS = 20000, ManagedToolsError, defaultCommandRunner = (command, args) => new Promise((resolve) => {
   execFile3(command, [...args], { timeout: 60000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
     if (!error) {
       resolve({ code: 0, stdout, stderr });
@@ -142783,7 +142829,7 @@ var init_managed_tools = __esm(() => {
   };
   MANAGED_TOOL_ORDER = ["tor", "zkapi-clientd"];
   MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
-  DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+  DOWNLOAD_STALL_MS3 = 2 * 60 * 1000;
   ManagedToolsError = class ManagedToolsError extends Error {
     code;
     tool;
@@ -185752,7 +185798,12 @@ function defaultLaunch(platform, homeDir) {
 }
 async function download(fetchImpl, url, maxBytes) {
   const controller = new AbortController;
-  const timeout = setTimeout(() => controller.abort(), SELF_UPDATE_DOWNLOAD_TIMEOUT_MS);
+  let timeout;
+  const stalled = () => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => controller.abort(), SELF_UPDATE_DOWNLOAD_STALL_MS);
+  };
+  stalled();
   let reader;
   try {
     const response = await fetchImpl(url, { method: "GET", headers: { "User-Agent": "Olympus" }, credentials: "omit", redirect: "error", signal: controller.signal });
@@ -185765,6 +185816,7 @@ async function download(fetchImpl, url, maxBytes) {
       const { done, value } = await reader.read();
       if (done)
         break;
+      stalled();
       size += value.byteLength;
       if (size > maxBytes)
         throw new Error("oversized");
@@ -185917,7 +185969,7 @@ function createSelfUpdater(options) {
     }
   };
 }
-var SELF_UPDATE_DOWNLOAD_TIMEOUT_MS = 30000, SELF_UPDATE_STALE_MS, SELF_UPDATE_SHOWN_MS, RUNNER = `#!/bin/sh
+var SELF_UPDATE_DOWNLOAD_STALL_MS = 30000, SELF_UPDATE_STALE_MS, SELF_UPDATE_SHOWN_MS, RUNNER = `#!/bin/sh
 dir=$1
 /bin/sh "$dir/install.sh" > "$dir/install.log" 2>&1 < /dev/null
 code=$?
@@ -274281,17 +274333,18 @@ function waitForWorkerReadiness(options, port, wait) {
       ended = "crash_loop";
       break;
     }
-    if (tick - startedTick >= capMs) {
+    const boot = tick - startedTick >= timeoutMs ? readBoot() : undefined;
+    if (tick - startedTick >= capMs && !bootStillUpdating(boot, heartbeat)) {
       ended = "cap";
       break;
     }
     if (tick - startedTick >= timeoutMs && tick - lastLineTick >= READINESS_PROGRESS_LINE_MS) {
-      const boot = readBoot();
       const counts = boot && heartbeat && boot.pid === heartbeat.pid ? `${bootProgressLine(boot)}; ` : "";
       progressLine(`Starting Olympus: ${counts}${heartbeatState(heartbeat)}`);
       lastLineTick = tick;
     }
-    waitForActivationSettle(Math.max(1, Math.ceil(Math.min(pollMs, capMs - (tick - startedTick)))));
+    const left = capMs - (tick - startedTick);
+    waitForActivationSettle(Math.max(1, Math.ceil(left > 0 ? Math.min(pollMs, left) : pollMs)));
     ready = probe();
   }
   const lastFront = ready ? undefined : readFront();
@@ -274305,6 +274358,11 @@ function waitForWorkerReadiness(options, port, wait) {
     ...!ready && ended ? { ended } : {},
     ...!ready && heartbeat ? { heartbeat } : {}
   };
+}
+function bootStillUpdating(boot, heartbeat) {
+  if (!boot || !heartbeat || boot.pid !== heartbeat.pid)
+    return false;
+  return (boot.phase === "backing_up" || boot.phase === "migrating") && engineHeartbeatBeating(heartbeat, { pid: boot.pid });
 }
 function defaultReadinessCapMs(env) {
   let bytes = 0;

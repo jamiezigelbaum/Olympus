@@ -1167,7 +1167,9 @@ const MAX_PROCESS_STARTS = 3;
  * The wait ends on an answer, the unit stopping, a crash loop (more than
  * three engine processes, or a front that stopped three times), or the cap,
  * measured on this process's monotonic clock; at the cap it says what the
- * engine last said it was doing.
+ * engine last said it was doing. The cap never cuts a boot that is still
+ * backing up or updating its stores while its heartbeat beats: that work is
+ * progressing, and stopping it means a rollback (owner rule, 16 Nov 2026).
  */
 function waitForWorkerReadiness(
   options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
@@ -1219,14 +1221,15 @@ function waitForWorkerReadiness(
     const front = readFront();
     const frontFailures = front && Date.parse(front.updatedAt) >= waitStartedAt ? front.failures ?? 0 : 0;
     if (processes.size > MAX_PROCESS_STARTS || frontFailures >= MAX_PROCESS_STARTS) { ended = 'crash_loop'; break; }
-    if (tick - startedTick >= capMs) { ended = 'cap'; break; }
+    const boot = tick - startedTick >= timeoutMs ? readBoot() : undefined;
+    if (tick - startedTick >= capMs && !bootStillUpdating(boot, heartbeat)) { ended = 'cap'; break; }
     if (tick - startedTick >= timeoutMs && tick - lastLineTick >= READINESS_PROGRESS_LINE_MS) {
-      const boot = readBoot();
       const counts = boot && heartbeat && boot.pid === heartbeat.pid ? `${bootProgressLine(boot)}; ` : '';
       progressLine(`Starting Olympus: ${counts}${heartbeatState(heartbeat)}`);
       lastLineTick = tick;
     }
-    waitForActivationSettle(Math.max(1, Math.ceil(Math.min(pollMs, capMs - (tick - startedTick)))));
+    const left = capMs - (tick - startedTick);
+    waitForActivationSettle(Math.max(1, Math.ceil(left > 0 ? Math.min(pollMs, left) : pollMs)));
     ready = probe();
   }
   // Only a front file written during this wait speaks for this start.
@@ -1238,6 +1241,12 @@ function waitForWorkerReadiness(
     ...(!ready && ended ? { ended } : {}),
     ...(!ready && heartbeat ? { heartbeat } : {}),
   };
+}
+
+/** The engine whose heartbeat beats says its boot is backing up or updating stores. */
+function bootStillUpdating(boot: BootProgress | undefined, heartbeat: EngineHeartbeat | undefined): boolean {
+  if (!boot || !heartbeat || boot.pid !== heartbeat.pid) return false;
+  return (boot.phase === 'backing_up' || boot.phase === 'migrating') && engineHeartbeatBeating(heartbeat, { pid: boot.pid });
 }
 
 function defaultReadinessCapMs(env: Record<string, string | undefined>): number {
