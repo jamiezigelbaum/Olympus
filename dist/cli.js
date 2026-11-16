@@ -35700,7 +35700,7 @@ async function startCpuSampleLog(env = process.env) {
       if (path)
         appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
 `, { mode: 384 });
-      else if (freezes.count > 0)
+      if (freezes.count > 0)
         console.error(freezeLogLine(new Date(now).toISOString(), role, freezes));
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : "error"}`);

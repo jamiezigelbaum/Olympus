@@ -294,9 +294,9 @@ export function freezeLogLine(
 export async function startCpuSampleLog(env: Record<string, string | undefined> = process.env): Promise<(() => void) | undefined> {
   const configured = env[CPU_SAMPLE_LOG_ENV]?.trim();
   if (configured === 'off') return undefined;
-  // Without a file, the sampler still runs and writes one line to the engine's
-  // own log for each interval that held a freeze: where a freeze on a real
-  // install was is then in its log, not only in a test run's.
+  // The sampler always runs and writes one line to the engine's own log for
+  // each interval that held a freeze, with or without a file: where a freeze
+  // on a real install was is then in its log, not only in a test run's.
   const path = configured || undefined;
   // Front and background write one file: each line names its process.
   const role = env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() || 'single';
@@ -347,7 +347,9 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
         ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? []),
       };
       if (path) appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}\n`, { mode: 0o600 });
-      else if (freezes.count > 0) console.error(freezeLogLine(new Date(now).toISOString(), role, freezes));
+      // The freeze line goes to the engine's log whether or not a sample file
+      // is set: on the owner's box the file was set, and the log named no frame.
+      if (freezes.count > 0) console.error(freezeLogLine(new Date(now).toISOString(), role, freezes));
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : 'error'}`);
     }
