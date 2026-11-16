@@ -416,7 +416,7 @@ async function restartEngine(timeoutMs: number): Promise<{ ok: boolean; ms: numb
   }
 }
 
-async function prepareSource(): Promise<never> {
+async function prepareSource(earlierRelease = false): Promise<never> {
   const config = readConfig();
   const p = platform();
   // A fresh install (1.3.0 on) asks the owner how Private items are answered
@@ -432,7 +432,7 @@ async function prepareSource(): Promise<never> {
     let offer: { state?: string; options?: Array<{ id?: string; recommended?: boolean }> } = {};
     try { offer = JSON.parse(asked.stdout); } catch { /* reported below */ }
     const recommended = offer.options?.filter((option) => option.recommended).map((option) => option.id) ?? [];
-    if (asked.code !== 0 || offer.state !== 'pending' || recommended.join() !== expected) {
+    if (asked.code !== 0 || offer.state !== 'pending' || recommended.length !== 1 || (!earlierRelease && recommended.join() !== expected)) {
       emit({ ok: false, step: 'privacy-choice', detail: `a fresh install did not ask for the privacy choice with ${expected} recommended (it recommended ${recommended.join() || 'nothing'}): ${asked.stdout.slice(0, 200) || asked.stderr.slice(0, 200)}` });
     }
     say(`fresh install asks for the privacy choice, ${expected} recommended`);
@@ -2690,7 +2690,7 @@ async function main(): Promise<void> {
       await new Promise(() => undefined);
       return;
     }
-    case 'prepare-source': return await prepareSource();
+    case 'prepare-source': return await prepareSource(rest[0] === 'earlier');
     case 'connect-source': return await connectSource();
     case 'settle': return await settle(Number(flag('--timeout-s', '600')));
     case 'mcp-token': return await mcpToken();
