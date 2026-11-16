@@ -3,7 +3,7 @@
 // written: in the same reply ('first') or in a call of their own ('pass').
 // Generic: nothing here reads the question's content. Off by default.
 import { expect, test } from 'bun:test';
-import { analystResponseSchema, createAnalyst, type AnalystModelRequest, type AnalystReadingNotes } from '../src/core/analyst.ts';
+import { analystResponseSchema, createAnalyst, type AnalystModel, type AnalystModelRequest, type AnalystReadingNotes } from '../src/core/analyst.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 
 const pack: EvidencePack = {
@@ -204,4 +204,35 @@ test('a notes reply cut off mid-note keeps the notes it finished', async () => {
   } }, { evidenceFormat: 'compact', readingNotes: 'pass' });
   await analyst.analyze(pack, { localOnly: true });
   expect(seen[1]!.prompt).toContain('- [1] Deposit: 2,000 EUR.\n\nAnswer this question');
+});
+
+test('a reply cut at its output limit after the answer keeps the answer and its finished citations', async () => {
+  const cutReply = '{"parts":["deposit"],"answer":"The deposit is 2,000 EUR.","citations":[{"evidence":1,"claim":"The deposit is 2,000 EUR."},{"evidence":1,"claim":"Section 7. On was';
+  const model: AnalystModel = { complete: async () => ({ text: cutReply, modelId: 'test' }) };
+  const pack: EvidencePack = {
+    question: 'What is the deposit?', builtAt: '2026-11-16T00:00:00Z',
+    coverage: { searchedCorpora: ['t'], skippedCorpora: [], extractionGaps: [] },
+    candidates: [{
+      provenance: { sourceItem: { family: 'file', provider: 't', accountScope: 't', providerItemId: 'a', localItemId: 'a' }, citation: { title: 'Lease' } },
+      trustTier: 'S2', trustDomain: 'internal', chunks: ['The tenant pays a deposit of 2,000 EUR on signing.'],
+    }],
+  };
+  const result = await createAnalyst(model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }).analyze(pack, { localOnly: true });
+  expect(result.answer).toBe('The deposit is 2,000 EUR.');
+  expect(result.citations.length).toBe(1);
+  expect(result.escalation).toBeUndefined();
+});
+
+test('a reply cut inside the answer is not taken as an answer', async () => {
+  const model: AnalystModel = { complete: async () => ({ text: '{"parts":["deposit"],"notes":[{"evidence":1,"fact":"deposit 2,000 EUR"}],"answer":"The deposit is 2,0', modelId: 'test' }) };
+  const pack: EvidencePack = {
+    question: 'What is the deposit?', builtAt: '2026-11-16T00:00:00Z',
+    coverage: { searchedCorpora: ['t'], skippedCorpora: [], extractionGaps: [] },
+    candidates: [{
+      provenance: { sourceItem: { family: 'file', provider: 't', accountScope: 't', providerItemId: 'a', localItemId: 'a' }, citation: { title: 'Lease' } },
+      trustTier: 'S2', trustDomain: 'internal', chunks: ['The tenant pays a deposit of 2,000 EUR on signing.'],
+    }],
+  };
+  const result = await createAnalyst(model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact', readingNotes: 'first' }).analyze(pack, { localOnly: true });
+  expect(result.escalation).toBeDefined();
 });

@@ -358,3 +358,21 @@ test('Ask env override beats the resolved server window and records env', async 
   await runWithSourceAnswerTrace(trace, () => exerciseAsk(analyst, false, false, 18000));
   expect(trace.evidenceSeats?.fits.at(-1)).toMatchObject({ promptBudgetBytes: 18000, promptBudgetSource: 'env' });
 });
+
+test('a proportional trim keeps every pick that still has room to say something, in order and inside the seat', async () => {
+  const { clipChunksInProportion } = await import('../src/workers/source-index/analyst-answer.ts');
+  const picks = ['a'.repeat(3_000), 'b'.repeat(1_500), 'c'.repeat(1_500)];
+  const fitted = clipChunksInProportion(picks, 3_000);
+  expect(fitted.map(pick => pick[0])).toEqual(['a', 'b', 'c']);
+  expect(fitted.map(pick => pick.length)).toEqual([1_500, 750, 750]);
+  // Everything fits: nothing is cut.
+  expect(clipChunksInProportion(picks, 6_000)).toEqual(picks);
+  // Too small for three: the last pick goes, the first two share the seat.
+  const small = clipChunksInProportion(picks, 700);
+  expect(small.map(pick => pick[0])).toEqual(['a', 'b']);
+  expect(small.join('').length).toBeLessThanOrEqual(700);
+  // Multi-byte text is cut on a character, never inside one.
+  const wide = clipChunksInProportion(['é'.repeat(1_000), 'ü'.repeat(1_000)], 1_001);
+  expect(new TextEncoder().encode(wide.join('')).length).toBeLessThanOrEqual(1_001);
+  expect(wide.join('')).not.toContain('�');
+});

@@ -8934,8 +8934,9 @@ var ANALYST_SYSTEM = [
   '"sufficient" is true only when the evidence fully answers the question.'
 ].join(`
 `);
+var NOTES_MAX = 12;
 var NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception";
-var NOTES_FIRST_RULE = `- Before "answer", write "notes": every fact in the items that answers any part of the question (${NOTES_FACT_KINDS}), copied exactly as the item gives it, one fact per note with its item number. Read each item to its end first. Then write "answer" from the notes: it gives every noted fact that answers the question. Drop words to stay short, never facts.`;
+var NOTES_FIRST_RULE = `- Before "answer", write "notes": every fact in the items that answers any part of the question (${NOTES_FACT_KINDS}), copied exactly as the item gives it, one fact per note with its item number, at most ${NOTES_MAX} notes. Read each item to its end first. Then write "answer" from the notes: it gives every noted fact that answers the question. Drop words to stay short, never facts.`;
 var NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.';
 var ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.";
 var ANALYST_NOTES_SYSTEM = [

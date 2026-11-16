@@ -27424,23 +27424,58 @@ function clampAnswer(answer, maxAnswerChars) {
   const space = cut.lastIndexOf(" ");
   return space > 0 ? `${cut.slice(0, space).replace(/[\s,;:]+$/u, "")}…` : cut;
 }
-function parseModelJsonObject(text) {
+function parseModelJsonObject(text, cut = false) {
   const stripped = stripCodeFences(text);
   const start = stripped.indexOf("{");
+  if (start === -1)
+    return null;
   const end = stripped.lastIndexOf("}");
-  if (start === -1 || end === -1 || end < start)
-    return null;
-  let raw;
-  try {
-    raw = JSON.parse(stripped.slice(start, end + 1));
-  } catch {
-    return null;
+  const closed = cut ? closeCutJson(stripped.slice(start)) : null;
+  for (const candidate of [end > start ? stripped.slice(start, end + 1) : null, closed]) {
+    if (candidate === null)
+      continue;
+    let raw;
+    try {
+      raw = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (typeof raw === "object" && raw !== null)
+      return raw;
   }
-  return typeof raw === "object" && raw !== null ? raw : null;
+  return null;
+}
+function closeCutJson(text) {
+  const open = [];
+  let inString = false;
+  let kept = null;
+  for (let at = 0;at < text.length; at++) {
+    const char = text[at];
+    if (inString) {
+      if (char === "\\")
+        at += 1;
+      else if (char === '"')
+        inString = false;
+    } else if (char === '"')
+      inString = true;
+    else if (char === "{" || char === "[")
+      open.push(char === "{" ? "}" : "]");
+    else if (char === "}" || char === "]") {
+      if (open.pop() !== char)
+        return null;
+      if (open.length === 0)
+        return null;
+      kept = { at: at + 1, closers: [...open].reverse().join("") };
+    }
+  }
+  return kept ? text.slice(0, kept.at) + kept.closers : null;
 }
 function parseAnalystModelOutput(text) {
-  const obj = parseModelJsonObject(text);
+  const whole = parseModelJsonObject(text);
+  const obj = whole ?? parseModelJsonObject(text, true);
   if (!obj)
+    return null;
+  if (!whole && (typeof obj.answer !== "string" || !obj.answer.trim()))
     return null;
   return {
     answer: typeof obj.answer === "string" ? obj.answer : "",
@@ -27464,7 +27499,7 @@ function coerceCitation(value) {
 function stripCodeFences(text) {
   return text.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', CLAIM_RULE = `Each citation's "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.`, ANALYST_SYSTEM, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, NOTES_MAX = 12, NOTES_FACT_CHARS = 200, NOTES_OUTPUT_CHARS = 1600, NOTES_HEADING = "Reading notes (facts copied from the evidence; check each against its item):", AUDIT_NOTES_TAIL = "The corrected answer states every reading note that the evidence supports and that answers the question.", NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`, NOTES_BATCHED_HEADING = "Reading notes (facts copied from each item's text, which is not shown here):", AUDIT_BATCHED_NOTES_TAIL = "The candidates' text is not shown: the reading notes are the facts copied from it. The corrected answer states every reading note that answers the question, cited to its candidate.", compactSystem = (notes = "off") => [
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', CLAIM_RULE = `Each citation's "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.`, ANALYST_SYSTEM, NOTES_MAX = 12, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, NOTES_FACT_CHARS = 200, NOTES_OUTPUT_CHARS = 1600, NOTES_HEADING = "Reading notes (facts copied from the evidence; check each against its item):", AUDIT_NOTES_TAIL = "The corrected answer states every reading note that the evidence supports and that answers the question.", NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`, NOTES_BATCHED_HEADING = "Reading notes (facts copied from each item's text, which is not shown here):", AUDIT_BATCHED_NOTES_TAIL = "The candidates' text is not shown: the reading notes are the facts copied from it. The corrected answer states every reading note that answers the question, cited to its candidate.", compactSystem = (notes = "off") => [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence below.",
   "Each evidence item starts with its number and name, then its date and source, then its text in source_data.",
   "Rules:",
@@ -27523,7 +27558,7 @@ var init_analyst = __esm(() => {
     '"sufficient" is true only when the evidence fully answers the question.'
   ].join(`
 `);
-  NOTES_FIRST_RULE = `- Before "answer", write "notes": every fact in the items that answers any part of the question (${NOTES_FACT_KINDS}), copied exactly as the item gives it, one fact per note with its item number. Read each item to its end first. Then write "answer" from the notes: it gives every noted fact that answers the question. Drop words to stay short, never facts.`;
+  NOTES_FIRST_RULE = `- Before "answer", write "notes": every fact in the items that answers any part of the question (${NOTES_FACT_KINDS}), copied exactly as the item gives it, one fact per note with its item number, at most ${NOTES_MAX} notes. Read each item to its end first. Then write "answer" from the notes: it gives every noted fact that answers the question. Drop words to stay short, never facts.`;
   ANALYST_NOTES_SYSTEM = [
     `${ANALYST_NOTES_SYSTEM_START} Do not answer the question.`,
     "Each evidence item starts with its number and name, then its date and source, then its text in source_data.",
@@ -105633,6 +105668,24 @@ function withLegPromptBudgets(route, localLeg, cloudLeg, veniceLeg) {
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
+function clipChunksInProportion(chunks, maxBytes) {
+  const budget = Math.max(0, Math.floor(maxBytes));
+  const sizes = chunks.map(utf8ByteLength);
+  let count = chunks.length;
+  let total = sizes.reduce((sum, size) => sum + size, 0);
+  if (total <= budget)
+    return [...chunks];
+  while (count > 1 && sizes.slice(0, count).some((size) => Math.min(size, Math.floor(budget * size / total)) < Math.min(size, MIN_PROPORTIONAL_PICK_BYTES))) {
+    count -= 1;
+    total -= sizes[count];
+  }
+  if (total <= budget)
+    return chunks.slice(0, count);
+  return chunks.slice(0, count).flatMap((chunk, index) => clipChunksToUtf8Bytes([chunk], Math.floor(budget * sizes[index] / total)));
+}
+function fitChunks(chunks, maxBytes) {
+  return process.env.OLYMPUS_FIT_PROPORTIONAL === "1" ? clipChunksInProportion(chunks, maxBytes) : clipChunksToUtf8Bytes(chunks, maxBytes);
+}
 function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySeats, lane, seatOf, evidenceFormat, candidateGaps, budgetForOutputChars) {
   return {
     analyze: (pack, analyzeOptions) => {
@@ -105698,7 +105751,7 @@ function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, ana
       for (let attempt = 0;attempt < 6; attempt += 1) {
         if (!minimumPack && share < (wide ? READ_WIDE_MIN_PASSAGE_BYTES : MIN_FITTED_BYTES_PER_CANDIDATE) && keep > 1)
           break;
-        const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share * shares(candidate))) })), candidateCorpus);
+        const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: fitChunks(candidate.chunks, Math.max(0, share * shares(candidate))) })), candidateCorpus);
         const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
         if (bytes <= maxPromptBytes)
           return fitted;
@@ -107255,7 +107308,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 60000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 60000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 60000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 60000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 60000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 60000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_PROPORTIONAL_PICK_BYTES = 200, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_model_stream();
   init_read_wide();
