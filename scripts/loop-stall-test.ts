@@ -563,6 +563,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const asks: Array<{ ms: number; status: number; evidence_ms: unknown }> = [];
   const acks: Array<{ at: string; ms: number; status: number; loop_held_ms?: number; error?: string }> = [];
   const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
+  let enginesStartedAt: number | undefined;
   const dashReads: Array<{ path: string; ms: number; status: number; error?: string }> = [];
   let frontLoopSql: { mode?: string; statements?: number; sites?: number; unlisted?: string[]; unlisted_sites?: Array<{ site: string; statements: number }> } | null = null;
   const errors: string[] = [];
@@ -593,6 +594,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     walAtOpen = walSizes(dir);
     coldFiles(dir);
     for (const role of ['background', 'front']) {
+      enginesStartedAt ??= Date.now();
       const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], { env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_MAIN_THREAD_SQL_LOG: join(metrics, `${role}.sql.jsonl`), OLYMPUS_CPU_SAMPLE_LOG: join(metrics, `${role}.cpu.jsonl`) }, stdout: 'pipe', stderr: 'pipe' });
       children.push(child);
       writeFileSync(pidFile, JSON.stringify(children.map(entry => entry.pid)));
@@ -705,7 +707,9 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const guards = sqliteGuards(walAtEnd, sqliteLines.map(entry => entry.line), { fromFirstLevel: options.runCase === 'boot-after-upgrade' });
   // Boot after upgrade: how long the padded WAL took to come down to the limit.
   const firstLevel = options.runCase === 'boot-after-upgrade' ? sqliteLines.find(entry => /tier-ledger\S* .*?wal_bytes=(\d+)/.test(entry.line) && Number(/wal_bytes=(\d+)/.exec(entry.line)![1]) <= WAL_END_LIMIT_BYTES) : undefined;
-  const padded_wal_level_s = firstLevel ? Math.round((Date.parse(firstLevel.at) - started) / 100) / 10 : null;
+  // From the engines' start (plan, 16 Nov 2026 14:58Z): at or under 64 MB within 5 minutes; longer while making progress is a
+  // report to the plan with the reason, not an automatic fail.
+  const padded_wal_level_s = firstLevel ? Math.round((Date.parse(firstLevel.at) - (enginesStartedAt ?? started)) / 100) / 10 : null;
   // One bar for the 600k gate and the quick cold test (plan, 16 Nov 2026).
   const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok, runCase: options.runCase });
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
@@ -749,7 +753,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const unlistedSites = frontLoopSql?.unlisted_sites ?? frontLoopSql?.unlisted?.map(site => ({ site, statements: NaN })) ?? [];
   console.log(`${options.runCase} front loop SQL (reported, not gated): ${frontLoopSql ? `${frontLoopSql.statements ?? '?'} statements at ${frontLoopSql.sites ?? '?'} sites, ${unlistedSites.length} not on the allowance list${unlistedSites.length ? `:\n${unlistedSites.map(entry => `  ${Number.isNaN(entry.statements) ? '?' : entry.statements} statements  ${entry.site}`).join('\n')}` : ''}` : 'not reported by this build'}`);
   const peaks = Object.entries(guards.wal_peak).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, bytes]) => `${label} ${Math.round(bytes / 1048576)} MB`).join(', ') || 'no wal lines';
-  console.log(`${options.runCase} WAL: peak ${peaks}${options.runCase === 'boot-after-upgrade' ? ` (from each file's first rewind; padded ledger at or under 64 MB after ${padded_wal_level_s ?? 'never'} s)` : ''}; over 64 MB at any point ${guards.wal_peak_over.length}, at end ${guards.wal_over_limit.length}; ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
+  console.log(`${options.runCase} WAL: peak ${peaks}${options.runCase === 'boot-after-upgrade' ? ` (from each file's first rewind; padded ledger at or under 64 MB after ${padded_wal_level_s ?? 'never'} s from the engines' start, bar 300 s, predicted about 60 s${padded_wal_level_s === null || padded_wal_level_s > 300 ? '; OVER 5 MIN: report to the plan with the reason' : ''})` : ''}; over 64 MB at any point ${guards.wal_peak_over.length}, at end ${guards.wal_over_limit.length}; ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
   console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}, judge model calls ${modelCalls.judge}); ${workload_ok ? 'PASS' : 'FAIL'}`);
   console.log(`${options.runCase} release bar (front under ${frontLimitMs(options.runCase) / 1000} s, ack under 1 s, background under 30 s, work done, WAL at most 64 MB throughout): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
   console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));

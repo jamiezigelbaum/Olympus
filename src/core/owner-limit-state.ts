@@ -6,9 +6,13 @@ import { installLimitStopHooks, invalidateLimitStop, type LimitStop } from './li
 export type { DailyCallOverride } from './owner-limit-settings.ts';
 export { ownerLimitSettingsPath, readJudgeCallOverride, saveJudgeCallOverride, readOwnerLimitOverride, saveOwnerLimitOverride } from './owner-limit-settings.ts';
 
-/** The existing store owns opening, migrations and deterministic closing. */
+/**
+ * A short visit to the scheduler's store for one limit-stop read or write.
+ * It runs on the caller's loop, the front's included, so it leaves the
+ * backfill and the closing checkpoint to the scheduler's own standing store.
+ */
 export function withOwnerLimitStore<T>(use: (store: LocalSourceSchedulerStateStore) => T, dbPath = defaultSourceSchedulerStateDbPath()): T {
-  const store = new LocalSourceSchedulerStateStore(dbPath);
+  const store = new LocalSourceSchedulerStateStore(dbPath, { visiting: true });
   try { return use(store); } finally { store.close(); }
 }
 export function recordOwnerLimitStop(stop: LimitStop): void {

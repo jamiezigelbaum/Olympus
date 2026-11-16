@@ -47696,7 +47696,11 @@ function frontLoopSqlHealth() {
   return {
     mode: watch.mode,
     statements: watch.statements,
-    ...watch.allowed ? { sites: watch.seen.size, unlisted: watch.unlisted.slice(), unlisted_sites: watch.unlisted.map((site) => ({ site, statements: watch.seen.get(site) ?? 0 })) } : {}
+    ...watch.allowed ? {
+      sites: watch.seen.size,
+      unlisted: watch.unlisted.slice(),
+      ...watch.unlisted.length ? { unlisted_sites: watch.unlisted.map((site) => ({ site, statements: watch.seen.get(site) ?? 0 })) } : {}
+    } : {}
   };
 }
 var FrontLoopSqlError, UNLISTED_KEPT = 50, watch;
@@ -140255,7 +140259,9 @@ class LocalSourceSchedulerStateStore {
   dbPath;
   db;
   closed = false;
-  constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
+  visiting;
+  constructor(dbPath = defaultSourceSchedulerStateDbPath(), options = {}) {
+    this.visiting = options.visiting === true;
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
       mkdirSync49(dirname80(dbPath), { recursive: true, mode: 448 });
@@ -140267,7 +140273,8 @@ class LocalSourceSchedulerStateStore {
     assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
     initializeLimitStops(this.db);
-    this.backfillLimitStops();
+    if (!this.visiting)
+      this.backfillLimitStops();
   }
   backfillLimitStops() {
     this.db.transaction(() => {
@@ -140280,7 +140287,7 @@ class LocalSourceSchedulerStateStore {
         if (state)
           syncSchedulerLimitStop(this.db, undefined, state);
       }
-    })();
+    }).immediate();
   }
   openLimitStops(now) {
     return this.closed ? [] : listOpenLimitStops(this.db, now);
@@ -140293,7 +140300,7 @@ class LocalSourceSchedulerStateStore {
   }
   close() {
     this.closed = true;
-    closeSqliteStore(this.db);
+    closeSqliteStore(this.db, this.visiting ? { checkpoint: false } : {});
   }
   get(key) {
     const safeKey = requireStateKey(key);
@@ -164602,7 +164609,7 @@ var init_provider_credit_status = __esm(() => {
 // src/core/owner-limit-state.ts
 import { existsSync as existsSync95 } from "node:fs";
 function withOwnerLimitStore(use, dbPath = defaultSourceSchedulerStateDbPath()) {
-  const store = new LocalSourceSchedulerStateStore(dbPath);
+  const store = new LocalSourceSchedulerStateStore(dbPath, { visiting: true });
   try {
     return use(store);
   } finally {
