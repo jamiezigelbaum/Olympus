@@ -1,3 +1,4 @@
+import { waitFor } from './helpers/test-clock.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -69,12 +70,10 @@ function analyst(packs: EvidencePack[]): Analyst {
 const set = { selected_item: { corpus_id: 'telegram.internal', family: 'chat', provider: 'telegram', account_scope: 'me', provider_item_id: 'm3', local_item_id: 'l3', provider_conversation_id: 'wellness', conversation_label: 'Wellness' }, whole: 'conversation' as const };
 
 async function settled(jobs: ReturnType<typeof createDeepReadJobs>, id: string) {
-  for (let i = 0; i < 200; i += 1) {
+  return waitFor(() => {
     const view = jobs.status(id)[0]!;
-    if (view.state === 'done' || view.state === 'failed' || view.state === 'cancelled') return view;
-    await new Promise(resolve => setTimeout(resolve, 5));
-  }
-  throw new Error('deep read did not settle');
+    return view.state === 'done' || view.state === 'failed' || view.state === 'cancelled' ? view : undefined;
+  }, { description: 'deep read settled' });
 }
 
 describe('deep read jobs', () => {
