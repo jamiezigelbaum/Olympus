@@ -2,7 +2,8 @@
 //
 // A stand-alone, read-only tool. It reads COPIES of connector stores (each
 // source's internal, secure_local, tier-ledger and tier-sniffer SQLite files,
-// taken with `sqlite3 ".backup"`), never a live store, and writes one sample
+// taken with `sqlite3 -readonly STORE "VACUUM INTO 'COPY'"`; `.backup` restarts on every engine
+// write and once wrote 220 GB for a 4.5 GB live ledger), never a live store, and writes one sample
 // file to an owner-only directory outside the repository. It prints counts
 // only, never an item's text or names.
 //

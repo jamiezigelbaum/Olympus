@@ -83,7 +83,9 @@ folder, so it has its own labels and never mixes with round 1.
 bun eval/calibration/sample-messages.ts --stores DIR
 ```
 
-`DIR` holds copies of each source's four stores, made with `sqlite3 ".backup"`.
+`DIR` holds copies of each source's four stores, made with
+`sqlite3 -readonly STORE "VACUUM INTO 'COPY'"`. Not `.backup`: on a store the engine
+is writing it restarts on every write (220 GB written for a 4.5 GB ledger, 16 Nov 2026).
 It never reads a live store and prints counts only. By default it takes 100
 Telegram, 50 WhatsApp and 60 Gmail items from the last two years, at most 3 per
 chat or sender while a source has enough to spare. Secrets and anything the
