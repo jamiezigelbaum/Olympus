@@ -124,6 +124,40 @@ jobs:
       # The privacy-judge calibration tests live in eval/, outside every lane.
       - run: bun run test:calibration
 
+  loop-stall-quick:
+    # A quick cold loop-stall test (plan, 16 Nov 2026): a 40k-item fixture under a 400 MB cap, both engines, 120 s; fails on
+    # any loop beat over 1 s and prints the site. It caught the freeze before 7216b4b4 twice (2.7 s, 1.7 s). Not a required
+    # check; the 600k gate on Sparta stays the bar for candidates. Runs only when engine or store code changed.
+    name: loop-stall quick
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 50
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - id: changed
+        env:
+          BEFORE: ${{ github.event.before || github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$BEFORE" ] && git cat-file -e "$BEFORE" 2>/dev/null && ! git diff --name-only "$BEFORE" HEAD | grep -qE '^(src/workers/(engine|connector-store|classification|file-extraction)/|src/core/(source-storage|sqlite|tier)|scripts/loop-stall-test\.ts)'; then
+            echo "run=false" >> "$GITHUB_OUTPUT"; echo "No engine or store code changed."
+          else echo "run=true" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.changed.outputs.run == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - if: steps.changed.outputs.run == 'true'
+        run: bun install --frozen-lockfile
+      - if: steps.changed.outputs.run == 'true'
+        run: |
+          export HOME="$(mktemp -d)"
+          bun scripts/loop-stall-test.ts build --dir "$RUNNER_TEMP/ls" --items 40000
+          sudo systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" -p MemoryMax=400M -p MemorySwapMax=0 \
+            --setenv=HOME="$HOME" --setenv=PATH="$PATH" -- \
+            bun scripts/loop-stall-test.ts run --dir "$RUNNER_TEMP/ls" --seconds 120 --memory-max 400M --io-floor-ms 200 --io-wait-seconds 60 --quick
+
   put-back-mac:
     # The put-back must hold on APFS too (step-back, 16 Nov 2026). Not a required check.
     name: put-back on macOS
