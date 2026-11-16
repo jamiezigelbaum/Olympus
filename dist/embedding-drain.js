@@ -19946,6 +19946,16 @@ var completedPrivateAnswers = new Set;
 var JOB_QUESTION_TTL_MS = 30 * 60000;
 var jobQuestions = new Map;
 
+// src/core/follow-up.ts
+var FOLLOW_UP_WEAK_BARS = Object.freeze({
+  rerankScore: -3,
+  conceptShare: 0.34,
+  vectorMargin: 0.02
+});
+var CUT_SHORT_REASONS = new Set(["lane_timeout", "semantic_lane_skipped"]);
+var NARROW_HANDLE_LIFETIME = 60 * 60 * 1000;
+var narrowHandles = new Map;
+
 // src/core/remote-result.ts
 var MAX_ANSWER = 64 * 1024;
 var MAX_SENT = 16 * 1024;
