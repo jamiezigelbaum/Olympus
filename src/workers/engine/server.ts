@@ -639,6 +639,8 @@ const FRONT_MOUNT_LOOK_QUIET_MS = 60_000;
  * background's start. A rebuild from the ledger took about 59 s on Sparta
  * (gate 1, ops#151); from a saved set the background keeps current, a start
  * applies a delta of at most a refresh period.
+ * Kind d (startup pace): this only ends the wait before listening. The
+ * visibility build keeps running in turns; no work is cancelled or dropped.
  */
 const FRONT_VISIBILITY_READY_BOUND_MS = 15_000;
 
@@ -6393,8 +6395,8 @@ export async function main(): Promise<void> {
         return response;
       } }))
     : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
-  // Bounded: a set that has to be rebuilt from the ledger (a retention gap)
-  // finishes after the front listens, in turns, rather than hold readiness.
+  // Only the wait is bounded: Promise.race does not cancel `warming`. A set
+  // rebuilt from the ledger keeps building after the front listens, in turns.
   if (engineFront) {
     const warming = keepVisibilityCurrent('before ready');
     let bound: ReturnType<typeof setTimeout> | undefined;
