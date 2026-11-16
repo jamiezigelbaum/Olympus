@@ -9,7 +9,8 @@
  * adds tests further away in the import graph, nearest first, until about
  * three minutes of measured test time per worker is used. It prints how many
  * reached tests it left to CI. A change to the toolchain or the test harness
- * runs the whole fast lane.
+ * runs the whole fast lane. Deploy-lane tests that import a changed file
+ * directly run too, one at a time as CI runs that lane.
  *
  *   bun run prepush                  # changes since origin/main
  *   bun run prepush --base <ref>     # changes since another ref
@@ -87,10 +88,10 @@ function resolve(from: string, spec: string): string | null {
   return null;
 }
 
-type Selection = { tests: string[]; whole: boolean; reached: number };
+type Selection = { tests: string[]; deploy: string[]; whole: boolean; reached: number };
 
-function selectTests(changed: string[], fast: string[]): Selection {
-  if (changed.some(name => WHOLE_LANE.test(name))) return { tests: fast, whole: true, reached: fast.length };
+function selectTests(changed: string[], fast: string[], deployLane: string[]): Selection {
+  if (changed.some(name => WHOLE_LANE.test(name))) return { tests: fast, deploy: [], whole: true, reached: fast.length };
   const reverse = importedBy();
   const depth = new Map<string, number>(changed.map(name => [name, 0]));
   let frontier = [...changed];
@@ -119,7 +120,9 @@ function selectTests(changed: string[], fast: string[]): Selection {
     budget -= test.ms;
     tests.push(test.name);
   }
-  return { tests, whole: false, reached: reached.length };
+  // Deploy-lane tests (process-spawning, run serially in CI) that import a changed file directly.
+  const deploy = deployLane.filter(name => (depth.get(`test/${name}`) ?? Infinity) <= 1);
+  return { tests, deploy, whole: false, reached: reached.length };
 }
 
 async function run(command: string[], env: Record<string, string> = {}): Promise<boolean> {
@@ -135,28 +138,31 @@ async function runStatic(): Promise<boolean> {
 
 const started = Date.now();
 const changed = changedFiles();
-const fast = partitionTestLanes(join(ROOT, 'test')).fast;
-const { tests, whole, reached } = selectTests(changed, fast);
+const lanes = partitionTestLanes(join(ROOT, 'test'));
+const fast = lanes.fast;
+const { tests, deploy, whole, reached } = selectTests(changed, fast, lanes.deploy);
 const relay = changed.some(name => name.startsWith('connect-relay/'));
 const left = reached - tests.length;
 console.log(
   `prepush: ${changed.length} changed files since ${base}; ` +
     (whole ? `the whole fast lane (${fast.length} files)` : `${tests.length} fast-lane test files on ${workers} workers`) +
+    (deploy.length > 0 ? `, ${deploy.length} deploy-lane test files that import a changed file (one at a time)` : '') +
     (relay ? ', the connect-relay tests' : '') + ', the type check, dist and the guards.' +
     (left > 0 ? ` ${left} more tests further down the import graph are left to CI (--all runs them).` : ''),
 );
 if (listOnly) {
-  for (const name of tests) console.log(`test/${name}`);
+  for (const name of [...tests, ...deploy]) console.log(`test/${name}`);
   process.exit(0);
 }
 
-const [staticOk, guardsOk, testsOk, relayOk] = await Promise.all([
+const [staticOk, guardsOk, testsOk, deployOk, relayOk] = await Promise.all([
   runStatic(),
   run(['bun', 'scripts/guards.ts']),
   tests.length === 0 ? Promise.resolve(true) : runFilePool(tests, workers, ROOT).then(code => code === 0),
+  deploy.length === 0 ? Promise.resolve(true) : runFilePool(deploy, 1, ROOT).then(code => code === 0),
   relay ? run(['bun', 'run', 'test:connect-relay']) : Promise.resolve(true),
 ]);
 const seconds = Math.round((Date.now() - started) / 1000);
-const failed = [!staticOk && 'type check or dist', !guardsOk && 'guards', !testsOk && 'fast-lane tests', !relayOk && 'connect-relay tests'].filter(Boolean);
+const failed = [!staticOk && 'type check or dist', !guardsOk && 'guards', !testsOk && 'fast-lane tests', !deployOk && 'deploy-lane tests', !relayOk && 'connect-relay tests'].filter(Boolean);
 console.log(failed.length === 0 ? `prepush: passed in ${seconds} s.` : `prepush: FAILED (${failed.join(', ')}) in ${seconds} s. Fix it before pushing.`);
 process.exit(failed.length === 0 ? 0 : 1);
