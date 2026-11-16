@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import { conversationWindowPerSide } from '../src/core/evidence-pack.ts';
@@ -76,6 +76,8 @@ export interface PassageAnswer {
   seat?: { packedChars: number; fittedChars: number; passageInPacked: boolean };
   /** The meaning judge's verdict (answer-judge.ts), when it ran: a second number, never the bar. */
   meaning?: 'correct' | 'partial' | 'wrong' | null;
+  /** The answer came from the answer store (answerStore), not from a model call in this run. */
+  reused?: boolean;
 }
 export interface PassageSummary {
   /** Questions scored; a degraded question is counted in `degraded` instead. */
@@ -191,6 +193,12 @@ export interface ArmSummary {
   paired?: { wins: number; losses: number; p: number; meaning?: { wins: number; losses: number; p: number } };
 }
 type AnswerFn = (question: EvalQuestion, pack: EvidencePack) => Promise<AnalystResult>;
+export interface StoredAnswer { result: AnalystResult; answerMs: number }
+/** Identity of a fitted pack: the question and every seat's item and text, so an answer is reused only on identical evidence. */
+export function fittedPackKey(pack: EvidencePack): string {
+  return createHash('sha256').update(JSON.stringify([pack.question, pack.candidates.map(candidate =>
+    [candidate.provenance.sourceItem.providerItemId, candidate.chunks, (candidate.facts ?? []).map(fact => fact.claim), candidate.tables ?? []])])).digest('hex').slice(0, 16);
+}
 const mostOf = (runs: readonly PassageAnswer[], holds: (run: PassageAnswer) => boolean): boolean => runs.filter(holds).length * 2 > runs.length;
 /** Exact two-sided sign test on paired wins and losses (ties left out). */
 export function signTestP(wins: number, losses: number): number {
@@ -350,6 +358,14 @@ export async function runPassageEval(input: {
    */
   answerArms?: ReadonlyArray<{ name: string; answer: AnswerFn }>;
   answerRepeats?: number;
+  /** Score only these question ids (a screen on the questions that matter). */
+  only?: readonly string[];
+  /**
+   * Answers already written for the same arm, repeat and fitted pack: reused
+   * instead of asking the model again, and every new answer is offered back.
+   * One baseline arm written once serves every run on the same packs.
+   */
+  answerStore?: { get(key: string): StoredAnswer | undefined; put(key: string, answer: StoredAnswer): void };
   /** Judge an answer's meaning against the expected passage (answer-judge.ts); the verdict only enters the receipt. */
   judgeAnswer?: (question: string, expected: string, answer: string) => Promise<'correct' | 'partial' | 'wrong' | null>;
   /** How many chunks an item has in its store (undefined when unknown). */
@@ -362,7 +378,11 @@ export async function runPassageEval(input: {
 }): Promise<PassageReceipt> {
   validatePassageDataset(input.dataset);
   const split = input.split ?? 'open';
-  const questions = input.dataset.questions.filter(q => (q.split ?? 'open') === split);
+  const questions = input.dataset.questions.filter(q => (q.split ?? 'open') === split && (!input.only || input.only.includes(q.id)));
+  // Meaning verdicts are judged after every answer is written, so the answer
+  // model's calls on one pack run back to back and its server can reuse the
+  // evidence it has just read, instead of a judge prompt landing in between.
+  const judgeLater: Array<() => Promise<void>> = [];
   if (!Number.isInteger(input.maxResults) || input.maxResults < 1) throw new Error('Pack size must be positive.');
   const ks = [...new Set([1, 3, 5, 10, input.maxResults])].sort((a, b) => a - b);
   const rows: PassageRow[] = [];
@@ -417,19 +437,23 @@ export async function runPassageEval(input: {
     const packedIds = needed.flatMap((_, index) => original.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
     const seatedIds = needed.flatMap((_, index) => pack.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
     const citedByAnswer = new WeakMap<PassageAnswer, number[]>();
-    const answerWith = async (ask: AnswerFn): Promise<PassageAnswer> => {
+    const packKey = input.answerStore ? fittedPackKey(pack) : '';
+    const answerWith = async (ask: AnswerFn, arm = 'off', repeat = 0): Promise<PassageAnswer> => {
       const answerStarted = performance.now();
+      const storeKey = `${question.id}|${arm}|${repeat}|${packKey}`;
       try {
-        const result = await ask(question, pack);
+        const stored = input.answerStore?.get(storeKey);
+        const result = stored?.result ?? await ask(question, pack);
         const citedIds = needed.flatMap((_, index) => result.citations.some(citation =>
           pack.candidates.some(candidate => candidate.provenance.sourceItem.providerItemId === citation.provenance.sourceItem.providerItemId
             && resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds)
               === resolveCitationCorpusId(candidate.provenance, detail.pack.candidates, detail.candidateCorpusIds)
             && matchingExpected(candidate, index))) ? [index + 1] : []);
-        const answerMs = performance.now() - answerStarted;
-        const graded: PassageAnswer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs, answerChars: result.answer.length, citations: result.citations.length, ...(seated ? { seat: seated } : {}) };
+        const answerMs = stored?.answerMs ?? performance.now() - answerStarted;
+        if (!stored) input.answerStore?.put(storeKey, { result, answerMs });
+        const graded: PassageAnswer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs, answerChars: result.answer.length, citations: result.citations.length, ...(seated ? { seat: seated } : {}), ...(stored ? { reused: true } : {}) };
         const expectedText = (question.expectedEvidence ?? []).map(item => item.quote).filter(Boolean).join('\n') || (question.expectedAnswerContains ?? []).join('; ');
-        if (input.judgeAnswer && expectedText) graded.meaning = await input.judgeAnswer(question.question, expectedText, result.answer);
+        if (input.judgeAnswer && expectedText) judgeLater.push(async () => { graded.meaning = await input.judgeAnswer!(question.question, expectedText, result.answer); });
         citedByAnswer.set(graded, citedIds);
         return graded;
       } catch (error) { return { outcome: 'failed', code: failureCode(error) ?? 'UNKNOWN' }; }
@@ -444,7 +468,7 @@ export async function runPassageEval(input: {
       for (let repeat = 0; repeat < (input.answerRepeats ?? 1); repeat++) {
         for (let turn = 0; turn < input.answerArms.length; turn++) {
           const arm = input.answerArms[(turn + position + repeat) % input.answerArms.length]!;
-          arms[arm.name]!.push(await answerWith(arm.answer));
+          arms[arm.name]!.push(await answerWith(arm.answer, arm.name, repeat));
         }
       }
       answer = arms[input.answerArms[0]!.name]![0];
@@ -493,6 +517,8 @@ export async function runPassageEval(input: {
       corpusTimings: (detail.corpusTimings ?? []).map(t => ({ corpusId: t.corpusId, elapsedMs: t.elapsedMs, outcome: t.outcome })),
     });
   }
+  if (judgeLater.length) input.onProgress?.(questions.length, questions.length, 'judge');
+  for (const judge of judgeLater) await judge();
   return { schema: 3, rule: PASSAGE_MATCH_RULE, gitSha: input.gitSha, split,
     // Identity includes only ids and structural labels; never hashes private text.
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
@@ -719,7 +745,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
       if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer' || key === '--judge-answers') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
-      if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes', '--answer-arms', '--answer-repeats', '--narrow'].includes(key!)) throw new Error('Unsupported passage eval option.');
+      if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes', '--answer-arms', '--answer-repeats', '--only', '--answers', '--narrow'].includes(key!)) throw new Error('Unsupported passage eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Passage eval option requires a value.');
       values.set(key!, value);
@@ -737,6 +763,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   if (armNames) values.set('--answer', 'yes');
   if (values.has('--answer-repeats') && !armNames) throw new Error('--answer-repeats needs --answer-arms.');
   const answerRepeats = positiveInteger(values.get('--answer-repeats'), 1);
+  const only = values.get('--only')?.split(',').map(id => id.trim()).filter(Boolean);
+  if (values.has('--answers') && !values.has('--answer')) throw new Error('--answers needs --answer or --answer-arms.');
   if (values.has('--answer') && provider !== 'local') throw Object.assign(new Error('--answer requires a local Analyst.'), { code: 'LOCAL_MODEL_REQUIRED' });
   const dataset: unknown = JSON.parse(readFileSync(datasetPath ?? 'eval/private/passage-questions.json', 'utf8'));
   validatePassageDataset(dataset);
@@ -759,6 +787,22 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const config = loadConfig();
     let answer: AnswerFn | undefined;
     let answerArms: Array<{ name: string; answer: AnswerFn }> | undefined;
+    const answerCalls: Record<string, { calls: number; wallMs: number; promptTokens: number; cachedTokens: number; promptMs: number; outputTokens: number; outputMs: number }> = {};
+    // --answers <file>: answers kept between runs (private text: owner-only file, never in git). An answer is reused
+    // only for the same question, arm, repeat, fitted pack and Analyst source, so one baseline serves many runs.
+    const answersPath = values.get('--answers');
+    const analystKey = createHash('sha256').update(readFileSync(new URL('../src/core/analyst.ts', import.meta.url))).digest('hex').slice(0, 12);
+    const kept: Record<string, StoredAnswer> = answersPath && existsSync(answersPath) ? JSON.parse(readFileSync(answersPath, 'utf8')) as Record<string, StoredAnswer> : {};
+    let reused = 0; let written = 0;
+    const answerStore = answersPath ? {
+      get: (key: string) => { const hit = kept[`${analystKey}|${key}`]; if (hit) reused++; return hit; },
+      // Written through, so a run that stops midway keeps what it has answered.
+      put: (key: string, value: StoredAnswer) => {
+        kept[`${analystKey}|${key}`] = value; written++;
+        mkdirSync(dirname(answersPath!), { recursive: true, mode: 0o700 });
+        writeFileSync(answersPath!, `${JSON.stringify(kept)}\n`, { mode: 0o600 });
+      },
+    } : undefined;
     if (values.has('--answer')) {
       enter('load_analyst');
       // Same local profile/lane selection as eval:real; no separate model override.
@@ -774,8 +818,17 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       } catch (error) {
         throw Object.assign(new Error('Local Analyst is unavailable.'), { code: failureCode(error) ?? 'LOCAL_MODEL_UNAVAILABLE' });
       }
+      const delphiModel = createDelphiAnalystModel(delphi, lane ? { lane } : { profile });
       const answerBy = (readingNotes: AnalystReadingNotes): AnswerFn => {
-        const analyst = createAnalyst(createDelphiAnalystModel(delphi, lane ? { lane } : { profile }), { auditSuspiciousDrafts: true, evidenceFormat: 'compact', readingNotes });
+        // Every model call's counts and times, per arm: how long the prompt took to read, how much of it the server reused.
+        const calls = answerCalls[readingNotes] = { calls: 0, wallMs: 0, promptTokens: 0, cachedTokens: 0, promptMs: 0, outputTokens: 0, outputMs: 0 };
+        const analyst = createAnalyst({ complete: async request => {
+          const started = performance.now();
+          const completion = await delphiModel.complete(request);
+          calls.calls++; calls.wallMs += Math.round(performance.now() - started);
+          for (const key of ['promptTokens', 'cachedTokens', 'promptMs', 'outputTokens', 'outputMs'] as const) calls[key] += completion.usage?.[key] ?? 0;
+          return completion;
+        } }, { auditSuspiciousDrafts: true, evidenceFormat: 'compact', readingNotes });
         return (_question, pack) => analyst.analyze(withPromptBudget(pack, promptBytes!), { localOnly: true });
       };
       answer = answerBy('off');
@@ -830,6 +883,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       ...(judge ? { judgeQuestion: judge } : {}),
       ...(judgeAnswer ? { judgeAnswer } : {}),
       ...(answerArms ? { answerArms, answerRepeats } : answer ? { answer } : {}),
+      ...(only ? { only } : {}), ...(answerStore ? { answerStore } : {}),
       itemChunks: itemChunks.count,
       ...(narrowMode ? { narrowApplied: (q: EvalQuestion) => oracle(q).applied, followUp: unnarrowedFollowUp } : {}),
       onProgress: (index, total, step) => enter(`question ${index}/${total}: ${step}`),
@@ -841,6 +895,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     writeFileSync(output, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
     // Store counts lead the line, so a short open never reads as a retrieval miss (#1576).
     console.log(JSON.stringify({ storesOpened: opened.stores.length, storesSkipped: opened.skipped.length, ...receipt.summary }));
+    if (answersPath) console.log(JSON.stringify({ answers: { reused, written } }));
+    if (Object.values(answerCalls).some(calls => calls.calls)) console.log(JSON.stringify({ answerCalls }));
     const multiItemEvidence = receipt.questions?.flatMap(row => row.neededEvidence ? [{ questionId: row.questionId, ...row.neededEvidence }] : []);
     if (multiItemEvidence?.length) console.log(JSON.stringify({ multiItemEvidence }));
     if (probe && receipt.questions) console.log(JSON.stringify({ recallGroups: recallGroups(receipt.questions) }));

@@ -23425,7 +23425,8 @@ class DelphiClient {
       ...options.lane ? { lane: options.lane } : {},
       ...options.profile ? { profile: options.profile } : {},
       model: data.model || model,
-      ...data.usage !== undefined ? { usage: data.usage } : {}
+      ...data.usage !== undefined ? { usage: data.usage } : {},
+      ...data.timings != null ? { timings: data.timings } : {}
     };
   }
   resolveRoute(options) {

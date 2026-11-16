@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
-import { comparePassageReceipts, followUpCheck, oracleNarrow, recallGroups, runPassageEval, signTestP, type LaneProbe } from '../eval/run-passages.ts';
+import { comparePassageReceipts, followUpCheck, oracleNarrow, recallGroups, runPassageEval, signTestP, type LaneProbe, type StoredAnswer } from '../eval/run-passages.ts';
 import { fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
 import type { EvalDataset } from '../eval/types.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -404,4 +404,30 @@ test('the sign test is exact and two-sided', () => {
   expect(signTestP(3, 1)).toBe(0.625);
   expect(signTestP(6, 0)).toBe(0.03125);
   expect(signTestP(0, 6)).toBe(0.03125);
+});
+
+test('stored answers are reused on the same arm, repeat and fitted pack; verdicts are judged after every answer is written', async () => {
+  const kept = new Map<string, StoredAnswer>();
+  const store = { get: (key: string) => kept.get(key), put: (key: string, value: StoredAnswer) => { kept.set(key, value); } };
+  const events: string[] = [];
+  const run = (texts: Record<string, string>, change = '') => runPassageEval({ dataset: { ...answerDataset, questions: [answerDataset.questions[0]!, { ...answerDataset.questions[0]!, id: 'second' }] },
+    maxResults: 5, storeCounts: counts, gitSha: 'abc', only: [answerDataset.questions[0]!.id],
+    buildPack: async () => { const built = detail(); if (change) built.pack.candidates[0]!.chunks = [change]; return built; },
+    answerStore: store, answerRepeats: 2,
+    answerArms: Object.entries(texts).map(([name, text]) => ({ name, answer: async () => { events.push(`answer:${name}`); return answered(text); } })),
+    judgeAnswer: async () => { events.push('judge'); return 'correct'; } });
+  const first = await run({ off: 'cafe amber violet silver cedar' });
+  expect(first.questions!.map(row => row.questionId)).toEqual([answerDataset.questions[0]!.id]);
+  expect(events).toEqual(['answer:off', 'answer:off', 'judge', 'judge']);
+  expect(first.questions![0]!.arms!.off!.map(answer => [answer.reused, answer.meaning])).toEqual([[undefined, 'correct'], [undefined, 'correct']]);
+  events.length = 0;
+  // A second run with a new arm asks the model only for that arm; the baseline is read back and graded again.
+  const second = await run({ off: 'never asked', first: 'cafe amber' });
+  expect(events.filter(event => event.startsWith('answer'))).toEqual(['answer:first', 'answer:first']);
+  expect(second.questions![0]!.arms!.off!.map(answer => [answer.reused, answer.right])).toEqual([[true, true], [true, true]]);
+  expect(second.questions![0]!.arms!.first!.every(answer => !answer.reused && !answer.right)).toBe(true);
+  events.length = 0;
+  // Different evidence in the fitted pack: nothing is reused.
+  await run({ off: 'cafe' }, 'other text');
+  expect(events.filter(event => event.startsWith('answer'))).toEqual(['answer:off', 'answer:off']);
 });

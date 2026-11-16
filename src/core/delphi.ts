@@ -49,6 +49,8 @@ export interface DelphiCompletionResult {
   profile?: ArgusModelProfile;
   model: string;
   usage?: unknown;
+  /** The server's per-request timings when it reports them (llama-server): counts and milliseconds only. */
+  timings?: unknown;
 }
 
 export interface DelphiClientOptions {
@@ -173,6 +175,7 @@ export class DelphiClient {
     const data = response as {
       choices?: Array<{ message?: { content?: string } }>;
       usage?: unknown;
+      timings?: unknown;
       model?: string;
     };
     const text = data.choices?.[0]?.message?.content;
@@ -185,6 +188,7 @@ export class DelphiClient {
       ...(options.profile ? { profile: options.profile } : {}),
       model: data.model || model,
       ...(data.usage !== undefined ? { usage: data.usage } : {}),
+      ...(data.timings != null ? { timings: data.timings } : {}),
     };
   }
 
