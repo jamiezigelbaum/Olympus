@@ -8618,6 +8618,13 @@ function isExecutableFile(path) {
 }
 var init_openclaw_executable = () => {};
 
+// src/core/source-index/read-progress.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var progress2;
+var init_read_progress = __esm(() => {
+  progress2 = new AsyncLocalStorage4;
+});
+
 // src/core/read-wide.ts
 var matchingProvenances, wideProvenances;
 var init_read_wide = __esm(() => {
@@ -8625,25 +8632,28 @@ var init_read_wide = __esm(() => {
   wideProvenances = new WeakSet;
 });
 // src/core/source-index/partial-search.ts
+function keywordPreparationGap(corpusId) {
+  return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;
+}
 function recentItemsTimeoutGap(corpusId) {
   return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
 }
 function visibilityCheckTimeoutGap(corpusId) {
   return `${UNCHECKED_PREFIX}${corpusId}; they were left out of this search. Ask again in a moment.`;
 }
-var SEMANTIC_TIMEOUT_REASONS, RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
+var SEMANTIC_TIMEOUT_REASONS, KEYWORD_PREPARATION_INCOMPLETE = "keyword_preparation_incomplete", KEYWORDS_PREFIX = "Keyword preparation unfinished for ", RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
 var init_partial_search = __esm(() => {
   SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
 });
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage4;
-  disabled = new AsyncLocalStorage4;
-  cachedOnly = new AsyncLocalStorage4;
-  requestContext = new AsyncLocalStorage4;
+  context = new AsyncLocalStorage5;
+  disabled = new AsyncLocalStorage5;
+  cachedOnly = new AsyncLocalStorage5;
+  requestContext = new AsyncLocalStorage5;
 });
 // src/core/store-reclaim-admission.ts
 var init_store_reclaim_admission = __esm(() => {
@@ -8652,14 +8662,14 @@ var init_store_reclaim_admission = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var poolSqlSites, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage5;
-  laneStorage = new AsyncLocalStorage5;
+  storage2 = new AsyncLocalStorage6;
+  laneStorage = new AsyncLocalStorage6;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -8684,6 +8694,8 @@ function normalizeRouterResultKey(key) {
 }
 var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
+  init_read_progress();
+  init_source_answer_jobs();
   init_read_wide();
   init_partial_search();
   init_keyword_context();
@@ -8724,10 +8736,10 @@ var init_router = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage6;
+  storage3 = new AsyncLocalStorage7;
   completedPrivateAnswers = new Set;
   JOB_QUESTION_TTL_MS = 30 * 60000;
   jobQuestions = new Map;
@@ -14035,7 +14047,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`, compactSystem = (notes = "off") => [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence below.",
   "Each evidence item starts with its number and name, then its date and source, then its text in source_data.",
@@ -14068,7 +14080,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage7;
+  analystAbortSignalStorage = new AsyncLocalStorage8;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -15695,6 +15707,7 @@ var init_credential_health = __esm(() => {
 // src/workers/connector-store/off-thread-reads.ts
 var startedStores, storeOpens, queues, openSnapshots, releases;
 var init_off_thread_reads = __esm(() => {
+  init_read_progress();
   init_answer_latency_trace();
   startedStores = new Set;
   storeOpens = new Map;
@@ -16155,7 +16168,7 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
@@ -16163,7 +16176,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage8;
+  priorityQueryEmbedding = new AsyncLocalStorage9;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -16553,11 +16566,11 @@ var init_media_cache = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage9;
+  readAuthorization = new AsyncLocalStorage10;
 });
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
@@ -16701,6 +16714,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 }
 var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
+  init_read_progress();
   init_source_size_limits();
   init_store_totals();
   init_vector_digest();
@@ -17607,6 +17621,7 @@ var init_evidence_pack = __esm(() => {
   init_answer_latency_trace();
   utf82 = new TextEncoder;
   CUT_SHORT_LANES = new Map([
+    [KEYWORD_PREPARATION_INCOMPLETE, { suffix: ":keywords", gap: keywordPreparationGap }],
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
     [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
   ]);

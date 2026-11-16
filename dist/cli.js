@@ -26340,7 +26340,10 @@ function semanticTimeoutGapCorpus(gap) {
   return gapCorpus(PREFIX, gap);
 }
 function laneTimeoutGap(corpusId) {
-  return `Ran out of time searching ${corpusId}; it is not part of this answer, so more may be there. Ask again in a moment.`;
+  return `${corpusId} is still being read; this answer uses only the matches already available, so more may be there. Ask again in a moment.`;
+}
+function keywordPreparationGap(corpusId) {
+  return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;
 }
 function recentItemsTimeoutGap(corpusId) {
   return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
@@ -26355,8 +26358,7 @@ function gapCorpus(prefix, gap) {
   return end > prefix.length ? gap.slice(prefix.length, end) : undefined;
 }
 function timedOutCorpora(coverage) {
-  const searched = new Set(coverage.searchedCorpora);
-  const stillSearching = [...new Set(coverage.skippedCorpora.filter((skip) => skip.reason === "lane_timeout" && !searched.has(skip.corpusId)).map((skip) => skip.corpusId))].sort();
+  const stillSearching = [...new Set(coverage.skippedCorpora.filter((skip) => skip.reason === "lane_timeout").map((skip) => skip.corpusId))].sort();
   const named = (corpusOf) => [...new Set(coverage.extractionGaps.map(corpusOf).filter((corpusId) => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
   return {
     stillSearching,
@@ -26371,10 +26373,11 @@ function timedOutCoverageNotes(coverage) {
     ...stillSearching.map(laneTimeoutGap),
     ...partlySearched.map(semanticTimeoutGap),
     ...newestMissed.map(recentItemsTimeoutGap),
-    ...unchecked.map(visibilityCheckTimeoutGap)
+    ...unchecked.map(visibilityCheckTimeoutGap),
+    ...[...new Set(coverage.extractionGaps.map((gap) => gapCorpus(KEYWORDS_PREFIX, gap)).filter((id) => id !== undefined))].map(keywordPreparationGap)
   ];
 }
-var SEMANTIC_TIMEOUT_REASONS, PREFIX = "Ran out of time searching by meaning: ", RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
+var SEMANTIC_TIMEOUT_REASONS, PREFIX = "Ran out of time searching by meaning: ", KEYWORD_PREPARATION_INCOMPLETE = "keyword_preparation_incomplete", KEYWORDS_PREFIX = "Keyword preparation unfinished for ", RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
 var init_partial_search = __esm(() => {
   SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
 });
@@ -45843,6 +45846,22 @@ var init_tier_set_binding = __esm(() => {
   tierLedgerIsWithin = pathResolvesWithin;
 });
 
+// src/core/source-index/read-progress.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+function withSourceIndexReadProgress(report, run) {
+  return progress2.run(report, run);
+}
+function noteSourceIndexReadProgress() {
+  const report = progress2.getStore();
+  if (!report)
+    return;
+  report();
+}
+var progress2;
+var init_read_progress = __esm(() => {
+  progress2 = new AsyncLocalStorage6;
+});
+
 // src/core/limit-stops.ts
 import { createHash as createHash18 } from "node:crypto";
 function registerLimit(input) {
@@ -46420,7 +46439,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 import { createHash as createHash20 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -47270,7 +47289,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage6;
+  priorityQueryEmbedding = new AsyncLocalStorage7;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -47527,7 +47546,7 @@ var init_store_reclaim_admission = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 import { createHash as createHash21, randomUUID as randomUUID7 } from "node:crypto";
 function poolSqlSite(sql) {
   return sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "?").replace(/\b\d+(?:\.\d+)?\b/g, "N").replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)").replace(/\s+/g, " ").trim().slice(0, POOL_SQL_SITE_CHARS);
@@ -47970,8 +47989,8 @@ var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage7;
-  laneStorage = new AsyncLocalStorage7;
+  storage2 = new AsyncLocalStorage8;
+  laneStorage = new AsyncLocalStorage8;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -51652,7 +51671,10 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
         setImmediate(resolve);
       })]);
     }
-    const alternatives = await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
+    const cached = { missing: false };
+    const alternatives = await expandCachedSourceIndexKeywords(query, languages ?? [], cached);
+    if (options.status)
+      options.status.incomplete = cached.missing || languages === undefined;
     pinKeywordAlternatives(owner, query, alternatives);
     return alternatives;
   }
@@ -51664,6 +51686,8 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
     })
   ]);
   clearTimeout(timer);
+  if (!waited && options.status)
+    options.status.incomplete = true;
   const alternatives = waited ? waited.value : await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
   pinKeywordAlternatives(owner, query, alternatives);
   return alternatives;
@@ -52109,6 +52133,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
             await moveToFreshWorker();
             rows = await once();
           }
+          noteSourceIndexReadProgress();
           report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
@@ -52235,6 +52260,9 @@ function readOnPool(dbPath, read, options = {}) {
       turns.push(dbPath);
     }
     dispatch();
+  }).then((rows) => {
+    noteSourceIndexReadProgress();
+    return rows;
   });
 }
 function releaseOffThreadReads(dbPath) {
@@ -52457,6 +52485,7 @@ self.onmessage = (event) => {
 };
 `, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, lostReplyCheck, openSnapshots, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
+  init_read_progress();
   init_answer_latency_trace();
   BACKGROUND_READS = { lane: "background" };
   OffThreadReadLostError = class OffThreadReadLostError extends Error {
@@ -53596,7 +53625,7 @@ var init_source_item_read = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 function privateQuestionKey(ref) {
   if (!ref || typeof ref !== "object")
     return;
@@ -53759,7 +53788,7 @@ function recordRemoteOperation(input) {
 }
 var storage3, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage8;
+  storage3 = new AsyncLocalStorage9;
   PROVIDER_APP_NAMES = {
     openai: "ChatGPT",
     anthropic: "Claude",
@@ -55125,7 +55154,7 @@ var init_remote_result = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 function currentAccess(authorized) {
   try {
     return authorized();
@@ -55147,7 +55176,7 @@ function currentRemoteReadAccess() {
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage9;
+  readAuthorization = new AsyncLocalStorage10;
 });
 
 // src/workers/classification/installed-tier-classification-registry.ts
@@ -59045,6 +59074,8 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
         return cutExact();
       if (excluded?.has(row.item_pk))
         continue;
+      if ((index & 31) === 0)
+        noteSourceIndexReadProgress();
       dimensionMismatches += foldVectorScore(bestByItem, row, queryVector).mismatch;
     }
     afterChunkPk = page.at(-1).chunk_pk;
@@ -59086,6 +59117,8 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         return false;
       if (excluded && itemPk !== undefined && excluded.has(itemPk))
         return true;
+      if ((index & 31) === 0)
+        noteSourceIndexReadProgress();
       heap.append(chunkPk, scoreVectorDigest(query, digest));
       return true;
     });
@@ -59361,6 +59394,14 @@ function defineConnectorCorpus(options) {
     description: "Shared connector-store corpus: generic local index over a Contract 1 SourceConnector."
   });
 }
+function partialKeywordRows(store, request, projector, locatorPathScope) {
+  return (rows) => request.onPartialResponse?.({
+    hits: rows.slice(0, request.maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank, projector, locatorPathScope)),
+    latencyMs: 0,
+    incomplete: true,
+    rawExposed: false
+  });
+}
 function createConnectorStoreCorpusAdapter(options) {
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
@@ -59379,7 +59420,7 @@ function createConnectorStoreCorpusAdapter(options) {
     }
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason)
       return (async () => {
-        const keywordLane = await revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs), options.localKeywordFallback, {}, request.deadlineAtMs));
+        const keywordLane = await revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs), options.localKeywordFallback, {}, request.deadlineAtMs));
         const rows = keywordLane.rows;
         let recencyCut = false;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => {
@@ -59491,7 +59532,7 @@ function createConnectorStoreCorpusAdapter(options) {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.vectorLaneServable(embeddingProvider.modelId);
-    const ftsOptions = hybrid ? { prefix: false, locate: false } : { locate: false };
+    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, onPartialRows: partialKeywordRows(store, request) };
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs), options.localKeywordFallback, ftsOptions, request.deadlineAtMs);
     const semanticRows = [];
@@ -59535,7 +59576,9 @@ function createConnectorStoreCorpusAdapter(options) {
   };
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => {
-    await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: KEYWORD_PREPARE_WAIT_MS });
+    const status = { incomplete: false };
+    await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: KEYWORD_PREPARE_WAIT_MS, status });
+    return status;
   };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
@@ -59617,13 +59660,22 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
   const keywordWork = (async () => {
     const keywordStartedAt = Date.now();
-    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
+    partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
   })();
   const vectorWork = (async () => {
     const vectorStartedAt = Date.now();
-    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, vectorScanDeadline(request.deadlineAtMs, vectorStartedAt));
+    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
+    const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
+    const rows = bar === undefined ? lane.rows : lane.rows.filter((row) => row.bestCosine >= bar);
+    request.onPartialResponse?.({
+      hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
+      latencyMs: Date.now() - startedAt,
+      incomplete: true,
+      rawExposed: false
+    });
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
@@ -59750,12 +59802,6 @@ function roundCosine(value) {
 }
 function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
-}
-function vectorScanDeadline(laneDeadlineAtMs, nowMs) {
-  if (laneDeadlineAtMs === undefined || !Number.isFinite(laneDeadlineAtMs))
-    return laneDeadlineAtMs;
-  const left = laneDeadlineAtMs - nowMs;
-  return laneDeadlineAtMs - Math.max(VECTOR_SCAN_RESERVE_MIN_MS, left / 10);
 }
 function yieldConnectorStoreVectorScan() {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -62232,7 +62278,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   } finally {
     closeSqliteStore(db);
   }
-};`, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
+};`, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
   SELECT
     SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
     SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
@@ -62261,6 +62307,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   GROUP BY provider
 `, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, IMAGE_CONTENT_PAGE_KEYS = 20000, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_read_progress();
   init_source_size_limits();
   init_store_totals();
   init_vector_digest();
@@ -69829,7 +69876,9 @@ ${parentKey(ref)}`, { ref, origin });
           continue;
         }
         const statement = this.db.query(read.sql);
-        step = steps.next(read.mode === "all" ? statement.all(...read.params) : statement.get(...read.params));
+        const rows = read.mode === "all" ? statement.all(...read.params) : statement.get(...read.params);
+        noteSourceIndexReadProgress();
+        step = steps.next(rows);
       }
       return step.value;
     }
@@ -69974,6 +70023,8 @@ ${parentKey(ref)}`, { ref, origin });
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
         }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
         selected.push(...visible);
+        if (visible.length > 0)
+          ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
         if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
           break;
         pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
@@ -102637,22 +102688,22 @@ function onDemandFailedCoverageNote(count) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
 function runPrivacyReleaseInference(work) {
-  privacyReleaseInference ??= new AsyncLocalStorage10;
-  localInferencePriority ??= new AsyncLocalStorage10;
+  privacyReleaseInference ??= new AsyncLocalStorage11;
+  localInferencePriority ??= new AsyncLocalStorage11;
   return privacyReleaseInference.run(true, () => localInferencePriority.run("owner", work));
 }
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage10;
+  localInferenceGuards ??= new AsyncLocalStorage11;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage10;
+  localInferencePriority ??= new AsyncLocalStorage11;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage10;
+  localInferencePriority ??= new AsyncLocalStorage11;
   return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
 }
 function currentLocalInferencePriority() {
@@ -103233,12 +103284,6 @@ var init_evidence_reranker = __esm(() => {
 function applySourceIndexVisibilityGate(gate, hits, report) {
   return gate.offThread ? gate.offThread(hits, report) : Promise.resolve(gate(hits, report));
 }
-function laneTimeoutWithinDeadline(laneTimeoutMs, deadlineAtMs, now = Date.now()) {
-  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
-    return laneTimeoutMs;
-  const left = Math.max(1, deadlineAtMs - now);
-  return Number.isFinite(laneTimeoutMs) && laneTimeoutMs > 0 ? Math.min(laneTimeoutMs, left) : left;
-}
 async function routeSourceIndexSearch(options) {
   return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
 }
@@ -103304,52 +103349,71 @@ async function routePreparedSourceIndexSearch(options) {
     const adapter = options.adapters[corpus.corpusId];
     const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable;
     const [keywordsMs, semanticMs] = await Promise.all([
-      timed(() => adapter.prepareKeywords?.(request.query)),
+      timed(async () => {
+        const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
+        if (prepared?.incomplete)
+          degradations.push({ laneName: `${corpus.corpusId}:keywords`, laneType: "keyword", reason: "lane_timeout", detail: "keyword_preparation_incomplete", occurrences: 1 });
+      }),
       semantic ? timed(() => adapter.prepareSemantic(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0)
     ]);
     prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
     prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
   const lanesStartedAt = Date.now();
-  const laneTimeoutMs = laneTimeoutWithinDeadline(resolveLaneTimeoutMs(options.laneTimeoutMs), options.searchDeadlineAtMs);
+  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const matchingIds = new Set;
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
-    const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);
+    let progress = () => {};
+    let partial;
     const corpusRequest = {
       query: request.query,
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: request.context,
-      ...cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}
+      onProgress: () => progress(),
+      onPartialResponse: (response) => {
+        assertSafeCorpusSearchResponse(response);
+        const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId}`;
+        const hits = new Map((partial?.hits ?? []).map((hit) => [key(hit), hit]));
+        for (const hit of response.hits) {
+          hits.set(key(hit), hit);
+          if (request.readWide)
+            matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+        }
+        partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
+      }
     };
     const retrievalState = retrievalStates.get(corpus.corpusId).state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
-    const outcome = await runCorpusLaneWithDeadline(() => runInSourceAnswerLane(corpus.corpusId, async () => {
-      if (metadataMatches) {
-        const response = await metadataMatches(corpusRequest);
-        if (request.readWide)
-          for (const hit of response.hits)
-            matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-        return response;
-      }
-      const response = await adapter(corpusRequest);
-      if (request.readWide)
-        for (const hit of response.hits) {
-          matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+    const outcome = await runCorpusLaneUntilIdle((report) => {
+      progress = report;
+      return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
+        if (metadataMatches) {
+          const response = await metadataMatches(corpusRequest);
+          if (request.readWide)
+            for (const hit of response.hits)
+              matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+          return response;
         }
-      const depth = request.poolAllocation?.storeDepth;
-      const neighbours = response.semanticNeighbourHits;
-      if (depth === undefined || !neighbours?.length || response.hits.length >= depth)
-        return response;
-      const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId ?? ""}`;
-      const seen = new Set(response.hits.map(key));
-      const added = neighbours.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
-      return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
-    }), laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
-    return { corpus, outcome, retrievalState };
+        const response = await adapter(corpusRequest);
+        if (request.readWide)
+          for (const hit of response.hits) {
+            matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+          }
+        const depth = request.poolAllocation?.storeDepth;
+        const neighbours = response.semanticNeighbourHits;
+        if (depth === undefined || !neighbours?.length || response.hits.length >= depth)
+          return response;
+        const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId ?? ""}`;
+        const seen = new Set(response.hits.map(key));
+        const added = neighbours.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
+        return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
+      }));
+    }, laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
+    return { corpus, outcome, retrievalState, partial };
   }));
-  for (const { corpus, outcome, retrievalState } of laneOutcomes) {
+  for (const { corpus, outcome, retrievalState, partial } of laneOutcomes) {
     if (outcome.kind === "timeout") {
       skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "lane_timeout" });
       degradations.push({
@@ -103363,17 +103427,20 @@ async function routePreparedSourceIndexSearch(options) {
         elapsedMs: outcome.elapsedMs,
         outcome: "timeout"
       });
-      continue;
+      if (!partial)
+        continue;
+      incompleteCorpora.push(corpus.corpusId);
     }
-    const response = outcome.response;
-    corpusTimings.push({
-      corpusId: corpus.corpusId,
-      elapsedMs: outcome.elapsedMs,
-      adapterReportedMs: response.latencyMs,
-      outcome: "success"
-    });
+    const response = outcome.kind === "response" ? outcome.response : partial;
+    if (outcome.kind === "response")
+      corpusTimings.push({
+        corpusId: corpus.corpusId,
+        elapsedMs: outcome.elapsedMs,
+        adapterReportedMs: response.latencyMs,
+        outcome: "success"
+      });
     searchedCorpora.push(corpus.corpusId);
-    if (response.incomplete === true)
+    if (response.incomplete === true && !incompleteCorpora.includes(corpus.corpusId))
       incompleteCorpora.push(corpus.corpusId);
     const corpusLaneAuditsStart = laneAudits.length;
     laneAudits.push(...response.laneAudits ?? []);
@@ -103655,10 +103722,18 @@ function normalizeSearchRequest(request) {
     maxResults: Math.floor(request.maxResults)
   };
 }
-async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId, clock = REAL_LANE_CLOCK) {
+async function runCorpusLaneUntilIdle(run, timeoutMs, corpusId, clock = REAL_LANE_CLOCK) {
   const startedAt = Date.now();
+  let active = true;
+  let lastProgressAt = clock.now();
+  const report = () => {
+    if (!active)
+      return;
+    lastProgressAt = clock.now();
+    noteSourceAnswerProgress("searching");
+  };
   const runValidated = async () => {
-    const response = await run();
+    const response = await run(report);
     assertSafeCorpusSearchResponse(response);
     return response;
   };
@@ -103686,17 +103761,23 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId, clock = REAL_
         error_class: sourceAnswerTraceErrorClass(error)
       });
       throw error;
+    } finally {
+      active = false;
     }
   }
   let timer;
   const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const hardStopAtMs = clock.now() + timeoutMs * HELD_THREAD_MAX_DEADLINE_FACTOR;
   const deadline = new Promise((resolve) => {
     const arm = (delayMs) => {
       const dueAtMs = clock.now() + delayMs;
       timer = clock.setTimeout(() => {
         const now = clock.now();
-        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS && now < hardStopAtMs) {
+        const remaining = timeoutMs - (now - lastProgressAt);
+        if (remaining > 0) {
+          arm(remaining);
+          return;
+        }
+        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS) {
           arm(HELD_THREAD_GRACE_MS);
           return;
         }
@@ -103744,6 +103825,7 @@ async function runCorpusLaneWithDeadline(run, timeoutMs, corpusId, clock = REAL_
     });
     return { kind: "response", response: settled.response, elapsedMs };
   } finally {
+    active = false;
     if (timer !== undefined)
       clock.clearTimeout(timer);
   }
@@ -103758,18 +103840,6 @@ function resolveLaneTimeoutMs(explicit) {
   if (!Number.isFinite(parsed))
     return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
   return parsed;
-}
-function resolveAskSearchBudgetMs(explicit) {
-  if (explicit !== undefined)
-    return explicit;
-  const raw = process.env.OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS?.trim();
-  const parsed = raw ? Number(raw) : NaN;
-  return Number.isFinite(parsed) ? parsed : DEFAULT_ASK_SEARCH_BUDGET_MS;
-}
-function cooperativeLaneDeadlineAtMs(timeoutMs) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-    return;
-  return Date.now() + Math.max(1, timeoutMs - COOPERATIVE_LANE_DEADLINE_HEADROOM_MS);
 }
 function skipReasonForCorpus(corpus, request) {
   if (!corpusMatchesRequestedSelection(corpus, request))
@@ -103827,8 +103897,10 @@ function assertNoForbiddenRouterResultKeys(value, path) {
 function normalizeRouterResultKey(key) {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60000, DEFAULT_ASK_SEARCH_BUDGET_MS = 1e5, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, SEMANTIC_POOL_SEATS_PER_STORE = 2, STORE_ORDER_MIN_CONCEPT_SHARE;
+var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 20000, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, SEMANTIC_POOL_SEATS_PER_STORE = 2, STORE_ORDER_MIN_CONCEPT_SHARE;
 var init_router = __esm(() => {
+  init_read_progress();
+  init_source_answer_jobs();
   init_read_wide();
   init_partial_search();
   init_keyword_context();
@@ -104258,8 +104330,8 @@ function selectedItemsToRoutedSlice(input) {
 async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolAllocation) {
   const literalQuery = literalSearchQuery(input);
   const pendingPlan = input.queryPlanner ? startQueryPlanner(input.queryPlanner, input.question) : undefined;
-  const budget = searchBudget(input);
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs, poolAllocation);
+  const laneTimeoutMs = resolveLaneTimeoutMs(input.laneTimeoutMs);
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, laneTimeoutMs, poolAllocation);
   if (!pendingPlan)
     return literalRun;
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -104275,12 +104347,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
     return literalRun;
   const runs = [literalRun];
   for (const query of expansions) {
-    const laneTimeoutMs = budget.laneTimeoutMs();
-    if (laneTimeoutMs === undefined) {
-      recordSourceAnswerQueryPlannerDisposition("search_budget_spent");
-      break;
-    }
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs, poolAllocation));
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, poolAllocation));
   }
   if (runs.length === 1)
     return literalRun;
@@ -104396,24 +104463,7 @@ function mergeRoutedSkippedCorpora(runs) {
 function literalSearchQuery(input) {
   return input.searchQuery?.trim() || input.question;
 }
-function searchBudget(input) {
-  const lane = resolveLaneTimeoutMs(input.laneTimeoutMs);
-  const total = resolveAskSearchBudgetMs(input.searchBudgetMs);
-  const startedAt = Date.now();
-  const cut = (left) => Number.isFinite(lane) && lane > 0 ? Math.min(lane, left) : left;
-  const left = () => Math.max(1, total - (Date.now() - startedAt));
-  const unbounded = !Number.isFinite(total) || total <= 0;
-  return {
-    deadlineAtMs: unbounded ? undefined : startedAt + total,
-    firstLaneTimeoutMs: () => unbounded ? lane : cut(left()),
-    laneTimeoutMs() {
-      if (unbounded)
-        return lane;
-      return left() < MIN_EXPANSION_BUDGET_MS ? undefined : cut(left());
-    }
-  };
-}
-function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, searchDeadlineAtMs, poolAllocation) {
+function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, poolAllocation) {
   return observeSourceAnswerRoutedQuery(ordinal, () => routeSourceIndexSearch({
     registry: input.registry,
     adapters: input.adapters,
@@ -104429,7 +104479,6 @@ function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, searc
     laneTimeoutMs,
     ...input.onSeatingLanes ? { onSeatingLanes: (lanes) => input.onSeatingLanes(lanes, ordinal) } : {},
     ...readWideEnabled() ? { storeSearchDepth: Math.max(READ_WIDE_MATCH_LIMIT, input.storeSearchDepth ?? 0) } : input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {},
-    ...searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {},
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
   }));
 }
@@ -104539,7 +104588,7 @@ function trustDomainRank2(trustDomain) {
     return 1;
   return 2;
 }
-var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf82, MAX_SEARCH_QUERIES = 3, CONVERSATION_WINDOW_ENV = "OLYMPUS_CONVERSATION_WINDOW", CONVERSATION_WINDOW_HITS = 3, MIN_EXPANSION_BUDGET_MS = 1000, CUT_SHORT_LANES;
+var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf82, MAX_SEARCH_QUERIES = 3, CONVERSATION_WINDOW_ENV = "OLYMPUS_CONVERSATION_WINDOW", CONVERSATION_WINDOW_HITS = 3, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_read_wide();
   init_keyword_context();
@@ -104555,6 +104604,7 @@ var init_evidence_pack = __esm(() => {
   init_answer_latency_trace();
   utf82 = new TextEncoder;
   CUT_SHORT_LANES = new Map([
+    [KEYWORD_PREPARATION_INCOMPLETE, { suffix: ":keywords", gap: keywordPreparationGap }],
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
     [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
   ]);
@@ -104875,17 +104925,31 @@ function createAnalystSourceIndexAnswerHandler(options) {
     const onDemandNotes = [];
     const onDemandLimits = [];
     let stillReading = 0;
+    if (selfHealAudit?.outcome === "in_progress") {
+      const corpus = selfHealAudit.corpus_id;
+      onDemandNotes.push(`Evidence repair is still in progress${corpus ? ` for ${corpus}` : ""}; this answer uses only the evidence already available.`);
+    }
     if (options.requestOnDemandRead && !readsDone) {
       const reads = await readNamesOnlyMatches(detail, options.requestOnDemandRead, options.onDemandReadWaitMs ?? DEFAULT_ON_DEMAND_READ_WAIT_MS);
       if (reads.started > 0 && reads.pending === 0)
         return answerOnce(request, local, true);
       stillReading = reads.pending;
+      if (stillReading > 0) {
+        const corpora = [...new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []].filter((index) => index < 3).map((index) => detail.candidateCorpusIds[index]).filter(Boolean))];
+        onDemandNotes.push(`Still reading evidence from ${corpora.join(", ")}; this answer uses only the content already available.`);
+      }
       if (reads.failed > 0)
         onDemandNotes.push(onDemandFailedCoverageNote(reads.failed));
       if (reads.limit) {
         onDemandLimits.push(reads.limit);
         onDemandNotes.push(onDemandCappedCoverageNote());
       }
+    }
+    if (onDemandNotes.length > 0) {
+      detail = { ...detail, pack: { ...detail.pack, coverage: {
+        ...detail.pack.coverage,
+        extractionGaps: [...detail.pack.coverage.extractionGaps, ...onDemandNotes]
+      } } };
     }
     let pack = detail.pack;
     const analyzedInputs = [];
@@ -105049,7 +105113,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
       releaseSecureContent,
       ...synthesizedGap ? { synthesizedGap } : {}
     });
-    const heldAnswer = [releasedAnswer, ...[...chunkHoldNotes].filter((note) => !releasedAnswer.includes(note))].join(`
+    const heldAnswer = [releasedAnswer, ...[...new Set([...chunkHoldNotes, ...onDemandNotes])].filter((note) => !releasedAnswer.includes(note))].join(`
 
 `);
     const itemKey = (item) => JSON.stringify([item.provider, item.accountScope, item.providerItemId]);
@@ -161506,7 +161570,7 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-import-allowance.ts
-import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
 function withGmailImportRunOnce(run) {
   const permission = { active: true };
   return operatorImport.run(permission, async () => {
@@ -161592,7 +161656,7 @@ var init_gmail_import_allowance = __esm(() => {
   init_limit_stops();
   registerLimit({ id: "gmail.import_allowance", kind: "requests", scope: "source", label: "Gmail import request allowance reached", unit: "requests", continue: "run_once" });
   GMAIL_IMPORT_LIMIT_SUBJECT = JSON.stringify(["gmail.email", "internal.email", "gmail.import_allowance"]);
-  operatorImport = new AsyncLocalStorage11;
+  operatorImport = new AsyncLocalStorage12;
   GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
   GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
   GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
@@ -184920,7 +184984,7 @@ var init_built_in_reranker = __esm(() => {
 });
 
 // src/workers/classification/judge-pacing.ts
-import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
 import { createHash as createHash95 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
@@ -184937,7 +185001,7 @@ class JudgeRateLimitPacer {
   lastSeq = 0;
   reportSeq = 0;
   blockedUntil = 0;
-  calls = new AsyncLocalStorage12;
+  calls = new AsyncLocalStorage13;
   constructor(clock = realClock) {
     this.clock = clock;
   }
@@ -236929,9 +236993,9 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/engine/runtime/source-answer-lanes.ts
-import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
-  const context = new AsyncLocalStorage13;
+  const context = new AsyncLocalStorage14;
   let inFlight = 0;
   let lastEndedAt;
   const release = () => {
@@ -242699,7 +242763,7 @@ var init_snapshot = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
 import { randomUUID as randomUUID41 } from "node:crypto";
 import { lstatSync as lstatSync57, rmSync as rmSync49 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
@@ -242839,7 +242903,7 @@ function restartingResponse(request) {
 function createFrontGate() {
   let open = true;
   let generation = 0;
-  const current = new AsyncLocalStorage14;
+  const current = new AsyncLocalStorage15;
   return {
     isOpen: () => open,
     close() {
