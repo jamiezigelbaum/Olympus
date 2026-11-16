@@ -9,6 +9,7 @@ import { buildEvalPack, createEvalSourceLanes } from '../eval/retrieval.ts';
 import type { DraftModel } from '../eval/local-model.ts';
 import { assertPrivateOutput, draftDeepReadQuestions, type DeepReadDataset } from '../eval/draft-deep-read-questions.ts';
 import { runDeepReadEval, type DeepReadReceipt } from '../eval/run-deep-read.ts';
+import { searchSetHits } from '../src/workers/engine/runtime/deep-read-jobs.ts';
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -104,6 +105,34 @@ test('drafts back-half targets in long conversations and documents, then scores 
       for (const word of q.quote.split(' ')) expect(written).not.toContain(word.replace(/\.$/, ''));
     }
     expect(written).not.toContain('Synthetic');
+  } finally { opened.close(); }
+}, 60_000);
+
+test('scores the day picker with the engine\'s own scoped search, and can run the relevant-days read', async () => {
+  const root = await fixture();
+  const opened = openEvalDataRoot({ dataRoot: root });
+  try {
+    const lanes = createEvalSourceLanes({ ...opened });
+    const drafted = await draftDeepReadQuestions({ opened, lanes: () => lanes(''), model: fakeDraft, seed: 'fixture', conversations: 1, documents: 0,
+      minMessages: 30, minChunks: 4, minWords: 10, conversationFamilies: ['file'], documentFamilies: ['file'] });
+    const [q] = drafted.dataset.questions;
+    const scoped = createEvalSourceLanes({ ...opened, storeScope: () => ({ filters: { conversationId: 'c1' } }) });
+    const corpusIds = [...new Set(q!.expected.map(e => e.corpus_id))];
+    const hits = await searchSetHits(scoped(q!.quote), q!.quote, corpusIds);
+    expect(hits.has(q!.set.provider_item_id === q!.expected[0]!.provider_item_id ? q!.set.provider_item_id : q!.expected[0]!.provider_item_id)).toBe(true);
+    const receipt = await runDeepReadEval({
+      dataset: drafted.dataset, stores: opened.stores, lanes: () => lanes(''), analyst: fakeAnalyst([q!.quote]),
+      deepPromptBytes: 6_000, deepPromptBytesSource: 'option', storeCounts: opened.storeCounts, gitSha: 'fixture',
+      setHits: async () => new Set([q!.expected[0]!.provider_item_id]), read: 'relevant_days',
+    });
+    expect(receipt.rows[0]!.deep).toMatchObject({ outcome: 'answered', right: true, readMode: 'relevant_days', dayPicker: { kept: true } });
+    expect(receipt.summary.overall.dayPicker).toMatchObject({ rows: 1, kept: 1 });
+    const only = await runDeepReadEval({
+      dataset: drafted.dataset, stores: opened.stores, lanes: () => lanes(''), analyst: { analyze: async () => { throw new Error('no model'); } },
+      deepPromptBytes: 1, deepPromptBytesSource: 'option', storeCounts: opened.storeCounts, gitSha: 'fixture',
+      setHits: async () => new Set(), dayPickerOnly: true,
+    });
+    expect(only.rows[0]!.deep).toMatchObject({ code: 'DAY_PICKER_ONLY', dayPicker: { kept: false } });
   } finally { opened.close(); }
 }, 60_000);
 

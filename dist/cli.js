@@ -54043,7 +54043,7 @@ function remoteDeclaredParams(operation, declared) {
   if (operation === "source_item_read")
     return ["read_handle", "page", "pages"];
   if (operation === "source_deep_read")
-    return ["question", "read_handle", "whole", "after", "before"];
+    return ["question", "read_handle", "whole", "after", "before", "read"];
   const withheld = withheldParams(operation);
   return declared.filter((name) => !withheld.includes(name));
 }
@@ -54072,7 +54072,8 @@ function remoteToolSchema(operation, schema) {
         read_handle: { type: "string", description: "The read_handle of a hit on this connection: the document, or a message of the conversation." },
         whole: { type: "string", enum: ["item", "conversation"], description: `"conversation" for the hit's whole chat, group or channel; "item" (default) for that document.` },
         after: { type: "string", description: "For a conversation: only messages on or after this ISO date." },
-        before: { type: "string", description: "For a conversation: only messages before this ISO date." }
+        before: { type: "string", description: "For a conversation: only messages before this ISO date." },
+        read: { type: "string", enum: ["all", "relevant_days"], description: "For a conversation: every message, or only the days that mention the question. Left out, the full read runs when it fits in an hour." }
       }
     };
   const withheld = withheldParams(operation);
@@ -54468,6 +54469,25 @@ function mintErrorRef() {
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
+function deepReadChoicesOutput(choices, count) {
+  if (!choices)
+    return {};
+  const choice = (raw) => {
+    const record = asRecord7(raw);
+    if (!record || count(record.sections) === undefined || count(record.messageCount) === undefined)
+      return;
+    const out = { sections: count(record.sections), messageCount: count(record.messageCount) };
+    for (const key of ["seconds", "days", "totalDays"])
+      if (count(record[key]) !== undefined)
+        out[key] = count(record[key]);
+    return out;
+  };
+  const all = choice(choices.all);
+  if (!all)
+    return {};
+  const relevantDays = choice(choices.relevantDays);
+  return { choices: { all, ...relevantDays ? { relevantDays } : {} } };
+}
 function deepReadJobOutput(job) {
   const count = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
   const state = DEEP_READ_STATES.find((entry) => entry === job.state);
@@ -54480,7 +54500,9 @@ function deepReadJobOutput(job) {
     sectionsTotal: count(job.sectionsTotal) ?? 0,
     sectionsDone: count(job.sectionsDone) ?? 0,
     ...count(job.estimateSecondsLeft) !== undefined ? { estimateSecondsLeft: count(job.estimateSecondsLeft) } : {},
-    ...job.waitingOn === "privacy checks" ? { waitingOn: "privacy checks" } : {},
+    ...job.waitingOn === "privacy checks" || job.waitingOn === "your questions" ? { waitingOn: job.waitingOn } : {},
+    ...job.read === "all" || job.read === "relevant_days" ? { read: job.read } : {},
+    ...deepReadChoicesOutput(asRecord7(job.choices), count),
     ...state === "failed" ? { failure: "The private model stopped before the read finished." } : {}
   };
 }
@@ -54523,7 +54545,7 @@ function dateOnly(value) {
 function asRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_FOLLOW_UP_QUESTION = 2000, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, DEEP_READ_STATES, DEEP_READ_JOB_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_FOLLOW_UP_QUESTION = 2000, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, RETRIEVAL_REASONS, PRIVACY_CHECK_WAITS, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, DEEP_READ_STATES, DEEP_READ_CHOICE_SCHEMA, DEEP_READ_JOB_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
 var init_remote_result = __esm(() => {
   init_source_item_read();
   init_app_release_capture();
@@ -54698,6 +54720,7 @@ var init_remote_result = __esm(() => {
       "Read ALL of one document, or one whole group, channel or chat, with the owner's private model on their computer, then answer the question from it.",
       "For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.",
       'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+      'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in an hour, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
       "It runs in the background; the answer lands in Olympus Private answers on the owner's computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status."
     ].join(" "),
     source_deep_read_status: "Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner's computer.",
@@ -54927,6 +54950,18 @@ var init_remote_result = __esm(() => {
     }
   };
   DEEP_READ_STATES = ["reading", "answering", "done", "failed", "cancelled"];
+  DEEP_READ_CHOICE_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["sections", "messageCount"],
+    properties: {
+      sections: { type: "integer", minimum: 0 },
+      messageCount: { type: "integer", minimum: 0 },
+      seconds: { type: "integer", minimum: 0 },
+      days: { type: "integer", minimum: 0 },
+      totalDays: { type: "integer", minimum: 0 }
+    }
+  };
   DEEP_READ_JOB_SCHEMA = {
     type: "object",
     additionalProperties: false,
@@ -54937,7 +54972,14 @@ var init_remote_result = __esm(() => {
       sectionsTotal: { type: "integer", minimum: 0 },
       sectionsDone: { type: "integer", minimum: 0 },
       estimateSecondsLeft: { type: "integer", minimum: 0 },
-      waitingOn: { type: "string", enum: ["privacy checks"] },
+      waitingOn: { type: "string", enum: ["privacy checks", "your questions"] },
+      read: { type: "string", enum: ["all", "relevant_days"] },
+      choices: {
+        type: "object",
+        additionalProperties: false,
+        required: ["all"],
+        properties: { all: DEEP_READ_CHOICE_SCHEMA, relevantDays: DEEP_READ_CHOICE_SCHEMA }
+      },
       failure: { type: "string" }
     }
   };
@@ -142124,7 +142166,8 @@ class EmailClient {
       selected_item: sourceItemReadSelectedItem(options.selectedItem),
       whole: options.whole ?? "item",
       ...options.after ? { after: options.after } : {},
-      ...options.before ? { before: options.before } : {}
+      ...options.before ? { before: options.before } : {},
+      ...options.read ? { read: options.read } : {}
     } } : { ...options.id ? { id: options.id } : {} };
     const response = asRecord14(await this.transport.requestJson(`${this.config.email.baseUrl}/source/deep-read${path}`, {
       method: "POST",
@@ -158276,6 +158319,7 @@ var init_operations = __esm(() => {
         "Read ALL of one document, or one whole group, channel or chat, with the owner's private model, then answer the question from what it read.",
         "For questions a search alone answers poorly: a topic discussed over many messages, days or years, or facts spread through a long file.",
         'Pass the selected_item of a search hit from source_index_search, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+        `A long chat is priced two ways before it starts: every message, or only the days that mention the question (a day either side). The full read runs when it fits in an hour, else the relevant-days read; read="all" or read="relevant_days" picks one. Show the owner the job's choiceSummary as is.`,
         "Runs in the background on the owner's computer and lands in Private answers; this returns the job with its progress. Check it with source_deep_read_status."
       ].join(" "),
       params: {
@@ -158283,11 +158327,15 @@ var init_operations = __esm(() => {
         selected_item: { type: "object", required: true, description: "The selected_item of a source_index_search hit; identifiers only." },
         whole: { type: "string", description: `"conversation" (the hit's whole chat, group or channel) or "item" (that document; default).` },
         after: { type: "string", description: "For a conversation: only messages authored on or after this ISO date." },
-        before: { type: "string", description: "For a conversation: only messages authored before this ISO date." }
+        before: { type: "string", description: "For a conversation: only messages authored before this ISO date." },
+        read: { type: "string", description: 'For a conversation: "all" (every message) or "relevant_days" (the days that mention the question). Left out, the full read runs when it fits in an hour.' }
       },
       mutating: false,
       nativeExposure: "sourceIndexEnabledOnly",
       handler: async (ctx, params) => {
+        const read = params.read === undefined ? undefined : params.read;
+        if (read !== undefined && read !== "all" && read !== "relevant_days")
+          throw new OperationError("invalid_params", 'read must be "all" or "relevant_days".');
         const whole = params.whole === undefined ? "item" : params.whole;
         if (whole !== "item" && whole !== "conversation")
           throw new OperationError("invalid_params", 'whole must be "item" or "conversation".');
@@ -158299,7 +158347,8 @@ var init_operations = __esm(() => {
           selectedItem: sourceItemReadSelectedItem(params.selected_item),
           whole,
           ...after ? { after } : {},
-          ...before ? { before } : {}
+          ...before ? { before } : {},
+          ...read ? { read } : {}
         });
       }
     },
@@ -189255,7 +189304,10 @@ async function runDeepRead(input) {
     await progress("reading");
   }
   await progress("answering");
-  const gaps = state.failedSections.length ? [`${state.failedSections.length} of ${sections.length} sections of the set could not be read by the model.`] : [];
+  const gaps = [
+    ...input.coverageNotes ?? [],
+    ...state.failedSections.length ? [`${state.failedSections.length} of ${sections.length} sections of the set could not be read by the model.`] : []
+  ];
   let notes = state.notes;
   let unanswered = [];
   for (;; ) {
@@ -189303,6 +189355,123 @@ var init_deep_read = __esm(() => {
 
 // src/workers/engine/runtime/deep-read-jobs.ts
 import { randomBytes as randomBytes33 } from "node:crypto";
+import { mkdirSync as mkdirSync70, readFileSync as readFileSync100, renameSync as renameSync25, writeFileSync as writeFileSync27 } from "node:fs";
+import { dirname as dirname108 } from "node:path";
+async function searchSetHits(lanes, question, corpusIds, maxResults = DEEP_READ_DAY_HITS) {
+  const hits = new Set;
+  for (const corpusId of corpusIds) {
+    const adapter = lanes.adapters[corpusId];
+    const corpus = lanes.registry.get(corpusId);
+    if (!adapter || !corpus)
+      continue;
+    const response = await adapter({ query: question, maxResults, corpus, context: { allowedTrustDomains: [corpus.trustDomain], allowCloudQueries: false } });
+    for (const hit of response.hits)
+      hits.add(hit.sourceItem.providerItemId);
+  }
+  return hits;
+}
+function shiftDay(day, delta) {
+  const time = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(time) ? new Date(time + delta * 86400000).toISOString().slice(0, 10) : day;
+}
+function candidateDay(candidate) {
+  const authoredAt = candidate.provenance.citation?.authoredAt;
+  return authoredAt && /^\d{4}-\d{2}-\d{2}/.test(authoredAt) ? authoredAt.slice(0, 10) : undefined;
+}
+function messageKey(candidate) {
+  const item = candidate.provenance.sourceItem;
+  return JSON.stringify([item.providerConversationId ?? "", item.providerItemId]);
+}
+function pickRelevantDays(candidates, hitProviderItemIds, spread = 1) {
+  const allDays = new Set;
+  const hitDays = new Set;
+  let anyHit = false;
+  for (const candidate of candidates) {
+    const hit = hitProviderItemIds.has(candidate.provenance.sourceItem.providerItemId);
+    anyHit ||= hit;
+    const day = candidateDay(candidate);
+    if (!day)
+      continue;
+    allDays.add(day);
+    if (hit)
+      hitDays.add(day);
+  }
+  const keep = new Set;
+  for (const day of hitDays)
+    for (let delta = -spread;delta <= spread; delta += 1)
+      keep.add(shiftDay(day, delta));
+  const picked = !anyHit ? [] : candidates.filter((candidate) => {
+    const day = candidateDay(candidate);
+    return day === undefined || keep.has(day);
+  });
+  return {
+    candidates: picked,
+    days: [...allDays].filter((day) => keep.has(day)).length,
+    totalDays: allDays.size,
+    hitDays: hitDays.size,
+    messages: new Set(picked.map(messageKey)).size,
+    totalMessages: new Set(candidates.map(messageKey)).size
+  };
+}
+function aboutDuration(seconds) {
+  if (seconds < 90)
+    return "about a minute";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90)
+    return `about ${minutes} minutes`;
+  const hours = Math.round(seconds / 360) / 10;
+  return `about ${hours} hours`;
+}
+function chooseDeepRead(choices, requested) {
+  const relevant = choices.relevantDays;
+  if (!relevant || relevant.messageCount >= choices.all.messageCount)
+    return "all";
+  if (requested)
+    return requested;
+  if (choices.all.seconds === undefined)
+    return relevant.sections < choices.all.sections ? "relevant_days" : "all";
+  return choices.all.seconds < FULL_READ_DEFAULT_SECONDS ? "all" : "relevant_days";
+}
+function deepReadChoiceSummary(choices, read, requested) {
+  const n = (value) => value.toLocaleString("en-US");
+  const time = (choice) => choice.seconds === undefined ? "" : `, ${aboutDuration(choice.seconds)}`;
+  const all = `All ${n(choices.all.messageCount)} messages${time(choices.all)}`;
+  const relevant = choices.relevantDays;
+  if (!relevant)
+    return `${all}. Reading all of it.`;
+  const days = `The days that mention this${time(relevant)}: ${n(relevant.days ?? 0)} days of ${n(relevant.totalDays ?? 0)}, ${n(relevant.messageCount)} messages`;
+  const reason = requested ? "as asked" : choices.all.seconds === undefined ? "the smaller read first; estimates follow once your model's pace is measured" : read === "all" ? "the full read fits in an hour" : "the full read would take over an hour";
+  const next = read === "relevant_days" ? " Ask for read: all to read every message." : "";
+  return `${all}. ${days}. Reading ${read === "all" ? "all of it" : "the days that mention this"} (${reason}).${next}`;
+}
+function paceBook(file) {
+  let paces = {};
+  if (file) {
+    try {
+      const parsed = JSON.parse(readFileSync100(file, "utf8"));
+      if (parsed && typeof parsed === "object") {
+        for (const [model, value] of Object.entries(parsed))
+          if (typeof value === "number" && value > 0)
+            paces[model] = value;
+      }
+    } catch {
+      paces = {};
+    }
+  }
+  return {
+    get: (model) => paces[model],
+    set(model, secondsPerSection) {
+      if (!(secondsPerSection > 0))
+        return;
+      paces[model] = secondsPerSection;
+      if (!file)
+        return;
+      mkdirSync70(dirname108(file), { recursive: true });
+      writeFileSync27(`${file}.tmp`, JSON.stringify(paces));
+      renameSync25(`${file}.tmp`, file);
+    }
+  };
+}
 async function readDeepReadSet(set, storesOf, lanesOf) {
   const selected = set.selected_item;
   const provider = selected.provider;
@@ -189386,6 +189555,7 @@ function createDeepReadJobs(options) {
   const now = options.now ?? (() => new Date);
   const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const jobs = new Map;
+  const paces = paceBook(options.paceFile);
   const readSet = (set) => readDeepReadSet(set, options.stores, options.lanes);
   function land(view, result, candidates, corpusIds) {
     const store = options.inbox();
@@ -189403,7 +189573,7 @@ function createDeepReadJobs(options) {
       status: result.citations.length ? "answered" : "not_found",
       ...result.citations.length ? { answer: `${result.answer}
 
-Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${result.sectionsTotal} sections, ${view.items} items${view.unreadable ? ` (${view.unreadable} not readable here)` : ""}.` } : {},
+${readFooter(view, result)}` } : {},
       citations: [...cited.values()].map((candidate) => ({
         ...candidate.provenance.citation?.title ? { title: candidate.provenance.citation.title } : {},
         ...providerSourceLabel(candidate.provenance.sourceItem.provider) ? { source: providerSourceLabel(candidate.provenance.sourceItem.provider) } : {},
@@ -189414,10 +189584,19 @@ Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${res
       read: [...cited.values()].map((candidate) => inboxEvidenceIdentity({ corpusId: corpusOf(candidate), trustDomain: candidate.trustDomain, trustTier: candidate.trustTier, provenance: candidate.provenance }))
     };
     const ticket = store.ticket(INBOX_CONNECTION);
-    const ref = store.record(ticket, { retainEachAsk: true, question: `Read all of ${view.setLabel}: ${view.question}`, surface: "remote", state: "waiting" });
+    const ref = store.record(ticket, { retainEachAsk: true, question: `${view.read === "all" ? "Read all of" : "Read the days that mention this in"} ${view.setLabel}: ${view.question}`, surface: "remote", state: "waiting" });
     if (!ref)
       return;
     return store.saveAnswer(ref, stored) ? ref.id : undefined;
+  }
+  function readFooter(view, result) {
+    const unreadable = view.unreadable ? ` (${view.unreadable} not readable here)` : "";
+    const relevant = view.choices.relevantDays;
+    if (view.read === "relevant_days" && relevant) {
+      const left = view.choices.all.messageCount - relevant.messageCount;
+      return `Read the days that mention this in ${view.setLabel} with ${view.model}: ${relevant.days} of ${relevant.totalDays} days, ${relevant.messageCount} of ${view.choices.all.messageCount} messages, ${result.sectionsRead} of ${result.sectionsTotal} sections${unreadable}. ${left} messages on other days were not read; ask for the full read (read: all) to read every message.`;
+    }
+    return `Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${result.sectionsTotal} sections, ${view.items} items${unreadable}.`;
   }
   return {
     async start(question, set) {
@@ -189431,7 +189610,29 @@ Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${res
       const { candidates, corpusIds, unreadable, items, label } = await readSet(set);
       if (candidates.length === 0)
         throw new DeepReadRefused("nothing_readable", `Nothing in ${label} is readable here (${items} items found).`);
-      const sectionsTotal = planDeepReadSections(question, candidates, corpusIds, model.promptBytes, "compact").length;
+      if (set.read !== undefined && set.read !== "all" && set.read !== "relevant_days")
+        throw new DeepReadRefused("invalid_set", "read must be all or relevant_days.");
+      const sectionsOf = (pieces) => planDeepReadSections(question, pieces, corpusIds, model.promptBytes, "compact").length;
+      const pace = paces.get(model.modelId);
+      const priced = (sections) => pace === undefined ? {} : { seconds: Math.round(sections * pace) };
+      const fullSections = sectionsOf(candidates);
+      const allMessages = new Set(candidates.map(messageKey)).size;
+      const choices = { all: { sections: fullSections, messageCount: allMessages, ...priced(fullSections) } };
+      let relevantCandidates;
+      if (set.whole === "conversation" && options.relevantItems) {
+        const pick = pickRelevantDays(candidates, await options.relevantItems(question, set, corpusIds));
+        if (pick.candidates.length > 0) {
+          relevantCandidates = pick.candidates;
+          const sections = sectionsOf(pick.candidates);
+          choices.relevantDays = { sections, messageCount: pick.messages, days: pick.days, totalDays: pick.totalDays, ...priced(sections) };
+        }
+      }
+      if (set.read === "relevant_days" && !relevantCandidates) {
+        throw new DeepReadRefused("nothing_readable", `No day in ${label} mentions this, so there is no relevant-days read; ask for read: all.`);
+      }
+      const read = chooseDeepRead(choices, set.read);
+      const reading = read === "relevant_days" && relevantCandidates ? relevantCandidates : candidates;
+      const sectionsTotal = read === "relevant_days" ? choices.relevantDays.sections : fullSections;
       const id = `dr_${randomBytes33(9).toString("base64url")}`;
       const view = {
         id,
@@ -189444,8 +189645,12 @@ Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${res
         sectionsDone: 0,
         notes: 0,
         model: model.modelId,
-        startedAt: now().toISOString()
+        startedAt: now().toISOString(),
+        read,
+        choices,
+        choiceSummary: deepReadChoiceSummary(choices, read, set.read)
       };
+      const coverageNotes = read === "relevant_days" && choices.relevantDays ? [`Only the days that mention this were read: ${choices.relevantDays.days} of ${choices.relevantDays.totalDays} days, ${choices.relevantDays.messageCount} of ${allMessages} messages. ${allMessages - choices.relevantDays.messageCount} messages on other days were not read.`] : [];
       const controller = new AbortController;
       jobs.set(id, { view, controller });
       while (jobs.size > MAX_JOBS_KEPT)
@@ -189453,37 +189658,50 @@ Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${res
       const started = now().getTime();
       let lastCallMs = 0;
       let callStarted;
+      let waitedMs = 0;
       const stepAside = async () => {
         if (callStarted !== undefined)
           lastCallMs = now().getTime() - callStarted;
-        const until = now().getTime() + Math.max(JUDGE_STEP_ASIDE_MIN_MS, lastCallMs);
-        while (options.judgeBusy?.() && now().getTime() < until && !controller.signal.aborted) {
-          view.waitingOn = "privacy checks";
+        const waitStarted = now().getTime();
+        const until = waitStarted + Math.max(JUDGE_STEP_ASIDE_MIN_MS, lastCallMs);
+        for (;; ) {
+          if (controller.signal.aborted)
+            break;
+          if (options.interactiveBusy?.())
+            view.waitingOn = "your questions";
+          else if (options.judgeBusy?.() && now().getTime() < until)
+            view.waitingOn = "privacy checks";
+          else
+            break;
           await sleep(JUDGE_LOOK_MS);
         }
         delete view.waitingOn;
         callStarted = now().getTime();
+        waitedMs += callStarted - waitStarted;
       };
       runBackgroundInference(() => runDeepRead({
         question,
-        candidates,
+        candidates: reading,
         corpusIds,
         analyst: model.analyst,
         promptBytes: model.promptBytes,
         evidenceFormat: "compact",
         signal: controller.signal,
+        coverageNotes,
         beforeModelCall: stepAside,
         onProgress: (progress) => {
           view.state = progress.phase === "done" ? "answering" : progress.phase;
           view.sectionsDone = progress.sectionsDone;
           view.notes = progress.notes;
-          if (progress.sectionsDone > 0) {
-            const perSection = (now().getTime() - started) / 1000 / progress.sectionsDone;
+          if (progress.sectionsDone > 0 && progress.phase === "reading") {
+            const perSection = Math.max(0, now().getTime() - started - waitedMs) / 1000 / progress.sectionsDone;
+            if (perSection > 0)
+              paces.set(model.modelId, perSection);
             view.estimateSecondsLeft = Math.round(perSection * (progress.sectionsTotal - progress.sectionsDone + 1));
           }
         }
       })).then((result) => {
-        const inboxId = land(view, result, candidates, corpusIds);
+        const inboxId = land(view, result, reading, corpusIds);
         if (inboxId)
           view.inboxId = inboxId;
         view.state = "done";
@@ -189515,7 +189733,7 @@ Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${res
     }
   };
 }
-var DeepReadRefused, INBOX_CONNECTION = "@local:You", JUDGE_LOOK_MS = 2000, JUDGE_STEP_ASIDE_MIN_MS = 5000, MAX_JOBS_KEPT = 50;
+var DeepReadRefused, INBOX_CONNECTION = "@local:You", JUDGE_LOOK_MS = 2000, JUDGE_STEP_ASIDE_MIN_MS = 5000, MAX_JOBS_KEPT = 50, FULL_READ_DEFAULT_SECONDS = 3600, DEEP_READ_DAY_HITS = 200;
 var init_deep_read_jobs = __esm(() => {
   init_deep_read();
   init_remote_result();
@@ -202558,7 +202776,7 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes35 } from "node:crypto";
-import { existsSync as existsSync108, mkdirSync as mkdirSync70, readdirSync as readdirSync32, realpathSync as realpathSync24, renameSync as renameSync25, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
+import { existsSync as existsSync108, mkdirSync as mkdirSync71, readdirSync as readdirSync32, realpathSync as realpathSync24, renameSync as renameSync26, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
 import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep25, join as join140, resolve as resolve30 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -202617,7 +202835,7 @@ function createArchiveUploads(options) {
   const stagingRoot = () => {
     if (rootPath)
       return rootPath;
-    mkdirSync70(options.root, { recursive: true, mode: 448 });
+    mkdirSync71(options.root, { recursive: true, mode: 448 });
     rootPath = realpathSync24.native(options.root);
     return rootPath;
   };
@@ -202696,7 +202914,7 @@ function createArchiveUploads(options) {
     try {
       const parent = join140(found.files, ...segments.slice(0, -1));
       try {
-        mkdirSync70(parent, { recursive: true, mode: 448 });
+        mkdirSync71(parent, { recursive: true, mode: 448 });
         if (!contained(realpathSync24.native(found.files), realpathSync24.native(parent)))
           throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
       } catch (error) {
@@ -202798,7 +203016,7 @@ function createArchiveUploads(options) {
       const root = stagingRoot();
       const uploadId = randomBytes35(16).toString("hex");
       const dir = join140(root, uploadId);
-      mkdirSync70(join140(dir, "files"), { recursive: true, mode: 448 });
+      mkdirSync71(join140(dir, "files"), { recursive: true, mode: 448 });
       sessions.set(uploadId, {
         id: uploadId,
         dir,
@@ -202922,7 +203140,7 @@ function createArchiveUploads(options) {
         sessions.delete(name);
         const aside = join140(root, `${REMOVING_PREFIX}${name}-${randomBytes35(4).toString("hex")}`);
         try {
-          renameSync25(dir, aside);
+          renameSync26(dir, aside);
         } catch {
           removeInBackground(dir);
           continue;
@@ -204184,7 +204402,7 @@ var init_write_routes = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash99 } from "node:crypto";
-import { readFileSync as readFileSync100 } from "node:fs";
+import { readFileSync as readFileSync101 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { isIP as isIP3 } from "node:net";
 import { homedir as homedir44 } from "node:os";
@@ -204352,7 +204570,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync100(trustPath, "utf8");
+        this.caPem = readFileSync101(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -204455,7 +204673,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url, init, timeoutMs, readFileSync100(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync101(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
 }
@@ -208621,7 +208839,7 @@ var init_locations = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash101 } from "node:crypto";
 import { execFileSync as execFileSync7 } from "node:child_process";
-import { existsSync as existsSync109, lstatSync as lstatSync54, readFileSync as readFileSync101, readdirSync as readdirSync33, realpathSync as realpathSync25 } from "node:fs";
+import { existsSync as existsSync109, lstatSync as lstatSync54, readFileSync as readFileSync102, readdirSync as readdirSync33, realpathSync as realpathSync25 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 
 class VolumeResolver {
@@ -208791,7 +209009,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform) {
   if (platform === "darwin")
     return execFileSync7("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync101("/proc/self/mountinfo", "utf8");
+  return readFileSync102("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -208906,8 +209124,8 @@ var init_volume_identity = __esm(() => {
 });
 
 // src/workers/backup-service.ts
-import { existsSync as existsSync110, mkdirSync as mkdirSync71, readFileSync as readFileSync102, readdirSync as readdirSync34, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
-import { dirname as dirname108, join as join141 } from "node:path";
+import { existsSync as existsSync110, mkdirSync as mkdirSync72, readFileSync as readFileSync103, readdirSync as readdirSync34, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
+import { dirname as dirname109, join as join141 } from "node:path";
 function defaultBackupServicePaths(env = process.env) {
   return {
     settings: defaultOwnerConfigPath("backup.json", env),
@@ -208917,13 +209135,13 @@ function defaultBackupServicePaths(env = process.env) {
 }
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync102(path, "utf8"));
+    return JSON.parse(readFileSync103(path, "utf8"));
   } catch {
     return;
   }
 }
 function writePrivateJson2(path, value) {
-  mkdirSync71(dirname108(path), { recursive: true, mode: 448 });
+  mkdirSync72(dirname109(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify(value, null, 2)}
 `);
 }
@@ -208944,7 +209162,7 @@ function readBackupSettings(path) {
 function readStoredBackupKeyState(path) {
   let text;
   try {
-    text = readFileSync102(path, "utf8");
+    text = readFileSync103(path, "utf8");
   } catch (error) {
     return error.code === "ENOENT" ? { state: "absent" } : { state: "invalid" };
   }
@@ -209460,9 +209678,9 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync111, mkdirSync as mkdirSync72, opendirSync, readFileSync as readFileSync103 } from "node:fs";
+import { existsSync as existsSync111, mkdirSync as mkdirSync73, opendirSync, readFileSync as readFileSync104 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname109, join as join142 } from "node:path";
+import { dirname as dirname110, join as join142 } from "node:path";
 function folderAccessMemoryPath() {
   return join142(olympusDataDir(), "local-files", "folder-access.json");
 }
@@ -209678,7 +209896,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync72(dirname109(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync73(dirname110(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -209689,7 +209907,7 @@ class MacPermissions {
     let loaded = {};
     if (this.memoryPath && existsSync111(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync103(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync104(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -209761,7 +209979,7 @@ var init_mac_settings = __esm(() => {
 // src/workers/local-files/scope-browser.ts
 import { lstatSync as lstatSync55, readdirSync as readdirSync35, realpathSync as realpathSync26 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
-import { dirname as dirname110, join as join144 } from "node:path";
+import { dirname as dirname111, join as join144 } from "node:path";
 function realFolder2(path) {
   try {
     const stat = lstatSync55(path);
@@ -209864,7 +210082,7 @@ function localFilesListing(options) {
     if (parent === undefined) {
       volumes.refresh();
       const homeFolders = childFolders(home, undefined);
-      const vaultShortcuts = notesAppFolders().filter((vault) => dirname110(vault.path) !== home).map((vault) => {
+      const vaultShortcuts = notesAppFolders().filter((vault) => dirname111(vault.path) !== home).map((vault) => {
         const guard = permissions.guardOf(vault.path, volumes.volumeOf(vault.path));
         const access = guard ? permissions.nodeAccess(guard) : undefined;
         const name = vault.path.slice(vault.path.lastIndexOf("/") + 1);
@@ -214722,8 +214940,8 @@ var init_connector5 = __esm(() => {
 });
 
 // src/workers/evernote/live-sync.ts
-import { existsSync as existsSync113, mkdirSync as mkdirSync73, readFileSync as readFileSync104 } from "node:fs";
-import { dirname as dirname111 } from "node:path";
+import { existsSync as existsSync113, mkdirSync as mkdirSync74, readFileSync as readFileSync105 } from "node:fs";
+import { dirname as dirname112 } from "node:path";
 function evernoteExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), EVERNOTE_SOURCE_ID, {
     enforceable: EVERNOTE_ENFORCEABLE_EXCLUSION_CRITERIA
@@ -214778,7 +214996,7 @@ function readPassFile(path) {
   if (!existsSync113(path))
     return { version: 1, status: {} };
   try {
-    const parsed = JSON.parse(readFileSync104(path, "utf8"));
+    const parsed = JSON.parse(readFileSync105(path, "utf8"));
     if (parsed.version !== 1 || typeof parsed.status !== "object" || parsed.status === null)
       return { version: 1, status: {} };
     const record = parsed.record?.version === 1 && parsed.record.notes && typeof parsed.record.notes === "object" ? parsed.record : undefined;
@@ -214789,7 +215007,7 @@ function readPassFile(path) {
   }
 }
 function writePassFile(path, file) {
-  mkdirSync73(dirname111(path), { recursive: true, mode: 448 });
+  mkdirSync74(dirname112(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify(file));
 }
 function evernotePassStatus(env = process.env) {
@@ -215431,7 +215649,7 @@ import {
   stat as stat6,
   unlink
 } from "node:fs/promises";
-import { dirname as dirname112 } from "node:path";
+import { dirname as dirname113 } from "node:path";
 function semanticTimeouts(degradations) {
   const corpora = [...new Set((degradations ?? []).filter((degradation) => degradation.reason === "semantic_lane_skipped" && semanticSearchTimedOut(degradation.detail)).map((degradation) => degradation.lane_name.replace(/:semantic$/, "")))];
   return corpora.length > 0 ? { semantic_timeouts: corpora } : {};
@@ -215586,7 +215804,7 @@ async function appendSourceAnswerLatencyLine(path, record, options = {}) {
   const line = `${JSON.stringify(record)}
 `;
   const maxBytes = options.maxBytes ?? DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES;
-  await mkdir5(dirname112(path), { recursive: true, mode: 448 });
+  await mkdir5(dirname113(path), { recursive: true, mode: 448 });
   await makeExistingLedgerPrivate(path);
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line), maxBytes);
@@ -216698,12 +216916,12 @@ var init_google_pilot_client = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-oauth-clients.ts
-import { readFileSync as readFileSync105 } from "node:fs";
+import { readFileSync as readFileSync106 } from "node:fs";
 import { homedir as homedir48 } from "node:os";
 import { join as join146 } from "node:path";
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync105(join146(homedir48(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync106(join146(homedir48(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -217067,7 +217285,7 @@ var init_dashboard_oauth_pages = __esm(() => {
 });
 
 // src/core/messaging-account-move.ts
-import { readFileSync as readFileSync106 } from "node:fs";
+import { readFileSync as readFileSync107 } from "node:fs";
 import { homedir as homedir49 } from "node:os";
 import { join as join147, resolve as resolve31 } from "node:path";
 function namesDefaultLegacySession(source, value, env) {
@@ -217186,7 +217404,7 @@ function repointGrant(env, source, sessionEnv) {
   const path = captureGrantPathFromEnv(source, env);
   let before;
   try {
-    before = readFileSync106(path, "utf8");
+    before = readFileSync107(path, "utf8");
   } catch {
     return false;
   }
@@ -217200,7 +217418,7 @@ function repointGrant(env, source, sessionEnv) {
   const producerEnv = { ...read.grant.producer.env ?? {} };
   delete producerEnv[sessionEnv];
   const grant = { ...rest, producer: { ...read.grant.producer, env: producerEnv } };
-  if (readFileSync106(path, "utf8") !== before)
+  if (readFileSync107(path, "utf8") !== before)
     return false;
   writePrivateFileAtomicSync(path, `${JSON.stringify(grant, null, 2)}
 `);
@@ -217519,7 +217737,7 @@ var init_x_bookmarks_admin = __esm(() => {
 
 // src/workers/engine/index.ts
 import { randomBytes as randomBytes38 } from "node:crypto";
-import { basename as basename23, dirname as dirname113 } from "node:path";
+import { basename as basename23, dirname as dirname114 } from "node:path";
 function createEmailSourceWorker(options = {}) {
   const deepReadJobsOrFail = () => {
     const jobs = options.deepRead?.();
@@ -219196,7 +219414,7 @@ function createEmailSourceWorker(options = {}) {
               let phoneUnlinked;
               const whatsappSessionDb = sourceId === "telegram.messages" ? undefined : session.paths.find((path) => basename23(path) === WHATSAPP_SESSION_FILE && artifactPresence(path) !== "gone");
               if (whatsappSessionDb && sourceDashboard.unlinkWhatsAppDevice) {
-                phoneUnlinked = await sourceDashboard.unlinkWhatsAppDevice(dirname113(whatsappSessionDb)).catch(() => "failed");
+                phoneUnlinked = await sourceDashboard.unlinkWhatsAppDevice(dirname114(whatsappSessionDb)).catch(() => "failed");
               }
               const phoneNote = phoneUnlinked === "offline" || phoneUnlinked === "failed" ? " Olympus could not reach WhatsApp to remove itself from your phone: remove Olympus in WhatsApp → Settings → Linked devices." : "";
               const removedSessionPaths = [];
@@ -219863,7 +220081,8 @@ function createEmailSourceWorker(options = {}) {
               selected_item: Object.fromEntries(Object.entries(selected).filter((entry) => typeof entry[1] === "string")),
               whole,
               ...typeof set.after === "string" ? { after: set.after } : {},
-              ...typeof set.before === "string" ? { before: set.before } : {}
+              ...typeof set.before === "string" ? { before: set.before } : {},
+              ...set.read === "all" || set.read === "relevant_days" ? { read: set.read } : {}
             });
             return json({ job });
           } catch (error) {
@@ -220540,14 +220759,14 @@ function startPacedStatusRecount(options) {
 var STATUS_RECOUNT_MIN_GAP_MS = 30000, STATUS_RECOUNT_PACE_FACTOR = 5, STATUS_RECOUNT_HELD_RETRY_MS = 5000;
 
 // src/core/model-choices.ts
-import { readFileSync as readFileSync107 } from "node:fs";
-import { dirname as dirname114, join as join148 } from "node:path";
+import { readFileSync as readFileSync108 } from "node:fs";
+import { dirname as dirname115, join as join148 } from "node:path";
 function modelChoicesPath(policyPath) {
-  return join148(dirname114(policyPath), "model-choices.json");
+  return join148(dirname115(policyPath), "model-choices.json");
 }
 function readModelChoices(policyPath) {
   try {
-    const value = JSON.parse(readFileSync107(modelChoicesPath(policyPath), "utf8"));
+    const value = JSON.parse(readFileSync108(modelChoicesPath(policyPath), "utf8"));
     if (value?.schema !== "olympus.model-choices.v1")
       return { schema: "olympus.model-choices.v1" };
     return {
@@ -220939,8 +221158,8 @@ var init_query_planner = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync114, readFileSync as readFileSync108 } from "node:fs";
-import { dirname as dirname115, join as join149 } from "node:path";
+import { existsSync as existsSync114, readFileSync as readFileSync109 } from "node:fs";
+import { dirname as dirname116, join as join149 } from "node:path";
 function watchIgnoreGlobs(context, extra = []) {
   const home = context.home;
   const globs = IGNORE_SEGMENTS.map((segment) => `**/${segment}`);
@@ -221139,7 +221358,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value = Number.parseInt(readFileSync108("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value = Number.parseInt(readFileSync109("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value) && value > 0 ? value : undefined;
   } catch {
     return;
@@ -221159,7 +221378,7 @@ async function loadParcelWatcher(extraDirs = []) {
     if (!existsSync114(join149(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire8(join149(dirname115(candidate), "package.json"));
+      const requireFrom = createRequire8(join149(dirname116(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -222313,7 +222532,7 @@ var init_whatsapp = __esm(() => {
 
 // src/workers/local-pacing.ts
 import { execFile as execFile5, spawn as spawn15 } from "node:child_process";
-import { existsSync as existsSync115, readdirSync as readdirSync37, readFileSync as readFileSync109 } from "node:fs";
+import { existsSync as existsSync115, readdirSync as readdirSync37, readFileSync as readFileSync110 } from "node:fs";
 import { join as join151 } from "node:path";
 function embedsOnThisComputer(provider) {
   try {
@@ -222366,7 +222585,7 @@ function readLinuxPower(root = "/sys/class/power_supply") {
     for (const name of readdirSync37(root)) {
       const read = (file) => {
         try {
-          return readFileSync109(join151(root, name, file), "utf8").trim();
+          return readFileSync110(join151(root, name, file), "utf8").trim();
         } catch {
           return;
         }
@@ -222427,7 +222646,7 @@ function compact2(reading) {
 }
 function readGoEasySetting(path) {
   try {
-    const value = JSON.parse(readFileSync109(path, "utf8")).go_easy;
+    const value = JSON.parse(readFileSync110(path, "utf8")).go_easy;
     return typeof value === "boolean" ? value : undefined;
   } catch {
     return;
@@ -239910,12 +240129,12 @@ var init_archive_target2 = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname116, join as join152 } from "node:path";
+import { dirname as dirname117, join as join152 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join152(dirname116(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join152(dirname117(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -242545,14 +242764,14 @@ var init_client5 = __esm(() => {
 });
 
 // src/workers/engine-split/snapshot.ts
-import { readFileSync as readFileSync110 } from "node:fs";
+import { readFileSync as readFileSync111 } from "node:fs";
 function writeEngineStatusSnapshot(path, snapshot) {
   writePrivateFileAtomicSync(path, `${JSON.stringify(snapshot)}
 `);
 }
 function readEngineStatusSnapshot(path, now = () => Date.now()) {
   try {
-    const snapshot = JSON.parse(readFileSync110(path, "utf8"));
+    const snapshot = JSON.parse(readFileSync111(path, "utf8"));
     if (snapshot?.schema !== ENGINE_STATUS_SNAPSHOT_SCHEMA || typeof snapshot.instance_id !== "string")
       return;
     const written = Date.parse(snapshot.written_at);
@@ -243048,7 +243267,7 @@ var init_front_state = __esm(() => {
 });
 
 // src/workers/engine-split/rss-restart.ts
-import { readFileSync as readFileSync111 } from "node:fs";
+import { readFileSync as readFileSync112 } from "node:fs";
 function engineRssRestartsFrom(read) {
   const value = read?.snapshot.rss_restarts;
   if (!value || !Number.isSafeInteger(value.count) || value.count < 0)
@@ -243103,7 +243322,7 @@ function startEngineRssRestart(input) {
 function engineMemoryRss() {
   if (process.platform === "linux") {
     try {
-      const line = /^RssAnon:\s+(\d+)\s+kB$/m.exec(readFileSync111("/proc/self/status", "utf8"));
+      const line = /^RssAnon:\s+(\d+)\s+kB$/m.exec(readFileSync112("/proc/self/status", "utf8"));
       if (line)
         return Number(line[1]) * 1024;
     } catch {}
@@ -243413,8 +243632,8 @@ var init_remote_access_control = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync74, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync26, rmdirSync as rmdirSync8, statSync as statSync53, unlinkSync as unlinkSync7 } from "node:fs";
-import { basename as basename25, dirname as dirname117, isAbsolute as isAbsolute42, join as join153, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
+import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync75, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync53, unlinkSync as unlinkSync7 } from "node:fs";
+import { basename as basename25, dirname as dirname118, isAbsolute as isAbsolute42, join as join153, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value === "" || MIGRATION_ON.includes(value);
@@ -243441,8 +243660,8 @@ function candidates(sourceId, slot, env) {
     }
   }
   if (sourceId === TELEGRAM_SOURCE_ID) {
-    const legacyDir = dirname117(legacyTelegramSessionBase(env));
-    const folderDir = dirname117(accountSessionPath(account, env));
+    const legacyDir = dirname118(legacyTelegramSessionBase(env));
+    const folderDir = dirname118(accountSessionPath(account, env));
     const own = basename25(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames3(legacyDir))
@@ -243512,13 +243731,13 @@ function absPath(ctx, rel) {
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
-    renameSync26(from, to);
-    syncFolder(dirname117(to));
-    syncFolder(dirname117(from));
+    renameSync27(from, to);
+    syncFolder(dirname118(to));
+    syncFolder(dirname118(from));
     return;
   }
   (__accountMigrationTestHooks.link ?? linkSync6)(from, to);
-  syncFolder(dirname117(to));
+  syncFolder(dirname118(to));
   unlinkSync7(from);
 }
 function errorCode2(error) {
@@ -243558,7 +243777,7 @@ function nearRealPath(path) {
   let near = resolve33(path);
   for (;; ) {
     rest.unshift(basename25(near));
-    const up = dirname117(near);
+    const up = dirname118(near);
     if (up === near)
       return resolve33(path);
     near = up;
@@ -243568,7 +243787,7 @@ function nearRealPath(path) {
   }
 }
 function destinationIsOurs(ctx, destination) {
-  const parent = dirname117(destination);
+  const parent = dirname118(destination);
   const at = rootOf(ctx, parent);
   if (!at)
     return false;
@@ -243581,7 +243800,7 @@ function nearestExisting(path) {
       statSync53(near);
       return near;
     } catch {
-      const up = dirname117(near);
+      const up = dirname118(near);
       if (up === near)
         return near;
       near = up;
@@ -243755,7 +243974,7 @@ function makeFolders(ctx, moves) {
     const real = realpathSync32(ctx.root);
     const destinations = new Set;
     for (const move of moves) {
-      const destination = dirname117(absPath(ctx, move.to));
+      const destination = dirname118(absPath(ctx, move.to));
       if (!destinationIsOurs(ctx, absPath(ctx, move.to)))
         throw Object.assign(new Error("link"), { code: "ELOOP" });
       destinations.add(destination);
@@ -243767,7 +243986,7 @@ function makeFolders(ctx, moves) {
           continue;
         if (found.kind !== "absent")
           throw Object.assign(new Error("not a folder"), { code: "ENOTDIR" });
-        mkdirSync74(current, { mode: 448 });
+        mkdirSync75(current, { mode: 448 });
       }
     }
     syncFolderChains(ctx, [...destinations]);
@@ -243780,8 +243999,8 @@ function makeFolders(ctx, moves) {
 function syncMoveFolders(ctx, moves) {
   const folders = new Set;
   for (const move of moves) {
-    folders.add(dirname117(absPath(ctx, move.from)));
-    folders.add(dirname117(absPath(ctx, move.to)));
+    folders.add(dirname118(absPath(ctx, move.from)));
+    folders.add(dirname118(absPath(ctx, move.to)));
   }
   try {
     for (const folder of folders) {
@@ -243796,7 +244015,7 @@ function removeEmptyFolders(ctx, moves) {
   const stop = accountFoldersRoot(ctx.env);
   const folders = new Set;
   for (const move of moves) {
-    for (let folder = dirname117(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep26}`); folder = dirname117(folder)) {
+    for (let folder = dirname118(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep26}`); folder = dirname118(folder)) {
       folders.add(folder);
       if (folder === stop)
         break;
@@ -243823,7 +244042,7 @@ function moveOne(ctx, move, direction) {
       return "there";
     if (move.kind === "file" && source.kind === "file" && target.kind === "file" && source.dev === target.dev && source.ino === target.ino && (move.ino === "" || String(source.ino) === move.ino)) {
       try {
-        syncFolder(dirname117(to));
+        syncFolder(dirname118(to));
         unlinkSync7(from);
       } catch (error) {
         throw new MoveFault("failed", "move_failed", `${name} could not be moved (${errorCode2(error)}).`);
@@ -243933,7 +244152,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   }
   checkpoint("revert");
   try {
-    syncFolderChains(ctx, moves.map((move) => dirname117(absPath(ctx, move.from))));
+    syncFolderChains(ctx, moves.map((move) => dirname118(absPath(ctx, move.from))));
   } catch (error) {
     if (error instanceof AccountMigrationKilled)
       throw error;
@@ -244092,7 +244311,7 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
   const folders = new Set;
   try {
     for (const candidate of candidates(sourceId, slot, ctx.env)) {
-      const folder = resolve33(dirname117(candidate.from));
+      const folder = resolve33(dirname118(candidate.from));
       if (!rootFolders.has(folder) && rootOf(ctx, folder))
         folders.add(folder);
     }
@@ -244104,7 +244323,7 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
       continue;
     try {
       rmdirSync8(folder);
-      syncFolder(dirname117(folder));
+      syncFolder(dirname118(folder));
     } catch {}
   }
 }
@@ -267266,7 +267485,7 @@ var init_handoff = __esm(() => {
 });
 
 // src/workers/chatgpt/setup-backend.ts
-import { readFileSync as readFileSync112 } from "node:fs";
+import { readFileSync as readFileSync113 } from "node:fs";
 import { totalmem as totalmem7 } from "node:os";
 import { createHash as createHash120 } from "node:crypto";
 function privacyRuleView(rule) {
@@ -267301,7 +267520,7 @@ function privacyRevision(profile) {
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
   const privacySettings = () => {
-    const current = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync112(options.sovereignty.path, "utf8"))) : policy;
+    const current = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync113(options.sovereignty.path, "utf8"))) : policy;
     policy = current;
     const policyRevision = createHash120("sha256").update(JSON.stringify(current)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current))
@@ -267531,8 +267750,8 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync44, lstatSync as lstatSync60, mkdirSync as mkdirSync75, statSync as statSync54 } from "node:fs";
-import { dirname as dirname118, isAbsolute as isAbsolute44 } from "node:path";
+import { chmodSync as chmodSync44, lstatSync as lstatSync60, mkdirSync as mkdirSync76, statSync as statSync54 } from "node:fs";
+import { dirname as dirname119, isAbsolute as isAbsolute44 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
   try {
@@ -267560,7 +267779,7 @@ function writeConsultSettings(input, location = {}) {
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
-  const custody = ensureSettingsDirectory(dirname118(path));
+  const custody = ensureSettingsDirectory(dirname119(path));
   if (custody !== "ok")
     return { ok: false, reason: custody };
   let published = false;
@@ -267617,12 +267836,12 @@ function ensureSettingsDirectory(directory) {
     if (error?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync54(dirname118(directory));
+      statSync54(dirname119(directory));
     } catch {
       return "home_missing";
     }
     try {
-      mkdirSync75(directory, { mode: 448 });
+      mkdirSync76(directory, { mode: 448 });
       chmodSync44(directory, 448);
     } catch {
       return "directory_unavailable";
@@ -267652,7 +267871,7 @@ var init_consult_settings_writer = __esm(() => {
 });
 
 // src/workers/engine/dashboard/dashboard-consult.ts
-import { delimiter as delimiter9, dirname as dirname119 } from "node:path";
+import { delimiter as delimiter9, dirname as dirname120 } from "node:path";
 function acknowledgementsCurrent(acknowledgements) {
   return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
 }
@@ -267701,7 +267920,7 @@ function createDashboardConsultAdapter(options) {
         return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
-      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname119(system)) ? system : undefined;
+      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname120(system)) ? system : undefined;
       return {
         tool: entry.tool,
         label: entry.label,
@@ -268771,7 +268990,7 @@ var init_dashboard_panel_tools = __esm(() => {
 });
 
 // src/workers/setup-status.ts
-import { readFileSync as readFileSync113 } from "node:fs";
+import { readFileSync as readFileSync114 } from "node:fs";
 function sourceState(card) {
   if (card.connection.state === "reauth_required")
     return "needs_you";
@@ -268807,7 +269026,7 @@ function currentPolicy(policy) {
   if (!policy.path)
     return policy.config;
   try {
-    return validateSovereigntyConfig(JSON.parse(readFileSync113(policy.path, "utf8")));
+    return validateSovereigntyConfig(JSON.parse(readFileSync114(policy.path, "utf8")));
   } catch {
     return policy.config;
   }
@@ -269005,8 +269224,8 @@ __export(exports_server, {
 });
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile6 } from "node:child_process";
-import { appendFileSync, existsSync as existsSync126, readFileSync as readFileSync114 } from "node:fs";
-import { dirname as dirname120, join as join154 } from "node:path";
+import { appendFileSync, existsSync as existsSync126, readFileSync as readFileSync115 } from "node:fs";
+import { dirname as dirname121, join as join154 } from "node:path";
 async function startWorkerWithLaunch(launch) {
   workerLaunch = { ...launch };
   await mainRecordingFrontFailure();
@@ -269125,7 +269344,7 @@ async function main() {
   let localWorkPending = () => false;
   const localPacer = new LocalWorkPacer({
     probe: systemIdlePowerProbe(),
-    settingPath: join154(dirname120(resolveClassificationLedgerPath(process.env)), "go-easy.json"),
+    settingPath: join154(dirname121(resolveClassificationLedgerPath(process.env)), "go-easy.json"),
     pendingLocalWork: () => localWorkPending(),
     log: (line) => console.log(line)
   });
@@ -272366,7 +272585,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return { ok: false, message: "This Olympus has no policy file to change." };
           let current;
           try {
-            current = validateSovereigntyConfig(JSON.parse(readFileSync114(sovereigntyEngine.path, "utf8")));
+            current = validateSovereigntyConfig(JSON.parse(readFileSync115(sovereigntyEngine.path, "utf8")));
           } catch {
             return { ok: false, message: "The privacy policy file cannot be read." };
           }
@@ -272709,6 +272928,24 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       },
       inbox: waitingQuestionStore,
       judgeBusy: () => classificationBusy(),
+      interactiveBusy: () => answerActivity.interactiveInFlight > 0,
+      paceFile: join154(dirname121(resolveClassificationLedgerPath(process.env)), "deep-read-pace.json"),
+      relevantItems: async (question, set, corpusIds) => {
+        const conversationId = set.selected_item.provider_conversation_id;
+        if (!conversationId)
+          return new Set;
+        return searchSetHits(deepReadLanes({
+          question,
+          retrieval_mode: "hybrid",
+          include_internal: true,
+          include_secure_local: true,
+          include_secure_local_content: true,
+          conversation_id: conversationId,
+          corpus_ids: [...corpusIds],
+          ...set.after ? { authored_after: set.after } : {},
+          ...set.before ? { authored_before: set.before } : {}
+        }, "private_search"), question, corpusIds);
+      },
       log: (message) => console.warn(message)
     });
   }
@@ -273537,7 +273774,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     ...fileExtractionRuntime ? { extractionState: (identity) => fileExtractionRuntime.jobs.itemExtractionState(identity) } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join154(dirname120(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join154(dirname121(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : snifferLane.kind === "tinfoil" ? { concurrentCalls: 4 } : snifferLane.kind === "venice" ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {},
@@ -274601,7 +274838,7 @@ init_messaging_capture();
 init_config2();
 import { randomBytes as randomBytes43 } from "node:crypto";
 import { spawnSync as spawnSync23 } from "node:child_process";
-import { existsSync as existsSync127, readFileSync as readFileSync115, openSync as openSync36, closeSync as closeSync37, writeSync as writeSync10 } from "node:fs";
+import { existsSync as existsSync127, readFileSync as readFileSync116, openSync as openSync36, closeSync as closeSync37, writeSync as writeSync10 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve34 } from "node:path";
@@ -278256,7 +278493,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync115("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync116("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -278611,7 +278848,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync115(resolve34(input2), "utf8");
+    raw = readFileSync116(resolve34(input2), "utf8");
   } catch (error) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error.message}`);
   }
@@ -280249,7 +280486,7 @@ async function runSettingsPropose(args, env, options) {
     throw new OperationError("invalid_params", SETTINGS_USAGE);
   let text;
   try {
-    text = file === "-" ? (options.readStdin ?? (() => readFileSync115(0, "utf8")))() : readFileSync115(file, "utf8");
+    text = file === "-" ? (options.readStdin ?? (() => readFileSync116(0, "utf8")))() : readFileSync116(file, "utf8");
   } catch (error) {
     throw new OperationError("invalid_params", `Could not read ${file === "-" ? "the proposal from standard input" : file}: ${error instanceof Error ? error.message : String(error)}`);
   }

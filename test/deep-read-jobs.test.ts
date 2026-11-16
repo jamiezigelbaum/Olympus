@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Analyst, EvidencePack } from '../src/core/contracts.ts';
 import type { SourceItemIdentity } from '../src/core/source-index/types.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
-import { createDeepReadJobs, DeepReadRefused, type DeepReadStore } from '../src/workers/engine/runtime/deep-read-jobs.ts';
+import { chooseDeepRead, createDeepReadJobs, DeepReadRefused, pickRelevantDays, type DeepReadStore } from '../src/workers/engine/runtime/deep-read-jobs.ts';
 import type { AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 
 const dirs: string[] = [];
@@ -123,6 +123,56 @@ describe('deep read jobs', () => {
     expect(done.waitingOn).toBeUndefined();
   });
 
+  test('prices both reads, takes the relevant days when unmeasured, says what it left unread, and learns the pace', async () => {
+    const { stores: deepStores, lanes } = fixture(n => (n === 4 ? `message ${n}: my heart doctor said ...` : `message ${n}: other things`));
+    const packs: EvidencePack[] = [];
+    let t = 0;
+    const timed = analyst(packs);
+    const dir = mkdtempSync(join(tmpdir(), 'deep-read-pace-'));
+    dirs.push(dir);
+    const make = () => createDeepReadJobs({
+      stores: () => deepStores, lanes: () => lanes, inbox: inbox,
+      model: async () => ({ analyst: { analyze: async (pack, options) => { t += 60_000; return timed.analyze(pack, options); } }, promptBytes: 2_000, modelId: 'qwen-35b' }),
+      relevantItems: async () => new Set(['m4']),
+      paceFile: join(dir, 'pace.json'),
+      now: () => new Date(t),
+    });
+    const jobs = make();
+    const first = await jobs.start('What was said about heart disease?', set);
+    expect(first.read).toBe('relevant_days');
+    expect(first.choices.all).toMatchObject({ messageCount: 15 });
+    expect(first.choices.all.seconds).toBeUndefined();
+    expect(first.choices.relevantDays).toMatchObject({ messageCount: 2, days: 1, totalDays: 9 });
+    expect(first.choiceSummary).toContain('All 15 messages. The days that mention this: 1 days of 9, 2 messages. Reading the days that mention this');
+    const done = await settled(jobs, first.id);
+    expect(done.state).toBe('done');
+    expect(packs.at(-1)!.coverage.extractionGaps[0]).toContain('13 messages on other days were not read');
+    expect(done.inboxId).toBeDefined();
+    // A new engine reads the pace back: both reads are now priced, and the hour rule picks the full read.
+    const again = await make().start('What was said about heart disease?', set);
+    expect(again.choices.all.seconds).toBeGreaterThan(0);
+    expect(again.choices.relevantDays!.seconds).toBeLessThan(again.choices.all.seconds!);
+    expect(again.read).toBe('all');
+    expect(again.choiceSummary).toContain('the full read fits in an hour');
+  });
+
+  test('waits for the owner\'s own questions before each model call, then resumes', async () => {
+    const { stores: deepStores, lanes } = fixture(() => 'x');
+    let t = 0;
+    let looks = 0;
+    const seen = new Set<string>();
+    const jobs = createDeepReadJobs({
+      stores: () => deepStores, lanes: () => lanes, inbox: () => undefined,
+      model: async () => ({ analyst: analyst([]), promptBytes: 13_500, modelId: 'm' }),
+      interactiveBusy: () => (looks += 1) <= 3,
+      now: () => new Date(t),
+      sleep: async (ms) => { t += ms; for (const job of jobs.status()) if (job.waitingOn) seen.add(job.waitingOn); await Promise.resolve(); },
+    });
+    const done = await settled(jobs, (await jobs.start('q', set)).id);
+    expect(done.state).toBe('done');
+    expect([...seen]).toEqual(['your questions']);
+  });
+
   test('the owner can cancel a read in progress', async () => {
     const { stores: deepStores, lanes } = fixture(() => 'x');
     let release!: () => void;
@@ -133,6 +183,27 @@ describe('deep read jobs', () => {
     expect(jobs.cancel(started.id)).toBe(true);
     release();
     expect((await settled(jobs, started.id)).state).toBe('cancelled');
+  });
+});
+
+describe('relevant-days picker', () => {
+  const at = (id: string, day?: string) => ({
+    provenance: { sourceItem: { family: 'chat', provider: 'telegram', accountScope: 'me', providerItemId: id, providerConversationId: 'c', localItemId: id }, ...(day ? { citation: { authoredAt: `${day}T10:00:00Z` } } : {}) },
+    trustTier: 'S1', trustDomain: 'internal', chunks: [id],
+  }) as never;
+  test('keeps every message on a hit day and the day either side, plus undated ones', () => {
+    const candidates = [at('a', '2024-01-01'), at('b', '2024-01-02'), at('c', '2024-01-03'), at('d', '2024-01-05'), at('e', '2024-02-29'), at('f', '2024-03-01'), at('g')];
+    const pick = pickRelevantDays(candidates, new Set(['b', 'e']));
+    expect(pick.candidates.map(c => c.chunks[0])).toEqual(['a', 'b', 'c', 'e', 'f', 'g']);
+    expect(pick).toMatchObject({ days: 5, totalDays: 6, hitDays: 2, messages: 6, totalMessages: 7 });
+    expect(pickRelevantDays(candidates, new Set()).candidates).toEqual([]);
+  });
+  test('the hour rule: full under an hour, relevant days over, the owner\'s pick wins', () => {
+    const relevantDays = { sections: 2, messageCount: 50, seconds: 120 };
+    expect(chooseDeepRead({ all: { sections: 10, messageCount: 500, seconds: 3_000 }, relevantDays })).toBe('all');
+    expect(chooseDeepRead({ all: { sections: 100, messageCount: 5_000, seconds: 30_000 }, relevantDays })).toBe('relevant_days');
+    expect(chooseDeepRead({ all: { sections: 100, messageCount: 5_000, seconds: 30_000 }, relevantDays }, 'all')).toBe('all');
+    expect(chooseDeepRead({ all: { sections: 10, messageCount: 500 } }, 'relevant_days')).toBe('all');
   });
 });
 

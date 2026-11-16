@@ -56,6 +56,8 @@ export interface DeepReadInput {
   onProgress?: (progress: DeepReadProgress, state: DeepReadState) => void | Promise<void>;
   /** Awaited before each model call: lets privacy judging, which shares the model's one slot, go first. */
   beforeModelCall?: () => Promise<void>;
+  /** What the read left out on purpose (a relevant-days read), stated in the final pack's coverage so the answer says it. */
+  coverageNotes?: readonly string[];
   now?: () => Date;
 }
 
@@ -173,9 +175,10 @@ export async function runDeepRead(input: DeepReadInput): Promise<DeepReadResult>
   }
 
   await progress('answering');
-  const gaps = state.failedSections.length
-    ? [`${state.failedSections.length} of ${sections.length} sections of the set could not be read by the model.`]
-    : [];
+  const gaps = [
+    ...(input.coverageNotes ?? []),
+    ...(state.failedSections.length ? [`${state.failedSections.length} of ${sections.length} sections of the set could not be read by the model.`] : []),
+  ];
   let notes = state.notes;
   let unanswered: string[] = [];
   // Reduce rounds: answer the notes in batches that fit one prompt until one call holds them all.
