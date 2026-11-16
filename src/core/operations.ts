@@ -525,6 +525,53 @@ export const operations: Operation[] = [
     }),
   },
   {
+    name: 'source_deep_read',
+    cliHints: { name: 'source deep read' },
+    description: [
+      'Read ALL of one document, or one whole group, channel or chat, with the owner\'s private model, then answer the question from what it read.',
+      'For questions a search alone answers poorly: a topic discussed over many messages, days or years, or facts spread through a long file.',
+      'Pass the selected_item of a search hit from source_index_search, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
+      'Runs in the background on the owner\'s computer and lands in Private answers; this returns the job with its progress. Check it with source_deep_read_status.',
+    ].join(' '),
+    params: {
+      question: { type: 'string', required: true, description: 'The question to answer from the whole set.' },
+      selected_item: { type: 'object', required: true, description: 'The selected_item of a source_index_search hit; identifiers only.' },
+      whole: { type: 'string', description: '"conversation" (the hit\'s whole chat, group or channel) or "item" (that document; default).' },
+      after: { type: 'string', description: 'For a conversation: only messages authored on or after this ISO date.' },
+      before: { type: 'string', description: 'For a conversation: only messages authored before this ISO date.' },
+    },
+    mutating: false,
+    nativeExposure: 'sourceIndexEnabledOnly',
+    handler: async (ctx, params) => {
+      const whole = params.whole === undefined ? 'item' : params.whole;
+      if (whole !== 'item' && whole !== 'conversation') throw new OperationError('invalid_params', 'whole must be "item" or "conversation".');
+      const after = optionalString(params.after);
+      const before = optionalString(params.before);
+      return ctx.email.sourceDeepRead({
+        action: 'start', question: asString(params.question, 'question'),
+        selectedItem: sourceItemReadSelectedItem(params.selected_item), whole,
+        ...(after ? { after } : {}), ...(before ? { before } : {}),
+      });
+    },
+  },
+  {
+    name: 'source_deep_read_status',
+    cliHints: { name: 'source deep read status' },
+    description: 'Progress of deep reads started with source_deep_read: sections read, time left, what it is waiting on, and where the answer landed. Pass cancel=true with an id to stop one.',
+    params: {
+      id: { type: 'string', description: 'One deep read\'s id; all recent ones when absent.' },
+      cancel: { type: 'boolean', description: 'Stop the deep read named by id.' },
+    },
+    mutating: false,
+    nativeExposure: 'sourceIndexEnabledOnly',
+    handler: async (ctx, params) => {
+      const id = optionalString(params.id);
+      const cancel = optionalBoolean(params.cancel, 'cancel');
+      if (cancel && !id) throw new OperationError('invalid_params', 'cancel needs the id of a deep read.');
+      return ctx.email.sourceDeepRead({ action: cancel ? 'cancel' : 'status', ...(id ? { id } : {}) });
+    },
+  },
+  {
     name: 'source_index_search',
     description: [
       'Search a calling-assistant-safe source-index surface without returning source packets, scopes, tokens, provider cursors, or secure-local raw content.',

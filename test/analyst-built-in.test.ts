@@ -428,6 +428,21 @@ describe('answerPrivately', () => {
     for (let index = 0; index < 8; index += 1) expect(body[1]!.content).toContain(`MARKER_${index}`);
   });
 
+  test('the eval read receipt excludes items dropped by prompt fitting', async () => {
+    const { model, requests } = stubModel(JSON.stringify({ answer: 'No result.', citations: [], unanswered: [], sufficient: false }));
+    const items = Array.from({ length: 8 }, (_, index) => ({
+      id: `synthetic-${index}`, title: `Synthetic ${index}`,
+      text: `SYNTHETIC_MARKER_${index} ${'invented sample passage '.repeat(400)}`,
+    }));
+    let retained: readonly string[] = [];
+    await answerPrivately('Summarize the synthetic records.', items, { model, audit: false, maxPromptBytes: 5_000, onEvidence: ids => { retained = ids; } });
+    const body = requests[0]!.body.messages as Array<{ content: string }>;
+    const sent = items.filter((_, index) => body[1]!.content.includes(`SYNTHETIC_MARKER_${index}`)).map(item => item.id);
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.length).toBeLessThan(items.length);
+    expect(retained).toEqual(sent);
+  });
+
   test('every evidence item is Private and local-only', () => {
     const pack = privateEvidencePack('q', evidence);
     expect(pack.candidates.every((candidate) => candidate.trustDomain === 'secure_local' && candidate.trustTier === 'S4')).toBe(true);
@@ -448,6 +463,17 @@ describe('Private lane fallback', () => {
     await expect(withBuiltInFallback(failing(slow), fixed('built-in')).analyze(pack, { localOnly: true })).rejects.toBe(slow);
     const refused = new OperationError('source_index_policy_violation', 'no');
     await expect(withBuiltInFallback(failing(refused), fixed('built-in')).analyze(pack, { localOnly: true })).rejects.toBe(refused);
+  });
+
+  // Jamie, 2026-11-16: "for my Olympus, we should never be using the small model".
+  test('once the owner\'s local model has answered, its being down is an error, never the built-in model', async () => {
+    const down = new OperationError('argus_unreachable', 'Argus fast lane is unreachable at http://127.0.0.1:28090/v1/chat/completions.');
+    let up = true;
+    const primary: Analyst = { analyze: async () => { if (!up) throw down; return answer('delphi'); } };
+    const wrapped = withBuiltInFallback(primary, fixed('built-in'));
+    expect((await wrapped.analyze(pack, { localOnly: true })).answer).toBe('delphi');
+    up = false;
+    await expect(wrapped.analyze(pack, { localOnly: true })).rejects.toBe(down);
   });
 
   test('wired into local secure-pool members before Venice', async () => {

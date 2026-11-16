@@ -137,6 +137,17 @@ async function handleRemoteCallTool(
       }
       args = { selected_item: selected, page: args.page, pages: args.pages };
     }
+    if (operation.name === 'source_deep_read') {
+      const access = currentAccess(authorized);
+      if (access !== 'active') return refusedAccess(access);
+      // The set is named only by a server-minted handle on this connection.
+      const selected = readHandles?.resolveReadHandle(args.read_handle);
+      if (!selected || Object.keys(args).some(key => !declaredParams.includes(key))) {
+        throw new OperationError('invalid_params', 'Invalid read handle.');
+      }
+      const { read_handle: _handle, ...rest } = args;
+      args = { ...rest, selected_item: selected };
+    }
     const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, args)));
     const afterHandler = currentAccess(authorized);
     if (afterHandler !== 'active') return refusedAccess(afterHandler);

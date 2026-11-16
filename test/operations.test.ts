@@ -121,6 +121,8 @@ describe('operations', () => {
       'source_answer_result',
       'source_index_status',
       'source_item_read',
+      'source_deep_read',
+      'source_deep_read_status',
       'source_index_search',
       'source_watch_create',
       'source_watches',

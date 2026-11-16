@@ -1,3 +1,4 @@
+import { READ_WIDE_MATCH_LIMIT, markReadWidePack, readWideEnabled, scoresHaveNoLeader } from './read-wide.ts';
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 import { bindReleaseChunks, copyReleaseChunks } from './release-manifest.ts';
 import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
@@ -6,6 +7,7 @@ import {
   rerankPassage,
   rerankPoolSize,
   RERANK_POOL_STORE_DEPTH,
+  rerankPoolSemanticSeats,
   type EvidenceRerankAudit,
   type EvidenceRerankOutcome,
   type EvidenceReranker,
@@ -64,6 +66,7 @@ import {
   type SourceIndexRoutedSearchHit,
   type SourceIndexRoutedSearchResponse,
   type SourceIndexRouterAdapterMap,
+  type SourceIndexSearchHit,
   type SourceIndexSearchContext,
   type SourceIndexSkippedCorpus,
   applySourceIndexVisibilityGate,
@@ -143,6 +146,11 @@ export interface LocalContentProvider {
   // matched or not. Optional: a provider that cannot answer it without walking
   // every document must omit it rather than pay that per query.
   corpusReadability?(): Promise<CorpusReadabilityCounts | undefined>;
+  // The items either side of this one in its conversation (the messages
+  // before and after a chat message, the neighbouring mails of a thread),
+  // nearest first, as identity-only hits the pack hydrates like any other.
+  // Absent when the provider has no conversations.
+  conversationNeighbours?(request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain; perSide: number }): readonly SourceIndexSearchHit[];
 }
 
 // Counts only — no paths, no titles, no identifiers beyond the corpus id the
@@ -245,7 +253,7 @@ export interface BuildEvidencePackInput {
   onSeatingLanes?: (lanes: readonly SeatingLane[], ordinal: number) => void;
   onRerankScores?: (entries: readonly { candidateId: SourceIndexCandidateId; score: number }[], outcome: EvidenceRerankOutcome) => void;
   // Optional experimental store allocation; ordinary builds use the shared default.
-  poolAllocation?: { storeDepth: number };
+  poolAllocation?: { storeDepth: number; semanticSeats?: number };
   // Eval capture's adapter depth, independent of pool/pack seats.
   storeSearchDepth?: number;
   now?: () => Date;
@@ -375,6 +383,7 @@ async function buildPreparedEvidencePackDetailed(
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input)
     ? input.reranker
     : undefined;
+  const readWide = readWideEnabled() && !input.selectedItems?.length;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const strength: SearchStrength = {};
   const observed: BuildEvidencePackInput = {
@@ -393,7 +402,7 @@ async function buildPreparedEvidencePackDetailed(
   };
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
-    : await runRoutedSearches(observed, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined));
+    : await runRoutedSearches(observed, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
   // A build can fan out more than once (the literal query plus planner
   // expansions), and each routed run judged its hits against its own ledger
   // snapshot. One more pass over the merged hits puts the whole pack on ONE
@@ -406,10 +415,21 @@ async function buildPreparedEvidencePackDetailed(
   // re-sort it: newest-first over the whole pool undid store turn and the
   // reserved leader seats, and buried a store's best match past what a local
   // Analyst reads (2026-11-11). Every seat carries its date.
-  const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
+  const storeScores = new Map<string, Array<number | undefined>>();
+  for (const hit of visibleHits) {
+    const scores = storeScores.get(hit.corpusId) ?? [];
+    scores.push(hit.score);
+    storeScores.set(hit.corpusId, scores);
+  }
+  let wide = readWide && [...storeScores.values()].some(scoresHaveNoLeader)
+    && [...storeScores.values()].every(scores => scores.length < 3 || scoresHaveNoLeader(scores));
+  // The ordinary draw remains a prefix. A clear leader keeps exactly that cut.
+  const routedHits = input.selectedItems?.length ? routed.hits
+    : readWide && !reranker && !wide ? visibleHits.slice(0, input.maxResults) : visibleHits;
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
+  const candidateHitIds: SourceIndexCandidateId[] = [];
   const candidateExtractionGapIndexes: number[][] = [];
   const extractionGaps: string[] = laneCutShortGaps(routed.degradations, input);
   const searched = new Set(routed.searchedCorpora);
@@ -450,7 +470,7 @@ async function buildPreparedEvidencePackDetailed(
   const hydrationStartedAt = Date.now();
   // A reranked build reads its whole pool but keeps only maxResults, so each
   // kept candidate gets the share it would have had without the pool.
-  const maxBytesPerCandidate = evidenceBytesPerCandidate(
+  let maxBytesPerCandidate = evidenceBytesPerCandidate(
     reranker ? Math.min(routedHits.length, input.maxResults) : routedHits.length,
     input.maxCharsPerCandidate,
     input.evidenceByteBudget,
@@ -519,18 +539,30 @@ async function buildPreparedEvidencePackDetailed(
       query: literalSearchQuery(input),
       items: scorable,
       passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
-      keep: input.maxResults,
+      keep: readWide ? scorable.length : input.maxResults,
       ...(input.rerankTimers ? { timers: input.rerankTimers } : {}),
       onScores: (entries, outcome) => {
         for (const { score } of entries) strength.rerankBest = Math.max(strength.rerankBest ?? Number.NEGATIVE_INFINITY, score);
+        if (readWide && outcome === 'applied') wide = scoresHaveNoLeader(entries.map(entry => entry.score));
         input.onRerankScores?.(entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome);
       },
     });
     // Denied items carry no text, but every one is still counted below, so the
     // policy gap and the content-free lane audits do not depend on the cut.
-    hydrated = [...denied, ...reranked.kept];
-    rerank = reranked.audit;
+    hydrated = [...denied, ...(readWide && wide ? reranked.kept : reranked.kept.slice(0, input.maxResults))];
+    rerank = readWide ? {
+      ...reranked.audit,
+      kept: hydrated.length - denied.length,
+      promoted: reranked.audit.outcome === 'applied'
+        ? hydrated.filter(entry => !entry.policyDenied && scorable.indexOf(entry) >= hydrated.length - denied.length).length : 0,
+    } : reranked.audit;
   }
+  const windowSide = conversationWindowPerSide();
+  if (windowSide > 0 && !input.selectedItems?.length) {
+    hydrated = await withConversationWindows(hydrated, input, windowSide, maxCharsPerCandidate);
+  }
+
+  if (wide) maxBytesPerCandidate = evidenceBytesPerCandidate(hydrated.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
 
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
@@ -582,6 +614,7 @@ async function buildPreparedEvidencePackDetailed(
     else if (!provider || !content || content.chunks.length === 0) unreadCandidates += 1;
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
+    candidateHitIds.push(routedHitCandidateId(hit));
 
     // The source's counts-only size notice explains these unread files. Do
     // not copy a held file's title or locator into the answer's coverage.
@@ -595,9 +628,12 @@ async function buildPreparedEvidencePackDetailed(
     if (gap) extractionGaps.push(gap);
   }
 
+  const matchingIds = new Set(routed.matchingCandidateIds ?? routed.hits.map(routedHitCandidateId));
+  const readMatchingIndexes = candidates.flatMap((candidate, index) =>
+    candidate.chunks.some(chunk => chunk.length > 0) && matchingIds.has(candidateHitIds[index]!) ? [index] : []);
   const matchCounts = coverageMatchCounts(
     routed.matchCounts,
-    candidateCorpusIds,
+    wide ? readMatchingIndexes.map(index => candidateCorpusIds[index]!) : candidateCorpusIds,
     candidates.some((candidate) => isSecureSensitivity(candidate)),
   );
   const coverage: EvidenceCoverage = {
@@ -641,7 +677,8 @@ async function buildPreparedEvidencePackDetailed(
   const secureRouted = new Set(routed.secureLaneAudits);
   const secureLaneAudits = laneAudits.filter((_, index) => secureRouted.has(routed.laneAudits[index]!));
   return {
-    pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
+    pack: wide ? markReadWidePack({ question: input.question, candidates: labelled.candidates, coverage, builtAt }, readMatchingIndexes.map(index => labelled.candidates[index]!))
+      : { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
     candidateExtractionGapIndexes,
     ...(routed.recencySeats ? { recencySeats: routed.recencySeats } : {}),
@@ -827,7 +864,7 @@ type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
   | 'encounteredSecureLocal' | 'secureLaneAudits'
-> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats'>>;
+> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats' | 'semanticSeats' | 'matchingCandidateIds'>>;
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
   const hits: SourceIndexRoutedSearchHit[] = [];
@@ -919,7 +956,7 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
 async function runRoutedSearches(
   input: BuildEvidencePackInput,
   retrievalLimit: number = input.maxResults,
-  poolAllocation?: { storeDepth: number },
+  poolAllocation?: { storeDepth: number; semanticSeats?: number },
 ): Promise<RoutedSearchSlice> {
   const literalQuery = literalSearchQuery(input);
   // Kicked off BEFORE the literal search so the two overlap rather than queue.
@@ -956,11 +993,20 @@ async function runRoutedSearches(
   }
   if (runs.length === 1) return literalRun;
 
-  const recency = seatRoutedQueryRuns(runs.map(run => run.hits), retrievalLimit, questionHasTemporalIntent(input));
-  const { hits: fused, degradations: budgetDegradations } = recency;
+  const drawRuns = readWideEnabled() ? runs.map(run => {
+    const semantic = new Set((run.semanticSeats ?? []).map(seat => routedHitCandidateId(seat.hit)));
+    const matches = new Set(run.matchingCandidateIds ?? []);
+    return run.hits.filter(hit => !semantic.has(routedHitCandidateId(hit)) || matches.has(routedHitCandidateId(hit)));
+  }) : runs.map(run => run.hits);
+  const recency = seatRoutedQueryRuns(drawRuns, readWideEnabled() ? Math.max(READ_WIDE_MATCH_LIMIT, retrievalLimit) : retrievalLimit, questionHasTemporalIntent(input));
+  const { degradations: budgetDegradations } = recency;
+  // The runs' semantic seats sit past the fused cut, so they are seated again
+  // after it, best margin first, as each run seated them.
+  const fused = withRunSemanticSeats(recency.hits, runs, poolAllocation?.semanticSeats ?? 0);
 
   return {
     hits: fused,
+    ...(readWideEnabled() ? { matchingCandidateIds: [...new Set(runs.flatMap(run => run.matchingCandidateIds ?? []))] } : {}),
     searchedCorpora: literalRun.searchedCorpora,
     // Coverage of WHICH corpora were eligible comes from run 1 (eligibility
     // depends on the context, not the query text). What each run LOST does
@@ -979,6 +1025,95 @@ async function runRoutedSearches(
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
     ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
   };
+}
+
+function withRunSemanticSeats(
+  hits: SourceIndexRoutedSearchHit[],
+  runs: readonly RoutedSearchSlice[],
+  seats: number,
+): SourceIndexRoutedSearchHit[] {
+  if (seats <= 0) return hits;
+  const seated = new Set(hits.map(routedHitCandidateId));
+  const offered = runs.flatMap((run) => run.semanticSeats ?? []).sort((left, right) => right.margin - left.margin);
+  const added: SourceIndexRoutedSearchHit[] = [];
+  for (const { hit } of offered) {
+    if (added.length >= seats) break;
+    const id = routedHitCandidateId(hit);
+    if (seated.has(id)) continue;
+    seated.add(id);
+    added.push(hit);
+  }
+  return added.length ? [...hits, ...added] : hits;
+}
+
+// Messages either side of a conversation hit: a chat answer often spans
+// several messages, and one found message without its neighbours reads out of
+// context. OLYMPUS_CONVERSATION_WINDOW sets how many each side (0 is off, the
+// default until the eval proves it).
+export const CONVERSATION_WINDOW_ENV = 'OLYMPUS_CONVERSATION_WINDOW';
+// The first this many conversation hits in pack order get a window.
+export const CONVERSATION_WINDOW_HITS = 3;
+export function conversationWindowPerSide(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env[CONVERSATION_WINDOW_ENV]?.trim();
+  if (!raw) return 0;
+  const side = Number(raw);
+  return Number.isInteger(side) && side >= 0 && side <= 10 ? side : 0;
+}
+
+/**
+ * After the cut, each of the first CONVERSATION_WINDOW_HITS kept items that
+ * belongs to a conversation brings the items either side of it, nearest first,
+ * placed right after it. Each neighbour is its own candidate: visibility-gated,
+ * read through the same provider under its own tier and model policy, and kept
+ * only when it is readable text no more restricted than the hit it came with
+ * (same trust domain, tier at most the hit's), so a window never turns an
+ * answer Private. The neighbours of one hit share one candidate's byte share.
+ */
+async function withConversationWindows<T extends { hit: SourceIndexRoutedSearchHit; provenance: SourceIndexProvenance; provider: LocalContentProvider | undefined; content: LocalContentBlock | undefined; policyDenied: boolean }>(
+  entries: readonly T[],
+  input: BuildEvidencePackInput,
+  perSide: number,
+  maxChars: number | undefined,
+): Promise<Array<T | { hit: SourceIndexRoutedSearchHit; provenance: SourceIndexProvenance; provider: LocalContentProvider | undefined; content: LocalContentBlock | undefined; policyDenied: boolean }>> {
+  const taken = new Set(entries.map((entry) => routedHitCandidateId(entry.hit)));
+  const out: Array<T | { hit: SourceIndexRoutedSearchHit; provenance: SourceIndexProvenance; provider: LocalContentProvider | undefined; content: LocalContentBlock | undefined; policyDenied: boolean }> = [];
+  let windows = 0;
+  for (const entry of entries) {
+    out.push(entry);
+    const anchor = entry.content?.sensitivity;
+    if (windows >= CONVERSATION_WINDOW_HITS || entry.policyDenied || !anchor || !entry.content?.chunks.length
+      || !entry.hit.sourceItem.providerConversationId || !entry.provider?.conversationNeighbours) continue;
+    const found: readonly SourceIndexSearchHit[] = entry.provider.conversationNeighbours({ provenance: entry.provenance, trustDomain: entry.hit.trustDomain, perSide });
+    let neighbours: SourceIndexRoutedSearchHit[] = found
+      .map((hit) => ({ ...hit, corpusId: entry.hit.corpusId, trustDomain: entry.hit.trustDomain }))
+      .filter((hit) => !taken.has(routedHitCandidateId(hit)));
+    if (neighbours.length === 0) continue;
+    windows += 1;
+    if (input.visibilityGate) neighbours = [...await applySourceIndexVisibilityGate(input.visibilityGate, neighbours)];
+    const share = maxChars === undefined ? undefined : Math.max(200, Math.floor(maxChars / Math.max(1, neighbours.length)));
+    const anchorRank = SOURCE_TRUST_TIERS.indexOf(anchor.trustTier);
+    for (const hit of neighbours) {
+      const provenance = hitProvenance(hit);
+      let content: LocalContentBlock | undefined;
+      try {
+        content = await entry.provider.fetchLocalContent({
+          provenance,
+          trustDomain: hit.trustDomain,
+          ...(share !== undefined ? { maxChars: share } : {}),
+          query: input.searchQuery ?? input.question,
+        });
+      } catch (error) {
+        if (error instanceof SourceModelPolicyDeniedError) continue;
+        throw error;
+      }
+      if (!content?.chunks.length || content.namesOnly || content.contentPrivate || content.sizeHeld) continue;
+      if (content.sensitivity.trustDomain !== anchor.trustDomain
+        || SOURCE_TRUST_TIERS.indexOf(content.sensitivity.trustTier) > anchorRank) continue;
+      taken.add(routedHitCandidateId(hit));
+      out.push({ hit, provenance, provider: entry.provider, content, policyDenied: false });
+    }
+  }
+  return out;
 }
 
 // Shared final fusion of multiple routed runs, also used by offline eval replay.
@@ -1064,7 +1199,7 @@ function runRoutedSearch(
   maxResults: number,
   laneTimeoutMs: number,
   searchDeadlineAtMs?: number,
-  poolAllocation?: { storeDepth: number },
+  poolAllocation?: { storeDepth: number; semanticSeats?: number },
 ): Promise<SourceIndexRoutedSearchResponse> {
   return observeSourceAnswerRoutedQuery(ordinal, () =>
     routeSourceIndexSearch({
@@ -1077,10 +1212,12 @@ function runRoutedSearch(
         context: input.searchContext,
         ...(questionHasTemporalIntent(input) ? { temporalIntent: true } : {}),
         ...(poolAllocation ? { poolAllocation } : {}),
+        ...(readWideEnabled() ? { readWide: true } : {}),
       },
       laneTimeoutMs,
       ...(input.onSeatingLanes ? { onSeatingLanes: (lanes) => input.onSeatingLanes!(lanes, ordinal) } : {}),
-      ...(input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {}),
+      ...(readWideEnabled() ? { storeSearchDepth: Math.max(READ_WIDE_MATCH_LIMIT, input.storeSearchDepth ?? 0) }
+        : input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {}),
       ...(searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {}),
       ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),
     }));

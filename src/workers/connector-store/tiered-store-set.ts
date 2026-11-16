@@ -1837,8 +1837,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // Every store write this flush made is durable before the ledger (FULL)
     // removes copy rows or clears write intents on it: a store (NORMAL) that
     // a power cut rolls back is then still owed its write by the ledger.
-    const barrier = () => { for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.durabilityBarrier(); };
-    if (this.copyRemovals.size > 0) barrier();
+    // The fsyncs run off the loop: a flush awaits them outside any transaction.
+    const barrier = async () => { for (const domain of TIER_DOMAIN_ORDER) await this.set.store(domain)?.durabilityBarrierOffLoop(); };
+    if (this.copyRemovals.size > 0) await barrier();
     for (const identity of this.copyRemovals.values()) {
       await ingestionTurn();
       this.set.ledger.removeCopies(identity);
@@ -1860,7 +1861,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       if (moveTo) for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(moveTo);
       cleared.push(identity);
     }
-    if (cleared.length > 0) barrier();
+    if (cleared.length > 0) await barrier();
     for (const identity of cleared) this.set.ledger.clearWriteIntent(identity);
     this.intents.clear();
     this.namesAdvance.clear();

@@ -38,6 +38,7 @@ import {
   type SnifferTarget,
 } from './sniffer-resolver.ts';
 import { existsSync, rmSync } from 'node:fs';
+import { basename } from 'node:path';
 import { retireStatePath } from '../../core/boot-progress.ts';
 import { retiredEmbeddingPrefilterPaths, TIER_LEDGER_SQLITE_STORE_ID, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger, type AutomaticTierMoveContext } from './installed-tier-classification-registry.ts';
@@ -90,6 +91,8 @@ export const NOT_ANSWERING_MAX_BACKOFF_MS = 60_000;
  */
 export interface TierSnifferServiceStore {
   readonly dbPath: string;
+  /** The store's corpus, to name the source when something about it cannot be read. */
+  readonly corpusId?: string;
   tierSetBinding?(): { ledgerId?: string; ledgerPath: string } | undefined;
   /** Where the bound set ledger sits now (found by its identity); a store without it is read by the recorded path. */
   tierSetLedgerPath?(): string | undefined;
@@ -364,6 +367,11 @@ export interface TierClassificationBacklog {
   awaitingApproval?: ClassifierApprovalKey;
   /** Why the last tick asked nothing while questions wait (absent while asking or idle). */
   waiting?: TierSnifferWaiting;
+  /**
+   * Sources whose privacy records could not be read: their items are held,
+   * are not in the counts above, and wait until they can be read. Content-free.
+   */
+  unreadableSources?: Array<{ source: string; what: string }>;
 }
 
 /** One exact classifier the owner approves: lane, profile, model and prompt version. */
@@ -490,6 +498,8 @@ export class TierSnifferService {
   private lastYieldReason: 'breaker' | 'answer' | 'owner_answer' | 'caller' | undefined;
   private lastHeldLogMs = Number.NEGATIVE_INFINITY;
   private lastSkipLogMs = Number.NEGATIVE_INFINITY;
+  /** What could not be read, by ledger or store path: said in the backlog and once in the log, cleared when read again. */
+  private readonly unreadable = new Map<string, string>();
   /** The running pass's last sign of progress, and the step it is in (for the stop line). */
   private lastProgressMs = 0;
   private passStep = 'starting';
@@ -667,14 +677,17 @@ export class TierSnifferService {
     try {
       if (!autoMoves || !autoMoves.localEmbeddingsOnly()) return 0;
     } catch {
+      this.noteUnreadable('automatic moves', 'which search model the automatic privacy moves use');
       return 0;
     }
+    this.noteReadable('automatic moves');
     let queued = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       try {
         const set = tierSetForLedger(ledgerPath);
         if (!set || !setEmbedsWithBuiltInOnly(set)) continue;
       } catch {
+        this.noteUnreadable(ledgerPath, 'its store set, so its automatic privacy moves are not counted');
         continue;
       }
       const opened = this.openBacklogLedger(ledgerPath);
@@ -686,8 +699,9 @@ export class TierSnifferService {
         queued += (opened.db.query(`SELECT COUNT(*) AS n FROM (
           SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
         ) AS tier_items WHERE 1 ${tierMovingDirectionClause('lower')}`).get(MOVES_SCAN_BOUND) as { n: number }).n;
+        this.noteReadable(ledgerPath);
       } catch {
-        // An unreadable ledger counts nothing, as in the backlog count itself.
+        this.noteUnreadable(ledgerPath, 'its queued privacy moves');
       } finally { opened.db.close(); }
     }
     return queued;
@@ -711,17 +725,67 @@ export class TierSnifferService {
     return {
       ...counts,
       summary: checkingItems === 0
-        ? 'No items waiting for classification.'
+        ? (this.unreadable.size > 0 ? `No items counted as waiting.${this.unreadableNote()}` : 'No items waiting for classification.')
         : `Checking ${checkingItems} item${checkingItems === 1 ? '' : 's'}, about ${remainingQuestions} question${remainingQuestions === 1 ? '' : 's'} remaining.`
           + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : '')
           + (oldestPendingAgeMs >= 3_600_000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60_000)} minutes.` : '')
-          + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ''),
+          + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : '')
+          + this.unreadableNote(),
       awaitingOwnerApproval: this.lastTick?.state === 'awaiting_owner_approval',
       ...(this.lastTick?.state === 'awaiting_owner_approval' ? { awaitingApproval: {
         lane: this.lastTick.lane, profileId: this.lastTick.profileId, modelId: this.lastTick.modelId, promptVersion: this.lastTick.promptVersion,
       } } : {}),
       ...(checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}),
+      ...(this.unreadable.size > 0 ? { unreadableSources: this.unreadableSources() } : {}),
     };
+  }
+
+  private unreadableNote(): string {
+    if (this.unreadable.size === 0) return '';
+    return ` Could not read ${this.unreadableSources().map(({ source, what }) => `${what} for ${source}`).join('; ')}: those items stay held and are not in these counts.`;
+  }
+
+  /** Nothing is left out silently: a skipped ledger or store is named in the backlog and once in the log. */
+  private noteUnreadable(path: string, what: string): void {
+    if (this.unreadable.get(path) === what) return;
+    this.unreadable.set(path, what);
+    this.options.log?.(`Olympus tier sniffer: could not read ${what} for ${this.sourceLabel(path)}; its items stay held and are not counted until it can be read.`);
+  }
+
+  private noteReadable(path: string): void {
+    if (this.unreadable.delete(path)) this.options.log?.(`Olympus tier sniffer: ${this.sourceLabel(path)} can be read again.`);
+  }
+
+  /** The sources behind a ledger or store path, by corpus; never item content. */
+  private sourceLabel(path: string): string {
+    try {
+      const corpora = [...new Set(this.options.stores()
+        .filter(store => store.dbPath === path || tierLedgerPathForStore(store.dbPath) === path
+          || this.ledgerPathsNamedBy(store).includes(path))
+        .map(store => store.corpusId).filter((id): id is string => typeof id === 'string' && id.length > 0))];
+      if (corpora.length > 0) return corpora.sort().join(', ');
+    } catch {
+      // Fall back to the file's own name below.
+    }
+    return basename(path);
+  }
+
+  /** The ledger paths a store names; one it cannot name (its binding unreadable) is already noted on its own path. */
+  private ledgerPathsNamedBy(store: TierSnifferServiceStore): string[] {
+    const named: string[] = [];
+    for (const read of [() => store.tierLedgerPathInUse?.(), () => store.tierSetLedgerPath?.(), () => store.tierSetBinding?.()?.ledgerPath]) {
+      try {
+        const path = read();
+        if (path) named.push(path);
+      } catch (error) {
+        void error; // The store's own path carries the unreadable note (ledgerPaths).
+      }
+    }
+    return named;
+  }
+
+  private unreadableSources(): Array<{ source: string; what: string }> {
+    return [...this.unreadable].map(([path, what]) => ({ source: this.sourceLabel(path), what }));
   }
 
   /** Opens a ledger for a backlog count, with its queue attached; undefined when it is not the bound ledger or cannot be read. */
@@ -734,7 +798,7 @@ export class TierSnifferService {
       if (expectedId !== undefined) {
         const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
         // Counted for the ledger its store is bound to, not for whatever sits at the path now.
-        if (row?.value !== expectedId) { db.close(); return undefined; }
+        if (row?.value !== expectedId) { db.close(); this.noteUnreadable(ledgerPath, 'the privacy ledger its store is bound to (another file is at its path)'); return undefined; }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
       const hasQueue = existsSync(path);
@@ -742,6 +806,7 @@ export class TierSnifferService {
       return { db, hasQueue };
     } catch {
       db?.close();
+      this.noteUnreadable(ledgerPath, 'its privacy ledger');
       return undefined;
     }
   }
@@ -755,8 +820,9 @@ export class TierSnifferService {
       try {
         rows += (opened.db.query('SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items').get() as { n: number }).n;
         if (opened.hasQueue) rows += (opened.db.query('SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+        this.noteReadable(ledgerPath);
       } catch {
-        // An unreadable ledger counts nothing, as in the count itself.
+        this.noteUnreadable(ledgerPath, 'its privacy ledger');
       } finally { opened.db.close(); }
     }
     return rows;
@@ -772,8 +838,10 @@ export class TierSnifferService {
       try {
         pendingItems += (opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get() as { n: number }).n;
         if (opened.hasQueue) remainingQuestions += (opened.db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+        this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
+        this.noteUnreadable(ledgerPath, 'its privacy ledger');
       } finally { opened.db.close(); }
     }
     return { checkingItems: Math.max(pendingItems, remainingQuestions ? 1 : 0), remainingQuestions, pendingItems, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
@@ -787,8 +855,10 @@ export class TierSnifferService {
       try {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue) this.addQuestionSlice(counts, opened.db, undefined);
+        this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
+        this.noteUnreadable(ledgerPath, 'its privacy ledger');
       } finally { opened.db.close(); }
     }
     return counts;
@@ -809,13 +879,20 @@ export class TierSnifferService {
     const results = await runBacklogCountWorker({ ledgers, sql });
     if (!results || this.stopped) return undefined;
     const counts = emptyBacklogCounts();
+    const read = new Set(ledgers.map(ledger => ledger.path));
     for (const result of results) {
+      if ('unreadable' in result) {
+        read.delete(result.unreadable);
+        this.noteUnreadable(result.unreadable, result.mismatch ? 'the privacy ledger its store is bound to (another file is at its path)' : 'its privacy ledger');
+        continue;
+      }
       counts.pendingItems += result.n;
       counts.pendingWithoutQuestion += result.missing ?? 0;
       counts.checkingItems += result.n + (result.other ?? 0);
       counts.remainingQuestions += result.questions;
       if (result.oldest) counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(result.oldest));
     }
+    for (const path of read) this.noteReadable(path);
     return counts;
   }
 
@@ -856,8 +933,10 @@ export class TierSnifferService {
             if (this.stopped) return undefined;
           }
         }
+        this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
+        this.noteUnreadable(ledgerPath, 'its privacy ledger');
       } finally { opened.db.close(); }
     }
     return counts;
@@ -1269,8 +1348,10 @@ export class TierSnifferService {
           paths.add(bound);
           if (binding?.ledgerId) this.boundLedgerIds.set(bound, binding.ledgerId);
         }
+        this.noteReadable(store.dbPath);
       } catch {
-        // An unreadable binding fails closed elsewhere; the sniffer skips it.
+        // Fails closed elsewhere; the sniffer skips it, and says so.
+        this.noteUnreadable(store.dbPath, 'which privacy ledger the store is bound to');
       }
       const own = tierLedgerPathForStore(store.dbPath);
       if (existsSync(own)) paths.add(own);
@@ -1314,7 +1395,9 @@ export class TierSnifferService {
       try {
         ledger = this.ledgerAt(ledgerPath);
       } catch {
-        continue; // Not the ledger its store is bound to: left alone this pass.
+        // Not the ledger its store is bound to: left alone this pass, and said.
+        this.noteUnreadable(ledgerPath, 'the privacy ledger its store is bound to (another file is at its path)');
+        continue;
       }
       const planner = tierSetPlannerForLedger(ledgerPath);
       targets.push({
@@ -2292,14 +2375,14 @@ self.onmessage = ({ data }) => {
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
       if (ledger.expectedId !== null) {
         const row = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get();
-        if (!row || row.value !== ledger.expectedId) continue;
+        if (!row || row.value !== ledger.expectedId) { out.push({ unreadable: ledger.path, mismatch: true }); continue; }
       }
       if (ledger.queue) db.query('ATTACH DATABASE ? AS queue').run(ledger.queue);
       const pending = db.query(ledger.queue ? data.sql.pendingQueued : data.sql.pendingAlone).get();
       const questions = ledger.queue ? db.query(data.sql.questions).get() : { n: 0, other: 0 };
       out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other });
     } catch {
-      // An unreadable ledger counts nothing, as in the count on the loop.
+      out.push({ unreadable: ledger.path });
     } finally { try { db?.close(); } catch {} }
   }
   postMessage(out);
@@ -2307,7 +2390,8 @@ self.onmessage = ({ data }) => {
 
 const BACKLOG_COUNT_WORKER_TIMEOUT_MS = 10 * 60_000;
 
-type BacklogWorkerResult = { n: number; missing: number | null; oldest: string | null; questions: number; other: number | null };
+type BacklogWorkerResult = { n: number; missing: number | null; oldest: string | null; questions: number; other: number | null }
+  | { unreadable: string; mismatch?: boolean };
 
 function runBacklogCountWorker(message: unknown): Promise<BacklogWorkerResult[] | undefined> {
   return new Promise((resolve) => {

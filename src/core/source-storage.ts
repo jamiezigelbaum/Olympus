@@ -107,7 +107,17 @@ export function enableSourceRegistryAdoption(): void {
  * service is opened read-only, whatever its lane asked for, and the
  * background, which syncs and judges, is the one writer.
  */
+// Every store and sidecar this process opened through the service. The
+// background publishes it in its status snapshot, so the split's front looks
+// for new stores to mount only when it changed (engine/server.ts).
+let storeOpens = 0;
+/** How many stores and sidecars this process has opened so far. */
+export function storeOpensSoFar(): number {
+  return storeOpens;
+}
+
 function frontReadOnly<T extends { readOnly?: boolean }>(options: T): T {
+  storeOpens += 1;
   return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
 }
 

@@ -15,6 +15,8 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   'source_answer',
   'source_index_status',
   'source_item_read',
+  'source_deep_read',
+  'source_deep_read_status',
   'source_index_search',
   'source_watch_create',
   'source_watches',
@@ -54,6 +56,8 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
   'source_answer_result',
   'source_index_status',
   'source_item_read',
+  'source_deep_read',
+  'source_deep_read_status',
   'source_index_search',
   'olympus_doctor',
   'olympus_setup_status',
@@ -74,6 +78,8 @@ export const V0_4_PUBLIC_CLI_OPERATIONS = [
   'source_answer',
   'source_index_status',
   'source_item_read',
+  'source_deep_read',
+  'source_deep_read_status',
   'source_index_search',
   'olympus_doctor',
   'olympus_setup_status',
@@ -99,6 +105,10 @@ export const V0_4_HERMES_MCP_TOOLS = [
 export const V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
   ...V0_4_HERMES_MCP_TOOLS,
   'source_item_read',
+  // Deep read (1.5 item 8): a remote agent names the set by a read handle and
+  // sees progress only; the answer stays in Private answers on the computer.
+  'source_deep_read',
+  'source_deep_read_status',
 ] as const;
 
 export const V0_4_PUBLIC_SKILL_DIRS = [
