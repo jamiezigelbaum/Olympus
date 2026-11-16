@@ -50,6 +50,7 @@ export async function runPanelEval(options: PanelEvalOptions) {
     baseUrl: options.modelBaseUrl, model: options.model,
   } };
   const route = createLocalPrivateRoute({
+    log: () => console.error(JSON.stringify({ routeErrors: 1 })),
     firstMember: () => member,
     model: () => {
       const model = createLocalSovereigntyAnalystModel({ profile: member.profile, olympusConfig: config, env: {} });

@@ -672,7 +672,8 @@ Stdout is one JSON receipt containing only dataset ids and numeric counts and
 budgets, with aggregate counts and open-split rows. `--split sealed` runs only
 sealed questions and omits rows. No item, question, answer, endpoint, model name
 or local path is printed. Questions with no readable evidence increment `noEvidence` and `judgeUnknown`
-and do not stop later questions. Other failures print only `{"errors":1}` and exit nonzero.
-The synthetic CLI acceptance run is `bun test test/eval-panel.test.ts`; its
+and do not stop later questions. Route diagnostics print `{"routeErrors":1}`; other failures print only
+`{"errors":1}` and exit nonzero.
+The synthetic CLI acceptance run is `bun run test:focus -- test/eval-panel.test.ts`; its
 loopback stub implements `/models`, `/props` and `/chat/completions` and uses no
 private data or installed services.
