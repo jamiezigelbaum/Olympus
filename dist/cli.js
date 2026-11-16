@@ -136040,14 +136040,23 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
   }
   return walks.length === 0 ? unreported ? false : undefined : walks.every(Boolean);
 }
+function changeWatchNote(scheduler) {
+  const watch = scheduler?.change_watch;
+  if (!watch || watch.state !== "polling")
+    return "";
+  const minutes = Math.max(1, Math.round(watch.poll_interval_seconds / 60));
+  const every = `checking every ${minutes} min because it can't watch for changes`;
+  return watch.meets_arrival_target ? `; ${every}` : `; ${every}, slower than the 10-minute target for new items`;
+}
 function freshnessFrom(corpus, scheduler) {
   const hours = scheduler?.freshness_hours;
   const threshold = scheduler?.freshness_threshold_hours;
   const stale = scheduler?.stale_sync_anomaly === true;
+  const polling = changeWatchNote(scheduler);
   if (hours !== undefined) {
     const checked = `Last checked ${relativeDurationFromHours(hours)}`;
     return {
-      label: stale ? `${checked}; refresh is late` : checked,
+      label: `${stale ? `${checked}; refresh is late` : checked}${polling}`,
       hours,
       ...threshold !== undefined ? { threshold_hours: threshold } : {},
       stale
@@ -221245,6 +221254,7 @@ class SourceScheduler {
   continueWake;
   changeDebounceMs;
   changeWakes = new Map;
+  changeWatchFailures = new Map;
   holdForAsk;
   constructor(options) {
     this.enabled = options.enabled;
@@ -221319,6 +221329,7 @@ class SourceScheduler {
   stop() {
     this.stops += 1;
     this.closeChangeSubscriptions(() => true);
+    this.changeWatchFailures.clear();
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
       this.timer = undefined;
@@ -221340,6 +221351,10 @@ class SourceScheduler {
       return;
     const wanted = new Map(this.sources.filter((source) => source.subscribeChanges !== undefined).map((source) => [source.sourceId, source]));
     this.closeChangeSubscriptions((sourceId, entry) => wanted.get(sourceId)?.subscribeChanges !== entry.subscribe);
+    for (const [sourceId, failure] of [...this.changeWatchFailures]) {
+      if (wanted.get(sourceId)?.subscribeChanges !== failure.subscribe)
+        this.changeWatchFailures.delete(sourceId);
+    }
     for (const [sourceId, source] of wanted) {
       if (this.changeWakes.has(sourceId))
         continue;
@@ -221350,13 +221365,20 @@ class SourceScheduler {
       };
       try {
         entry.unsubscribe = source.subscribeChanges(() => this.signalChange(sourceId, entry));
-      } catch {
+      } catch (error) {
         entry.closed = true;
         if (entry.timer)
           this.clearTimeoutImpl(entry.timer);
         delete entry.timer;
+        const known = this.changeWatchFailures.get(sourceId);
+        this.changeWatchFailures.set(sourceId, { subscribe: entry.subscribe, reason: changeWatchFailureReason(error) });
+        if (!known) {
+          const watch = this.changeWatchStatus(source);
+          console.warn(`[olympus:source-scheduler] change_watch_unavailable source_id=${sourceId} error_kind=${safeSchedulerErrorKind(error)} poll_interval_seconds=${watch.poll_interval_seconds} meets_arrival_target=${watch.meets_arrival_target}`);
+        }
         continue;
       }
+      this.changeWatchFailures.delete(sourceId);
       this.changeWakes.set(sourceId, entry);
     }
   }
@@ -222045,7 +222067,20 @@ ${request.taskId}`);
       freshness_threshold_hours: source.freshnessThresholdHours,
       ...freshnessHours !== undefined ? { freshness_hours: freshnessHours } : {},
       stale_sync_anomaly: source.cadence === "continuous" && (source.lastSyncCompletedAt ? freshnessHours === undefined || freshnessHours > source.freshnessThresholdHours : taskStatuses.some((task) => task.kind === "sync" && task.stale_anomaly === true)),
+      ...source.subscribeChanges ? { change_watch: this.changeWatchStatus(source) } : {},
       tasks: taskStatuses
+    };
+  }
+  changeWatchStatus(source) {
+    const failure = this.changeWatchFailures.get(source.sourceId);
+    const syncIntervals = this.states.filter((state) => state.source === source && state.task.kind === "sync").map((state) => taskIntervalMs(source, state.task));
+    const pollingMs = syncIntervals.length > 0 ? Math.min(...syncIntervals) : source.intervalMs;
+    const watching = this.changeWakes.has(source.sourceId) && !failure;
+    return {
+      state: watching ? "watching" : "polling",
+      ...watching ? {} : { reason: failure?.reason ?? "Change watching has not started yet." },
+      poll_interval_seconds: Math.round(pollingMs / 1000),
+      meets_arrival_target: watching || pollingMs <= SOURCE_ARRIVAL_TARGET_MS
     };
   }
   taskStatus(state, now) {
@@ -223106,6 +223141,14 @@ function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
 function utcDayOf(timestamp) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString().slice(0, 10) : undefined;
 }
+function changeWatchFailureReason(error) {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const firstLine = message.split(`
+`)[0]?.trim() ?? "";
+  if (!firstLine)
+    return "Change watching could not start.";
+  return firstLine.length > 200 ? `${firstLine.slice(0, 199)}…` : firstLine;
+}
 function safeSchedulerErrorKind(error) {
   if (error instanceof SourceSchedulerTaskFailure)
     return mapExplicitSchedulerErrorKind(error.errorKind);
@@ -223232,7 +223275,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_ASK_RECHECK_MS = 1000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_ASK_RECHECK_MS = 1000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SOURCE_ARRIVAL_TARGET_MS, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_provider_rate_limits();
   init_api();
@@ -223270,6 +223313,7 @@ var init_source_scheduler = __esm(() => {
     archiveImports: "archive.imports",
     evernote: "evernote.notes"
   };
+  SOURCE_ARRIVAL_TARGET_MS = 10 * 60000;
   SourceSchedulerTaskDeferral = class SourceSchedulerTaskDeferral extends Error {
     retryAt;
     counts;
