@@ -240082,7 +240082,7 @@ function startSqliteCheckpointer(options = {}) {
   let stopped = false;
   let needRoom;
   let gate;
-  const stats = { waits: 0, totalMs: 0, worstMs: 0, rewinds: 0, rewindsMissed: 0 };
+  const stats = { passes: 0, waits: 0, totalMs: 0, worstMs: 0, rewinds: 0, rewindsMissed: 0 };
   let summarized = { ...stats };
   let summarizedAt = now();
   const finish = (entry, reply) => {
@@ -240186,11 +240186,13 @@ function startSqliteCheckpointer(options = {}) {
   function record(state, reply, madeRoom) {
     state.lastPassAt = now();
     if (!reply.ok) {
-      log(`[olympus] sqlite checkpoint: ${state.label} failed (${reply.error ?? "Error"}); tried again at the next pass.`);
+      if (!stopped)
+        log(`[olympus] sqlite checkpoint: ${state.label} failed (${reply.error ?? "Error"}); tried again at the next pass.`);
       return;
     }
     if (reply.lost)
       return;
+    stats.passes += 1;
     const expectedRewind = state.awaitRewind;
     state.awaitRewind = madeRoom;
     state.firstDone = true;
