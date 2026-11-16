@@ -673,6 +673,48 @@ export interface PeopleSenderIdentity {
   senderLabel?: string;
 }
 
+interface PersonRow {
+  person_id: string; display_name: string; is_owner: number; name_shareable: number; item_count: number; linked_by_json: string;
+}
+
+interface IdentityRow {
+  identity_key: string; provider: string; sender_id: string | null; sender_label: string | null; keys_json: string;
+  names_json: string; is_owner: number; item_count: number; person_id: string; corpus_ids_json: string; link_reason: PeopleLinkReason | null;
+}
+
+// A page is a scheduling unit, never a cap on how many people are loaded.
+const PEOPLE_RELOAD_PAGE_ROWS = 500;
+const PERSON_COLUMNS = 'person_id, display_name, is_owner, name_shareable, item_count, linked_by_json';
+const IDENTITY_COLUMNS = 'identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason';
+
+function identityFromRow(row: IdentityRow): PeopleIdentity {
+  return {
+    identityKey: row.identity_key,
+    provider: row.provider,
+    ...(row.sender_id ? { senderId: row.sender_id } : {}),
+    ...(row.sender_label ? { senderLabel: row.sender_label } : {}),
+    keys: JSON.parse(row.keys_json) as string[],
+    names: JSON.parse(row.names_json) as string[],
+    isOwner: row.is_owner === 1,
+    itemCount: row.item_count,
+    personId: row.person_id,
+    corpusIds: JSON.parse(row.corpus_ids_json) as string[],
+    ...(row.link_reason ? { linkReason: row.link_reason } : {}),
+  };
+}
+
+function personFromRow(row: PersonRow, identities: PeopleIdentity[]): PeoplePerson {
+  return {
+    personId: row.person_id,
+    displayName: row.display_name,
+    isOwner: row.is_owner === 1,
+    nameShareable: row.name_shareable === 1,
+    itemCount: row.item_count,
+    identities,
+    linkedBy: JSON.parse(row.linked_by_json) as string[],
+  };
+}
+
 /**
  * The people index on disk: the derived people (rebuilt from observations)
  * and the owner's own corrections and contact cards, which no rebuild
@@ -681,13 +723,15 @@ export interface PeopleSenderIdentity {
 export class LocalPeopleIndex {
   private readonly db: Database;
   private people: PeoplePerson[];
-  private readonly bySender: Map<string, PeoplePerson>;
+  private bySender: Map<string, PeoplePerson>;
   private readonly now: () => Date;
   private readonly readOnly: boolean;
+  private loadedDataVersion: number | undefined;
+  private reloading: Promise<void> | undefined;
 
   /**
    * `readOnly`: the engine split's front, which reads the index the
-   * background rebuilds; `reload` picks up each rebuild. Otherwise a writable
+   * background rebuilds; `reloadIfChanged` picks up each rebuild. Otherwise a writable
    * open, which the front's write guard refuses.
    */
   constructor(options: { dbPath: string; now?: () => Date; readOnly?: boolean }) {
@@ -695,11 +739,13 @@ export class LocalPeopleIndex {
     this.bySender = new Map();
     this.now = options.now ?? (() => new Date());
     this.readOnly = options.readOnly === true;
+    this.loadedDataVersion = undefined;
+    this.reloading = undefined;
     if (this.readOnly) {
       this.db = new Database(options.dbPath, { readonly: true, create: false, strict: true });
       try {
         this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;');
-        this.loadPeople();
+        this.reload();
       } catch (error) {
         closeSqliteStore(this.db, { checkpoint: false });
         throw error;
@@ -729,7 +775,94 @@ export class LocalPeopleIndex {
 
   /** Read the people again from the file: a read-only open follows the writer's rebuilds. */
   reload(): void {
-    this.loadPeople();
+    if (!this.readOnly) {
+      this.loadPeople();
+      return;
+    }
+    const version = this.dataVersion();
+    this.db.exec('BEGIN');
+    try {
+      this.loadPeople();
+      this.db.exec('COMMIT');
+      this.loadedDataVersion = version;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /**
+   * The front follows writer commits without blocking its loop on the whole
+   * index. Callers share one reload, including any commit made while it read.
+   * Recheck after COMMIT: data_version inside the read transaction is pinned
+   * to its snapshot, and must never mark a newer, unread commit as loaded.
+   */
+  reloadIfChanged(): Promise<void> {
+    if (this.reloading) return this.reloading;
+    this.reloading = Promise.resolve().then(async () => {
+      if (!this.readOnly) throw new Error('Cooperative people reload requires a read-only index');
+      let version = this.dataVersion();
+      while (version !== this.loadedDataVersion) {
+        await this.loadPeopleInTurns();
+        this.loadedDataVersion = version;
+        version = this.dataVersion();
+      }
+    }).finally(() => { this.reloading = undefined; });
+    return this.reloading;
+  }
+
+  private dataVersion(): number {
+    return (this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
+  }
+
+  private async loadPeopleInTurns(): Promise<void> {
+    const people: PeoplePerson[] = [];
+    const byPerson = new Map<string, PeoplePerson>();
+    const bySender = new Map<string, PeoplePerson>();
+    this.db.exec('BEGIN');
+    try {
+      let afterPerson: number | undefined;
+      for (;;) {
+        // Rowid preserves the synchronous loader's person order. Both tables
+        // use keyset seeks, so later pages never scan earlier rows again.
+        const statement = this.db.query(`SELECT rowid AS cursor, ${PERSON_COLUMNS} FROM people_persons
+          ${afterPerson === undefined ? '' : 'WHERE rowid > ?'} ORDER BY rowid LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`);
+        const rows = (afterPerson === undefined ? statement.all() : statement.all(afterPerson)) as Array<PersonRow & { cursor: number }>;
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          const person = personFromRow(row, []);
+          people.push(person);
+          byPerson.set(person.personId, person);
+        }
+        afterPerson = rows[rows.length - 1]!.cursor;
+        // Unlike ingestionTurn (which can return undefined within its shared
+        // slice), this always gives front requests a turn after every page.
+        await new Promise<void>((resolve) => { setImmediate(resolve); });
+      }
+      let afterIdentity: string | undefined;
+      for (;;) {
+        const statement = this.db.query(`SELECT ${IDENTITY_COLUMNS} FROM people_identities
+          ${afterIdentity === undefined ? '' : 'WHERE identity_key > ?'} ORDER BY identity_key LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`);
+        const rows = (afterIdentity === undefined ? statement.all() : statement.all(afterIdentity)) as IdentityRow[];
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          const person = byPerson.get(row.person_id);
+          if (!person) continue;
+          const identity = identityFromRow(row);
+          person.identities.push(identity);
+          if (identity.senderId) bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
+          else if (identity.senderLabel) bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
+        }
+        afterIdentity = rows[rows.length - 1]!.identity_key;
+        await new Promise<void>((resolve) => { setImmediate(resolve); });
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    // Readers retain the entire old snapshot until these references swap.
+    this.setPeople(people, bySender);
   }
 
   /** Rebuild the derived people from fresh observations; corrections and cards stay. */
@@ -946,53 +1079,33 @@ export class LocalPeopleIndex {
   }
 
   private loadPeople(): void {
-    const persons = this.db.query(`SELECT person_id, display_name, is_owner, name_shareable, item_count, linked_by_json FROM people_persons`).all() as Array<{
-      person_id: string; display_name: string; is_owner: number; name_shareable: number; item_count: number; linked_by_json: string;
-    }>;
+    const persons = this.db.query(`SELECT ${PERSON_COLUMNS} FROM people_persons`).all() as PersonRow[];
     const identities = this.db.query(`
-      SELECT identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason
+      SELECT ${IDENTITY_COLUMNS}
       FROM people_identities ORDER BY identity_key
-    `).all() as Array<{
-      identity_key: string; provider: string; sender_id: string | null; sender_label: string | null; keys_json: string;
-      names_json: string; is_owner: number; item_count: number; person_id: string; corpus_ids_json: string; link_reason: PeopleLinkReason | null;
-    }>;
+    `).all() as IdentityRow[];
     const byPerson = new Map<string, PeopleIdentity[]>();
     for (const row of identities) {
-      byPerson.set(row.person_id, [...(byPerson.get(row.person_id) ?? []), {
-        identityKey: row.identity_key,
-        provider: row.provider,
-        ...(row.sender_id ? { senderId: row.sender_id } : {}),
-        ...(row.sender_label ? { senderLabel: row.sender_label } : {}),
-        keys: JSON.parse(row.keys_json) as string[],
-        names: JSON.parse(row.names_json) as string[],
-        isOwner: row.is_owner === 1,
-        itemCount: row.item_count,
-        personId: row.person_id,
-        corpusIds: JSON.parse(row.corpus_ids_json) as string[],
-        ...(row.link_reason ? { linkReason: row.link_reason } : {}),
-      }]);
+      let members = byPerson.get(row.person_id);
+      if (!members) { members = []; byPerson.set(row.person_id, members); }
+      members.push(identityFromRow(row));
     }
-    const people = persons.map((row): PeoplePerson => ({
-      personId: row.person_id,
-      displayName: row.display_name,
-      isOwner: row.is_owner === 1,
-      nameShareable: row.name_shareable === 1,
-      itemCount: row.item_count,
-      identities: byPerson.get(row.person_id) ?? [],
-      linkedBy: JSON.parse(row.linked_by_json) as string[],
-    }));
+    const people = persons.map((row) => personFromRow(row, byPerson.get(row.person_id) ?? []));
     this.setPeople(people);
   }
 
-  private setPeople(people: PeoplePerson[]): void {
-    this.people = people;
-    this.bySender.clear();
-    for (const person of people) {
-      for (const identity of person.identities) {
-        if (identity.senderId) this.bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
-        else if (identity.senderLabel) this.bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
+  private setPeople(people: PeoplePerson[], bySender?: Map<string, PeoplePerson>): void {
+    if (!bySender) {
+      bySender = new Map();
+      for (const person of people) {
+        for (const identity of person.identities) {
+          if (identity.senderId) bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
+          else if (identity.senderLabel) bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
+        }
       }
     }
+    this.people = people;
+    this.bySender = bySender;
   }
 }
 
