@@ -239280,6 +239280,7 @@ var init_installed_tier_classification = __esm(() => {
 // src/workers/classification/sniffer-service.ts
 import { Database as Database30 } from "bun:sqlite";
 import { existsSync as existsSync120, rmSync as rmSync48 } from "node:fs";
+import { basename as basename24 } from "node:path";
 function unrefTimer(timer) {
   timer?.unref?.();
 }
@@ -239325,6 +239326,7 @@ class TierSnifferService {
   lastYieldReason;
   lastHeldLogMs = Number.NEGATIVE_INFINITY;
   lastSkipLogMs = Number.NEGATIVE_INFINITY;
+  unreadable = new Map;
   lastProgressMs = 0;
   passStep = "starting";
   progress = () => {
@@ -239465,8 +239467,10 @@ class TierSnifferService {
       if (!autoMoves || !autoMoves.localEmbeddingsOnly())
         return 0;
     } catch {
+      this.noteUnreadable("automatic moves", "which search model the automatic privacy moves use");
       return 0;
     }
+    this.noteReadable("automatic moves");
     let queued = 0;
     for (const ledgerPath of this.ledgerPaths()) {
       try {
@@ -239474,6 +239478,7 @@ class TierSnifferService {
         if (!set || !setEmbedsWithBuiltInOnly(set))
           continue;
       } catch {
+        this.noteUnreadable(ledgerPath, "its store set, so its automatic privacy moves are not counted");
         continue;
       }
       const opened = this.openBacklogLedger(ledgerPath);
@@ -239483,7 +239488,9 @@ class TierSnifferService {
         queued += opened.db.query(`SELECT COUNT(*) AS n FROM (
           SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
         ) AS tier_items WHERE 1 ${tierMovingDirectionClause("lower")}`).get(MOVES_SCAN_BOUND).n;
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its queued privacy moves");
+      } finally {
         opened.db.close();
       }
     }
@@ -239510,7 +239517,7 @@ class TierSnifferService {
     const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
     return {
       ...counts,
-      summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ""),
+      summary: checkingItems === 0 ? this.unreadable.size > 0 ? `No items counted as waiting.${this.unreadableNote()}` : "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : "") + this.unreadableNote(),
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
       ...this.lastTick?.state === "awaiting_owner_approval" ? { awaitingApproval: {
         lane: this.lastTick.lane,
@@ -239518,8 +239525,46 @@ class TierSnifferService {
         modelId: this.lastTick.modelId,
         promptVersion: this.lastTick.promptVersion
       } } : {},
-      ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
+      ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {},
+      ...this.unreadable.size > 0 ? { unreadableSources: this.unreadableSources() } : {}
     };
+  }
+  unreadableNote() {
+    if (this.unreadable.size === 0)
+      return "";
+    return ` Could not read ${this.unreadableSources().map(({ source, what }) => `${what} for ${source}`).join("; ")}: those items stay held and are not in these counts.`;
+  }
+  noteUnreadable(path, what) {
+    if (this.unreadable.get(path) === what)
+      return;
+    this.unreadable.set(path, what);
+    this.options.log?.(`Olympus tier sniffer: could not read ${what} for ${this.sourceLabel(path)}; its items stay held and are not counted until it can be read.`);
+  }
+  noteReadable(path) {
+    if (this.unreadable.delete(path))
+      this.options.log?.(`Olympus tier sniffer: ${this.sourceLabel(path)} can be read again.`);
+  }
+  sourceLabel(path) {
+    try {
+      const corpora = [...new Set(this.options.stores().filter((store) => store.dbPath === path || tierLedgerPathForStore(store.dbPath) === path || this.ledgerPathsNamedBy(store).includes(path)).map((store) => store.corpusId).filter((id) => typeof id === "string" && id.length > 0))];
+      if (corpora.length > 0)
+        return corpora.sort().join(", ");
+    } catch {}
+    return basename24(path);
+  }
+  ledgerPathsNamedBy(store) {
+    const named = [];
+    for (const read of [() => store.tierLedgerPathInUse?.(), () => store.tierSetLedgerPath?.(), () => store.tierSetBinding?.()?.ledgerPath]) {
+      try {
+        const path = read();
+        if (path)
+          named.push(path);
+      } catch (error) {}
+    }
+    return named;
+  }
+  unreadableSources() {
+    return [...this.unreadable].map(([path, what]) => ({ source: this.sourceLabel(path), what }));
   }
   openBacklogLedger(ledgerPath) {
     let db;
@@ -239531,6 +239576,7 @@ class TierSnifferService {
         const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
         if (row?.value !== expectedId) {
           db.close();
+          this.noteUnreadable(ledgerPath, "the privacy ledger its store is bound to (another file is at its path)");
           return;
         }
       }
@@ -239538,9 +239584,12 @@ class TierSnifferService {
       const hasQueue = existsSync120(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
+      db.query("SELECT 1 FROM tier_items LIMIT 1").get();
+      this.noteReadable(ledgerPath);
       return { db, hasQueue };
     } catch {
       db?.close();
+      this.noteUnreadable(ledgerPath, "its privacy ledger");
       return;
     }
   }
@@ -239554,7 +239603,9 @@ class TierSnifferService {
         rows += opened.db.query("SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items").get().n;
         if (opened.hasQueue)
           rows += opened.db.query("SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions").get().n;
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its privacy ledger");
+      } finally {
         opened.db.close();
       }
     }
@@ -239571,7 +239622,9 @@ class TierSnifferService {
         pendingItems += opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get().n;
         if (opened.hasQueue)
           remainingQuestions += opened.db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its privacy ledger");
+      } finally {
         opened.db.close();
       }
     }
@@ -239587,7 +239640,9 @@ class TierSnifferService {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue)
           this.addQuestionSlice(counts, opened.db, undefined);
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its privacy ledger");
+      } finally {
         opened.db.close();
       }
     }
@@ -239603,7 +239658,13 @@ class TierSnifferService {
     if (!results || this.stopped)
       return;
     const counts = emptyBacklogCounts();
+    const read = new Set(ledgers.map((ledger) => ledger.path));
     for (const result of results) {
+      if ("unreadable" in result) {
+        read.delete(result.unreadable);
+        this.noteUnreadable(result.unreadable, result.mismatch ? "the privacy ledger its store is bound to (another file is at its path)" : "its privacy ledger");
+        continue;
+      }
       counts.pendingItems += result.n;
       counts.pendingWithoutQuestion += result.missing ?? 0;
       counts.checkingItems += result.n + (result.other ?? 0);
@@ -239611,6 +239672,8 @@ class TierSnifferService {
       if (result.oldest)
         counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(result.oldest));
     }
+    for (const path of read)
+      this.noteReadable(path);
     return counts;
   }
   async countBacklogInSlices() {
@@ -239650,7 +239713,9 @@ class TierSnifferService {
               return;
           }
         }
-      } catch {} finally {
+      } catch {
+        this.noteUnreadable(ledgerPath, "its privacy ledger");
+      } finally {
         opened.db.close();
       }
     }
@@ -240011,7 +240076,10 @@ class TierSnifferService {
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
-      } catch {}
+        this.noteReadable(store.dbPath);
+      } catch {
+        this.noteUnreadable(store.dbPath, "which privacy ledger the store is bound to");
+      }
       const own = tierLedgerPathForStore(store.dbPath);
       if (existsSync120(own))
         paths.add(own);
@@ -240046,6 +240114,7 @@ class TierSnifferService {
       try {
         ledger = this.ledgerAt(ledgerPath);
       } catch {
+        this.noteUnreadable(ledgerPath, "the privacy ledger its store is bound to (another file is at its path)");
         continue;
       }
       const planner = tierSetPlannerForLedger(ledgerPath);
@@ -240862,14 +240931,14 @@ self.onmessage = ({ data }) => {
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
       if (ledger.expectedId !== null) {
         const row = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get();
-        if (!row || row.value !== ledger.expectedId) continue;
+        if (!row || row.value !== ledger.expectedId) { out.push({ unreadable: ledger.path, mismatch: true }); continue; }
       }
       if (ledger.queue) db.query('ATTACH DATABASE ? AS queue').run(ledger.queue);
       const pending = db.query(ledger.queue ? data.sql.pendingQueued : data.sql.pendingAlone).get();
       const questions = ledger.queue ? db.query(data.sql.questions).get() : { n: 0, other: 0 };
       out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other });
     } catch {
-      // An unreadable ledger counts nothing, as in the count on the loop.
+      out.push({ unreadable: ledger.path });
     } finally { try { db?.close(); } catch {} }
   }
   postMessage(out);
@@ -241971,7 +242040,7 @@ var init_remote_access_control = __esm(() => {
 
 // src/core/source-account-migration.ts
 import { linkSync as linkSync6, lstatSync as lstatSync58, mkdirSync as mkdirSync74, readdirSync as readdirSync38, realpathSync as realpathSync32, renameSync as renameSync26, rmdirSync as rmdirSync8, statSync as statSync53, unlinkSync as unlinkSync7 } from "node:fs";
-import { basename as basename24, dirname as dirname117, isAbsolute as isAbsolute42, join as join153, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
+import { basename as basename25, dirname as dirname117, isAbsolute as isAbsolute42, join as join153, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value === "" || MIGRATION_ON.includes(value);
@@ -242000,7 +242069,7 @@ function candidates(sourceId, slot, env) {
   if (sourceId === TELEGRAM_SOURCE_ID) {
     const legacyDir = dirname117(legacyTelegramSessionBase(env));
     const folderDir = dirname117(accountSessionPath(account, env));
-    const own = basename24(legacyTelegramSessionBase(env));
+    const own = basename25(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames3(legacyDir))
       if (folderNameOfStagedTelegramLogin(name, env))
@@ -242114,7 +242183,7 @@ function nearRealPath(path) {
   const rest = [];
   let near = resolve33(path);
   for (;; ) {
-    rest.unshift(basename24(near));
+    rest.unshift(basename25(near));
     const up = dirname117(near);
     if (up === near)
       return resolve33(path);
@@ -242182,7 +242251,7 @@ function inspect(ctx, sourceId, slot, entry) {
     const found = look(candidate.from);
     if (found.kind === "absent")
       continue;
-    const name = basename24(candidate.from);
+    const name = basename25(candidate.from);
     if (found.kind === "unreadable")
       return skip("unreadable", `${name} cannot be looked at.`);
     if (found.kind === "link" || found.kind === "other" || found.kind !== candidate.kind) {
@@ -242200,7 +242269,7 @@ function inspect(ctx, sourceId, slot, entry) {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
   for (const { candidate, found } of present) {
-    const name = basename24(candidate.from);
+    const name = basename25(candidate.from);
     if (!destinationIsOurs(ctx, candidate.to))
       return skip("unexpected_file", `A folder on the way to ${name}'s place in the account folder is a link.`);
     const destination = look(candidate.to);
@@ -242249,7 +242318,7 @@ function checkDatabases(ctx, moves) {
     const path = absPath(ctx, move.from);
     const reads = storeFileReads(path, waitMs(ctx));
     if (reads === "busy")
-      return { busy: `${basename24(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename25(move.from)} is in use by another program, so the account stays where it is for now.` };
     if (reads === "damaged") {
       checked.push({ file: move.to, result: "damaged" });
       continue;
@@ -242265,7 +242334,7 @@ function checkDatabases(ctx, moves) {
     ctx.quickCheckSpentMs += ctx.now() - started;
     ctx.quickCheckBytes += bytes;
     if (result === "busy")
-      return { busy: `${basename24(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename25(move.from)} is in use by another program, so the account stays where it is for now.` };
     checked.push({ file: move.to, result });
   }
   return { checked };
@@ -242369,7 +242438,7 @@ function moveOne(ctx, move, direction) {
   const [from, to] = direction === "forward" ? [absPath(ctx, move.from), absPath(ctx, move.to)] : [absPath(ctx, move.to), absPath(ctx, move.from)];
   const source = look(from);
   const target = look(to);
-  const name = basename24(move.from);
+  const name = basename25(move.from);
   if (source.kind === "absent") {
     if (target.kind !== "absent")
       return "there";
@@ -242418,13 +242487,13 @@ function verifyIdentity(ctx, moves) {
     if (found.kind === "absent" && isDisposable(move))
       continue;
     if (found.kind !== "file" && found.kind !== "dir" || found.kind !== move.kind) {
-      throw new MoveFault("failed", "verify_failed", `${basename24(move.from)} is not there after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} is not there after the move.`);
     }
     if (String(found.dev) !== move.dev || String(found.ino) !== move.ino) {
-      throw new MoveFault("failed", "verify_failed", `${basename24(move.from)} is not the same file after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} is not the same file after the move.`);
     }
     if (move.kind === "file" && !move.from.endsWith("-shm") && Number(found.size) !== move.size) {
-      throw new MoveFault("failed", "verify_failed", `${basename24(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
+      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
     }
   }
 }
@@ -242432,12 +242501,12 @@ function verifyRestored(ctx, moves) {
   for (const move of moves) {
     const back = look(absPath(ctx, move.from));
     if (isPlanned(look(absPath(ctx, move.to)), move)) {
-      throw new MoveFault("failed", "move_failed", `${basename24(move.from)} is still in the account folder.`);
+      throw new MoveFault("failed", "move_failed", `${basename25(move.from)} is still in the account folder.`);
     }
     if (back.kind === "absent" && isDisposable(move))
       continue;
     if (back.kind !== "file" && back.kind !== "dir" || back.kind !== move.kind) {
-      throw new MoveFault("failed", "move_failed", `${basename24(move.from)} is not back at its old place.`);
+      throw new MoveFault("failed", "move_failed", `${basename25(move.from)} is not back at its old place.`);
     }
   }
 }
@@ -242449,7 +242518,7 @@ function forward(ctx, sourceId, slot, migration) {
   makeFolders(ctx, moves);
   moves.forEach((move, index) => {
     if (moveOne(ctx, move, "forward") === "lost") {
-      throw new MoveFault("failed", "move_failed", `${basename24(move.from)} is in neither place.`);
+      throw new MoveFault("failed", "move_failed", `${basename25(move.from)} is in neither place.`);
     }
     checkpoint(`rename:${index}`);
   });
@@ -242460,9 +242529,9 @@ function forward(ctx, sourceId, slot, migration) {
       continue;
     const reads = storeFileReads(absPath(ctx, move.to), waitMs(ctx));
     if (reads === "busy")
-      throw new MoveFault("skipped", "busy", `${basename24(move.from)} is in use by another program, so the account stays where it is for now.`);
+      throw new MoveFault("skipped", "busy", `${basename25(move.from)} is in use by another program, so the account stays where it is for now.`);
     if (reads !== "reads") {
-      throw new MoveFault("failed", "verify_failed", `${basename24(move.from)} does not open after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} does not open after the move.`);
     }
   }
   checkpoint("verified");
@@ -242500,7 +242569,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   const lost = [];
   back.forEach((move, index) => {
     if (moveOne(ctx, move, "back") === "lost")
-      lost.push(basename24(move.from));
+      lost.push(basename25(move.from));
     checkpoint(`unrename:${index}`);
   });
   for (const move of moves) {
@@ -242603,12 +242672,12 @@ function foldLogs(ctx, moves) {
       const logs = moves.filter((other) => other.from === `${move.from}-wal` || other.from === `${move.from}-journal`);
       if (logs.every((log) => log.size === 0))
         continue;
-      return notFolded(`${basename24(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
+      return notFolded(`${basename25(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
     }
     if (result === "busy") {
-      return { kind: "skip", reason: "busy", detail: `${basename24(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
+      return { kind: "skip", reason: "busy", detail: `${basename25(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
     }
-    return notFolded(`${basename24(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
+    return notFolded(`${basename25(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
   }
   return;
 }

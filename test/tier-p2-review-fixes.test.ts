@@ -341,6 +341,36 @@ describe('2. an answer preempts the sniffer', () => {
     expect(ledger.getCurrent(subject(1))?.state).toBe('pending');
   });
 
+  test('a store or ledger the judge cannot read is named in the backlog, not counted as zero', () => {
+    const dir = workspace();
+    const installed = new InstalledTierClassification({ env: {}, lane: LANE });
+    cleanups.push(() => installed.close());
+    const ledgerPath = join(dir, 'broken.tier-ledger.sqlite');
+    writeFileSync(ledgerPath, 'not a database');
+    let bindingReadable = false;
+    const lines: string[] = [];
+    const service = new TierSnifferService({
+      installed, lane: LANE, model: answering(() => ({ tier: 'personal', category: 'other', confidence: 0.9 })),
+      log: (line) => lines.push(line),
+      stores: () => [
+        { dbPath: join(dir, 'mail.sqlite'), corpusId: 'fixture.mail', tierSetBinding: () => { if (!bindingReadable) throw new Error('unreadable'); return undefined; } },
+        { dbPath: join(dir, 'files.sqlite'), corpusId: 'fixture.files', tierSetLedgerPath: () => ledgerPath },
+      ],
+      classificationLedgerPath: join(dir, 'classification-ledger.jsonl'),
+    });
+    cleanups.push(() => service.stop());
+    const backlog = service.backlog();
+    expect(backlog.unreadableSources).toEqual(expect.arrayContaining([
+      { source: 'fixture.mail', what: 'which privacy ledger the store is bound to' },
+      { source: 'fixture.files', what: 'its privacy ledger' },
+    ]));
+    expect(backlog.summary).toContain('Could not read');
+    expect(backlog.summary).toContain('not in these counts');
+    expect(lines.filter((line) => line.includes('could not read')).length).toBe(2);
+    bindingReadable = true;
+    expect(service.backlog().unreadableSources).toEqual([{ source: 'fixture.files', what: 'its privacy ledger' }]);
+  });
+
   test('every call carries one item, on a local lane too', async () => {
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const store = new TierSnifferStore({ dbPath: ':memory:' });
