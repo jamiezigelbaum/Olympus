@@ -37,9 +37,14 @@ const SPACE_MARGIN_BYTES = 64 * 1024 ** 2;
  */
 const ROOT_KEPT = new Set(['models', 'backup-staging', 'tools']);
 const CAPTURE_KEPT = new Set(['versions', 'tools']);
+// Compared through the parent's real path: during a put-back the live folder is renamed away, and realpath of a missing
+// path falls back to the literal one, which on a Mac (/var -> /private/var) no longer matches the layout's path.
+function samePlace(a: string, b: string): boolean {
+  return a === b || join(realOrSelf(dirname(a)), basename(a)) === join(realOrSelf(dirname(b)), basename(b));
+}
 function keptWithLive(folder: string, env: LayoutEnv): Set<string> {
-  if (folder === olympusDataRoot(env) || realOrSelf(folder) === realOrSelf(olympusDataRoot(env))) return ROOT_KEPT;
-  if (realOrSelf(folder) === realOrSelf(legacyCaptureDataRoot(env))) return CAPTURE_KEPT;
+  if (samePlace(folder, olympusDataRoot(env))) return ROOT_KEPT;
+  if (samePlace(folder, legacyCaptureDataRoot(env))) return CAPTURE_KEPT;
   return new Set();
 }
 

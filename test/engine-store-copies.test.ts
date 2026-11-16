@@ -3,7 +3,7 @@
 // removes the copy when it does, the way `olympus worker upgrade` does.
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { updateInFlightSince, updateRecordPath } from '../src/core/data-root-snapshot.ts';
@@ -14,7 +14,8 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 function setup() {
-  const home = mkdtempSync(join(tmpdir(), 'olympus-engine-store-copies-'));
+  // Real path: a schema backup is removed only where its folder has no symlink in its path, and a Mac's temp folder does.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'olympus-engine-store-copies-')));
   roots.push(home);
   const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share') };
   mkdirSync(olympusDataRoot(env), { recursive: true });
