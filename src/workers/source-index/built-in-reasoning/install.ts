@@ -102,7 +102,7 @@ export interface PinnedInstallTuning {
   /** Longest a download may go without receiving a byte before it is abandoned (resumable). */
   downloadStallMs?: number;
   /** Longest the checksum pass over the model file may take. */
-  verifyTimeoutMs?: number;
+  verifyStallMs?: number;
   /** One line per install stage; defaults to the worker log. */
   log?: (line: string) => void;
   /** Free bytes on the volume holding `path`; defaults to statfs. */
@@ -167,9 +167,12 @@ const SPACE_BACKOFF_MS = 15 * 60_000;
 const PROGRESS_WRITE_INTERVAL_MS = 500;
 /** No byte for this long and a download is abandoned; the partial file is kept and resumes on retry. */
 const DOWNLOAD_STALL_MS = 2 * 60_000;
-/** A checksum pass over a few gigabytes takes seconds to a minute or two; far past that, something is wrong. */
-const VERIFY_TIMEOUT_MS = 15 * 60_000;
-const EXTRACT_TIMEOUT_MS = 5 * 60_000;
+/**
+ * A checksum pass or an unpack stops only when it reads nothing for this
+ * long: a slow disk that keeps going is never cut.
+ */
+const VERIFY_STALL_MS = 2 * 60_000;
+const EXTRACT_STALL_MS = 2 * 60_000;
 const LOG_PREFIX = '[built-in-model]';
 const RUNTIME_MARKER = 'olympus-runtime.json';
 const SERVER_BINARY = 'llama-server';
@@ -313,7 +316,7 @@ export async function installPinnedModel(options: PinnedModelInstallerOptions): 
   const log = options.log ?? ((line: string) => console.log(line));
   const timing = {
     downloadStallMs: options.downloadStallMs ?? DOWNLOAD_STALL_MS,
-    verifyTimeoutMs: options.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS,
+    verifyStallMs: options.verifyStallMs ?? VERIFY_STALL_MS,
   };
   const lockWaitMs = options.lockWaitMs ?? STALE_LOCK_MS;
   const lockRefreshMs = options.lockRefreshMs ?? LOCK_REFRESH_MS;
@@ -331,7 +334,7 @@ export async function installPinnedModel(options: PinnedModelInstallerOptions): 
     }
   };
   const verifyAll = async (): Promise<void> => {
-    for (const { file, path } of files) await verifyPinnedFile(path, file, noun, reporter, timing.verifyTimeoutMs);
+    for (const { file, path } of files) await verifyPinnedFile(path, file, noun, reporter, timing.verifyStallMs);
   };
   // The install has finished only when the status file says so. Leaving the
   // last stage's "verifying" behind kept every later boot reading the model
@@ -621,21 +624,39 @@ async function installRuntime(
  */
 function extractWithTar(archivePath: string, targetDir: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn('tar', ['-xzf', archivePath, '-C', targetDir], { stdio: ['ignore', 'ignore', 'pipe'] });
+    // The archive is fed through stdin, so the bytes tar takes are its
+    // progress: it is stopped only when it takes none for a while.
+    const child = spawn('tar', ['-xzf', '-', '-C', targetDir], { stdio: ['pipe', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr?.on('data', (chunk: Buffer) => {
       if (stderr.length < 4_000) stderr += chunk.toString();
     });
-    const timer = setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = (): void => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`tar took no data for ${Math.round(EXTRACT_STALL_MS / 60_000)} min`));
+      }, EXTRACT_STALL_MS);
+    };
+    arm();
+    const archive = createReadStream(archivePath);
+    archive.on('data', arm);
+    archive.on('error', (error) => {
+      clearTimeout(timer);
       child.kill('SIGKILL');
-      reject(new Error(`tar did not finish within ${Math.round(EXTRACT_TIMEOUT_MS / 60_000)} min`));
-    }, EXTRACT_TIMEOUT_MS);
+      reject(error);
+    });
+    child.stdin?.on('error', () => undefined);
+    if (child.stdin) archive.pipe(child.stdin);
     child.on('error', (error) => {
       clearTimeout(timer);
+      archive.destroy();
       reject(error);
     });
     child.on('close', (status, signal) => {
       clearTimeout(timer);
+      archive.destroy();
       if (status === 0) resolve();
       else reject(new Error(stderr.trim() || `tar exited with ${status ?? signal}`));
     });
@@ -689,7 +710,7 @@ async function downloadVerified(
   await downloadPinnedFile({
     fetchImpl, url, target, partial: `${target}.partial`, expectedBytes,
     algorithm: 'sha256', digest: expectedSha256, encoding: 'hex',
-    noun: space.noun, stallMs, verifyTimeoutMs: VERIFY_TIMEOUT_MS, keepPartial: true,
+    noun: space.noun, stallMs, verifyStallMs: VERIFY_STALL_MS, keepPartial: true,
     error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
     diskError: (error) => isNoSpaceError(error)
       ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname(target)) ?? 0, 'the disk filled up during the download')
@@ -701,14 +722,14 @@ async function downloadVerified(
 }
 
 /**
- * Hashes `path` into `hash`, reporting bytes read. A pass that has not ended
- * within `timeoutMs` (or whose stream closes without ending) fails instead of
- * leaving its caller waiting forever.
+ * Hashes `path` into `hash`, reporting bytes read. A pass that reads nothing
+ * for `stallMs` (or whose stream closes without ending) fails instead of
+ * leaving its caller waiting forever; one that keeps reading is never cut.
  */
 function hashInto(
   path: string,
   hash: ReturnType<typeof createHash>,
-  timeoutMs: number,
+  stallMs: number,
   onProgress?: (bytesDone: number) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -726,12 +747,18 @@ function hashInto(
         resolve();
       }
     };
-    const timer = setTimeout(() => finish(new BuiltInReasoningInstallError(
-      'checksum_mismatch',
-      `Checking ${path} did not finish within ${Math.round(timeoutMs / 60_000)} min.`,
-    )), timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = (): void => {
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(new BuiltInReasoningInstallError(
+        'checksum_mismatch',
+        `Checking ${path} read nothing for ${Math.round(stallMs / 1000)} s.`,
+      )), stallMs);
+    };
+    arm();
     stream
       .on('data', (chunk) => {
+        arm();
         hash.update(chunk);
         done += chunk.length;
         onProgress?.(done);
@@ -742,9 +769,9 @@ function hashInto(
   });
 }
 
-async function sha256File(path: string, timeoutMs: number, onProgress?: (bytesDone: number) => void): Promise<string> {
+async function sha256File(path: string, stallMs: number, onProgress?: (bytesDone: number) => void): Promise<string> {
   const hash = createHash('sha256');
-  await hashInto(path, hash, timeoutMs, onProgress);
+  await hashInto(path, hash, stallMs, onProgress);
   return hash.digest('hex');
 }
 
