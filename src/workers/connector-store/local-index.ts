@@ -269,6 +269,15 @@ const EMBEDDING_BATCH_SIZE = 32;
 const MAX_SELECTED_EMBED_ITEM_IDS = 25_000;
 const MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 const MIN_VECTOR_SCORE = 0.18;
+/**
+ * A conversation's messages by authored time, which conversationNeighbours
+ * needs. Not created at open: on a store of hundreds of thousands of rows the
+ * build is seconds of synchronous work. Eval copies create it up front
+ * (eval/run-passages.ts); the shipped build path is to be built off the loop.
+ */
+export const CONNECTOR_STORE_CONVERSATION_INDEX = 'idx_connector_store_items_conversation_time';
+export const CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
+  ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
 // How many of its nearest vector rows a store offers a reranked pool's
 // semantic seats (router withSemanticPoolSeats), whatever the bar.
 const CONNECTOR_STORE_SEMANTIC_ROWS = 3;
@@ -15614,6 +15623,67 @@ export class LocalConnectorStore {
     };
   }
 
+  /**
+   * The messages either side of an item in its conversation, by authored
+   * time, nearest first on each side: up to `perSide` before and `perSide`
+   * after, in the same account, live, with stored text, through the same
+   * scope filters and tier visibility as the recency lane. Empty for an item
+   * with no conversation or no authored time. Reads the conversation index,
+   * so a busy chat store answers in a few row reads.
+   */
+  conversationNeighbours(
+    localItemId: string,
+    perSide: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+  ): ConnectorStoreSearchRow[] {
+    const side = Math.max(0, Math.min(Math.floor(perSide), 10));
+    if (side === 0) return [];
+    // Without its index the read scans the whole items table, a stall on a
+    // big chat store, so windows stay off until the index exists. Nothing
+    // creates it at open (open cost, step-back 16 Nov); see
+    // CONNECTOR_STORE_CONVERSATION_INDEX_SQL.
+    this.conversationIndexReady ||= this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?")
+      .get(CONNECTOR_STORE_CONVERSATION_INDEX) !== null;
+    if (!this.conversationIndexReady) return [];
+    const anchor = this.db.query(`
+      SELECT item_pk, provider_conversation_id AS conversation, authored_at, account_scope
+      FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
+    `).get(localItemId) as { item_pk: number; conversation: string | null; authored_at: string | null; account_scope: string } | null;
+    if (!anchor?.conversation || !anchor.authored_at) return [];
+    const selectedAccount = normalizeOptionalAccountScope(accountScope);
+    if (selectedAccount && selectedAccount !== anchor.account_scope) return [];
+    const selectedFilters = connectorStoreFilterSql(filters);
+    const columns = `
+        i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
+        i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
+        i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
+        i.mime_type, i.authored_at, i.updated_at,
+        i.trust_tier, i.sync_run_id,
+        0 AS rank`;
+    const where = `i.provider_conversation_id = ? AND i.account_scope = ? AND i.tombstoned = 0 AND i.item_pk <> ?
+        ${selectedFilters.sql}
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)`;
+    const params = [anchor.conversation, anchor.account_scope, anchor.item_pk, ...selectedFilters.params];
+    const before = this.db.query(`SELECT ${columns} FROM items i WHERE ${where}
+        AND (i.authored_at < ? OR (i.authored_at = ? AND i.item_pk < ?))
+      ORDER BY i.authored_at DESC, i.item_pk DESC LIMIT ?`)
+      .all(...params, anchor.authored_at, anchor.authored_at, anchor.item_pk, side) as ItemRow[];
+    const after = this.db.query(`SELECT ${columns} FROM items i WHERE ${where}
+        AND (i.authored_at > ? OR (i.authored_at = ? AND i.item_pk > ?))
+      ORDER BY i.authored_at ASC, i.item_pk ASC LIMIT ?`)
+      .all(...params, anchor.authored_at, anchor.authored_at, anchor.item_pk, side) as ItemRow[];
+    // Nearest first, alternating sides, so a cut by budget keeps the closest.
+    const ordered: ItemRow[] = [];
+    for (let index = 0; index < side; index += 1) {
+      if (before[index]) ordered.push(before[index]!);
+      if (after[index]) ordered.push(after[index]!);
+    }
+    return this.visibleRecentRows(ordered);
+  }
+
+  private conversationIndexReady: boolean | undefined;
+
   private visibleRecentRows(rows: ItemRow[]): ConnectorStoreSearchRow[] {
     return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
   }
@@ -18311,6 +18381,14 @@ export function createConnectorStoreContentProvider(
       if (!(options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
         && !(options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters))) return false;
       return store.contentServedNow(localItemId, request.throwOnUnavailable);
+    },
+    conversationNeighbours(request) {
+      if (request.trustDomain !== store.trustDomain) return [];
+      const localItemId = request.provenance.sourceItem.localItemId.trim();
+      if (!localItemId || options.contentAllowed === false
+        || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return [];
+      return store.conversationNeighbours(localItemId, request.perSide, options.accountScope, options.filters)
+        .map((row) => connectorStoreHitFromRow(store, row, 0, undefined, options.filters?.locatorPathScope));
     },
     async fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined> {
       if (request.trustDomain !== store.trustDomain) {

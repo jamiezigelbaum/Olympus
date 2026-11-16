@@ -23,7 +23,7 @@ export type ModelThreadRequest =
   | { kind: 'embedding-load'; handle: number; installed: InstalledBuiltInEmbedding; model: BuiltInEmbeddingModelSpec; env: Record<string, string | undefined>; threads: number }
   | { kind: 'embedding-run'; handle: number; inputs: SourceEmbeddingInput[]; taskType: SourceEmbeddingTaskType; priority: boolean }
   | { kind: 'reranker-load'; handle: number; env: Record<string, string | undefined> }
-  | { kind: 'reranker-run'; handle: number; request: Omit<EvidenceRerankRequest, 'signal'> }
+  | { kind: 'reranker-run'; handle: number; request: Omit<EvidenceRerankRequest, 'signal' | 'onProgress'> }
   | { kind: 'litert-start'; handle: number; options: LiteRtEmbedderOptions }
   | { kind: 'litert-run'; handle: number; items: readonly LiteRtEmbedItem[] }
   | { kind: 'litert-release'; handle: number }
@@ -35,6 +35,8 @@ export type ModelThreadReply = {
   error?: ModelThreadFailure;
   progress?: BuiltInReasoningStatus;
   embeddingProgress?: BuiltInEmbeddingStatus;
+  /** One batch of reranker pairs was scored. */
+  rerankProgress?: true;
   log?: string;
   handle?: number;
   pid?: number | undefined;
@@ -52,6 +54,7 @@ export class ModelThread {
     resolve: (result: unknown) => void; reject: (error: Error) => void;
     progress?: ((status: BuiltInReasoningStatus) => void) | undefined; log?: ((line: string) => void) | undefined;
     embeddingProgress?: ((status: BuiltInEmbeddingStatus) => void) | undefined;
+    rerankProgress?: (() => void) | undefined;
     cleanup: () => void;
   }>();
   readonly pids = new Map<number, number>();
@@ -74,6 +77,7 @@ export class ModelThread {
       const pending = this.pending.get(reply.id);
       if (!pending) return;
       if (reply.embeddingProgress) { pending.embeddingProgress?.(reply.embeddingProgress); return; }
+      if (reply.rerankProgress) { pending.rerankProgress?.(); return; }
       if (reply.progress) { pending.progress?.(reply.progress); return; }
       if (reply.log !== undefined) { pending.log?.(reply.log); return; }
       this.pending.delete(reply.id);
@@ -98,6 +102,7 @@ export class ModelThread {
   call<T>(request: ModelThreadRequest, options: {
     signal?: AbortSignal | undefined; timeoutMs?: number;
     embeddingProgress?: ((status: BuiltInEmbeddingStatus) => void) | undefined;
+    rerankProgress?: (() => void) | undefined;
     progress?: ((status: BuiltInReasoningStatus) => void) | undefined; log?: ((line: string) => void) | undefined;
   } = {}): Promise<T> {
     if (options.signal?.aborted) return Promise.reject(cancelled());
@@ -113,7 +118,7 @@ export class ModelThread {
       }, options.timeoutMs ?? 2 * 60 * 60_000);
       const cleanup = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); };
       options.signal?.addEventListener('abort', abort, { once: true });
-      this.pending.set(id, { resolve: result => resolve(result as T), reject, cleanup, progress: options.progress, log: options.log, embeddingProgress: options.embeddingProgress });
+      this.pending.set(id, { resolve: result => resolve(result as T), reject, cleanup, progress: options.progress, log: options.log, embeddingProgress: options.embeddingProgress, rerankProgress: options.rerankProgress });
       this.worker.ref();
       try { this.worker.postMessage({ id, request }); }
       catch (error) {

@@ -197,3 +197,16 @@ describe('deep read through the engine route and the operation', () => {
     await expect(start.handler(ctx, { question: 'q', selected_item: set.selected_item, whole: 'folder' })).rejects.toThrow();
   });
 });
+
+describe('deep read on the remote surface', () => {
+  test('a remote agent sees progress only: never the question, the set name, counts or the answer', async () => {
+    const { remoteOperationOutput, remoteOutputSchema } = await import('../src/core/remote-result.ts');
+    const job = { id: 'dr_abcdefghij', state: 'reading', question: 'secret question', setLabel: 'Wellness', items: 16, unreadable: 1, sectionsTotal: 4, sectionsDone: 1, notes: 2, model: 'qwen', startedAt: 'x', estimateSecondsLeft: 60, waitingOn: 'privacy checks' };
+    const started = remoteOperationOutput('source_deep_read', { job }, {}) as Record<string, unknown>;
+    expect(started).toEqual({ job: { id: 'dr_abcdefghij', state: 'reading', sectionsTotal: 4, sectionsDone: 1, estimateSecondsLeft: 60, waitingOn: 'privacy checks' }, answerLandsIn: "Olympus Private answers on the owner's computer" });
+    const listed = JSON.stringify(remoteOperationOutput('source_deep_read_status', { jobs: [{ ...job, state: 'done', inboxId: 'q1' }] }, {}));
+    for (const hidden of ['secret question', 'Wellness', 'qwen', 'q1', '"items"']) expect(listed).not.toContain(hidden);
+    expect(remoteOutputSchema('source_deep_read')).toBeDefined();
+    expect(() => remoteOperationOutput('source_deep_read', { job: { id: 'nope', state: 'reading' } }, {})).toThrow();
+  });
+});

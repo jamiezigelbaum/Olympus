@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
+import { conversationWindowPerSide } from '../src/core/evidence-pack.ts';
 import { RERANK_POOL_STORE_DEPTH, rerankPoolSemanticSeats, type EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import { createAnalyst, withPromptBudget, type AnalystReadingNotes } from '../src/core/analyst.ts';
@@ -24,7 +25,7 @@ import { answerMeaningJudge } from './answer-judge.ts';
 import { enterStage, failureCode, runEvalCli, type EvalStage } from './cli-failure.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { calibratedSemanticRelevanceBar } from '../src/workers/connector-store/local-index.ts';
+import { calibratedSemanticRelevanceBar, CONNECTOR_STORE_CONVERSATION_INDEX_SQL } from '../src/workers/connector-store/local-index.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
@@ -114,6 +115,8 @@ export interface PassageReceipt {
   rerankPoolStoreDepth?: number;
   /** Semantic seats added to the reranked pool (OLYMPUS_SEMANTIC_POOL_SEATS); absent with the reranker off. */
   semanticPoolSeats?: number;
+  /** Messages each side of a conversation hit (OLYMPUS_CONVERSATION_WINDOW); absent when 0. */
+  conversationWindow?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
   summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
     /** By the expected item's stored chunks (1_chunk, 2-3_chunks, 4+_chunks), when counted. */
@@ -402,6 +405,7 @@ export async function runPassageEval(input: {
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
     maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off',
     ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth, semanticPoolSeats: rerankPoolSemanticSeats() } : {}),
+    ...(conversationWindowPerSide() > 0 ? { conversationWindow: conversationWindowPerSide() } : {}),
     storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
     summary: summaries(rows, ks),
     ...(split === 'open' ? { questions: rows } : {}),
@@ -623,6 +627,15 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   const promptBytes = provider === 'local' ? positiveInteger(values.get('--prompt-bytes') ?? process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES) : undefined;
   enter('open_data_root');
   const opened = openEvalDataRoot(isolation);
+  // Conversation windows need their index, which no open creates; on an eval
+  // copy it is built here, up front, outside any timed question.
+  if (conversationWindowPerSide() > 0) {
+    enter('conversation_index');
+    for (const store of opened.stores) {
+      const db = new Database(store.dbPath);
+      try { db.exec(CONNECTOR_STORE_CONVERSATION_INDEX_SQL); } finally { db.close(); }
+    }
+  }
   const cleanups: Array<() => void> = [];
   try {
     const config = loadConfig();

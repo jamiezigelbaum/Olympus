@@ -514,6 +514,8 @@ export interface AnswerPrivatelyOptions {
   evidenceFormat?: AnalystEvidenceFormat;
   /** Called after each model call with its stage and timing (counts only, never content). */
   onModelCall?: (call: PrivateModelCallTiming) => void;
+  /** Item ids retained after prompt fitting, for content-free evaluation receipts. */
+  onEvidence?: (ids: readonly string[]) => void;
   signal?: AbortSignal;
 }
 
@@ -555,6 +557,7 @@ export async function answerPrivately(
     options.evidenceFormat ?? 'full',
     options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS,
   ), maxPromptBytes);
+  options.onEvidence?.(pack.candidates.filter(item => item.chunks.some(text => text.trim())).map(item => item.provenance.sourceItem.providerItemId));
   // Whether the model called its own answer complete ("sufficient"): the
   // AnalystResult does not carry it, and the panel shows no gaps then.
   const verdict: { sufficient: boolean | undefined } = { sufficient: undefined };
