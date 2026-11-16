@@ -246,6 +246,7 @@ export interface AgentArchiveView {
   notImported: string[];
   howRead: string[];
   stopCode?: string;
+  sourceId?: string;
 }
 
 export interface StatusView {
@@ -286,6 +287,7 @@ export function statusViewOf(json: unknown, token: string): StatusView {
       name: optText(archive.name) ?? '',
       format: optText(archive.format) ?? '',
       status: optText(archive.status) ?? '',
+      ...(optText(asRecord(archive.target).source_id) ? { sourceId: optText(asRecord(archive.target).source_id)! } : {}),
       // `messages` is the count for mail and chat; any family also gives `items`, the same number.
       ...((optNumber(archive.messages) ?? optNumber(archive.items)) !== undefined ? { messages: (optNumber(archive.messages) ?? optNumber(archive.items))! } : {}),
       ...(optNumber(archive.progress_percent) !== undefined ? { progressPercent: optNumber(archive.progress_percent)! } : {}),

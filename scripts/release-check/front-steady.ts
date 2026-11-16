@@ -222,15 +222,19 @@ export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; s
   return set;
 }
 
-/** An upgrade leg's Telegram seed, once the candidate runs: what the set's Telegram and lanes are then. */
-export async function seedTelegramAfterUpdate(host: FrontHost): Promise<Pick<FrontStoreSet, 'telegram' | 'lanes'>> {
+export type FrontAfterUpdate = Pick<FrontStoreSet, 'telegram' | 'lanes'> & { gmail: Pick<FrontStoreSet['gmail'], 'settled' | 'status'> };
+
+/** Once the candidate runs: seed Telegram and reread Gmail's import and both sources' lanes. */
+export async function seedTelegramAfterUpdate(host: FrontHost): Promise<FrontAfterUpdate> {
   let telegram: FrontStoreSet['telegram'] = { ok: false, detail: 'this machine cannot run a live seed hook' };
   if (host.seedLive) {
     const seeded = await host.seedLive('telegram');
     telegram = { ok: seeded.ok, ...(seeded.detail !== undefined ? { detail: `after the update: ${seeded.detail}` } : {}) };
   }
   const lanes = [GMAIL_SOURCE, TELEGRAM_SOURCE].flatMap((source) => (['internal', 'secure_local'] as const).map((tier) => host.laneItems(source, tier)));
-  return { telegram, lanes };
+  const answer = host.cli(['status']);
+  const status = answer.code === 0 ? archiveStatusOf(answer.json, FRONT_GMAIL_FILE) : undefined;
+  return { telegram, lanes, gmail: { settled: status === 'imported', ...(status !== undefined ? { status } : {}) } };
 }
 
 /** Samples the engine's processes every few seconds for `watchMs`, then counts the crash lines the logs gained since `offsets`. */

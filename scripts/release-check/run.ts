@@ -90,7 +90,7 @@ import { SOURCE_ANSWER_HANDOFF_MAX_MS, SOURCE_ANSWER_RESULT_WAIT_MAX_MS } from '
 import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation } from './inbox.ts';
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
-import { FRONT_WATCH_S, frontSteadyChecks, type FrontStoreSet, type FrontSteadyObservation, type FrontWatch } from './front-steady.ts';
+import { FRONT_WATCH_S, frontSteadyChecks, type FrontAfterUpdate, type FrontStoreSet, type FrontSteadyObservation, type FrontWatch } from './front-steady.ts';
 import { bundleWhatsAppBridgeName, whatsappBridgeCheck } from './helper-files.ts';
 import { STORES_PUT_BACK, brokenBundle, forcedFailureChecks, storesKeptCheck, type ForcedFailureObservation, type StoreFileCount } from './upgrade-split.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
@@ -956,7 +956,7 @@ async function runProtocolAgent(run: Run, workDir: string): Promise<void> {
   run.agents.push(agent);
 }
 
-const TEXT_EXT = /\.(log|json|txt|md|err)$/;
+const TEXT_EXT = /\.(log|jsonl?|txt|md|err)$/;
 
 function listFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
@@ -996,7 +996,7 @@ async function collectEvidence(run: Run, outDir: string): Promise<void> {
  * The machine's engine logs, status output and engine state files (collect-logs), fetched into `<outDir>/<into>`, scanned for
  * planted Private content under `scanLabel`, redacted and listed in the report.
  */
-async function fetchMachineLogs(run: Run, outDir: string, remoteDir: string, into: string, scanLabel: string): Promise<void> {
+async function fetchMachineLogs(run: Run, outDir: string, remoteDir: string, into: string, scanLabel: string, logs: ReportFile[] = run.logs): Promise<void> {
   const collected = await run.agent('collect-logs', `--out ${remoteDir}`, 120_000);
   if (collected.result?.ok !== true) {
     run.add({ id: `scan.${scanLabel}`, title: `No Private or Secret content in ${scanLabel}`, status: 'fail', detail: 'the machine logs could not be collected' });
@@ -1011,7 +1011,7 @@ async function fetchMachineLogs(run: Run, outDir: string, remoteDir: string, int
   run.add(evaluateArtifactScan(scanLabel, texts, run.markers));
   for (const path of listFiles(local)) {
     if (TEXT_EXT.test(path)) writeFileSync(path, redactMarkers(readFileSync(path, 'utf8'), run.markers));
-    run.logs.push({ label: path.slice(local.length + 1), path: `${into}/${path.slice(local.length + 1)}` });
+    logs.push({ label: path.slice(local.length + 1), path: `${into}/${path.slice(local.length + 1)}` });
   }
 }
 
@@ -1507,6 +1507,12 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
   const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed} --settle-s ${seedS - 360} --queue-s 120 --telegram-later`, 120 * 60_000), 120 * 60_000);
   const set = seeded.result as FrontStoreSet | undefined;
   run.log(`front-seed: ${set ? `Gmail ${set.gmail.settled ? 'settled' : `not settled (${set.gmail.status ?? 'not listed'})`}, job queue ${set.jobQueue ? 'present' : 'missing'}${set.detail ? `; ${set.detail}` : ''}` : agentDetail(seeded)}`);
+  run.add({
+    id: 'baseline.front.gmail', title: 'Before the update, the earlier release seeded the Gmail import',
+    status: set?.gmail.settled ? 'pass' : 'warn',
+    detail: set?.gmail.settled ? 'the pre-upgrade seed settled' : `the pre-upgrade seed did not settle (${set?.gmail.status ?? 'not listed'}); baseline observation only; the candidate is checked after the update`,
+  });
+  if (!set?.gmail.settled) await fetchMachineLogs(run, run.options.outDir, '~/rc/front-seed-logs', 'logs/front-seed', 'the pre-upgrade front seed diagnostics', run.stages.get('before')!.logs);
   const on = await run.agent('engine-split-on', '', 60_000);
   run.add({
     id: 'upgrade.split.switch',
@@ -1561,9 +1567,10 @@ async function checkSplitUpdate(run: Run, prep: { set?: FrontStoreSet; storeFile
   // Telegram is seeded now, by the candidate's own pull: before the update it would write stores the earlier release cannot open.
   const telegram = await run.agent('front-seed-telegram', '', 5 * 60_000);
   if (prep.set && telegram.result?.ok === true) {
-    const after = telegram.result as unknown as Pick<FrontStoreSet, 'telegram' | 'lanes'>;
-    prep.set = { ...prep.set, telegram: after.telegram, lanes: after.lanes };
-  } else if (prep.set) prep.set = { ...prep.set, telegram: { ok: false, detail: `after the update: ${agentDetail(telegram)}` } };
+    const after = telegram.result as unknown as FrontAfterUpdate;
+    const { status: _seedStatus, ...gmail } = prep.set.gmail;
+    prep.set = { ...prep.set, gmail: { ...gmail, ...after.gmail, settled: after.gmail?.settled === true }, telegram: after.telegram, lanes: after.lanes };
+  } else if (prep.set) prep.set = { ...prep.set, gmail: { approved: prep.set.gmail.approved, settled: false }, telegram: { ok: false, detail: `after the update: ${agentDetail(telegram)}` } };
   const watched = await run.phase('front-watch', () => run.agent('front-watch', `--watch-s ${FRONT_WATCH_S}`, (FRONT_WATCH_S + 120) * 1_000));
   const watch = watched.result?.ok === true ? watched.result as unknown as FrontWatch : undefined;
   const obs = prep.set && watch ? { ...prep.set, ...watch, restart: back } as FrontSteadyObservation : undefined;

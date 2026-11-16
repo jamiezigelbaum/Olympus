@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { FIXTURE_ITEMS } from '../scripts/release-check/fixture.ts';
+import { FIXTURE_ITEMS, forbiddenMarkers } from '../scripts/release-check/fixture.ts';
 import { isSettled, privateEmbeddedUnder, type AgentConfig } from '../scripts/release-check/machine-agent.ts';
 import { newRunId, parseCli, runReleaseCheck, UPGRADE_SELFTEST_FAILS, type RunConfigFile } from '../scripts/release-check/run.ts';
 import {
@@ -313,10 +313,10 @@ if (verb === 'provision') {
   else if (sub === 'set-policy-setting') { mark('setting'); say({ ok: true, changed: 'retrieval.trustDomains.internal.allowCloudQuery', value: false }); }
   else if (sub === 'upgrade-selftest') { const mode = /--mode (\S+)/.exec(script)?.[1]; mark(mode); say({ ok: true, mode }); }
   else if (sub === 'await-engine') say({ ok: true, readyMs: 2000 });
-  else if (sub === 'front-seed') say({ ok: true, gmail: { started: 'needs_approval', approved: true, settled: true, status: 'imported' }, telegram: { ok: true, detail: 'seeded' },
+  else if (sub === 'front-seed') say({ ok: true, gmail: { started: 'needs_approval', approved: true, settled: process.env.FAKE_SEED_STALLED !== '1', status: process.env.FAKE_SEED_STALLED === '1' ? 'importing' : 'imported' }, telegram: { ok: true, detail: 'seeded' },
     lanes: [{ source: 'gmail.email', tier: 'internal', exists: true, items: 2 }, { source: 'telegram.messages', tier: 'internal', exists: true, items: 2 }], archives: 1, traces: [] });
   // Telegram is seeded after the update on an upgrade leg: the candidate's pull writes its own schema (mac-upgrade 43855656930).
-  else if (sub === 'front-seed-telegram') { mark('telegram-after-update'); say({ ok: true, telegram: { ok: true, detail: 'after the update: seeded' },
+  else if (sub === 'front-seed-telegram') { mark('telegram-after-update'); say({ ok: true, gmail: { settled: process.env.FAKE_GMAIL_AFTER !== 'importing', status: process.env.FAKE_GMAIL_AFTER ?? 'imported' }, telegram: { ok: true, detail: 'after the update: seeded' },
     lanes: [{ source: 'gmail.email', tier: 'internal', exists: true, items: 2 }, { source: 'telegram.messages', tier: 'internal', exists: true, items: 2 }] }); }
   else if (sub === 'engine-split-on') { mark('split-on'); say({ ok: true }); }
   else if (sub === 'front-mark') { mark('front-mark'); say({ ok: true }); }
@@ -342,9 +342,11 @@ if (verb === 'provision') {
     } });
   }
   else if (sub === 'dashboard-json') say({ ok: true, status: 200, body: '{}' });
-  else if (sub === 'collect-logs') say({ ok: true, files: [] });
+  else if (sub === 'collect-logs') say({ ok: true, files: process.env.FAKE_SEED_STALLED === '1' ? ['archive-imports.json', 'engine-background-status.json', 'archive-status.txt', 'archive-panel-probe.jsonl'] : [] });
   else if (sub === 'screenshots') say({ ok: false, detail: 'no browser in the scripted machine' });
   else say({ ok: false, detail: 'scripted machine: unknown ' + sub });
+} else if (verb === 'get') {
+  writeFileSync(arg('--to'), readFileSync(state + '/diagnostic.txt'));
 } else if (verb === 'destroy') {
   mark('destroyed');
 }
@@ -355,7 +357,7 @@ let driverPath: string;
 let candidateDir: string;
 let baselineDir: string;
 const saved: Record<string, string | undefined> = {};
-const SPLIT_KEYS = ['FAKE_BROKEN_ACCEPTED', 'FAKE_LOST_STORE', 'FAKE_FRONT_CRASH', 'FAKE_DRIVER_ERROR'];
+const SPLIT_KEYS = ['FAKE_BROKEN_ACCEPTED', 'FAKE_LOST_STORE', 'FAKE_FRONT_CRASH', 'FAKE_DRIVER_ERROR', 'FAKE_SEED_STALLED', 'FAKE_GMAIL_AFTER'];
 const ENV_KEYS = ['FAKE_STATE', 'FAKE_OLD_POLICY', 'FAKE_NEW_POLICY', 'FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED', 'FAKE_NO_BRIDGE', ...SPLIT_KEYS];
 
 beforeEach(() => {
@@ -548,6 +550,37 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
     expect(upgrades).toHaveLength(2);
     expect(upgrades[0]).toContain('upgrade-broken-front');
     expect(upgrades[1]).toContain(`--candidate ${candidateDir}`);
+  }, 120_000);
+
+  test('a stalled baseline is reported and kept redacted, while Gmail completed by the candidate passes', async () => {
+    realCandidate();
+    process.env.FAKE_SEED_STALLED = '1';
+    const marker = forbiddenMarkers()[0]!;
+    writeFileSync(join(dir, 'diagnostic.txt'), `full diagnostic before update: ${marker.text}`);
+    const opts = splitOptions();
+    const report = await runReleaseCheck(opts);
+    expect(checkOf(report, 'baseline.front.gmail')).toMatchObject({ status: 'warn' });
+    expect(checkOf(report, 'baseline.front.gmail')?.detail).toContain('pre-upgrade seed did not settle (importing)');
+    expect(checkOf(report, 'front.store-set')?.status).toBe('pass');
+    for (const name of ['archive-imports.json', 'engine-background-status.json', 'archive-status.txt', 'archive-panel-probe.jsonl']) {
+      const text = readFileSync(join(opts.outDir, 'logs/front-seed', name), 'utf8');
+      expect(text).toContain('full diagnostic before update:');
+      expect(text).toContain(`[redacted:${marker.id}]`);
+      expect(text).not.toContain(marker.text);
+      expect(report.machines[0]!.upgrade!.from.logs.some(file => file.path === `logs/front-seed/${name}`)).toBe(true);
+    }
+    const log = driverLog();
+    expect(log.findIndex(line => line.includes('front-seed-logs'))).toBeLessThan(log.findIndex(line => line.startsWith('upgrade ')));
+    expect(JSON.stringify(report)).not.toContain('full diagnostic before update:');
+  }, 120_000);
+
+  test('a seed that settled before the update cannot hide Gmail still importing on the candidate', async () => {
+    realCandidate();
+    process.env.FAKE_GMAIL_AFTER = 'importing';
+    const report = await runReleaseCheck(splitOptions());
+    expect(checkOf(report, 'baseline.front.gmail')?.status).toBe('pass');
+    expect(checkOf(report, 'front.store-set')?.status).toBe('fail');
+    expect(checkOf(report, 'front.store-set')?.detail).toContain('did not settle (importing)');
   }, 120_000);
 
   test('an installer that accepts a front that cannot start fails the forced-failure checks; a lost store file fails the store count', async () => {

@@ -2362,6 +2362,8 @@ function collectLogs(outDir: string): never {
   }
   writeFileSync(join(outDir, 'engine-status.json'), olympus(['engine', 'status']).stdout);
   written.push('engine-status.json');
+  writeFileSync(join(outDir, 'archive-status.txt'), olympus(['archive', 'status']).stdout, { mode: 0o600 });
+  written.push('archive-status.txt');
   writeFileSync(join(outDir, 'doctor.json'), olympus(['doctor']).stdout);
   written.push('doctor.json');
   // The engine split's state, as the front last read it, and the archive import's own records (L1, 2026-11-11). Absent files are left out.
@@ -2371,7 +2373,7 @@ function collectLogs(outDir: string): never {
     writeFileSync(join(outDir, name), readFileSync(path));
     written.push(name);
   }
-  for (const name of readdirSync(WORKDIR).filter((n) => /^data-root-.*\.jsonl?$/.test(n))) {
+  for (const name of readdirSync(WORKDIR).filter((n) => /^data-root-.*\.jsonl?$/.test(n) || n === 'archive-panel-probe.jsonl')) {
     writeFileSync(join(outDir, name), readFileSync(join(WORKDIR, name)));
     written.push(name);
   }

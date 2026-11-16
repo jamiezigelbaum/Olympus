@@ -19,7 +19,7 @@ import {
 import { archivesOpenTarget, createArchiveImportAgent } from '../src/workers/archive-import/agent.ts';
 import { FIXTURE_FOLDER, legFixture, writeFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, agentImportJourney, pickerImportJourney, besideLiveJourney, changedChecks, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, shownPath,
+  ARCHIVE_PANEL_PROBE, ARCHIVE_BOUNDS, agentImportJourney, pickerImportJourney, besideLiveJourney, changedChecks, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks, shownPath,
   type StoreView,
 } from '../scripts/release-check/archive-leg.ts';
 import {
@@ -66,6 +66,8 @@ interface World {
   engineKeepsRemoved: boolean;
   /** This many of the next navigations throw, as a page that times out loading does. */
   goFails?: number;
+  hiddenProbeNames?: string[];
+  probeMisses?: number;
 }
 
 /** A stand-in machine: the product's state, the agent's CLI over it, the stores, the engine restart, the private model. */
@@ -90,6 +92,7 @@ class FakeMachine implements ArchiveHost {
   private readonly initialSize = new Map<string, number>();
   private readonly contentKept = new Set<string>();
   searches = 0;
+  readonly sourceTargets = new Map<string, string>();
   /** The family and provider each store read asked for, with the word it looked for: an archive is read in its own format's stores. */
   readonly storeReads: Array<{ family: string; provider: string; token: string }> = [];
 
@@ -149,6 +152,10 @@ class FakeMachine implements ArchiveHost {
     if (args[0] === 'status') {
       this.tick();
       const json = createArchiveImportAgent({ state: {} as never, requests: {} as never, view: () => this.statusMeta() }).status();
+      for (const archive of json.ok ? json.archives : []) {
+        const sourceId = this.sourceTargets.get(archive.name);
+        if (sourceId) Object.assign(archive, { target: { source_id: sourceId } });
+      }
       return { code: 0, json, stderr: '' };
     }
     return { code: 2, json: undefined, stderr: 'usage' };
@@ -159,7 +166,13 @@ class FakeMachine implements ArchiveHost {
     class Driver extends PanelDriver {
       override async probe(frame: 'host' | 'panel', call: string): Promise<unknown> {
         if (world.panelUnreadable) throw new Error('the page is not there');
-        return super.probe(frame, call);
+        const raw = await super.probe(frame, call);
+        if (call === ARCHIVE_PANEL_PROBE) {
+          const panel = raw as { rows: Array<{ name: string }> };
+          if (world.probeMisses && world.probeMisses-- > 0) return { ...panel, rows: [] };
+          return { ...panel, rows: panel.rows.filter(row => !world.hiddenProbeNames?.includes(row.name)) };
+        }
+        return raw;
       }
       override async go(path?: string): Promise<void> {
         if (world.goFails && path?.startsWith('/dashboard')) { world.goFails -= 1; throw new Error('navigation timed out'); }
@@ -427,6 +440,59 @@ describe('importing an archive', () => {
     expect(fake.archives.map((entry) => entry.name)).toEqual([fx.picker!.fileName]);
     expect(fake.lines.some((line) => line.includes('removing leftover archive'))).toBe(true);
     expect(failing(importChecks(observation, fx.picker!, 'linux'))).toEqual([]);
+  });
+
+  test('a CLI source import missed by the probe is never removed and does not block the picker', async () => {
+    const { machine: fake } = machine();
+    const source = legFixture('agent', 'front-seed');
+    fake.know(source);
+    fake.archives = [entryFor(source)];
+    fake.sourceTargets.set(source.fileName, 'gmail.email');
+    fake.world.hiddenProbeNames = [source.fileName];
+    const observation = await importStage(fake, { role: 'picker', format: 'mbox', via: 'picker', seed: SEED, clean: true, settleS: PASS_S, startS: PASS_S });
+    expect(observation.ok).toBe(true);
+    expect(fake.archives.some(entry => entry.name === source.fileName)).toBe(true);
+    expect(fake.lines.some(line => line.includes(`unmatched status entry ${source.fileName}`))).toBe(true);
+    expect(fake.lines.some(line => line.includes(`removing leftover archive ${source.fileName}`))).toBe(false);
+    const probes = readFileSync(join(fake.workDir, 'archive-panel-probe.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(probes.length).toBeGreaterThan(0);
+    expect(probes[0]).toMatchObject({ rows: [] });
+    expect(probes.some(probe => probe.unmatchedStatusEntries?.includes(source.fileName))).toBe(true);
+  });
+
+  test('a source target stays protected even when its matched probe row offers Remove', async () => {
+    const { machine: fake } = machine();
+    const source = legFixture('agent', 'source-target');
+    fake.know(source);
+    fake.archives = [entryFor(source)];
+    fake.sourceTargets.set(source.fileName, 'gmail.email');
+    expect(await removeAllStage(fake)).toMatchObject({ ok: true, removed: [] });
+    expect(fake.archives).toHaveLength(1);
+  });
+
+  test('an ordinary unmatched status entry is reported and never chosen for Remove', async () => {
+    const { machine: fake } = machine();
+    const missing = legFixture('agent', 'unmatched');
+    fake.know(missing);
+    fake.archives = [entryFor(missing)];
+    fake.world.hiddenProbeNames = [missing.fileName];
+    const cleaned = await removeAllStage(fake, { verifyS: 0 });
+    expect(cleaned).toMatchObject({ ok: false, removed: [], failed: [], remaining: [missing.fileName] });
+    expect(fake.lines.some(line => line.includes('unmatched status entry'))).toBe(true);
+    expect(cleaned.detail).toContain('unmatched or non-removable archive entries (not removed)');
+    expect(fake.lines.some(line => line.startsWith('removing'))).toBe(false);
+  });
+
+  test('classification awaits the full Sources landing and a late matching row', async () => {
+    const { machine: fake } = machine();
+    const late = legFixture('agent', 'late-row');
+    fake.know(late);
+    fake.archives = [entryFor(late)];
+    fake.world.probeMisses = 2;
+    expect(await removeAllStage(fake)).toMatchObject({ ok: true, removed: [late.fileName] });
+    const probes = readFileSync(join(fake.workDir, 'archive-panel-probe.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(probes[0].rows).toEqual([]);
+    expect(probes[2].rows[0].name).toBe(late.fileName);
   });
 
   test('a leftover that cannot be removed stops the picker import with the reason, rather than pressing a button that is not there', async () => {
