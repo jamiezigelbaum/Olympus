@@ -99922,7 +99922,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
       }).finally(() => {
         probing = false;
       });
-    }, Math.min(LIVENESS_PROBE_MS, Math.max(1000, Math.floor(idleMs / 4))));
+    }, Math.min(LIVENESS_PROBE_MS, Math.max(50, Math.floor(idleMs / 4))));
     try {
       const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}${path}`, {
         method: "POST",
