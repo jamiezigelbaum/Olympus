@@ -573,7 +573,10 @@ export interface AnswerResultOptions {
 
 /** A Private check still running when the result went out: never silent about where its answer goes. */
 export const PRIVATE_CHECK_PENDING_NOTE = 'Olympus is still checking this question against the user\'s Private items on their computer. '
-  + 'Tell the user, in one short sentence, that if any match, the answer will be waiting in Olympus on their computer.';
+  + 'Tell the user, in one short sentence, that if any match, the answer will be waiting in Olympus on their computer. '
+  // Live 2026-11-16: with only the first sentence, a lab-results question
+  // ended with "upload the lab PDFs here" for files Olympus already holds.
+  + 'Don\'t ask the user to upload, attach or paste files: Olympus already has them, and Private ones stay on their computer.';
 
 /** An empty search on a new install, before any source is connected. */
 export const NO_SOURCES_CONNECTED_TEXT = 'No sources are connected to Olympus yet, so there is nothing to search. '
