@@ -32,8 +32,8 @@ import { oldestOffThreadSnapshot } from '../connector-store/off-thread-reads.ts'
 
 /** WAL file size below which a pass is skipped (SQLite's own default is 1000 pages, about 4 MB). */
 export const SQLITE_CHECKPOINT_AT_BYTES = 4 * 1024 * 1024;
-/** WAL content at which bulk work waits for a pass, so the next commit rewinds the file. Passes trail the writing by a second, so this sits well under the 64 MB limit. */
-export const SQLITE_WAL_ROOM_BYTES = 24 * 1024 * 1024;
+/** WAL content at which bulk work waits for a pass, so the next commit rewinds the file. Passes trail the writing by a second and a rewind can miss once or twice (peaks ran 20 to 35 MB past the mark on the cold test), so this sits well under the 64 MB limit. */
+export const SQLITE_WAL_ROOM_BYTES = 16 * 1024 * 1024;
 /** A file that changed since its last pass is checkpointed again this soon; a quiet one at the idle pace. */
 export const SQLITE_CHECKPOINT_HOT_MS = 1_000;
 export const SQLITE_CHECKPOINT_IDLE_MS = 5_000;
