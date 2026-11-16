@@ -30459,6 +30459,46 @@ ${parentKey(ref)}`, { ref, origin });
       ]
     };
   }
+  conversationNeighbours(localItemId, perSide, accountScope, filters) {
+    const side = Math.max(0, Math.min(Math.floor(perSide), 10));
+    if (side === 0)
+      return [];
+    const anchor = this.db.query(`
+      SELECT item_pk, provider_conversation_id AS conversation, authored_at, account_scope
+      FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
+    `).get(localItemId);
+    if (!anchor?.conversation || !anchor.authored_at)
+      return [];
+    const selectedAccount = normalizeOptionalAccountScope(accountScope);
+    if (selectedAccount && selectedAccount !== anchor.account_scope)
+      return [];
+    const selectedFilters = connectorStoreFilterSql(filters);
+    const columns = `
+        i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
+        i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
+        i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
+        i.mime_type, i.authored_at, i.updated_at,
+        i.trust_tier, i.sync_run_id,
+        0 AS rank`;
+    const where = `i.provider_conversation_id = ? AND i.account_scope = ? AND i.tombstoned = 0 AND i.item_pk <> ?
+        ${selectedFilters.sql}
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)`;
+    const params = [anchor.conversation, anchor.account_scope, anchor.item_pk, ...selectedFilters.params];
+    const before = this.db.query(`SELECT ${columns} FROM items i WHERE ${where}
+        AND (i.authored_at < ? OR (i.authored_at = ? AND i.item_pk < ?))
+      ORDER BY i.authored_at DESC, i.item_pk DESC LIMIT ?`).all(...params, anchor.authored_at, anchor.authored_at, anchor.item_pk, side);
+    const after = this.db.query(`SELECT ${columns} FROM items i WHERE ${where}
+        AND (i.authored_at > ? OR (i.authored_at = ? AND i.item_pk > ?))
+      ORDER BY i.authored_at ASC, i.item_pk ASC LIMIT ?`).all(...params, anchor.authored_at, anchor.authored_at, anchor.item_pk, side);
+    const ordered = [];
+    for (let index = 0;index < side; index += 1) {
+      if (before[index])
+        ordered.push(before[index]);
+      if (after[index])
+        ordered.push(after[index]);
+    }
+    return this.visibleRecentRows(ordered);
+  }
   visibleRecentRows(rows) {
     return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
   }
@@ -33332,6 +33372,11 @@ function createConnectorStoreSenderIndexes(db) {
 }
 var PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`;
 function createConnectorStorePeopleIndex(db) {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_conversation_time
+      ON items(provider_conversation_id, authored_at)
+      WHERE provider_conversation_id IS NOT NULL;
+  `);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
       ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)

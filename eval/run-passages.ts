@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
+import { conversationWindowPerSide } from '../src/core/evidence-pack.ts';
 import { RERANK_POOL_STORE_DEPTH, rerankPoolSemanticSeats, type EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import { createAnalyst, withPromptBudget } from '../src/core/analyst.ts';
@@ -110,6 +111,8 @@ export interface PassageReceipt {
   rerankPoolStoreDepth?: number;
   /** Semantic seats added to the reranked pool (OLYMPUS_SEMANTIC_POOL_SEATS); absent with the reranker off. */
   semanticPoolSeats?: number;
+  /** Messages each side of a conversation hit (OLYMPUS_CONVERSATION_WINDOW); absent when 0. */
+  conversationWindow?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
   summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
     /** By the expected item's stored chunks (1_chunk, 2-3_chunks, 4+_chunks), when counted. */
@@ -324,6 +327,7 @@ export async function runPassageEval(input: {
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
     maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off',
     ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth, semanticPoolSeats: rerankPoolSemanticSeats() } : {}),
+    ...(conversationWindowPerSide() > 0 ? { conversationWindow: conversationWindowPerSide() } : {}),
     storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
     summary: summaries(rows, ks),
     ...(split === 'open' ? { questions: rows } : {}),
