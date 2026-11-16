@@ -1,4 +1,3 @@
-import { waitFor } from './helpers/test-clock.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { waitFor } from './helpers/test-clock.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
