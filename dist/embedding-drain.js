@@ -11370,6 +11370,9 @@ var SNIFFER_NAMES_MAX_CHARS = 400;
 var SNIFFER_EXCERPT_MAX_CHARS = 1200;
 var CONTENT_READ_SNIFFER_FLAG = "content:read";
 var PERSONAL_FIRST_REASON = "content:personal_first";
+function contentHeldForJudgment(decision) {
+  return decision.contentPending;
+}
 var HELD_UNTIL_JUDGED_REASON = "content:held_until_judged";
 function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
@@ -19511,10 +19514,10 @@ function hasImmutableAccountLabel(id) {
 }
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash11, randomUUID as randomUUID8 } from "node:crypto";
-import { closeSync as closeSync10, existsSync as existsSync20, fsyncSync as fsyncSync3, lstatSync as lstatSync10, mkdirSync as mkdirSync13, openSync as openSync10, statSync as statSync12, statfsSync } from "node:fs";
+import { createHash as createHash12, randomUUID as randomUUID8 } from "node:crypto";
+import { closeSync as closeSync11, existsSync as existsSync21, fsyncSync as fsyncSync3, lstatSync as lstatSync10, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { dirname as dirname21 } from "node:path";
+import { dirname as dirname23 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
@@ -20778,6 +20781,126 @@ function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
   };
 }
 
+// src/workers/source-index/media-judge.ts
+var MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
+  "id_document",
+  "bank_card",
+  "financial_document",
+  "medical_document",
+  "intimate"
+];
+var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
+var MEDIA_JUDGE_TEXT_DECIDES = "text_decides";
+var MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29";
+var MEDIA_JUDGE_PROMPTS = Object.freeze({
+  id_document: "a photo of a passport, national identity card or driving licence",
+  bank_card: "a photo of a credit card, debit card or bank card",
+  financial_document: "a bank statement, payslip or document showing account numbers",
+  medical_document: "a medical report or lab test results document",
+  intimate: "a nude, intimate or sexually explicit photo",
+  ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
+});
+var MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ";
+var MEDIA_JUDGE_THRESHOLDS = Object.freeze({
+  margin: 0.04,
+  intimateMargin: 0.025
+});
+function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
+}
+function dot(left, right) {
+  let sum = 0;
+  const length = Math.min(left.length, right.length);
+  for (let index = 0;index < length; index += 1)
+    sum += left[index] * right[index];
+  return sum;
+}
+function rounded(value) {
+  return Math.round(value * 1e4) / 1e4;
+}
+function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const ordinary = scores.ordinary;
+  const sensitive = MEDIA_JUDGE_SENSITIVE_CATEGORIES.map((category) => [category, scores[category]]);
+  if (typeof ordinary !== "number" || !Number.isFinite(ordinary) || sensitive.some(([, score]) => typeof score !== "number" || !Number.isFinite(score))) {
+    return { verdict: "unjudged", judgeId, reason: "scores_unavailable" };
+  }
+  let top = sensitive[0][0];
+  let topScore = -Infinity;
+  for (const [category, score] of sensitive) {
+    if (score > topScore) {
+      top = category;
+      topScore = score;
+    }
+  }
+  const margin = topScore - ordinary;
+  const intimateMargin = scores.intimate - ordinary;
+  const kept = Object.fromEntries(Object.entries(scores).map(([key, value]) => [key, rounded(value)]));
+  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
+    return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
+  }
+  let pictureTop;
+  for (const [category, score] of sensitive) {
+    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
+      continue;
+    if (!pictureTop || score > scores[pictureTop])
+      pictureTop = category;
+  }
+  if (pictureTop) {
+    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
+  }
+  if (intimateMargin >= thresholds.intimateMargin) {
+    return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
+  }
+  if (margin >= thresholds.margin) {
+    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
+  }
+  return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
+}
+function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (!imageVector || imageVector.length === 0)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  if (Math.hypot(...imageVector) < 0.000001)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  const scores = {};
+  for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
+    scores[category] = dot(imageVector, promptVectors[category]);
+  }
+  return judgeMediaScores(scores, judgeId, thresholds);
+}
+function canJudgeMedia(provider) {
+  return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
+}
+var promptVectorCache = new Map;
+function mediaJudgePromptVectors(provider) {
+  const key = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
+  let cached = promptVectorCache.get(key);
+  if (!cached) {
+    const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
+    cached = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
+      if (vectors.length !== categories.length || vectors.some((vector) => vector.length === 0)) {
+        throw new Error("The photo judge's descriptions could not be embedded.");
+      }
+      return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
+    });
+    promptVectorCache.set(key, cached);
+    cached.catch(() => promptVectorCache.delete(key));
+  }
+  return cached;
+}
+async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (images.length === 0)
+    return [];
+  const prompts = await mediaJudgePromptVectors(provider);
+  const vectors = await provider.embedImageVectors([...images]);
+  const judgeId = mediaJudgeId(provider, thresholds);
+  return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
+}
+async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const prompts = await mediaJudgePromptVectors(provider);
+  const judgeId = mediaJudgeId(provider, thresholds);
+  return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
+}
+
 // src/workers/connector-store/child-visibility.ts
 function* visibilityRead(here, offThread) {
   return yield { here, offThread };
@@ -21058,6 +21181,54 @@ function* judge(lane, parents, depth) {
     }
   }
   return verdicts;
+}
+function* itemVerdictsSteps(lane, items) {
+  const asked = new Map;
+  for (const item of items)
+    asked.set(tierLedgerIdentityKey(item), item);
+  const out = new Map;
+  if (asked.size === 0)
+    return out;
+  try {
+    const refs = new Map;
+    const refKeyOf = new Map;
+    for (const store of lane.stores()) {
+      for (const [key, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
+        const ref = {
+          provider: row.provider,
+          accountScope: row.accountScope,
+          parentLocalItemId: row.parentLocalItemId,
+          identity: row.identity
+        };
+        refs.set(parentKey(ref), ref);
+        refKeyOf.set(key, parentKey(ref));
+      }
+    }
+    for (const [key, item] of asked) {
+      if (refKeyOf.has(key))
+        continue;
+      const ref = {
+        provider: item.provider,
+        accountScope: item.accountScope,
+        parentLocalItemId: `identity:${key}`,
+        identity: {
+          provider: item.provider,
+          accountScope: item.accountScope,
+          providerItemId: item.providerItemId,
+          ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}
+        }
+      };
+      refs.set(parentKey(ref), ref);
+      refKeyOf.set(key, parentKey(ref));
+    }
+    const verdicts = yield* parentVerdictsSteps(lane, [...refs.values()]);
+    for (const [key, refKey] of refKeyOf)
+      out.set(key, verdicts.get(refKey) ?? HIDDEN);
+  } catch {
+    for (const key of asked.keys())
+      out.set(key, HIDDEN);
+  }
+  return out;
 }
 function* childrenWithHiddenParentsSteps(lane, children) {
   const hidden = new Set;
@@ -21600,6 +21771,1817 @@ function retireSecretRedactions(ledger, options = {}) {
   return retired;
 }
 
+// src/workers/source-index/built-in-embedding/provider.ts
+import { isMainThread as isMainThread5 } from "node:worker_threads";
+import { createHash as createHash11 } from "node:crypto";
+import { readFileSync as readFileSync18 } from "node:fs";
+import { availableParallelism } from "node:os";
+import { dirname as dirname22, join as join24 } from "node:path";
+
+// src/workers/source-index/built-in-embedding/litert-runtime.ts
+import { isMainThread as isMainThread4 } from "node:worker_threads";
+import { execFileSync as execFileSync2, spawn } from "node:child_process";
+import { closeSync as closeSync10, constants as constants4, existsSync as existsSync20, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync4, readFileSync as readFileSync16, statSync as statSync12 } from "node:fs";
+import { homedir as homedir10 } from "node:os";
+import { delimiter as delimiter2, dirname as dirname21, isAbsolute as isAbsolute14, join as join22 } from "node:path";
+import { createInterface } from "node:readline";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+class LiteRtImagesUnavailableError extends Error {
+  indexes;
+  constructor(indexes) {
+    super("The built-in search model is running without its image encoder.");
+    this.name = "LiteRtImagesUnavailableError";
+    this.indexes = indexes;
+  }
+}
+
+class LiteRtPictureEngineFaultError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "LiteRtPictureEngineFaultError";
+  }
+}
+
+class LiteRtHelperReplacedError extends Error {
+  done;
+  reason;
+  constructor(message, reason, done) {
+    super(message);
+    this.name = "LiteRtHelperReplacedError";
+    this.reason = reason;
+    this.done = done;
+  }
+}
+var helperReplacements = 0;
+var REQUEST_TIMEOUT_MS = 3 * 60000;
+var HELPER_WORKING_CPU_MS = 1000;
+function helperCpuMs(pid, platform = process.platform) {
+  if (pid === undefined)
+    return;
+  try {
+    if (platform === "linux") {
+      const stat = readFileSync16(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      const ticks = Number(fields[11]) + Number(fields[12]);
+      return Number.isFinite(ticks) ? ticks * 10 : undefined;
+    }
+    if (platform === "darwin") {
+      const text = execFileSync2("/bin/ps", ["-o", "time=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
+      const [days, clock] = text.includes("-") ? text.split("-") : ["0", text];
+      const parts = clock.split(":").map(Number);
+      const seconds = parts.reduce((sum, part) => sum * 60 + part, 0) + Number(days) * 86400;
+      return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+    }
+  } catch {}
+  return;
+}
+function helperEnvironment() {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value === undefined)
+      continue;
+    if (["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"].includes(name) || name.startsWith("VK_")) {
+      env[name] = value;
+    }
+  }
+  env.HOME ??= homedir10();
+  return env;
+}
+
+class HelperProcess {
+  child;
+  device = "cpu";
+  vision = false;
+  nextId = 1;
+  pending = new Map;
+  stderr = "";
+  requestTimeoutMs;
+  stopTimeoutMs;
+  exited = false;
+  constructor(child, options) {
+    this.child = child;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 5000;
+  }
+  failAll(reason, why = "stopped") {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      helperReplacements += 1;
+      console.warn(`[built-in embedding] helper replaced (${why}) after ${Math.round((Date.now() - pending.startedAt) / 1000)} s on a batch of ${pending.count} item(s), ${pending.pictures} with a picture, ${pending.done.size} already answered; replacement ${helperReplacements} in this process.`);
+      pending.reject(new LiteRtHelperReplacedError(reason.message, why, pending.done));
+    }
+    this.pending.clear();
+  }
+  static start(options, device) {
+    const settings = {
+      library: options.library,
+      model: options.model,
+      cacheDir: options.cacheDir,
+      threads: options.threads,
+      device,
+      maxInputTokens: options.maxInputTokens,
+      ...options.visionTokensPerImage !== undefined ? { visionTokensPerImage: options.visionTokensPerImage } : {}
+    };
+    const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: helperEnvironment()
+    });
+    const helper = new HelperProcess(child, options);
+    child.stdin.on("error", (error) => {
+      helper.exited = true;
+      helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
+      child.kill("SIGKILL");
+    });
+    return new Promise((resolve, reject) => {
+      let started = false;
+      const timer = setTimeout(() => {
+        if (started)
+          return;
+        child.kill("SIGKILL");
+        reject(new Error("The built-in search model took too long to start."));
+      }, options.startTimeoutMs ?? 5 * 60000);
+      child.stderr.on("data", (chunk) => {
+        helper.stderr = (helper.stderr + chunk.toString("utf8")).slice(-4000);
+      });
+      createInterface({ input: child.stdout }).on("line", (line) => {
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (!started) {
+          if (message.ready) {
+            started = true;
+            clearTimeout(timer);
+            helper.device = message.device === "gpu" ? "gpu" : "cpu";
+            helper.vision = message.vision === true;
+            resolve(helper);
+          } else if (message.fatal) {
+            started = true;
+            clearTimeout(timer);
+            reject(Object.assign(new Error(message.fatal), { fatal: true }));
+          }
+          return;
+        }
+        helper.settle(message);
+      });
+      child.on("error", (error) => {
+        if (!started) {
+          started = true;
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+      child.on("exit", () => {
+        helper.exited = true;
+      });
+      child.on("close", (code, signal) => {
+        helper.exited = true;
+        const reason = new Error(`The built-in search model stopped (${signal ?? `exit ${code}`})${helper.stderr ? `: ${helper.stderr.trim().split(`
+`).at(-1)}` : ""}.`);
+        if (!started) {
+          started = true;
+          clearTimeout(timer);
+          reject(reason);
+        }
+        if (helper.replacing)
+          return;
+        helper.failAll(reason, signal ?? `exit ${code}`);
+      });
+    });
+  }
+  replacing = false;
+  watch(id) {
+    return setTimeout(() => {
+      const pending = this.pending.get(id);
+      if (!pending)
+        return;
+      const cpuMs = helperCpuMs(this.child.pid);
+      const working = pending.progressed || cpuMs !== undefined && pending.cpuMs !== undefined && cpuMs - pending.cpuMs >= Math.min(HELPER_WORKING_CPU_MS, this.requestTimeoutMs / 4);
+      if (working) {
+        pending.progressed = false;
+        pending.cpuMs = cpuMs;
+        pending.timer = this.watch(id);
+        return;
+      }
+      this.replacing = true;
+      this.exited = true;
+      this.child.kill("SIGKILL");
+      this.failAll(new Error("The built-in search model stopped responding and was restarted."), "no answer and no processor time for a whole window");
+    }, this.requestTimeoutMs);
+  }
+  embed(items) {
+    if (this.exited)
+      return Promise.reject(new Error("The built-in search model is not running."));
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const pictures = items.filter((item) => typeof item !== "string" && item.image).length;
+      this.pending.set(id, {
+        resolve,
+        reject,
+        count: items.length,
+        pictures,
+        timer: this.watch(id),
+        startedAt: Date.now(),
+        done: new Map,
+        progressed: false,
+        cpuMs: helperCpuMs(this.child.pid)
+      });
+      const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
+      this.child.stdin.write(`${JSON.stringify(request)}
+`);
+    });
+  }
+  settle(message) {
+    const pending = message.id === undefined ? undefined : this.pending.get(message.id);
+    if (!pending || message.id === undefined)
+      return;
+    if (typeof message.progress === "number") {
+      pending.progressed = true;
+      if (message.itemFailed)
+        pending.done.set(message.progress, new Float32Array(0));
+      else if (message.vector) {
+        const bytes = Buffer.from(message.vector, "base64");
+        pending.done.set(message.progress, new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
+      }
+      return;
+    }
+    this.pending.delete(message.id);
+    clearTimeout(pending.timer);
+    if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
+      pending.reject(new LiteRtImagesUnavailableError(message.unsupported));
+      return;
+    }
+    const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
+    if (!message.error && failed.size === pending.count) {
+      pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
+      return;
+    }
+    if (message.error || !message.vectors || !message.dimension) {
+      pending.reject(message.error && message.pictures ? new LiteRtPictureEngineFaultError(message.error) : new Error(message.error ?? "The built-in search model returned no vectors."));
+      if (message.native) {
+        this.exited = true;
+        this.child.kill("SIGKILL");
+      }
+      return;
+    }
+    const bytes = Buffer.from(message.vectors, "base64");
+    const all = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    const vectors = Array.from({ length: pending.count }, (_, index) => failed.has(index) ? new Float32Array(0) : all.subarray(index * message.dimension, (index + 1) * message.dimension));
+    if (vectors.some((vector, index) => !failed.has(index) && vector.length !== message.dimension)) {
+      pending.reject(new Error("The built-in search model returned the wrong number of values."));
+      return;
+    }
+    pending.resolve(vectors);
+  }
+  async stop() {
+    if (this.exited)
+      return;
+    const exited = new Promise((resolve) => this.child.once("close", () => resolve()));
+    this.child.stdin.end();
+    const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
+    await exited;
+    clearTimeout(timer);
+  }
+}
+async function startLiteRtEmbedder(options) {
+  if (isMainThread4 && !options.gpuAvailable) {
+    const handle = modelThreadHandleId();
+    let state = await modelThread().call({ kind: "litert-start", handle, options });
+    return {
+      get device() {
+        return state.device;
+      },
+      get vision() {
+        return state.vision;
+      },
+      async embed(items) {
+        try {
+          const result = await modelThread().call({ kind: "litert-run", handle, items });
+          state = result;
+          return result.vectors;
+        } catch (error) {
+          const failure = error;
+          if (failure.device !== undefined && failure.vision !== undefined)
+            state = { device: failure.device, vision: failure.vision };
+          if (failure.name === "LiteRtImagesUnavailableError")
+            throw new LiteRtImagesUnavailableError(failure.indexes ?? []);
+          if (failure.name === "LiteRtPictureEngineFaultError")
+            throw new LiteRtPictureEngineFaultError(failure.message);
+          throw error;
+        }
+      },
+      async release() {
+        await modelThread().call({ kind: "litert-release", handle });
+      }
+    };
+  }
+  let device = options.device === "auto" && process.platform === "linux" && !(options.gpuAvailable ?? linuxGpuAvailable)() ? "cpu" : options.device;
+  let helper;
+  try {
+    helper = await HelperProcess.start(options, device);
+  } catch (error) {
+    if (device === "cpu" || error.fatal)
+      throw error;
+    device = "cpu";
+    helper = await HelperProcess.start(options, device);
+  }
+  const releaseAtExit = () => {
+    if (!helper.exited)
+      helper.child.kill("SIGKILL");
+  };
+  process.once("exit", releaseAtExit);
+  return {
+    get device() {
+      return helper.device;
+    },
+    get vision() {
+      return helper.vision;
+    },
+    async embed(items) {
+      if (helper.exited) {
+        if (helper.device === "gpu")
+          device = "cpu";
+        helper = await HelperProcess.start(options, device);
+      }
+      const pictures = items.flatMap((item, index) => typeof item !== "string" && item.image ? [index] : []);
+      if (pictures.length > 0 && !helper.vision)
+        throw new LiteRtImagesUnavailableError(pictures);
+      try {
+        return await helper.embed(items);
+      } catch (error) {
+        if (!(error instanceof LiteRtHelperReplacedError))
+          throw error;
+        if (helper.device === "gpu")
+          device = "cpu";
+        helper = await HelperProcess.start(options, device);
+        const rest = items.map((_, index) => index).filter((index) => !error.done.has(index));
+        const restPictures = rest.filter((index) => pictures.includes(index));
+        if (restPictures.length > 0 && !helper.vision)
+          throw new LiteRtImagesUnavailableError(restPictures);
+        const vectors = rest.length > 0 ? await helper.embed(rest.map((index) => items[index])) : [];
+        const resumed = new Map(rest.map((index, row) => [index, vectors[row]]));
+        return items.map((_, index) => error.done.get(index) ?? resumed.get(index));
+      }
+    },
+    async release() {
+      process.removeListener("exit", releaseAtExit);
+      await helper.stop();
+    }
+  };
+}
+function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
+  try {
+    return readdirSync4(deviceDirectory).some((name) => {
+      if (!/^renderD[0-9]+$/.test(name))
+        return false;
+      let fd;
+      try {
+        fd = openSync10(join22(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
+        return fstatSync2(fd).isCharacterDevice();
+      } catch {
+        return false;
+      } finally {
+        if (fd !== undefined)
+          closeSync10(fd);
+      }
+    });
+  } catch {
+    return false;
+  }
+}
+function helperPath() {
+  const here = dirname21(fileURLToPath2(import.meta.url));
+  for (const name of ["litert-helper.js", "litert-helper.ts"]) {
+    const candidate = join22(here, name);
+    if (existsSync20(candidate))
+      return candidate;
+  }
+  throw new Error("The built-in search model helper is missing from this install.");
+}
+function resolveBun() {
+  const bunName = process.platform === "win32" ? "bun.exe" : "bun";
+  const candidates = [
+    process.versions.bun ? process.execPath : undefined,
+    process.env.BUN_INSTALL ? join22(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join22(directory, bunName)),
+    join22(homedir10(), ".bun", "bin", bunName)
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute14(candidate))
+      continue;
+    try {
+      if (statSync12(candidate).isFile())
+        return candidate;
+    } catch {}
+  }
+  throw new Error("The built-in search model needs Bun, and none was found.");
+}
+
+// src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
+import { readFileSync as readFileSync17 } from "node:fs";
+
+class RemoteLiteRtEmbedder {
+  options;
+  device = "cpu";
+  vision = false;
+  verified = false;
+  retryAt = 0;
+  state = "unused";
+  slot = Promise.resolve();
+  url;
+  constructor(options) {
+    this.options = options;
+    try {
+      this.url = new URL(options.url);
+    } catch {
+      throw new Error("Invalid built-in embedding remote URL.");
+    }
+    const loopback = this.url.hostname === "localhost" || this.url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(this.url.hostname);
+    if (this.url.protocol !== "https:" && !(this.url.protocol === "http:" && loopback) || this.url.username || this.url.password || this.url.search || this.url.hash) {
+      throw new Error("Built-in embedding remote requires HTTPS or loopback HTTP, without URL credentials, query or fragment.");
+    }
+  }
+  get active() {
+    return this.state === "remote";
+  }
+  async embed(items) {
+    const previous = this.slot;
+    let unlock;
+    this.slot = new Promise((resolve) => {
+      unlock = resolve;
+    });
+    await previous;
+    try {
+      const now = this.options.now ?? Date.now;
+      if (now() < this.retryAt)
+        throw new Error("Remote embedding cooling down.");
+      try {
+        if (items.length === 0 || items.length > 8 || items.some((item) => typeof item !== "string")) {
+          throw new Error("Remote embedding requires a text-only batch.");
+        }
+        if (!this.verified) {
+          const handshake = await this.request("/v1/handshake");
+          for (const [field, value] of Object.entries(this.options.identity)) {
+            if (handshake[field] !== value)
+              throw new Error("Remote embedding identity mismatch.");
+          }
+          if (handshake.device !== "cpu" && handshake.device !== "gpu")
+            throw new Error("Invalid remote device.");
+          if (handshake.vision !== false)
+            throw new Error("Invalid remote vision capability.");
+          this.device = handshake.device;
+          this.verified = true;
+        }
+        const response = await this.request("/v1/embed", items);
+        const identity = this.options.identity;
+        if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
+          throw new Error("Remote embedding identity mismatch.");
+        }
+        const bytes = Buffer.from(response.vectors, "base64");
+        if (bytes.length !== items.length * identity.dimension * 4)
+          throw new Error("Invalid remote vector length.");
+        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
+        if (vectors.some((vector) => vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0))) {
+          throw new Error("Invalid remote vector values.");
+        }
+        this.transition("remote");
+        return vectors;
+      } catch {
+        this.verified = false;
+        this.retryAt = now() + 60000;
+        this.transition("local");
+        throw new Error("Remote embedding unavailable; using local helper.");
+      }
+    } finally {
+      unlock();
+    }
+  }
+  async release() {
+    this.verified = false;
+  }
+  transition(state) {
+    if (this.state === state)
+      return;
+    this.state = state;
+    console.warn(state === "remote" ? "[built-in embedding] document text embedding is using the remote helper." : "[built-in embedding] remote helper unavailable; document text embedding is using the local helper.");
+  }
+  async request(path, texts) {
+    const headers = {};
+    if (this.options.tokenFile) {
+      const token = readFileSync17(this.options.tokenFile, "utf8").trim();
+      if (!token)
+        throw new Error("Empty remote token file.");
+      headers.Authorization = `Bearer ${token}`;
+    }
+    if (texts)
+      headers["Content-Type"] = "application/json";
+    const response = await fetch(new URL(path, this.url), {
+      method: texts ? "POST" : "GET",
+      headers,
+      ...texts ? { body: JSON.stringify({ texts }) } : {},
+      signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
+      redirect: "error"
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error("Remote request failed.");
+    }
+    return await response.json();
+  }
+}
+
+// src/workers/source-index/built-in-embedding/runtime.ts
+import { realpathSync as realpathSync7 } from "node:fs";
+import { createRequire as createRequire5 } from "node:module";
+import { join as join23, sep as sep6 } from "node:path";
+function onnxRuntimeFromDirectory(runtimeDir) {
+  return {
+    async createSession(modelPath, options) {
+      const ort = requireOnnxRuntimeFromPack(runtimeDir);
+      const session = await ort.InferenceSession.create(modelPath, {
+        executionProviders: ["cpu"],
+        intraOpNumThreads: options.threads,
+        interOpNumThreads: 1,
+        executionMode: "sequential",
+        graphOptimizationLevel: "all",
+        enableCpuMemArena: false
+      });
+      const releaseAtExit = () => {
+        session.release().catch(() => {
+          return;
+        });
+      };
+      process.once("exit", releaseAtExit);
+      const wantsTokenTypes = session.inputNames.includes("token_type_ids");
+      const outputName = session.outputNames.includes("last_hidden_state") ? "last_hidden_state" : session.outputNames[0];
+      if (!outputName)
+        throw new Error("The built-in search model has no outputs.");
+      return {
+        async run(batch) {
+          const dims = [batch.batchSize, batch.sequenceLength];
+          const feeds = {
+            input_ids: new ort.Tensor("int64", batch.inputIds, dims),
+            attention_mask: new ort.Tensor("int64", batch.attentionMask, dims)
+          };
+          if (wantsTokenTypes)
+            feeds.token_type_ids = new ort.Tensor("int64", batch.tokenTypeIds, dims);
+          const output = (await session.run(feeds))[outputName];
+          if (!output || !(output.data instanceof Float32Array)) {
+            throw new Error("The built-in search model returned an unexpected output.");
+          }
+          return { data: output.data, dims: output.dims };
+        },
+        release: () => {
+          process.removeListener("exit", releaseAtExit);
+          return session.release();
+        }
+      };
+    }
+  };
+}
+function requireOnnxRuntimeFromPack(runtimeDir) {
+  const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
+  let root;
+  let resolved;
+  const requireFromPack = createRequire5(join23(runtimeDir, "olympus-runtime.json"));
+  try {
+    root = realpathSync7(join23(runtimeDir, "node_modules"));
+    resolved = realpathSync7(requireFromPack.resolve("onnxruntime-node"));
+  } catch {
+    throw missing();
+  }
+  if (!resolved.startsWith(root + sep6))
+    throw missing();
+  return requireFromPack(resolved);
+}
+
+// src/workers/source-index/built-in-embedding/pair-tokenizer.ts
+function truncatePair(a, b, room, tiePolicy = "wordpiece") {
+  let keepA = a.length;
+  let keepB = b.length;
+  room = Math.max(0, room);
+  while (keepA + keepB > room) {
+    if (keepB > keepA || keepB === keepA && (tiePolicy === "wordpiece" || a.length > b.length))
+      keepB -= 1;
+    else
+      keepA -= 1;
+  }
+  return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
+}
+function pairWindows(a, b, room, overlap, tiePolicy = "wordpiece") {
+  const first = truncatePair(a, b, room, tiePolicy);
+  const size = first.b.length;
+  if (size === 0 || size >= b.length)
+    return { a: first.a, windows: [first.b], truncated: first.truncated };
+  const step = Math.max(1, size - Math.max(0, Math.min(Math.floor(overlap), size - 1)));
+  const windows = [];
+  for (let start = 0;; start += step) {
+    if (start + size >= b.length) {
+      windows.push(b.slice(b.length - size));
+      break;
+    }
+    windows.push(b.slice(start, start + size));
+  }
+  return { a: first.a, windows, truncated: first.a.length < a.length };
+}
+
+// src/workers/source-index/built-in-embedding/wordpiece.ts
+var MAX_INPUT_CHARS_PER_WORD = 100;
+var CONTINUING_SUBWORD_PREFIX = "##";
+
+class WordPieceTokenizer {
+  vocab;
+  clsId;
+  sepId;
+  unkId;
+  padId;
+  constructor(vocabText) {
+    const vocab = new Map;
+    const lines = vocabText.split(`
+`);
+    for (let index = 0;index < lines.length; index += 1) {
+      const token = lines[index].replace(/\r$/, "");
+      if (token.length === 0 && index === lines.length - 1)
+        continue;
+      if (!vocab.has(token))
+        vocab.set(token, index);
+    }
+    this.vocab = vocab;
+    this.clsId = requireToken(vocab, "[CLS]");
+    this.sepId = requireToken(vocab, "[SEP]");
+    this.unkId = requireToken(vocab, "[UNK]");
+    this.padId = requireToken(vocab, "[PAD]");
+  }
+  tokenize(text) {
+    const ids = [];
+    for (const word of preTokenize(normalize3(text))) {
+      this.wordPiece(word, ids);
+    }
+    return ids;
+  }
+  encode(text, maxLength) {
+    const content = this.tokenize(text);
+    const room = Math.max(0, maxLength - 2);
+    const truncated = content.length > room;
+    return {
+      ids: [this.clsId, ...truncated ? content.slice(0, room) : content, this.sepId],
+      truncated
+    };
+  }
+  encodePair(first, second, maxLength) {
+    const { a, b, truncated } = truncatePair(this.tokenize(first), this.tokenize(second), maxLength - 3);
+    const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+    const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
+    return { ids, typeIds, truncated };
+  }
+  encodePairWindows(first, second, maxLength, overlap) {
+    const { a, windows, truncated } = pairWindows(this.tokenize(first), this.tokenize(second), maxLength - 3, overlap);
+    return windows.map((b) => {
+      const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+      return { ids, typeIds: ids.map((_, index) => index < a.length + 2 ? 0 : 1), truncated };
+    });
+  }
+  wordPiece(word, out) {
+    const chars = Array.from(word);
+    if (chars.length > MAX_INPUT_CHARS_PER_WORD) {
+      out.push(this.unkId);
+      return;
+    }
+    const pieces = [];
+    let start = 0;
+    while (start < chars.length) {
+      let end = chars.length;
+      let found;
+      while (start < end) {
+        const piece = (start > 0 ? CONTINUING_SUBWORD_PREFIX : "") + chars.slice(start, end).join("");
+        const id = this.vocab.get(piece);
+        if (id !== undefined) {
+          found = id;
+          break;
+        }
+        end -= 1;
+      }
+      if (found === undefined) {
+        out.push(this.unkId);
+        return;
+      }
+      pieces.push(found);
+      start = end;
+    }
+    out.push(...pieces);
+  }
+}
+function requireToken(vocab, token) {
+  const id = vocab.get(token);
+  if (id === undefined)
+    throw new Error(`WordPiece vocabulary is missing ${token}.`);
+  return id;
+}
+var CONTROL = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}]/u;
+var WHITESPACE = /[\s\p{Zs}]/u;
+var COMBINING_MARK = /\p{Mn}/gu;
+var PUNCTUATION = /\p{P}/u;
+function normalize3(text) {
+  let cleaned = "";
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code === 0 || code === 65533)
+      continue;
+    if (char === "\t" || char === `
+` || char === "\r") {
+      cleaned += " ";
+      continue;
+    }
+    if (CONTROL.test(char))
+      continue;
+    if (WHITESPACE.test(char)) {
+      cleaned += " ";
+      continue;
+    }
+    cleaned += isChineseChar(code) ? ` ${char} ` : char;
+  }
+  return cleaned.toLowerCase().normalize("NFD").replace(COMBINING_MARK, "");
+}
+function preTokenize(text) {
+  const words = [];
+  let current = "";
+  for (const char of text) {
+    if (char === " " || WHITESPACE.test(char)) {
+      if (current)
+        words.push(current);
+      current = "";
+    } else if (isPunctuation(char)) {
+      if (current)
+        words.push(current);
+      words.push(char);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current)
+    words.push(current);
+  return words;
+}
+function isPunctuation(char) {
+  const code = char.codePointAt(0);
+  if (code >= 33 && code <= 47 || code >= 58 && code <= 64 || code >= 91 && code <= 96 || code >= 123 && code <= 126) {
+    return true;
+  }
+  return PUNCTUATION.test(char);
+}
+function isChineseChar(code) {
+  return code >= 19968 && code <= 40959 || code >= 13312 && code <= 19903 || code >= 131072 && code <= 173791 || code >= 173824 && code <= 177983 || code >= 177984 && code <= 178207 || code >= 178208 && code <= 183983 || code >= 63744 && code <= 64255 || code >= 194560 && code <= 195103;
+}
+
+// src/workers/source-index/built-in-embedding/provider.ts
+var BUILT_IN_EMBEDDING_PROVIDER = "built-in";
+var BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS";
+var BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE";
+var BUILT_IN_EMBEDDING_REMOTE_URL_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_URL";
+var BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE";
+var MAX_WINDOWS_PER_DOCUMENT = 8;
+var MAX_BATCH_TOKENS = 2048;
+var MAX_BATCH_ROWS = 32;
+var LITERT_BATCH = 8;
+var RETRY_AFTER_FAILURE_MS = 2 * 60000;
+var PICTURE_ENGINE_FAULT_LIMIT = 2;
+var PICTURE_HOLD_MS = 60 * 60000;
+class BuiltInSourceEmbeddingProvider {
+  provider;
+  modelId;
+  dimension;
+  configHash;
+  epochId;
+  backend;
+  threads;
+  device;
+  remote;
+  spec;
+  env;
+  onnxOffThread;
+  runtimeFactory;
+  liteRtFactory;
+  install;
+  installerOptions;
+  now;
+  loading;
+  loaded;
+  priorityLoaded;
+  prioritySlotBusy = false;
+  priorityWaiting = [];
+  lastFailure;
+  slotBusy = false;
+  imageSupportWarned = false;
+  pictureFaults;
+  waiting = { query: [], document: [] };
+  runsOnThisComputer() {
+    return this.remote === undefined;
+  }
+  constructor(options = {}) {
+    this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
+    this.env = options.env ?? process.env;
+    this.provider = BUILT_IN_EMBEDDING_PROVIDER;
+    this.backend = "local";
+    this.modelId = this.spec.modelId;
+    this.dimension = this.spec.dimension;
+    this.threads = resolveThreads(options.threads, this.env);
+    this.device = resolveDevice(this.env);
+    this.onnxOffThread = isMainThread5 && !options.runtime;
+    this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
+    this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
+    this.install = options.install ?? installBuiltInEmbedding;
+    this.installerOptions = options.installerOptions ?? {};
+    this.now = options.now ?? Date.now;
+    const remoteUrl = this.env[BUILT_IN_EMBEDDING_REMOTE_URL_ENV]?.trim();
+    if (remoteUrl && this.spec.runtime === "litert") {
+      this.remote = new RemoteLiteRtEmbedder({
+        url: remoteUrl,
+        tokenFile: this.env[BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV],
+        now: this.now,
+        requestTimeoutMs: options.remoteRequestTimeoutMs,
+        identity: {
+          modelId: this.modelId,
+          weightsSha256: this.spec.model.sha256,
+          runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}`,
+          dimension: this.dimension,
+          maxTokens: this.spec.maxTokens,
+          overflow: "chunk-and-average"
+        }
+      });
+    }
+    this.epochId = resolveEmbeddingEpoch({
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      backend: this.backend,
+      ...options.epochId ? { epochOverride: options.epochId } : {}
+    });
+    this.configHash = createHash11("sha256").update(JSON.stringify({
+      provider: this.provider,
+      model: this.modelId,
+      repository: this.spec.repository,
+      revision: this.spec.revision,
+      weights: this.spec.model.sha256,
+      ...this.spec.vocabulary ? { vocabulary: this.spec.vocabulary.sha256 } : {},
+      ...this.spec.runtime === "litert" ? { runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}` } : {},
+      dimension: this.dimension,
+      maxTokens: this.spec.maxTokens,
+      pooling: this.spec.pooling,
+      queryPrefix: this.spec.queryPrefix,
+      documentPrefix: this.spec.documentPrefix,
+      ...this.spec.runtime === "litert" ? { overflow: "chunk-and-average" } : { windows: MAX_WINDOWS_PER_DOCUMENT },
+      backend: this.backend
+    })).digest("hex");
+  }
+  status() {
+    const status = readBuiltInEmbeddingStatus(this.env, this.spec);
+    return this.remote ? { ...status, remoteDocuments: this.remote.active } : status;
+  }
+  async prepare() {
+    await this.load();
+  }
+  async warm() {
+    await this.load();
+    await this.embed([{ text: "warm up" }], { taskType: "RETRIEVAL_QUERY" });
+  }
+  async imageSupport() {
+    if (this.spec.runtime !== "litert" || !this.spec.vision)
+      return false;
+    if (this.picturesHeld())
+      return false;
+    const model = await this.ready();
+    const supported = model.kind === "litert" && model.embedder.vision;
+    if (!supported && !this.imageSupportWarned) {
+      this.imageSupportWarned = true;
+      console.warn("[built-in embedding] the image encoder could not start on this machine; photos keep keyword search and wait for their picture vectors.");
+    }
+    return supported;
+  }
+  async retry() {
+    if (!this.loading)
+      this.lastFailure = undefined;
+    await this.load();
+  }
+  async embed(inputs, options) {
+    if (inputs.length === 0)
+      return [];
+    if (options.taskType === "RETRIEVAL_QUERY" && !this.loaded) {
+      const status = this.status();
+      if (this.spec.runtime === "litert" || status.state !== "ready" && status.state !== "loading") {
+        this.load().catch(() => {
+          return;
+        });
+        const now = this.status();
+        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
+          modelStarting: this.loading !== undefined && (now.state === "ready" || now.state === "loading")
+        });
+      }
+    }
+    const model = await this.ready();
+    return this.embedLoaded(model, inputs, options.taskType);
+  }
+  loadedOnly() {
+    return {
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      configHash: this.configHash,
+      epochId: this.epochId,
+      backend: this.backend,
+      embed: async (inputs, options) => {
+        if (inputs.length === 0)
+          return [];
+        const model = this.loaded;
+        if (!model)
+          throw new BuiltInEmbeddingNotReadyError(this.status());
+        return this.embedLoaded(model, inputs, options.taskType);
+      }
+    };
+  }
+  async ready() {
+    if (this.loaded)
+      return this.loaded;
+    try {
+      return await this.load();
+    } catch (error) {
+      throw new BuiltInEmbeddingNotReadyError(this.status(), error);
+    }
+  }
+  load() {
+    if (this.loading)
+      return this.loading;
+    if (this.lastFailure && this.now() - this.lastFailure.atMs < RETRY_AFTER_FAILURE_MS) {
+      return Promise.reject(this.lastFailure.error);
+    }
+    const loading = this.loadOnce();
+    this.loading = loading;
+    loading.then((model) => {
+      this.loaded = model;
+      this.lastFailure = undefined;
+    }, (error) => {
+      this.lastFailure = { atMs: this.now(), error };
+      if (this.loading === loading)
+        this.loading = undefined;
+    });
+    return loading;
+  }
+  async loadOnce() {
+    const reporterOptions = {
+      env: this.env,
+      model: this.spec,
+      ...this.installerOptions.now ? { now: this.installerOptions.now } : {},
+      ...this.installerOptions.onProgress ? { onProgress: this.installerOptions.onProgress } : {}
+    };
+    let installed;
+    try {
+      installed = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
+    } catch (error) {
+      throw builtInEmbeddingOperationError(error);
+    }
+    try {
+      reportBuiltInEmbeddingState(reporterOptions, "loading");
+      let model;
+      if (this.spec.runtime === "litert") {
+        if (!installed.libraryPath)
+          throw new Error("the LiteRT-LM runtime is not installed.");
+        const settings = {
+          library: installed.libraryPath,
+          model: installed.modelPath,
+          cacheDir: join24(dirname22(installed.modelPath), "cache"),
+          threads: this.threads,
+          device: this.device,
+          maxInputTokens: this.spec.maxTokens,
+          ...this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}
+        };
+        const embedder = await this.liteRtFactory(settings);
+        model = { kind: "litert", embedder };
+        try {
+          const { visionTokensPerImage: _vision, ...querySettings } = settings;
+          this.priorityLoaded = { kind: "litert", embedder: await this.liteRtFactory(querySettings) };
+        } catch (error) {
+          await embedder.release().catch(() => {
+            return;
+          });
+          throw error;
+        }
+        if (this.spec.vision)
+          reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
+      } else if (this.onnxOffThread) {
+        const handle = modelThreadHandleId();
+        await modelThread().call({ kind: "embedding-load", handle, installed, model: this.spec, env: this.env, threads: this.threads });
+        model = { kind: "thread", handle };
+      } else {
+        if (!installed.vocabularyPath)
+          throw new Error("the model vocabulary is not installed.");
+        const tokenizer = loadTokenizer(installed.vocabularyPath);
+        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+        model = { kind: "onnx", session, tokenizer };
+        try {
+          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
+        } catch (error) {
+          await session.release?.().catch(() => {
+            return;
+          });
+          throw error;
+        }
+      }
+      reportBuiltInEmbeddingState(reporterOptions, "ready");
+      return model;
+    } catch (error) {
+      const failure = new BuiltInEmbeddingInstallError("runtime_load_failed", `The built-in search model could not start: ${error instanceof Error ? error.message : String(error)}`);
+      reportBuiltInEmbeddingState(reporterOptions, "failed", { reason: failure.reason, message: failure.message });
+      throw builtInEmbeddingOperationError(failure);
+    }
+  }
+  async withSlot(taskType, run) {
+    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
+      if (this.prioritySlotBusy)
+        await new Promise((resolve) => this.priorityWaiting.push(resolve));
+      else
+        this.prioritySlotBusy = true;
+      try {
+        return await run();
+      } finally {
+        const next = this.priorityWaiting.shift();
+        if (next)
+          next();
+        else
+          this.prioritySlotBusy = false;
+      }
+    }
+    if (this.slotBusy) {
+      await new Promise((resolve) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve));
+    } else {
+      this.slotBusy = true;
+    }
+    try {
+      return await run();
+    } finally {
+      const next = this.waiting.query.shift() ?? this.waiting.document.shift();
+      if (next)
+        next();
+      else
+        this.slotBusy = false;
+    }
+  }
+  async embedLoaded(model, inputs, taskType) {
+    if (model.kind === "thread") {
+      return modelThread().call({ kind: "embedding-run", handle: model.handle, inputs, taskType, priority: priorityQueryEmbeddingRequested() });
+    }
+    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
+      if (!this.priorityLoaded)
+        throw new BuiltInEmbeddingNotReadyError(this.status());
+      model = this.priorityLoaded;
+    }
+    if (model.kind === "litert")
+      return this.embedLiteRt(model.embedder, inputs, taskType);
+    const windowTokens = this.spec.maxTokens - 2;
+    const windows = [];
+    inputs.forEach((input, index) => {
+      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
+      const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
+      const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
+      for (let window = 0;window < count; window += 1) {
+        windows.push({
+          input: index,
+          ids: [model.tokenizer.startId, ...ids.slice(window * windowTokens, (window + 1) * windowTokens), model.tokenizer.endId]
+        });
+      }
+    });
+    const sums = inputs.map(() => new Float64Array(this.dimension));
+    for (const batch of planBatches(windows)) {
+      const vectors = await this.withSlot(taskType, () => this.forward(model, batch));
+      batch.forEach((window, row) => {
+        const vector = vectors[row];
+        const weight = window.ids.length - 2;
+        const sum = sums[window.input];
+        for (let d = 0;d < this.dimension; d += 1)
+          sum[d] += vector[d] * Math.max(1, weight);
+      });
+    }
+    return sums.map((sum) => normalize4(sum));
+  }
+  async embedWithImageVectors(inputs) {
+    if (inputs.length === 0)
+      return { vectors: [], imageVectors: [] };
+    const model = await this.ready();
+    if (model.kind !== "litert" || !this.spec.vision) {
+      return { vectors: await this.embedLoaded(model, inputs, "RETRIEVAL_DOCUMENT"), imageVectors: inputs.map(() => {
+        return;
+      }) };
+    }
+    const extra = inputs.flatMap((input, index) => input.image && isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
+    const { vectors, failed } = await this.liteRtVectors(model.embedder, [...this.liteRtItems(inputs, "RETRIEVAL_DOCUMENT"), ...extra.map((index) => ({ text: "", image: inputs[index].image.path }))], "RETRIEVAL_DOCUMENT", new Set(this.refusedPictures(inputs)));
+    const documentFailures = failed.filter((index) => index < inputs.length);
+    if (documentFailures.length > 0)
+      throw new SourceEmbeddingInputsFailedError(documentFailures, "image_unreadable");
+    const imageVectors = inputs.map(() => {
+      return;
+    });
+    extra.forEach((input, row) => {
+      imageVectors[input] = vectors[inputs.length + row];
+    });
+    return { vectors: vectors.slice(0, inputs.length), imageVectors };
+  }
+  async embedImageVectors(images) {
+    if (images.length === 0)
+      return [];
+    const model = await this.ready();
+    if (model.kind !== "litert" || !this.spec.vision) {
+      throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
+    }
+    const refused = new Set(images.flatMap((image, index) => isMediaCachePath(image.path, image.sha256) ? [] : [index]));
+    const live = images.flatMap((image, index) => refused.has(index) ? [] : [{ index, image }]);
+    const out = images.map(() => {
+      return;
+    });
+    if (live.length === 0)
+      return out;
+    const { vectors } = await this.liteRtVectors(model.embedder, live.map(({ image }) => ({ text: "", image: image.path })), "RETRIEVAL_DOCUMENT", new Set);
+    live.forEach(({ index }, row) => {
+      out[index] = vectors[row];
+    });
+    return out;
+  }
+  async embedPromptTexts(texts) {
+    if (texts.length === 0)
+      return [];
+    const model = await this.ready();
+    if (model.kind !== "litert")
+      throw new Error("The photo judge needs the LiteRT model.");
+    const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, "RETRIEVAL_DOCUMENT", new Set);
+    if (failed.length > 0)
+      throw new Error("The photo judge's descriptions could not be embedded.");
+    return vectors;
+  }
+  refusedPictures(inputs) {
+    if (!this.spec.vision)
+      return [];
+    return inputs.flatMap((input, index) => input.image && !isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
+  }
+  liteRtItems(inputs, taskType) {
+    return inputs.map((input) => {
+      const text = promptText(this.spec, input, taskType);
+      if (taskType !== "RETRIEVAL_DOCUMENT" || !this.spec.vision || !input.image)
+        return text;
+      return { text, image: input.image.path };
+    });
+  }
+  async embedLiteRt(embedder, inputs, taskType) {
+    const { vectors, failed } = await this.liteRtVectors(embedder, this.liteRtItems(inputs, taskType), taskType, new Set(taskType === "RETRIEVAL_DOCUMENT" ? this.refusedPictures(inputs) : []), new Set(inputs.flatMap((input, index) => input.image ? [index] : [])));
+    if (failed.length > 0)
+      throw new SourceEmbeddingInputsFailedError(failed, "image_unreadable");
+    return vectors;
+  }
+  async liteRtVectors(embedder, prompts, taskType, refused, localOnly = new Set) {
+    const out = [];
+    const pictures = prompts.flatMap((prompt, index) => typeof prompt !== "string" && !refused.has(index) ? [index] : []);
+    if (pictures.length > 0 && this.picturesHeld()) {
+      throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
+    }
+    const failed = [...refused];
+    for (let offset = 0;offset < prompts.length; offset += LITERT_BATCH) {
+      const batch = prompts.slice(offset, offset + LITERT_BATCH).map((prompt, row) => refused.has(offset + row) && typeof prompt !== "string" ? prompt.text : prompt);
+      const batchPictures = batch.flatMap((prompt, row) => typeof prompt !== "string" ? [offset + row] : []);
+      let vectors;
+      try {
+        let remoteVectors;
+        if (this.remote && taskType === "RETRIEVAL_DOCUMENT" && batch.every((prompt) => typeof prompt === "string") && !prompts.slice(offset, offset + LITERT_BATCH).some((prompt, row) => typeof prompt !== "string" || localOnly.has(offset + row))) {
+          try {
+            remoteVectors = await this.remote.embed(batch);
+          } catch {}
+        }
+        vectors = remoteVectors ?? await this.withSlot(taskType, () => embedder.embed(batch));
+        if (batchPictures.length > 0)
+          this.pictureFaults = undefined;
+      } catch (error) {
+        if (error instanceof LiteRtPictureEngineFaultError) {
+          const count = (this.pictureFaults?.count ?? 0) + 1;
+          if (count < PICTURE_ENGINE_FAULT_LIMIT) {
+            this.pictureFaults = { count };
+            offset -= LITERT_BATCH;
+            continue;
+          }
+          this.pictureFaults = { count: 0, heldUntilMs: this.now() + PICTURE_HOLD_MS };
+          console.warn(`[built-in embedding] the image encoder keeps failing a known-good picture; photos wait ${PICTURE_HOLD_MS / 60000} minutes while text keeps embedding.`);
+          throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
+        }
+        if (error instanceof LiteRtImagesUnavailableError) {
+          throw new SourceEmbeddingInputsFailedError(error.indexes.map((index) => offset + index), "image_encoder_unavailable", "held");
+        }
+        throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; Olympus restarts the model on the next try.");
+      }
+      for (const [row, vector] of vectors.entries()) {
+        if (vector.length === 0) {
+          failed.push(offset + row);
+          out.push(undefined);
+          continue;
+        }
+        if (vector.length !== this.dimension) {
+          throw new OperationError("source_index_error", `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
+        }
+        out.push(refused.has(offset + row) ? undefined : normalize4(vector));
+      }
+    }
+    return { vectors: out, failed: [...new Set(failed)].sort((left, right) => left - right) };
+  }
+  picturesHeld() {
+    const heldUntilMs = this.pictureFaults?.heldUntilMs;
+    return heldUntilMs !== undefined && this.now() < heldUntilMs;
+  }
+  async forward(model, batch) {
+    const rows = batch.length;
+    const length = Math.max(...batch.map((window) => window.ids.length));
+    const inputIds = new BigInt64Array(rows * length);
+    const attentionMask = new BigInt64Array(rows * length);
+    const tokenTypeIds = new BigInt64Array(rows * length);
+    if (model.tokenizer.padId !== 0)
+      inputIds.fill(BigInt(model.tokenizer.padId));
+    batch.forEach((window, row) => {
+      window.ids.forEach((id, column) => {
+        inputIds[row * length + column] = BigInt(id);
+        attentionMask[row * length + column] = 1n;
+      });
+    });
+    let output;
+    try {
+      output = await model.session.run({ inputIds, attentionMask, tokenTypeIds, batchSize: rows, sequenceLength: length });
+    } catch (error) {
+      throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; restarting Olympus reloads the model.");
+    }
+    const expected = [rows, length, this.dimension];
+    if (output.dims.length !== expected.length || output.dims.some((size, axis) => size !== expected[axis])) {
+      throw new OperationError("source_index_error", `The built-in search model returned shape [${output.dims.join(", ")}], expected [${expected.join(", ")}].`);
+    }
+    const hidden = this.dimension;
+    return batch.map((window, row) => {
+      const vector = new Float64Array(hidden);
+      const base = row * length * hidden;
+      if (this.spec.pooling === "cls") {
+        for (let d = 0;d < hidden; d += 1)
+          vector[d] = output.data[base + d];
+      } else {
+        for (let token = 0;token < window.ids.length; token += 1) {
+          const offset = base + token * hidden;
+          for (let d = 0;d < hidden; d += 1)
+            vector[d] += output.data[offset + d];
+        }
+        for (let d = 0;d < hidden; d += 1)
+          vector[d] /= window.ids.length;
+      }
+      return Float64Array.from(normalize4(vector));
+    });
+  }
+}
+function loadTokenizer(path) {
+  const tokenizer = new WordPieceTokenizer(readFileSync18(path, "utf8"));
+  return {
+    tokenize: (text) => tokenizer.tokenize(text),
+    startId: tokenizer.clsId,
+    endId: tokenizer.sepId,
+    padId: tokenizer.padId
+  };
+}
+function promptText(spec, input, taskType) {
+  if (taskType === "RETRIEVAL_QUERY")
+    return `${spec.queryPrefix}${input.title ? `${input.title}
+` : ""}${input.text}`;
+  if (spec.documentPrefix.includes("{title}")) {
+    const title = input.title?.replace(/\s+/g, " ").trim() || "none";
+    return `${spec.documentPrefix.replace("{title}", () => title)}${input.text}`;
+  }
+  return `${spec.documentPrefix}${input.title ? `${input.title}
+` : ""}${input.text}`;
+}
+
+class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
+  status;
+  constructor(status, cause, options = {}) {
+    super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0, 0, options);
+    this.name = "BuiltInEmbeddingNotReadyError";
+    this.status = status;
+    this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
+    this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
+  }
+}
+function builtInEmbeddingOperationError(error) {
+  if (error instanceof OperationError)
+    return error;
+  const message = error instanceof Error ? error.message : String(error);
+  const reason = error instanceof BuiltInEmbeddingInstallError ? error.reason : undefined;
+  return new OperationError("source_index_error", message, reason === "unsupported_platform" ? "Choose another embedding provider for this machine in the model settings." : reason === "download_failed" ? "Check the internet connection; Olympus tries the download again automatically." : reason === "disk_write_failed" ? "Free some disk space; Olympus tries again automatically." : "Olympus removes the bad file and downloads it again automatically.");
+}
+function planBatches(windows) {
+  const ordered = [...windows].sort((left, right) => right.ids.length - left.ids.length);
+  const batches = [];
+  let current = [];
+  let currentLength = 0;
+  for (const window of ordered) {
+    const length = Math.max(currentLength, window.ids.length);
+    if (current.length > 0 && (current.length >= MAX_BATCH_ROWS || length * (current.length + 1) > MAX_BATCH_TOKENS)) {
+      batches.push(current);
+      current = [];
+      currentLength = 0;
+    }
+    current.push(window);
+    currentLength = Math.max(currentLength, window.ids.length);
+  }
+  if (current.length > 0)
+    batches.push(current);
+  return batches;
+}
+function normalize4(vector) {
+  let norm = 0;
+  for (let index = 0;index < vector.length; index += 1)
+    norm += vector[index] * vector[index];
+  norm = Math.sqrt(norm);
+  const out = new Array(vector.length);
+  for (let index = 0;index < vector.length; index += 1)
+    out[index] = norm > 0 ? vector[index] / norm : 0;
+  return out;
+}
+function resolveDevice(env) {
+  const configured = env[BUILT_IN_EMBEDDING_DEVICE_ENV]?.trim().toLowerCase();
+  if (configured && configured !== "cpu" && configured !== "auto") {
+    throw new OperationError("config_error", `${BUILT_IN_EMBEDDING_DEVICE_ENV} must be "auto" or "cpu".`);
+  }
+  return configured === "cpu" ? "cpu" : "auto";
+}
+function resolveThreads(explicit, env) {
+  const configured = explicit ?? (env[BUILT_IN_EMBEDDING_THREADS_ENV]?.trim() ? Number(env[BUILT_IN_EMBEDDING_THREADS_ENV]) : undefined);
+  if (configured !== undefined) {
+    if (!Number.isSafeInteger(configured) || configured < 1) {
+      throw new OperationError("config_error", `${BUILT_IN_EMBEDDING_THREADS_ENV} must be a positive whole number.`);
+    }
+    return configured;
+  }
+  return Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
+}
+var sharedProviders;
+function sharedBuiltInSourceEmbeddingProvider(options) {
+  const model = builtInEmbeddingModel(options.modelId);
+  if (!model) {
+    throw new OperationError("config_error", `This version of Olympus does not include the built-in embedding model "${options.modelId}".`, `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(", ")} for the built-in profile, or update Olympus.`);
+  }
+  const env = options.env ?? process.env;
+  const key = `${builtInEmbeddingPaths(env).root}\x00${options.modelId}`;
+  sharedProviders ??= new Map;
+  let provider = sharedProviders.get(key);
+  if (!provider) {
+    provider = new BuiltInSourceEmbeddingProvider({ env, model });
+    sharedProviders.set(key, provider);
+  }
+  return provider;
+}
+
+// src/workers/embedding-ledger.ts
+var EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
+var recordedIdCache = new Map;
+var EMBEDDING_LEDGER_APPROVAL_TEXT = {
+  [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
+  "system-automatic": "Not approved — the system did this on its own",
+  "unattributed-historical": "Not approved — no decision is on record"
+};
+var WIPED_CORPORA = [
+  "dropbox",
+  "gmail-secure",
+  "drive-secure",
+  "whatsapp-live",
+  "telegram-protected"
+];
+var QWEN3_MODEL_ID = "secure-local-qwen3-embed";
+var QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560";
+var DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1";
+var PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1";
+var GEMINI_MODEL_ID = "gemini-embedding-2";
+var LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
+var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
+  {
+    entry_id: "backfill-2026-08-20-endpoint-retarget",
+    recorded_at: "2026-08-20T02:42:00.000Z",
+    kind: "endpoint_change",
+    what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
+    model_id: QWEN3_MODEL_ID,
+    epoch: QWEN3_EPOCH,
+    endpoint: DELPHI_ROUTER_ENDPOINT,
+    why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
+    approved_by: "unattributed-historical",
+    status: "complete"
+  },
+  {
+    entry_id: "backfill-2026-08-20-invalidation",
+    recorded_at: "2026-08-20T12:03:00.000Z",
+    kind: "invalidation",
+    what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
+    model_id: QWEN3_MODEL_ID,
+    epoch: QWEN3_EPOCH,
+    endpoint: DELPHI_ROUTER_ENDPOINT,
+    scope: { corpora: WIPED_CORPORA },
+    why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
+    approved_by: "system-automatic",
+    status: "complete"
+  },
+  {
+    entry_id: "backfill-2026-08-20-re-embed",
+    recorded_at: "2026-08-20T12:04:00.000Z",
+    kind: "re_embed_started",
+    what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
+    model_id: QWEN3_MODEL_ID,
+    epoch: QWEN3_EPOCH,
+    endpoint: DELPHI_ROUTER_ENDPOINT,
+    scope: { corpora: WIPED_CORPORA },
+    why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
+    approved_by: "system-automatic",
+    status: "in_progress"
+  },
+  {
+    entry_id: "backfill-2026-08-24-model-decision",
+    recorded_at: "2026-08-24T00:00:00.000Z",
+    kind: "model_decision",
+    what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
+    model_id: QWEN3_MODEL_ID,
+    epoch: QWEN3_EPOCH,
+    why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: "complete"
+  },
+  {
+    entry_id: "backfill-2026-08-24-drain-lane-enablement",
+    recorded_at: "2026-08-24T23:30:00.000Z",
+    kind: "note",
+    what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
+    scope: {
+      corpora: LANE_ENABLEMENT_CORPORA,
+      chunks: { dropbox: 52840, "x-bookmarks": 15 }
+    },
+    why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: "complete"
+  },
+  {
+    entry_id: "decision-2026-09-24-readwise-hybrid",
+    recorded_at: "2026-09-24T13:30:00.000Z",
+    kind: "model_decision",
+    what: "Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep " + "vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword " + "retrieval on the models they already embed with — the Personal store on its cloud identity, the " + "Private store on the approved private (Venice) lane — and embedding runs in the lane's own " + "embedding task instead of inside the pull and reconcile.",
+    scope: { corpora: ["readwise", "readwise-secure"] },
+    why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: "complete"
+  },
+  {
+    entry_id: "decision-2026-09-25-chat-lane-catch-up",
+    recorded_at: "2026-09-25T07:00:00.000Z",
+    kind: "model_decision",
+    what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
+    scope: {
+      corpora: [
+        "internal.x.bookmarks",
+        "secure_local.x.bookmarks",
+        "internal.whatsapp.messages",
+        "secure_local.whatsapp.messages",
+        "internal.telegram.messages",
+        "secure_local.telegram.protected.messages"
+      ]
+    },
+    why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: "complete"
+  },
+  {
+    entry_id: "decision-2026-09-30-gmail-catch-up",
+    recorded_at: "2026-09-30T21:05:00.000Z",
+    kind: "model_decision",
+    what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
+    scope: { corpora: ["internal.email"] },
+    why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
+    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
+    status: "complete"
+  }
+];
+
+// src/workers/answer-activity.ts
+var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+
+// src/core/request-peer.ts
+var ownerSockets = new WeakSet;
+var peers = new WeakMap;
+
+// src/core/open-targets.ts
+var OPEN_CONNECT_SOURCES = {
+  x: { sourceId: "x.bookmarks", label: "X bookmarks" },
+  readwise: { sourceId: "readwise.library", label: "Readwise" },
+  telegram: { sourceId: "telegram.messages", label: "Telegram" },
+  whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" },
+  evernote: { sourceId: "evernote.notes", label: "Evernote" }
+};
+var OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+var OPEN_UNREADABLE_SOURCES = {
+  dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+  drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+  whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+};
+function allOpenTargets() {
+  return [
+    { kind: "dashboard" },
+    { kind: "private_answers" },
+    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
+    { kind: "archives" }
+  ];
+}
+function openTargetToken(target) {
+  if (target.kind === "private_answers")
+    return target.answerId ? `page.private.${target.answerId}` : "page.private";
+  if (target.kind === "connect")
+    return `connect.${target.source}`;
+  if (target.kind === "fix")
+    return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
+  return;
+}
+function openTargetTokenPattern() {
+  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isConnectOpenTarget(target) {
+  return target.kind === "connect";
+}
+function isKeysOpenTarget(target) {
+  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function tokenPattern(filter) {
+  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function keysOpenTargetTokenPattern() {
+  return tokenPattern(isKeysOpenTarget);
+}
+function connectOpenTargetTokenPattern() {
+  return tokenPattern(isConnectOpenTarget);
+}
+function privateAnswersOpenTargetTokenPattern() {
+  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
+}
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable" || target.kind === "archives";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+var DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open";
+var DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+
+// src/core/dashboard-launch.ts
+var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket";
+var DASHBOARD_UNLOCK_STORAGE_KEY = "olympus-dashboard-unlock-v1";
+var DASHBOARD_UNLOCK_HEADER = "X-Olympus-Dashboard-Unlock";
+var DASHBOARD_UNLOCK_SHELL_HEADER = "X-Olympus-Dashboard-Shell";
+var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var CONNECT = /${connectOpenTargetTokenPattern()}/;
+        var PANEL = /${panelOpenTargetTokenPattern()}/;
+        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
+        var status = document.getElementById('status');
+        var open = '';
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          var params = new URLSearchParams(hash);
+          // Where to land: one of a closed list, or the plain dashboard.
+          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
+          if (OPEN.test(wanted)) open = wanted;
+          return params.get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
+          window.location.replace('/dashboard');
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (!response.ok) return response;
+          // This browser's key for later plain navigations (#1187): kept per origin, so per port.
+          return response.json().then(function (body) {
+            try {
+              if (body && typeof body.unlock_key === 'string') window.localStorage.setItem('${DASHBOARD_UNLOCK_STORAGE_KEY}', body.unlock_key);
+            } catch (e) {}
+            return response;
+          }, function () { return response; });
+        }).then(function (response) {
+          // A link already used or expired (a reload, a second open) still
+          // lands on the dashboard: the session it opened is in its cookie,
+          // and without one the dashboard itself offers the way back in.
+          if (response.ok || response.status === 403) {
+            // Connect lands on Connect a source, where the computer's setup sheets live; a
+            // model fix lands on Privacy settings (?keys), where the models live. Each only
+            // opens something there, never submits anything.
+            // A panel target (See why on one source) lands on the dashboard there.
+            // Private answers lands on that page, carrying nothing.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(CONNECT.test(open)
+              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
+            return;
+          }
+          // Anything else: the dashboard is the way in (its session, or how to get one).
+          window.location.replace('/dashboard');
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
+var DASHBOARD_UNLOCK_SHELL_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      code { color: #e8e6e3; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail"></p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_UNLOCK_STORAGE_KEY}';
+        var SHELL = '${DASHBOARD_UNLOCK_SHELL_HEADER}';
+        var HEADER = '${DASHBOARD_UNLOCK_HEADER}';
+        var status = document.getElementById('status');
+        var detail = document.getElementById('detail');
+        function locked() {
+          try { window.localStorage.removeItem(KEY); } catch (e) {}
+          status.textContent = 'Dashboard controls are locked';
+          detail.textContent = 'Run ';
+          var command = document.createElement('code');
+          command.textContent = 'olympus dashboard';
+          detail.appendChild(command);
+          detail.appendChild(document.createTextNode(' in a terminal on this computer to open it again.'));
+        }
+        function failed() {
+          status.textContent = 'Opening failed.';
+          detail.textContent = 'Reload this page to try again.';
+        }
+        var key = '';
+        try { key = window.localStorage.getItem(KEY) || ''; } catch (e) {}
+        if (!key) { locked(); return; }
+        var headers = {};
+        headers[HEADER] = key;
+        fetch(window.location.href, {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          headers: headers
+        }).then(function (response) {
+          // A page that moved: go there, and its own navigation proves itself the same way.
+          if (response.redirected) { window.location.replace(response.url); return; }
+          if (response.headers.get(SHELL) || response.status === 401 || response.status === 403) { locked(); return; }
+          var type = response.headers.get('Content-Type') || '';
+          if (!response.ok || type.indexOf('text/html') !== 0) { failed(); return; }
+          return response.text().then(function (html) {
+            document.open();
+            document.write(html);
+            document.close();
+          });
+        }).catch(failed);
+      }());
+    </script>
+  </body>
+</html>
+`;
+
+// src/workers/http.ts
+var DASHBOARD_CONTROL_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+var AGENT_MINT_PATHS = new Set(["/dashboard/agents/pairing-code", "/dashboard/agents/keys"]);
+var AGENT_MINT_WINDOW_MS = 10 * 60000;
+var REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
+
+// src/workers/engine-split/commands.ts
+var ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
+var ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
+var forwardedRecordIds = new WeakMap;
+var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+
+// src/workers/connector-store/tier-visibility.ts
+function childLane(scope) {
+  const stores = scope.stores;
+  return stores ? { ledger: () => scope.ledger, stores } : undefined;
+}
+function* effectiveItemVerdicts(scopes, inputs) {
+  const verdicts = inputs.map(() => ({ tier: "legacy", gone: false }));
+  if (inputs.length === 0)
+    return verdicts;
+  for (const scope of scopes()) {
+    const governed = [];
+    inputs.forEach((input, index) => {
+      if (!scope.corpusIds.has(input.corpusId))
+        return;
+      if (!input.accountScope || !input.provider || !input.providerItemId) {
+        verdicts[index] = { tier: "unknown", gone: false };
+        return;
+      }
+      governed.push({
+        index,
+        identity: {
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: input.providerItemId,
+          ...input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}
+        }
+      });
+    });
+    if (governed.length === 0)
+      continue;
+    const identities = governed.map(({ identity }) => identity);
+    const states = yield* visibilityRead(() => memoVisibilityItemsHere(scope.ledger, "states", () => scope.ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => scope.ledger.itemStatesForMany(missing)), () => itemStatesOffThread(scope.ledger, identities));
+    for (const { index, identity } of governed) {
+      const state = states.get(tierLedgerIdentityKey(identity));
+      if (!state)
+        continue;
+      const { record, copies, override } = state;
+      const namesOnly = inputs[index].layer === "names";
+      const tiers = namesOnly ? [record.metadataTier, record.targetMetadataTier] : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+      if (override?.kind === "tier")
+        tiers.push(override.tier);
+      const held = record.metadataPending || !namesOnly && contentHeldForJudgment(record);
+      verdicts[index] = {
+        tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
+        gone: record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata"))
+      };
+    }
+    const lane = childLane(scope);
+    if (lane) {
+      const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter(({ index }) => inputs[index].dependency !== "parent_label").map(({ identity }) => identity));
+      for (const { index, identity } of governed) {
+        if (inputs[index].dependency !== "parent_label" && orphaned.has(tierLedgerIdentityKey(identity))) {
+          verdicts[index] = { ...verdicts[index], gone: true, hiddenByParent: true };
+        }
+      }
+      const named = governed.filter(({ index }) => inputs[index].dependency === "parent_label");
+      if (named.length > 0) {
+        const standing = yield* itemVerdictsSteps(lane, named.map(({ identity }) => identity));
+        for (const { index, identity } of named) {
+          if (standing.get(tierLedgerIdentityKey(identity))?.visible !== true)
+            verdicts[index] = { ...verdicts[index], gone: true };
+        }
+      }
+    }
+  }
+  return verdicts;
+}
+
 // src/core/source-index/reactions.ts
 var MAX_SOURCE_REACTION_TOKENS = 32;
 var MAX_SOURCE_REACTION_KEY_CHARS = 64;
@@ -21764,126 +23746,6 @@ function compareStrings(left, right) {
   if (left === right)
     return 0;
   return left < right ? -1 : 1;
-}
-
-// src/workers/source-index/media-judge.ts
-var MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
-  "id_document",
-  "bank_card",
-  "financial_document",
-  "medical_document",
-  "intimate"
-];
-var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
-var MEDIA_JUDGE_TEXT_DECIDES = "text_decides";
-var MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29";
-var MEDIA_JUDGE_PROMPTS = Object.freeze({
-  id_document: "a photo of a passport, national identity card or driving licence",
-  bank_card: "a photo of a credit card, debit card or bank card",
-  financial_document: "a bank statement, payslip or document showing account numbers",
-  medical_document: "a medical report or lab test results document",
-  intimate: "a nude, intimate or sexually explicit photo",
-  ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
-});
-var MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ";
-var MEDIA_JUDGE_THRESHOLDS = Object.freeze({
-  margin: 0.04,
-  intimateMargin: 0.025
-});
-function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
-}
-function dot(left, right) {
-  let sum = 0;
-  const length = Math.min(left.length, right.length);
-  for (let index = 0;index < length; index += 1)
-    sum += left[index] * right[index];
-  return sum;
-}
-function rounded(value) {
-  return Math.round(value * 1e4) / 1e4;
-}
-function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  const ordinary = scores.ordinary;
-  const sensitive = MEDIA_JUDGE_SENSITIVE_CATEGORIES.map((category) => [category, scores[category]]);
-  if (typeof ordinary !== "number" || !Number.isFinite(ordinary) || sensitive.some(([, score]) => typeof score !== "number" || !Number.isFinite(score))) {
-    return { verdict: "unjudged", judgeId, reason: "scores_unavailable" };
-  }
-  let top = sensitive[0][0];
-  let topScore = -Infinity;
-  for (const [category, score] of sensitive) {
-    if (score > topScore) {
-      top = category;
-      topScore = score;
-    }
-  }
-  const margin = topScore - ordinary;
-  const intimateMargin = scores.intimate - ordinary;
-  const kept = Object.fromEntries(Object.entries(scores).map(([key, value]) => [key, rounded(value)]));
-  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
-    return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
-  }
-  let pictureTop;
-  for (const [category, score] of sensitive) {
-    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
-      continue;
-    if (!pictureTop || score > scores[pictureTop])
-      pictureTop = category;
-  }
-  if (pictureTop) {
-    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
-  }
-  if (intimateMargin >= thresholds.intimateMargin) {
-    return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
-  }
-  if (margin >= thresholds.margin) {
-    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
-  }
-  return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
-}
-function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  if (!imageVector || imageVector.length === 0)
-    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
-  if (Math.hypot(...imageVector) < 0.000001)
-    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
-  const scores = {};
-  for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
-    scores[category] = dot(imageVector, promptVectors[category]);
-  }
-  return judgeMediaScores(scores, judgeId, thresholds);
-}
-function canJudgeMedia(provider) {
-  return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
-}
-var promptVectorCache = new Map;
-function mediaJudgePromptVectors(provider) {
-  const key = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
-  let cached = promptVectorCache.get(key);
-  if (!cached) {
-    const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
-    cached = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
-      if (vectors.length !== categories.length || vectors.some((vector) => vector.length === 0)) {
-        throw new Error("The photo judge's descriptions could not be embedded.");
-      }
-      return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
-    });
-    promptVectorCache.set(key, cached);
-    cached.catch(() => promptVectorCache.delete(key));
-  }
-  return cached;
-}
-async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  if (images.length === 0)
-    return [];
-  const prompts = await mediaJudgePromptVectors(provider);
-  const vectors = await provider.embedImageVectors([...images]);
-  const judgeId = mediaJudgeId(provider, thresholds);
-  return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
-}
-async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  const prompts = await mediaJudgePromptVectors(provider);
-  const judgeId = mediaJudgeId(provider, thresholds);
-  return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
 }
 
 // src/workers/connector-store/local-index.ts
@@ -23000,9 +24862,9 @@ class LocalConnectorStore {
       assertStoreTierLedgerCanOpen(this.dbPath);
       assertWritableStoreOpenAllowed("connector store", this.dbPath);
       if (this.dbPath !== ":memory:")
-        mkdirSync13(dirname21(this.dbPath), { recursive: true, mode: 448 });
+        mkdirSync13(dirname23(this.dbPath), { recursive: true, mode: 448 });
     }
-    const creatingFile = this.dbPath === ":memory:" || !existsSync20(this.dbPath);
+    const creatingFile = this.dbPath === ":memory:" || !existsSync21(this.dbPath);
     this.db = new Database6(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
     this.openedFile = fileIdentity(this.dbPath);
     try {
@@ -23184,7 +25046,7 @@ class LocalConnectorStore {
     try {
       if (this.db.query("PRAGMA auto_vacuum").get().auto_vacuum !== 0)
         return 0;
-      return Math.ceil(statSync12(this.dbPath).size / RECLAIM_CONVERSION_BYTES_PER_MS);
+      return Math.ceil(statSync13(this.dbPath).size / RECLAIM_CONVERSION_BYTES_PER_MS);
     } catch {
       return 0;
     }
@@ -23196,7 +25058,7 @@ class LocalConnectorStore {
       pages: this.db.query("PRAGMA page_count").get().page_count,
       free: this.db.query("PRAGMA freelist_count").get().freelist_count,
       pageBytes: this.db.query("PRAGMA page_size").get().page_size,
-      bytes: statSync12(this.dbPath).size
+      bytes: statSync13(this.dbPath).size
     };
   }
   async reclaimFreePages(budgetMs, options = {}) {
@@ -23206,8 +25068,8 @@ class LocalConnectorStore {
     if (converting) {
       if (this.reclaimKilledAttempts >= 3 && storeOwnerIdleMs(this.now().getTime()) < 10 * 60000)
         return;
-      const neededBytes = 2 * statSync12(this.dbPath).size + 1024 ** 3;
-      const disk = (options.statfs ?? statfsSync)(dirname21(this.dbPath));
+      const neededBytes = 2 * statSync13(this.dbPath).size + 1024 ** 3;
+      const disk = (options.statfs ?? statfsSync)(dirname23(this.dbPath));
       const availableBytes = Number(disk.bavail) * Number(disk.bsize);
       if (!Number.isFinite(availableBytes) || availableBytes < neededBytes) {
         console.info(`[store-reclaim] conversion_skipped reason=disk_space needed_bytes=${neededBytes} available_bytes=${availableBytes}`);
@@ -23234,7 +25096,7 @@ class LocalConnectorStore {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "ignore",
-      env: { ...process.env, SQLITE_TMPDIR: dirname21(this.dbPath), TMPDIR: dirname21(this.dbPath) }
+      env: { ...process.env, SQLITE_TMPDIR: dirname23(this.dbPath), TMPDIR: dirname23(this.dbPath) }
     });
     this.reclaimProcess = child;
     let preempted = false;
@@ -23298,12 +25160,34 @@ class LocalConnectorStore {
   governingTierLedger() {
     return this.visibilityLedger();
   }
+  effectiveItemTiers(identities, layer) {
+    try {
+      const ledger = this.governingTierLedger();
+      return visibilityHere(effectiveItemVerdicts(() => ledger ? [{ ledger, corpusIds: new Set([this.corpusId]) }] : [], identities.map((identity) => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...layer ? { layer } : {} })))).map((verdict) => verdict.gone && verdict.tier !== "secret" ? "private" : verdict.tier);
+    } catch {
+      return identities.map(() => "private");
+    }
+  }
+  effectiveLocalItemTier(localItemId) {
+    const row = this.db.query(`
+      SELECT provider, account_scope, provider_item_id, provider_conversation_id
+      FROM items WHERE local_item_id = ? AND tombstoned = 0 LIMIT 1
+    `).get(localItemId);
+    if (!row)
+      return "private";
+    return this.effectiveItemTiers([{
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+    }])[0];
+  }
   tierLedger() {
     if (this.tierLedgerDisabled === true)
       return;
     if (!this.tierLedgerHandle) {
       const path = tierLedgerPathForStore(this.dbPath);
-      if (this.readOnly && (path === ":memory:" || !existsSync20(path)))
+      if (this.readOnly && (path === ":memory:" || !existsSync21(path)))
         return;
       this.tierLedgerHandle = new TierLedger({ dbPath: path, now: this.now, ...this.readOnly ? { readOnly: true } : {} });
       this.tierLedgerOwned = true;
@@ -23417,7 +25301,7 @@ class LocalConnectorStore {
     if (this.tierLedgerDisabled === true)
       return;
     const path = tierLedgerPathForStore(this.dbPath);
-    if (path === ":memory:" || !existsSync20(path))
+    if (path === ":memory:" || !existsSync21(path))
       return;
     return this.tierLedger();
   }
@@ -25355,7 +27239,7 @@ ${parentKey(ref)}`, { ref, origin });
       seen.add(sha);
       if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha))
         continue;
-      if (!isMediaCachePath(row.media_path, sha) || !existsSync20(row.media_path))
+      if (!isMediaCachePath(row.media_path, sha) || !existsSync21(row.media_path))
         continue;
       images.push({ path: row.media_path, sha256: sha, mimeType: "image/jpeg" });
     }
@@ -26790,7 +28674,7 @@ ${parentKey(ref)}`, { ref, origin });
         embeddingsComplete: false
       };
     }
-    const chunkTextCoherent = chunkRows.every((chunk) => createHash11("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+    const chunkTextCoherent = chunkRows.every((chunk) => createHash12("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
     if (!chunkTextCoherent) {
       return {
         chunksIndexed: 0,
@@ -27107,7 +28991,7 @@ ${parentKey(ref)}`, { ref, origin });
         WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
       `).all();
       for (const row of rows) {
-        if (existsSync20(row.media_path))
+        if (existsSync21(row.media_path))
           retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
       }
       reassertedMediaHolders.add(holderKey);
@@ -27369,8 +29253,8 @@ ${parentKey(ref)}`, { ref, origin });
       throw new Error("Connector store trust reconciliation requires two distinct stores.");
     }
     if (this.dbPath !== ":memory:" && options.stricter.dbPath !== ":memory:") {
-      const looserFile = statSync12(this.dbPath);
-      const stricterFile = statSync12(options.stricter.dbPath);
+      const looserFile = statSync13(this.dbPath);
+      const stricterFile = statSync13(options.stricter.dbPath);
       if (looserFile.dev === stricterFile.dev && looserFile.ino === stricterFile.ino) {
         throw new Error("Connector store trust reconciliation refuses one database as both stores.");
       }
@@ -27700,8 +29584,8 @@ ${parentKey(ref)}`, { ref, origin });
       itemsUnchanged: 0,
       itemsMissing: 0
     };
-    const inputDigest = createHash11("sha256");
-    const outputDigest = createHash11("sha256");
+    const inputDigest = createHash12("sha256");
+    const outputDigest = createHash12("sha256");
     const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -27778,8 +29662,8 @@ ${parentKey(ref)}`, { ref, origin });
       ftsRowsRefreshed: 0,
       chunkEmbeddingInputsInvalidated: 0
     };
-    const inputDigest = createHash11("sha256");
-    const outputDigest = createHash11("sha256");
+    const inputDigest = createHash12("sha256");
+    const outputDigest = createHash12("sha256");
     let lastItemPk = startAfter;
     let hasMore = false;
     while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -29271,14 +31155,21 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(JSON.stringify(itemPks));
     const current = new Map(currentRows.map((row) => [row.item_pk, row]));
     const hidden = this.embeddingHiddenAmong(currentRows, this.canEmbedHeld(provider));
+    const verdicts = this.effectiveItemTiers(currentRows.map((item) => ({
+      provider: item.provider,
+      accountScope: item.account_scope,
+      providerItemId: item.provider_item_id,
+      ...item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}
+    })));
+    const tiers = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
     const kept = [];
     let privateTier = 0;
     let notVisible = 0;
     for (const row of batch) {
       const item = current.get(row.item_pk);
-      if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || hidden.has(row.item_pk)) {
+      if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || tiers.get(row.item_pk) === "secret" || hidden.has(row.item_pk)) {
         notVisible += 1;
-      } else if (embeddableTiers !== undefined && !embeddableTiers.includes(item.trust_tier)) {
+      } else if (embeddableTiers !== undefined && (!embeddableTiers.includes(item.trust_tier) || tiers.get(row.item_pk) === "private" || tiers.get(row.item_pk) === "unknown")) {
         privateTier += 1;
       } else {
         kept.push(row);
@@ -29526,7 +31417,7 @@ ${parentKey(ref)}`, { ref, origin });
             continue;
           if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
             skip.add(row);
-          } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync20(row.media_path)) {
+          } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync21(row.media_path)) {
             this.clearChunkMedia(row.chunk_pk, row.item_pk);
             skip.add(row);
           }
@@ -31251,14 +33142,14 @@ ${parentKey(ref)}`, { ref, origin });
       return;
     let fd;
     try {
-      fd = openSync10(`${this.dbPath}-wal`, "r");
+      fd = openSync11(`${this.dbPath}-wal`, "r");
       fsyncSync3(fd);
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
     } finally {
       if (fd !== undefined)
-        closeSync10(fd);
+        closeSync11(fd);
     }
   }
   async durabilityBarrierOffLoop() {
@@ -32006,7 +33897,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash11("sha256");
+  const digest = createHash12("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -32173,7 +34064,7 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash11("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash12("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -34001,7 +35892,7 @@ function requireNonEmpty(value, label) {
   return text;
 }
 function hashString2(value) {
-  return createHash11("sha256").update(value).digest("hex");
+  return createHash12("sha256").update(value).digest("hex");
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -34013,7 +35904,7 @@ function fileIdentity(path) {
   if (path === ":memory:" || path === "")
     return;
   try {
-    const stat = statSync12(path);
+    const stat = statSync13(path);
     return { dev: stat.dev, ino: stat.ino };
   } catch {
     return;
@@ -34027,131 +35918,6 @@ function sqliteJournalSettingsOf(db) {
   };
 }
 
-// src/workers/embedding-ledger.ts
-var EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
-var recordedIdCache = new Map;
-var EMBEDDING_LEDGER_APPROVAL_TEXT = {
-  [EMBEDDING_LEDGER_OWNER_APPROVAL]: "Approved in advance by the owner",
-  "system-automatic": "Not approved — the system did this on its own",
-  "unattributed-historical": "Not approved — no decision is on record"
-};
-var WIPED_CORPORA = [
-  "dropbox",
-  "gmail-secure",
-  "drive-secure",
-  "whatsapp-live",
-  "telegram-protected"
-];
-var QWEN3_MODEL_ID = "secure-local-qwen3-embed";
-var QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560";
-var DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1";
-var PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1";
-var GEMINI_MODEL_ID = "gemini-embedding-2";
-var LANE_ENABLEMENT_CORPORA = ["dropbox", "readwise", "x-bookmarks"];
-var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
-  {
-    entry_id: "backfill-2026-08-20-endpoint-retarget",
-    recorded_at: "2026-08-20T02:42:00.000Z",
-    kind: "endpoint_change",
-    what: `The embedding endpoint was retargeted from ${PREVIOUS_ENDPOINT} to the Delphi router at ` + `${DELPHI_ROUTER_ENDPOINT}, in commit 8ad61fa9. The model and the epoch did not change.`,
-    model_id: QWEN3_MODEL_ID,
-    epoch: QWEN3_EPOCH,
-    endpoint: DELPHI_ROUTER_ENDPOINT,
-    why: "To move embedding traffic onto the Delphi router along with everything else. It was " + "understood at the time as a routing change, and nobody expected it to touch stored vectors.",
-    approved_by: "unattributed-historical",
-    status: "complete"
-  },
-  {
-    entry_id: "backfill-2026-08-20-invalidation",
-    recorded_at: "2026-08-20T12:03:00.000Z",
-    kind: "invalidation",
-    what: "Between roughly 02:42 and 12:03 UTC the endpoint change altered the embedding config " + "hash, and the currency check treated the new hash as a different configuration. It emptied " + "chunk_embeddings in five connector stores — on the order of 240,000 stored vectors, though " + "no exact count was recorded before they were gone.",
-    model_id: QWEN3_MODEL_ID,
-    epoch: QWEN3_EPOCH,
-    endpoint: DELPHI_ROUTER_ENDPOINT,
-    scope: { corpora: WIPED_CORPORA },
-    why: "Nothing intended this. The config hash covered the endpoint, so a routing change was " + "indistinguishable from a model change, and the invalidation followed automatically.",
-    approved_by: "system-automatic",
-    status: "complete"
-  },
-  {
-    entry_id: "backfill-2026-08-20-re-embed",
-    recorded_at: "2026-08-20T12:04:00.000Z",
-    kind: "re_embed_started",
-    what: "The embedding drain began recomputing every wiped vector on the same model it had used " + "before. This has been running since and is not finished.",
-    model_id: QWEN3_MODEL_ID,
-    epoch: QWEN3_EPOCH,
-    endpoint: DELPHI_ROUTER_ENDPOINT,
-    scope: { corpora: WIPED_CORPORA },
-    why: "The vectors were gone and the corpora could not be searched properly without them. The " + "drain picked the work up on its own; nobody scheduled it.",
-    approved_by: "system-automatic",
-    status: "in_progress"
-  },
-  {
-    entry_id: "backfill-2026-08-24-model-decision",
-    recorded_at: "2026-08-24T00:00:00.000Z",
-    kind: "model_decision",
-    what: `Stay on ${QWEN3_MODEL_ID}. From now on, any change to the embedding model, endpoint or ` + "epoch — and any re-embed — needs the owner's approval before it happens, and gets an entry " + "here.",
-    model_id: QWEN3_MODEL_ID,
-    epoch: QWEN3_EPOCH,
-    why: "The owner researched the alternatives himself and concluded the current model is the right " + "one to keep. The approval rule is the answer to 2026-08-20: the wipe was possible because an " + "embedding change could happen without anyone deciding to make one.",
-    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-    status: "complete"
-  },
-  {
-    entry_id: "backfill-2026-08-24-drain-lane-enablement",
-    recorded_at: "2026-08-24T23:30:00.000Z",
-    kind: "note",
-    what: "Three corpora that need embeddings had no drain lane driving them, so nothing was ever " + `going to finish them. The owner approved adding one each. Dropbox's connector store embeds ` + `on ${QWEN3_MODEL_ID} (52,840 of its 69,512 chunks were waiting); the Readwise library and ` + `the X bookmarks store embed on ${GEMINI_MODEL_ID} (roughly 7,700 of about 15,400 chunks ` + "waiting, and 15 of 2,992 respectively).",
-    scope: {
-      corpora: LANE_ENABLEMENT_CORPORA,
-      chunks: { dropbox: 52840, "x-bookmarks": 15 }
-    },
-    why: "These are lanes being switched on, not a model or epoch change: each corpus embeds on the " + "model it already stores vectors under, and no existing vector is invalidated — the lanes " + "only fill in chunks that have none. The owner approved this in advance, which is the rule " + "2026-08-20 produced.",
-    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-    status: "complete"
-  },
-  {
-    entry_id: "decision-2026-09-24-readwise-hybrid",
-    recorded_at: "2026-09-24T13:30:00.000Z",
-    kind: "model_decision",
-    what: "Readwise: use existing embeddings for hybrid answers; decouple embedding from sync; keep " + "vectors. Both Readwise tier stores (Personal and Private) now answer with semantic plus keyword " + "retrieval on the models they already embed with — the Personal store on its cloud identity, the " + "Private store on the approved private (Venice) lane — and embedding runs in the lane's own " + "embedding task instead of inside the pull and reconcile.",
-    scope: { corpora: ["readwise", "readwise-secure"] },
-    why: "The Readwise stores were declared keyword-only while the sync embedded every chunk inline, so " + "the vectors were paid for and never used, and a Venice embedding timeout failed the whole sync " + "(live, 2026-09-24). No model, endpoint or epoch changes, no existing vector is invalidated or " + "re-embedded; only chunks with no vector yet are embedded, by the embedding task, with backoff " + "when the provider does not answer.",
-    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-    status: "complete"
-  },
-  {
-    entry_id: "decision-2026-09-25-chat-lane-catch-up",
-    recorded_at: "2026-09-25T07:00:00.000Z",
-    kind: "model_decision",
-    what: "Chat lanes (X bookmarks, WhatsApp, Telegram): the embedding sweep also embeds every " + "chunk still missing a vector in a hybrid or shadow corpus, not only chunks a sync queued, so items whose " + "embedding was deferred or lost across a restart catch up.",
-    scope: {
-      corpora: [
-        "internal.x.bookmarks",
-        "secure_local.x.bookmarks",
-        "internal.whatsapp.messages",
-        "secure_local.whatsapp.messages",
-        "internal.telegram.messages",
-        "secure_local.telegram.protected.messages"
-      ]
-    },
-    why: "Deferred chat chunks otherwise stay without a vector for good (WhatsApp and Telegram only " + "re-list an item when it changes). No model, endpoint or epoch changes and no existing vector " + "is re-embedded; a store with an old backlog embeds it once on its approved identity, bounded " + "per pass, with the backlog and estimated cost shown on the source page and in doctor.",
-    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-    status: "complete"
-  },
-  {
-    entry_id: "decision-2026-09-30-gmail-catch-up",
-    recorded_at: "2026-09-30T21:05:00.000Z",
-    kind: "model_decision",
-    what: "Gmail: the embedding sweep also embeds every chunk still missing a vector, not only chunks " + "a sync queued, so the existing mail backlog (about 186,000 chunks) is embedded once on the " + "store's approved identity.",
-    scope: { corpora: ["internal.email"] },
-    why: "The owner approved the one-time cloud embedding spend for the mail backlog (estimated " + "US$20-25 at the provider's published rate) on 2026-09-30. No model, endpoint or epoch changes " + "and no existing vector is re-embedded; bounded per pass, with the backlog and estimated cost " + "shown on the source page and in doctor.",
-    approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
-    status: "complete"
-  }
-];
-
 // src/workers/connector-store/tier-auto-prune-sweep.ts
 var RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
 var sweeping = new WeakSet;
@@ -34164,1374 +35930,6 @@ var SQLITE_FIXED_MESSAGES = new Set([
   "attempt to write a readonly database",
   "database disk image is malformed"
 ]);
-
-// src/workers/source-index/built-in-embedding/provider.ts
-import { isMainThread as isMainThread5 } from "node:worker_threads";
-import { createHash as createHash12 } from "node:crypto";
-import { readFileSync as readFileSync18 } from "node:fs";
-import { availableParallelism } from "node:os";
-import { dirname as dirname23, join as join24 } from "node:path";
-
-// src/workers/source-index/built-in-embedding/litert-runtime.ts
-import { isMainThread as isMainThread4 } from "node:worker_threads";
-import { execFileSync as execFileSync2, spawn } from "node:child_process";
-import { closeSync as closeSync11, constants as constants4, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync11, readdirSync as readdirSync4, readFileSync as readFileSync16, statSync as statSync13 } from "node:fs";
-import { homedir as homedir10 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname22, isAbsolute as isAbsolute14, join as join22 } from "node:path";
-import { createInterface } from "node:readline";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
-
-class LiteRtImagesUnavailableError extends Error {
-  indexes;
-  constructor(indexes) {
-    super("The built-in search model is running without its image encoder.");
-    this.name = "LiteRtImagesUnavailableError";
-    this.indexes = indexes;
-  }
-}
-
-class LiteRtPictureEngineFaultError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "LiteRtPictureEngineFaultError";
-  }
-}
-
-class LiteRtHelperReplacedError extends Error {
-  done;
-  reason;
-  constructor(message, reason, done) {
-    super(message);
-    this.name = "LiteRtHelperReplacedError";
-    this.reason = reason;
-    this.done = done;
-  }
-}
-var helperReplacements = 0;
-var REQUEST_TIMEOUT_MS = 3 * 60000;
-var HELPER_WORKING_CPU_MS = 1000;
-function helperCpuMs(pid, platform = process.platform) {
-  if (pid === undefined)
-    return;
-  try {
-    if (platform === "linux") {
-      const stat = readFileSync16(`/proc/${pid}/stat`, "utf8");
-      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      const ticks = Number(fields[11]) + Number(fields[12]);
-      return Number.isFinite(ticks) ? ticks * 10 : undefined;
-    }
-    if (platform === "darwin") {
-      const text = execFileSync2("/bin/ps", ["-o", "time=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
-      const [days, clock] = text.includes("-") ? text.split("-") : ["0", text];
-      const parts = clock.split(":").map(Number);
-      const seconds = parts.reduce((sum, part) => sum * 60 + part, 0) + Number(days) * 86400;
-      return Number.isFinite(seconds) ? seconds * 1000 : undefined;
-    }
-  } catch {}
-  return;
-}
-function helperEnvironment() {
-  const env = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value === undefined)
-      continue;
-    if (["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"].includes(name) || name.startsWith("VK_")) {
-      env[name] = value;
-    }
-  }
-  env.HOME ??= homedir10();
-  return env;
-}
-
-class HelperProcess {
-  child;
-  device = "cpu";
-  vision = false;
-  nextId = 1;
-  pending = new Map;
-  stderr = "";
-  requestTimeoutMs;
-  stopTimeoutMs;
-  exited = false;
-  constructor(child, options) {
-    this.child = child;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
-    this.stopTimeoutMs = options.stopTimeoutMs ?? 5000;
-  }
-  failAll(reason, why = "stopped") {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      helperReplacements += 1;
-      console.warn(`[built-in embedding] helper replaced (${why}) after ${Math.round((Date.now() - pending.startedAt) / 1000)} s on a batch of ${pending.count} item(s), ${pending.pictures} with a picture, ${pending.done.size} already answered; replacement ${helperReplacements} in this process.`);
-      pending.reject(new LiteRtHelperReplacedError(reason.message, why, pending.done));
-    }
-    this.pending.clear();
-  }
-  static start(options, device) {
-    const settings = {
-      library: options.library,
-      model: options.model,
-      cacheDir: options.cacheDir,
-      threads: options.threads,
-      device,
-      maxInputTokens: options.maxInputTokens,
-      ...options.visionTokensPerImage !== undefined ? { visionTokensPerImage: options.visionTokensPerImage } : {}
-    };
-    const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: helperEnvironment()
-    });
-    const helper = new HelperProcess(child, options);
-    child.stdin.on("error", (error) => {
-      helper.exited = true;
-      helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
-      child.kill("SIGKILL");
-    });
-    return new Promise((resolve, reject) => {
-      let started = false;
-      const timer = setTimeout(() => {
-        if (started)
-          return;
-        child.kill("SIGKILL");
-        reject(new Error("The built-in search model took too long to start."));
-      }, options.startTimeoutMs ?? 5 * 60000);
-      child.stderr.on("data", (chunk) => {
-        helper.stderr = (helper.stderr + chunk.toString("utf8")).slice(-4000);
-      });
-      createInterface({ input: child.stdout }).on("line", (line) => {
-        let message;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          return;
-        }
-        if (!started) {
-          if (message.ready) {
-            started = true;
-            clearTimeout(timer);
-            helper.device = message.device === "gpu" ? "gpu" : "cpu";
-            helper.vision = message.vision === true;
-            resolve(helper);
-          } else if (message.fatal) {
-            started = true;
-            clearTimeout(timer);
-            reject(Object.assign(new Error(message.fatal), { fatal: true }));
-          }
-          return;
-        }
-        helper.settle(message);
-      });
-      child.on("error", (error) => {
-        if (!started) {
-          started = true;
-          clearTimeout(timer);
-          reject(error);
-        }
-      });
-      child.on("exit", () => {
-        helper.exited = true;
-      });
-      child.on("close", (code, signal) => {
-        helper.exited = true;
-        const reason = new Error(`The built-in search model stopped (${signal ?? `exit ${code}`})${helper.stderr ? `: ${helper.stderr.trim().split(`
-`).at(-1)}` : ""}.`);
-        if (!started) {
-          started = true;
-          clearTimeout(timer);
-          reject(reason);
-        }
-        if (helper.replacing)
-          return;
-        helper.failAll(reason, signal ?? `exit ${code}`);
-      });
-    });
-  }
-  replacing = false;
-  watch(id) {
-    return setTimeout(() => {
-      const pending = this.pending.get(id);
-      if (!pending)
-        return;
-      const cpuMs = helperCpuMs(this.child.pid);
-      const working = pending.progressed || cpuMs !== undefined && pending.cpuMs !== undefined && cpuMs - pending.cpuMs >= Math.min(HELPER_WORKING_CPU_MS, this.requestTimeoutMs / 4);
-      if (working) {
-        pending.progressed = false;
-        pending.cpuMs = cpuMs;
-        pending.timer = this.watch(id);
-        return;
-      }
-      this.replacing = true;
-      this.exited = true;
-      this.child.kill("SIGKILL");
-      this.failAll(new Error("The built-in search model stopped responding and was restarted."), "no answer and no processor time for a whole window");
-    }, this.requestTimeoutMs);
-  }
-  embed(items) {
-    if (this.exited)
-      return Promise.reject(new Error("The built-in search model is not running."));
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const pictures = items.filter((item) => typeof item !== "string" && item.image).length;
-      this.pending.set(id, {
-        resolve,
-        reject,
-        count: items.length,
-        pictures,
-        timer: this.watch(id),
-        startedAt: Date.now(),
-        done: new Map,
-        progressed: false,
-        cpuMs: helperCpuMs(this.child.pid)
-      });
-      const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
-      this.child.stdin.write(`${JSON.stringify(request)}
-`);
-    });
-  }
-  settle(message) {
-    const pending = message.id === undefined ? undefined : this.pending.get(message.id);
-    if (!pending || message.id === undefined)
-      return;
-    if (typeof message.progress === "number") {
-      pending.progressed = true;
-      if (message.itemFailed)
-        pending.done.set(message.progress, new Float32Array(0));
-      else if (message.vector) {
-        const bytes = Buffer.from(message.vector, "base64");
-        pending.done.set(message.progress, new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
-      }
-      return;
-    }
-    this.pending.delete(message.id);
-    clearTimeout(pending.timer);
-    if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
-      pending.reject(new LiteRtImagesUnavailableError(message.unsupported));
-      return;
-    }
-    const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
-    if (!message.error && failed.size === pending.count) {
-      pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
-      return;
-    }
-    if (message.error || !message.vectors || !message.dimension) {
-      pending.reject(message.error && message.pictures ? new LiteRtPictureEngineFaultError(message.error) : new Error(message.error ?? "The built-in search model returned no vectors."));
-      if (message.native) {
-        this.exited = true;
-        this.child.kill("SIGKILL");
-      }
-      return;
-    }
-    const bytes = Buffer.from(message.vectors, "base64");
-    const all = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-    const vectors = Array.from({ length: pending.count }, (_, index) => failed.has(index) ? new Float32Array(0) : all.subarray(index * message.dimension, (index + 1) * message.dimension));
-    if (vectors.some((vector, index) => !failed.has(index) && vector.length !== message.dimension)) {
-      pending.reject(new Error("The built-in search model returned the wrong number of values."));
-      return;
-    }
-    pending.resolve(vectors);
-  }
-  async stop() {
-    if (this.exited)
-      return;
-    const exited = new Promise((resolve) => this.child.once("close", () => resolve()));
-    this.child.stdin.end();
-    const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
-    await exited;
-    clearTimeout(timer);
-  }
-}
-async function startLiteRtEmbedder(options) {
-  if (isMainThread4 && !options.gpuAvailable) {
-    const handle = modelThreadHandleId();
-    let state = await modelThread().call({ kind: "litert-start", handle, options });
-    return {
-      get device() {
-        return state.device;
-      },
-      get vision() {
-        return state.vision;
-      },
-      async embed(items) {
-        try {
-          const result = await modelThread().call({ kind: "litert-run", handle, items });
-          state = result;
-          return result.vectors;
-        } catch (error) {
-          const failure = error;
-          if (failure.device !== undefined && failure.vision !== undefined)
-            state = { device: failure.device, vision: failure.vision };
-          if (failure.name === "LiteRtImagesUnavailableError")
-            throw new LiteRtImagesUnavailableError(failure.indexes ?? []);
-          if (failure.name === "LiteRtPictureEngineFaultError")
-            throw new LiteRtPictureEngineFaultError(failure.message);
-          throw error;
-        }
-      },
-      async release() {
-        await modelThread().call({ kind: "litert-release", handle });
-      }
-    };
-  }
-  let device = options.device === "auto" && process.platform === "linux" && !(options.gpuAvailable ?? linuxGpuAvailable)() ? "cpu" : options.device;
-  let helper;
-  try {
-    helper = await HelperProcess.start(options, device);
-  } catch (error) {
-    if (device === "cpu" || error.fatal)
-      throw error;
-    device = "cpu";
-    helper = await HelperProcess.start(options, device);
-  }
-  const releaseAtExit = () => {
-    if (!helper.exited)
-      helper.child.kill("SIGKILL");
-  };
-  process.once("exit", releaseAtExit);
-  return {
-    get device() {
-      return helper.device;
-    },
-    get vision() {
-      return helper.vision;
-    },
-    async embed(items) {
-      if (helper.exited) {
-        if (helper.device === "gpu")
-          device = "cpu";
-        helper = await HelperProcess.start(options, device);
-      }
-      const pictures = items.flatMap((item, index) => typeof item !== "string" && item.image ? [index] : []);
-      if (pictures.length > 0 && !helper.vision)
-        throw new LiteRtImagesUnavailableError(pictures);
-      try {
-        return await helper.embed(items);
-      } catch (error) {
-        if (!(error instanceof LiteRtHelperReplacedError))
-          throw error;
-        if (helper.device === "gpu")
-          device = "cpu";
-        helper = await HelperProcess.start(options, device);
-        const rest = items.map((_, index) => index).filter((index) => !error.done.has(index));
-        const restPictures = rest.filter((index) => pictures.includes(index));
-        if (restPictures.length > 0 && !helper.vision)
-          throw new LiteRtImagesUnavailableError(restPictures);
-        const vectors = rest.length > 0 ? await helper.embed(rest.map((index) => items[index])) : [];
-        const resumed = new Map(rest.map((index, row) => [index, vectors[row]]));
-        return items.map((_, index) => error.done.get(index) ?? resumed.get(index));
-      }
-    },
-    async release() {
-      process.removeListener("exit", releaseAtExit);
-      await helper.stop();
-    }
-  };
-}
-function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
-  try {
-    return readdirSync4(deviceDirectory).some((name) => {
-      if (!/^renderD[0-9]+$/.test(name))
-        return false;
-      let fd;
-      try {
-        fd = openSync11(join22(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
-        return fstatSync2(fd).isCharacterDevice();
-      } catch {
-        return false;
-      } finally {
-        if (fd !== undefined)
-          closeSync11(fd);
-      }
-    });
-  } catch {
-    return false;
-  }
-}
-function helperPath() {
-  const here = dirname22(fileURLToPath2(import.meta.url));
-  for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join22(here, name);
-    if (existsSync21(candidate))
-      return candidate;
-  }
-  throw new Error("The built-in search model helper is missing from this install.");
-}
-function resolveBun() {
-  const bunName = process.platform === "win32" ? "bun.exe" : "bun";
-  const candidates = [
-    process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join22(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join22(directory, bunName)),
-    join22(homedir10(), ".bun", "bin", bunName)
-  ];
-  for (const candidate of candidates) {
-    if (!candidate || !isAbsolute14(candidate))
-      continue;
-    try {
-      if (statSync13(candidate).isFile())
-        return candidate;
-    } catch {}
-  }
-  throw new Error("The built-in search model needs Bun, and none was found.");
-}
-
-// src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-import { readFileSync as readFileSync17 } from "node:fs";
-
-class RemoteLiteRtEmbedder {
-  options;
-  device = "cpu";
-  vision = false;
-  verified = false;
-  retryAt = 0;
-  state = "unused";
-  slot = Promise.resolve();
-  url;
-  constructor(options) {
-    this.options = options;
-    try {
-      this.url = new URL(options.url);
-    } catch {
-      throw new Error("Invalid built-in embedding remote URL.");
-    }
-    const loopback = this.url.hostname === "localhost" || this.url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(this.url.hostname);
-    if (this.url.protocol !== "https:" && !(this.url.protocol === "http:" && loopback) || this.url.username || this.url.password || this.url.search || this.url.hash) {
-      throw new Error("Built-in embedding remote requires HTTPS or loopback HTTP, without URL credentials, query or fragment.");
-    }
-  }
-  get active() {
-    return this.state === "remote";
-  }
-  async embed(items) {
-    const previous = this.slot;
-    let unlock;
-    this.slot = new Promise((resolve) => {
-      unlock = resolve;
-    });
-    await previous;
-    try {
-      const now = this.options.now ?? Date.now;
-      if (now() < this.retryAt)
-        throw new Error("Remote embedding cooling down.");
-      try {
-        if (items.length === 0 || items.length > 8 || items.some((item) => typeof item !== "string")) {
-          throw new Error("Remote embedding requires a text-only batch.");
-        }
-        if (!this.verified) {
-          const handshake = await this.request("/v1/handshake");
-          for (const [field, value] of Object.entries(this.options.identity)) {
-            if (handshake[field] !== value)
-              throw new Error("Remote embedding identity mismatch.");
-          }
-          if (handshake.device !== "cpu" && handshake.device !== "gpu")
-            throw new Error("Invalid remote device.");
-          if (handshake.vision !== false)
-            throw new Error("Invalid remote vision capability.");
-          this.device = handshake.device;
-          this.verified = true;
-        }
-        const response = await this.request("/v1/embed", items);
-        const identity = this.options.identity;
-        if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
-          throw new Error("Remote embedding identity mismatch.");
-        }
-        const bytes = Buffer.from(response.vectors, "base64");
-        if (bytes.length !== items.length * identity.dimension * 4)
-          throw new Error("Invalid remote vector length.");
-        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
-        if (vectors.some((vector) => vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0))) {
-          throw new Error("Invalid remote vector values.");
-        }
-        this.transition("remote");
-        return vectors;
-      } catch {
-        this.verified = false;
-        this.retryAt = now() + 60000;
-        this.transition("local");
-        throw new Error("Remote embedding unavailable; using local helper.");
-      }
-    } finally {
-      unlock();
-    }
-  }
-  async release() {
-    this.verified = false;
-  }
-  transition(state) {
-    if (this.state === state)
-      return;
-    this.state = state;
-    console.warn(state === "remote" ? "[built-in embedding] document text embedding is using the remote helper." : "[built-in embedding] remote helper unavailable; document text embedding is using the local helper.");
-  }
-  async request(path, texts) {
-    const headers = {};
-    if (this.options.tokenFile) {
-      const token = readFileSync17(this.options.tokenFile, "utf8").trim();
-      if (!token)
-        throw new Error("Empty remote token file.");
-      headers.Authorization = `Bearer ${token}`;
-    }
-    if (texts)
-      headers["Content-Type"] = "application/json";
-    const response = await fetch(new URL(path, this.url), {
-      method: texts ? "POST" : "GET",
-      headers,
-      ...texts ? { body: JSON.stringify({ texts }) } : {},
-      signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
-      redirect: "error"
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error("Remote request failed.");
-    }
-    return await response.json();
-  }
-}
-
-// src/workers/source-index/built-in-embedding/runtime.ts
-import { realpathSync as realpathSync7 } from "node:fs";
-import { createRequire as createRequire5 } from "node:module";
-import { join as join23, sep as sep6 } from "node:path";
-function onnxRuntimeFromDirectory(runtimeDir) {
-  return {
-    async createSession(modelPath, options) {
-      const ort = requireOnnxRuntimeFromPack(runtimeDir);
-      const session = await ort.InferenceSession.create(modelPath, {
-        executionProviders: ["cpu"],
-        intraOpNumThreads: options.threads,
-        interOpNumThreads: 1,
-        executionMode: "sequential",
-        graphOptimizationLevel: "all",
-        enableCpuMemArena: false
-      });
-      const releaseAtExit = () => {
-        session.release().catch(() => {
-          return;
-        });
-      };
-      process.once("exit", releaseAtExit);
-      const wantsTokenTypes = session.inputNames.includes("token_type_ids");
-      const outputName = session.outputNames.includes("last_hidden_state") ? "last_hidden_state" : session.outputNames[0];
-      if (!outputName)
-        throw new Error("The built-in search model has no outputs.");
-      return {
-        async run(batch) {
-          const dims = [batch.batchSize, batch.sequenceLength];
-          const feeds = {
-            input_ids: new ort.Tensor("int64", batch.inputIds, dims),
-            attention_mask: new ort.Tensor("int64", batch.attentionMask, dims)
-          };
-          if (wantsTokenTypes)
-            feeds.token_type_ids = new ort.Tensor("int64", batch.tokenTypeIds, dims);
-          const output = (await session.run(feeds))[outputName];
-          if (!output || !(output.data instanceof Float32Array)) {
-            throw new Error("The built-in search model returned an unexpected output.");
-          }
-          return { data: output.data, dims: output.dims };
-        },
-        release: () => {
-          process.removeListener("exit", releaseAtExit);
-          return session.release();
-        }
-      };
-    }
-  };
-}
-function requireOnnxRuntimeFromPack(runtimeDir) {
-  const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
-  let root;
-  let resolved;
-  const requireFromPack = createRequire5(join23(runtimeDir, "olympus-runtime.json"));
-  try {
-    root = realpathSync7(join23(runtimeDir, "node_modules"));
-    resolved = realpathSync7(requireFromPack.resolve("onnxruntime-node"));
-  } catch {
-    throw missing();
-  }
-  if (!resolved.startsWith(root + sep6))
-    throw missing();
-  return requireFromPack(resolved);
-}
-
-// src/workers/source-index/built-in-embedding/pair-tokenizer.ts
-function truncatePair(a, b, room, tiePolicy = "wordpiece") {
-  let keepA = a.length;
-  let keepB = b.length;
-  room = Math.max(0, room);
-  while (keepA + keepB > room) {
-    if (keepB > keepA || keepB === keepA && (tiePolicy === "wordpiece" || a.length > b.length))
-      keepB -= 1;
-    else
-      keepA -= 1;
-  }
-  return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
-}
-function pairWindows(a, b, room, overlap, tiePolicy = "wordpiece") {
-  const first = truncatePair(a, b, room, tiePolicy);
-  const size = first.b.length;
-  if (size === 0 || size >= b.length)
-    return { a: first.a, windows: [first.b], truncated: first.truncated };
-  const step = Math.max(1, size - Math.max(0, Math.min(Math.floor(overlap), size - 1)));
-  const windows = [];
-  for (let start = 0;; start += step) {
-    if (start + size >= b.length) {
-      windows.push(b.slice(b.length - size));
-      break;
-    }
-    windows.push(b.slice(start, start + size));
-  }
-  return { a: first.a, windows, truncated: first.a.length < a.length };
-}
-
-// src/workers/source-index/built-in-embedding/wordpiece.ts
-var MAX_INPUT_CHARS_PER_WORD = 100;
-var CONTINUING_SUBWORD_PREFIX = "##";
-
-class WordPieceTokenizer {
-  vocab;
-  clsId;
-  sepId;
-  unkId;
-  padId;
-  constructor(vocabText) {
-    const vocab = new Map;
-    const lines = vocabText.split(`
-`);
-    for (let index = 0;index < lines.length; index += 1) {
-      const token = lines[index].replace(/\r$/, "");
-      if (token.length === 0 && index === lines.length - 1)
-        continue;
-      if (!vocab.has(token))
-        vocab.set(token, index);
-    }
-    this.vocab = vocab;
-    this.clsId = requireToken(vocab, "[CLS]");
-    this.sepId = requireToken(vocab, "[SEP]");
-    this.unkId = requireToken(vocab, "[UNK]");
-    this.padId = requireToken(vocab, "[PAD]");
-  }
-  tokenize(text) {
-    const ids = [];
-    for (const word of preTokenize(normalize3(text))) {
-      this.wordPiece(word, ids);
-    }
-    return ids;
-  }
-  encode(text, maxLength) {
-    const content = this.tokenize(text);
-    const room = Math.max(0, maxLength - 2);
-    const truncated = content.length > room;
-    return {
-      ids: [this.clsId, ...truncated ? content.slice(0, room) : content, this.sepId],
-      truncated
-    };
-  }
-  encodePair(first, second, maxLength) {
-    const { a, b, truncated } = truncatePair(this.tokenize(first), this.tokenize(second), maxLength - 3);
-    const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
-    const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
-    return { ids, typeIds, truncated };
-  }
-  encodePairWindows(first, second, maxLength, overlap) {
-    const { a, windows, truncated } = pairWindows(this.tokenize(first), this.tokenize(second), maxLength - 3, overlap);
-    return windows.map((b) => {
-      const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
-      return { ids, typeIds: ids.map((_, index) => index < a.length + 2 ? 0 : 1), truncated };
-    });
-  }
-  wordPiece(word, out) {
-    const chars = Array.from(word);
-    if (chars.length > MAX_INPUT_CHARS_PER_WORD) {
-      out.push(this.unkId);
-      return;
-    }
-    const pieces = [];
-    let start = 0;
-    while (start < chars.length) {
-      let end = chars.length;
-      let found;
-      while (start < end) {
-        const piece = (start > 0 ? CONTINUING_SUBWORD_PREFIX : "") + chars.slice(start, end).join("");
-        const id = this.vocab.get(piece);
-        if (id !== undefined) {
-          found = id;
-          break;
-        }
-        end -= 1;
-      }
-      if (found === undefined) {
-        out.push(this.unkId);
-        return;
-      }
-      pieces.push(found);
-      start = end;
-    }
-    out.push(...pieces);
-  }
-}
-function requireToken(vocab, token) {
-  const id = vocab.get(token);
-  if (id === undefined)
-    throw new Error(`WordPiece vocabulary is missing ${token}.`);
-  return id;
-}
-var CONTROL = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}]/u;
-var WHITESPACE = /[\s\p{Zs}]/u;
-var COMBINING_MARK = /\p{Mn}/gu;
-var PUNCTUATION = /\p{P}/u;
-function normalize3(text) {
-  let cleaned = "";
-  for (const char of text) {
-    const code = char.codePointAt(0);
-    if (code === 0 || code === 65533)
-      continue;
-    if (char === "\t" || char === `
-` || char === "\r") {
-      cleaned += " ";
-      continue;
-    }
-    if (CONTROL.test(char))
-      continue;
-    if (WHITESPACE.test(char)) {
-      cleaned += " ";
-      continue;
-    }
-    cleaned += isChineseChar(code) ? ` ${char} ` : char;
-  }
-  return cleaned.toLowerCase().normalize("NFD").replace(COMBINING_MARK, "");
-}
-function preTokenize(text) {
-  const words = [];
-  let current = "";
-  for (const char of text) {
-    if (char === " " || WHITESPACE.test(char)) {
-      if (current)
-        words.push(current);
-      current = "";
-    } else if (isPunctuation(char)) {
-      if (current)
-        words.push(current);
-      words.push(char);
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-  if (current)
-    words.push(current);
-  return words;
-}
-function isPunctuation(char) {
-  const code = char.codePointAt(0);
-  if (code >= 33 && code <= 47 || code >= 58 && code <= 64 || code >= 91 && code <= 96 || code >= 123 && code <= 126) {
-    return true;
-  }
-  return PUNCTUATION.test(char);
-}
-function isChineseChar(code) {
-  return code >= 19968 && code <= 40959 || code >= 13312 && code <= 19903 || code >= 131072 && code <= 173791 || code >= 173824 && code <= 177983 || code >= 177984 && code <= 178207 || code >= 178208 && code <= 183983 || code >= 63744 && code <= 64255 || code >= 194560 && code <= 195103;
-}
-
-// src/workers/source-index/built-in-embedding/provider.ts
-var BUILT_IN_EMBEDDING_PROVIDER = "built-in";
-var BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS";
-var BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE";
-var BUILT_IN_EMBEDDING_REMOTE_URL_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_URL";
-var BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE";
-var MAX_WINDOWS_PER_DOCUMENT = 8;
-var MAX_BATCH_TOKENS = 2048;
-var MAX_BATCH_ROWS = 32;
-var LITERT_BATCH = 8;
-var RETRY_AFTER_FAILURE_MS = 2 * 60000;
-var PICTURE_ENGINE_FAULT_LIMIT = 2;
-var PICTURE_HOLD_MS = 60 * 60000;
-class BuiltInSourceEmbeddingProvider {
-  provider;
-  modelId;
-  dimension;
-  configHash;
-  epochId;
-  backend;
-  threads;
-  device;
-  remote;
-  spec;
-  env;
-  onnxOffThread;
-  runtimeFactory;
-  liteRtFactory;
-  install;
-  installerOptions;
-  now;
-  loading;
-  loaded;
-  priorityLoaded;
-  prioritySlotBusy = false;
-  priorityWaiting = [];
-  lastFailure;
-  slotBusy = false;
-  imageSupportWarned = false;
-  pictureFaults;
-  waiting = { query: [], document: [] };
-  runsOnThisComputer() {
-    return this.remote === undefined;
-  }
-  constructor(options = {}) {
-    this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
-    this.env = options.env ?? process.env;
-    this.provider = BUILT_IN_EMBEDDING_PROVIDER;
-    this.backend = "local";
-    this.modelId = this.spec.modelId;
-    this.dimension = this.spec.dimension;
-    this.threads = resolveThreads(options.threads, this.env);
-    this.device = resolveDevice(this.env);
-    this.onnxOffThread = isMainThread5 && !options.runtime;
-    this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
-    this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
-    this.install = options.install ?? installBuiltInEmbedding;
-    this.installerOptions = options.installerOptions ?? {};
-    this.now = options.now ?? Date.now;
-    const remoteUrl = this.env[BUILT_IN_EMBEDDING_REMOTE_URL_ENV]?.trim();
-    if (remoteUrl && this.spec.runtime === "litert") {
-      this.remote = new RemoteLiteRtEmbedder({
-        url: remoteUrl,
-        tokenFile: this.env[BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV],
-        now: this.now,
-        requestTimeoutMs: options.remoteRequestTimeoutMs,
-        identity: {
-          modelId: this.modelId,
-          weightsSha256: this.spec.model.sha256,
-          runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}`,
-          dimension: this.dimension,
-          maxTokens: this.spec.maxTokens,
-          overflow: "chunk-and-average"
-        }
-      });
-    }
-    this.epochId = resolveEmbeddingEpoch({
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.dimension,
-      backend: this.backend,
-      ...options.epochId ? { epochOverride: options.epochId } : {}
-    });
-    this.configHash = createHash12("sha256").update(JSON.stringify({
-      provider: this.provider,
-      model: this.modelId,
-      repository: this.spec.repository,
-      revision: this.spec.revision,
-      weights: this.spec.model.sha256,
-      ...this.spec.vocabulary ? { vocabulary: this.spec.vocabulary.sha256 } : {},
-      ...this.spec.runtime === "litert" ? { runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}` } : {},
-      dimension: this.dimension,
-      maxTokens: this.spec.maxTokens,
-      pooling: this.spec.pooling,
-      queryPrefix: this.spec.queryPrefix,
-      documentPrefix: this.spec.documentPrefix,
-      ...this.spec.runtime === "litert" ? { overflow: "chunk-and-average" } : { windows: MAX_WINDOWS_PER_DOCUMENT },
-      backend: this.backend
-    })).digest("hex");
-  }
-  status() {
-    const status = readBuiltInEmbeddingStatus(this.env, this.spec);
-    return this.remote ? { ...status, remoteDocuments: this.remote.active } : status;
-  }
-  async prepare() {
-    await this.load();
-  }
-  async warm() {
-    await this.load();
-    await this.embed([{ text: "warm up" }], { taskType: "RETRIEVAL_QUERY" });
-  }
-  async imageSupport() {
-    if (this.spec.runtime !== "litert" || !this.spec.vision)
-      return false;
-    if (this.picturesHeld())
-      return false;
-    const model = await this.ready();
-    const supported = model.kind === "litert" && model.embedder.vision;
-    if (!supported && !this.imageSupportWarned) {
-      this.imageSupportWarned = true;
-      console.warn("[built-in embedding] the image encoder could not start on this machine; photos keep keyword search and wait for their picture vectors.");
-    }
-    return supported;
-  }
-  async retry() {
-    if (!this.loading)
-      this.lastFailure = undefined;
-    await this.load();
-  }
-  async embed(inputs, options) {
-    if (inputs.length === 0)
-      return [];
-    if (options.taskType === "RETRIEVAL_QUERY" && !this.loaded) {
-      const status = this.status();
-      if (this.spec.runtime === "litert" || status.state !== "ready" && status.state !== "loading") {
-        this.load().catch(() => {
-          return;
-        });
-        const now = this.status();
-        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
-          modelStarting: this.loading !== undefined && (now.state === "ready" || now.state === "loading")
-        });
-      }
-    }
-    const model = await this.ready();
-    return this.embedLoaded(model, inputs, options.taskType);
-  }
-  loadedOnly() {
-    return {
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.dimension,
-      configHash: this.configHash,
-      epochId: this.epochId,
-      backend: this.backend,
-      embed: async (inputs, options) => {
-        if (inputs.length === 0)
-          return [];
-        const model = this.loaded;
-        if (!model)
-          throw new BuiltInEmbeddingNotReadyError(this.status());
-        return this.embedLoaded(model, inputs, options.taskType);
-      }
-    };
-  }
-  async ready() {
-    if (this.loaded)
-      return this.loaded;
-    try {
-      return await this.load();
-    } catch (error) {
-      throw new BuiltInEmbeddingNotReadyError(this.status(), error);
-    }
-  }
-  load() {
-    if (this.loading)
-      return this.loading;
-    if (this.lastFailure && this.now() - this.lastFailure.atMs < RETRY_AFTER_FAILURE_MS) {
-      return Promise.reject(this.lastFailure.error);
-    }
-    const loading = this.loadOnce();
-    this.loading = loading;
-    loading.then((model) => {
-      this.loaded = model;
-      this.lastFailure = undefined;
-    }, (error) => {
-      this.lastFailure = { atMs: this.now(), error };
-      if (this.loading === loading)
-        this.loading = undefined;
-    });
-    return loading;
-  }
-  async loadOnce() {
-    const reporterOptions = {
-      env: this.env,
-      model: this.spec,
-      ...this.installerOptions.now ? { now: this.installerOptions.now } : {},
-      ...this.installerOptions.onProgress ? { onProgress: this.installerOptions.onProgress } : {}
-    };
-    let installed;
-    try {
-      installed = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
-    } catch (error) {
-      throw builtInEmbeddingOperationError(error);
-    }
-    try {
-      reportBuiltInEmbeddingState(reporterOptions, "loading");
-      let model;
-      if (this.spec.runtime === "litert") {
-        if (!installed.libraryPath)
-          throw new Error("the LiteRT-LM runtime is not installed.");
-        const settings = {
-          library: installed.libraryPath,
-          model: installed.modelPath,
-          cacheDir: join24(dirname23(installed.modelPath), "cache"),
-          threads: this.threads,
-          device: this.device,
-          maxInputTokens: this.spec.maxTokens,
-          ...this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}
-        };
-        const embedder = await this.liteRtFactory(settings);
-        model = { kind: "litert", embedder };
-        try {
-          const { visionTokensPerImage: _vision, ...querySettings } = settings;
-          this.priorityLoaded = { kind: "litert", embedder: await this.liteRtFactory(querySettings) };
-        } catch (error) {
-          await embedder.release().catch(() => {
-            return;
-          });
-          throw error;
-        }
-        if (this.spec.vision)
-          reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
-      } else if (this.onnxOffThread) {
-        const handle = modelThreadHandleId();
-        await modelThread().call({ kind: "embedding-load", handle, installed, model: this.spec, env: this.env, threads: this.threads });
-        model = { kind: "thread", handle };
-      } else {
-        if (!installed.vocabularyPath)
-          throw new Error("the model vocabulary is not installed.");
-        const tokenizer = loadTokenizer(installed.vocabularyPath);
-        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
-        model = { kind: "onnx", session, tokenizer };
-        try {
-          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
-          this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
-        } catch (error) {
-          await session.release?.().catch(() => {
-            return;
-          });
-          throw error;
-        }
-      }
-      reportBuiltInEmbeddingState(reporterOptions, "ready");
-      return model;
-    } catch (error) {
-      const failure = new BuiltInEmbeddingInstallError("runtime_load_failed", `The built-in search model could not start: ${error instanceof Error ? error.message : String(error)}`);
-      reportBuiltInEmbeddingState(reporterOptions, "failed", { reason: failure.reason, message: failure.message });
-      throw builtInEmbeddingOperationError(failure);
-    }
-  }
-  async withSlot(taskType, run) {
-    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
-      if (this.prioritySlotBusy)
-        await new Promise((resolve) => this.priorityWaiting.push(resolve));
-      else
-        this.prioritySlotBusy = true;
-      try {
-        return await run();
-      } finally {
-        const next = this.priorityWaiting.shift();
-        if (next)
-          next();
-        else
-          this.prioritySlotBusy = false;
-      }
-    }
-    if (this.slotBusy) {
-      await new Promise((resolve) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve));
-    } else {
-      this.slotBusy = true;
-    }
-    try {
-      return await run();
-    } finally {
-      const next = this.waiting.query.shift() ?? this.waiting.document.shift();
-      if (next)
-        next();
-      else
-        this.slotBusy = false;
-    }
-  }
-  async embedLoaded(model, inputs, taskType) {
-    if (model.kind === "thread") {
-      return modelThread().call({ kind: "embedding-run", handle: model.handle, inputs, taskType, priority: priorityQueryEmbeddingRequested() });
-    }
-    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
-      if (!this.priorityLoaded)
-        throw new BuiltInEmbeddingNotReadyError(this.status());
-      model = this.priorityLoaded;
-    }
-    if (model.kind === "litert")
-      return this.embedLiteRt(model.embedder, inputs, taskType);
-    const windowTokens = this.spec.maxTokens - 2;
-    const windows = [];
-    inputs.forEach((input, index) => {
-      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
-      const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
-      const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
-      for (let window = 0;window < count; window += 1) {
-        windows.push({
-          input: index,
-          ids: [model.tokenizer.startId, ...ids.slice(window * windowTokens, (window + 1) * windowTokens), model.tokenizer.endId]
-        });
-      }
-    });
-    const sums = inputs.map(() => new Float64Array(this.dimension));
-    for (const batch of planBatches(windows)) {
-      const vectors = await this.withSlot(taskType, () => this.forward(model, batch));
-      batch.forEach((window, row) => {
-        const vector = vectors[row];
-        const weight = window.ids.length - 2;
-        const sum = sums[window.input];
-        for (let d = 0;d < this.dimension; d += 1)
-          sum[d] += vector[d] * Math.max(1, weight);
-      });
-    }
-    return sums.map((sum) => normalize4(sum));
-  }
-  async embedWithImageVectors(inputs) {
-    if (inputs.length === 0)
-      return { vectors: [], imageVectors: [] };
-    const model = await this.ready();
-    if (model.kind !== "litert" || !this.spec.vision) {
-      return { vectors: await this.embedLoaded(model, inputs, "RETRIEVAL_DOCUMENT"), imageVectors: inputs.map(() => {
-        return;
-      }) };
-    }
-    const extra = inputs.flatMap((input, index) => input.image && isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
-    const { vectors, failed } = await this.liteRtVectors(model.embedder, [...this.liteRtItems(inputs, "RETRIEVAL_DOCUMENT"), ...extra.map((index) => ({ text: "", image: inputs[index].image.path }))], "RETRIEVAL_DOCUMENT", new Set(this.refusedPictures(inputs)));
-    const documentFailures = failed.filter((index) => index < inputs.length);
-    if (documentFailures.length > 0)
-      throw new SourceEmbeddingInputsFailedError(documentFailures, "image_unreadable");
-    const imageVectors = inputs.map(() => {
-      return;
-    });
-    extra.forEach((input, row) => {
-      imageVectors[input] = vectors[inputs.length + row];
-    });
-    return { vectors: vectors.slice(0, inputs.length), imageVectors };
-  }
-  async embedImageVectors(images) {
-    if (images.length === 0)
-      return [];
-    const model = await this.ready();
-    if (model.kind !== "litert" || !this.spec.vision) {
-      throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
-    }
-    const refused = new Set(images.flatMap((image, index) => isMediaCachePath(image.path, image.sha256) ? [] : [index]));
-    const live = images.flatMap((image, index) => refused.has(index) ? [] : [{ index, image }]);
-    const out = images.map(() => {
-      return;
-    });
-    if (live.length === 0)
-      return out;
-    const { vectors } = await this.liteRtVectors(model.embedder, live.map(({ image }) => ({ text: "", image: image.path })), "RETRIEVAL_DOCUMENT", new Set);
-    live.forEach(({ index }, row) => {
-      out[index] = vectors[row];
-    });
-    return out;
-  }
-  async embedPromptTexts(texts) {
-    if (texts.length === 0)
-      return [];
-    const model = await this.ready();
-    if (model.kind !== "litert")
-      throw new Error("The photo judge needs the LiteRT model.");
-    const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, "RETRIEVAL_DOCUMENT", new Set);
-    if (failed.length > 0)
-      throw new Error("The photo judge's descriptions could not be embedded.");
-    return vectors;
-  }
-  refusedPictures(inputs) {
-    if (!this.spec.vision)
-      return [];
-    return inputs.flatMap((input, index) => input.image && !isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
-  }
-  liteRtItems(inputs, taskType) {
-    return inputs.map((input) => {
-      const text = promptText(this.spec, input, taskType);
-      if (taskType !== "RETRIEVAL_DOCUMENT" || !this.spec.vision || !input.image)
-        return text;
-      return { text, image: input.image.path };
-    });
-  }
-  async embedLiteRt(embedder, inputs, taskType) {
-    const { vectors, failed } = await this.liteRtVectors(embedder, this.liteRtItems(inputs, taskType), taskType, new Set(taskType === "RETRIEVAL_DOCUMENT" ? this.refusedPictures(inputs) : []), new Set(inputs.flatMap((input, index) => input.image ? [index] : [])));
-    if (failed.length > 0)
-      throw new SourceEmbeddingInputsFailedError(failed, "image_unreadable");
-    return vectors;
-  }
-  async liteRtVectors(embedder, prompts, taskType, refused, localOnly = new Set) {
-    const out = [];
-    const pictures = prompts.flatMap((prompt, index) => typeof prompt !== "string" && !refused.has(index) ? [index] : []);
-    if (pictures.length > 0 && this.picturesHeld()) {
-      throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
-    }
-    const failed = [...refused];
-    for (let offset = 0;offset < prompts.length; offset += LITERT_BATCH) {
-      const batch = prompts.slice(offset, offset + LITERT_BATCH).map((prompt, row) => refused.has(offset + row) && typeof prompt !== "string" ? prompt.text : prompt);
-      const batchPictures = batch.flatMap((prompt, row) => typeof prompt !== "string" ? [offset + row] : []);
-      let vectors;
-      try {
-        let remoteVectors;
-        if (this.remote && taskType === "RETRIEVAL_DOCUMENT" && batch.every((prompt) => typeof prompt === "string") && !prompts.slice(offset, offset + LITERT_BATCH).some((prompt, row) => typeof prompt !== "string" || localOnly.has(offset + row))) {
-          try {
-            remoteVectors = await this.remote.embed(batch);
-          } catch {}
-        }
-        vectors = remoteVectors ?? await this.withSlot(taskType, () => embedder.embed(batch));
-        if (batchPictures.length > 0)
-          this.pictureFaults = undefined;
-      } catch (error) {
-        if (error instanceof LiteRtPictureEngineFaultError) {
-          const count = (this.pictureFaults?.count ?? 0) + 1;
-          if (count < PICTURE_ENGINE_FAULT_LIMIT) {
-            this.pictureFaults = { count };
-            offset -= LITERT_BATCH;
-            continue;
-          }
-          this.pictureFaults = { count: 0, heldUntilMs: this.now() + PICTURE_HOLD_MS };
-          console.warn(`[built-in embedding] the image encoder keeps failing a known-good picture; photos wait ${PICTURE_HOLD_MS / 60000} minutes while text keeps embedding.`);
-          throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
-        }
-        if (error instanceof LiteRtImagesUnavailableError) {
-          throw new SourceEmbeddingInputsFailedError(error.indexes.map((index) => offset + index), "image_encoder_unavailable", "held");
-        }
-        throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; Olympus restarts the model on the next try.");
-      }
-      for (const [row, vector] of vectors.entries()) {
-        if (vector.length === 0) {
-          failed.push(offset + row);
-          out.push(undefined);
-          continue;
-        }
-        if (vector.length !== this.dimension) {
-          throw new OperationError("source_index_error", `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
-        }
-        out.push(refused.has(offset + row) ? undefined : normalize4(vector));
-      }
-    }
-    return { vectors: out, failed: [...new Set(failed)].sort((left, right) => left - right) };
-  }
-  picturesHeld() {
-    const heldUntilMs = this.pictureFaults?.heldUntilMs;
-    return heldUntilMs !== undefined && this.now() < heldUntilMs;
-  }
-  async forward(model, batch) {
-    const rows = batch.length;
-    const length = Math.max(...batch.map((window) => window.ids.length));
-    const inputIds = new BigInt64Array(rows * length);
-    const attentionMask = new BigInt64Array(rows * length);
-    const tokenTypeIds = new BigInt64Array(rows * length);
-    if (model.tokenizer.padId !== 0)
-      inputIds.fill(BigInt(model.tokenizer.padId));
-    batch.forEach((window, row) => {
-      window.ids.forEach((id, column) => {
-        inputIds[row * length + column] = BigInt(id);
-        attentionMask[row * length + column] = 1n;
-      });
-    });
-    let output;
-    try {
-      output = await model.session.run({ inputIds, attentionMask, tokenTypeIds, batchSize: rows, sequenceLength: length });
-    } catch (error) {
-      throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; restarting Olympus reloads the model.");
-    }
-    const expected = [rows, length, this.dimension];
-    if (output.dims.length !== expected.length || output.dims.some((size, axis) => size !== expected[axis])) {
-      throw new OperationError("source_index_error", `The built-in search model returned shape [${output.dims.join(", ")}], expected [${expected.join(", ")}].`);
-    }
-    const hidden = this.dimension;
-    return batch.map((window, row) => {
-      const vector = new Float64Array(hidden);
-      const base = row * length * hidden;
-      if (this.spec.pooling === "cls") {
-        for (let d = 0;d < hidden; d += 1)
-          vector[d] = output.data[base + d];
-      } else {
-        for (let token = 0;token < window.ids.length; token += 1) {
-          const offset = base + token * hidden;
-          for (let d = 0;d < hidden; d += 1)
-            vector[d] += output.data[offset + d];
-        }
-        for (let d = 0;d < hidden; d += 1)
-          vector[d] /= window.ids.length;
-      }
-      return Float64Array.from(normalize4(vector));
-    });
-  }
-}
-function loadTokenizer(path) {
-  const tokenizer = new WordPieceTokenizer(readFileSync18(path, "utf8"));
-  return {
-    tokenize: (text) => tokenizer.tokenize(text),
-    startId: tokenizer.clsId,
-    endId: tokenizer.sepId,
-    padId: tokenizer.padId
-  };
-}
-function promptText(spec, input, taskType) {
-  if (taskType === "RETRIEVAL_QUERY")
-    return `${spec.queryPrefix}${input.title ? `${input.title}
-` : ""}${input.text}`;
-  if (spec.documentPrefix.includes("{title}")) {
-    const title = input.title?.replace(/\s+/g, " ").trim() || "none";
-    return `${spec.documentPrefix.replace("{title}", () => title)}${input.text}`;
-  }
-  return `${spec.documentPrefix}${input.title ? `${input.title}
-` : ""}${input.text}`;
-}
-
-class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
-  status;
-  constructor(status, cause, options = {}) {
-    super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0, 0, options);
-    this.name = "BuiltInEmbeddingNotReadyError";
-    this.status = status;
-    this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
-    this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
-  }
-}
-function builtInEmbeddingOperationError(error) {
-  if (error instanceof OperationError)
-    return error;
-  const message = error instanceof Error ? error.message : String(error);
-  const reason = error instanceof BuiltInEmbeddingInstallError ? error.reason : undefined;
-  return new OperationError("source_index_error", message, reason === "unsupported_platform" ? "Choose another embedding provider for this machine in the model settings." : reason === "download_failed" ? "Check the internet connection; Olympus tries the download again automatically." : reason === "disk_write_failed" ? "Free some disk space; Olympus tries again automatically." : "Olympus removes the bad file and downloads it again automatically.");
-}
-function planBatches(windows) {
-  const ordered = [...windows].sort((left, right) => right.ids.length - left.ids.length);
-  const batches = [];
-  let current = [];
-  let currentLength = 0;
-  for (const window of ordered) {
-    const length = Math.max(currentLength, window.ids.length);
-    if (current.length > 0 && (current.length >= MAX_BATCH_ROWS || length * (current.length + 1) > MAX_BATCH_TOKENS)) {
-      batches.push(current);
-      current = [];
-      currentLength = 0;
-    }
-    current.push(window);
-    currentLength = Math.max(currentLength, window.ids.length);
-  }
-  if (current.length > 0)
-    batches.push(current);
-  return batches;
-}
-function normalize4(vector) {
-  let norm = 0;
-  for (let index = 0;index < vector.length; index += 1)
-    norm += vector[index] * vector[index];
-  norm = Math.sqrt(norm);
-  const out = new Array(vector.length);
-  for (let index = 0;index < vector.length; index += 1)
-    out[index] = norm > 0 ? vector[index] / norm : 0;
-  return out;
-}
-function resolveDevice(env) {
-  const configured = env[BUILT_IN_EMBEDDING_DEVICE_ENV]?.trim().toLowerCase();
-  if (configured && configured !== "cpu" && configured !== "auto") {
-    throw new OperationError("config_error", `${BUILT_IN_EMBEDDING_DEVICE_ENV} must be "auto" or "cpu".`);
-  }
-  return configured === "cpu" ? "cpu" : "auto";
-}
-function resolveThreads(explicit, env) {
-  const configured = explicit ?? (env[BUILT_IN_EMBEDDING_THREADS_ENV]?.trim() ? Number(env[BUILT_IN_EMBEDDING_THREADS_ENV]) : undefined);
-  if (configured !== undefined) {
-    if (!Number.isSafeInteger(configured) || configured < 1) {
-      throw new OperationError("config_error", `${BUILT_IN_EMBEDDING_THREADS_ENV} must be a positive whole number.`);
-    }
-    return configured;
-  }
-  return Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
-}
-var sharedProviders;
-function sharedBuiltInSourceEmbeddingProvider(options) {
-  const model = builtInEmbeddingModel(options.modelId);
-  if (!model) {
-    throw new OperationError("config_error", `This version of Olympus does not include the built-in embedding model "${options.modelId}".`, `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(", ")} for the built-in profile, or update Olympus.`);
-  }
-  const env = options.env ?? process.env;
-  const key = `${builtInEmbeddingPaths(env).root}\x00${options.modelId}`;
-  sharedProviders ??= new Map;
-  let provider = sharedProviders.get(key);
-  if (!provider) {
-    provider = new BuiltInSourceEmbeddingProvider({ env, model });
-    sharedProviders.set(key, provider);
-  }
-  return provider;
-}
 
 // src/workers/connector-store/tier-row-rehome.ts
 var MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
@@ -36214,9 +36612,6 @@ var GAP_GENERIC_WORDS = new Set([
   "claims"
 ]);
 var utf8 = new TextEncoder;
-
-// src/workers/answer-activity.ts
-var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 
 // src/core/analyst-openclaw-infer.ts
 var MAX_PROMPT_BYTES = 1e5;
