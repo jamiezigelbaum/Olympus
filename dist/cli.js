@@ -240376,6 +240376,7 @@ class TierSnifferService {
         queued += opened.db.query(`SELECT COUNT(*) AS n FROM (
           SELECT * FROM tier_items WHERE state = 'moving' LIMIT ?
         ) AS tier_items WHERE 1 ${tierMovingDirectionClause("lower")}`).get(MOVES_SCAN_BOUND).n;
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its queued privacy moves");
       } finally {
@@ -240472,8 +240473,6 @@ class TierSnifferService {
       const hasQueue = existsSync120(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
-      db.query("SELECT 1 FROM tier_items LIMIT 1").get();
-      this.noteReadable(ledgerPath);
       return { db, hasQueue };
     } catch {
       db?.close();
@@ -240491,6 +240490,7 @@ class TierSnifferService {
         rows += opened.db.query("SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items").get().n;
         if (opened.hasQueue)
           rows += opened.db.query("SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions").get().n;
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
       } finally {
@@ -240510,6 +240510,7 @@ class TierSnifferService {
         pendingItems += opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get().n;
         if (opened.hasQueue)
           remainingQuestions += opened.db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
       } finally {
@@ -240528,6 +240529,7 @@ class TierSnifferService {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue)
           this.addQuestionSlice(counts, opened.db, undefined);
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
       } finally {
@@ -240601,6 +240603,7 @@ class TierSnifferService {
               return;
           }
         }
+        this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
       } finally {
