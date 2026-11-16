@@ -296,7 +296,21 @@ export async function attachEngineFixture(stores: LocalConnectorStore[], role: s
   return { answerModel, stop() { stopped = true; for (const timer of timers) clearInterval(timer); stopRecount(); service?.stop(); installed?.close(); jobs?.close(); ledger.close(); } };
 }
 
-interface Loop { max_ms: number; over_budget: number; beats: number }
+interface Loop { max_ms: number; over_budget: number; beats: number; buckets?: number[] }
+const LAG_EDGES_MS = [10, 25, 50, 100, 200, 300, 500, 1000, 2000, 5000, 10000];
+/** The 95th-percentile loop beat, as the upper edge of its histogram bucket ("<= N ms"); undefined without a histogram. */
+export function beatP95(loop: Loop): number | undefined {
+  const buckets = loop.buckets; if (!buckets?.length) return undefined;
+  const total = buckets.reduce((sum, n) => sum + n, 0); if (!total) return undefined;
+  let seen = 0;
+  for (let i = 0; i < buckets.length; i++) { seen += buckets[i]!; if (seen >= total * 0.95) return LAG_EDGES_MS[i] ?? Infinity; }
+  return Infinity;
+}
+export function percentile(values: number[], p: number): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)]!);
+}
 /**
  * The pass bar (owner, 16 Nov 2026: "If the dashboard freezes are extremely short, like less than a second or something,
  * it's not much of a priority"): the worst loop stall under 1 s on both engines, with the workload complete. The 250/100 ms
@@ -307,9 +321,12 @@ export const LOOP_STALL_LIMIT_MS = 1_000;
 // acknowledged under 1 s; the background gates on progress (no beat over 30 s, the work done, no WAL over 64 MB at any point).
 // Background beats over 1 s are reported by site and do not gate.
 const BACKGROUND_PROGRESS_LIMIT_MS = 30_000;
-export function gate(input: { background: Loop; front: Loop; workload_ok: boolean; wal_ok: boolean; ack_ok: boolean }) {
+// Boot after upgrade (owner, 16 Nov 2026 14:35Z: "a 3.7-second freeze after an update is not such a big issue"): the front's
+// beats are reported, with a 30 s sanity limit so a real hang still fails.
+export function frontLimitMs(runCase: string): number { return runCase === 'boot-after-upgrade' ? BACKGROUND_PROGRESS_LIMIT_MS : LOOP_STALL_LIMIT_MS; }
+export function gate(input: { background: Loop; front: Loop; workload_ok: boolean; wal_ok: boolean; ack_ok: boolean; runCase?: string }) {
   return input.workload_ok && input.wal_ok && input.ack_ok && input.background.beats > 0 && input.front.beats > 0
-    && input.background.max_ms < BACKGROUND_PROGRESS_LIMIT_MS && input.front.max_ms < LOOP_STALL_LIMIT_MS;
+    && input.background.max_ms < BACKGROUND_PROGRESS_LIMIT_MS && input.front.max_ms < frontLimitMs(input.runCase ?? 'steady');
 }
 export function memoryMaxBytes(value: string): number {
   const match = /^(\d+)([KMGT]?)$/i.exec(value);
@@ -524,6 +541,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const asks: Array<{ ms: number; status: number; evidence_ms: unknown }> = [];
   const acks: Array<{ at: string; ms: number; status: number; loop_held_ms?: number; error?: string }> = [];
   const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
+  const dashReads: Array<{ path: string; ms: number; status: number; error?: string }> = [];
   const errors: string[] = [];
   const requestErrors: string[] = [];
   // Steady: every run starts with the WALs folded in, as on a box in use. Boot after upgrade: one large WAL left on the ledger.
@@ -563,7 +581,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
       const json = await response.json() as Record<string, unknown>;
       return { ms: performance.now() - start, status: response.status, json };
     };
-    let nextAsk = Date.now(), nextRead = Date.now(), nextAck = Date.now(), askSequence = 0, ackSequence = 0;
+    let nextAsk = Date.now(), nextRead = Date.now(), nextAck = Date.now(), nextDash = Date.now(), askSequence = 0, ackSequence = 0;
     const statusPath = engineStatusSnapshotPath(env);
     while (Date.now() < deadline) {
       if (children.some(child => child.exitCode !== null)) throw new Error('Engine exited during measurement');
@@ -576,6 +594,16 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
           .then(async response => { const json = await response.json().catch(() => ({})) as Record<string, unknown>; acks.push({ at: new Date().toISOString(), ms: Math.round(performance.now() - start), status: response.status, ...(typeof json.loop_held_ms === 'number' ? { loop_held_ms: json.loop_held_ms } : {}) }); })
           .catch(error => { acks.push({ at: new Date().toISOString(), ms: Math.round(performance.now() - start), status: 0, error: error.message }); }));
         try { const status = JSON.parse(readFileSync(statusPath, 'utf8')) as { written_at?: string; loop_held_ms?: number }; if (status.written_at) statusAges.push({ age_ms: Date.now() - Date.parse(status.written_at), ...(typeof status.loop_held_ms === 'number' ? { loop_held_ms: status.loop_held_ms } : {}) }); } catch { /* not written yet */ }
+      }
+      if (Date.now() >= nextDash) {
+        // What the dashboard reads (its health poll and the source status), timed end to end on the front, once a second.
+        nextDash += 1000;
+        for (const path of ['/v1/health', '/v1/source/index/status']) {
+          const start = performance.now();
+          requests.push(workerFetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}` }, signal: AbortSignal.timeout(60_000) })
+            .then(async response => { await response.arrayBuffer(); dashReads.push({ path, ms: Math.round(performance.now() - start), status: response.status }); })
+            .catch(error => { dashReads.push({ path, ms: Math.round(performance.now() - start), status: 0, error: error.message }); }));
+        }
       }
       if (Date.now() >= nextRead) {
         nextRead += 1000;
@@ -629,16 +657,22 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     max_loop_held_ms: Math.max(0, ...acks.map(ack => ack.loop_held_ms ?? 0)), status_max_age_ms: Math.max(0, ...statusAges.map(row => row.age_ms)), status_reads: statusAges.length,
     status_max_loop_held_ms: Math.max(0, ...statusAges.map(row => row.loop_held_ms ?? 0)),
     no_control_thread: /no control thread here|the control thread ended/.test(output.background ?? '') };
+  // Typical case beside the worst (plan, 16 Nov 2026), reported only until two runs show the measurement is steady:
+  // click acknowledgement p95 under 100 ms, dashboard reads p95 under 300 ms, both worst under 1 s.
+  const dashOk = dashReads.filter(read => read.status === 200);
+  const typical = { ack_p95_ms: percentile(acks.map(ack => ack.ms), 0.95), dashboard_p95_ms: percentile(dashReads.map(read => read.ms), 0.95), dashboard_max_ms: Math.max(0, ...dashReads.map(read => read.ms)),
+    dashboard_reads: dashReads.length, dashboard_failed: dashReads.length - dashOk.length, dashboard_failures: dashReads.filter(read => read.status !== 200).slice(0, 10),
+    front_beat_p95_ms: beatP95(front) ?? null, background_beat_p95_ms: beatP95(background) ?? null };
   const ack_ok = ackOk.length > 0 && ackSummary.over_1s.length === 0 && ackSummary.status_max_age_ms <= 10_000 && !ackSummary.no_control_thread;
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
   const guards = sqliteGuards(walAtEnd, sqliteLines.map(entry => entry.line));
   // One bar for the 600k gate and the quick cold test (plan, 16 Nov 2026).
-  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok });
+  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok, runCase: options.runCase });
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000),
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -665,14 +699,16 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const siteTable = { background: sites('background'), front: sites('front') };
   for (const [role, loop] of [['front', front], ['background', background]] as const) {
     const worst = siteTable[role].slice().sort((a, b) => b.worst_ms - a.worst_ms)[0];
-    const limit = role === 'front' ? LOOP_STALL_LIMIT_MS : BACKGROUND_PROGRESS_LIMIT_MS;
-    console.log(`${options.runCase} ${role}: worst ${Math.round(loop.max_ms)} ms at ${worst?.site ?? 'no sample'}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s${role === 'background' ? `; beats over 1 s, reported not gated: ${siteTable.background.reduce((sum, entry) => sum + entry.count, 0)}` : ''})`);
+    const limit = role === 'front' ? frontLimitMs(options.runCase) : BACKGROUND_PROGRESS_LIMIT_MS;
+    const p95 = beatP95(loop);
+    console.log(`${options.runCase} ${role}: p95 beat ${p95 === undefined ? 'n/a' : `<= ${p95} ms`}, worst ${Math.round(loop.max_ms)} ms at ${worst?.site ?? 'no sample'}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s${role === 'background' ? `; beats over 1 s, reported not gated: ${siteTable.background.reduce((sum, entry) => sum + entry.count, 0)}` : ''})`);
   }
   console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s)`);
+  console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
   const peaks = Object.entries(guards.wal_peak).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, bytes]) => `${label} ${Math.round(bytes / 1048576)} MB`).join(', ') || 'no wal lines';
   console.log(`${options.runCase} WAL: peak ${peaks}; over 64 MB at any point ${guards.wal_peak_over.length}, at end ${guards.wal_over_limit.length}; ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
-  console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}); ${workload_ok ? 'PASS' : 'FAIL'}`);
-  console.log(`${options.runCase} release bar (front under 1 s, ack under 1 s, background under 30 s, work done, WAL at most 64 MB throughout): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
+  console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}, judge model calls ${modelCalls.judge}); ${workload_ok ? 'PASS' : 'FAIL'}${modelCalls.judge === 0 && workloads.judge_passes > 0 ? '. The judge ran but found nothing to judge: earlier runs judged this fixture out (verdicts are cached); build a new fixture folder.' : ''}`);
+  console.log(`${options.runCase} release bar (front under ${frontLimitMs(options.runCase) / 1000} s, ack under 1 s, background under 30 s, work done, WAL at most 64 MB throughout): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
   console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));
   rmSync(runDir, { recursive: true, force: true });
   return pass;
