@@ -67,6 +67,26 @@ describe('release-check report verdict', () => {
     expect(buildReport(input({ machines: [machine([], [{ id: 'q.no-leak', title: 'x', status: 'fail' }])] })).verdict).toBe('fail');
   });
 
+  test('setup failures and candidate failures have separate JSON and HTML summaries across upgrade stages and agents', () => {
+    const m = machine([{ id: 'setup.preflight', title: 'Setup', status: 'fail' }], [{ id: 'candidate.agent', title: 'Agent', status: 'fail' }]);
+    m.upgrade = {
+      from: { id: 'before', label: 'Old', timings: {}, checks: [{ id: 'setup.old-install', title: 'Old install', status: 'fail' }], agents: [], screenshots: [], logs: [] },
+      step: { label: 'Update', checks: [{ id: 'upgrade.installer', title: 'Install', status: 'fail' }], differences: [] },
+      afterLabel: 'After',
+    };
+    const report = buildReport(input({ machines: [m] }));
+    expect(report.verdict).toBe('fail');
+    expect(report.errors).toEqual([]);
+    expect(report.failures.setup.map(check => check.id)).toEqual(['setup.old-install', 'setup.preflight']);
+    expect(report.failures.candidate.map(check => check.id)).toEqual(['upgrade.installer', 'candidate.agent']);
+    const html = renderHtml(report);
+    expect(html).toContain('Setup failures (2)');
+    expect(html).toContain('Candidate failures (2)');
+    // Older v1 reports lack the new summary field and still render.
+    const legacy = { ...report }; delete (legacy as Partial<typeof report>).failures;
+    expect(renderHtml(legacy)).toContain('Setup failures (2)');
+  });
+
   test('a run in which every agent was skipped fails: nothing was asked of the product', () => {
     const skipped = machine([{ id: 'c1', title: 'Install', status: 'pass' }]);
     skipped.agents = skipped.agents.map((agent) => ({ ...agent, ran: false, skipReason: 'key missing', checks: [] }));

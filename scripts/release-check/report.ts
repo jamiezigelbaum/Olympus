@@ -225,6 +225,7 @@ export interface ReleaseReport extends ReleaseReportInput {
   phases: PhaseVerdict[];
   counts: Record<CheckStatus, number>;
   harness: HarnessRecord;
+  failures: { setup: CheckResult[]; candidate: CheckResult[] };
 }
 
 export function harnessRecord(harnessCommit: string | undefined, candidateCommit: string | undefined): HarnessRecord {
@@ -244,7 +245,7 @@ function allChecks(machine: MachineReport): CheckResult[] {
 export interface PhaseVerdict { id: string; label: string; verdict: 'pass' | 'fail' }
 
 /** A stage that recorded nothing but the report's own scan never ran, and a stage that never ran cannot pass. */
-const verdictOf = (checks: readonly CheckResult[]): 'pass' | 'fail' => (!checks.some((check) => check.id !== 'scan.report') || checks.some((check) => check.status === 'fail') ? 'fail' : 'pass');
+const verdictOf = (checks: readonly CheckResult[]): 'pass' | 'fail' => (!checks.some((check) => check.id !== 'scan.report' && check.status !== 'skip') || checks.some((check) => check.status === 'fail') ? 'fail' : 'pass');
 
 /** A verdict per stage of an upgrade run (before, the update, after); a plain run has one stage. */
 export function phaseVerdicts(machine: MachineReport): PhaseVerdict[] {
@@ -256,6 +257,14 @@ export function phaseVerdicts(machine: MachineReport): PhaseVerdict[] {
     { id: 'upgrade', label: step.label, verdict: verdictOf(step.checks) },
     after,
   ];
+}
+
+function failureSummary(machines: readonly MachineReport[]): ReleaseReport['failures'] {
+  const failures: ReleaseReport['failures'] = { setup: [], candidate: [] };
+  for (const check of machines.flatMap(allChecks).filter(check => check.status === 'fail')) {
+    failures[check.id.startsWith('setup.') ? 'setup' : 'candidate'].push(check);
+  }
+  return failures;
 }
 
 /** An agent counts as having asked a question only if it ran, was not the harness's own scripted one, and produced checks. */
@@ -274,6 +283,8 @@ export function buildReport(input: ReleaseReportInput): ReleaseReport {
   }
   const errors = [...input.errors];
   for (const machine of input.machines) {
+    // A failed setup deliberately leaves the dependent agent phases unattempted.
+    if (allChecks(machine).some(check => check.id === 'setup.preflight' && check.status === 'fail')) continue;
     if (machine.upgrade && !machine.upgrade.from.agents.some(askedAQuestion)) {
       const problem = `${machine.label}: no agent asked a question before the upgrade (${machine.upgrade.from.agents.length === 0 ? 'none was configured' : 'every agent was skipped'}), so the baseline proves nothing about answers`;
       if (!errors.includes(problem)) errors.push(problem);
@@ -292,7 +303,8 @@ export function buildReport(input: ReleaseReportInput): ReleaseReport {
   }
   const failed = counts.fail > 0 || errors.length > 0 || input.machines.length === 0;
   const phases = input.machines.flatMap((machine) => phaseVerdicts(machine));
-  return { schema: 'olympus.release-check.report.v1', ...input, errors, verdict: failed ? 'fail' : 'pass', phases, counts, harness };
+  const failures = failureSummary(input.machines);
+  return { schema: 'olympus.release-check.report.v1', ...input, errors, verdict: failed ? 'fail' : 'pass', phases, counts, harness, failures };
 }
 
 const STATUS_LABEL: Record<CheckStatus, string> = { pass: 'PASS', fail: 'FAIL', warn: 'WARN', skip: 'SKIP' };
@@ -563,6 +575,7 @@ function harnessLine(harness: HarnessRecord): string {
 
 /** One static page; no scripts, no external requests. */
 export function renderHtml(report: ReleaseReport): string {
+  const failures = failureSummary(report.machines);
   const totals = (['pass', 'fail', 'warn', 'skip'] as const).map((s) => `${report.counts[s]} ${s}`).join(' · ');
   const errors = report.errors.length === 0 ? '' : `<div class="errors"><strong>Run problems</strong><ul>${report.errors.map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul></div>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`
@@ -573,6 +586,8 @@ export function renderHtml(report: ReleaseReport): string {
     + `<p class="muted">${harnessLine(report.harness)}</p>`
     + (report.selfTest ? `<p class="muted">Self-test: ${escapeHtml(report.selfTest)}</p>` : '')
     + (report.settings?.engineSplit ? '<p class="muted">Engine split on: worker.engineSplit was set to true on the install under test</p>' : '')
+    + `<h2>Setup failures (${failures.setup.length})</h2>${checkTable(failures.setup)}`
+    + `<h2>Candidate failures (${failures.candidate.length})</h2>${checkTable(failures.candidate)}`
     + errors
     + carrySection(report.carry)
     + report.machines.map(machineSection).join('')

@@ -39,6 +39,17 @@ describe('front steadiness', () => {
     expect(checks.map((check) => [check.id, check.status])).toEqual([['front.store-set', 'pass'], ['front.steady', 'pass']]);
   });
 
+  test('a missing background fails with its sample count even if it returns with the same PID', () => {
+    for (const samples of [
+      [{ front: [200], background: [] }],
+      [{ front: [200], background: [100] }, { front: [200], background: [] }, { front: [200], background: [100] }],
+    ]) {
+      const check = status(frontSteadyChecks(steady({ samples })), 'front.steady')!;
+      expect(check.status).toBe('fail');
+      expect(check.detail).toContain(`no background running in 1 of ${samples.length} samples`);
+    }
+  });
+
   test('the rc.4 front fails: it answered ready, then crashed and was started again, with front_store_write in the log', () => {
     const samples = [
       ...Array.from({ length: 5 }, () => ({ front: [200], background: [100] })),

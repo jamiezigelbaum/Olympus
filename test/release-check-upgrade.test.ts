@@ -275,6 +275,7 @@ const NEW = JSON.parse(readFileSync(process.env.FAKE_NEW_POLICY, 'utf8'));
 const sha = (value) => new Bun.CryptoHasher('sha256').update(value).digest('hex');
 const oldText = JSON.stringify(OLD, null, 2) + '\n';
 if (verb === 'provision') {
+  if (process.env.FAKE_OLD_INSTALL_FAIL === '1') { console.error('[fake] problem: setup.old-install: historical release status did not answer within 120 s.'); process.exit(1); }
   console.log('{"machine":"fake-' + arg('--run-id') + '","label":"Scripted machine","os":"linux","driver":"fake"}');
 } else if (verb === 'upgrade') {
   // The split update's forced failure: a copy of the candidate whose front cannot start. The installer rolls it back unless told not to.
@@ -297,6 +298,7 @@ if (verb === 'provision') {
   // The forwarded-socket owner proof (#1188): the bare forwarded mint is refused, the owner's opened page unlocks.
   if (script.includes('forward_bare=')) { console.log('forward_bare=401\nowner_page=200'); process.exit(0); }
   const sub = /agent\.js (\S+)/.exec(script)?.[1];
+  if (sub) log('agent ' + sub + (script.includes('--earlier-release') ? ' --earlier-release' : ''));
   const upgraded = flag('upgraded');
   const say = (value) => console.log(JSON.stringify(value));
   const life = JSON.parse(readFileSync(state + '/life.json', 'utf8'));
@@ -305,6 +307,7 @@ if (verb === 'provision') {
   if (sub === 'helper-files') say({ ok: true, whatsappBridges: upgraded && process.env.FAKE_NO_BRIDGE !== '1' ? ['${OLD_BRIDGE}', '${NEW_BRIDGE}'] : ['${OLD_BRIDGE}'] });
   else if (sub === 'engine-build') say({ ok: true, build: (upgraded ? '1.0.1' : '1.0.0') + '+abc', version: upgraded ? '1.0.1' : '1.0.0', remoteMode: 'relay', relay: {} });
   else if (sub === 'fixture-judge-stats') say({ ok: true, calls: 3, ms: 1 });
+  else if (sub === 'preflight') say({ ok: process.env.FAKE_PREFLIGHT_FAIL !== '1', protocol: 'release-check.preflight.v1', detail: 'browser probe failed' });
   else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000 });
   else if (sub === 'connect-source') say({ ok: true, message: 'Connected' });
   else if (sub === 'settle') say({ ok: true, settled: true, polls: 2, waitedMs: 1000, snapshot: counts });
@@ -357,7 +360,7 @@ let driverPath: string;
 let candidateDir: string;
 let baselineDir: string;
 const saved: Record<string, string | undefined> = {};
-const SPLIT_KEYS = ['FAKE_BROKEN_ACCEPTED', 'FAKE_LOST_STORE', 'FAKE_FRONT_CRASH', 'FAKE_DRIVER_ERROR', 'FAKE_SEED_STALLED', 'FAKE_GMAIL_AFTER'];
+const SPLIT_KEYS = ['FAKE_PREFLIGHT_FAIL', 'FAKE_OLD_INSTALL_FAIL', 'FAKE_BROKEN_ACCEPTED', 'FAKE_LOST_STORE', 'FAKE_FRONT_CRASH', 'FAKE_DRIVER_ERROR', 'FAKE_SEED_STALLED', 'FAKE_GMAIL_AFTER'];
 const ENV_KEYS = ['FAKE_STATE', 'FAKE_OLD_POLICY', 'FAKE_NEW_POLICY', 'FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED', 'FAKE_NO_BRIDGE', ...SPLIT_KEYS];
 
 beforeEach(() => {
@@ -406,6 +409,38 @@ const failedIds = (report: Awaited<ReturnType<typeof runReleaseCheck>>): string[
 };
 
 describe('the upgrade leg end to end, against a scripted machine', () => {
+  test('a failed preflight stops before fixture preparation and upgrade, reports skips and measured duration', async () => {
+    process.env.FAKE_PREFLIGHT_FAIL = '1';
+    const opts = options();
+    const report = await runReleaseCheck(opts);
+    const check = checkOf(report, 'setup.preflight');
+    expect(check?.status).toBe('fail');
+    expect(check?.ms).toBeGreaterThanOrEqual(0);
+    expect(report.machines[0]!.upgrade!.from.timings.preflight).toBeGreaterThanOrEqual(0);
+    expect(report.failures.setup.map(check => check.id)).toContain('setup.preflight');
+    expect(report.failures.candidate).toEqual([]);
+    expect(report.errors).toEqual([]);
+    expect(report.phases.every(phase => phase.verdict === 'fail')).toBe(true);
+    const checks = [...report.machines[0]!.checks, ...report.machines[0]!.upgrade!.from.checks, ...report.machines[0]!.upgrade!.step.checks];
+    expect(checks.find(check => check.id === 'upgrade.installer')).toMatchObject({ status: 'skip', detail: 'not attempted: preflight failed' });
+    expect(driverLog()).toContain('agent engine-build --earlier-release');
+    expect(driverLog()).not.toContain('agent prepare-source');
+    expect(driverLog().some(line => line.startsWith('upgrade '))).toBe(false);
+    expect(driverLog().some(line => line.startsWith('destroy --machine'))).toBe(true);
+    expect(readFileSync(join(opts.outDir, 'logs', 'run.log'), 'utf8')).toContain('phase preflight:');
+  });
+
+  test('old installer status exhaustion is setup failure and tears down by run id', async () => {
+    process.env.FAKE_OLD_INSTALL_FAIL = '1';
+    const opts = options();
+    const report = await runReleaseCheck(opts);
+    expect(report.failures.setup.map(check => check.id)).toEqual(['setup.old-install', 'setup.preflight']);
+    expect(report.failures.candidate).toEqual([]);
+    expect(report.errors).toEqual([]);
+    expect(driverLog().some(line => line.startsWith('upgrade '))).toBe(false);
+    expect(driverLog()).toContain(`destroy --run-id ${opts.runId}`);
+  });
+
   test('the earlier release is provisioned, the candidate installs over it with the upgrade verb, and every comparison passes', async () => {
     let limitsRuns = 0;
     const opts = { ...options(), limitsStage: async () => {
@@ -419,6 +454,7 @@ describe('the upgrade leg end to end, against a scripted machine', () => {
     expect(failedIds(report)).toEqual([]);
     expect(report.errors.every((e) => e.includes('no agent asked a question'))).toBe(true);
     expect(driverLog()[0]).toContain(`provision --run-id ${opts.runId} --candidate ${baselineDir}`);
+    expect(driverLog().indexOf('agent preflight')).toBeLessThan(driverLog().indexOf('agent prepare-source'));
     const upgrade = driverLog().find((line) => line.startsWith('upgrade'))!;
     expect(upgrade).toContain(`--machine fake-${opts.runId} --candidate ${candidateDir}`);
     // Provision came first, the update after the baseline's suite, and the machine was destroyed at the end.
@@ -518,6 +554,8 @@ describe('the upgrade leg end to end, against a scripted machine', () => {
     expect(report.machines[0]!.upgrade).toBeUndefined();
     expect(report.phases.map((p) => p.id)).toEqual(['install']);
     expect(driverLog()[0]).toContain(`--candidate ${candidateDir}`);
+    expect(driverLog()).toContain('agent engine-build');
+    expect(driverLog()).not.toContain('agent engine-build --earlier-release');
     expect(driverLog().some((line) => line.startsWith('upgrade'))).toBe(false);
   }, 120_000);
 });

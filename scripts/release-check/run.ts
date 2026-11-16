@@ -60,6 +60,8 @@
  * Exit status: 0 the report passed, 1 the report failed, 2 the run could not
  * start (arguments, config, bundle).
  */
+import { digest, oldInstallBundle } from './preflight.ts';
+import { LEGS } from './impact.ts';
 import { liveChecks, publishFailedCheck } from './live-checks.ts';
 import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -284,6 +286,7 @@ export class Run {
   readonly markers: LeakMarker[] = forbiddenMarkers();
   readonly logLines: string[] = [];
   readonly errors: string[] = [];
+  preflightFailed = false;
   /**
    * When the run's time budget ends (epoch ms). Every in-machine call is cut to what is left of it, so a degraded candidate fails the
    * run inside its budget with the call named, instead of each phase waiting out its own long bound (olympus-ops#156).
@@ -372,7 +375,7 @@ export class Run {
     const fail = () => {
       if (exceeded) return;
       exceeded = true;
-      this.add({ id: `phase.${name}.time-budget`, title: `${name} stays within its wall-clock budget`, status: 'fail',
+      this.add({ id: `${name === 'preflight' || (name === 'provision' && this.options.upgradeFromDir !== undefined) ? 'setup' : 'phase'}.${name}.time-budget`, title: `${name} stays within its wall-clock budget`, status: 'fail',
         detail: `${name} exceeded ${Math.round(budget / 1000)}s; ${this.phaseTimings()}` });
     };
     const timer = this.clock.setTimeout(fail, budget);
@@ -431,7 +434,7 @@ export class Run {
     const phaseBound = Math.max(1, this.phaseDeadline - this.clock.now());
     const allowed = Math.min(agentTimeoutMs(timeoutMs, this.deadline, this.clock.now()), phaseBound, this.phaseOwnBudget ? phaseBound : phaseBudgetMs(sub));
     const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs: allowed });
-    if (exec.timedOut || exec.code === 124) this.add({ id: `phase.${this.phaseName ?? sub}.time-budget`,
+    if (exec.timedOut || exec.code === 124) this.add({ id: `${this.phaseName === 'preflight' ? 'setup' : 'phase'}.${this.phaseName ?? sub}.time-budget`,
       title: `${this.phaseName ?? sub} finishes within its bound`, status: 'fail',
       detail: `${sub} stopped after ${Math.round(exec.ms / 1000)}s (allowed ${Math.round(allowed / 1000)}s); ${this.phaseTimings()}` });
     if (this.clock.now() >= this.deadline && stoppedByBudget(exec, allowed, timeoutMs)) this.errors.push(`${sub} was stopped when the run's time budget ran out (after ${Math.round(exec.ms / 1000)} s of its ${Math.round(timeoutMs / 1000)} s bound)`);
@@ -485,7 +488,7 @@ export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean, archiv
  * Driver transfers and teardown have their own 2/3-minute bounds. */
 export function phaseBudgetMs(name: string): number {
   const minutes: Record<string, number> = {
-    provision: 25, 'restore-provision': 25, install: 25, 'reranker-ready': 16, 'restore-zig': 5, prepare: 7, 'prepare-source': 7,
+    preflight: 4, provision: 25, 'restore-provision': 25, install: 25, 'reranker-ready': 16, 'restore-zig': 5, prepare: 7, 'prepare-source': 7,
     ingest: 4, 'ingest-earlier-release': 10, settle: 10, 'front-seed': 15, 'front-steady': 10, 'front-watch': 5,
     'archive-beside-live': 8, 'archive-import': 12, 'archive-changed': 12,
     'archive-drain': 8, 'archive-remove': 5, 'archive-model': 7,
@@ -635,24 +638,55 @@ async function installedBridges(run: Run): Promise<string[] | undefined> {
   return Array.isArray(files.result?.whatsappBridges) ? (files.result.whatsappBridges as unknown[]).map(String) : undefined;
 }
 
+function skipAfterPreflight(run: Run): void {
+  run.preflightFailed = true;
+  const current = run.stage.id;
+  for (const stage of run.stages.values()) {
+    run.use(stage.id);
+    for (const id of [...LEGS, 'source.prepare', 'source.connect', 'ingest.settled', 'zkapi.confinement', 'limits', 'server-mode', ...(stage.id === 'upgrade' ? ['upgrade.installer'] : [])]) {
+      run.add({ id, title: id, status: 'skip', detail: 'not attempted: preflight failed' });
+    }
+  }
+  run.use(current);
+}
+
 async function setupMachine(run: Run, workDir: string, bundlePath: string, installTitle = 'The candidate installed and the engine is running', earlierRelease = false): Promise<boolean> {
   const machine = run.machine!;
-  const configPath = join(workDir, 'config.json');
-  writeFileSync(configPath, JSON.stringify(agentConfig(run.options)));
-  await machine.exec('mkdir -p ~/rc && chmod 700 ~/rc\n', { timeoutMs: 30_000 });
-  await machine.put(bundlePath, '~/rc/agent.js');
-  await machine.put(configPath, '~/rc/config.json');
-
-  const build = await run.agent('engine-build', '', 60_000);
-  if (typeof build.result?.build === 'string') run.build = build.result.build;
-  if (typeof build.result?.version === 'string') run.stage.version = build.result.version;
-  run.add({
-    id: 'install.engine',
-    title: installTitle,
-    status: build.result?.ok === true && run.build ? 'pass' : 'fail',
-    detail: installDetail(run.build, build.result),
+  const preflightStarted = Date.now();
+  let preflightDetail = '';
+  const passed = await run.phase('preflight', async () => {
+    try {
+      const configPath = join(workDir, 'config.json');
+      writeFileSync(configPath, JSON.stringify(agentConfig(run.options)));
+      const made = await machine.exec('mkdir -p ~/rc && chmod 700 ~/rc\n', { timeoutMs: 30_000 });
+      if (made.code !== 0) throw new Error('could not prepare the agent directory');
+      await machine.put(bundlePath, '~/rc/agent.js');
+      await machine.put(configPath, '~/rc/config.json');
+      const build = await run.agent('engine-build', earlierRelease ? '--earlier-release' : '', earlierRelease ? 150_000 : 60_000);
+      if (typeof build.result?.build === 'string') run.build = build.result.build;
+      if (typeof build.result?.version === 'string') run.stage.version = build.result.version;
+      run.add({
+        id: earlierRelease ? 'setup.old-install' : 'install.engine', title: installTitle,
+        status: build.result?.ok === true && run.build ? 'pass' : 'fail',
+        detail: installDetail(run.build, build.result),
+      });
+      if (build.result?.ok !== true || !run.build) throw new Error('installed build/status did not answer: ' + agentDetail(build, 'detail'));
+      const archive = join(workDir, 'candidate.tar');
+      const packed = spawnSync('tar', ['-cf', archive, '-C', run.options.candidateDir, '.'], { encoding: 'utf8', timeout: 30_000 });
+      if (packed.status !== 0) throw new Error('could not pack candidate for staging');
+      await machine.put(archive, '~/rc/candidate.tar');
+      const probe = await run.agent('preflight', `--bundle-sha ${digest(archive)}`, 90_000);
+      if (probe.code !== 0 || probe.result?.ok !== true || probe.result.protocol !== 'release-check.preflight.v1') throw new Error(agentDetail(probe, 'detail'));
+      preflightDetail = 'installed build/status answered; staged candidate permissions and checksums verified; dashboard browser loaded; agent protocol replied';
+      return true;
+    } catch (error) {
+      preflightDetail = error instanceof Error ? error.message : String(error);
+      return false;
+    }
   });
-  if (build.result?.ok !== true) return false;
+  const preflightOkay = passed && !run.checks.some(check => check.id.startsWith('setup.preflight.') && check.status === 'fail');
+  run.add({ id: 'setup.preflight', title: 'The leg machine passes its setup self-check', status: preflightOkay ? 'pass' : 'fail', detail: preflightDetail, ms: Date.now() - preflightStarted });
+  if (!preflightOkay) { skipAfterPreflight(run); return false; }
 
   // An earlier release answers the privacy question as it shipped (1.4.4 always recommends local-first), so only the
   // candidate is held to the memory-based recommendation (linux-upgrade 43858223532 on a 12 GB VM, 16 Nov 2026).
@@ -1743,7 +1777,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
 
   run.use('before');
   const ready = await setupMachine(run, workDir, bundlePath, `The earlier release${expected.from ? ` (${expected.from})` : ''} installed fresh and the engine is running`, true);
-  if (!ready) { run.errors.push('the earlier release did not reach a settled install, so the update was not attempted'); return; }
+  if (!ready) { if (!run.preflightFailed) run.errors.push('the earlier release did not reach a settled install, so the update was not attempted'); return; }
   const bridgesBefore = { expected: bundleWhatsAppBridgeName(options.upgradeFromDir!), installed: await installedBridges(run) };
   if (Date.now() >= deadline) { run.errors.push('the run exceeded its time budget before the earlier release\'s suite'); return; }
   await runSuite(run, workDir, judge, { mintToken: true });
@@ -1886,56 +1920,67 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   let machineInfo = { label: 'machine', os: 'linux', driver: 'driver' };
   try {
     const bundlePath = await bundleAgent(workDir);
-    run.machine = await run.phase('provision', () => driver.provision({ runId: options.runId, candidateDir: upgrading ? options.upgradeFromDir! : options.candidateDir, workdir: workDir, timeoutMs: 25 * 60_000 }));
-    machineInfo = { label: run.machine.label, os: run.machine.os, driver: run.machine.driver };
-    run.add({ id: 'provision', title: upgrading ? 'A fresh machine was created and the earlier release installed' : 'A fresh machine was created and the candidate installed', status: 'pass', detail: `${run.machine.label}` });
-    if (options.failAfterProvision) throw new Error('simulated failure after provision (teardown test)');
-    if (upgrading) {
-      await runUpgradeLeg(run, workDir, bundlePath, judge, deadline, versions);
-    } else {
-      const ready = await setupMachine(run, workDir, bundlePath);
-      if (ready) run.add(whatsappBridgeCheck({ id: 'install.whatsapp-bridge', expected: bundleWhatsAppBridgeName(options.candidateDir), installed: await installedBridges(run) }));
-      if (ready && !options.skipSuite && Date.now() < deadline) {
-        await run.inLeg('suite', () => runSuite(run, workDir, judge, { mintToken: true }));
-      } else if (ready && !options.skipSuite) {
-        run.errors.push('the run exceeded its time budget before the agent suite');
-      }
-      if (ready) {
-        await run.inLeg('screenshots', () => captureScreenshots(run, options.outDir));
-        if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
-        if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
-        if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
-        if (options.archiveScale) await run.inLeg('archive', () => runArchiveScaleLeg(run, options.outDir, deadline));
-        // With the split on, the front must survive a restart on a store set like a real one (rc.4, ops#151).
-        if (options.engineSplit && !options.skipArchive && Date.now() < deadline) await run.inLeg('archive', () => runFrontSteady(run));
-        // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
-        // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
-        // The restore leg's second machine comes only after the first is done and gone: both drivers run one machine at a time
-        // on their host (tart: run 42918085215's restore-provision timed out waiting; LXD: run 42960983714's was refused, since
-        // two VMs do not fit in Sparta's memory).
-        let restore: RestorePrepared | undefined;
-        if (Date.now() < deadline) {
-          await run.inLeg('restore', async () => { restore = await prepareRestore(run, workDir, options.outDir); });
-        } else run.errors.push('the run exceeded its time budget before the restore leg');
-        if (Date.now() < deadline) await runRelayConsentCheck(run);
-        if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
-        if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
-        if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
-        await runLimitsLeg(run);
-        await collectEvidence(run, options.outDir);
-        if (restore) {
-          const prepared: RestorePrepared = restore;
-          if (Date.now() >= deadline) { rmSync(prepared.local, { force: true }); run.errors.push('the run exceeded its time budget before the restore leg\'s clean machine'); }
-          else if (options.keepMachine) { rmSync(prepared.local, { force: true }); run.errors.push('the restore leg\'s clean machine was left out: --keep-machine keeps the first machine, and the driver runs one at a time'); }
-          else {
-            await run.inLeg('restore', async () => {
-              // Teardown destroys run.machine again afterwards, which is a no-op for a machine already gone.
-              await run.driver.destroy({ handle: run.machine!.handle });
-              await finishRestore(run, bundlePath, options.outDir, workDir, prepared);
-            });
-          }
+    try {
+      const installBundle = upgrading ? oldInstallBundle(options.upgradeFromDir!, workDir) : options.candidateDir;
+      if (upgrading && installBundle !== options.upgradeFromDir) run.log('setup: historical Linux installer status read retries for up to 120 s (scratch copy; candidate unchanged)');
+      run.machine = await run.phase('provision', () => driver.provision({ runId: options.runId, candidateDir: installBundle, workdir: workDir, timeoutMs: 25 * 60_000 }));
+    } catch (error) {
+      if (!upgrading) throw error;
+      run.add({ id: 'setup.old-install', title: 'The historical release installed and answered status', status: 'fail', detail: error instanceof Error ? error.message : String(error) });
+      run.add({ id: 'setup.preflight', title: 'The leg machine passes its setup self-check', status: 'fail', detail: 'historical release provision failed before the machine became usable', ms: run.timings.provision ?? 0 });
+      skipAfterPreflight(run);
+    }
+    if (run.machine) {
+      machineInfo = { label: run.machine.label, os: run.machine.os, driver: run.machine.driver };
+      run.add({ id: 'provision', title: upgrading ? 'A fresh machine was created and the earlier release installed' : 'A fresh machine was created and the candidate installed', status: 'pass', detail: `${run.machine.label}` });
+      if (options.failAfterProvision) throw new Error('simulated failure after provision (teardown test)');
+      if (upgrading) {
+        await runUpgradeLeg(run, workDir, bundlePath, judge, deadline, versions);
+      } else {
+        const ready = await setupMachine(run, workDir, bundlePath);
+        if (ready) run.add(whatsappBridgeCheck({ id: 'install.whatsapp-bridge', expected: bundleWhatsAppBridgeName(options.candidateDir), installed: await installedBridges(run) }));
+        if (ready && !options.skipSuite && Date.now() < deadline) {
+          await run.inLeg('suite', () => runSuite(run, workDir, judge, { mintToken: true }));
+        } else if (ready && !options.skipSuite) {
+          run.errors.push('the run exceeded its time budget before the agent suite');
         }
-      } else await collectEvidence(run, options.outDir);
+        if (ready) {
+          await run.inLeg('screenshots', () => captureScreenshots(run, options.outDir));
+          if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
+          if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
+          if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+          if (options.archiveScale) await run.inLeg('archive', () => runArchiveScaleLeg(run, options.outDir, deadline));
+          // With the split on, the front must survive a restart on a store set like a real one (rc.4, ops#151).
+          if (options.engineSplit && !options.skipArchive && Date.now() < deadline) await run.inLeg('archive', () => runFrontSteady(run));
+          // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
+          // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
+          // The restore leg's second machine comes only after the first is done and gone: both drivers run one machine at a time
+          // on their host (tart: run 42918085215's restore-provision timed out waiting; LXD: run 42960983714's was refused, since
+          // two VMs do not fit in Sparta's memory).
+          let restore: RestorePrepared | undefined;
+          if (Date.now() < deadline) {
+            await run.inLeg('restore', async () => { restore = await prepareRestore(run, workDir, options.outDir); });
+          } else run.errors.push('the run exceeded its time budget before the restore leg');
+          if (Date.now() < deadline) await runRelayConsentCheck(run);
+          if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
+          if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
+          if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
+          await runLimitsLeg(run);
+          await collectEvidence(run, options.outDir);
+          if (restore) {
+            const prepared: RestorePrepared = restore;
+            if (Date.now() >= deadline) { rmSync(prepared.local, { force: true }); run.errors.push('the run exceeded its time budget before the restore leg\'s clean machine'); }
+            else if (options.keepMachine) { rmSync(prepared.local, { force: true }); run.errors.push('the restore leg\'s clean machine was left out: --keep-machine keeps the first machine, and the driver runs one at a time'); }
+            else {
+              await run.inLeg('restore', async () => {
+                // Teardown destroys run.machine again afterwards, which is a no-op for a machine already gone.
+                await run.driver.destroy({ handle: run.machine!.handle });
+                await finishRestore(run, bundlePath, options.outDir, workDir, prepared);
+              });
+            }
+          }
+        } else if (!run.preflightFailed) await collectEvidence(run, options.outDir);
+      }
     }
   } catch (error) {
     run.errors.push(error instanceof Error ? error.message : String(error));
@@ -2005,7 +2050,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         ? `a fault was deliberately made in the Inbox leg (${options.inboxSelftest}); this run is expected to FAIL on ${run.inboxSelftestFailsOn && options.inboxSelftest === 'wrong-link-id' ? run.inboxSelftestFailsOn : INBOX_SELFTEST_FAILS[options.inboxSelftest]}`
         : undefined;
   let carry: ReleaseReportInput['carry'];
-  if (options.carry) {
+  if (options.carry && !run.preflightFailed) {
     const { base, path, plan } = options.carry;
     const from = { runId: base.runId, sha: base.candidate.sha! };
     try {
@@ -2183,7 +2228,7 @@ if (import.meta.main) {
     process.exit(2);
   }
   const report = await runReleaseCheck(options);
-  console.log(JSON.stringify({ verdict: report.verdict, counts: report.counts, report: join(options.outDir, 'report.html') }));
+  console.log(JSON.stringify({ verdict: report.verdict, counts: report.counts, failures: report.failures, report: join(options.outDir, 'report.html') }));
   process.exit(report.verdict === 'pass' ? 0 : 1);
 }
 

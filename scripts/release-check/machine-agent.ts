@@ -17,6 +17,7 @@
  * worker listens on an owner-only Unix socket that a bridge forwards to the port
  * a browser expects; on macOS the engine itself listens on that loopback port.
  */
+import { firstStatus, OLD_STATUS_WAIT_MS, digest, verifyStagedBundle, preflightProbes } from './preflight.ts';
 import { sourceCard, sourceConnected } from './source-cards.ts';
 import { archiveStateSiblingPath, olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
@@ -678,8 +679,7 @@ async function mcpToken(): Promise<never> {
   emit({ ok: true, connection: parsed.connection?.id ?? null });
 }
 
-async function mcpRpc(sessionHeaders: { sid?: string }, body: unknown): Promise<{ status: number; text: string }> {
-  const token = readFileSync(TOKEN_PATH, 'utf8').trim();
+async function mcpRpc(sessionHeaders: { sid?: string }, body: unknown, token = readFileSync(TOKEN_PATH, 'utf8').trim()): Promise<{ status: number; text: string }> {
   const response = await platform().workerFetch('/mcp', {
     method: 'POST',
     headers: {
@@ -2629,20 +2629,20 @@ async function upgradeSelftest(mode: string): Promise<never> {
 /**
  * The engine's build, once its status is healthy. A just-installed engine can report itself running while its worker
  * cannot yet answer for a few seconds at a time (engine.err names each stall), so the status is read again for up to
- * `ENGINE_HEALTH_WAIT_MS` before the install counts as failed; the wait is reported, never hidden.
+ * `ENGINE_HEALTH_WAIT_MS` before the candidate counts as failed. Only the old release gets 120 s for its startup race.
+ * The wait is reported, never hidden.
  */
 const ENGINE_HEALTH_WAIT_MS = 45_000;
 
-async function engineBuild(): Promise<never> {
+async function engineBuild(earlierRelease = false): Promise<never> {
   const started = Date.now();
-  let status = olympus(['engine', 'status']);
-  let parsed: { ok?: boolean; engine?: { build?: string; remote_mode?: string }; worker?: { detail?: string } } | undefined;
-  for (;;) {
-    try { parsed = JSON.parse(status.stdout); } catch { parsed = undefined; }
-    if (status.code === 0 || Date.now() - started >= ENGINE_HEALTH_WAIT_MS) break;
-    await sleep(3_000);
-    status = olympus(['engine', 'status']);
-  }
+  const status = await firstStatus({
+    now: Date.now, sleep,
+    read: (remainingMs) => olympus(['engine', 'status'], { timeoutMs: remainingMs }),
+    answers: (value) => value.code === 0,
+  }, earlierRelease ? OLD_STATUS_WAIT_MS : ENGINE_HEALTH_WAIT_MS);
+  let parsed: { engine?: { build?: string; remote_mode?: string }; worker?: { detail?: string } } | undefined;
+  try { parsed = JSON.parse(status.stdout); } catch { parsed = undefined; }
   const build = parsed?.engine?.build ?? null;
   const remote: unknown = parsed?.engine?.remote_mode ?? null;
   const waitedMs = Date.now() - started;
@@ -2654,6 +2654,54 @@ async function engineBuild(): Promise<never> {
   } catch { /* leave null */ }
   const version = /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\b/.exec(olympus(['--version']).stdout)?.[1] ?? null;
   emit({ ok: status.code === 0, build, version, remoteMode: remote, relay, waitedMs, ...(status.code === 0 ? {} : { worker: parsed?.worker?.detail ?? null }) });
+}
+
+/** Probes the owner dashboard and an ephemeral MCP connection before fixture/model setup. */
+async function preflight(bundleSha: string): Promise<never> {
+  try {
+    await preflightProbes({
+      bundle: async () => {
+        const archive = join(WORKDIR, 'candidate.tar');
+        if (digest(archive) !== bundleSha) throw new Error('staged candidate archive checksum mismatch');
+        const root = join(WORKDIR, 'candidate');
+        mkdirSync(root, { recursive: true, mode: 0o700 });
+        const unpacked = spawnSync('tar', ['-xf', archive, '-C', root], { encoding: 'utf8', timeout: 30_000 });
+        if (unpacked.status !== 0) throw new Error('could not unpack staged candidate');
+        verifyStagedBundle(root);
+      },
+      browser: async () => {
+        const browser = findBrowser();
+        if (!browser) throw new Error('no headless browser on the machine');
+        const opened = await openBrowser(browser, 'chrome-profile-preflight', ARCHIVE_DEBUG_PORT, true);
+        let stopBridge = () => {};
+        try {
+          const driver = new CdpJourneyDriver({ cdp: opened.cdp, debugPort: ARCHIVE_DEBUG_PORT, outDir: WORKDIR,
+            mintLink: async place => mintOpeningLink(place),
+            onOrigin: origin => { stopBridge = startBridge(Number(new URL(origin).port || 80)); },
+          });
+          await driver.start();
+          await driver.open('dashboard');
+          const text = await driver.probe('panel', '__rc.visibleText()');
+          if (typeof text !== 'string' || text.trim().length <= 40) throw new Error('dashboard browser probe did not load');
+        } finally { opened.close(); stopBridge(); }
+      },
+      protocol: async () => {
+        const created = olympus(['connections', 'add', 'release-check-preflight']);
+        const connection = jsonOf(created) as { token?: string; connection?: { id?: string } } | undefined;
+        if (created.code !== 0 || !connection?.token || !connection.connection?.id) throw new Error('could not create preflight protocol connection');
+        try {
+          const reply = await mcpRpc({}, { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'release-check-preflight', version: '1' } } }, connection.token);
+          const message = parseRpc(reply.text);
+          if (reply.status !== 200 || message.id !== 1 || !message.result?.protocolVersion || message.error) throw new Error(`agent protocol did not initialize (HTTP ${reply.status})`);
+        } finally {
+          if (olympus(['connections', 'revoke', connection.connection.id]).code !== 0) throw new Error('could not revoke preflight protocol connection');
+        }
+      },
+    });
+    return emit({ ok: true, protocol: 'release-check.preflight.v1' });
+  } catch (error) {
+    return emit({ ok: false, detail: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2696,6 +2744,7 @@ async function main(): Promise<void> {
       await new Promise(() => undefined);
       return;
     }
+    case 'preflight': return await preflight(flag('--bundle-sha'));
     case 'prepare-source': return await prepareSource(rest[0] === 'earlier');
     case 'connect-source': return await connectSource();
     case 'settle': return await settle(Number(flag('--timeout-s', '600')));
@@ -2759,7 +2808,7 @@ async function main(): Promise<void> {
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'data-root-snapshot': return dataRootSnapshotCommand(flag('--label'));
     case 'data-root-watch': return await dataRootWatchCommand(Number(flag('--seconds', '900')));
-    case 'engine-build': return await engineBuild();
+    case 'engine-build': return await engineBuild(rest.includes('--earlier-release'));
     case 'snapshot-state': return await snapshotState();
     case 'set-policy-setting': return await setPolicySetting();
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
