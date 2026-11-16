@@ -9,7 +9,7 @@
     "src/core/analyst-openai.ts": 1,
     "src/core/analyst-openclaw-infer.ts": 1,
     "src/core/analyst-tinfoil.ts": 1,
-    "src/core/analyst.ts": 2,
+    "src/core/analyst.ts": 1,
     "src/core/atomic-file.ts": 1,
     "src/core/boot-progress.ts": 5,
     "src/core/calendar-agenda.ts": 1,
