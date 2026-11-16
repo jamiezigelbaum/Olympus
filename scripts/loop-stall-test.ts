@@ -496,7 +496,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     walAtOpen = walSizes(dir);
     coldFiles(dir);
     for (const role of ['background', 'front']) {
-      const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], { env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_MAIN_THREAD_SQL_LOG: join(metrics, `${role}.sql.jsonl`) }, stdout: 'pipe', stderr: 'pipe' });
+      const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], { env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_MAIN_THREAD_SQL_LOG: join(metrics, `${role}.sql.jsonl`), OLYMPUS_CPU_SAMPLE_LOG: join(metrics, `${role}.cpu.jsonl`) }, stdout: 'pipe', stderr: 'pipe' });
       children.push(child);
       for (const stream of [child.stdout, child.stderr]) pumps.push((async () => { for await (const chunk of stream as ReadableStream<Uint8Array>) { const text = new TextDecoder().decode(chunk); keepSqliteLines(role, text); output[role] = (output[role]! + text).slice(-100_000); } })());
     }
@@ -554,12 +554,21 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const workload_ok = finished && errors.length === 0 && workloads.failures.length === 0 && workloads.sync_items > 0 && workloads.embed_passes_started > 0 && workloads.judge_passes > 0 && workloads.recounts_started > 0
     && modelCalls.judge > 0 && asks.some(ask => ask.status === 200 && typeof ask.evidence_ms === 'number') && forwarded.some(read => read.status === 200);
   const allowed = JSON.parse(readFileSync(join(import.meta.dir, 'loop-stall-allowlist.json'), 'utf8')) as string[];
+  // The engine's own CPU sampler (every 30 s): each loop beat over 1 s, with the frames sampled inside it.
+  const cpuFreezes = ['background', 'front'].flatMap(role => {
+    const path = join(metrics, `${role}.cpu.jsonl`);
+    if (!existsSync(path)) return [];
+    writeFileSync(join(dir, `last-run-${role}.cpu.jsonl`), readFileSync(path));
+    return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).flatMap(line => {
+      try { const row = JSON.parse(line) as { at: string; freezes?: { count: number } }; return row.freezes?.count ? [{ role, at: row.at, freezes: row.freezes }] : []; } catch { return []; }
+    });
+  });
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
   const guards = sqliteGuards(walAtEnd, walLines.map(entry => entry.line));
   const pass = gate({ background, front, slow_sql, workload_ok }, allowed) && guards.ok;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000), wal: walLines.slice(0, 2000) } };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
