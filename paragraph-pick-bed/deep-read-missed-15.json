@@ -1,0 +1,427 @@
+{
+ "version": "deep-read-1",
+ "description": "Paragraph-pick test bed (public QASPER papers): 15 questions whose document is at seat 1 and whose answer paragraph does not reach the prompt at 12 seats, 27,000 B (main 8521207). Deep read of that one file.",
+ "seed": "first 15 by id",
+ "questions": [
+  {
+   "id": "q06b5272774",
+   "kind": "item",
+   "question": "In the paper \"Predicting Annotation Difficulty to Improve Task Routing and Model Performance for Biomedical Information Extraction\", is an instance a sentence or an IE tuple?",
+   "quote": "they reproduced them with reasonable fidelity. The difficult sentences usually exhibit complicated structure and feature jargon.",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1905.07791",
+    "provider_item_id": "1905.07791"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1905.07791",
+     "local_item_id": "personal:1905.07791"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 8
+   },
+   "setItems": 1,
+   "setPassages": 8,
+   "notes": "natural"
+  },
+  {
+   "id": "q114934e1a1",
+   "kind": "item",
+   "question": "In the paper \"Neural Collective Entity Linking\", how effective is their NCEL approach overall?",
+   "quote": "five public available benchmarks. The results show that NCEL consistently outperforms various baselines with a favorable generalization ability. Finally, we further present the performance on a",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1811.08603",
+    "provider_item_id": "1811.08603"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1811.08603",
+     "local_item_id": "personal:1811.08603"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 8
+   },
+   "setItems": 1,
+   "setPassages": 8,
+   "notes": "natural"
+  },
+  {
+   "id": "q1269c5d8f6",
+   "kind": "item",
+   "question": "In the paper \"Combining Advanced Methods in Japanese-Vietnamese Neural Machine Translation\", what methods were used to reduce data sparsity effects?",
+   "quote": "In this section, we describe the data augmentation methods we use to increase the amount of",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1805.07133",
+    "provider_item_id": "1805.07133"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1805.07133",
+     "local_item_id": "personal:1805.07133"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 7
+   },
+   "setItems": 1,
+   "setPassages": 7,
+   "notes": "natural"
+  },
+  {
+   "id": "q12f7fac818",
+   "kind": "item",
+   "question": "In the paper \"A Joint Model for Multimodal Document Quality Assessment\", what kind of model do they use?",
+   "quote": "joint model that integrates visual features learned through Inception V3 with textual features learned through a biLSTM. In",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1901.01010",
+    "provider_item_id": "1901.01010"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1901.01010",
+     "local_item_id": "personal:1901.01010"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 7
+   },
+   "setItems": 1,
+   "setPassages": 7,
+   "notes": "natural"
+  },
+  {
+   "id": "q16535db1d7",
+   "kind": "item",
+   "question": "In the paper \"Inexpensive Domain Adaptation of Pretrained Language Models: A Case Study on Biomedical Named Entity Recognition\", what in-domain text did they use?",
+   "quote": "$d_\\mathrm {W2V} = d_\\mathrm {LM} = 768$ on PubMed+PMC (see Appendix for details). Then, we follow the",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:2004.03354",
+    "provider_item_id": "2004.03354"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "2004.03354",
+     "local_item_id": "personal:2004.03354"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 6
+   },
+   "setItems": 1,
+   "setPassages": 6,
+   "notes": "natural"
+  },
+  {
+   "id": "q1b23c4535a",
+   "kind": "item",
+   "question": "In the paper \"Attention-based Wav2Text with Feature Transfer Learning\", which architecture do they use for the encoder and decoder?",
+   "quote": "purely based on recurrent neural network (RNNs) framework, we construct an encoder with several convolutional layers BIBREF14 followed by NIN layers BIBREF15 as the lower part in the encoder and",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1709.07814",
+    "provider_item_id": "1709.07814"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1709.07814",
+     "local_item_id": "personal:1709.07814"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 5
+   },
+   "setItems": 1,
+   "setPassages": 5,
+   "notes": "natural"
+  },
+  {
+   "id": "q2eb9280d72",
+   "kind": "item",
+   "question": "In the paper \"MCScript: A Novel Dataset for Assessing Machine Comprehension Using Script Knowledge\", what is the size of their dataset?",
+   "quote": "questions during the validation, the final dataset comprises 13,939 questions, 3,827 of which require commonsense knowledge (i.e.",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1803.05223",
+    "provider_item_id": "1803.05223"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1803.05223",
+     "local_item_id": "personal:1803.05223"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 8
+   },
+   "setItems": 1,
+   "setPassages": 8,
+   "notes": "natural"
+  },
+  {
+   "id": "q34dc083863",
+   "kind": "item",
+   "question": "In the paper \"Generating Personalized Recipes from Historical User Preferences\", what are the baseline models?",
+   "quote": "models against two baselines. The first is a name-based Nearest-Neighbor model (NN). We initially adapted the Neural Checklist Model of",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1909.00105",
+    "provider_item_id": "1909.00105"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1909.00105",
+     "local_item_id": "personal:1909.00105"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 5
+   },
+   "setItems": 1,
+   "setPassages": 5,
+   "notes": "natural"
+  },
+  {
+   "id": "q36ae003c7c",
+   "kind": "item",
+   "question": "In the paper \"Follow Alice into the Rabbit Hole: Giving Dialogue Agents Understanding of Human Level Attributes.\", how does dataset model character's profiles?",
+   "quote": "and edited collaboratively by a massive user-base. These attributes are determined by human viewers and their impressions of the characters, and are correlated with human-like characteristics. We believe that TV",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1910.08293",
+    "provider_item_id": "1910.08293"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1910.08293",
+     "local_item_id": "personal:1910.08293"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 9
+   },
+   "setItems": 1,
+   "setPassages": 9,
+   "notes": "natural"
+  },
+  {
+   "id": "q37edc25e39",
+   "kind": "item",
+   "question": "In the paper \"Multitask Learning for Fine-Grained Twitter Sentiment Analysis\", what was the baseline?",
+   "quote": "performance in several text classification problems BIBREF16 . SVM INLINEFORM0 stands for an SVM with linear kernel and",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1707.03569",
+    "provider_item_id": "1707.03569"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1707.03569",
+     "local_item_id": "personal:1707.03569"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 5
+   },
+   "setItems": 1,
+   "setPassages": 5,
+   "notes": "natural"
+  },
+  {
+   "id": "q41ac23e32b",
+   "kind": "item",
+   "question": "In the paper \"Toward Multilingual Neural Machine Translation with Universal Encoder and Decoder\", which languages do they test on for the under-resourced scenario?",
+   "quote": "small portion of the large parallel corpus for English-German is used as a simulation for the scenario",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1611.04798",
+    "provider_item_id": "1611.04798"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1611.04798",
+     "local_item_id": "personal:1611.04798"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 8
+   },
+   "setItems": 1,
+   "setPassages": 8,
+   "notes": "natural"
+  },
+  {
+   "id": "q440faf8d0a",
+   "kind": "item",
+   "question": "In the paper \"Text Classification based on Word Subspace with Term-Frequency\", which dataset has been used in this work?",
+   "quote": "proposed method and its extension. We used the Reuters-8 dataset without stop words from BIBREF27 aiming at single-label classification, which is",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1806.03125",
+    "provider_item_id": "1806.03125"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1806.03125",
+     "local_item_id": "personal:1806.03125"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 9
+   },
+   "setItems": 1,
+   "setPassages": 9,
+   "notes": "natural"
+  },
+  {
+   "id": "q455d4ef861",
+   "kind": "item",
+   "question": "In the paper \"Data Collection for Interactive Learning through the Dialog\", how was this data collected?",
+   "quote": "usually hard. Therefore, we used the crowdsourcing platform CrowdFlower (CF) for our data collection.",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1603.09631",
+    "provider_item_id": "1603.09631"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1603.09631",
+     "local_item_id": "personal:1603.09631"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 5
+   },
+   "setItems": 1,
+   "setPassages": 5,
+   "notes": "natural"
+  },
+  {
+   "id": "q48bd71477d",
+   "kind": "item",
+   "question": "In the paper \"Arabic Diacritic Recovery Using a Feature-Rich biLSTM Model\", what surface-level features are used?",
+   "quote": "include many more surface level features such as affixes, leading and trailing characters in words and stems, and the presence of words in large gazetteers of named entities. As we",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:2002.01207",
+    "provider_item_id": "2002.01207"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "2002.01207",
+     "local_item_id": "personal:2002.01207"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 8
+   },
+   "setItems": 1,
+   "setPassages": 8,
+   "notes": "natural"
+  },
+  {
+   "id": "q4cbe5a36b4",
+   "kind": "item",
+   "question": "In the paper \"Causal Explanation Analysis on Social Media\", what baselines did they consider?",
+   "quote": "We first use state-of-the-art PDTB taggers for our baseline BIBREF13 , BIBREF12 for the evaluation of",
+   "set": {
+    "whole": "item",
+    "corpus_id": "internal.fixture.files",
+    "provider": "fixture",
+    "account_scope": "personal",
+    "local_item_id": "personal:1809.01202",
+    "provider_item_id": "1809.01202"
+   },
+   "expected": [
+    {
+     "corpus_id": "internal.fixture.files",
+     "provider_item_id": "1809.01202",
+     "local_item_id": "personal:1809.01202"
+    }
+   ],
+   "target": {
+    "index": 0,
+    "of": 7
+   },
+   "setItems": 1,
+   "setPassages": 7,
+   "notes": "natural"
+  }
+ ]
+}
