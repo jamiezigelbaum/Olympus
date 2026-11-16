@@ -12,6 +12,7 @@ import { withKeywordAlternatives, requestKeywordAlternatives, pinKeywordAlternat
 // `value` is set once the translation has finished, so a caller that must not wait can use it.
 interface CachedExpansion { pending: Promise<KeywordExpansionMap>; expires: number; value?: KeywordExpansionMap }
 const caches = new WeakMap<AnalystModel, Map<string, CachedExpansion>>();
+const sharedCalls = new WeakMap<AnalystModel, { seen: Set<string>; calls: Map<string, { query: string; languages: readonly string[]; pending: Promise<unknown>; expires: number }> }>();
 
 /** The owner's local Private model from the shared chooser: a model, 'unavailable' when it is set up but down, undefined when there is none. */
 export type OwnerKeywordModel = () => Promise<AnalystModel | 'unavailable' | undefined>;
@@ -147,7 +148,6 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
   if (builtIn?.down) return failedCopy(fallback);
   const expander = builtIn?.available() ? builtIn.model : undefined;
   if (!expander) return fallback;
-  const waitsItsTurn = builtIn!.owner === true;
   let cache = caches.get(expander);
   if (!cache) { cache = new Map(); caches.set(expander, cache); }
   const key = JSON.stringify([query, languages]);
@@ -169,23 +169,44 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
   if (cache.size > 128) cache.delete(cache.keys().next().value!);
   return pending;
 
+  // One model call per question, not one per store: every store of this
+  // install asks for the languages seen across all of them, and a store whose
+  // languages a call already covers shares that call.
+  function askOnce(): Promise<unknown> {
+    let shared = sharedCalls.get(expander!);
+    if (!shared) { shared = { seen: new Set(), calls: new Map() }; sharedCalls.set(expander!, shared); }
+    for (const language of languages) shared.seen.add(language);
+    for (const [callKey, call] of shared.calls) {
+      if (call.query === query && languages.every(language => call.languages.includes(language))) return call.pending;
+      if (call.expires <= Date.now()) shared.calls.delete(callKey);
+    }
+    const union = [...shared.seen].filter(code => !sourceLanguages.includes(code)).sort();
+    const asked = union.length <= MAX_LANGUAGES ? union : languages;
+    const names = Object.fromEntries(asked.map(code => [code, new Intl.DisplayNames(['en'], {type:'language'}).of(code) ?? code]));
+    // No give-up clock: the search has already started on the static word
+    // list, and the model's own silence limit ends a call that stops producing.
+    const pending = expander!.complete({
+      system: SYSTEM + '\nTarget languages: ' + asked.map(code => code + ' = ' + names[code]).join('; '), prompt: JSON.stringify({ context: query, concepts: sources.map((term,index)=>({id:String(index),term})), languages: asked, languageNames: names }),
+      localOnly: true, maxOutputChars: 6000,
+      responseSchema: {
+        type: 'object', properties: Object.fromEntries(asked.map(language => [language, {
+          type: 'object', properties: Object.fromEntries(sources.map((_,index) => [String(index), {
+            type: 'array', maxItems: 3, items: {type: 'string', maxLength: 64},
+          }])), additionalProperties: false,
+        }])), required: asked, additionalProperties: false,
+      },
+    }).then(completion => JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')) as unknown);
+    const callKey = JSON.stringify([query, asked]);
+    shared.calls.set(callKey, { query, languages: asked, pending, expires: Date.now() + 5 * 60_000 });
+    // A failed call is not shared with a later request.
+    pending.catch(() => { if (shared!.calls.get(callKey)?.pending === pending) shared!.calls.delete(callKey); });
+    if (shared.calls.size > 128) shared.calls.delete(shared.calls.keys().next().value!);
+    return pending;
+  }
+
   async function translate(): Promise<KeywordExpansionMap> {
     try {
-      const completion = await expander!.complete({
-        system: SYSTEM + '\nTarget languages: ' + languages.map(code => code + ' = ' + new Intl.DisplayNames(['en'], {type:'language'}).of(code)).join('; '), prompt: JSON.stringify({ context: query, concepts: sources.map((term,index)=>({id:String(index),term})), languages, languageNames: Object.fromEntries(languages.map(code => [code, new Intl.DisplayNames(['en'], {type:'language'}).of(code) ?? code])) }),
-        localOnly: true, maxOutputChars: 6000,
-        // The built-in model keeps its give-up; the owner's model waits its turn like any other call.
-        ...(waitsItsTurn ? {} : { signal: AbortSignal.timeout(20_000) }),
-        responseSchema: {
-          type: 'object', properties: Object.fromEntries(languages.map(language => [language, {
-            type: 'object', properties: Object.fromEntries(sources.map((_,index) => [String(index), {
-              type: 'array', maxItems: 3, items: {type: 'string', maxLength: 64},
-            }])), additionalProperties: false,
-          }])), required: languages, additionalProperties: false,
-        },
-      });
-      let generated: unknown;
-      try { generated=JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')); } catch { return failedCopy(fallback); }
+      const generated = await askOnce();
       const merged: Record<string, Record<string, unknown>> = {};
       for (const language of languages) {
         const decoded: Record<string,unknown> = {...seeded[language]};

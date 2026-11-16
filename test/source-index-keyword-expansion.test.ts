@@ -432,3 +432,28 @@ test("with the switch on, the owner's model translates, waits its turn, and the 
     registerOwnerKeywordModel(undefined);
   }
 });
+
+test('stores with different language mixes share one translation call per question, and no give-up clock rides it', async () => {
+  const asked: string[][] = [];
+  let signal: unknown = 'unset';
+  registerBuiltInPrivateModel({ available: () => true, model: { async complete(request) {
+    signal = request.signal;
+    asked.push((JSON.parse(request.prompt) as { languages: string[] }).languages);
+    return { text: '{"spa":{"0":["cometa"]},"deu":{"0":["Komet"]}}', modelId: 'fixture' };
+  } } });
+  // The first question learns the install's languages store by store.
+  await expandSourceIndexKeywords('comet ledger', ['spa'], {}, { waitMs: 5_000 });
+  await expandSourceIndexKeywords('comet ledger', ['deu', 'spa'], {}, { waitMs: 5_000 });
+  expect(asked).toEqual([['spa'], ['deu', 'spa']]);
+  // From then on a question is one call, whichever store asks first.
+  const [first, second] = await Promise.all([
+    expandSourceIndexKeywords('nebula ledger', ['spa'], {}, { waitMs: 5_000 }),
+    expandSourceIndexKeywords('nebula ledger', ['deu', 'spa'], {}, { waitMs: 5_000 }),
+  ]);
+  expect(asked).toHaveLength(3);
+  expect(asked[2]).toEqual(['deu', 'spa']);
+  // Each store keeps only its own languages' words.
+  expect(JSON.stringify([...first])).not.toContain('komet');
+  expect(JSON.stringify([...second])).toContain('komet');
+  expect(signal).toBeUndefined();
+});

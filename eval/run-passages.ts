@@ -556,7 +556,10 @@ function summaries(rows: readonly PassageRow[], ks: readonly number[]): PassageR
 export function degradationsOf(detail: EvidencePackBuildDetail): Degradation[] {
   // lane_budget_cut means a store searched fine but the seat budget filled
   // first (source-index/types.ts): a pack-size outcome, not a search cut short.
-  const lanes = detail.degradations.filter(({ reason }) => reason !== 'lane_budget_cut').map(({ laneName, reason }) => {
+  // A translation of the search words that failed or was not ready left the
+  // search on the static word list: a gap of its own (the keywordExpansion
+  // line counts the failures), not a store search cut short.
+  const lanes = detail.degradations.filter(({ reason, detail: why }) => reason !== 'lane_budget_cut' && why !== 'keyword_preparation_incomplete').map(({ laneName, reason }) => {
     const split = laneName.indexOf(':');
     return split < 0 ? { corpusId: laneName, reason } : { corpusId: laneName.slice(0, split), lane: laneName.slice(split + 1), reason };
   });
