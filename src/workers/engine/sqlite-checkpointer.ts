@@ -51,7 +51,9 @@ const WORKERS = 2;
 const CHECKPOINT_NOTABLE_MS = 1_000;
 const CHECKPOINT_NOTABLE_BYTES = 32 * 1024 * 1024;
 /** Passes one wait may take to find the WAL level; each after the first copies only what landed during the one before. */
-const ROOM_PASSES = 6;
+const ROOM_PASSES = 8;
+/** Passes in a row that copy nothing new, with frames left, before a file counts as held by a read. */
+const HELD_AFTER_PASSES = 3;
 const ROOM_NOTABLE_MS = 1_000;
 const ROOM_SUMMARY_MS = 60_000;
 
@@ -135,6 +137,7 @@ interface FileState extends SqliteCheckpointFile {
   firstDone: boolean;
   /** Bulk work made room; the next pass says whether the writer's commit rewound the file. */
   awaitRewind: boolean;
+  stuckPasses: number;
   running: boolean;
   queued: Job | undefined;
 }
@@ -260,7 +263,7 @@ export function startSqliteCheckpointer(options: {
     state.firstDone = true;
     if (reply.skipped) {
       if (expectedRewind) stats.rewinds += 1;
-      state.live = 0; state.hot = false; state.held = false; state.lastLog = undefined; state.lastCheckpointed = undefined;
+      state.live = 0; state.hot = false; state.held = false; state.stuckPasses = 0; state.lastLog = undefined; state.lastCheckpointed = undefined;
       return;
     }
     const frames = Math.max(0, reply.log ?? 0);
@@ -269,7 +272,9 @@ export function startSqliteCheckpointer(options: {
     if (expectedRewind && !madeRoom) { if (rewound) stats.rewinds += 1; else stats.rewindsMissed += 1; }
     // Frames left over while the copied count stands still: a read holds them. (A writer adding frames during the pass moves the count.)
     const stuck = copied < frames && !rewound && state.lastCheckpointed !== undefined && copied <= state.lastCheckpointed;
-    const held = reply.busy === 1 || stuck;
+    // One such pass is an ordinary short read (gate runs: tens of milliseconds); a read that outlasts several passes holds the file.
+    state.stuckPasses = stuck ? state.stuckPasses + (madeRoom ? 0 : 1) : 0; // Paced passes, a second apart; a wait's passes are milliseconds apart.
+    const held = reply.busy === 1 || state.stuckPasses >= HELD_AFTER_PASSES;
     const walBytes = reply.walBytes ?? 0;
     if (held && !state.held) {
       const read = oldestOffThreadSnapshot(state.dbPath);
@@ -307,28 +312,37 @@ export function startSqliteCheckpointer(options: {
     // owner's change) can still land during a pass and leave it a few frames
     // behind. A pass with nothing to copy takes about a millisecond, so pass
     // again until one finds the WAL as the last left it, fully copied.
-    let level = false;
-    let before: number | undefined;
-    let reply = await pass(state, true);
-    for (let again = 0; ; again += 1) {
-      record(state, reply, true);
-      if (!reply.ok || reply.lost || reply.skipped || state.held) break;
-      const frames = reply.log ?? 0;
-      if (before !== undefined && frames < before) break; // A write already rewound it.
-      level = (reply.checkpointed ?? 0) >= frames && before === frames;
-      if (level || again >= ROOM_PASSES - 1) break;
-      before = frames;
-      reply = await pass(state, true);
-    }
+    let passes = 0;
+    const untilLevel = async (): Promise<boolean> => {
+      let before: number | undefined;
+      for (;;) {
+        const reply = await pass(state, true);
+        passes += 1;
+        record(state, reply, true);
+        if (!reply.ok || reply.lost || reply.skipped || state.held) return false;
+        const frames = reply.log ?? 0;
+        if (before !== undefined && frames < before) return false; // A write already rewound it.
+        if ((reply.checkpointed ?? 0) >= frames && before === frames) return true;
+        if (passes >= ROOM_PASSES) return false;
+        before = frames;
+      }
+    };
+    let readersMs = 0;
+    let level = await untilLevel();
     const passMs = now() - started;
-    const readersMs = level ? await readsFromBeforeEnd(state.dbPath, now()) : 0;
+    if (level) {
+      readersMs = await readsFromBeforeEnd(state.dbPath, now());
+      // A write outside a turn that landed while those reads were ending could
+      // not rewind the file either; level it once more before work goes on.
+      if (readersMs >= READER_POLL_MS && passes < ROOM_PASSES) level = await untilLevel();
+    }
     state.lastPassAt = now();
     const waited = now() - started;
     stats.waits += 1;
     stats.totalMs += waited;
     if (waited > stats.worstMs) stats.worstMs = waited;
     if (waited >= ROOM_NOTABLE_MS) {
-      log(`[olympus] sqlite wal room: ${state.label} work waited_ms=${Math.round(waited)} pass_ms=${Math.round(passMs)} reads_ms=${Math.round(readersMs)} wal_content_bytes=${live}`);
+      log(`[olympus] sqlite wal room: ${state.label} work waited_ms=${Math.round(waited)} pass_ms=${Math.round(passMs)} reads_ms=${Math.round(readersMs)} passes=${passes} level=${level} wal_content_bytes=${live}`);
     }
   }
 
@@ -369,7 +383,7 @@ export function startSqliteCheckpointer(options: {
         if (known) { known.label = file.label; continue; }
         states.set(file.dbPath, {
           ...file, live: 0, lastLog: undefined, lastCheckpointed: undefined, lastPassAt: -Infinity, hot: false, held: false,
-          firstDone: false, awaitRewind: false, running: false, queued: undefined,
+          firstDone: false, awaitRewind: false, stuckPasses: 0, running: false, queued: undefined,
         });
       }
       for (const path of [...states.keys()]) if (!current.has(path)) states.delete(path);

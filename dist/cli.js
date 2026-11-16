@@ -240291,6 +240291,7 @@ function startSqliteCheckpointer(options = {}) {
       state.live = 0;
       state.hot = false;
       state.held = false;
+      state.stuckPasses = 0;
       state.lastLog = undefined;
       state.lastCheckpointed = undefined;
       return;
@@ -240305,7 +240306,8 @@ function startSqliteCheckpointer(options = {}) {
         stats.rewindsMissed += 1;
     }
     const stuck = copied < frames && !rewound && state.lastCheckpointed !== undefined && copied <= state.lastCheckpointed;
-    const held = reply.busy === 1 || stuck;
+    state.stuckPasses = stuck ? state.stuckPasses + (madeRoom ? 0 : 1) : 0;
+    const held = reply.busy === 1 || state.stuckPasses >= HELD_AFTER_PASSES;
     const walBytes = reply.walBytes ?? 0;
     if (held && !state.held) {
       const read = oldestOffThreadSnapshot(state.dbPath);
@@ -240341,24 +240343,33 @@ function startSqliteCheckpointer(options = {}) {
   async function makeRoom(state) {
     const started = now();
     const live = state.live;
-    let level = false;
-    let before;
-    let reply = await pass(state, true);
-    for (let again = 0;; again += 1) {
-      record(state, reply, true);
-      if (!reply.ok || reply.lost || reply.skipped || state.held)
-        break;
-      const frames = reply.log ?? 0;
-      if (before !== undefined && frames < before)
-        break;
-      level = (reply.checkpointed ?? 0) >= frames && before === frames;
-      if (level || again >= ROOM_PASSES - 1)
-        break;
-      before = frames;
-      reply = await pass(state, true);
-    }
+    let passes = 0;
+    const untilLevel = async () => {
+      let before;
+      for (;; ) {
+        const reply = await pass(state, true);
+        passes += 1;
+        record(state, reply, true);
+        if (!reply.ok || reply.lost || reply.skipped || state.held)
+          return false;
+        const frames = reply.log ?? 0;
+        if (before !== undefined && frames < before)
+          return false;
+        if ((reply.checkpointed ?? 0) >= frames && before === frames)
+          return true;
+        if (passes >= ROOM_PASSES)
+          return false;
+        before = frames;
+      }
+    };
+    let readersMs = 0;
+    let level = await untilLevel();
     const passMs = now() - started;
-    const readersMs = level ? await readsFromBeforeEnd(state.dbPath, now()) : 0;
+    if (level) {
+      readersMs = await readsFromBeforeEnd(state.dbPath, now());
+      if (readersMs >= READER_POLL_MS && passes < ROOM_PASSES)
+        level = await untilLevel();
+    }
     state.lastPassAt = now();
     const waited = now() - started;
     stats.waits += 1;
@@ -240366,7 +240377,7 @@ function startSqliteCheckpointer(options = {}) {
     if (waited > stats.worstMs)
       stats.worstMs = waited;
     if (waited >= ROOM_NOTABLE_MS) {
-      log(`[olympus] sqlite wal room: ${state.label} work waited_ms=${Math.round(waited)} pass_ms=${Math.round(passMs)} reads_ms=${Math.round(readersMs)} wal_content_bytes=${live}`);
+      log(`[olympus] sqlite wal room: ${state.label} work waited_ms=${Math.round(waited)} pass_ms=${Math.round(passMs)} reads_ms=${Math.round(readersMs)} passes=${passes} level=${level} wal_content_bytes=${live}`);
     }
   }
   function drive() {
@@ -240419,6 +240430,7 @@ function startSqliteCheckpointer(options = {}) {
           held: false,
           firstDone: false,
           awaitRewind: false,
+          stuckPasses: 0,
           running: false,
           queued: undefined
         });
@@ -240461,7 +240473,7 @@ function startSqliteCheckpointer(options = {}) {
     }
   };
 }
-var SQLITE_CHECKPOINT_AT_BYTES, SQLITE_WAL_ROOM_BYTES, SQLITE_CHECKPOINT_HOT_MS = 1000, SQLITE_CHECKPOINT_IDLE_MS = 5000, SQLITE_WAL_ROOM_READER_WAIT_MS = 2000, READER_POLL_MS = 20, WORKERS = 2, CHECKPOINT_NOTABLE_MS = 1000, CHECKPOINT_NOTABLE_BYTES, ROOM_PASSES = 6, ROOM_NOTABLE_MS = 1000, ROOM_SUMMARY_MS = 60000, WORKER_SOURCE2 = `
+var SQLITE_CHECKPOINT_AT_BYTES, SQLITE_WAL_ROOM_BYTES, SQLITE_CHECKPOINT_HOT_MS = 1000, SQLITE_CHECKPOINT_IDLE_MS = 5000, SQLITE_WAL_ROOM_READER_WAIT_MS = 2000, READER_POLL_MS = 20, WORKERS = 2, CHECKPOINT_NOTABLE_MS = 1000, CHECKPOINT_NOTABLE_BYTES, ROOM_PASSES = 8, HELD_AFTER_PASSES = 3, ROOM_NOTABLE_MS = 1000, ROOM_SUMMARY_MS = 60000, WORKER_SOURCE2 = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const connections = new Map();
