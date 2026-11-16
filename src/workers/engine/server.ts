@@ -61,7 +61,7 @@ import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/wo
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   createFileExtractionRuntime,
@@ -104,7 +104,7 @@ import {
 } from '../source-index/status.ts';
 import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
 import { storeTotalsReconcileDue } from '../connector-store/store-totals.ts';
-import { LOOP_SLOW_SQL_MS, slowMainThreadSqlHealth, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
+import { LOOP_SLOW_SQL_MS, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
 import {
   dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
@@ -673,6 +673,16 @@ export async function main(): Promise<void> {
     setEngineStep('starting');
   }
   if (engineRole !== 'front') beginBootProgress(process.env);
+  // A measuring run: every call site that runs a statement on this loop.
+  const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
+  if (sqlSitesDir) {
+    const sqlSites = startMainThreadSqlSiteCount();
+    const writeSqlSites = () => {
+      try { writeFileSync(join(sqlSitesDir, `${engineRole}.sql-sites.json`), JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() })); }
+      catch { /* a measuring aid: the engine runs on without it */ }
+    };
+    setInterval(writeSqlSites, 10_000).unref?.();
+  }
   else {
     beginFrontProgress(process.env);
     // A front that exits on an error says which, by code, in its progress
