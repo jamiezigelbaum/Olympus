@@ -52,6 +52,13 @@ import type {
   SourceEmbeddingProvider,
 } from '../src/workers/source-index/embeddings.ts';
 
+/** A raw handle to a store file waits, as the product's connections do, for the read pool's last connection to finish its closing checkpoint. */
+function rawStore(path: string): Database {
+  const db = new Database(path);
+  db.exec('PRAGMA busy_timeout = 10000');
+  return db;
+}
+
 const CORPUS_ID = 'secure_local.fake.files';
 const ACCOUNT = 'personal';
 
@@ -1481,7 +1488,7 @@ describe('LocalConnectorStore sync', () => {
     await store.embedChunks({ provider });
     store.close();
 
-    const raw = new Database(dbPath);
+    const raw = rawStore(dbPath);
     raw.transaction(() => {
       raw.query(`
         DELETE FROM connector_store_fts_rows
@@ -1545,7 +1552,7 @@ describe('LocalConnectorStore sync', () => {
     expect(store.status().counts).toMatchObject({ items: 1, chunks: 0 });
     store.close();
 
-    const raw = new Database(dbPath);
+    const raw = rawStore(dbPath);
     raw.query(`
       DELETE FROM connector_store_fts_rows
       WHERE item_pk = (
@@ -1588,7 +1595,7 @@ describe('LocalConnectorStore sync', () => {
     await store.embedChunks({ provider });
     store.close();
 
-    const raw = new Database(dbPath);
+    const raw = rawStore(dbPath);
     const existing = raw.query(`
       SELECT fts.title, fts.bounded_text, owned.item_pk, owned.chunk_pk
       FROM connector_store_fts_rows owned
@@ -1644,7 +1651,7 @@ describe('LocalConnectorStore sync', () => {
     // refresh never ran. Every FTS row still exists, so count equality
     // holds — yet each mapping dangles at the deleted chunk and search
     // serves the pre-edit text.
-    const raw = new Database(dbPath);
+    const raw = rawStore(dbPath);
     const old = raw.query(`
       SELECT c.chunk_pk, c.item_pk, c.chunk_index, c.indexed_at
       FROM chunks c
@@ -1702,7 +1709,7 @@ describe('LocalConnectorStore sync', () => {
     await store.embedChunks({ provider });
     store.close();
 
-    const raw = new Database(dbPath);
+    const raw = rawStore(dbPath);
     raw.transaction(() => {
       raw.query(`
         DELETE FROM chunk_embeddings
@@ -2107,7 +2114,7 @@ describe('LocalConnectorStore sync', () => {
     // A process killed mid-run leaves a 'running' row behind. Its cursor column
     // still holds the position that run STARTED from — it is only overwritten
     // with the end position when the run terminates. It is also the newest row.
-    const db = new Database(dbPath);
+    const db = rawStore(dbPath);
     db.query(`
       INSERT INTO sync_runs (sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at)
       VALUES ('killed-mid-run', ?, 'lane-a', 'running', 'cursor-2', 0, 0, ?)
@@ -2153,7 +2160,7 @@ describe('LocalConnectorStore sync', () => {
     // first-inserted run gets the lexically greater id on purpose — id
     // ordering and insertion ordering disagree.
     const startedAt = '2026-07-06T12:00:00.000Z';
-    const db = new Database(dbPath);
+    const db = rawStore(dbPath);
     const insert = db.query(`
       INSERT INTO sync_runs (sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at)
       VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?)
@@ -2181,7 +2188,7 @@ describe('LocalConnectorStore sync', () => {
   test('a tier move copying an item in is not the source\'s last sync, and not a sync run', () => {
     const dbPath = join(mkdtempSync(join(tmpdir(), 'connector-store-')), 'store.sqlite');
     const store = newStore(dbPath);
-    const db = new Database(dbPath);
+    const db = rawStore(dbPath);
     const insert = db.query(`
       INSERT INTO sync_runs (sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at)
       VALUES (?, ?, ?, 'completed', NULL, ?, ?, ?, ?)
@@ -2276,7 +2283,7 @@ describe('LocalConnectorStore reactions', () => {
     // between deploying a build that reads reactions and the writer that
     // migrates the file. A read-only open cannot migrate it, and refusing to
     // serve would take the answer path down for a purely additive column.
-    const rewind = new Database(dbPath);
+    const rewind = rawStore(dbPath);
     try {
       rewind.exec('DROP INDEX IF EXISTS idx_connector_store_items_parent;');
       rewind.exec('ALTER TABLE items DROP COLUMN parent_local_item_id;');
