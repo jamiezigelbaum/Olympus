@@ -521,7 +521,7 @@ describe('settled names copies', () => {
       expect(status.tier?.pendingClassificationItems ?? 0).toBe(scenario.expected === 'waiting' ? 1 : 0);
       expect(status.counts.scopeMetadataOnlyFiles).toBe(scenario.expected === 'by_choice' ? 1 : 0);
       expect(status.counts.contentElsewhereItems ?? 0).toBe(0);
-      if (scenario.name === 'metadata-only policy job') expect(store.status().counts.scopeMetadataOnlyFiles).toBe(1);
+      if (scenario.name === 'metadata-only policy job') { await store.prepareStatusCounts(); expect(store.status().counts.scopeMetadataOnlyFiles).toBe(1); }
       const list = store.settledUnreadableItems(scope);
       expect(list).toHaveLength(problem ? 1 : 0);
       expect(await store.settledUnreadableItemsInTurns(scope)).toEqual(list);
@@ -566,6 +566,7 @@ describe('settled names copies', () => {
     lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
     const store = lane.stores.internal!;
     store.setExtractionOutcomeProbe(() => ({ status: 'failed_terminal', lastErrorKind: 'pdf_damaged', warnings: [], policyDecision: 'index_allowed' }));
+    await store.prepareStatusCounts();
     expect(store.status().counts.settledUnreadableItems).toBe(1);
     expect(store.settledUnreadableItems().map(item => item.ref.name)).toEqual(['scan-0413.pdf']);
     expect(store.status({}).counts.fullIngestionFiles).toBe(1);
@@ -574,6 +575,7 @@ describe('settled names copies', () => {
     lane.ledger.setOverride(identity, { kind: 'not_secret' });
     await lane.sink.accept(request(NEW[1]!.id, NEW[1]!.body));
     expect(store.settledUnreadableItems()).toEqual([]);
+    await store.prepareStatusCounts();
     expect(store.status().counts.contentElsewhereItems).toBe(1);
   });
 
@@ -618,6 +620,7 @@ describe('settled names copies', () => {
     const db = new Database(store.dbPath);
     db.query("UPDATE items SET deferred_locator = '', bytes_available = 0").run();
     db.close();
+    await store.prepareStatusCounts();
     expect(store.status().counts.settledUnreadableItems ?? 0).toBe(0);
     expect(store.settledUnreadableItems()).toEqual([]);
   });
@@ -636,11 +639,13 @@ describe('settled names copies', () => {
     let ended = false;
     const asked: string[] = [];
     store.setExtractionOutcomeProbe((item) => { asked.push(item.providerItemId); return ended ? { status: 'failed_terminal', lastErrorKind: 'pdf_damaged', warnings: [], policyDecision: 'index_allowed' } : undefined; });
+    await store.prepareStatusCounts();
     expect(store.status().counts.settledUnreadableItems ?? 0).toBe(0);
     expect(store.settledUnreadableItems()).toEqual([]);
     expect(asked).toContain(identity.providerItemId);
     ended = true;
     store.setExtractionOutcomeProbe((item) => { asked.push(item.providerItemId); return ended ? { status: 'failed_terminal', lastErrorKind: 'pdf_damaged', warnings: [], policyDecision: 'index_allowed' } : undefined; });
+    await store.prepareStatusCounts();
     expect(store.status().counts.settledUnreadableItems).toBe(1);
     expect(store.settledUnreadableItems().map(item => item.ref.name)).toEqual(['scan-0413.pdf']);
   });

@@ -75,12 +75,25 @@ test.skipIf(process.platform!=='linux')('legacy recovery leaves unrelated deskto
  expect(receipt.machineArtifacts.some((item:any)=>[desktop,icon].includes(item.path))).toBe(false);
 });
 
+/** stderr without the put-back's own log: its before/after manifest lines and its "put back" notice. */
+function withoutPutBackLog(stderr:string):string{
+ const lines=stderr.split('\n');const kept:string[]=[];
+ for(let i=0;i<lines.length;i++){
+  const line=lines[i]!;
+  if(line.startsWith('{"put_back_manifest":'))continue;
+  if(line==='The Olympus data was put back as it was before the update.'){if(lines[i+1]?.startsWith('The data as the failed update left it is kept at '))i++;continue;}
+  kept.push(line);
+ }
+ return kept.join('\n');
+}
+
 test.skipIf(process.platform!=='linux')('recovery removes the published migration hardlink before hashing, twice',()=>{
  const root=mkdtempSync(join(tmpdir(),'linux-migration-crash-'));roots.push(root);
  expect(run(root,'install').status).toBe(0);
  const legacy=join(root,'home/.olympus');mkdirSync(legacy,{mode:0o700});writeFileSync(join(legacy,'privacy.json'),'synthetic',{mode:0o600});
  const crashed=run(root,'install','legacy_setting_published','2.0.0');expect({status:crashed.status,signal:crashed.signal,stderr:crashed.stderr}).toMatchObject({status:null,signal:'SIGKILL'});
- for(let pass=0;pass<2;pass++){const recovered=run(root,'recover');expect({pass,status:recovered.status,stderr:recovered.stderr}).toEqual({pass,status:0,stderr:''});}
+ // The put-back of the data root the crashed update took a copy of logs what it worked from and says it was put back (d21042bc, a23fd664); nothing else may reach stderr.
+ for(let pass=0;pass<2;pass++){const recovered=run(root,'recover');expect({pass,status:recovered.status,stderr:withoutPutBackLog(recovered.stderr)}).toEqual({pass,status:0,stderr:''});}
  expect(readFileSync(join(legacy,'privacy.json'),'utf8')).toBe('synthetic');
  expect(existsSync(join(root,'config/olympus/privacy.json'))).toBe(false);
  expect(readdirSync(join(root,'config/olympus')).some(name=>name.endsWith('.migration'))).toBe(false);

@@ -491,7 +491,7 @@ describe('over HTTP', () => {
       limits: { handoffMs: 5_000, resultWaitMs: 0 },
       priority: { isBackground: () => true, maxQueuedPerOwner: 0, maxQueuedTotal: 0 },
     });
-    let finish!: () => void;
+    let finish: (() => void) | undefined;
     const base = serve(jobs, store, () => new Promise((resolve) => { finish = () => resolve({ answer: 'x' }); }));
     const call = (body: Record<string, unknown>) => fetch(`${base}/api/v1/tools/source_answer`, {
       method: 'POST',
@@ -500,7 +500,8 @@ describe('over HTTP', () => {
     });
     const first = call({ question: 'first' });
     const deadline = Date.now() + 5_000;
-    while (jobs.stats().running === 0) {
+    // Running counts from the handoff; the answer itself starts a turn later, so wait for both.
+    while (jobs.stats().running === 0 || !finish) {
       if (Date.now() > deadline) throw new Error('first answer did not start');
       await Bun.sleep(5);
     }
@@ -528,7 +529,7 @@ describe('over HTTP', () => {
     });
     expect(list.headers.get('retry-after')).toBeNull();
     await list.text();
-    finish();
+    finish!();
     await (await first).text();
   });
 });
