@@ -32,8 +32,13 @@ test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-th
   const onDisk = { ...process.env, TMPDIR: diskTmp, SQLITE_TMPDIR: diskTmp };
   expect(invoke(['bun', script, 'build', '--dir', dir], 180 * 60_000, onDisk)).toBe(0);
   // More RAM must not hide repeated scans through SQLite's small connection caches.
-  expect(invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G'], 10 * 60_000, onDisk)).toBe(0);
-}, 195 * 60_000);
+  // Two cases, each scored on its own line: a box in use, and the first boot after an upgrade left a large WAL.
+  // Exit 3 is "host busy" (the IO floor was never reached): not a product result.
+  const results = Object.fromEntries((['steady', 'boot-after-upgrade'] as const).map(runCase => [runCase,
+    invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase], 25 * 60_000, onDisk)]));
+  console.log(JSON.stringify({ phase: 'cases', results }));
+  expect(results).toEqual({ steady: 0, 'boot-after-upgrade': 0 });
+}, 235 * 60_000);
 
 test('memory cap accepts the default and warm-cache sizes and rejects invalid caps', () => {
   expect(memoryMaxBytes('2G')).toBe(2 * 1024 ** 3);
