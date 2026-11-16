@@ -8851,13 +8851,14 @@ var ANALYST_NOTES_SYSTEM = [
   '{"notes": [{"evidence": number, "fact": string}]}'
 ].join(`
 `);
+var NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`;
 var compactSystem = (notes = "off") => [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence below.",
   "Each evidence item starts with its number and name, then its date and source, then its text in source_data.",
   "Rules:",
   "- First decide which items are about what the question asks (its subject, and any date or name it gives). Answer from those items only and cite each by its [number].",
   '- Find every part the question asks for (each value, name, date or item). Give each part the cited items hold; put each part they do not hold in "unanswered". Check every part before returning.',
-  ...notes === "first" ? [NOTES_FIRST_RULE] : notes === "pass" ? [NOTES_GIVEN_RULE] : [],
+  ...notes === "first" ? [NOTES_FIRST_RULE] : notes === "pass" ? [NOTES_GIVEN_RULE] : notes === "batched" ? [NOTES_BATCHED_RULE] : [],
   "- An item that only shares words with the question is not evidence: do not cite it.",
   '- If the evidence does not contain the answer, say so plainly and list what is missing in "unanswered". Never invent facts, names, dates, or values.',
   "- If no item is about what the question asks, the whole answer is one short sentence saying the evidence does not answer it, with no citations. Never describe an item about something else as if it answered the question.",
@@ -8900,6 +8901,7 @@ var AUDIT_OUTPUT_HEADROOM_CHARS = 800;
 var DEFAULT_AUDIT_MAX_OUTPUT_CHARS = DEFAULT_ANALYST_MAX_OUTPUT_CHARS + AUDIT_OUTPUT_HEADROOM_CHARS;
 var analystEvidenceFormats = new WeakMap;
 var packPromptBudgets = new WeakMap;
+var packEvidenceBatches = new WeakMap;
 var promptEncoder = new TextEncoder;
 var STOP_WORDS = new Set([
   "a",
