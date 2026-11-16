@@ -112,6 +112,8 @@ function* imageContentSweepPass(options: { set: TieredStoreSet; limit?: number }
     save(overflow ? { done: false } : { done: false, held, retry: true });
     return report;
   }
+  // The strips are durable before the ledger (FULL) records them done.
+  for (const domain of ['public_safe', 'internal'] as const) set.store(domain)?.durabilityBarrier();
   save({ done: true });
   return report;
 }

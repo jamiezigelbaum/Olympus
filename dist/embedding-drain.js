@@ -19162,7 +19162,7 @@ function hasImmutableAccountLabel(id) {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID7 } from "node:crypto";
-import { existsSync as existsSync20, lstatSync as lstatSync10, mkdirSync as mkdirSync13, statSync as statSync12, statfsSync } from "node:fs";
+import { closeSync as closeSync10, existsSync as existsSync20, fsyncSync as fsyncSync3, lstatSync as lstatSync10, mkdirSync as mkdirSync13, openSync as openSync10, statSync as statSync12, statfsSync } from "node:fs";
 import { dirname as dirname21 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
@@ -30687,6 +30687,21 @@ ${parentKey(ref)}`, { ref, origin });
     }
     return out;
   }
+  durabilityBarrier() {
+    if (this.dbPath === ":memory:" || this.readOnly)
+      return;
+    let fd;
+    try {
+      fd = openSync10(`${this.dbPath}-wal`, "r");
+      fsyncSync3(fd);
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+    } finally {
+      if (fd !== undefined)
+        closeSync10(fd);
+    }
+  }
   sqliteJournalSettings() {
     return sqliteJournalSettingsOf(this.db);
   }
@@ -33490,7 +33505,7 @@ import { dirname as dirname23, join as join24 } from "node:path";
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { isMainThread as isMainThread4 } from "node:worker_threads";
 import { execFileSync as execFileSync2, spawn } from "node:child_process";
-import { closeSync as closeSync10, constants as constants4, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync4, readFileSync as readFileSync16, statSync as statSync13 } from "node:fs";
+import { closeSync as closeSync11, constants as constants4, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync11, readdirSync as readdirSync4, readFileSync as readFileSync16, statSync as statSync13 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname22, isAbsolute as isAbsolute14, join as join22 } from "node:path";
 import { createInterface } from "node:readline";
@@ -33848,13 +33863,13 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
         return false;
       let fd;
       try {
-        fd = openSync10(join22(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
+        fd = openSync11(join22(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
         return fstatSync2(fd).isCharacterDevice();
       } catch {
         return false;
       } finally {
         if (fd !== undefined)
-          closeSync10(fd);
+          closeSync11(fd);
       }
     });
   } catch {

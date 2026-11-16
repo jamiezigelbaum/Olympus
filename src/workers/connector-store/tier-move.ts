@@ -814,6 +814,9 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
     // The content destination stays stable. Verification precedes the ledger
     // writer, so exporting large content never monopolizes routing writes.
     timed(options.timings, 'verifyMs', () => {
+      // The destination's writes are durable before the ledger (FULL) can
+      // flip on them: a store (NORMAL) never rolls back under a flip.
+      for (const copy of receipt.placement) set.store(copy.trustDomain)?.durabilityBarrier();
       for (const copy of receipt.placement) {
         const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
         if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
@@ -852,8 +855,12 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
           if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
             throw new Error('Lower store unavailable or ledger binding changed; move purge remains pending.');
           }
-          timed(options.timings, 'purgeMs', () => store.stripCopyContent(identity, { keepMetadata: !!metadata
-            && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) }));
+          timed(options.timings, 'purgeMs', () => {
+            store.stripCopyContent(identity, { keepMetadata: !!metadata
+              && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+            // The strip is durable before the flip that relies on it commits.
+            store.durabilityBarrier();
+          });
         }
       }
       if (receipt.raise && content) ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));

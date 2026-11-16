@@ -1834,6 +1834,11 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         ...automaticTierMoveOptions(this.set, context), expectedGeneration: move.generation });
     }
     this.cachedLowerings.clear();
+    // Every store write this flush made is durable before the ledger (FULL)
+    // removes copy rows or clears write intents on it: a store (NORMAL) that
+    // a power cut rolls back is then still owed its write by the ledger.
+    const barrier = () => { for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.durabilityBarrier(); };
+    if (this.copyRemovals.size > 0) barrier();
     for (const identity of this.copyRemovals.values()) {
       await ingestionTurn();
       this.set.ledger.removeCopies(identity);
@@ -1841,6 +1846,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.copyRemovals.clear();
     // The intents go last, once every leg has its write. A `names` write is the version move, done now: later
     // plans of the same item in this run replaced it (one intent per item), so it can never lower a version.
+    const cleared: Array<typeof this.intents extends Map<string, infer T> ? T : never> = [];
     for (const [key, identity] of this.intents) {
       await ingestionTurn();
       const intent = this.set.ledger.writeIntent(identity);
@@ -1852,8 +1858,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       // (the intent never owes a version below the rows).
       if (moveTo && intent && intent.kind !== 'advance') this.set.ledger.putWriteIntent({ identity: intent.identity, version: moveTo.sourceVersion, kind: 'advance', connectorId: intent.connectorId } as TierWriteIntent);
       if (moveTo) for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(moveTo);
-      this.set.ledger.clearWriteIntent(identity);
+      cleared.push(identity);
     }
+    if (cleared.length > 0) barrier();
+    for (const identity of cleared) this.set.ledger.clearWriteIntent(identity);
     this.intents.clear();
     this.namesAdvance.clear();
     this.emptied.clear();

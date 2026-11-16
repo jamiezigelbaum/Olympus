@@ -106,7 +106,12 @@ export function settleSecretsCopies(options: {
   }
   // Whichever way the copies go, the side stores forget the item now.
   const sideStores = forgetSecretInSideStores({ ledger: options.ledger, identity });
-  if (disposition === 'tombstone_now') options.ledger.removeCopies(options.identity);
+  if (disposition === 'tombstone_now') {
+    // The tombstones are durable before the ledger (FULL) forgets the copies:
+    // a store (NORMAL) rolled back by a power cut never shows a copyless row.
+    for (const copy of options.copies) options.storeFor(copy.corpusId)?.durabilityBarrier();
+    options.ledger.removeCopies(options.identity);
+  }
   return { disposition, chunks, sideStores };
 }
 

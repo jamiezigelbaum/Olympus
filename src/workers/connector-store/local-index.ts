@@ -52,7 +52,7 @@ import { BACKGROUND_READS, OffThreadReadBusyError, offThreadReadsSupported, open
 
 import { compareProviderAccounts } from '../../core/provider-account-identity.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, statSync, statfsSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, statSync, statfsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
@@ -16153,6 +16153,29 @@ export class LocalConnectorStore {
    * small read, never a count. Undefined until the first reconcile, and on a
    * store no build with the totals has written.
    */
+  /**
+   * Makes every write this store has committed durable now. The store
+   * commits at synchronous NORMAL: a power cut can roll back its last
+   * commits, independently of the ledger, which commits at FULL. A ledger
+   * write that relies on this store's writes (a move's flip, removing copy
+   * rows, clearing a write intent, a strip sweep's done) calls this first,
+   * so the ledger can never survive the writes it relies on. One fsync of
+   * the WAL: every committed frame is in it.
+   */
+  durabilityBarrier(): void {
+    if (this.dbPath === ':memory:' || this.readOnly) return;
+    let fd: number | undefined;
+    try {
+      fd = openSync(`${this.dbPath}-wal`, 'r');
+      fsyncSync(fd);
+    } catch (error) {
+      // No WAL file: every commit is already in the database file, synced by the checkpoint that moved it there.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+
   /** This connection's journal settings, for the WAL sampler's receipt. */
   sqliteJournalSettings(): { journal_mode: string; synchronous: number; wal_autocheckpoint: number } {
     return sqliteJournalSettingsOf(this.db);
