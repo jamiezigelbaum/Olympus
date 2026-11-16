@@ -1158,6 +1158,26 @@ async function runStepsInTurns<T>(steps: Generator<void, T>): Promise<T> {
   return step.value;
 }
 
+/** One chunk of an embedding pass's work list (embeddingWorkRows). */
+interface EmbeddingWorkRow {
+  chunk_pk: number;
+  item_pk: number;
+  content_hash: string;
+  bounded_text: string;
+  title: string | null;
+  search_text: string | null;
+  mime_type: string | null;
+  authored_at: string | null;
+  updated_at: string | null;
+  trust_tier: string;
+  media_path: string | null;
+  media_sha256: string | null;
+  /** The stored vector's hash for the pass's model (null: none); undefined when it is to be read here. */
+  current_hash?: string | null;
+  /** False until hydrateEmbeddingWorkRows has read the text. */
+  text_loaded: boolean;
+}
+
 interface TierLedgerHiddenItemPks {
   hidden: number[];
   held: number[];
@@ -6139,6 +6159,30 @@ export class LocalConnectorStore {
    * a Secret's location (tombstoned at tier S5).
    */
   activeChildParents(after: ParentRef | undefined, limit: number): ParentRef[] {
+    return this.readHere(this.activeChildParentsSteps(after, limit));
+  }
+
+  /** activeChildParents on the read thread where the store allows it (the child sweep's finder). */
+  activeChildParentsOffThread(after: ParentRef | undefined, limit: number): Promise<ParentRef[]> {
+    return this.readStepsInBackground(this.activeChildParentsSteps(after, limit));
+  }
+
+  /** What this store's rows say of each parent, read on the background lane (the child sweep's check, never memoised). */
+  async parentStandingsInBackground(parents: readonly ParentRef[]): Promise<ParentStandingRow[]> {
+    return this.readStepsInBackground(this.parentStandingsSteps(parents));
+  }
+
+  /** Drives store reads on this store's background read worker, in one snapshot; here when the pool never reads this store. */
+  private async readStepsInBackground<T>(steps: Generator<StoreRead, T, unknown>): Promise<T> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.readHere(steps);
+    return withOffThreadSnapshot(this.dbPath, async (read) => {
+      let next = steps.next();
+      while (!next.done) next = steps.next(await read(next.value));
+      return next.value;
+    }, BACKGROUND_READS);
+  }
+
+  private *activeChildParentsSteps(after: ParentRef | undefined, limit: number): Generator<StoreRead, ParentRef[], unknown> {
     if (!this.childItemColumnsPresent) return [];
     const want = Math.max(1, Math.floor(limit));
     const afterKey = [after?.parentLocalItemId ?? '', after?.provider ?? '', after?.accountScope ?? ''] as const;
@@ -6157,19 +6201,19 @@ export class LocalConnectorStore {
     let from = afterKey[0];
     let inclusive = true;
     while (rows.length < want) {
-      const window = (this.db.query(`
+      const window = ((yield { sql: `
         SELECT parent_local_item_id AS parent FROM items
         WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? '>=' : '>'} ?
         GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
-      `).all(from, want) as Array<{ parent: string }>).map((row) => row.parent);
+      `, params: [from, want], mode: 'all' }) as Array<{ parent: string }>).map((row) => row.parent);
       if (window.length === 0) break;
-      rows.push(...this.db.query(`
+      rows.push(...((yield { sql: `
         SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
         WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND (tombstoned = 0 OR trust_tier = 'S5')
           AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
         GROUP BY parent_local_item_id, provider, account_scope
         ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
-      `).all(JSON.stringify(window), ...afterKey, want - rows.length) as typeof rows);
+      `, params: [JSON.stringify(window), ...afterKey, want - rows.length], mode: 'all' }) as typeof rows));
       // A short window is the last; otherwise every row under it was taken
       // (or the page is full), so the next window starts past it.
       if (window.length < want) break;
@@ -13283,7 +13327,12 @@ export class LocalConnectorStore {
     // Built in turns: a pass over a store that is being written would
     // otherwise rebuild it synchronously on every call (Sparta, 2026-11-04).
     const tierHidden = await this.tierHiddenItemPksInTurns();
-    const selectedRows = this.embeddingSourceRows(
+    // Read on the read thread where the store allows it, without the text
+    // (fetched by key for each batch) and with each chunk's current vector
+    // hash: a whole-store pass held the loop 41 s on lane 6's fixture
+    // reading every chunk's text, then asked for each vector one at a time.
+    const selectedRows = await this.embeddingWorkRows(
+      provider.modelId,
       options.localItemIds,
       options.accountScope,
       options.filters,
@@ -13310,8 +13359,10 @@ export class LocalConnectorStore {
       );
       for (const row of selectedRows) {
         if (kept.has(row)) continue;
-        const existing = currentVector.get(row.chunk_pk, provider.modelId) as { content_hash: string } | null;
-        if (existing?.content_hash !== row.content_hash) privateTierWithheldChunks += 1;
+        const existingHash = row.current_hash !== undefined
+          ? row.current_hash
+          : (currentVector.get(row.chunk_pk, provider.modelId) as { content_hash: string } | null)?.content_hash ?? null;
+        if (existingHash === null || existingHash !== row.content_hash) privateTierWithheldChunks += 1;
       }
     }
     const selectionSha256 = connectorStoreEmbeddingSelectionSha256(options.localItemIds);
@@ -13445,10 +13496,12 @@ export class LocalConnectorStore {
     let skipped = 0;
     for (const row of rows) {
       if (limit !== undefined && pending.length >= limit) break;
-      const existing = this.db.query(
-        'SELECT content_hash FROM chunk_embeddings WHERE chunk_pk = ? AND model_id = ?',
-      ).get(row.chunk_pk, provider.modelId) as { content_hash: string } | null;
-      if (existing?.content_hash === row.content_hash) {
+      const existingHash = row.current_hash !== undefined
+        ? row.current_hash
+        : (this.db.query(
+          'SELECT content_hash FROM chunk_embeddings WHERE chunk_pk = ? AND model_id = ?',
+        ).get(row.chunk_pk, provider.modelId) as { content_hash: string } | null)?.content_hash ?? null;
+      if (existingHash !== null && existingHash === row.content_hash) {
         skipped += 1;
         continue;
       }
@@ -13518,6 +13571,12 @@ export class LocalConnectorStore {
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
+        if (batch.length === 0) continue;
+      }
+      {
+        const hydrated = this.hydrateEmbeddingWorkRows(batch);
+        staleSkipped += batch.length - hydrated.length;
+        batch = hydrated;
         if (batch.length === 0) continue;
       }
       const inputsFor = (rows: typeof batch) => rows.map((row) => ({
@@ -14515,6 +14574,91 @@ export class LocalConnectorStore {
 
   // Embeddable chunk rows: every live (non-tombstoned) chunk plus the
   // citation-safe item metadata that seasons the embedding text.
+  /**
+   * The chunks an embedding pass works through, with `current_hash` (the
+   * stored vector's hash for this model, or null). Off the loop, the rows
+   * carry no text (`text_loaded` false): hydrateEmbeddingWorkRows reads it by
+   * key for each batch. Here (a store the read thread never reads), they are
+   * embeddingSourceRows' full rows.
+   */
+  private async embeddingWorkRows(
+    modelId: string,
+    localItemIds?: readonly string[],
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+    tierHidden?: TierLedgerHiddenItemPks,
+    allowHeld = false,
+  ): Promise<EmbeddingWorkRow[]> {
+    if (!offThreadReadsSupported(this.dbPath)) {
+      return this.embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld)
+        .map((row) => ({ ...row, text_loaded: true }));
+    }
+    const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
+    if (selectedLocalItemIds && selectedLocalItemIds.length === 0) return [];
+    const selectedAccount = normalizeOptionalAccountScope(accountScope);
+    const selectedFilters = connectorStoreFilterSql(filters);
+    const itemFilter = selectedLocalItemIds
+      ? ` AND i.local_item_id IN (SELECT value FROM json_each(?))`
+      : '';
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden ?? this.tierHiddenItemPks(), allowHeld, false);
+    const sql = `
+      SELECT
+        c.chunk_pk,
+        c.item_pk,
+        c.embedding_input_hash AS content_hash,
+        i.trust_tier,
+        ${this.chunkMediaColumnsPresent ? 'c.media_path, c.media_sha256' : 'NULL AS media_path, NULL AS media_sha256'},
+        e.content_hash AS current_hash
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
+        ${itemFilter}
+        ${tierExclusion.filter}
+        ${selectedAccount ? 'AND i.account_scope = ?' : ''}
+        ${selectedFilters.sql}
+      ORDER BY c.chunk_pk ASC
+    `;
+    const params = [
+      modelId,
+      ...(selectedLocalItemIds ? [JSON.stringify(selectedLocalItemIds)] : []),
+      ...tierExclusion.params,
+      ...(selectedAccount ? [selectedAccount] : []),
+      ...selectedFilters.params,
+    ];
+    const rows = await readInBackground(this.dbPath, { sql, params, mode: 'all' }) as Array<{
+      chunk_pk: number; item_pk: number; content_hash: string; trust_tier: string;
+      media_path: string | null; media_sha256: string | null; current_hash: string | null;
+    }>;
+    return rows.map((row) => ({
+      ...row,
+      bounded_text: '', title: null, search_text: null, mime_type: null, authored_at: null, updated_at: null,
+      text_loaded: false,
+    }));
+  }
+
+  /** A batch's text, read by key; a chunk removed or re-chunked since the work list was read is dropped. */
+  private hydrateEmbeddingWorkRows<T extends EmbeddingWorkRow>(batch: readonly T[]): T[] {
+    if (batch.every((row) => row.text_loaded)) return [...batch];
+    const fresh = new Map((this.db.query(`
+      SELECT c.chunk_pk, c.embedding_input_hash AS content_hash, c.bounded_text, i.title, i.search_text, i.mime_type, i.authored_at, i.updated_at
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE c.chunk_pk IN (SELECT value FROM json_each(?))
+    `).all(JSON.stringify(batch.map((row) => row.chunk_pk))) as Array<{
+      chunk_pk: number; content_hash: string; bounded_text: string; title: string | null; search_text: string | null;
+      mime_type: string | null; authored_at: string | null; updated_at: string | null;
+    }>).map((row) => [row.chunk_pk, row] as const));
+    const out: T[] = [];
+    for (const row of batch) {
+      if (row.text_loaded) { out.push(row); continue; }
+      const text = fresh.get(row.chunk_pk);
+      if (!text || text.content_hash !== row.content_hash) continue;
+      out.push({ ...row, bounded_text: text.bounded_text, title: text.title, search_text: text.search_text,
+        mime_type: text.mime_type, authored_at: text.authored_at, updated_at: text.updated_at, text_loaded: true });
+    }
+    return out;
+  }
+
   private embeddingSourceRows(
     localItemIds?: readonly string[],
     accountScope?: string,

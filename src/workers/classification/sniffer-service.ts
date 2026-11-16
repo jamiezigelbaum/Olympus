@@ -683,7 +683,8 @@ export class TierSnifferService {
     if (this.backlogRows() <= (this.options.backlogExactRows ?? BACKLOG_EXACT_ROWS)) return this.countBacklogNow();
     if (this.backlogCache && this.clockMs() - this.backlogCache.atMs < BACKLOG_REFRESH_MS) return this.backlogCache.counts;
     if (!this.backlogRefresh) {
-      this.backlogRefresh = this.countBacklogInSlices()
+      this.backlogRefresh = (this.options.backlogSliceRows === undefined && typeof Worker !== 'undefined'
+        ? this.countBacklogOffThread() : this.countBacklogInSlices())
         .then((counts) => { if (counts) this.backlogCache = { counts, atMs: this.clockMs() }; })
         .catch(() => undefined)
         .finally(() => { this.backlogRefresh = undefined; });
@@ -775,6 +776,31 @@ export class TierSnifferService {
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
       } finally { opened.db.close(); }
+    }
+    return counts;
+  }
+
+  /**
+   * The same count as `countBacklogNow`, read in a worker of its own (the
+   * ledger needs its queue attached, which the shared read pool does not
+   * do). The sliced count held the loop 25 s in sum on lane 6's fixture, up to
+   * 635 ms a slice. Undefined when stopped or when the worker fails.
+   */
+  private async countBacklogOffThread(): Promise<BacklogCounts | undefined> {
+    const ledgers = this.ledgerPaths().map((path) => {
+      const queue = tierSnifferPathForLedger(path);
+      return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync(queue) ? queue : null };
+    });
+    const sql = { pendingQueued: pendingCountSql(true), pendingAlone: pendingCountSql(false), questions: questionCountSql() };
+    const results = await runBacklogCountWorker({ ledgers, sql });
+    if (!results || this.stopped) return undefined;
+    const counts = emptyBacklogCounts();
+    for (const result of results) {
+      counts.pendingItems += result.n;
+      counts.pendingWithoutQuestion += result.missing ?? 0;
+      counts.checkingItems += result.n + (result.other ?? 0);
+      counts.remainingQuestions += result.questions;
+      if (result.oldest) counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(result.oldest));
     }
     return counts;
   }
@@ -2209,4 +2235,77 @@ function checkpointRetiredLedger(path: string): boolean {
   } finally {
     db?.close();
   }
+}
+
+/** addPendingSlice's whole-ledger count. */
+function pendingCountSql(hasQueue: boolean): string {
+  const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
+      WHERE q.provider = t.provider AND q.account_scope = t.account_scope
+      AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : '0';
+  return `SELECT COUNT(*) AS n, SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing, MIN(decided_at) AS oldest
+          FROM tier_items t WHERE state = 'pending'`;
+}
+
+/** addQuestionSlice's whole-queue count. */
+function questionCountSql(): string {
+  return `SELECT COUNT(*) AS n, SUM(CASE
+        WHEN EXISTS (SELECT 1 FROM queue.sniffer_questions e
+          WHERE e.provider = q.provider AND e.account_scope = q.account_scope
+          AND e.conversation_key = q.conversation_key AND e.provider_item_id = q.provider_item_id
+          AND e.question_pk < q.question_pk) THEN 0
+        WHEN EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
+          AND t.provider = q.provider AND t.account_scope = q.account_scope
+          AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id) THEN 0
+        ELSE 1 END) AS other
+      FROM queue.sniffer_questions q`;
+}
+
+// Runs in a Worker of its own: read-only, the bound ledger only, its queue attached.
+const BACKLOG_COUNT_WORKER_SOURCE = `
+import { Database } from 'bun:sqlite';
+self.onmessage = ({ data }) => {
+  const out = [];
+  for (const ledger of data.ledgers) {
+    let db;
+    try {
+      db = new Database(ledger.path, { readonly: true, create: false });
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      if (ledger.expectedId !== null) {
+        const row = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get();
+        if (!row || row.value !== ledger.expectedId) continue;
+      }
+      if (ledger.queue) db.query('ATTACH DATABASE ? AS queue').run(ledger.queue);
+      const pending = db.query(ledger.queue ? data.sql.pendingQueued : data.sql.pendingAlone).get();
+      const questions = ledger.queue ? db.query(data.sql.questions).get() : { n: 0, other: 0 };
+      out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other });
+    } catch {
+      // An unreadable ledger counts nothing, as in the count on the loop.
+    } finally { try { db?.close(); } catch {} }
+  }
+  postMessage(out);
+};`;
+
+const BACKLOG_COUNT_WORKER_TIMEOUT_MS = 10 * 60_000;
+
+type BacklogWorkerResult = { n: number; missing: number | null; oldest: string | null; questions: number; other: number | null };
+
+function runBacklogCountWorker(message: unknown): Promise<BacklogWorkerResult[] | undefined> {
+  return new Promise((resolve) => {
+    let worker: Worker;
+    try {
+      worker = new Worker(URL.createObjectURL(new Blob([BACKLOG_COUNT_WORKER_SOURCE], { type: 'text/javascript' })));
+    } catch {
+      resolve(undefined);
+      return;
+    }
+    const done = (value: BacklogWorkerResult[] | undefined) => {
+      clearTimeout(timer);
+      try { worker.terminate(); } catch { /* already gone */ }
+      resolve(value);
+    };
+    const timer = setTimeout(() => done(undefined), BACKLOG_COUNT_WORKER_TIMEOUT_MS);
+    worker.onmessage = ({ data }) => done(data as BacklogWorkerResult[]);
+    worker.onerror = () => done(undefined);
+    worker.postMessage(message);
+  });
 }

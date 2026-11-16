@@ -292,7 +292,7 @@ import {
 } from '../x-bookmarks/tier-set.ts';
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
-import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
+import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
 import { createPendingGovernance, createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { judgeBoosts } from '../classification/judge-boost.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
@@ -6717,6 +6717,15 @@ export async function main(): Promise<void> {
                 if (set) console.warn(`[olympus] ${store.corpusId}: set the embedding input hash on ${set} chunks that had none.`);
               } catch (error) {
                 console.warn(`[olympus] ${store.corpusId}: embedding input hash repair failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+              }
+            }
+            for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
+              if (standBack.holds('status')) break;
+              try {
+                const settled = await settleStaleEmbedHolds(ledger);
+                if (settled) console.warn(`[olympus] tier ledger: released ${settled} decided copies an older build left held.`);
+              } catch (error) {
+                console.warn(`[olympus] tier ledger: settling held copies failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
               }
             }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {

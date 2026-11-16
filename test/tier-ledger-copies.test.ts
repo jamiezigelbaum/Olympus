@@ -5,6 +5,7 @@
 // copy rows and the ledger never gives them any on its own.
 
 import { Database } from 'bun:sqlite';
+import { settleStaleEmbedHolds } from '../src/workers/connector-store/child-visibility.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -450,7 +451,7 @@ describe('embedding holds follow the decision through a move', () => {
     store.close();
   });
 
-  test('a decided item left held by an older flip is settled when the ledger opens; a pending one stays held', () => {
+  test('a decided item left held by an older flip is settled once, off the loop; a pending one stays held', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-ledger-hold-'));
     try {
       const dbPath = join(dir, 'store.tier-ledger.sqlite');
@@ -468,6 +469,9 @@ describe('embedding holds follow the decision through a move', () => {
       raw.close();
 
       const reopened = new TierLedger({ dbPath });
+      expect(await settleStaleEmbedHolds(reopened, 1)).toBe(1);
+      expect(await settleStaleEmbedHolds(reopened, 1)).toBe(0);
+      expect(reopened.staleEmbedHoldsSettled()).toBe(true);
       expect(reopened.copies(ITEM).find((copy) => copy.state === 'current')?.embedHold).toBe(false);
       expect(reopened.copies(pending).every((copy) => copy.embedHold)).toBe(true);
       expect(reopened.corpusCopyCounts(INTERNAL.corpusId).held).toBe(1);

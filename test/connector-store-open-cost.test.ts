@@ -139,13 +139,13 @@ test('a store whose schema moved under a matching stamp (an older build dropped 
   expect((check.query('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(stamp);
 });
 
-test('a tier ledger settles stale embedding holds once, not at every open', () => {
+test('a tier ledger open walks no copies: stale embedding holds are settled off the open', () => {
   const { dir, cleanup } = tempDir('olympus-ledger-open-');
   cleanups.push(cleanup);
   const dbPath = join(dir, 'ledger.sqlite');
-  const settles = (sql: string) => /UPDATE tier_copies SET embed_hold = 0/.test(sql);
-  expect(statementsDuring(() => { new TierLedger({ dbPath }).close(); }).some(settles)).toBe(true);
-  expect(statementsDuring(() => { new TierLedger({ dbPath }).close(); }).some(settles)).toBe(false);
+  const walks = (sql: string) => /\b(UPDATE|FROM) tier_copies\b/.test(sql);
+  new TierLedger({ dbPath }).close();
+  expect(statementsDuring(() => { new TierLedger({ dbPath }).close(); }).some(walks)).toBe(false);
 });
 
 test('chunks with no embedding input hash are set by key, a page at a time, and the search stops once none are left', async () => {

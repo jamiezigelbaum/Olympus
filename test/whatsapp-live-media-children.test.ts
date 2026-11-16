@@ -1008,7 +1008,9 @@ describe('review round 9 on #558: Olympus asks the bridge for the exact version,
           return Reflect.get(set, key, set);
         },
       });
-      await expect(pass(target, bridge().call, { set: racing })).rejects.toThrow('disk I/O error');
+      // .then(ok, err), not .rejects: the pass awaits a read-worker reply, where Bun's .rejects stalls.
+      const failed = await pass(target, bridge().call, { set: racing }).then(() => undefined, (error: unknown) => error);
+      expect(failed instanceof Error ? failed.message : String(failed)).toContain('disk I/O error');
       // Nothing was deleted ahead of the settlement: the file is still there, and the take-back is owed.
       expect(existsSync(fetchedPath(target, 'A1'))).toBe(true);
       expect(searchable(target, 'Lighthousemarker').length).toBeGreaterThan(0);

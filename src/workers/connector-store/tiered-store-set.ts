@@ -460,10 +460,15 @@ export class TieredStoreSet {
           if (this.syncsRunning > 0) return result;
           const stores = this.openStores().filter((store) => store.hasChildItems());
           if (stores.length === 0) return result;
-          const page = this.sweepPage(stores, after);
+          const page = await this.sweepPage(stores, after);
           if (page.length === 0) break;
           after = page[page.length - 1]!;
-          this.removeChildrenOfGoneParents(stores, page, result, failed);
+          // Only a parent no store holds a row for is judged on this thread,
+          // afresh, in the step that removes (usually none of a page).
+          const unheld = await parentsNoStoreHolds(stores, page);
+          // The reads above awaited: a sync that started meanwhile owns the stores again.
+          if (this.syncsRunning > 0) return result;
+          if (unheld.length > 0) this.removeChildrenOfGoneParents(stores, unheld, result, failed);
           // Let the event loop breathe between batches.
           await new Promise<void>((resolve) => { setImmediate(resolve); });
         }
@@ -476,10 +481,10 @@ export class TieredStoreSet {
   }
 
   /** The next parents of active children, in one order across every store. */
-  private sweepPage(stores: readonly LocalConnectorStore[], after: ParentRef | undefined): ParentRef[] {
+  private async sweepPage(stores: readonly LocalConnectorStore[], after: ParentRef | undefined): Promise<ParentRef[]> {
     const merged = new Map<string, ParentRef>();
     for (const store of stores) {
-      for (const parent of store.activeChildParents(after, TieredStoreSet.CHILD_SWEEP_PAGE)) merged.set(parentKey(parent), parent);
+      for (const parent of await store.activeChildParentsOffThread(after, TieredStoreSet.CHILD_SWEEP_PAGE)) merged.set(parentKey(parent), parent);
     }
     return [...merged.values()]
       .sort((a, b) => (a.parentLocalItemId < b.parentLocalItemId ? -1 : a.parentLocalItemId > b.parentLocalItemId ? 1
@@ -2383,4 +2388,13 @@ export type { TierCopy };
 /** A listed item's path, when its metadata names one as text. */
 function pathOf(path: unknown): string | undefined {
   return typeof path === 'string' && path ? path : undefined;
+}
+
+/** Those of `parents` no store holds an active row or a Secret's location for, read on the read thread. */
+async function parentsNoStoreHolds(stores: readonly LocalConnectorStore[], parents: readonly ParentRef[]): Promise<ParentRef[]> {
+  const held = new Set<string>();
+  for (const store of stores) {
+    for (const row of await store.parentStandingsInBackground(parents)) if (row.active || row.secret) held.add(parentKey(row));
+  }
+  return parents.filter((parent) => !held.has(parentKey(parent)));
 }

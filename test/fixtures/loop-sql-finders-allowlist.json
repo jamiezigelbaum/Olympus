@@ -117,16 +117,6 @@
       "reason": "judge backlog counts on the loop"
     },
     {
-      "site": "embedChunksUnderLease local-index.ts < async withFileLease file-lease.ts",
-      "table": "chunks",
-      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
-    },
-    {
-      "site": "embedChunksUnderLease local-index.ts",
-      "table": "chunks",
-      "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
-    },
-    {
       "site": "embeddingBacklogEstimate local-index.ts < withEmbeddingBacklogEstimate status.ts",
       "table": "chunks",
       "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
@@ -135,6 +125,11 @@
       "site": "embeddingBacklogEstimate local-index.ts",
       "table": "chunks",
       "reason": "family 4: the recount on the loop (estimates, fallbacks, in-memory counts)"
+    },
+    {
+      "site": "embeddingWorkRows local-index.ts < embedChunksUnderLease local-index.ts",
+      "table": "chunks",
+      "reason": "a store the read pool never reads (in memory): on disk the work list is read on the read worker without text (embeddingWorkRows)"
     },
     {
       "site": "lastCompletedSyncRun local-index.ts < pull provider-store-sync.ts",
@@ -185,6 +180,11 @@
       "site": "read sniffer-store.ts < listQuestions sniffer-store.ts",
       "table": "sniffer_questions",
       "reason": "judge backlog counts on the loop"
+    },
+    {
+      "site": "rebuildFtsTokenizerIndex fts.ts < runBoundedFtsTokenizerMigration fts.ts",
+      "table": "items",
+      "reason": "write found by the write plan check (16 Nov): a version step that runs once; to move off the loop with progress (store-open plan item 2)"
     },
     {
       "site": "reconcileTotals local-index.ts",
@@ -265,6 +265,11 @@
       "site": "syncFromConnectorHeld local-index.ts < async syncFromConnector local-index.ts",
       "table": "items",
       "reason": "writer-path finder (sync, move, embed, purge): find ids on the read worker, apply by key"
+    },
+    {
+      "site": "up job-store.ts < <anonymous> sqlite-migrations.ts",
+      "table": "extraction_jobs",
+      "reason": "write found by the write plan check (16 Nov): a version step that runs once; to move off the loop with progress (store-open plan item 2)"
     },
     {
       "site": "up local-index.ts < <anonymous> sqlite-migrations.ts",

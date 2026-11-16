@@ -809,7 +809,6 @@ export class TierLedger {
       // an older build opens the file as before and ignores it.
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
-      settleStaleEmbedHolds(db, this.now().toISOString());
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
       if (db) closeSqliteStore(db, { checkpoint: !this.readOnly });
@@ -4291,6 +4290,57 @@ export class TierLedger {
    * seen as of before or after the change, as with a copy changed after a
    * single read.
    */
+  /** True once this ledger's stale embedding holds were settled. One keyed read. */
+  staleEmbedHoldsSettled(): boolean {
+    return this.db.query('SELECT 1 FROM tier_ledger_meta WHERE key = ?').get(STALE_EMBED_HOLDS_SETTLED) !== null;
+  }
+
+  /**
+   * Reads for the read worker: up to `limit` rowids of current copies still
+   * held on a decided item, after `after` (corpus, rowid), each corpus
+   * sought through tier_copies_corpus. `next` is undefined once none are left.
+   */
+  *staleEmbedHoldSteps(after: { corpusId: string; rowId: number } | undefined, limit: number): Generator<LedgerRead, { rowIds: number[]; next?: { corpusId: string; rowId: number } }, unknown> {
+    const rowIds: number[] = [];
+    let corpusId = after?.corpusId;
+    let rowId = after?.rowId ?? 0;
+    if (corpusId === undefined) {
+      const first = (yield { sql: 'SELECT MIN(corpus_id) AS id FROM tier_copies', params: [], mode: 'get' }) as { id: string | null } | null;
+      if (!first?.id) return { rowIds };
+      corpusId = first.id;
+    }
+    for (;;) {
+      const rows = (yield {
+        sql: `SELECT rowid AS row_id FROM tier_copies
+          WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1 AND rowid > ? AND ${STALE_EMBED_HOLD_DECIDED}
+          ORDER BY rowid LIMIT ?`,
+        params: [corpusId, rowId, limit - rowIds.length],
+        mode: 'all',
+      }) as Array<{ row_id: number }>;
+      for (const row of rows) rowIds.push(row.row_id);
+      if (rowIds.length >= limit) return { rowIds, next: { corpusId, rowId: rows[rows.length - 1]!.row_id } };
+      const nextCorpus = (yield { sql: 'SELECT MIN(corpus_id) AS id FROM tier_copies WHERE corpus_id > ?', params: [corpusId], mode: 'get' }) as { id: string | null } | null;
+      if (!nextCorpus?.id) return { rowIds };
+      corpusId = nextCorpus.id;
+      rowId = 0;
+    }
+  }
+
+  /** Clears these copies' holds by key, where they are still current, held and decided. Returns how many. */
+  settleStaleEmbedHoldRows(rowIds: readonly number[]): number {
+    if (this.readOnly || rowIds.length === 0) return 0;
+    return this.db.query(`
+      UPDATE tier_copies SET embed_hold = 0, updated_at = ?
+      WHERE rowid IN (SELECT value FROM json_each(?)) AND copy_state = 'current' AND embed_hold = 1 AND ${STALE_EMBED_HOLD_DECIDED}
+    `).run(this.now().toISOString(), JSON.stringify(rowIds)).changes;
+  }
+
+  /** Records that every stale hold was settled, so no later boot looks again. */
+  markStaleEmbedHoldsSettled(): void {
+    if (this.readOnly) return;
+    this.db.query('INSERT OR REPLACE INTO tier_ledger_meta (key, value) VALUES (?, ?)').run(STALE_EMBED_HOLDS_SETTLED, this.now().toISOString());
+  }
+
   *corpusCopyIdentitiesSteps(
     corpusId: string,
     filter: TierCorpusCopyFilter,
@@ -5336,42 +5386,18 @@ function rowOf(record: TierLedgerRecord): EffectiveRow {
  * open: idempotent, and it touches only decided items' current copies (the
  * hold is cleared where the decision already placed the copy).
  */
-// Settled once per ledger: completeMove applies the placement's hold, so no
-// build since makes such a copy, and the walk is not repeated at every open
-// (49 s on lane 6's fixture, 16 Nov, on the loop at each TierLedger open).
+// Copies left held on a decided item. completeMove applies the placement's
+// hold, so no build since makes one; the ones older builds left are settled
+// once per ledger, found off the loop and set by key (settleStaleEmbedHolds
+// in child-visibility.ts). Settling them at every open walked every held
+// copy on the loop: 49 s, then 10.5 s, on lane 6's fixture (16 Nov).
 const STALE_EMBED_HOLDS_SETTLED = 'settled:stale_embed_holds:v1';
-
-function settleStaleEmbedHolds(db: Database, now: string): number {
-  if (db.query('SELECT 1 FROM tier_ledger_meta WHERE key = ?').get(STALE_EMBED_HOLDS_SETTLED)) return 0;
-  // One corpus at a time, so each update seeks tier_copies_corpus
-  // (corpus_id, copy_state, embed_hold) to the held current copies instead
-  // of walking every copy; the corpus ids are found by skipping through the
-  // same index.
-  const corpora = (db.query(`
-    WITH RECURSIVE corpus(id) AS (
-      SELECT MIN(corpus_id) FROM tier_copies
-      UNION ALL
-      SELECT (SELECT MIN(corpus_id) FROM tier_copies WHERE corpus_id > corpus.id) FROM corpus WHERE corpus.id IS NOT NULL
-    )
-    SELECT id FROM corpus WHERE id IS NOT NULL
-  `).all() as Array<{ id: string }>).map((row) => row.id);
-  const settle = db.query(`
-    UPDATE tier_copies SET embed_hold = 0, updated_at = ?
-    WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1
-      AND EXISTS (
+const STALE_EMBED_HOLD_DECIDED = `EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
           AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
-      )
-  `);
-  let settled = 0;
-  db.transaction(() => {
-    for (const corpusId of corpora) settled += settle.run(now, corpusId).changes;
-    db.query('INSERT OR REPLACE INTO tier_ledger_meta (key, value) VALUES (?, ?)').run(STALE_EMBED_HOLDS_SETTLED, now);
-  })();
-  return settled;
-}
+      )`;
 
 /** One chat (`conversationKey`) or one source (`provider`, optionally one account) the owner asked to re-check. */
 export interface TierRecheckScope {

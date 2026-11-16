@@ -88,3 +88,37 @@ test('sparse backlog reads slices of existing rows and stops at both initial hig
   // The appended row really exists, but belongs to the next refresh.
   expect(exact.backlog()).toMatchObject({ pendingItems: 3, remainingQuestions: 4 });
 });
+
+test('a large backlog is counted off the loop, in a worker, to the same numbers as the exact count', async () => {
+  const tmp = tempDir();
+  cleanup.push(() => tmp.cleanup());
+  const storePath = join(tmp.dir, 'store.sqlite');
+  const ledger = new TierLedger({ dbPath: tierLedgerPathForStore(storePath) });
+  cleanup.push(() => ledger.close());
+  const installed = new InstalledTierClassification({ env: {}, lane: BUILT_IN_SNIFFER_LANE });
+  cleanup.push(() => installed.close());
+  const queue = installed.snifferStoreForLedger(ledger.dbPath);
+  const decision = classifyItemTiers({ signals: { title: 'Notes' }, text: 'Ordinary notes.' });
+  for (const [id, pending] of [['00', true], ['01', true], ['02', false]] as const) {
+    ledger.recordDecision(identityOf(id), { ...decision, state: pending ? 'pending' : 'current', contentRead: true, metadataPending: false, contentPending: pending });
+  }
+  for (const [id, pass] of [['00', 'metadata'], ['00', 'content'], ['02', 'content']] as const) {
+    queue.enqueue({ subject: identityOf(id), pass, material: 'Ordinary notes.', flags: [], mapRevision: 'none' });
+  }
+  const options = { installed, lane: BUILT_IN_SNIFFER_LANE,
+    model: { async complete(): Promise<never> { throw new Error('counting must not infer'); } },
+    stores: () => [{ dbPath: storePath }], classificationLedgerPath: join(tmp.dir, 'classification.jsonl'),
+    now: () => new Date('2026-11-06T00:00:00.000Z') };
+  const exact = new TierSnifferService({ ...options, backlogExactRows: Number.MAX_SAFE_INTEGER });
+  cleanup.push(() => exact.stop());
+  const expected = exact.backlog();
+  const service = new TierSnifferService({ ...options, backlogExactRows: 0 });
+  cleanup.push(() => service.stop());
+  const probe = service as unknown as SliceProbe & { countBacklogOffThread(): Promise<Record<string, number> | undefined> };
+  const sliced = spyOn(probe, 'countBacklogInSlices');
+  cleanup.push(() => sliced.mockRestore());
+  expect(await probe.countBacklogOffThread()).toEqual({ checkingItems: expected.checkingItems, remainingQuestions: expected.remainingQuestions,
+    pendingItems: expected.pendingItems, pendingWithoutQuestion: expected.pendingWithoutQuestion, oldestPendingAgeMs: expected.oldestPendingAgeMs });
+  service.backlog();
+  expect(sliced).not.toHaveBeenCalled();
+});

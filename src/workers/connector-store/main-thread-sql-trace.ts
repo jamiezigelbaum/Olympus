@@ -18,6 +18,8 @@ const TIMED = '__olympusMainThreadSqlTimed';
 const STATEMENT_METHODS = ['all', 'get', 'run', 'values'] as const;
 const SITE_FRAMES = 3;
 let installed = false;
+// One UPDATE, DELETE or INSERT ... SELECT, with no second statement after it.
+const SINGLE_WRITE = /^\s*(UPDATE|DELETE|INSERT)\b[^;]*;?\s*$/i;
 let sliceTiming: { maxStatementMs: number } | undefined;
 
 /** Synchronous scope: also measures ledger, proof reads and store commits in a sweep. */
@@ -35,6 +37,11 @@ export function installMainThreadSqlTrace(): void {
   installed = true;
   const exec = Database.prototype.exec;
   Database.prototype.exec = function (...args: Parameters<typeof exec>) {
+    // A write run as text is planned too: an UPDATE or DELETE that has to
+    // search is a finder plus a keyed write, wherever it is run from.
+    if (planRecorder && !planRecorder.explaining && typeof args[0] === 'string' && SINGLE_WRITE.test(args[0])) {
+      recordPlan({ [SQL]: args[0], [DB]: this });
+    }
     if (!sliceTiming && !slowLog) return exec.apply(this, args);
     const started = performance.now();
     try { return exec.apply(this, args); }
