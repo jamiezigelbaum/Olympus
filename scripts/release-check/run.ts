@@ -1484,7 +1484,9 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
   // queue appeared) instead of being killed with nothing to say: twice a stopped seed left front-steady only "did not report"
   // (mac-upgrade 43783902175 and 43790901220, 16 Nov 2026).
   const seedS = phaseBudgetMs('front-seed') / 1000;
-  const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed} --settle-s ${seedS - 360} --queue-s 120 --telegram-later`, 30 * 60_000));
+  // The seed waits as long as the Gmail import makes progress (--settle-s is how long it may stand still), so neither the phase
+  // nor the agent call carries a clock that would cut a progressing import short; the phase reports its time.
+  const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed} --settle-s ${seedS - 360} --queue-s 120 --telegram-later`, 120 * 60_000), 120 * 60_000);
   const set = seeded.result as FrontStoreSet | undefined;
   run.log(`front-seed: ${set ? `Gmail ${set.gmail.settled ? 'settled' : `not settled (${set.gmail.status ?? 'not listed'})`}, job queue ${set.jobQueue ? 'present' : 'missing'}${set.detail ? `; ${set.detail}` : ''}` : agentDetail(seeded)}`);
   const on = await run.agent('engine-split-on', '', 60_000);

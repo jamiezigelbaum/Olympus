@@ -120,6 +120,10 @@ export function archiveStatusOf(json: unknown, fileName: string): string | undef
   const found = archives.map(asRecord).find((archive) => archive.name === fileName);
   return typeof found?.status === 'string' ? found.status : undefined;
 }
+function archiveOf(json: unknown, fileName: string): Record<string, unknown> | undefined {
+  const archives = asRecord(json).archives;
+  return Array.isArray(archives) ? archives.map(asRecord).find((archive) => archive.name === fileName) : undefined;
+}
 
 const archiveCount = (json: unknown): number => {
   const archives = asRecord(json).archives;
@@ -178,13 +182,24 @@ export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; s
       // front counted the stores itself while an import ran, and the page failed).
       if (trace.ok) set.traces.push(await runJourney(driver, SOURCES_DURING_IMPORT));
     });
-    const settled = await until(host, async () => {
-      const status = archiveStatusOf(host.cli(['status']).json, FRONT_GMAIL_FILE);
+    // No clock cancels an import that is progressing (owner rule; plan, 16 Nov 2026): the seed waits while the import's status,
+    // item count or percent moves, and gives up only after `settleS` with none of them moving. It says how long it took.
+    const settleStarted = host.now();
+    const stallMs = (args.settleS ?? 900) * 1_000;
+    let lastMark = '', lastMove = host.now(), items: unknown;
+    for (;;) {
+      const archive = archiveOf(host.cli(['status']).json, FRONT_GMAIL_FILE);
+      const status = typeof archive?.status === 'string' ? archive.status : undefined;
       if (status !== undefined) set.gmail.status = status;
-      return status === 'imported' ? status : undefined;
-    }, (args.settleS ?? 900) * 1_000, 5_000);
-    set.gmail.settled = settled !== undefined;
-    host.say(`front: Gmail import ${set.gmail.settled ? 'settled' : `not settled (${set.gmail.status ?? 'not listed'})`}`);
+      items = archive?.items;
+      if (status === 'imported') { set.gmail.settled = true; break; }
+      const mark = JSON.stringify([status, archive?.items, archive?.progress_percent]);
+      if (mark !== lastMark) { lastMark = mark; lastMove = host.now(); }
+      if (host.now() - lastMove >= stallMs) break;
+      await host.sleep(5_000);
+    }
+    const tookS = Math.round((host.now() - settleStarted) / 1000);
+    host.say(`front: Gmail import ${set.gmail.settled ? `settled in ${tookS} s` : `stopped moving for ${Math.round(stallMs / 1000)} s after ${tookS} s (${set.gmail.status ?? 'not listed'}, ${String(items ?? 'no')} items)`}`);
     // On an upgrade leg the earlier release is running, and the seed's pull is the candidate's code: it writes Telegram stores at
     // the candidate's schema, which the earlier release then cannot open (mac-upgrade 43855656930: 1.4.4 refused connector-store
     // 16 after the put-back). There Telegram is seeded after the update (seedTelegramAfterUpdate).
