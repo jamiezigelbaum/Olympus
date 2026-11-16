@@ -200,7 +200,7 @@
     "src/workers/engine/runtime/source-answer-lanes.ts": 1,
     "src/workers/engine/runtime/venice-inbox-answer.ts": 1,
     "src/workers/engine/server.ts": 23,
-    "src/workers/engine/sqlite-checkpointer.ts": 2,
+    "src/workers/engine/sqlite-checkpointer.ts": 1,
     "src/workers/evernote/connector.ts": 2,
     "src/workers/evernote/live-sync.ts": 1,
     "src/workers/file-extraction/extractors/built-in-transcriber.ts": 3,

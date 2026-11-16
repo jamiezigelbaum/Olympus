@@ -86,6 +86,7 @@ export class ControlPathHeadroom {
   private readonly log: (line: string) => void;
   private readonly freezeLogMs: number;
   private readonly freezeSubject: string;
+  private roomGate: (() => Promise<void> | undefined) | undefined;
 
   constructor(options: ControlPathHeadroomOptions = {}) {
     this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
@@ -127,6 +128,18 @@ export class ControlPathHeadroom {
     // all fire in one timer phase before the loop polls for requests, each
     // lane spending its own slice: five lanes made a 100-400 ms wall.
     if (this.pendingTurn) return this.pendingTurn;
+    // A store's WAL needs room (engine/sqlite-checkpointer.ts): bulk work
+    // stands back for one checkpoint pass. The thread is free meanwhile.
+    const room = this.roomGate?.();
+    if (room) {
+      this.turns += 1;
+      const waiting = room.then(() => this.turn(0)).then(() => {
+        this.pendingTurn = undefined;
+        this.lastTurnAt = this.now();
+      });
+      this.pendingTurn = waiting;
+      return waiting;
+    }
     const now = this.now();
     if (now - this.lastTurnAt < this.sliceMs) return undefined;
     const rest = this.lastLagMs >= this.lagRestThresholdMs;
@@ -138,6 +151,15 @@ export class ControlPathHeadroom {
     });
     this.pendingTurn = pending;
     return pending;
+  }
+
+  /**
+   * A wait every ingestion turn joins while it is pending: `gate` returns
+   * undefined when there is nothing to wait for (one call per unit of work,
+   * so it must be cheap) and a promise that never rejects otherwise.
+   */
+  setRoomGate(gate: (() => Promise<void> | undefined) | undefined): void {
+    this.roomGate = gate;
   }
 
   /** Counts only, for status and tests. */

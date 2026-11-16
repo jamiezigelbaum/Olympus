@@ -168,7 +168,8 @@
     "src/workers/source-scheduler.ts#EMBEDDING_SWEEP_STORE_DEADLINE_MS": "d",
     "src/workers/source-scheduler.ts#FILE_EXTRACTION_PASS_BUDGET_MS": "d",
     "src/workers/whatsapp/media-fetch.ts#CALL_STALL_MS": "c",
-    "src/core/model-stream.ts#MODEL_IDLE_TIMEOUT_MS": "b"
+    "src/core/model-stream.ts#MODEL_IDLE_TIMEOUT_MS": "b",
+    "src/workers/engine/sqlite-checkpointer.ts#SQLITE_WAL_ROOM_READER_WAIT_MS": "d"
   },
   "inline": {
     "connect-relay/server/limits.ts": {
