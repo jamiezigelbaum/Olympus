@@ -81264,6 +81264,32 @@ function normalizeCardKey(key) {
     return `email:${key.slice("email:".length).trim().toLowerCase()}`;
   return;
 }
+function identityFromRow2(row) {
+  return {
+    identityKey: row.identity_key,
+    provider: row.provider,
+    ...row.sender_id ? { senderId: row.sender_id } : {},
+    ...row.sender_label ? { senderLabel: row.sender_label } : {},
+    keys: JSON.parse(row.keys_json),
+    names: JSON.parse(row.names_json),
+    isOwner: row.is_owner === 1,
+    itemCount: row.item_count,
+    personId: row.person_id,
+    corpusIds: JSON.parse(row.corpus_ids_json),
+    ...row.link_reason ? { linkReason: row.link_reason } : {}
+  };
+}
+function personFromRow(row, identities) {
+  return {
+    personId: row.person_id,
+    displayName: row.display_name,
+    isOwner: row.is_owner === 1,
+    nameShareable: row.name_shareable === 1,
+    itemCount: row.item_count,
+    identities,
+    linkedBy: JSON.parse(row.linked_by_json)
+  };
+}
 
 class LocalPeopleIndex {
   db;
@@ -81271,16 +81297,20 @@ class LocalPeopleIndex {
   bySender;
   now;
   readOnly;
+  loadedDataVersion;
+  reloading;
   constructor(options) {
     this.people = [];
     this.bySender = new Map;
     this.now = options.now ?? (() => new Date);
     this.readOnly = options.readOnly === true;
+    this.loadedDataVersion = undefined;
+    this.reloading = undefined;
     if (this.readOnly) {
       this.db = new Database12(options.dbPath, { readonly: true, create: false, strict: true });
       try {
         this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;");
-        this.loadPeople();
+        this.reload();
       } catch (error) {
         closeSqliteStore(this.db, { checkpoint: false });
         throw error;
@@ -81309,7 +81339,93 @@ class LocalPeopleIndex {
     closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : {});
   }
   reload() {
-    this.loadPeople();
+    if (!this.readOnly) {
+      this.loadPeople();
+      return;
+    }
+    const version = this.dataVersion();
+    this.db.exec("BEGIN");
+    try {
+      this.loadPeople();
+      this.db.exec("COMMIT");
+      this.loadedDataVersion = version;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  reloadIfChanged() {
+    if (this.reloading)
+      return this.reloading;
+    this.reloading = Promise.resolve().then(async () => {
+      if (!this.readOnly)
+        throw new Error("Cooperative people reload requires a read-only index");
+      let version = this.dataVersion();
+      while (version !== this.loadedDataVersion) {
+        await this.loadPeopleInTurns();
+        this.loadedDataVersion = version;
+        version = this.dataVersion();
+      }
+    }).finally(() => {
+      this.reloading = undefined;
+    });
+    return this.reloading;
+  }
+  dataVersion() {
+    return this.db.query("PRAGMA data_version").get().data_version;
+  }
+  async loadPeopleInTurns() {
+    const people = [];
+    const byPerson = new Map;
+    const bySender = new Map;
+    this.db.exec("BEGIN");
+    try {
+      let afterPerson;
+      for (;; ) {
+        const statement = this.db.query(`SELECT rowid AS cursor, ${PERSON_COLUMNS} FROM people_persons
+          ${afterPerson === undefined ? "" : "WHERE rowid > ?"} ORDER BY rowid LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`);
+        const rows = afterPerson === undefined ? statement.all() : statement.all(afterPerson);
+        if (rows.length === 0)
+          break;
+        for (const row of rows) {
+          const person = personFromRow(row, []);
+          people.push(person);
+          byPerson.set(person.personId, person);
+        }
+        afterPerson = rows[rows.length - 1].cursor;
+        await new Promise((resolve) => {
+          setImmediate(resolve);
+        });
+      }
+      let afterIdentity;
+      for (;; ) {
+        const statement = this.db.query(`SELECT ${IDENTITY_COLUMNS} FROM people_identities
+          ${afterIdentity === undefined ? "" : "WHERE identity_key > ?"} ORDER BY identity_key LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`);
+        const rows = afterIdentity === undefined ? statement.all() : statement.all(afterIdentity);
+        if (rows.length === 0)
+          break;
+        for (const row of rows) {
+          const person = byPerson.get(row.person_id);
+          if (!person)
+            continue;
+          const identity = identityFromRow2(row);
+          person.identities.push(identity);
+          if (identity.senderId)
+            bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
+          else if (identity.senderLabel)
+            bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
+        }
+        afterIdentity = rows[rows.length - 1].identity_key;
+        await new Promise((resolve) => {
+          setImmediate(resolve);
+        });
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.setPeople(people, bySender);
   }
   rebuild(observations) {
     const people = linkPeople({ observations, contacts: this.contactCards(), corrections: this.corrections() });
@@ -81487,49 +81603,37 @@ class LocalPeopleIndex {
     return this.db.query(`SELECT card_id, name, keys_json FROM people_contact_cards ORDER BY card_id`).all().map((row) => ({ cardId: row.card_id, ...row.name ? { name: row.name } : {}, keys: JSON.parse(row.keys_json) }));
   }
   loadPeople() {
-    const persons = this.db.query(`SELECT person_id, display_name, is_owner, name_shareable, item_count, linked_by_json FROM people_persons`).all();
+    const persons = this.db.query(`SELECT ${PERSON_COLUMNS} FROM people_persons`).all();
     const identities = this.db.query(`
-      SELECT identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason
+      SELECT ${IDENTITY_COLUMNS}
       FROM people_identities ORDER BY identity_key
     `).all();
     const byPerson = new Map;
     for (const row of identities) {
-      byPerson.set(row.person_id, [...byPerson.get(row.person_id) ?? [], {
-        identityKey: row.identity_key,
-        provider: row.provider,
-        ...row.sender_id ? { senderId: row.sender_id } : {},
-        ...row.sender_label ? { senderLabel: row.sender_label } : {},
-        keys: JSON.parse(row.keys_json),
-        names: JSON.parse(row.names_json),
-        isOwner: row.is_owner === 1,
-        itemCount: row.item_count,
-        personId: row.person_id,
-        corpusIds: JSON.parse(row.corpus_ids_json),
-        ...row.link_reason ? { linkReason: row.link_reason } : {}
-      }]);
+      let members = byPerson.get(row.person_id);
+      if (!members) {
+        members = [];
+        byPerson.set(row.person_id, members);
+      }
+      members.push(identityFromRow2(row));
     }
-    const people = persons.map((row) => ({
-      personId: row.person_id,
-      displayName: row.display_name,
-      isOwner: row.is_owner === 1,
-      nameShareable: row.name_shareable === 1,
-      itemCount: row.item_count,
-      identities: byPerson.get(row.person_id) ?? [],
-      linkedBy: JSON.parse(row.linked_by_json)
-    }));
+    const people = persons.map((row) => personFromRow(row, byPerson.get(row.person_id) ?? []));
     this.setPeople(people);
   }
-  setPeople(people) {
-    this.people = people;
-    this.bySender.clear();
-    for (const person of people) {
-      for (const identity of person.identities) {
-        if (identity.senderId)
-          this.bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
-        else if (identity.senderLabel)
-          this.bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
+  setPeople(people, bySender) {
+    if (!bySender) {
+      bySender = new Map;
+      for (const person of people) {
+        for (const identity of person.identities) {
+          if (identity.senderId)
+            bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
+          else if (identity.senderLabel)
+            bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
+        }
       }
     }
+    this.people = people;
+    this.bySender = bySender;
   }
 }
 function authoredStores(stores) {
@@ -81676,7 +81780,7 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
     closeSqliteStore(db);
   }
 }
-var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 2, PEOPLE_INDEX_STORE_ID = "people-index", MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PeopleCorrectionRefusedError, PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable", READ_FAILED = "!read-failed";
+var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 2, PEOPLE_INDEX_STORE_ID = "people-index", MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PeopleCorrectionRefusedError, PEOPLE_RELOAD_PAGE_ROWS = 500, PERSON_COLUMNS = "person_id, display_name, is_owner, name_shareable, item_count, linked_by_json", IDENTITY_COLUMNS = "identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason", PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable", READ_FAILED = "!read-failed";
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();
@@ -272071,15 +272175,14 @@ ${key}`;
       peopleIndex ??= openPeopleIndexOrUndefined({ readOnly: true });
       if (!peopleIndex)
         return;
-      try {
-        peopleIndex.reload();
-        const people = peopleIndex;
+      const people = peopleIndex;
+      people.reloadIfChanged().then(() => {
         const resolver = (provider, senderId, senderLabel) => people.citationName(provider, senderId, senderLabel);
         for (const store of connectorStores)
           store.setPeopleNames?.(resolver);
-      } catch (error) {
+      }).catch((error) => {
         console.warn(`[olympus] people index reload failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      });
       return;
     }
     if (!peopleRefresher)

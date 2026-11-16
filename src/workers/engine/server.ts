@@ -2384,15 +2384,14 @@ export async function main(): Promise<void> {
     if (engineFront) {
       peopleIndex ??= openPeopleIndexOrUndefined({ readOnly: true });
       if (!peopleIndex) return;
-      try {
-        peopleIndex.reload();
-        const people = peopleIndex;
+      const people = peopleIndex;
+      void people.reloadIfChanged().then(() => {
         const resolver = (provider: string, senderId: string | undefined, senderLabel: string | undefined) =>
           people.citationName(provider, senderId, senderLabel);
         for (const store of connectorStores) store.setPeopleNames?.(resolver);
-      } catch (error) {
+      }).catch((error) => {
         console.warn(`[olympus] people index reload failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      });
       return;
     }
     if (!peopleRefresher) return;
