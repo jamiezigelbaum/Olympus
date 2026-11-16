@@ -2844,6 +2844,8 @@ describe('analyst-backed source_answer handler', () => {
 
     expect(selfHealCalls).toBe(1);
     expect(calls).toHaveLength(1);
+    expect(result.answer).toContain(`Evidence repair is still in progress for ${SECURE}`);
+    expect(calls[0]?.pack.coverage.extractionGaps).toContain(`Evidence repair is still in progress for ${SECURE}; this answer uses only the evidence already available.`);
     expect(result.audit.self_heal).toMatchObject({
       attempted: true,
       outcome: 'in_progress',
@@ -3775,4 +3777,29 @@ test('a trust label the model repeats reaches the person as the tier name', asyn
   const { plainTrustWords } = await import('../src/core/opsec.ts');
   expect(plainTrustWords('The code is "ZULE", per the secure_local copy of the PDF [1].')).toBe('The code is "ZULE", per the Private copy of the PDF [1].');
   expect(plainTrustWords('From secure_local.dropbox and public_safe [2].')).toBe('From Private and Personal [2].');
+});
+
+
+test('a silent store is named in the released answer, coverage and degradations', async () => {
+  const lanes = lanesFixture({ internal: ['ready'], other: [] });
+  lanes.adapters = { ...lanes.adapters, [OTHER]: () => new Promise(() => {}) };
+  const { analyst, calls } = scriptedAnalyst(citingFirstCandidate('Available evidence.', 'Available evidence.'));
+  const handler = createAnalystSourceIndexAnswerHandler({ analyst, lanes: () => lanes, laneTimeoutMs: 5 });
+  const result = await handler.answer({ question: 'fixture', include_internal: true, corpus_ids: [INTERNAL, OTHER] });
+  expect(result.answer).toContain(`${OTHER} is still being read`);
+  expect(result.audit.retrieval_degradations).toContainEqual(expect.objectContaining({ lane_name: OTHER, reason: 'lane_timeout' }));
+  expect(calls[0]?.pack.coverage.skippedCorpora).toContainEqual(expect.objectContaining({ corpusId: OTHER, reason: 'lane_timeout' }));
+});
+
+
+test('unfinished keyword preparation is named in the released answer and coverage', async () => {
+  const lanes = lanesFixture({ internal: ['ready'] });
+  const adapter = adapterReturning(['ready']);
+  adapter.prepareKeywords = async () => ({ incomplete: true });
+  lanes.adapters = { ...lanes.adapters, [INTERNAL]: adapter };
+  const { analyst, calls } = scriptedAnalyst(citingFirstCandidate('Available evidence.', 'Available evidence.'));
+  const result = await createAnalystSourceIndexAnswerHandler({ analyst, lanes: () => lanes }).answer({ question: 'fixture', include_internal: true, corpus_id: INTERNAL });
+  expect(result.answer).toContain(`Keyword preparation unfinished for ${INTERNAL}`);
+  expect(calls[0]?.pack.coverage.extractionGaps.some(gap => gap.includes(`Keyword preparation unfinished for ${INTERNAL}`))).toBe(true);
+  expect(result.audit.retrieval_degradations).toContainEqual(expect.objectContaining({ lane_name: `${INTERNAL}:keywords`, detail: 'keyword_preparation_incomplete' }));
 });

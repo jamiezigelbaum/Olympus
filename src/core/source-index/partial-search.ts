@@ -22,16 +22,18 @@ export function semanticTimeoutGapCorpus(gap: string): string | undefined {
   return gapCorpus(PREFIX, gap);
 }
 
-/** The coverage gap for a source whose whole lane ran out of time and was left out of the answer. */
+/** An idle store is unfinished even when a usable prefix reached the answer. */
 export function laneTimeoutGap(corpusId: string): string {
-  return `Ran out of time searching ${corpusId}; it is not part of this answer, so more may be there. Ask again in a moment.`;
+  return `${corpusId} is still being read; this answer uses only the matches already available, so more may be there. Ask again in a moment.`;
 }
 
-// A source's read of its newest items (the chat recency lane) that ran out of
-// time or found the store busy (#1460). Its other lanes still answered, so the
-// source is searched; only its newest items may be missing, and that is said.
-// The lane reports this token as its skip reason; the router carries it as a
-// lane_timeout degradation on that one lane.
+export const KEYWORD_PREPARATION_INCOMPLETE = 'keyword_preparation_incomplete';
+const KEYWORDS_PREFIX = 'Keyword preparation unfinished for ';
+export function keywordPreparationGap(corpusId: string): string {
+  return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;
+}
+
+// A source's newest-items read can be incomplete while its keyword lane answers.
 export const RECENT_ITEMS_CUT_SHORT = 'recent_items_cut_short';
 
 const RECENT_PREFIX = 'Ran out of time reading the newest items in ';
@@ -78,9 +80,8 @@ export function timedOutCorpora(coverage: {
   skippedCorpora: readonly { corpusId: string; reason: string }[];
   extractionGaps: readonly string[];
 }): TimedOutCorpora {
-  const searched = new Set(coverage.searchedCorpora);
   const stillSearching = [...new Set(coverage.skippedCorpora
-    .filter((skip) => skip.reason === 'lane_timeout' && !searched.has(skip.corpusId))
+    .filter((skip) => skip.reason === 'lane_timeout')
     .map((skip) => skip.corpusId))].sort();
   const named = (corpusOf: (gap: string) => string | undefined) => [...new Set(coverage.extractionGaps
     .map(corpusOf)
@@ -101,5 +102,6 @@ export function timedOutCoverageNotes(coverage: Parameters<typeof timedOutCorpor
     ...partlySearched.map(semanticTimeoutGap),
     ...newestMissed.map(recentItemsTimeoutGap),
     ...unchecked.map(visibilityCheckTimeoutGap),
+    ...[...new Set(coverage.extractionGaps.map(gap => gapCorpus(KEYWORDS_PREFIX, gap)).filter((id): id is string => id !== undefined))].map(keywordPreparationGap),
   ];
 }

@@ -559,16 +559,30 @@ export function createAnalystSourceIndexAnswerHandler(
       const onDemandNotes: string[] = [];
       const onDemandLimits: OnDemandReadLimit[] = [];
       let stillReading = 0;
+      if (selfHealAudit?.outcome === 'in_progress') {
+        const corpus = selfHealAudit.corpus_id;
+        onDemandNotes.push(`Evidence repair is still in progress${corpus ? ` for ${corpus}` : ''}; this answer uses only the evidence already available.`);
+      }
       if (options.requestOnDemandRead && !readsDone) {
         const reads = await readNamesOnlyMatches(detail, options.requestOnDemandRead,
           options.onDemandReadWaitMs ?? DEFAULT_ON_DEMAND_READ_WAIT_MS);
         if (reads.started > 0 && reads.pending === 0) return answerOnce(request, local, true);
         stillReading = reads.pending;
+        if (stillReading > 0) {
+          const corpora = [...new Set([...(detail.namesOnlyCandidateIndexes ?? []), ...(detail.contentPrivateCandidateIndexes ?? [])]
+            .filter(index => index < 3).map(index => detail.candidateCorpusIds[index]).filter(Boolean))];
+          onDemandNotes.push(`Still reading evidence from ${corpora.join(', ')}; this answer uses only the content already available.`);
+        }
         if (reads.failed > 0) onDemandNotes.push(onDemandFailedCoverageNote(reads.failed));
         if (reads.limit) {
           onDemandLimits.push(reads.limit);
           onDemandNotes.push(onDemandCappedCoverageNote());
         }
+      }
+      if (onDemandNotes.length > 0) {
+        detail = { ...detail, pack: { ...detail.pack, coverage: { ...detail.pack.coverage,
+          extractionGaps: [...detail.pack.coverage.extractionGaps, ...onDemandNotes],
+        } } };
       }
       let pack = detail.pack;
       const analyzedInputs: ReleaseInput[] = [];
@@ -791,7 +805,7 @@ export function createAnalystSourceIndexAnswerHandler(
         releaseSecureContent,
         ...(synthesizedGap ? { synthesizedGap } : {}),
       });
-      const heldAnswer = [releasedAnswer, ...[...chunkHoldNotes].filter(note => !releasedAnswer.includes(note))].join('\n\n');
+      const heldAnswer = [releasedAnswer, ...[...new Set([...chunkHoldNotes, ...onDemandNotes])].filter(note => !releasedAnswer.includes(note))].join('\n\n');
       // Nothing cited yet while files are still being read: the reply is what
       // is being read and when to ask again, never a "not found" for them.
       // A citation of a file's name alone is no answer: only a cited passage is.
