@@ -6572,7 +6572,12 @@ export async function main(): Promise<void> {
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls }
           : snifferLane.kind === 'tinfoil' ? { concurrentCalls: 4 } : snifferLane.kind === 'venice' ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {}),
-        ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind !== 'local' && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
+        // A local model costs nothing per call and is paced by its own speed,
+        // so no default daily cap stops it (his box, 16 Nov: judging sat at
+        // "0 calls, daily_budget" on a free model). Cloud judging with a
+        // dollar cap is bounded by that cap. Only cloud judging with no dollar
+        // cap keeps the default call cap; a configured limit always applies.
+        ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'local' || !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
         ownerInFlight: () => standBack.holds('judge') || (snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource))),
