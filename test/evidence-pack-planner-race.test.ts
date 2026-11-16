@@ -12,6 +12,7 @@
 //   - the latency trace says which of those happened, in counts only
 
 import { describe, expect, test } from 'bun:test';
+import { waitFor } from './helpers/test-clock.ts';
 import {
   buildEvidencePackDetailed,
   type LocalContentBlock,
@@ -400,7 +401,7 @@ describe('evidence pack query-planner trace counters', () => {
     expect(serialized).not.toContain('content for');
   });
 
-  test('a spent search budget answers from the literal run without starting an expansion', async () => {
+  test('a spent total clock does not cancel a progressing literal run or its expansions', async () => {
     const calls: string[] = [];
     const slowLiteral = adapterByQuery({ [QUESTION]: ['doc-a'], [EXPANSION]: ['doc-b'] }, calls);
     const startedAt = Date.now();
@@ -410,19 +411,26 @@ describe('evidence pack query-planner trace counters', () => {
       maxResults: 4,
       searchContext: allowAll,
       registry: registry(),
-      // The lane allows far longer; the whole-search budget is what binds.
-      laneTimeoutMs: 60_000,
-      searchBudgetMs: 150,
+      // The obsolete total budget must not interrupt rows that keep arriving.
+      laneTimeoutMs: 100,
+      searchBudgetMs: 1,
       adapters: {
-        // The literal lane never answers; only the search budget can end it.
-        [CORPUS]: (request) => (request.query === QUESTION ? new Promise(() => {}) : slowLiteral(request)),
+        // Each batch arrives within the idle allowance.
+        [CORPUS]: async (request) => {
+          if (request.query === QUESTION) {
+            for (let batch = 0; batch < 4; batch++) {
+              const nextBatch = Date.now() + 40;
+              await waitFor(() => Date.now() >= nextBatch); request.onProgress?.();
+            }
+          }
+          return slowLiteral(request);
+        },
       } as SourceIndexRouterAdapterMap,
       contentProviders: providers(),
     });
-    // The literal lane was cut at the budget, not the 60 s lane deadline, and
-    // no expansion ran once the budget was spent.
+    // Literal and expansion both finish despite the obsolete total budget.
     expect(Date.now() - startedAt).toBeLessThan(30_000);
-    expect(calls).toEqual([]);
-    expect(detail.pack.candidates).toEqual([]);
+    expect(calls).toEqual([QUESTION, EXPANSION]);
+    expect(detail.pack.candidates.length).toBeGreaterThan(0);
   });
 });

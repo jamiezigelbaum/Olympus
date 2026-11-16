@@ -8794,6 +8794,11 @@ function compactPassageWhitespace(text) {
 
 // src/core/source-index/partial-search.ts
 var SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+var KEYWORD_PREPARATION_INCOMPLETE = "keyword_preparation_incomplete";
+var KEYWORDS_PREFIX = "Keyword preparation unfinished for ";
+function keywordPreparationGap(corpusId) {
+  return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;
+}
 var RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short";
 var RECENT_PREFIX = "Ran out of time reading the newest items in ";
 function recentItemsTimeoutGap(corpusId) {
@@ -15874,6 +15879,16 @@ function overrideFromJson(json) {
   return;
 }
 
+// src/core/source-index/read-progress.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+var progress = new AsyncLocalStorage3;
+function noteSourceIndexReadProgress() {
+  const report = progress.getStore();
+  if (!report)
+    return;
+  report();
+}
+
 // src/core/source-size-limits.ts
 import { createHash as createHash6 } from "node:crypto";
 
@@ -16120,7 +16135,7 @@ function readStoreWriteSequence(db) {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 import { createHash as createHash7 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -16260,7 +16275,7 @@ function contaminatedEmbeddingEpoch(modelId, epochId) {
 }
 
 // src/workers/source-index/embeddings.ts
-var priorityQueryEmbedding = new AsyncLocalStorage3;
+var priorityQueryEmbedding = new AsyncLocalStorage4;
 function priorityQueryEmbeddingRequested() {
   return priorityQueryEmbedding.getStore() === true;
 }
@@ -17240,13 +17255,13 @@ import { Database as Database2 } from "bun:sqlite";
 import { isMainThread as isMainThread3 } from "node:worker_threads";
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 
 // src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
 function chunkCoverageNote(result) {
   return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
@@ -17264,14 +17279,14 @@ async function checkReleaseChunks(check, inputs, options) {
   };
 }
 var chunkProvenance = new WeakMap;
-var storage = new AsyncLocalStorage4;
+var storage = new AsyncLocalStorage5;
 var withheldAnswers = new WeakSet;
 
 // src/core/source-answer-jobs.ts
 var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
 var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
 var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-var progressSink = new AsyncLocalStorage5;
+var progressSink = new AsyncLocalStorage6;
 
 // src/core/store-reclaim-admission.ts
 import { join as join17 } from "node:path";
@@ -17306,8 +17321,8 @@ function poolSqlSite(sql) {
 var SLOW_MAIN_THREAD_SQL_MS = 250;
 var SLOW_MAIN_THREAD_SQL_KEPT = 20;
 var SITE_TALLY_MS = 25;
-var storage2 = new AsyncLocalStorage6;
-var laneStorage = new AsyncLocalStorage6;
+var storage2 = new AsyncLocalStorage7;
+var laneStorage = new AsyncLocalStorage7;
 function beginSourceAnswerPoolRead(site) {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
@@ -19092,6 +19107,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
             await moveToFreshWorker();
             rows = await once();
           }
+          noteSourceIndexReadProgress();
           report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
@@ -19211,6 +19227,9 @@ function readOnPool(dbPath, read, options = {}) {
       turns.push(dbPath);
     }
     dispatch();
+  }).then((rows) => {
+    noteSourceIndexReadProgress();
+    return rows;
   });
 }
 function releaseOffThreadReads(dbPath) {
@@ -19918,7 +19937,7 @@ function ensureOwnerOnlyDir(dir) {
 }
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 
 // src/core/source-item-read.ts
 var SOURCE_ITEM_READ_REFUSALS = [
@@ -19934,8 +19953,8 @@ var SOURCE_ITEM_READ_REFUSALS = [
 ];
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-var storage3 = new AsyncLocalStorage7;
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+var storage3 = new AsyncLocalStorage8;
 var completedPrivateAnswers = new Set;
 var JOB_QUESTION_TTL_MS = 30 * 60000;
 var jobQuestions = new Map;
@@ -20385,7 +20404,7 @@ function currentAccess(authorized) {
     return "unavailable";
   }
 }
-var readAuthorization = new AsyncLocalStorage8;
+var readAuthorization = new AsyncLocalStorage9;
 function currentRemoteReadAccess() {
   const authorized = readAuthorization.getStore();
   return authorized ? currentAccess(authorized) : "active";
@@ -22483,6 +22502,8 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
         return cutExact();
       if (excluded?.has(row.item_pk))
         continue;
+      if ((index & 31) === 0)
+        noteSourceIndexReadProgress();
       dimensionMismatches += foldVectorScore(bestByItem, row, queryVector).mismatch;
     }
     afterChunkPk = page.at(-1).chunk_pk;
@@ -22527,6 +22548,8 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         return false;
       if (excluded && itemPk !== undefined && excluded.has(itemPk))
         return true;
+      if ((index & 31) === 0)
+        noteSourceIndexReadProgress();
       heap.append(chunkPk, scoreVectorDigest(query, digest));
       return true;
     });
@@ -30192,7 +30215,9 @@ ${parentKey(ref)}`, { ref, origin });
         continue;
       }
       const statement = this.db.query(read.sql);
-      step = steps.next(read.mode === "all" ? statement.all(...read.params) : statement.get(...read.params));
+      const rows = read.mode === "all" ? statement.all(...read.params) : statement.get(...read.params);
+      noteSourceIndexReadProgress();
+      step = steps.next(rows);
     }
     return step.value;
   }
@@ -30337,6 +30362,8 @@ ${parentKey(ref)}`, { ref, origin });
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
       selected.push(...visible);
+      if (visible.length > 0)
+        ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
       if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
         break;
       pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
@@ -36090,6 +36117,7 @@ function normalizeRouterResultKey(key) {
 // src/core/evidence-pack.ts
 var utf82 = new TextEncoder;
 var CUT_SHORT_LANES = new Map([
+  [KEYWORD_PREPARATION_INCOMPLETE, { suffix: ":keywords", gap: keywordPreparationGap }],
   [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
   [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
 ]);

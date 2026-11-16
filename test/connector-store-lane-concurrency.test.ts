@@ -7,6 +7,8 @@
 // the embeddings on this store), so each now runs for the whole budget.
 import { afterEach, expect, test } from 'bun:test';
 import { join } from 'node:path';
+import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import {
   LocalConnectorStore,
   createConnectorStoreCorpusAdapter,
@@ -15,7 +17,7 @@ import {
 import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import type { SourceEmbeddingInput } from '../src/workers/source-index/embeddings.ts';
-import { waitFor } from './helpers/test-clock.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 import { fixtureConnector, RecordingProvider, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
@@ -56,12 +58,18 @@ test('the vector lane starts while the keyword lane is still searching', async (
     return result;
   };
   const adapter = createConnectorStoreCorpusAdapter({ store, retrievalMode: 'hybrid', embeddingProvider: provider });
-  const response = await adapter({
-    query: 'kestrel boatyard invoice',
-    maxResults: 5,
-    corpus: defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain }),
-    context: { allowedTrustDomains: [store.trustDomain] },
+  let vectorDeadline: number | undefined;
+  const vectorSearch = store.vectorSearchLane;
+  store.vectorSearchLane = function (...args: Parameters<typeof vectorSearch>) {
+    vectorDeadline = args[5];
+    return vectorSearch.apply(store, args);
+  };
+  const response = await routeSourceIndexSearch({
+    registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })]),
+    adapters: { [store.corpusId]: adapter },
+    request: { query: 'kestrel boatyard invoice', maxResults: 5, context: { allowedTrustDomains: [store.trustDomain] } },
   });
+  expect(vectorDeadline).toBeUndefined(); // no derived 54-second stop on a routed scan
   expect(response.hits.map((hit) => hit.sourceItem.providerItemId)).toContain('k1');
   const vectorStart = events.indexOf('vector:start');
   expect(vectorStart).toBeGreaterThanOrEqual(0);
@@ -109,10 +117,34 @@ test('the vector scan reads large pages on the read pool and yields at most once
   expect(zeroDelayTimers).toBeLessThanOrEqual(1);
 });
 
-test("the hybrid lane's vector scan stops before the lane's deadline, keeping time for its keyword rows (#1305)", async () => {
-  const { vectorScanDeadline } = await import('../src/workers/connector-store/local-index.ts');
-  expect(vectorScanDeadline(undefined, 0)).toBeUndefined();
-  // A tenth of the time left, at least a second.
-  expect(vectorScanDeadline(60_000, 0)).toBe(54_000);
-  expect(vectorScanDeadline(5_000, 0)).toBe(4_000);
+
+test('a store keeps tier-checked keyword rows when a later read becomes silent', async () => {
+  const { dir, cleanup } = tempDir('olympus-partial-lane-');
+  const store = new LocalConnectorStore({ dbPath: join(dir, 'fixture.sqlite'), corpusId: 'internal.fixture.rows', family: 'file', trustDomain: 'internal', tierLedger: null });
+  cleanups.push(cleanup, () => store.close());
+  await store.syncFromConnector(fixtureConnector(() => [
+    { id: 'row', name: 'orchard.txt', text: 'orchard harvest' },
+  ]), { fetchContent: true });
+  const search = store.searchItemsDetailedOffThread;
+  store.searchItemsDetailedOffThread = async function (...args: Parameters<typeof search>) {
+    await search.apply(store, args); // publishes a tier-checked prefix
+    return new Promise(() => {}); // the next stage is silent
+  };
+  const adapter = createConnectorStoreCorpusAdapter({ store });
+  const clock = createTestClock();
+  let prefix = false;
+  const result = routeSourceIndexSearch({
+    registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })]),
+    laneClock: clock,
+    adapters: { [store.corpusId]: request => adapter({ ...request, onPartialResponse: response => {
+      prefix ||= response.hits.length > 0;
+      request.onPartialResponse?.(response);
+    } }) },
+    request: { query: 'orchard', maxResults: 5, context: { allowedTrustDomains: [store.trustDomain] } },
+  });
+  await waitFor(() => prefix);
+  await clock.advance(20_000);
+  const response = await result;
+  expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['row']);
+  expect(response.skippedCorpora).toContainEqual({ corpusId: store.corpusId, trustDomain: store.trustDomain, reason: 'lane_timeout' });
 });

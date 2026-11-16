@@ -302,7 +302,9 @@ test('a search stops waiting for a slow translation, uses the static equivalents
   } } });
   const owner = {};
   await withKeywordRequestScope(async () => {
-    const quick = await expandSourceIndexKeywords('asteroid notary', ['spa'], owner, { waitMs: 0 });
+    const status = { incomplete: false };
+    const quick = await expandSourceIndexKeywords('asteroid notary', ['spa'], owner, { waitMs: 0, status });
+    expect(status.incomplete).toBe(true);
     expect(quick.get('asteroid')).toBeUndefined();
     // Pinned for this request: the lanes do not wait either.
     expect(await expandSourceIndexKeywords('asteroid notary', ['spa'], owner)).toBe(quick);

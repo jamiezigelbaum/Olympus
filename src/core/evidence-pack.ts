@@ -1,6 +1,6 @@
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 import { bindReleaseChunks, copyReleaseChunks } from './release-manifest.ts';
-import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
+import { KEYWORD_PREPARATION_INCOMPLETE, keywordPreparationGap, RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
 import {
   rerankCandidates,
   rerankPassage,
@@ -54,7 +54,6 @@ import {
   withReservedRecencySeats,
 } from './source-index/retrieval.ts';
 import {
-  resolveAskSearchBudgetMs,
   resolveLaneTimeoutMs,
   routeSourceIndexSearch,
   routedHitCandidateId,
@@ -203,16 +202,9 @@ export interface BuildEvidencePackInput {
   // ones, inside the same prompt size. Omitted, only maxCharsPerCandidate
   // bounds each candidate, as before.
   evidenceByteBudget?: number;
-  // Per-lane retrieval deadline handed to every routed run this build performs.
-  // Omitted, the router falls back to its env-configured default. Present so a
-  // caller that knows its own wall-clock budget can set one rather than reach
-  // for a process-wide env var (see RouteSourceIndexSearchOptions.laneTimeoutMs).
+  // Idle wait for each routed store; a returned batch resets it.
   laneTimeoutMs?: number;
-  // Wall-clock budget for all of this build's routed runs together (the
-  // literal query and any planner expansions, which run one after another).
-  // Each run's lanes get at most what is left of it; an expansion is not
-  // started once it is spent. Omitted, OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS
-  // or the router's default. Non-positive disables it.
+  // Legacy option, ignored: total clocks no longer stop progressing searches.
   searchBudgetMs?: number;
   // See SourceIndexVisibilityGate: one tier-ledger snapshot over every routed run's hits.
   visibilityGate?: SourceIndexVisibilityGate;
@@ -916,8 +908,8 @@ async function runRoutedSearches(
     ? startQueryPlanner(input.queryPlanner, input.question)
     : undefined;
 
-  const budget = searchBudget(input);
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs, poolAllocation);
+  const laneTimeoutMs = resolveLaneTimeoutMs(input.laneTimeoutMs);
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, laneTimeoutMs, poolAllocation);
   if (!pendingPlan) return literalRun;
 
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -934,14 +926,7 @@ async function runRoutedSearches(
 
   const runs: SourceIndexRoutedSearchResponse[] = [literalRun];
   for (const query of expansions) {
-    // A spent budget answers from the runs already made; the literal run's
-    // lanes that ran out of time are already in its skippedCorpora.
-    const laneTimeoutMs = budget.laneTimeoutMs();
-    if (laneTimeoutMs === undefined) {
-      recordSourceAnswerQueryPlannerDisposition('search_budget_spent');
-      break;
-    }
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs, poolAllocation));
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, poolAllocation));
   }
   if (runs.length === 1) return literalRun;
 
@@ -1107,44 +1092,12 @@ function literalSearchQuery(input: BuildEvidencePackInput): string {
   return input.searchQuery?.trim() || input.question;
 }
 
-// Below this much left of the search budget, an expansion is not worth starting.
-const MIN_EXPANSION_BUDGET_MS = 1_000;
-
-/**
- * The lane timeout for the next routed run: the per-lane timeout, cut to what
- * is left of the whole search budget. An expansion gets undefined once too
- * little is left to start it; the literal run always starts.
- */
-function searchBudget(input: BuildEvidencePackInput): {
-  firstLaneTimeoutMs(): number;
-  laneTimeoutMs(): number | undefined;
-  // When the whole search ends, for the router to cut its lanes to after preparation; undefined when unbounded.
-  deadlineAtMs: number | undefined;
-} {
-  const lane = resolveLaneTimeoutMs(input.laneTimeoutMs);
-  const total = resolveAskSearchBudgetMs(input.searchBudgetMs);
-  const startedAt = Date.now();
-  const cut = (left: number) => (Number.isFinite(lane) && lane > 0 ? Math.min(lane, left) : left);
-  const left = () => Math.max(1, total - (Date.now() - startedAt));
-  const unbounded = !Number.isFinite(total) || total <= 0;
-  return {
-    deadlineAtMs: unbounded ? undefined : startedAt + total,
-    firstLaneTimeoutMs: () => (unbounded ? lane : cut(left())),
-    laneTimeoutMs() {
-      if (unbounded) return lane;
-      // A disabled lane timeout (non-positive) still ends at the search budget.
-      return left() < MIN_EXPANSION_BUDGET_MS ? undefined : cut(left());
-    },
-  };
-}
-
 function runRoutedSearch(
   input: BuildEvidencePackInput,
   query: string,
   ordinal: number,
   maxResults: number,
   laneTimeoutMs: number,
-  searchDeadlineAtMs?: number,
   poolAllocation?: { storeDepth: number; semanticSeats?: number },
 ): Promise<SourceIndexRoutedSearchResponse> {
   return observeSourceAnswerRoutedQuery(ordinal, () =>
@@ -1162,7 +1115,6 @@ function runRoutedSearch(
       laneTimeoutMs,
       ...(input.onSeatingLanes ? { onSeatingLanes: (lanes) => input.onSeatingLanes!(lanes, ordinal) } : {}),
       ...(input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {}),
-      ...(searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {}),
       ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),
     }));
 }
@@ -1257,6 +1209,7 @@ export function semanticLaneSkippedGap(corpusId: string, detail: string | undefi
 // degradation detail the router gives them: the lane suffix it names and the
 // gap that says so (#1460).
 const CUT_SHORT_LANES: ReadonlyMap<string, { suffix: string; gap: (corpusId: string) => string }> = new Map([
+  [KEYWORD_PREPARATION_INCOMPLETE, { suffix: ':keywords', gap: keywordPreparationGap }],
   [RECENT_ITEMS_CUT_SHORT, { suffix: ':recency', gap: recentItemsTimeoutGap }],
   [VISIBILITY_CHECK_CUT_SHORT, { suffix: ':visibility', gap: visibilityCheckTimeoutGap }],
 ]);

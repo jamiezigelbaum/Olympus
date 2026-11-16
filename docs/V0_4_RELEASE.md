@@ -284,6 +284,14 @@ default no worse than 1.4.4. Every Ask's latency record now carries its
 main-thread SQL time with call sites. The measurements are on the private
 operations issue (olympus-ops#151).
 
+Retrieval now waits on store progress rather than those provisional total
+budgets: a returned store batch or scored vector rows reset a 20-second idle
+wait, and progressing lanes continue without a total clock. An idle lane's
+available hits stay in the pack; coverage and the released answer name the
+store still being read. Keyword preparation that finishes late, pending
+on-demand reads and unfinished evidence repair are named too. Model-call
+idle limits are a separate change.
+
 The busy gate changed with it. Its first version passed in a cloud container
 (worst freeze 303 ms) on a seed that lacked what made the real reads slow.
 The gate now seeds vectors at real count, a tier ledger with items and

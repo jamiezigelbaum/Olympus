@@ -45,7 +45,7 @@ export async function expandSourceIndexKeywords(
   query: string,
   profile: KeywordLanguageProfile,
   owner?: object,
-  options: { waitMs?: number } = {},
+  options: { waitMs?: number; status?: { incomplete: boolean } } = {},
 ): Promise<KeywordExpansionMap> {
   if (keywordExpansionDisabled()) return EMPTY;
   const pinned = requestKeywordAlternatives(owner, query);
@@ -71,7 +71,9 @@ export async function expandSourceIndexKeywords(
     if (languages === undefined && read) {
       await Promise.race([read.catch(() => {}), new Promise<void>((resolve) => { setImmediate(resolve); })]);
     }
-    const alternatives = await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
+    const cached = { missing: false };
+    const alternatives = await expandCachedSourceIndexKeywords(query, languages ?? [], cached);
+    if (options.status) options.status.incomplete = cached.missing || languages === undefined;
     pinKeywordAlternatives(owner, query, alternatives);
     return alternatives;
   }
@@ -81,6 +83,7 @@ export async function expandSourceIndexKeywords(
     new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), Math.max(0, options.waitMs ?? 0)); }),
   ]);
   clearTimeout(timer);
+  if (!waited && options.status) options.status.incomplete = true;
   // Not translated in time: this request uses what is cached, else the static equivalents.
   const alternatives = waited
     ? waited.value

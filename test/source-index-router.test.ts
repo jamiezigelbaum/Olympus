@@ -6,7 +6,6 @@ import {
   type SourceIndexCorpusDefinition,
 } from '../src/core/source-index/corpus.ts';
 import {
-  laneTimeoutWithinDeadline,
   routeSourceIndexSearch,
   type SourceIndexCorpusSearchAdapter,
   type SourceIndexCorpusSearchResponse,
@@ -223,7 +222,7 @@ describe('source-index router per-lane retrieval deadline', () => {
   }
   const context = { allowedTrustDomains: ['public_safe'] as const, allowCloudQueries: true };
 
-  test('passes CPU-bound adapters a cooperative deadline before the authoritative timer', async () => {
+  test('does not give a progressing adapter a total cooperative deadline', async () => {
     const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1));
     let observedDeadlineAtMs: number | undefined;
     const startedAt = Date.now();
@@ -239,9 +238,7 @@ describe('source-index router per-lane retrieval deadline', () => {
       request: { query: 'q', maxResults: 5, context },
     });
 
-    expect(observedDeadlineAtMs).toBeNumber();
-    expect(observedDeadlineAtMs!).toBeGreaterThan(startedAt);
-    expect(observedDeadlineAtMs!).toBeLessThanOrEqual(startedAt + 250);
+    expect(observedDeadlineAtMs).toBeUndefined();
   });
 
   test('drops a lane that blows the deadline, reports lane_timeout, and proceeds with the rest', async () => {
@@ -302,30 +299,63 @@ describe('source-index router per-lane retrieval deadline', () => {
     expect(result.skippedCorpora).toEqual([]);
   });
 
-  // Codex review on #1329: the router started its lane timer after preparation, so a search that spent its budget
-  // preparing still got a whole lane timeout and could run past the Ask's search budget.
-  test('lanes end at the search deadline, whatever preparation took', async () => {
-    expect(laneTimeoutWithinDeadline(60_000, undefined, 0)).toBe(60_000);
-    expect(laneTimeoutWithinDeadline(60_000, 25_000, 0)).toBe(25_000);
-    expect(laneTimeoutWithinDeadline(60_000, 100_000, 0)).toBe(60_000);
-    expect(laneTimeoutWithinDeadline(0, 25_000, 0)).toBe(25_000);
-    expect(laneTimeoutWithinDeadline(60_000, 5, 10)).toBe(1);
-
+  test('total search clocks do not shorten the idle wait', async () => {
     const clock = createTestClock();
-    const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1));
+    let started = false;
+    let done = false;
     const routed = routeSourceIndexSearch({
-      registry,
-      laneTimeoutMs: 60_000,
-      // Preparation already used the whole budget.
-      searchDeadlineAtMs: Date.now() - 1,
-      laneClock: clock,
-      adapters: { 'public_safe.fast': () => new Promise<SourceIndexCorpusSearchResponse>(() => {}) },
+      registry: buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1)),
+      laneTimeoutMs: 20_000, searchDeadlineAtMs: Date.now() - 1, laneClock: clock,
+      adapters: { 'public_safe.fast': () => { started = true; return new Promise(() => {}); } },
       request: { query: 'q', maxResults: 5, context },
-    });
-    await waitFor(() => clock.pendingTimers() === 1);
+    }).then(value => { done = true; return value; });
+    await waitFor(() => started && clock.pendingTimers() === 1);
     await clock.advance(1);
+    expect(done).toBe(false);
+    await clock.advance(19_999);
+    expect((await routed).skippedCorpora[0]?.reason).toBe('lane_timeout');
+  });
+
+  test('keeps a slow store while its batches keep arriving, beyond multiple idle windows', async () => {
+    const clock = createTestClock();
+    let started = false;
+    let done = false;
+    const routed = routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1)),
+      laneTimeoutMs: 20_000, laneClock: clock,
+      adapters: { 'public_safe.fast': async request => {
+        started = true;
+        for (let batch = 0; batch < 8; batch++) {
+          await clock.sleep(10_000);
+          request.onProgress?.();
+        }
+        return adapterFor([], 'public_safe.fast', 'file', 'fast-1')(request);
+      } },
+      request: { query: 'q', maxResults: 5, context },
+    }).then(value => { done = true; return value; });
+    await waitFor(() => started);
+    for (let batch = 0; batch < 7; batch++) {
+      await clock.advance(10_000);
+      expect(done).toBe(false);
+    }
+    await clock.advance(10_000);
     const result = await routed;
-    expect(result.skippedCorpora).toContainEqual({ corpusId: 'public_safe.fast', trustDomain: 'public_safe', reason: 'lane_timeout' });
+    expect(result.hits).toHaveLength(1);
+    expect(result.skippedCorpora).toEqual([]);
+    expect(clock.pendingTimers()).toBe(0);
+  });
+
+  test('keeps available rows from a store that goes idle and names its unfinished read', async () => {
+    const result = await routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1)), laneTimeoutMs: 5,
+      adapters: { 'public_safe.fast': request => {
+        request.onPartialResponse?.({ hits: [{ sourceItem: { family: 'file', provider: 'fixture', accountScope: 'test', providerItemId: 'prefix', localItemId: 'prefix' }, rawExposed: false }], latencyMs: 0, rawExposed: false });
+        return new Promise(() => {});
+      } }, request: { query: 'q', maxResults: 5, context },
+    });
+    expect(result.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['prefix']);
+    expect(result.skippedCorpora[0]?.reason).toBe('lane_timeout');
+    expect(result.degradations).toContainEqual({ laneName: 'public_safe.fast', laneType: 'keyword', reason: 'lane_timeout', occurrences: 1 });
   });
 
   test('a lane still unfinished when its grace fires on time is dropped', async () => {
@@ -349,7 +379,7 @@ describe('source-index router per-lane retrieval deadline', () => {
     expect(result.skippedCorpora).toContainEqual({ corpusId: 'public_safe.fast', trustDomain: 'public_safe', reason: 'lane_timeout' });
   });
 
-  test('a thread held past the hard stop drops the lane at its first late timer', async () => {
+  test('a held thread gives the lane a turn even after the old hard stop', async () => {
     const clock = createTestClock();
     const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1));
     const routed = routeSourceIndexSearch({
@@ -362,6 +392,8 @@ describe('source-index router per-lane retrieval deadline', () => {
     await waitFor(() => clock.pendingTimers() === 1);
     clock.set(clock.now() + 61_000);
     await clock.advance(0);
+    expect(clock.pendingTimers()).toBe(1);
+    await clock.advance(1_000);
     const result = await routed;
 
     expect(result.skippedCorpora).toContainEqual({ corpusId: 'public_safe.fast', trustDomain: 'public_safe', reason: 'lane_timeout' });
@@ -450,7 +482,7 @@ describe('source-index router per-lane retrieval deadline', () => {
         adapters: {
           'public_safe.fast': async request => {
             started++;
-            await clock.sleep(50_000); // a slow but healthy store, inside the 60 s default
+            for (let batch = 0; batch < 5; batch++) { await clock.sleep(10_000); request.onProgress?.(); }
             return healthy(request);
           },
           'public_safe.slow': () => { started++; return new Promise(() => {}); },
@@ -458,7 +490,7 @@ describe('source-index router per-lane retrieval deadline', () => {
         request: { query: 'q', maxResults: 5, context },
       });
       await waitFor(() => started === 2, { description: 'both budget-test lanes started' });
-      await clock.advance(60_000);
+      for (let batch = 0; batch < 5; batch++) await clock.advance(10_000);
       const result = await pending;
       expect(result.searchedCorpora).toEqual(['public_safe.fast']);
       expect(result.hits.map(hit => hit.corpusId)).toEqual(['public_safe.fast']);
