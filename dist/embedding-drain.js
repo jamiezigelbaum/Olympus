@@ -17202,7 +17202,38 @@ import { Database as Database2 } from "bun:sqlite";
 import { isMainThread as isMainThread3 } from "node:worker_threads";
 
 // src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+
+// src/core/source-answer-jobs.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+
+// src/core/release-manifest.ts
 import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+var chunkProvenance = new WeakMap;
+var storage = new AsyncLocalStorage4;
+var withheldAnswers = new WeakSet;
+
+// src/core/source-answer-jobs.ts
+var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+var progressSink = new AsyncLocalStorage5;
 
 // src/core/store-reclaim-admission.ts
 import { join as join17 } from "node:path";
@@ -17237,8 +17268,8 @@ function poolSqlSite(sql) {
 var SLOW_MAIN_THREAD_SQL_MS = 250;
 var SLOW_MAIN_THREAD_SQL_KEPT = 20;
 var SITE_TALLY_MS = 25;
-var storage = new AsyncLocalStorage4;
-var laneStorage = new AsyncLocalStorage4;
+var storage2 = new AsyncLocalStorage6;
+var laneStorage = new AsyncLocalStorage6;
 function beginSourceAnswerPoolRead(site) {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
@@ -17315,10 +17346,10 @@ var CONTENT_FREE_ERROR_CLASSES = new Set([
   "TypeError"
 ]);
 function currentSourceAnswerTrace() {
-  return storage.getStore();
+  return storage2.getStore();
 }
 function sourceAnswerTraceActive() {
-  return storage.getStore() !== undefined;
+  return storage2.getStore() !== undefined;
 }
 function recordSourceAnswerMainThreadSql(elapsedMs, site) {
   const trace = currentSourceAnswerTrace();
@@ -19847,30 +19878,8 @@ function ensureOwnerOnlyDir(dir) {
   chmodSync5(dir, 448);
 }
 
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
-function chunkCoverageNote(result) {
-  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
-}
-async function checkReleaseChunks(check, inputs, options) {
-  try {
-    const result = await check?.chunks?.(inputs, options);
-    if (result && result.allowed.length === inputs.length)
-      return result;
-  } catch {}
-  return {
-    allowed: inputs.map(() => []),
-    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
-    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
-  };
-}
-var chunkProvenance = new WeakMap;
-var storage2 = new AsyncLocalStorage5;
-var withheldAnswers = new WeakSet;
-
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 
 // src/core/source-item-read.ts
 var SOURCE_ITEM_READ_REFUSALS = [
@@ -19886,8 +19895,8 @@ var SOURCE_ITEM_READ_REFUSALS = [
 ];
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var storage3 = new AsyncLocalStorage6;
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+var storage3 = new AsyncLocalStorage7;
 var completedPrivateAnswers = new Set;
 var JOB_QUESTION_TTL_MS = 30 * 60000;
 var jobQuestions = new Map;
@@ -20303,7 +20312,7 @@ function currentAccess(authorized) {
     return "unavailable";
   }
 }
-var readAuthorization = new AsyncLocalStorage7;
+var readAuthorization = new AsyncLocalStorage8;
 function currentRemoteReadAccess() {
   const authorized = readAuthorization.getStore();
   return authorized ? currentAccess(authorized) : "active";

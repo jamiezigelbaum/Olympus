@@ -17,7 +17,7 @@ const ALLOWANCE_PATH = 'config/timeout-allowance.json';
 /**
  * Kind (a) sites today. Lower it as they go; it never rises.
  */
-const KIND_A_CEILING = 63;
+const KIND_A_CEILING = 62;
 
 const KINDS = new Set(['a', 'b', 'c', 'd', 'n']);
 const CONSTANT = /\b(?:export\s+)?(?:const|readonly|static\s+readonly|private\s+static\s+readonly)\s+([A-Z][A-Z0-9_]*(?:TIMEOUT|DEADLINE|_WAIT|BUDGET|GRACE|STALL|BOUND|ABANDON|HANDOFF|PASS_TIME|MAX_PASS|STAND_BACK_MAX|SELF_HEAL_MAX)[A-Z0-9_]*?_(?:MS|SECONDS))\s*(?::[^=]+)?=\s*([^;]+);/;

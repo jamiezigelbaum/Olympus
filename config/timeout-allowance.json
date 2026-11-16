@@ -71,7 +71,6 @@
     "src/core/source-answer-jobs.ts#SOURCE_ANSWER_HANDOFF_DEFAULT_MS": "b",
     "src/core/source-answer-jobs.ts#SOURCE_ANSWER_HANDOFF_MAX_MS": "b",
     "src/core/source-answer-jobs.ts#SOURCE_ANSWER_HANDOFF_MIN_MS": "n",
-    "src/core/source-answer-jobs.ts#SOURCE_ANSWER_JOB_DEADLINE_MS": "a/L2",
     "src/core/source-answer-jobs.ts#SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS": "b",
     "src/core/source-answer-jobs.ts#SOURCE_ANSWER_RESULT_WAIT_MAX_MS": "b",
     "src/core/source-answer-jobs.ts#SOURCE_ANSWER_STDIO_HANDOFF_DEFAULT_MS": "b",
