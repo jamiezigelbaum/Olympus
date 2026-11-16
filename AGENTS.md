@@ -108,24 +108,23 @@ Enforcement is mechanical, so this survives any thread or tool:
 - Focused local checks are the normal edit loop. `bun run verify` and
   `bun run verify:full` are available when uncertainty or release risk merits
   them; neither is a push prerequisite.
-- **`bun run prepush` after merging `main` and before every push to `main`**
-  (about three minutes). It runs `bun run guards` (the mechanical guards other
-  threads' pushes keep tripping: timeouts, silent fallbacks, model choice,
-  loop and pool SQL finders, limit registry, raw sleeps, spawn timeouts, lane
-  split, design digest, store open, data root, architecture, privacy-per-item,
-  public surface and the rest) beside the fast-lane tests that import the
-  files this push changes, nearest in the import graph first, and the
-  connect-relay tests when the relay changed. It prints how many reached
-  tests it left to CI; `--all` runs them too. A failure is fixed in the
-  change, never by loosening a guard or test; a new timeout, catch or
-  built-in-model reference is listed in its allowance in the same commit.
-  Codex briefs include this step, and a Codex builder runs it before it
-  pushes. Merge `main` first, then run prepush, then push at once: a merge
-  after prepush means it checked a different tree. Never chain the push
-  through a pipe (`bun run prepush | tail && git push` pushes on `tail`'s
-  status); write the output to a file and test prepush's own exit code
-  (`bun run prepush > prepush.log 2>&1 || exit 1; git push`), or
-  `set -o pipefail` first.
+- **Push to `main` with `bun run ship`.** After committing, it merges
+  `origin/main`, runs `bun run prepush` on exactly the commit it will push
+  (in a throwaway worktree), and pushes only if prepush passed; if main moved
+  meanwhile it merges and checks again. It prints the failing step and pushes
+  nothing on a failure. Prepush (about three minutes, also runnable alone)
+  covers CI's static job (type check over src, test, scripts and eval; dist
+  up to date), `bun run guards` (timeouts, silent fallbacks, model choice,
+  loop and pool SQL finders, front-loop SQL, limit registry, raw sleeps,
+  spawn timeouts, lane split, design digest, store open, data root,
+  architecture, privacy-per-item, public surface and the rest), the
+  fast-lane tests that import the files the push changes, nearest in the
+  import graph first, and the connect-relay tests when the relay changed. It
+  prints how many reached tests it left to CI; `bun run ship -- --all` runs
+  them too. A plain `git push` to main is possible but not the documented
+  path. A failure is fixed in the change, never by loosening a guard or test;
+  a new timeout, catch or built-in-model reference is listed in its allowance
+  in the same commit. Codex briefs say "push to main with `bun run ship`".
 - `test/architecture-guard.test.ts` fails the build if the deleted template
   path reappears or if template/regex answer code appears anywhere in src.
   Do not weaken the guard to make a change pass.
@@ -147,7 +146,7 @@ Enforcement is mechanical, so this survives any thread or tool:
 
 Follow the canonical [delivery path](docs/ENGINEERING_PROCESS.md#one-delivery-path): run the
 focused checks for what you changed and the change once for real, commit
-straight to `main` and push; the session that pushed keeps `main`'s CI green
+and push to `main` with `bun run ship`; the session that pushed keeps `main`'s CI green
 and fixes forward when it isn't. Source-pipeline structural changes also require
 the held-out eval (`eval/`); contract changes follow the
 [versioned change gate](docs/ENGINEERING_PROCESS.md#contract-evolution).
@@ -208,9 +207,9 @@ remain outside the repo's ownership.
 
 ## Git
 
-- Commit straight to `main` and push (owner rule, 13 Nov 2026). No pull
-  request, auto-merge or review wait; if it breaks, fix forward. Pull in
-  `main` before pushing, retry a rejected push, never force-push.
+- Commit straight to `main` and push with `bun run ship` (owner rule, 13 Nov
+  2026). No pull request, auto-merge or review wait; if it breaks, fix
+  forward. Never force-push.
 - Stage only your own files, never `git add .` or `-A`: a Mac checkout may hold
   another session's uncommitted edits (2026-07-08 incident).
 - Commits are authored by people only (owner rule, standing). Commit as
