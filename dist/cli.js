@@ -275171,7 +275171,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     }) : undefined;
     engineBackground = { stop: () => {
       walSampler?.stop();
-      controlPathHeadroom.setRoomGate(undefined);
       checkpointer?.stop();
       statusRecount?.stop();
       rssRestart.stop();
