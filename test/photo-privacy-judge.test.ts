@@ -75,6 +75,13 @@ import {
   type MediaJudgment,
 } from '../src/workers/source-index/media-judge.ts';
 
+/** A raw handle to a store file waits, as the product's connections do, for the read pool's last connection to finish its closing checkpoint. */
+function rawStore(path: string): Database {
+  const db = new Database(path);
+  db.exec('PRAGMA busy_timeout = 10000');
+  return db;
+}
+
 const temporaryDirs: string[] = [];
 function temporaryDir(prefix = 'olympus-photo-judge-'): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -594,7 +601,7 @@ describe('the judge in the embed pass', () => {
       await plainSink(store).accept(request('a', card));
       const provider = new JudgingProvider(new Map([[card.sha256, scores(0.6, { bank_card: 0.7 })]]));
       await store.embedChunks({ provider });
-      const db = new Database(dbPath);
+      const db = rawStore(dbPath);
       try {
         // As if an earlier judge had found it ordinary and that had been applied.
         db.query("UPDATE media_judgments SET judge_id = 'photo-judge-older', verdict = 'ordinary', category = NULL, tier_applied = 1").run();
@@ -608,7 +615,7 @@ describe('the judge in the embed pass', () => {
       // A judgment replaced between the sweep reading it and marking it stays unapplied.
       const page = store.unappliedMediaJudgments();
       expect(page).toHaveLength(1);
-      const replaced = new Database(dbPath);
+      const replaced = rawStore(dbPath);
       try {
         replaced.query("UPDATE media_judgments SET verdict = 'ordinary', category = NULL").run();
       } finally {
@@ -618,14 +625,14 @@ describe('the judge in the embed pass', () => {
       expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ verdict: 'ordinary', tier_applied: 0 })]);
       store.markMediaJudgmentsApplied(store.unappliedMediaJudgments());
       expect(judgmentRows(dbPath)).toEqual([expect.objectContaining({ verdict: 'ordinary', tier_applied: 1 })]);
-      const restored = new Database(dbPath);
+      const restored = rawStore(dbPath);
       try {
         restored.query("UPDATE media_judgments SET verdict = 'sensitive', category = 'bank_card', tier_applied = 0").run();
       } finally {
         restored.close();
       }
       // Still sensitive, but another category: applied again too.
-      const recategorized = new Database(dbPath);
+      const recategorized = rawStore(dbPath);
       try {
         recategorized.query("UPDATE media_judgments SET judge_id = 'photo-judge-older', category = 'id_document', tier_applied = 1").run();
       } finally {
@@ -930,7 +937,7 @@ describe('an unreadable picture is judged again, a bounded number of times', () 
       expect(store.mediaJudgment(broken.sha256)?.verdict).toBe('unjudged');
 
       // A new judge starts its own count.
-      const db = new Database(dbPath);
+      const db = rawStore(dbPath);
       try {
         db.query("UPDATE media_judgments SET judge_id = 'photo-judge-older' WHERE media_sha256 = ?").run(broken.sha256);
       } finally {
@@ -961,7 +968,7 @@ describe('the judgment sweep cannot be starved', () => {
       expect(store.unappliedMediaJudgments(2).map((entry) => entry.mediaSha256)).toEqual([media[2]!.sha256, media[0]!.sha256]);
       // A changed verdict goes back to the front.
       store.markMediaJudgmentsWaiting([media[2]!.sha256]);
-      const db = new Database(dbPath);
+      const db = rawStore(dbPath);
       try {
         db.query("UPDATE media_judgments SET judge_id = 'photo-judge-older' WHERE media_sha256 = ?").run(media[1]!.sha256);
       } finally {
@@ -1123,7 +1130,7 @@ describe('a store migrates to the judgments schema with its photos intact', () =
     };
 
     for (const shape of ['v13', 'earlier v14'] as const) {
-      const db = new Database(dbPath);
+      const db = rawStore(dbPath);
       try {
         if (shape === 'v13') {
           db.exec('DROP INDEX idx_connector_store_media_judgments_unapplied; DROP TABLE media_judgments;');
@@ -1327,7 +1334,7 @@ describe('review of #189: the judge never lets a picture out of Private without 
   }
 
   function setJudgment(dbPath: string, sha: string, fields: string): void {
-    const db = new Database(dbPath);
+    const db = rawStore(dbPath);
     try {
       db.query(`UPDATE media_judgments SET ${fields} WHERE media_sha256 = ?`).run(sha);
     } finally {
