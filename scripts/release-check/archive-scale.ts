@@ -250,6 +250,16 @@ export const READWISE_SCALE_ROW = String.raw`(() => {
   return row ? String(row.textContent || '').replace(/\s+/g, ' ').trim() : null;
 })()`;
 
+/** What the page showed when the Sources tab did not open, so the leg log names it. */
+function openFailure(trace: JourneyTrace): string {
+  if (trace.error) return trace.error;
+  const step = trace.steps.find((candidate) => !candidate.ok);
+  if (!step) return 'no step recorded';
+  const requests = step.failedRequests.slice(0, 3).join('; ');
+  const errors = step.consoleErrors.slice(0, 2).join('; ');
+  return [`at ${step.at}: ${step.actual}`, requests && `failed requests: ${requests}`, errors && `console: ${errors}`].filter(Boolean).join('; ').slice(0, 600);
+}
+
 export async function scaleReadwiseStage(host: ScaleHost, seed: string, boundS = SCALE_BOUND_S): Promise<ScaleObservation> {
   const expected = scaleReadwise(seed).items;
   const obs = empty('readwise', expected);
@@ -259,7 +269,10 @@ export async function scaleReadwiseStage(host: ScaleHost, seed: string, boundS =
       await measured(host, obs, async () => {
         // Start sampling before connecting so the first visible count may be zero.
         const opened = await runJourney(driver, { id: 'archive-scale-readwise-open', title: 'Open Readwise progress', source: 'archive scale', mutates: false, steps: [{ name: 'Open the Sources tab', do: { go: '/dashboard?connect' }, expect: [{ present: { css: '.srcrows' }, frame: 'host' }] }] });
-        if (!opened.ok) throw new Error('Readwise Sources page did not open');
+        if (!opened.ok) {
+          obs.traces.push(opened);
+          throw new Error(`Readwise Sources page did not open: ${openFailure(opened)}`);
+        }
         obs.traces.push(opened);
         const started = host.now();
         await host.beginReadwise(seed);
