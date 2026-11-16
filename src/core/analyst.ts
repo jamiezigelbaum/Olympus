@@ -1,3 +1,4 @@
+import { isReadWidePack } from './read-wide.ts';
 // The Analyst capability (Contract 3, src/core/contracts.ts).
 //
 // One generic reasoning path over an EvidencePack: answer from the evidence
@@ -413,7 +414,7 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
       const signal = currentAnalystAbortSignal();
       const compact = createOptions.evidenceFormat === 'compact';
       const request: AnalystModelRequest = {
-        system: compact ? ANALYST_COMPACT_SYSTEM : ANALYST_SYSTEM,
+        system: analystSystem(pack, compact),
         // The bounded schema stops the answer at its bound mid-word; told
         // the bound, the model finishes its last sentence inside it.
         prompt: `${compact ? buildCompactAnalystPrompt(pack) : buildAnalystPrompt(pack, localOnly)}${
@@ -509,10 +510,15 @@ export function analystPromptBytes(
 ): number {
   const bound = boundedOutputChars !== undefined ? answerLengthLine(analystSchemaAnswerChars(boundedOutputChars)) : '';
   if (evidenceFormat === 'compact') {
-    return promptEncoder.encode(`${ANALYST_COMPACT_SYSTEM}\n\n${buildCompactAnalystPrompt(pack)}${bound}`).length;
+    return promptEncoder.encode(`${analystSystem(pack, true)}\n\n${buildCompactAnalystPrompt(pack)}${bound}`).length;
   }
   const localOnly = options.localOnly || evidencePackRequiresLocalOnly(pack);
-  return promptEncoder.encode(`${ANALYST_SYSTEM}\n\n${buildAnalystPrompt(pack, localOnly)}${bound}`).length;
+  return promptEncoder.encode(`${analystSystem(pack, false)}\n\n${buildAnalystPrompt(pack, localOnly)}${bound}`).length;
+}
+
+function analystSystem(pack: EvidencePack, compact: boolean): string {
+  const system = compact ? ANALYST_COMPACT_SYSTEM : ANALYST_SYSTEM;
+  return isReadWidePack(pack) ? `${system}\nState reading coverage from Coverage matches: read N of M matching items, with M minus N left out; a + marks a lower bound. In evidence means supplied passages, not every page of a file.` : system;
 }
 
 function evidencePackRequiresLocalOnly(pack: EvidencePack): boolean {

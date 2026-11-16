@@ -1,3 +1,4 @@
+import { READ_WIDE_MATCH_LIMIT, markReadWidePack, readWideEnabled, scoresHaveNoLeader } from './read-wide.ts';
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 import { bindReleaseChunks, copyReleaseChunks } from './release-manifest.ts';
 import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
@@ -371,6 +372,7 @@ async function buildPreparedEvidencePackDetailed(
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input)
     ? input.reranker
     : undefined;
+  const readWide = readWideEnabled() && !input.selectedItems?.length;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
@@ -387,10 +389,21 @@ async function buildPreparedEvidencePackDetailed(
   // re-sort it: newest-first over the whole pool undid store turn and the
   // reserved leader seats, and buried a store's best match past what a local
   // Analyst reads (2026-11-11). Every seat carries its date.
-  const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
+  const storeScores = new Map<string, Array<number | undefined>>();
+  for (const hit of visibleHits) {
+    const scores = storeScores.get(hit.corpusId) ?? [];
+    scores.push(hit.score);
+    storeScores.set(hit.corpusId, scores);
+  }
+  let wide = readWide && [...storeScores.values()].some(scoresHaveNoLeader)
+    && [...storeScores.values()].every(scores => scores.length < 3 || scoresHaveNoLeader(scores));
+  // The ordinary draw remains a prefix. A clear leader keeps exactly that cut.
+  const routedHits = input.selectedItems?.length ? routed.hits
+    : readWide && !reranker && !wide ? visibleHits.slice(0, input.maxResults) : visibleHits;
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
+  const candidateHitIds: SourceIndexCandidateId[] = [];
   const candidateExtractionGapIndexes: number[][] = [];
   const extractionGaps: string[] = laneCutShortGaps(routed.degradations, input);
   const searched = new Set(routed.searchedCorpora);
@@ -431,7 +444,7 @@ async function buildPreparedEvidencePackDetailed(
   const hydrationStartedAt = Date.now();
   // A reranked build reads its whole pool but keeps only maxResults, so each
   // kept candidate gets the share it would have had without the pool.
-  const maxBytesPerCandidate = evidenceBytesPerCandidate(
+  let maxBytesPerCandidate = evidenceBytesPerCandidate(
     reranker ? Math.min(routedHits.length, input.maxResults) : routedHits.length,
     input.maxCharsPerCandidate,
     input.evidenceByteBudget,
@@ -500,17 +513,25 @@ async function buildPreparedEvidencePackDetailed(
       query: literalSearchQuery(input),
       items: scorable,
       passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
-      keep: input.maxResults,
+      keep: readWide ? scorable.length : input.maxResults,
       ...(input.rerankTimers ? { timers: input.rerankTimers } : {}),
-      ...(input.onRerankScores ? { onScores: (entries, outcome) => input.onRerankScores!(
-        entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome,
-      ) } : {}),
+      onScores: (entries, outcome) => {
+        if (readWide && outcome === 'applied') wide = scoresHaveNoLeader(entries.map(entry => entry.score));
+        input.onRerankScores?.(entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome);
+      },
     });
     // Denied items carry no text, but every one is still counted below, so the
     // policy gap and the content-free lane audits do not depend on the cut.
-    hydrated = [...denied, ...reranked.kept];
-    rerank = reranked.audit;
+    hydrated = [...denied, ...(readWide && wide ? reranked.kept : reranked.kept.slice(0, input.maxResults))];
+    rerank = readWide ? {
+      ...reranked.audit,
+      kept: hydrated.length - denied.length,
+      promoted: reranked.audit.outcome === 'applied'
+        ? hydrated.filter(entry => !entry.policyDenied && scorable.indexOf(entry) >= hydrated.length - denied.length).length : 0,
+    } : reranked.audit;
   }
+
+  if (wide) maxBytesPerCandidate = evidenceBytesPerCandidate(hydrated.length, input.maxCharsPerCandidate, input.evidenceByteBudget);
 
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
@@ -562,6 +583,7 @@ async function buildPreparedEvidencePackDetailed(
     else if (!provider || !content || content.chunks.length === 0) unreadCandidates += 1;
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
+    candidateHitIds.push(routedHitCandidateId(hit));
 
     // The source's counts-only size notice explains these unread files. Do
     // not copy a held file's title or locator into the answer's coverage.
@@ -575,9 +597,12 @@ async function buildPreparedEvidencePackDetailed(
     if (gap) extractionGaps.push(gap);
   }
 
+  const matchingIds = new Set(routed.matchingCandidateIds ?? routed.hits.map(routedHitCandidateId));
+  const readMatchingIndexes = candidates.flatMap((candidate, index) =>
+    candidate.chunks.some(chunk => chunk.length > 0) && matchingIds.has(candidateHitIds[index]!) ? [index] : []);
   const matchCounts = coverageMatchCounts(
     routed.matchCounts,
-    candidateCorpusIds,
+    wide ? readMatchingIndexes.map(index => candidateCorpusIds[index]!) : candidateCorpusIds,
     candidates.some((candidate) => isSecureSensitivity(candidate)),
   );
   const coverage: EvidenceCoverage = {
@@ -621,7 +646,8 @@ async function buildPreparedEvidencePackDetailed(
   const secureRouted = new Set(routed.secureLaneAudits);
   const secureLaneAudits = laneAudits.filter((_, index) => secureRouted.has(routed.laneAudits[index]!));
   return {
-    pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
+    pack: wide ? markReadWidePack({ question: input.question, candidates: labelled.candidates, coverage, builtAt }, readMatchingIndexes.map(index => labelled.candidates[index]!))
+      : { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
     candidateExtractionGapIndexes,
     ...(routed.recencySeats ? { recencySeats: routed.recencySeats } : {}),
@@ -806,7 +832,7 @@ type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
   | 'encounteredSecureLocal' | 'secureLaneAudits'
-> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats' | 'semanticSeats'>>;
+> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats' | 'semanticSeats' | 'matchingCandidateIds'>>;
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
   const hits: SourceIndexRoutedSearchHit[] = [];
@@ -935,7 +961,12 @@ async function runRoutedSearches(
   }
   if (runs.length === 1) return literalRun;
 
-  const recency = seatRoutedQueryRuns(runs.map(run => run.hits), retrievalLimit, questionHasTemporalIntent(input));
+  const drawRuns = readWideEnabled() ? runs.map(run => {
+    const semantic = new Set((run.semanticSeats ?? []).map(seat => routedHitCandidateId(seat.hit)));
+    const matches = new Set(run.matchingCandidateIds ?? []);
+    return run.hits.filter(hit => !semantic.has(routedHitCandidateId(hit)) || matches.has(routedHitCandidateId(hit)));
+  }) : runs.map(run => run.hits);
+  const recency = seatRoutedQueryRuns(drawRuns, readWideEnabled() ? Math.max(READ_WIDE_MATCH_LIMIT, retrievalLimit) : retrievalLimit, questionHasTemporalIntent(input));
   const { degradations: budgetDegradations } = recency;
   // The runs' semantic seats sit past the fused cut, so they are seated again
   // after it, best margin first, as each run seated them.
@@ -943,6 +974,7 @@ async function runRoutedSearches(
 
   return {
     hits: fused,
+    ...(readWideEnabled() ? { matchingCandidateIds: [...new Set(runs.flatMap(run => run.matchingCandidateIds ?? []))] } : {}),
     searchedCorpora: literalRun.searchedCorpora,
     // Coverage of WHICH corpora were eligible comes from run 1 (eligibility
     // depends on the context, not the query text). What each run LOST does
@@ -1078,10 +1110,12 @@ function runRoutedSearch(
         context: input.searchContext,
         ...(questionHasTemporalIntent(input) ? { temporalIntent: true } : {}),
         ...(poolAllocation ? { poolAllocation } : {}),
+        ...(readWideEnabled() ? { readWide: true } : {}),
       },
       laneTimeoutMs,
       ...(input.onSeatingLanes ? { onSeatingLanes: (lanes) => input.onSeatingLanes!(lanes, ordinal) } : {}),
-      ...(input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {}),
+      ...(readWideEnabled() ? { storeSearchDepth: Math.max(READ_WIDE_MATCH_LIMIT, input.storeSearchDepth ?? 0) }
+        : input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {}),
       ...(searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {}),
       ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),
     }));

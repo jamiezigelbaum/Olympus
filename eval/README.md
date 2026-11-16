@@ -479,6 +479,14 @@ dropped. Sealed receipts carry no rows, so two sealed runs compare only when
 they left out the same questions. Inspect skipped-store counts before comparing
 runs.
 
+For questions with several expected evidence entries, open receipt rows also
+record `neededEvidence`: needed, packed, seated (after prompt fitting), and
+cited counts. Id lists are one-based indexes into the expected entries, with
+alternates counted once per entry and repeated citations deduplicated. Citation
+counts are absent unless an answer completed. No item text or source identifiers
+are printed. This reports multi-item coverage separately from the existing
+first-hit metric.
+
 Each answerable question also gets a funnel stage, the first place its expected
 item dropped out: `not_found` (no lane found it), `found_not_returned` (a lane
 ranked it but its store did not return it), `not_returned` (its store did not

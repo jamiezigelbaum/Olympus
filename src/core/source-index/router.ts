@@ -1,3 +1,4 @@
+import { READ_WIDE_MATCH_LIMIT } from '../read-wide.ts';
 import { isSourceIndexLaneBusyError } from './lane-busy.ts';
 import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT } from './partial-search.ts';
 import { withKeywordRequestScope } from './keyword-context.ts';
@@ -66,6 +67,8 @@ export interface SourceIndexSearchRequest {
   // chat stores' pinned newest messages take the recency seats
   // (withReservedRecencySeats). Decided by the caller's existing heuristic.
   temporalIntent?: boolean;
+  // Ask-only: append store matches after the ordinary draw, before semantic seats.
+  readWide?: boolean;
   // A reranker pool (evidence-pack): seat every store's leader, then go deep
   // in the strongest stores first, up to storeDepth of each store's own ranks
   // (applyStrengthPoolBudget). Absent: stores share seats in even turns.
@@ -308,6 +311,8 @@ export interface SourceIndexRoutedSearchResponse {
   corpusTimings: readonly SourceIndexRoutedCorpusTiming[];
   // Per-corpus match breadth, for every searched corpus whose adapter counts.
   matchCounts?: readonly SourceIndexRoutedMatchCount[];
+  // Ask-only membership before neighbour fill; does not cross the public membrane.
+  matchingCandidateIds?: readonly SourceIndexCandidateId[];
   // Searched corpora whose adapter reported an incomplete response (see
   // SourceIndexCorpusSearchResponse.incomplete).
   incompleteCorpora?: readonly string[];
@@ -590,6 +595,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   }));
   const lanesStartedAt = Date.now();
   const laneTimeoutMs = laneTimeoutWithinDeadline(resolveLaneTimeoutMs(options.laneTimeoutMs), options.searchDeadlineAtMs);
+  const matchingIds = new Set<SourceIndexCandidateId>();
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
     const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);
@@ -604,8 +610,15 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneWithDeadline(
       () => runInSourceAnswerLane(corpus.corpusId, async () => {
-        if (metadataMatches) return metadataMatches(corpusRequest);
+        if (metadataMatches) {
+          const response = await metadataMatches(corpusRequest);
+          if (request.readWide) for (const hit of response.hits) matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+          return response;
+        }
         const response = await adapter(corpusRequest);
+        if (request.readWide) for (const hit of response.hits) {
+          matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+        }
         // A reranked pool draws each store's share from its matches first,
         // then its nearest semantic neighbours from the same search: a
         // below-bar vector hit can still be the answer, and the reranker
@@ -686,6 +699,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     lanes.push({
       name: corpus.corpusId,
       ...(response.storeRelevance ? { relevance: response.storeRelevance } : {}),
+      ...(request.readWide ? { matchingIds } : {}),
       items: response.hits.map((hit) => ({
         ...hit,
         corpusId: corpus.corpusId,
@@ -723,6 +737,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
 
   const result: SourceIndexRoutedSearchResponse = {
     hits: fused,
+    ...(request.readWide ? { matchingCandidateIds: [...matchingIds] } : {}),
     searchedCorpora,
     skippedCorpora,
     laneAudits,
@@ -752,6 +767,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
 export interface SeatingLane {
   name: string;
   relevance?: SourceIndexStoreRelevance;
+  matchingIds?: ReadonlySet<SourceIndexCandidateId>;
   items: readonly SourceIndexRoutedSearchHit[];
   // The store's best vector rows with their margin over its bar (semanticRows).
   semantic?: readonly SemanticPoolSeat[];
@@ -802,7 +818,7 @@ export function withSemanticPoolSeats(
 // Pure seating shared by routed search and offline eval replay.
 export function seatRoutedLanes(
   lanes: readonly SeatingLane[],
-  options: Pick<SourceIndexSearchRequest, 'maxResults' | 'poolAllocation' | 'temporalIntent'>,
+  options: Pick<SourceIndexSearchRequest, 'maxResults' | 'poolAllocation' | 'temporalIntent' | 'readWide'>,
 ): { hits: SourceIndexRoutedSearchHit[]; degradations: RetrievalDegradation[]; recencySeats: number; semanticSeats?: SemanticPoolSeat[] } {
   // Store order within each turn: how well each store's best hit answers
   // this question (storeOrderForQuestion), then lane declaration order.
@@ -839,6 +855,24 @@ export function seatRoutedLanes(
   const recency = options.temporalIntent
     ? withReservedRecencySeats(leadered, pool, options.maxResults)
     : { ...leadered, recencySeats: 0 };
+  if (options.readWide) {
+    const taken = new Set(recency.hits.map(routedHitCandidateId));
+    const matches = fusedAll.map(candidate => candidate.item).filter(hit =>
+      lanes.some(lane => lane.name === hit.corpusId && (!lane.matchingIds || lane.matchingIds.has(routedHitCandidateId(hit)))));
+    // Keep the ordinary draw's order and append every remaining relevant match.
+    // Neighbours retain their existing seats; they do not spend the match cap.
+    let matching = recency.hits.filter(hit => matches.some(match => routedHitCandidateId(match) === routedHitCandidateId(hit))).length;
+    for (const hit of matches) {
+      if (matching >= READ_WIDE_MATCH_LIMIT) break;
+      const id = routedHitCandidateId(hit);
+      if (taken.has(id)) continue;
+      taken.add(id);
+      recency.hits.push(hit);
+      matching += 1;
+    }
+    const represented = new Set(recency.hits.map(hit => hit.corpusId));
+    recency.degradations = recency.degradations.filter(loss => loss.reason !== 'lane_budget_cut' || !represented.has(loss.laneName));
+  }
   const seats = options.poolAllocation?.semanticSeats ?? 0;
   if (seats <= 0) return recency;
   const semantic = withSemanticPoolSeats(recency.hits, lanes, seats);

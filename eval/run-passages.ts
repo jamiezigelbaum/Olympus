@@ -93,6 +93,7 @@ export interface PassageRow {
   questionId: string; shape: string; families: string[]; tiers: string[];
   seatsFilled: number; answerable: boolean; object: HitScore; passage: HitScore;
   funnel?: FunnelRow; judge?: QuestionJudgement;
+  neededEvidence?: { needed: number; packed: number; seated: number; cited?: number; packedIds: number[]; seatedIds: number[]; citedIds?: number[] };
   answer?: PassageAnswer;
   rerank?: { outcome: EvidenceRerankOutcome; scored: number; promoted: number; elapsedMs: number };
   /** Present when a store's search was cut short: which store and lane, and why (codes only). Left out of the metrics. */
@@ -274,12 +275,27 @@ export async function runPassageEval(input: {
     }
     // Retrieval and fitting end here; answer and diagnostic calls have separate timings.
     const finished = performance.now();
+    // Expected-entry indexes are safe receipt ids; never print source ids or text.
+    const needed = question.expectedEvidence ?? [];
+    const matchingExpected = (candidate: EvidencePack['candidates'][number], index: number) => {
+      const expected = needed[index]!;
+      const corpus = resolveCitationCorpusId(candidate.provenance, detail.pack.candidates, detail.candidateCorpusIds);
+      return [expected, ...(expected.alternates ?? [])].some(item => item.corpusId === corpus && item.providerItemId === candidate.provenance.sourceItem.providerItemId);
+    };
+    const packedIds = needed.flatMap((_, index) => original.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
+    const seatedIds = needed.flatMap((_, index) => pack.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
+    let citedIds: number[] | undefined;
     let answer: PassageAnswer | undefined;
     if (input.answer) {
       step('answer');
       const answerStarted = performance.now();
       try {
         const result = await input.answer(question, pack);
+        citedIds = needed.flatMap((_, index) => result.citations.some(citation =>
+          pack.candidates.some(candidate => candidate.provenance.sourceItem.providerItemId === citation.provenance.sourceItem.providerItemId
+            && resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds)
+              === resolveCitationCorpusId(candidate.provenance, detail.pack.candidates, detail.candidateCorpusIds)
+            && matchingExpected(candidate, index))) ? [index + 1] : []);
         const answerMs = performance.now() - answerStarted;
         answer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs, answerChars: result.answer.length, citations: result.citations.length, ...(seated ? { seat: seated } : {}) };
         const expectedText = (question.expectedEvidence ?? []).map(item => item.quote).filter(Boolean).join('\n') || (question.expectedAnswerContains ?? []).join('; ');
@@ -313,6 +329,8 @@ export async function runPassageEval(input: {
       seatsFilled: pack.candidates.length, answerable, object: score(objectRank, ks), passage: score(passageRank, ks),
       ...(funnel ? { funnel } : {}), ...(judge ? { judge } : {}),
       ...(answer ? { answer } : {}),
+      ...(needed.length > 1 ? { neededEvidence: { needed: needed.length, packed: packedIds.length, seated: seatedIds.length, packedIds, seatedIds,
+        ...(citedIds ? { cited: citedIds.length, citedIds } : {}) } } : {}),
       ...(detail.rerank ? { rerank: { outcome: detail.rerank.outcome, scored: detail.rerank.scored, promoted: detail.rerank.promoted, elapsedMs: detail.rerank.elapsedMs } } : {}),
       ...(degraded.length ? { degraded } : {}),
       timings: { buildPackMs: builtAt - started, fitMs: finished - builtAt, totalMs: finished - started, storeSearchMs: (detail.corpusTimings ?? []).reduce((n, t) => n + t.elapsedMs, 0) },
@@ -603,6 +621,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     writeFileSync(output, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
     // Store counts lead the line, so a short open never reads as a retrieval miss (#1576).
     console.log(JSON.stringify({ storesOpened: opened.stores.length, storesSkipped: opened.skipped.length, ...receipt.summary }));
+    const multiItemEvidence = receipt.questions?.flatMap(row => row.neededEvidence ? [{ questionId: row.questionId, ...row.neededEvidence }] : []);
+    if (multiItemEvidence?.length) console.log(JSON.stringify({ multiItemEvidence }));
     if (probe && receipt.questions) console.log(JSON.stringify({ recallGroups: recallGroups(receipt.questions) }));
     if (storeTimes) console.log(JSON.stringify({ storeTimes: storeTimes.summary() }));
     if (values.has('--compare')) enter('compare');
