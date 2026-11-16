@@ -1,7 +1,9 @@
 // The built-in reranker (issue #921): a cross-encoder run by the same
 // ONNX Runtime pack shared with the ONNX embedding models,
 // on this computer. It reads the query and one candidate's text together and
-// returns that pair's relevance logit (core/evidence-reranker.ts).
+// returns that pair's relevance logit (core/evidence-reranker.ts). A candidate
+// longer than the pair window is read in overlapping windows and scored by
+// its best one.
 //
 // Installed with the embedding model (~136 MB). On by default with at least
 // 16 GiB RAM once the files are present; OLYMPUS_SOURCE_RERANKER=off opts out.
@@ -44,6 +46,8 @@ const MAX_PAIR_TOKENS = 512;
 const BATCH_SIZE = 8;
 /** Default pair window, measured on the passage compare (#921); the env override is capped at MAX_PAIR_TOKENS. */
 const DEFAULT_PAIR_TOKENS = 256;
+/** Neighbouring windows of one long passage share a 1/8 window, so a sentence on a boundary is whole in one of them. */
+const WINDOW_OVERLAP_FRACTION = 8;
 /** Release the loaded session after this long with no score; resource pacing only, never cuts a score short. */
 const IDLE_RELEASE_MS = 10 * 60_000;
 /** Physical RAM at which the reranker turns on without OLYMPUS_SOURCE_RERANKER=built-in (README model-size split). */
@@ -120,12 +124,19 @@ export function createCrossEncoderReranker(options: CrossEncoderRerankerOptions)
       lastActivity = timers.now();
       try {
         const model = await session();
-        const scores: number[] = [];
-        for (let start = 0; start < request.passages.length; start += batchSize) {
+        // Every window of every passage, scored on one scale; a passage's
+        // score is its best window (MaxP), so the deciding paragraph counts
+        // wherever it sits in the text.
+        const owners: number[] = [];
+        const windows = request.passages.flatMap((passage, index) => {
+          const pairs = options.tokenizer.encodePairWindows(request.query, passage, maxPairTokens, Math.floor(maxPairTokens / WINDOW_OVERLAP_FRACTION));
+          for (let count = 0; count < pairs.length; count += 1) owners.push(index);
+          return pairs;
+        });
+        const scores: number[] = request.passages.map(() => Number.NEGATIVE_INFINITY);
+        for (let start = 0; start < windows.length; start += batchSize) {
           if (request.signal.aborted) throw new Error('Reranking was abandoned.');
-          const pairs = request.passages
-            .slice(start, start + batchSize)
-            .map((passage) => options.tokenizer.encodePair(request.query, passage, maxPairTokens));
+          const pairs = windows.slice(start, start + batchSize);
           const sequenceLength = Math.max(...pairs.map((pair) => pair.ids.length));
           const size = pairs.length * sequenceLength;
           const inputIds = new BigInt64Array(size).fill(BigInt(options.tokenizer.padId));
@@ -144,7 +155,13 @@ export function createCrossEncoderReranker(options: CrossEncoderRerankerOptions)
           if (output.dims.length !== 2 || output.dims[0] !== pairs.length || output.dims[1] !== 1) {
             throw new Error('The reranker model returned an unexpected output.');
           }
-          scores.push(...output.data);
+          for (let row = 0; row < pairs.length; row += 1) {
+            const owner = owners[start + row]!;
+            const score = output.data[row]!;
+            // NaN must reach the caller, which fails open on it.
+            if (Number.isNaN(score) || score > scores[owner]!) scores[owner] = score;
+          }
+          request.onProgress?.();
         }
         return scores;
       } finally { active--; armIdle(); }
@@ -239,10 +256,11 @@ export function builtInRerankerFromEnv(options: BuiltInRerankerFromEnvOptions = 
       localOnly: true,
       poolSize: positiveInteger(env[SOURCE_RERANKER_POOL_ENV]) ?? DEFAULT_RERANK_POOL_SIZE,
       prepare,
-      async score({ signal, ...request }) {
+      async score({ signal, onProgress, ...request }) {
         if (signal.aborted) throw new Error('Reranking was abandoned.');
         await prepare();
-        return modelThread().call<number[]>({ kind: 'reranker-run', handle, request }, { signal });
+        onProgress?.();
+        return modelThread().call<number[]>({ kind: 'reranker-run', handle, request }, { signal, rerankProgress: onProgress });
       },
     };
   }

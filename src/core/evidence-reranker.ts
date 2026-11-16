@@ -15,7 +15,7 @@
 // the owner's own private host serving it) can be wired in. A cloud reranker
 // is not something this seam accepts.
 //
-// Fail open: a reranker that throws, times out or returns a malformed score
+// Fail open: a reranker that throws, stalls or returns a malformed score
 // list leaves the fused order exactly as it was. Reranking is an improvement,
 // never a reason an answer fails.
 
@@ -25,6 +25,8 @@ export interface EvidenceRerankRequest {
   /** One passage per candidate, in fused order. */
   passages: readonly string[];
   signal: AbortSignal;
+  /** Called each time more of the pool has been scored; scoring that keeps reporting is never abandoned. */
+  onProgress?: () => void;
 }
 
 export interface EvidenceReranker {
@@ -34,7 +36,11 @@ export interface EvidenceReranker {
   readonly localOnly: true;
   /** How many fused candidates to read and score before the cut. */
   readonly poolSize: number;
-  /** One relevance score per passage, any scale; higher is more relevant. */
+  /**
+   * One relevance score per passage, any scale; higher is more relevant. A
+   * passage longer than the model's window is scored by its best part, not
+   * by its opening.
+   */
   score(request: EvidenceRerankRequest): Promise<readonly number[]>;
 }
 
@@ -53,10 +59,15 @@ export interface EvidenceRerankAudit {
   elapsedMs: number;
 }
 
-/** Characters of one candidate's text the reranker reads (a 512-token window holds about this much). */
-export const RERANK_PASSAGE_CHARS = 2_000;
-/** A reranker that has not answered by then is abandoned and the fused order stands. */
-export const DEFAULT_RERANK_TIMEOUT_MS = 5_000;
+// Characters of one candidate's text handed to the reranker, which reads all
+// of it in windows. A candidate is hydrated to its seat's share of the
+// evidence budget, which is below this at the shipped budgets, so this bounds
+// one request, not what is read.
+export const RERANK_PASSAGE_CHARS = 12_000;
+// A reranker that has scored nothing more for this long has stalled: it is
+// abandoned and the fused order stands. The clock restarts on every progress
+// report, so a large pool of long candidates is scored to the end.
+export const DEFAULT_RERANK_STALL_MS = 10_000;
 export const DEFAULT_RERANK_POOL_SIZE = 30;
 // The pool is drawn by store strength: every store's leader, then the
 // strongest stores first, up to this many of each store's ranks. On subset L
@@ -95,7 +106,8 @@ export interface RerankCandidatesOptions<T> {
   /** The text the reranker reads for one candidate; empty when it has none. */
   passageOf: (item: T) => string;
   keep: number;
-  timeoutMs?: number;
+  /** Silence, not total time: restarts whenever the reranker reports progress. */
+  stallMs?: number;
   timers?: RerankTimers;
   // Internal observer; entries are in input order and contain no passage text.
   onScores?: (entries: readonly { item: T; score: number }[], outcome: EvidenceRerankOutcome) => void;
@@ -135,19 +147,28 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
 
   const controller = new AbortController();
   let timer: unknown;
-  const timedOut = new Promise<'timed_out'>((resolve) => {
+  let settled = false;
+  let stalled!: (outcome: 'timed_out') => void;
+  const timedOut = new Promise<'timed_out'>((resolve) => { stalled = resolve; });
+  const stallMs = options.stallMs ?? DEFAULT_RERANK_STALL_MS;
+  const restartStallClock = () => {
+    if (settled) return;
+    if (timer !== undefined) timers.clearTimeout(timer);
     timer = timers.setTimeout(() => {
       // Settle first: a reranker that rejects on abort must not win the race.
-      resolve('timed_out');
+      settled = true;
+      stalled('timed_out');
       controller.abort();
-    },options.timeoutMs ?? DEFAULT_RERANK_TIMEOUT_MS);
-  });
+    }, stallMs);
+  };
+  restartStallClock();
   let scores: readonly number[] | 'timed_out';
   try {
     const scoring = options.reranker.score({
       query: options.query,
       passages: scoredIndexes.map((index) => passages[index]!),
       signal: controller.signal,
+      onProgress: restartStallClock,
     });
     // An abandoned score must not surface later as an unhandled rejection.
     scoring.catch(() => undefined);
@@ -155,6 +176,7 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
   } catch {
     return fusedCut('failed', 0);
   } finally {
+    settled = true;
     timers.clearTimeout(timer);
   }
   if (scores === 'timed_out') return fusedCut('timed_out', 0);
