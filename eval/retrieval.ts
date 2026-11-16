@@ -144,7 +144,7 @@ export function openEvalDropboxStores(
  * mode: a store's vector lane runs only with the built-in model this process
  * holds loaded, and otherwise searches by keyword.
  */
-export function createEvalDropboxLanes(input: {
+function createEvalRequestLanes(input: {
   stores: readonly LocalConnectorStore[];
   ledger?: TierLedger;
   scopes?: readonly TierVisibilityScope[];
@@ -155,7 +155,7 @@ export function createEvalDropboxLanes(input: {
   localEmbedding?: (provider: SourceEmbeddingProvider) => SourceEmbeddingProvider | undefined;
   /** Told each store search's returned item ids, in order (the report's expectedStoreRanks). */
   onStoreSearch?: (search: EvalStoreSearch) => void;
-}): (question: string) => AnalystAnswerLanes {
+}) {
   const stores = () => input.stores;
   const scopes = () => input.scopes ?? (input.ledger
     ? [{ ledger: input.ledger, corpusIds: new Set(input.stores.map((store) => store.corpusId)), stores }]
@@ -189,9 +189,9 @@ export function createEvalDropboxLanes(input: {
     parentLabels: createParentLabelResolver({ stores, scopes }),
   });
   const onStoreSearch = input.onStoreSearch;
-  if (!onStoreSearch) return (question) => lanes(localAnswerRequest(question), 'built_in_only');
-  return (question) => {
-    const built = lanes(localAnswerRequest(question), 'built_in_only');
+  if (!onStoreSearch) return lanes;
+  return (...args: Parameters<typeof lanes>) => {
+    const built = lanes(...args);
     return {
       ...built,
       adapters: Object.fromEntries(Object.entries(built.adapters).flatMap(([corpusId, adapter]) => adapter ? [[
@@ -205,6 +205,17 @@ export function createEvalDropboxLanes(input: {
       ]] : [])),
     };
   };
+}
+
+/** Existing passage evals retain their local-answer request and mode. */
+export function createEvalDropboxLanes(input: Parameters<typeof createEvalRequestLanes>[0]): (question: string) => AnalystAnswerLanes {
+  const lanes = createEvalRequestLanes(input);
+  return question => lanes(localAnswerRequest(question), 'built_in_only');
+}
+
+/** The panel passes its own request and private_search mode, unchanged. */
+export function createEvalPrivateLanes(input: Omit<Parameters<typeof createEvalRequestLanes>[0], 'scope'>) {
+  return createEvalRequestLanes({ ...input, scope: {} });
 }
 
 export function createEvalSourceLanes(input: {
