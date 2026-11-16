@@ -97,7 +97,9 @@ const REAL_CLOCK: ReadPoolClock = {
   clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
 };
 let clock: ReadPoolClock = REAL_CLOCK;
-let observer: ((dbPath: string, read: StoreRead) => void) | undefined;
+/** What the observer learns of a snapshot read besides its text: its lane and the function that opened the snapshot. */
+export interface ObservedRead { lane: ReadPoolLane; site: string }
+let observer: ((dbPath: string, read: StoreRead, seen?: ObservedRead) => void) | undefined;
 let observeSnapshots = false;
 let workerFactory: (url: string) => Worker = (url) => new Worker(url);
 
@@ -107,7 +109,7 @@ export function setReadPoolClockForTests(testClock?: ReadPoolClock): void {
 }
 
 /** Tests only: sees each pool query as it is sent to a thread, and with `snapshots`, each snapshot read too. */
-export function setReadPoolObserverForTests(observe?: (dbPath: string, read: StoreRead) => void, options: { snapshots?: boolean } = {}): void {
+export function setReadPoolObserverForTests(observe?: (dbPath: string, read: StoreRead, seen?: ObservedRead) => void, options: { snapshots?: boolean } = {}): void {
   observer = observe;
   observeSnapshots = options.snapshots === true;
 }
@@ -406,7 +408,7 @@ function send(
 export async function withOffThreadSnapshot<T>(
   dbPath: string,
   work: (read: (query: StoreRead) => Promise<unknown>) => Promise<T>,
-  options: { lane?: ReadPoolLane; noWait?: boolean } = {},
+  options: { lane?: ReadPoolLane; noWait?: boolean; perRead?: boolean } = {},
 ): Promise<T> {
   const lane = options.lane ?? 'shared';
   // Before the first await, while the caller's frames are still on the stack.
@@ -435,8 +437,9 @@ export async function withOffThreadSnapshot<T>(
   // key and checked again there, so they need no one snapshot across their
   // reads. Each of their reads is its own read transaction. A snapshot held
   // across a whole walk pinned the WAL: no checkpoint could reset it, and
-  // tier-ledger-1's WAL stood at 6 GB through a gate run (16 Nov).
-  const perRead = lane === 'background';
+  // tier-ledger-1's WAL stood at 6 GB through a gate run (16 Nov). A caller
+  // that checks for writes across the whole read itself asks for the same.
+  const perRead = lane === 'background' || options.perRead === true;
   try {
     await send(reader, { op: 'open', snapshot, path: dbPath, perRead });
     if (!perRead) markRead(dbPath, snapshot, { atMs: clock.now(), lane, site });
@@ -444,7 +447,7 @@ export async function withOffThreadSnapshot<T>(
       return await work(async (query) => {
         const readId = perRead ? -(nextId++) : 0;
         if (perRead) markRead(dbPath, readId, { atMs: clock.now(), lane, site });
-        if (observeSnapshots) observer?.(dbPath, query);
+        if (observeSnapshots) observer?.(dbPath, query, { lane, site });
         // A snapshot read made by a traced Ask lane counts in its pool reads.
         const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
         const sentAtMs = clock.now();

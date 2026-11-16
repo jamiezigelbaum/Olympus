@@ -175,21 +175,7 @@ function recordPlan(held: Record<string, unknown>): void {
     scans = [];
     recorder.explaining = true;
     try {
-      // Prepared and finalized here, never left in the connection's statement
-      // cache, where an unfinished one would block the caller's commit.
-      const explain = db.prepare(`EXPLAIN QUERY PLAN ${sql}`);
-      let rows: Array<{ detail: string }>;
-      try { rows = explain.all() as Array<{ detail: string }>; } finally { explain.finalize(); }
-      const aliases = tableAliases(sql);
-      for (const { detail } of rows) {
-        const scan = /^SCAN (\S+)/.exec(detail);
-        const temp = /^USE TEMP B-TREE/.test(detail);
-        if (!scan && !temp) continue;
-        const name = scan ? aliases.get(scan[1]!) ?? scan[1]! : undefined;
-        if (name && recorder.large.has(name)) scans.push({ table: name, plan: detail });
-      }
-    } catch {
-      // Not a plannable statement (a pragma, a transaction): nothing to record.
+      scans = largeTableScans(db, sql, recorder.large);
     } finally {
       recorder.explaining = false;
     }
@@ -207,6 +193,28 @@ function recordPlan(held: Record<string, unknown>): void {
     const key = `${site}|${scan.table}`;
     if (!recorder.finders.has(key)) recorder.finders.set(key, { ...scan, site, sql: sql.replace(/\s+/g, ' ').trim().slice(0, 160) });
   }
+}
+
+/** The plan lines of `sql` that scan one of the `large` tables (SCAN, not a SEARCH by key or index range). */
+export function largeTableScans(db: Database, sql: string, large: ReadonlySet<string>): Array<{ table: string; plan: string }> {
+  const scans: Array<{ table: string; plan: string }> = [];
+  try {
+    // Prepared and finalized here, never left in the connection's statement
+    // cache, where an unfinished one would block the caller's commit.
+    const explain = db.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+    let rows: Array<{ detail: string }>;
+    try { rows = explain.all() as Array<{ detail: string }>; } finally { explain.finalize(); }
+    const aliases = tableAliases(sql);
+    for (const { detail } of rows) {
+      const scan = /^SCAN (\S+)/.exec(detail);
+      if (!scan) continue;
+      const name = aliases.get(scan[1]!) ?? scan[1]!;
+      if (large.has(name)) scans.push({ table: name, plan: detail });
+    }
+  } catch {
+    // Not a plannable statement (a pragma, a transaction): nothing to record.
+  }
+  return scans;
 }
 
 function inMemory(db: Database): boolean {

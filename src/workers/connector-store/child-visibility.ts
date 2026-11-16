@@ -163,9 +163,18 @@ export async function memoVisibilityItems<K, V>(
   return out;
 }
 
+// The Ask's visibility reads take their batches each in its own read
+// transaction, not one snapshot across them all: memoVisibilityItems already
+// voids the whole read when any write lands during it (the ledger's change
+// marker counts other connections' commits too), so one snapshot added
+// nothing, and held across thousands of hits it pinned the ledger's WAL for
+// as long as the Ask's thread took to come back for each batch (24.8 s, lane
+// 6 gate on a5b756db, 16 Nov).
+const ASK_LEDGER_READS = { perRead: true } as const;
+
 export function itemStatesOffThread(ledger: TierLedger, identities: readonly TierLedgerIdentity[]) {
   return memoVisibilityItems(ledger, 'states', () => ledger.changeMarker(), identities, tierLedgerIdentityKey,
-    missing => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing)));
+    missing => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS));
 }
 
 function* itemSecretSteps(ledger: TierLedger, identity: TierLedgerIdentity): Generator<VisibilityRead, boolean, unknown> {
@@ -176,7 +185,7 @@ function* itemSecretSteps(ledger: TierLedger, identity: TierLedgerIdentity): Gen
     () => memoVisibilityItems(ledger, 'secret', () => ledger.changeMarker(), [identity], tierLedgerIdentityKey,
       async missing => {
         const rows = new Map<string, boolean>();
-        for (const item of missing) rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item)));
+        for (const item of missing) rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item), ASK_LEDGER_READS));
         return rows;
       }),
   );
@@ -217,7 +226,7 @@ export async function ledgerVisibilityOffThread(
   // separate from the release check's raw copies, and invalidate both on writes.
   const rows = await memoVisibilityItems(ledger, options.personalFirst ? 'visibility-personal-first' : 'visibility',
     () => ledger.changeMarker(), identities, tierLedgerIdentityKey,
-    async missing => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options))));
+    async missing => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)));
   return visibilityFromRows(rows);
 }
 
@@ -227,7 +236,7 @@ const releasing = new WeakSet<TierLedger>();
 // snapshot here; a busy pool must withhold rather than freeze the Ask thread.
 // An owner's read (a visibility check during an Ask) takes the shared worker;
 // the engine's finders pass the background lane.
-export async function ledgerReadOffThread<T>(ledger: TierLedger, steps: Generator<LedgerRead, T, unknown>, options: { lane?: ReadPoolLane } = {}): Promise<T> {
+export async function ledgerReadOffThread<T>(ledger: TierLedger, steps: Generator<LedgerRead, T, unknown>, options: { lane?: ReadPoolLane; perRead?: boolean } = {}): Promise<T> {
   if (!offThreadReadsSupported(ledger.dbPath)) return ledger.readSteps(steps);
   if (!releasing.has(ledger)) {
     releasing.add(ledger);

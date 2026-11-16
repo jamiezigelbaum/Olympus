@@ -351,15 +351,17 @@ describe('read transactions and checkpoints', () => {
   test('a background walk holds no read between its reads, so a checkpoint completes; a shared snapshot still holds one', async () => {
     const path = storeFile();
     const writer = new Database(path);
-    const checkpointBetweenReads = async (lane: 'background' | 'shared') => withOffThreadSnapshot(path, async (read) => {
+    const checkpointBetweenReads = async (lane: 'background' | 'shared', perRead?: boolean) => withOffThreadSnapshot(path, async (read) => {
       await read(COUNT);
       writer.exec('INSERT INTO items VALUES (4)');
       const result = writer.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number };
       await read(COUNT);
       return result.busy;
-    }, { lane });
+    }, { lane, ...(perRead ? { perRead } : {}) });
     expect(await checkpointBetweenReads('background')).toBe(0);
     expect(await checkpointBetweenReads('shared')).toBe(1);
+    // An Ask's visibility reads ask for a transaction per read.
+    expect(await checkpointBetweenReads('shared', true)).toBe(0);
     writer.close();
   });
 });

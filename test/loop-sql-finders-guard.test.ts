@@ -18,25 +18,12 @@ import { Database } from 'bun:sqlite';
 import {
   slowMainThreadSqlHealth, startSlowMainThreadSqlLog, stopSlowMainThreadSqlLog, type LoopSqlFinder,
 } from '../src/workers/connector-store/main-thread-sql-trace.ts';
+import { BACKGROUND_WORKLOAD_TESTS } from './helpers/background-workload-tests.ts';
 
 const ROOT = resolve(import.meta.dir, '..');
 const ALLOWLIST = join(ROOT, 'test/fixtures/loop-sql-finders-allowlist.json');
 
-/** The background's work: sync, embed, judge and settle, visibility, the status recount. */
-export const LOOP_WORKLOAD_TESTS = [
-  'test/background-loop-named-calls.test.ts',
-  'test/status-snapshot-never-waits.test.ts',
-  'test/source-index-status-readiness-cache.test.ts',
-  'test/store-totals-drift.test.ts',
-  'test/embedding-hidden-set-in-turns.test.ts',
-  'test/hidden-child-incremental.test.ts',
-  'test/tier-visibility-incremental.test.ts',
-  'test/tier-ledger-cleared-override-paging.test.ts',
-  'test/tier-sniffer-recovery.test.ts',
-  'test/tier-sniffer-unread-not-missing.test.ts',
-  'test/sniffer-new-arrivals.test.ts',
-  'test/unreadable-files.test.ts',
-] as const;
+export const LOOP_WORKLOAD_TESTS = BACKGROUND_WORKLOAD_TESTS;
 
 interface AllowlistEntry { site: string; table: string; reason: string }
 

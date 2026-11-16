@@ -46935,24 +46935,8 @@ function recordPlan(held) {
     scans = [];
     recorder.explaining = true;
     try {
-      const explain = db.prepare(`EXPLAIN QUERY PLAN ${sql}`);
-      let rows;
-      try {
-        rows = explain.all();
-      } finally {
-        explain.finalize();
-      }
-      const aliases = tableAliases(sql);
-      for (const { detail } of rows) {
-        const scan = /^SCAN (\S+)/.exec(detail);
-        const temp = /^USE TEMP B-TREE/.test(detail);
-        if (!scan && !temp)
-          continue;
-        const name = scan ? aliases.get(scan[1]) ?? scan[1] : undefined;
-        if (name && recorder.large.has(name))
-          scans.push({ table: name, plan: detail });
-      }
-    } catch {} finally {
+      scans = largeTableScans(db, sql, recorder.large);
+    } finally {
       recorder.explaining = false;
     }
     recorder.plans.set(sql, scans);
@@ -46969,6 +46953,28 @@ function recordPlan(held) {
     if (!recorder.finders.has(key))
       recorder.finders.set(key, { ...scan, site, sql: sql.replace(/\s+/g, " ").trim().slice(0, 160) });
   }
+}
+function largeTableScans(db, sql, large) {
+  const scans = [];
+  try {
+    const explain = db.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+    let rows;
+    try {
+      rows = explain.all();
+    } finally {
+      explain.finalize();
+    }
+    const aliases = tableAliases(sql);
+    for (const { detail } of rows) {
+      const scan = /^SCAN (\S+)/.exec(detail);
+      if (!scan)
+        continue;
+      const name = aliases.get(scan[1]) ?? scan[1];
+      if (large.has(name))
+        scans.push({ table: name, plan: detail });
+    }
+  } catch {}
+  return scans;
 }
 function inMemory(db) {
   const name = db.filename;
@@ -50832,7 +50838,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
   }
   const snapshot = nextId++;
   let reserveWaitMs = clock2.now() - askedAtMs;
-  const perRead = lane === "background";
+  const perRead = lane === "background" || options.perRead === true;
   try {
     await send(reader, { op: "open", snapshot, path: dbPath, perRead });
     if (!perRead)
@@ -50843,7 +50849,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         if (perRead)
           markRead(dbPath, readId, { atMs: clock2.now(), lane, site });
         if (observeSnapshots)
-          observer?.(dbPath, query);
+          observer?.(dbPath, query, { lane, site });
         const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
         const sentAtMs = clock2.now();
         const queueWaitMs = reserveWaitMs;
@@ -54037,14 +54043,14 @@ async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
   return out;
 }
 function itemStatesOffThread(ledger, identities) {
-  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing)));
+  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS));
 }
 function* itemSecretSteps(ledger, identity) {
   const key = tierLedgerIdentityKey(identity);
   const rows = yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, (missing) => new Map(missing.map((item) => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))), () => memoVisibilityItems(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, async (missing) => {
     const rows = new Map;
     for (const item of missing)
-      rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item)));
+      rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item), ASK_LEDGER_READS));
     return rows;
   }));
   return rows.get(key) === true;
@@ -54071,7 +54077,7 @@ function ledgerVisibilityHere(ledger, identities, options = {}) {
   return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
 }
 async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
-  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options))));
+  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)));
   return visibilityFromRows(rows);
 }
 async function ledgerReadOffThread(ledger, steps, options = {}) {
@@ -54354,7 +54360,7 @@ function* hiddenChildKeysSteps(lane, probes) {
   }
   return yield* childrenWithHiddenParentsSteps(lane, links);
 }
-var VisibilityChangedError, VISIBILITY_CHANGE_RETRIES = 3, askReads, releasing, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var VisibilityChangedError, VISIBILITY_CHANGE_RETRIES = 3, askReads, ASK_LEDGER_READS, releasing, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   init_answer_latency_trace();
@@ -54366,6 +54372,7 @@ var init_child_visibility = __esm(() => {
     }
   };
   askReads = new WeakMap;
+  ASK_LEDGER_READS = { perRead: true };
   releasing = new WeakSet;
   HIDDEN = { visible: false, gone: false };
 });

@@ -209,39 +209,42 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     }
   });
 
-  test('a status snapshot may reuse the hidden copies for a while; other reads never do', async () => {
+  // A store the read pool reads never walks the hidden copies inside the
+  // status call: on the loop that walk was the gate's top statement (16 Nov).
+  // The call serves the last count and a new one is read in turns, on the
+  // read worker, whatever age the caller allows.
+  test('a status call never reads the hidden copies itself; a fresh count follows in turns', async () => {
     const dir = workspace();
     const tiered = await raised(dir);
     const store = tiered.stores.internal!;
     const ledger = tiered.ledger;
+    let inCall = 0;
+    let inTurns = 0;
     const real = ledger.corpusCopyIdentities.bind(ledger);
-    let reads = 0;
-    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { inCall += 1; return real(...args); }) as typeof real;
     const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
-    // The paged form (#858) reads the hidden copies too.
-    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { inCall += 1; return realSteps(...args); }) as typeof realSteps;
+    const realReads = ledger.corpusCopyIdentityReads.bind(ledger);
+    ledger.corpusCopyIdentityReads = ((...args: Parameters<typeof realReads>) => { inTurns += 1; return realReads(...args); }) as typeof realReads;
     try {
-      const readsFor = (options?: { countsMaxAgeMs: number }): number => {
-        const before = reads;
+      const statusThenTurns = async (options?: { countsMaxAgeMs: number }): Promise<{ call: number; turns: number }> => {
+        const [callBefore, turnsBefore] = [inCall, inTurns];
         store.status(undefined, options);
-        return reads - before;
+        const call = inCall - callBefore;
+        for (let i = 0; i < 40 && inTurns === turnsBefore; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+        return { call, turns: inTurns - turnsBefore };
       };
-      const fresh = readsFor({ countsMaxAgeMs: 60_000 });
-      expect(fresh).toBeGreaterThan(0);
-      // Writes on both sides, as an importing store has between snapshots.
-      ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
-      store.advanceItemVersion(identityOf('garden'));
-      // The snapshot reuses what it read; it still checks unreadable items
-      // through its own memo, so it reads no copy identities at all.
-      expect(readsFor({ countsMaxAgeMs: 60_000 })).toBe(0);
-      // A read that states no age sees the change at once.
-      expect(readsFor()).toBeGreaterThan(0);
-      // An age of zero is no allowance.
-      store.advanceItemVersion(identityOf('garden'));
-      expect(readsFor({ countsMaxAgeMs: 0 })).toBeGreaterThan(0);
+      for (const options of [{ countsMaxAgeMs: 60_000 }, undefined, { countsMaxAgeMs: 0 }]) {
+        ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
+        store.advanceItemVersion(identityOf('garden'));
+        const seen = await statusThenTurns(options);
+        expect(seen.call).toBe(0);
+        expect(seen.turns).toBeGreaterThan(0);
+      }
     } finally {
       ledger.corpusCopyIdentities = real;
       ledger.corpusCopyIdentitiesSteps = realSteps;
+      ledger.corpusCopyIdentityReads = realReads;
       tiered.close();
     }
   });
@@ -266,7 +269,11 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
         store.status(undefined, { countsMaxAgeMs: 5 });
         return reads - before;
       };
-      expect(readsFor()).toBeGreaterThan(0);
+      // The first call too reads nothing itself; the set is built in turns.
+      const first = reads;
+      expect(readsFor()).toBe(0);
+      for (let i = 0; i < 40 && reads === first; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(reads).toBeGreaterThan(first);
       ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
       await new Promise((resolve) => setTimeout(resolve, 20));
       // Expired: the call itself reads nothing and answers from the older set.

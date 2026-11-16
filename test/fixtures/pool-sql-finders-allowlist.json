@@ -1,0 +1,95 @@
+{
+  "note": "Scans still on a store's read workers (test/pool-sql-finders-guard.test.ts). Shrink only: make one a seek, then rewrite.",
+  "entries": [
+    {
+      "lane": "background",
+      "site": "authorCoverageOffThread@local-index.ts<<anonymous>@background-loop-named-calls.test.ts",
+      "table": "items",
+      "reason": "to page by key (SCAN items USING INDEX sqlite_autoindex_items_1: SELECT provider, COUNT(*) AS items, SUM(CASE WHEN (sender_id IS NULL OR TRIM(sender_id) = '') AND (sender_label IS NULL OR TRIM(sender_label) = '') THEN 1 ELSE )"
+    },
+    {
+      "lane": "background",
+      "site": "embeddingBacklogEstimateOffThread@local-index.ts<<anonymous>@background-loop-named-calls.test.ts",
+      "table": "chunks",
+      "reason": "to page by key (SCAN c: SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars FROM chunks c JOIN items i ON i.item_pk = c.item_pk LEFT JOIN chunk_embeddings e O)"
+    },
+    {
+      "lane": "background",
+      "site": "imageContentOutsidePrivateRowsOffThread@local-index.ts<runPassOffThread@loop-pass.ts",
+      "table": "items",
+      "reason": "to page by key (SCAN i: SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id FROM items i WHERE i.tombstoned = 0 AND LOWER(i.mime_type) LIKE 'i)"
+    },
+    {
+      "lane": "background",
+      "site": "pdfExtractionBacklogOffThread@local-index.ts<<anonymous>@background-loop-named-calls.test.ts",
+      "table": "items",
+      "reason": "to page by key (SCAN i: SELECT SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted, COALESCE(SUM(chars), 0) AS chars )"
+    },
+    {
+      "lane": "background",
+      "site": "reconcileTotals@local-index.ts<<anonymous>@store-totals-drift.test.ts",
+      "table": "chunk_embeddings",
+      "reason": "to page by key (SCAN chunk_embeddings USING COVERING INDEX idx_connector_store_chunk_embeddings_model: SELECT (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items, (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items, (SELECT COUNT(*) FROM)"
+    },
+    {
+      "lane": "background",
+      "site": "reconcileTotals@local-index.ts<<anonymous>@store-totals-drift.test.ts",
+      "table": "chunks",
+      "reason": "to page by key (SCAN chunks USING COVERING INDEX sqlite_autoindex_chunks_1: SELECT (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items, (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items, (SELECT COUNT(*) FROM)"
+    },
+    {
+      "lane": "background",
+      "site": "reconcileTotals@local-index.ts<<anonymous>@store-totals-drift.test.ts",
+      "table": "items",
+      "reason": "to page by key (SCAN items: SELECT (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items, (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items, (SELECT COUNT(*) FROM)"
+    },
+    {
+      "lane": "background",
+      "site": "reconcileTotals@local-index.ts<<anonymous>@store-totals-drift.test.ts",
+      "table": "sync_runs",
+      "reason": "to page by key (SCAN sync_runs USING COVERING INDEX idx_sync_runs_connector_state: SELECT (SELECT COUNT(*) FROM items WHERE tombstoned = 0) AS items, (SELECT COUNT(*) FROM items WHERE tombstoned <> 0) AS tombstoned_items, (SELECT COUNT(*) FROM)"
+    },
+    {
+      "lane": "background",
+      "site": "runPassOffThread@loop-pass.ts<settleStoredItems@sniffer-service.ts",
+      "table": "tier_items",
+      "reason": "to page by key (SCAN tier_items USING INDEX sqlite_autoindex_tier_items_1: SELECT * FROM ( SELECT * FROM tier_items ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ? ) WHERE routed = 1 AND content_read = 0 AN)"
+    },
+    {
+      "lane": "background",
+      "site": "runPassOffThread@loop-pass.ts<settleStoredItems@tiered-store-set.ts",
+      "table": "tier_items",
+      "reason": "to page by key (SCAN tier_items USING INDEX sqlite_autoindex_tier_items_1: SELECT * FROM ( SELECT * FROM tier_items ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ? ) WHERE routed = 1 AND content_pending = 1)"
+    },
+    {
+      "lane": "background",
+      "site": "runPassOffThread@loop-pass.ts",
+      "table": "tier_items",
+      "reason": "to page by key (SCAN i USING INDEX tier_items_secrets: SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id, EXISTS ( SELECT 1 FROM tier_copies c WHERE c.provider = i.provider AND c.account_sco)"
+    },
+    {
+      "lane": "background",
+      "site": "runPassOffThread@loop-pass.ts",
+      "table": "tier_overrides",
+      "reason": "to page by key (SCAN o USING INDEX sqlite_autoindex_tier_overrides_1: SELECT i.*, o.override_json AS override_json FROM tier_overrides o CROSS JOIN tier_items i ON i.provider = o.provider AND i.account_scope = o.account_scope AND )"
+    },
+    {
+      "lane": "background",
+      "site": "sweepSecretsFloor@tier-secrets-floor-sweep.ts<settleStoredItems@tiered-store-set.ts",
+      "table": "tier_items",
+      "reason": "to page by key (SCAN tier_items USING INDEX sqlite_autoindex_tier_items_1: SELECT * FROM tier_items WHERE routed = 1 AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)) ORDER BY provider, acc)"
+    },
+    {
+      "lane": "shared",
+      "site": "recoverMissingQuestions@sniffer-service.ts<tick@sniffer-service.ts",
+      "table": "tier_items",
+      "reason": "to page by key (SCAN tier_items: SELECT rowid FROM tier_items WHERE content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question\"') > 0 AND EXISTS (SELECT 1 FROM json_each(reasons_json)"
+    },
+    {
+      "lane": "shared",
+      "site": "runAutoMoves@sniffer-service.ts<drainMoves@sniffer-service.ts",
+      "table": "tier_items",
+      "reason": "to page by key (SCAN tier_items USING INDEX tier_items_move_order: SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving' AND ((CASE target_metadata_tier WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN)"
+    }
+  ]
+}
