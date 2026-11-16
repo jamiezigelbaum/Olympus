@@ -1,4 +1,6 @@
-import { updateSovereigntyConfigFile, loadSovereigntyPreset, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
+import { updateSovereigntyConfigFile, validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
+// Inlined when the machine agent is bundled: the VM has no config folder beside it (Mac leg 43773123900).
+import localOnlyPreset from '../../config/sovereignty/presets/local-only.json' with { type: 'json' };
 import { FIXTURE_JUDGE_MODEL, FIXTURE_JUDGE_PORT } from './fixture-judge.ts';
 
 /** The documented owner policy-file route (docs/SOVEREIGNTY_CONFIG.md, privacy sniffer).
@@ -9,7 +11,7 @@ export function saveFixtureJudge(path: string, expected: SovereigntyConfig): voi
     // prepare's historical no-sensitive choice has no private pool. Give the judge
     // a local eligible pool while keeping its retrieval/migration setting intact.
     if (next.routes.secure_local?.mode === 'disabled') {
-      const preset = loadSovereigntyPreset('local-only');
+      const preset = validateSovereigntyConfig(structuredClone(localOnlyPreset) as unknown as SovereigntyConfig);
       next.modelProfiles['local-source-answer'] ??= preset.modelProfiles['local-source-answer']!;
       next.routes.secure_local = structuredClone(preset.routes.secure_local!);
     }
