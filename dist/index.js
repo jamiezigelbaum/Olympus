@@ -9881,7 +9881,7 @@ var init_engine_children = __esm(() => {
 });
 
 // src/core/data-root-snapshot.ts
-var SPACE_MARGIN_BYTES, NOT_CLONED;
+var SPACE_MARGIN_BYTES, ROOT_KEPT, CAPTURE_KEPT;
 var init_data_root_snapshot = __esm(() => {
   init_atomic_file();
   init_engine_children();
@@ -9889,7 +9889,8 @@ var init_data_root_snapshot = __esm(() => {
   init_operation_error();
   init_source_placement();
   SPACE_MARGIN_BYTES = 64 * 1024 ** 2;
-  NOT_CLONED = new Set(["models", "backup-staging"]);
+  ROOT_KEPT = new Set(["models", "backup-staging", "tools"]);
+  CAPTURE_KEPT = new Set(["versions", "tools"]);
 });
 
 // src/core/mac-engine-daemon.ts
