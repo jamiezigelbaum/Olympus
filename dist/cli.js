@@ -101474,19 +101474,21 @@ function builtInAnalystMaxTokensForChars(chars) {
     return 1024;
   return Math.max(512, Math.ceil(chars / 2));
 }
-function withBuiltInFallback(primary, builtIn) {
+function withBuiltInFallback(primary, builtIn, seen = { answered: false }) {
   const analyst = withEvidenceFormatOf({
     async analyze(pack, options) {
       try {
-        return await primary.analyze(pack, options);
+        const result = await primary.analyze(pack, options);
+        seen.answered = true;
+        return result;
       } catch (error) {
-        if (!isLocalServiceDown(error))
+        if (!isLocalServiceDown(error) || seen.answered)
           throw error;
         return builtIn.analyze(pack, options);
       }
     }
   }, primary, builtIn);
-  return registerLocalAnalystFallback(analyst, (fit) => withBuiltInFallback(fit(primary), fit(builtIn)));
+  return registerLocalAnalystFallback(analyst, (fit) => withBuiltInFallback(fit(primary), fit(builtIn), seen));
 }
 function isLocalServiceDown(error) {
   return error instanceof OperationError && error.code === "argus_unreachable" && !/timed out/i.test(error.message);
@@ -244778,6 +244780,7 @@ function createLocalPrivateRoute(input) {
   const now = input.now ?? Date.now;
   const models = new Map;
   let checked;
+  const seenUp = new Set;
   return async () => {
     let member;
     try {
@@ -244805,11 +244808,13 @@ function createLocalPrivateRoute(input) {
         up = false;
       }
       checked = { id: member.id, atMs: now(), up };
+      if (up)
+        seenUp.add(member.id);
     }
     if (!checked.up) {
       let standsIn = false;
       try {
-        standsIn = input.builtInStandsIn?.(member) === true;
+        standsIn = !seenUp.has(member.id) && input.builtInStandsIn?.(member) === true;
       } catch {
         standsIn = false;
       }
