@@ -376,3 +376,18 @@ test('a proportional trim keeps every pick that still has room to say something,
   expect(new TextEncoder().encode(wide.join('')).length).toBeLessThanOrEqual(1_001);
   expect(wide.join('')).not.toContain('�');
 });
+
+test('a centre trim keeps the middle of a cut passage, inside its bytes and on whole characters', async () => {
+  const { clipTextAroundCentre, clipChunksInProportion } = await import('../src/workers/source-index/analyst-answer.ts');
+  const passage = 'a'.repeat(400) + 'MATCH' + 'b'.repeat(400);
+  const kept = clipTextAroundCentre(passage, 105);
+  expect(kept).toContain('MATCH');
+  expect(kept.length).toBe(105);
+  expect(clipTextAroundCentre('short', 100)).toBe('short');
+  expect(clipTextAroundCentre('anything', 0)).toBe('');
+  const wide = clipTextAroundCentre('é'.repeat(300), 201);
+  expect(new TextEncoder().encode(wide).length).toBe(200);
+  const picks = clipChunksInProportion([passage, passage], 400, true);
+  expect(picks).toHaveLength(2);
+  for (const pick of picks) expect(pick).toContain('MATCH');
+});
