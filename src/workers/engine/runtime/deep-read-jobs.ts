@@ -27,7 +27,9 @@
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Analyst, EvidenceCandidate } from '../../../core/contracts.ts';
+import type { Analyst, AnalystResult, EvidenceCandidate } from '../../../core/contracts.ts';
+import { DeepReadRefused } from '../../../core/deep-read-refused.ts';
+export { DeepReadRefused } from '../../../core/deep-read-refused.ts';
 import { runDeepRead, planDeepReadSections, type DeepReadProgress } from '../../../core/deep-read.ts';
 import { providerSourceLabel } from '../../../core/remote-result.ts';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../../core/source-index/types.ts';
@@ -105,11 +107,8 @@ export interface DeepReadJobView {
   choiceSummary: string;
 }
 
-export class DeepReadRefused extends Error {
-  constructor(readonly code: 'no_private_model' | 'model_unavailable' | 'not_found' | 'nothing_readable' | 'invalid_set', message: string) { super(message); }
-}
 
-interface Job { view: DeepReadJobView; controller: AbortController }
+interface Job { view: DeepReadJobView; controller: AbortController; completion?: Promise<AnalystResult | undefined> }
 
 const INBOX_CONNECTION = '@local:You';
 /** How often a read stepping aside looks again whether judging is done. */
@@ -489,7 +488,8 @@ export function createDeepReadJobs(options: {
         ? [`Only the days that mention this were read: ${choices.relevantDays.days} of ${choices.relevantDays.totalDays} days, ${choices.relevantDays.messageCount} of ${allMessages} messages. ${allMessages - choices.relevantDays.messageCount} messages on other days were not read.`]
         : [];
       const controller = new AbortController();
-      jobs.set(id, { view, controller });
+      const job: Job = { view, controller };
+      jobs.set(id, job);
       while (jobs.size > MAX_JOBS_KEPT) jobs.delete(jobs.keys().next().value!);
       const started = now().getTime();
       let lastCallMs = 0;
@@ -512,7 +512,7 @@ export function createDeepReadJobs(options: {
         waitedMs += callStarted - waitStarted;
       };
       // Background priority on the shared model: the owner's own asks go first.
-      void runBackgroundInference(() => runDeepRead({
+      job.completion = runBackgroundInference(() => runDeepRead({
         question, candidates: reading, corpusIds, analyst: model.analyst, promptBytes: model.promptBytes, evidenceFormat: 'compact',
         signal: controller.signal, coverageNotes,
         beforeModelCall: stepAside,
@@ -531,6 +531,7 @@ export function createDeepReadJobs(options: {
         if (inboxId) view.inboxId = inboxId;
         view.state = 'done'; view.finishedAt = now().toISOString(); delete view.estimateSecondsLeft;
         if (!inboxId) view.failure = 'The answer could not be saved to Private answers.';
+        return result;
       }, (error: unknown) => {
         view.state = controller.signal.aborted ? 'cancelled' : 'failed';
         view.finishedAt = now().toISOString(); delete view.estimateSecondsLeft;
@@ -538,8 +539,13 @@ export function createDeepReadJobs(options: {
           view.failure = 'The private model stopped before the read finished.';
           options.log?.(`[deep-read] ${id} failed: ${error instanceof Error ? error.name : 'error'}`);
         }
+        return undefined;
       });
       return { ...view };
+    },
+    /** In-process consumers can await the same background job without a polling clock. */
+    async wait(id: string): Promise<AnalystResult | undefined> {
+      return jobs.get(id)?.completion;
     },
     status(id?: string): DeepReadJobView[] {
       const all = [...jobs.values()].map(job => ({ ...job.view })).reverse();

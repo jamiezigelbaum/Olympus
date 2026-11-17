@@ -3,7 +3,7 @@ import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/
 import { sourceSupportDetails } from '../dashboard/source-failure.ts';
 import { totalmem } from 'node:os';
 import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS, privateAnswerOptions } from '../../core/privacy-language.ts';
-import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
+import { REMOTE_SECRET_NOTE, remoteDeepReadFields } from '../../core/remote-result.ts';
 import { secretLabelsInText } from '../../core/opsec.ts';
 import { parseFollowUp, type SourceAnswerFollowUp } from '../../core/follow-up.ts';
 import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from '../../core/app-release-capture.ts';
@@ -856,7 +856,8 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   const usedPrivate = synthesis?.private_context_used === true
     || (typeof synthesis?.secure_local_items_consulted === 'number' && synthesis.secure_local_items_consulted > 0);
   if (usedPrivate) privateMatched = true;
-  const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record.answer.replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER);
+  const { ordinaryAnswer, remoteNotice, job } = remoteDeepReadFields(record, record.answer);
+  const answer = (usedPrivate ? PRIVATE_ANSWER_WITHHELD : ordinaryAnswer.replace(UNSAFE_CHARS, '').slice(0, MAX_ANSWER - remoteNotice.length)) + remoteNotice;
   const shownCitations = usedPrivate ? [] : citations;
   const consulted = typeof synthesis?.secure_local_items_consulted === 'number' && Number.isFinite(synthesis.secure_local_items_consulted)
     ? Math.max(0, Math.floor(synthesis.secure_local_items_consulted)) : 0;
@@ -884,6 +885,7 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
     citations: shownCitations,
     ...(notes.length > 0 ? { notes } : {}),
     ...(followUp ? { follow_up: followUp } : {}),
+    ...(job ? { deep_read: job } : {}),
   };
   return withPrivateAnswerMeta({ content: [{ type: 'text', text: textParts.join('\n') }], structuredContent }, options.privateMatch);
 }

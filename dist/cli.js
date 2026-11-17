@@ -54673,6 +54673,28 @@ function pendingOutput(raw) {
     message: REMOTE_PENDING_MESSAGE
   };
 }
+function remoteDeepReadFields(record, answer) {
+  const localNotice = typeof record.deep_read_notice === "string" ? record.deep_read_notice : undefined;
+  const ordinaryAnswer = localNotice && answer.endsWith(`
+
+${localNotice}`) ? answer.slice(0, -localNotice.length - 2) : answer;
+  const deepRead = asRecord7(record.deep_read);
+  const job = deepRead && typeof deepRead.id === "string" && /^dr_[A-Za-z0-9_-]+$/.test(deepRead.id) && typeof deepRead.sectionsTotal === "number" && Number.isSafeInteger(deepRead.sectionsTotal) && deepRead.sectionsTotal >= 0 ? { id: deepRead.id, sectionsTotal: deepRead.sectionsTotal } : undefined;
+  const refusalReasons = {
+    no_private_model: "No private model is configured.",
+    model_unavailable: "The private model is unavailable.",
+    not_found: "The item is no longer available here.",
+    nothing_readable: "The item has no readable content here.",
+    invalid_set: "The item could not be selected."
+  };
+  const reason = typeof record.deep_read_refused === "string" && Object.hasOwn(refusalReasons, record.deep_read_refused) ? refusalReasons[record.deep_read_refused] : "The full read could not be started.";
+  const remoteNotice = job ? `
+
+Reading the full item for this question; the answer follows in Private answers. Poll source_deep_read_status with the deep_read id.` : localNotice ? `
+
+The full item was not read: ${reason} Use source_deep_read to request the full read.` : "";
+  return { ordinaryAnswer, remoteNotice, job };
+}
 function sourceAnswerOutput(raw, options) {
   const record = asRecord7(raw);
   if (!record || typeof record.answer !== "string" || !Array.isArray(record.evidence)) {
@@ -54686,9 +54708,10 @@ function sourceAnswerOutput(raw, options) {
       return withheldAnswer(recheck.withhold, evidence.length);
     dropped = recheck.dropped;
   }
-  if (isSecretLike(record.answer))
+  const { ordinaryAnswer, remoteNotice, job } = remoteDeepReadFields(record, record.answer);
+  if (isSecretLike(ordinaryAnswer))
     return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
-  const answer = scannedText(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER, "multiline");
+  const answer = scannedText(withoutSecretLocationCoverageNotes(ordinaryAnswer), MAX_ANSWER, "multiline");
   if (answer.secret)
     return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
   const citations = [];
@@ -54710,7 +54733,8 @@ Coverage notes:
   return {
     kind: "source_answer",
     status: "answered",
-    answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
+    answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length - remoteNotice.length) + coverageSuffix + remoteNotice,
+    ...job ? { deep_read: job } : {},
     citations,
     ...followUp ? { follow_up: followUp } : {}
   };
@@ -55300,7 +55324,8 @@ var init_remote_result = __esm(() => {
       status: { enum: ["answered", "withheld"] },
       answer: { type: "string", maxLength: MAX_ANSWER },
       citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
-      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
+      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN },
+      deep_read: { type: "object", additionalProperties: false, required: ["id", "sectionsTotal"], properties: { id: { type: "string", pattern: "^dr_[A-Za-z0-9_-]+$" }, sectionsTotal: { type: "integer", minimum: 0 } } }
     }
   };
   ANONYMOUS_ANSWERED_SCHEMA = {
@@ -106762,6 +106787,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const routedHits = input.selectedItems?.length ? routed.hits : readWide && !reranker && !wide ? visibleHits.slice(0, input.maxResults) : visibleHits;
   const candidates = [];
   const candidateCorpusIds = [];
+  const truncatedCandidateIndexes = [];
   const candidateHitIds = [];
   const candidateExtractionGapIndexes = [];
   const extractionGaps = laneCutShortGaps(routed.degradations, input);
@@ -106906,6 +106932,8 @@ async function buildPreparedEvidencePackDetailed(input) {
       contentPrivateCandidateIndexes.push(candidates.length);
     else if (!provider || !content || content.chunks.length === 0)
       unreadCandidates += 1;
+    if (content?.truncated || candidate.chunks.join("").length < chunks.join("").length)
+      truncatedCandidateIndexes.push(candidates.length);
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
     candidateHitIds.push(routedHitCandidateId(hit));
@@ -106940,6 +106968,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   return {
     pack: wide ? markReadWidePack({ question: input.question, candidates: labelled.candidates, coverage, builtAt }, readMatchingIndexes.map((index) => labelled.candidates[index])) : { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
+    truncatedCandidateIndexes,
     candidateExtractionGapIndexes,
     ...routed.recencySeats ? { recencySeats: routed.recencySeats } : {},
     laneAudits,
@@ -107388,6 +107417,59 @@ var init_evidence_pack = __esm(() => {
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
     [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
   ]);
+});
+
+// src/core/deep-read-refused.ts
+var DeepReadRefused;
+var init_deep_read_refused = __esm(() => {
+  DeepReadRefused = class DeepReadRefused extends Error {
+    code;
+    constructor(code, message) {
+      super(message);
+      this.code = code;
+    }
+  };
+});
+
+// src/workers/source-index/deep-read-trigger.ts
+async function triggerDeepRead(detail, result, jobs) {
+  if (result.unanswered.length === 0 && result.citations.length > 0)
+    return {};
+  const index = detail.truncatedCandidateIndexes?.find((seat) => seat < RESERVED_HEAD_SEATS);
+  if (index === undefined)
+    return {};
+  const candidate = detail.pack.candidates[index];
+  const corpusId = detail.candidateCorpusIds[index];
+  if (!candidate || !corpusId)
+    return {};
+  const item = candidate.provenance.sourceItem;
+  const title = candidate.provenance.citation?.title ?? "the document";
+  const selected = {
+    corpus_id: corpusId,
+    family: item.family,
+    provider: item.provider,
+    account_scope: item.accountScope,
+    provider_item_id: item.providerItemId,
+    local_item_id: item.localItemId,
+    ...item.sourceVersion ? { source_version: item.sourceVersion } : {},
+    title
+  };
+  try {
+    if (!jobs)
+      throw new DeepReadRefused("no_private_model", "Deep read needs your own private model. Set one up in Settings, Models.");
+    const view = await jobs.start(detail.pack.question, { selected_item: selected, whole: "item" });
+    return {
+      job: { id: view.id, sectionsTotal: view.sectionsTotal },
+      notice: `Reading all of "${title}" for this question: ${view.sectionsDone} of ${view.sectionsTotal} sections; the answer follows in Private answers.`
+    };
+  } catch (error) {
+    if (!(error instanceof DeepReadRefused))
+      throw error;
+    return { refused: error.code, notice: `"${title}" was not read in full: ${error.message} Use source_deep_read to request the full read.` };
+  }
+}
+var init_deep_read_trigger = __esm(() => {
+  init_deep_read_refused();
 });
 
 // src/workers/source-index/analyst-pool.ts
@@ -107905,6 +107987,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
     const releaseGateMs = Date.now() - releaseGateStartedAt;
     recordSourceAnswerReleaseDecision(decision.decision);
     const released = decision.decision === "allow" || decision.decision === "redact";
+    const deepRead = await triggerDeepRead(detail, analystResult, options.deepRead?.());
+    const deepReadNotice = released ? deepRead.notice : deepRead.notice ? remoteDeepReadFields({ deep_read: deepRead.job, deep_read_notice: deepRead.notice, deep_read_refused: deepRead.refused }, "").remoteNotice.trim() : undefined;
     const totalLatencyMs = Date.now() - startedAt;
     const phaseTimings = {
       lane_setup_ms: laneSetupMs,
@@ -107924,7 +108008,12 @@ function createAnalystSourceIndexAnswerHandler(options) {
       ...followUp?.names ?? []
     ], constraints: releaseConstraints });
     return {
-      answer,
+      answer: deepReadNotice ? `${answer}
+
+${deepReadNotice}` : answer,
+      ...deepRead.job ? { deep_read: deepRead.job } : {},
+      ...deepReadNotice ? { deep_read_notice: deepReadNotice } : {},
+      ...deepRead.refused ? { deep_read_refused: deepRead.refused } : {},
       evidence: released && !readingOnly ? releasedEvidence(analystResult.citations, detail, releaseSecureContent) : [],
       ...(detail.secretLocations ?? []).length > 0 ? {
         secret_locations: (detail.secretLocations ?? []).map((location) => ({
@@ -109837,6 +109926,7 @@ var init_analyst_answer = __esm(() => {
   init_source_corpus_registry();
   init_keyword_context();
   init_router();
+  init_deep_read_trigger();
   init_source_model_policy();
   init_sovereignty();
   init_types();
@@ -145526,6 +145616,9 @@ function parseSourceIndexAnswerResult(value) {
   return {
     answer,
     evidence: value.evidence,
+    ...typeof value.deep_read_notice === "string" ? { deep_read_notice: value.deep_read_notice } : {},
+    ...typeof value.deep_read_refused === "string" ? { deep_read_refused: value.deep_read_refused } : {},
+    ...value.deep_read && typeof value.deep_read === "object" && typeof value.deep_read.id === "string" && Number.isSafeInteger(value.deep_read.sectionsTotal) ? { deep_read: value.deep_read } : {},
     audit: {
       searched_corpora: audit.searched_corpora.filter((corpus) => typeof corpus === "string"),
       skipped_corpora: audit.skipped_corpora,
@@ -192630,7 +192723,8 @@ ${readFooter(view, result)}` } : {},
       };
       const coverageNotes = read === "relevant_days" && choices.relevantDays ? [`Only the days that mention this were read: ${choices.relevantDays.days} of ${choices.relevantDays.totalDays} days, ${choices.relevantDays.messageCount} of ${allMessages} messages. ${allMessages - choices.relevantDays.messageCount} messages on other days were not read.`] : [];
       const controller = new AbortController;
-      jobs.set(id, { view, controller });
+      const job = { view, controller };
+      jobs.set(id, job);
       while (jobs.size > MAX_JOBS_KEPT)
         jobs.delete(jobs.keys().next().value);
       const started = now().getTime();
@@ -192657,7 +192751,7 @@ ${readFooter(view, result)}` } : {},
         callStarted = now().getTime();
         waitedMs += callStarted - waitStarted;
       };
-      runBackgroundInference(() => runDeepRead({
+      job.completion = runBackgroundInference(() => runDeepRead({
         question,
         candidates: reading,
         corpusIds,
@@ -192687,6 +192781,7 @@ ${readFooter(view, result)}` } : {},
         delete view.estimateSecondsLeft;
         if (!inboxId)
           view.failure = "The answer could not be saved to Private answers.";
+        return result;
       }, (error) => {
         view.state = controller.signal.aborted ? "cancelled" : "failed";
         view.finishedAt = now().toISOString();
@@ -192695,8 +192790,12 @@ ${readFooter(view, result)}` } : {},
           view.failure = "The private model stopped before the read finished.";
           options.log?.(`[deep-read] ${id} failed: ${error instanceof Error ? error.name : "error"}`);
         }
+        return;
       });
       return { ...view };
+    },
+    async wait(id) {
+      return jobs.get(id)?.completion;
     },
     status(id) {
       const all = [...jobs.values()].map((job) => ({ ...job.view })).reverse();
@@ -192711,19 +192810,14 @@ ${readFooter(view, result)}` } : {},
     }
   };
 }
-var DeepReadRefused, INBOX_CONNECTION = "@local:You", JUDGE_LOOK_MS = 2000, JUDGE_STEP_ASIDE_MIN_MS = 5000, MAX_JOBS_KEPT = 50, FULL_READ_DEFAULT_SECONDS = 3600, DEEP_READ_DAY_HITS = 200;
+var INBOX_CONNECTION = "@local:You", JUDGE_LOOK_MS = 2000, JUDGE_STEP_ASIDE_MIN_MS = 5000, MAX_JOBS_KEPT = 50, FULL_READ_DEFAULT_SECONDS = 3600, DEEP_READ_DAY_HITS = 200;
 var init_deep_read_jobs = __esm(() => {
+  init_deep_read_refused();
+  init_deep_read_refused();
   init_deep_read();
   init_remote_result();
   init_local_private_answers();
   init_answer_activity();
-  DeepReadRefused = class DeepReadRefused extends Error {
-    code;
-    constructor(code, message) {
-      super(message);
-      this.code = code;
-    }
-  };
 });
 
 // src/core/computer-identity.ts
@@ -253412,7 +253506,8 @@ function answerToolResult(raw, options = {}) {
   const usedPrivate = synthesis?.private_context_used === true || typeof synthesis?.secure_local_items_consulted === "number" && synthesis.secure_local_items_consulted > 0;
   if (usedPrivate)
     privateMatched = true;
-  const answer = usedPrivate ? PRIVATE_ANSWER_WITHHELD : record.answer.replace(UNSAFE_CHARS2, "").slice(0, MAX_ANSWER2);
+  const { ordinaryAnswer, remoteNotice, job } = remoteDeepReadFields(record, record.answer);
+  const answer = (usedPrivate ? PRIVATE_ANSWER_WITHHELD : ordinaryAnswer.replace(UNSAFE_CHARS2, "").slice(0, MAX_ANSWER2 - remoteNotice.length)) + remoteNotice;
   const shownCitations = usedPrivate ? [] : citations;
   const consulted = typeof synthesis?.secure_local_items_consulted === "number" && Number.isFinite(synthesis.secure_local_items_consulted) ? Math.max(0, Math.floor(synthesis.secure_local_items_consulted)) : 0;
   noteReleasedItems(usedPrivate ? [] : released, privateDropped + consulted, usedPrivate);
@@ -253438,7 +253533,8 @@ function answerToolResult(raw, options = {}) {
     answer,
     citations: shownCitations,
     ...notes.length > 0 ? { notes } : {},
-    ...followUp ? { follow_up: followUp } : {}
+    ...followUp ? { follow_up: followUp } : {},
+    ...job ? { deep_read: job } : {}
   };
   return withPrivateAnswerMeta({ content: [{ type: "text", text: textParts.join(`
 `) }], structuredContent }, options.privateMatch);
@@ -273153,6 +273249,7 @@ ${key}`;
     const sourceReranker = createBuiltInRerankerResolver();
     sourceReranker();
     return createAnalystSourceIndexAnswerHandler({
+      deepRead: () => deepReadJobs,
       requestOnDemandRead: requestFileRead,
       inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes, pack, request, corpusIds }),
       analyst: defaultLocalAnalyst,

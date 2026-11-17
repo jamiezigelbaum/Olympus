@@ -62,6 +62,18 @@ re-runs inside the chosen scope. A search cut short is coverage, not weak. The
 bars are re-calibrated with `bun eval/run-passages.ts --narrow
 source|span|conversation`.
 
+Unanswered long files (1.5 item 7): when the Analyst leaves `unanswered`
+non-empty or cites nothing, Ask starts one existing deep-read job for the
+first cut file among the three reserved head seats. Cut-seat indexes ride the
+build detail; no question or answer text decides the trigger. The ordinary
+answer carries progress and `deep_read: {id, sectionsTotal}`; the full answer
+lands in Private answers. Refusals name the unread file and offer
+`source_deep_read`. Remote surfaces receive only the handle and counts.
+`eval/run-passages.ts --deep-read-trigger` enables this same trigger for the
+whole run, waits for each job without a timeout, and records its sections,
+time, expected citation and meaning verdict beside the ordinary answer.
+The subset L proof is owned by the setup thread (ops#151).
+
 Rules for this release:
 
 - Recent requests from AI apps (#1266): the Agents panel and

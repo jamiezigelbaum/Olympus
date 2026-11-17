@@ -251,6 +251,9 @@ export interface SourceIndexAnswerResult {
   evidence: unknown[];
   secret_locations?: SourceSecretLocation[];
   follow_up?: SourceAnswerFollowUp;
+  deep_read?: { id: string; sectionsTotal: number };
+  deep_read_notice?: string;
+  deep_read_refused?: string;
   audit: {
     searched_corpora: string[];
     skipped_corpora: unknown[];
@@ -1268,6 +1271,10 @@ function parseSourceIndexAnswerResult(value: Record<string, unknown>): SourceInd
   return {
     answer,
     evidence: value.evidence,
+    ...(typeof value.deep_read_notice === 'string' ? { deep_read_notice: value.deep_read_notice } : {}),
+    ...(typeof value.deep_read_refused === 'string' ? { deep_read_refused: value.deep_read_refused } : {}),
+    ...(value.deep_read && typeof value.deep_read === 'object' && typeof (value.deep_read as Record<string, unknown>).id === 'string' && Number.isSafeInteger((value.deep_read as Record<string, unknown>).sectionsTotal)
+      ? { deep_read: value.deep_read as { id: string; sectionsTotal: number } } : {}),
     audit: {
       searched_corpora: audit.searched_corpora.filter((corpus): corpus is string => typeof corpus === 'string'),
       skipped_corpora: audit.skipped_corpora,

@@ -282,6 +282,8 @@ export interface SelectedEvidenceItem {
 export interface EvidencePackBuildDetail {
   pack: EvidencePack;
   candidateCorpusIds: readonly string[];
+  // Final seat indexes whose hydrated text was cut for length.
+  truncatedCandidateIndexes?: readonly number[];
   // Index-aligned with candidates; indexes refer to pack.coverage.extractionGaps.
   // Unowned gaps describe the corpus/policy and survive every prompt fit.
   candidateExtractionGapIndexes?: readonly (readonly number[])[];
@@ -421,6 +423,7 @@ async function buildPreparedEvidencePackDetailed(
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
+  const truncatedCandidateIndexes: number[] = [];
   const candidateHitIds: SourceIndexCandidateId[] = [];
   const candidateExtractionGapIndexes: number[][] = [];
   const extractionGaps: string[] = laneCutShortGaps(routed.degradations, input);
@@ -604,6 +607,7 @@ async function buildPreparedEvidencePackDetailed(
     if (content?.namesOnly === true) namesOnlyCandidateIndexes.push(candidates.length);
     else if (content?.contentPrivate === true) contentPrivateCandidateIndexes.push(candidates.length);
     else if (!provider || !content || content.chunks.length === 0) unreadCandidates += 1;
+    if (content?.truncated || candidate.chunks.join('').length < chunks.join('').length) truncatedCandidateIndexes.push(candidates.length);
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
     candidateHitIds.push(routedHitCandidateId(hit));
@@ -672,6 +676,7 @@ async function buildPreparedEvidencePackDetailed(
     pack: wide ? markReadWidePack({ question: input.question, candidates: labelled.candidates, coverage, builtAt }, readMatchingIndexes.map(index => labelled.candidates[index]!))
       : { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
+    truncatedCandidateIndexes,
     candidateExtractionGapIndexes,
     ...(routed.recencySeats ? { recencySeats: routed.recencySeats } : {}),
     laneAudits,

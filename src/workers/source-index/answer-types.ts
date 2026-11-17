@@ -94,6 +94,9 @@ export interface SourceIndexAnswerResult {
   // Present only when the search was weak (core/follow-up.ts): one question
   // built from what was found's metadata, with options to search again inside.
   follow_up?: SourceAnswerFollowUp;
+  deep_read?: { id: string; sectionsTotal: number };
+  deep_read_notice?: string;
+  deep_read_refused?: string;
   audit: {
     on_demand_limits?: OnDemandReadLimit[];
     searched_corpora: string[];
