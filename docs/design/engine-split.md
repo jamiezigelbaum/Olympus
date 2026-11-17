@@ -320,7 +320,24 @@ the cause).
   switch on, when its RSS passes a threshold between batches (#957). An
   interrupted pass is not a failure (#803, PR #1096). The owner-busy
   state for the shared model is re-sent by the front when the background
-  comes back.
+  comes back. Both roles emit an ISO-timestamped `[olympus] memory` line
+  every five minutes and immediately before an RSS restart, with anonymous
+  peaks sampled on the existing minute check even when restarting is disabled.
+  Fields include role/pid/uptime_s, activity (judging, embedding, recount,
+  import, extract, idle; shared with the status snapshot), rss_total_mb,
+  Linux rss_anon_mb/rss_file_mb/swap_mb and peak_anon_mb since the previous
+  line (unavailable measurements omitted), plus JSC heap_size_mb,
+  heap_capacity_mb, extra_memory_mb and object_count read only on emission.
+  Maintained process-local counts, read without SQL or a walk, size
+  connector_stores, read_workers/read_connections (retiring workers included
+  until close; one shared connection counter), tier_visibility_items
+  (installed memo's item copies), hidden_child_items (installed memo's distinct
+  child identities), people/identities, embedding_queue and judge_in_flight
+  (submitted items including model-slot waits); transient build/result copies
+  are excluded, and the front reads activity from its already-polled snapshot.
+  The existing `[engine-split] rss_restart rss_mb=...` prefix and fields remain,
+  followed by over_threshold_s, at (ISO time) and the identical diagnostic
+  fields, so a restart records its state.
 - **The front restarts behind a socket that stays (14 Nov 2026).** A
   model, judge or policy change restarts both processes: the front builds
   its answer routing, keys and policy at boot, and serving on the old

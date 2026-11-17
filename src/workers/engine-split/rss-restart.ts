@@ -14,7 +14,7 @@
  * the status snapshot (`rss_restarts`), carried from one background to the
  * next through the snapshot it left.
  */
-import { readFileSync } from 'node:fs';
+import { createMemoryDiagnostic, processMemory, type ProcessMemory } from './memory.ts';
 import type { EngineStatusRead } from './snapshot.ts';
 
 export { ENGINE_RSS_RESTART_DEFAULT_MB } from '../../core/config.ts';
@@ -41,6 +41,7 @@ export function startEngineRssRestart(input: {
   /** 0 turns it off. */
   thresholdMb: number;
   rss?: () => number;
+  sample?: () => ProcessMemory;
   /** A judge pass is running: the restart waits for it to end. */
   batchRunning: () => boolean;
   /** The clean reload; false when nothing supervises this process. */
@@ -52,31 +53,36 @@ export function startEngineRssRestart(input: {
   setInterval?: (callback: () => void, ms: number) => unknown;
   clearInterval?: (timer: unknown) => void;
   log?: (line: string) => void;
+  memory?: ReturnType<typeof createMemoryDiagnostic>;
 }): { restarts(): EngineRssRestarts; stop(): void } {
   const now = input.now ?? (() => Date.now());
-  const rss = input.rss ?? engineMemoryRss;
   const log = input.log ?? ((line: string) => console.warn(line));
+  const memory = input.memory ?? createMemoryDiagnostic({ role: 'background', now, log });
   let restarts: EngineRssRestarts = input.previous;
   let overSince: number | undefined;
   let done = false;
   const check = (): void => {
-    if (done || input.thresholdMb <= 0) return;
-    const rssMb = Math.round(rss() / (1024 * 1024));
-    if (rssMb < input.thresholdMb) { overSince = undefined; return; }
+    const sampled = (input.sample ?? processMemory)();
+    memory.sample(sampled);
+    const periodic = () => { if (memory.due()) memory.write(sampled); };
+    if (done || input.thresholdMb <= 0) { periodic(); return; }
+    const rssMb = Math.round((input.rss?.() ?? sampled.anon ?? sampled.rss) / (1024 * 1024));
+    if (rssMb < input.thresholdMb) { overSince = undefined; periodic(); return; }
     overSince ??= now();
     const waited = now() - overSince;
-    if (input.batchRunning() && waited < ENGINE_RSS_RESTART_MAX_WAIT_MS) return;
+    if (input.batchRunning() && waited < ENGINE_RSS_RESTART_MAX_WAIT_MS) { periodic(); return; }
     done = true;
     const next = { count: restarts.count + 1, last: { at: new Date(now()).toISOString(), rss_mb: rssMb } };
     const previous = restarts;
     restarts = next;
     input.record(next);
+    const fields = memory.write(sampled);
     if (!input.restart()) {
       restarts = previous;
       log(`[engine-split] rss_over_threshold rss_mb=${rssMb} threshold_mb=${input.thresholdMb}: nothing supervises this process, so it keeps running.`);
       return;
     }
-    log(`[engine-split] rss_restart rss_mb=${rssMb} threshold_mb=${input.thresholdMb} restarts=${next.count} waited_ms=${waited}`);
+    log(`[engine-split] rss_restart rss_mb=${rssMb} threshold_mb=${input.thresholdMb} restarts=${next.count} waited_ms=${waited} over_threshold_s=${Math.floor(waited / 1000)} ${fields}`);
   };
   const timer = (input.setInterval ?? ((callback, ms) => { const handle = setInterval(callback, ms); handle.unref?.(); return handle; }))(check, ENGINE_RSS_CHECK_INTERVAL_MS);
   return {
@@ -92,11 +98,6 @@ export function startEngineRssRestart(input: {
  * RSS, as before (mapping is Linux-only too).
  */
 export function engineMemoryRss(): number {
-  if (process.platform === 'linux') {
-    try {
-      const line = /^RssAnon:\s+(\d+)\s+kB$/m.exec(readFileSync('/proc/self/status', 'utf8'));
-      if (line) return Number(line[1]) * 1024;
-    } catch { /* fall through */ }
-  }
-  return process.memoryUsage.rss();
+  const memory = processMemory();
+  return memory.anon ?? memory.rss;
 }

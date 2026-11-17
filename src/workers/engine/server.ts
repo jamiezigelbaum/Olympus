@@ -1,3 +1,5 @@
+import { memoryActivity } from '../../core/memory-counters.ts';
+import { createMemoryDiagnostic } from '../engine-split/memory.ts';
 import { readTinfoilStatus } from '../../core/analyst-tinfoil.ts';
 import { rerankOutcomeCounts } from '../../core/evidence-reranker.ts';
 import { localAnalystWindowReports, reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../source-index/local-analyst-window.ts';
@@ -295,7 +297,7 @@ import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
 import { sqliteFilesHealth, startSqliteWalSampler } from './sqlite-wal-sampler.ts';
-import { readPoolDiagnostics } from '../connector-store/off-thread-reads.ts';
+import { readPoolDiagnostics, readPoolMemoryCounts } from '../connector-store/off-thread-reads.ts';
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
 import { setSqliteCheckpointsOffLoop } from '../../core/sqlite-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
@@ -6679,6 +6681,15 @@ export async function main(): Promise<void> {
   tierSniffer?.start();
   // The split's background: its private command socket, then the status
   // snapshot, then ready. The front waits for ready before it serves.
+  const currentMemoryActivity = () => engineRole === 'front'
+    ? engineFront?.backgroundActivity() ?? 'idle'
+    : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
+  const memoryDiagnostic = createMemoryDiagnostic({ role: engineRole, activity: currentMemoryActivity, readers: readPoolMemoryCounts });
+  // Both roles use the same minute check. The background's existing restart tick owns its sampling.
+  const frontMemory = engineRole !== 'background' ? startEngineRssRestart({
+    thresholdMb: 0, batchRunning: () => false, restart: () => false, record: () => {},
+    previous: { count: 0 }, memory: memoryDiagnostic,
+  }) : undefined;
   let engineBackground: { stop(): void } | undefined;
   if (engineRole === 'background') {
     if (!authToken) throw new Error('The engine background needs the worker auth token.');
@@ -6818,6 +6829,7 @@ export async function main(): Promise<void> {
     // (#957). Created before the first snapshot is written, so it carries the
     // count the last background left in it.
     const rssRestart = startEngineRssRestart({
+      memory: memoryDiagnostic,
       thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
       batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
       restart: () => requestModelReload(),
@@ -6828,6 +6840,7 @@ export async function main(): Promise<void> {
       env: process.env,
       instanceId: commands.instanceId,
       collect: () => ({
+        activity: currentMemoryActivity(),
         scheduler: sourceScheduler?.status() ?? null,
         judge: (() => {
           const backlog = tierSniffer?.backlog();
@@ -6975,6 +6988,7 @@ export async function main(): Promise<void> {
     waitingStore = undefined;
     fileExtractionRuntime?.close();
     engineBackground?.stop();
+    frontMemory?.stop();
     if (frontMountRetry) clearInterval(frontMountRetry);
     clearInterval(visibilityRefresh);
     engineFront?.stop();

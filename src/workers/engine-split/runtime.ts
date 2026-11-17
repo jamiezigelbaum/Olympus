@@ -1,3 +1,4 @@
+import type { MemoryActivity } from '../../core/memory-counters.ts';
 /**
  * The engine split's wiring for the worker's `main()` (server.ts): the
  * background's command socket and status publisher, and the front's command
@@ -213,6 +214,8 @@ export interface EngineFront {
   ownerBusy: OwnerBusyRelay;
   /** The background's last status snapshot and its age; read from disk at most once a second. */
   status(): EngineStatusRead | undefined;
+  /** The polled activity, with no disk read or status refresh on the log path. */
+  backgroundActivity(): MemoryActivity;
   /** One built-in model completion, run by the background, which holds the model. */
   completeModel(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
   /** Whether the background's boot work is done and its process is alive, busy or not (the front's health reports it). */
@@ -270,7 +273,7 @@ export function createEngineFront(input: {
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
   // Busy is not unreachable: the background's receipt and heartbeat say it is up.
   const backgroundReady = async () => backgroundBootDone(readBootProgress(input.env));
-  return { client, ownerBusy: relay, status, completeModel, backgroundReady, stop: () => { clearInterval(poll); relay?.stop(); } };
+  return { client, ownerBusy: relay, status, backgroundActivity: () => cached?.read?.snapshot.activity ?? 'idle', completeModel, backgroundReady, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
 // How long the front waits on a background that has stopped answering. A

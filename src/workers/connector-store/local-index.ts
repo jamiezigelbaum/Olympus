@@ -1,3 +1,4 @@
+import { changeMemoryCounter } from '../../core/memory-counters.ts';
 import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
@@ -1345,6 +1346,7 @@ interface HiddenChildMemo {
 }
 
 interface TierVisibilityMemo {
+  itemCount: number;
   ledger: TierLedger;
   /** The ledger's identity, for the saved set's stamp; undefined when it has none. */
   ledgerId: string | undefined;
@@ -1427,7 +1429,7 @@ function emptyTierVisibilityMemo(
   dataVersion: number,
 ): TierVisibilityMemo {
   return {
-    ledger, ledgerId, ledgerCursor, storeCursor, dataVersion,
+    ledger, ledgerId, ledgerCursor, storeCursor, dataVersion, itemCount: 0,
     lists: { hidden: new MutablePkList(), held: new MutablePkList(), heldForJudgment: new MutablePkList(), metadataLayer: new MutablePkList(),
       metadataLayerContentUnread: new MutablePkList() }, members: new Map(),
     value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 },
@@ -4016,6 +4018,7 @@ export class LocalConnectorStore {
       }
       // The split front's start moves one store at a time; the upgrade's wait reads it (#1563).
       reportFrontStoreOpened();
+      changeMemoryCounter('connector_stores', 1);
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       throw error;
@@ -4116,6 +4119,13 @@ export class LocalConnectorStore {
   }
 
   close(): void {
+    if (this.closedForPoolReads) return;
+    changeMemoryCounter('connector_stores', -1);
+    this.tierLedgerHiddenMemo = undefined;
+    this.hiddenChildMemo = undefined;
+    this.visibilitySqlMemo = undefined;
+    changeMemoryCounter('embedding_queue', -(this.embeddingQueueState?.size ?? 0));
+    this.embeddingQueueState = undefined;
     const reclaiming = this.reclaimProcess !== undefined;
     this.reclaimProcess?.kill('SIGKILL');
     clearTimeout(this.vectorDigestBackfillTimer);
@@ -4807,8 +4817,28 @@ export class LocalConnectorStore {
     if (!this.readOnly) await this.publishVisibility();
   }
 
-  private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
-  private hiddenChildMemo: HiddenChildMemo | undefined;
+  private tierLedgerHiddenState: TierVisibilityMemo | undefined;
+  private hiddenChildState: HiddenChildMemo | undefined;
+  private tierMemoryItems = 0;
+  private childMemoryItems = 0;
+  private get tierLedgerHiddenMemo(): TierVisibilityMemo | undefined { return this.tierLedgerHiddenState; }
+  private set tierLedgerHiddenMemo(value: TierVisibilityMemo | undefined) {
+    this.tierLedgerHiddenState = value;
+    this.refreshVisibilityMemory();
+  }
+  private get hiddenChildMemo(): HiddenChildMemo | undefined { return this.hiddenChildState; }
+  private set hiddenChildMemo(value: HiddenChildMemo | undefined) {
+    this.hiddenChildState = value;
+    this.refreshVisibilityMemory();
+  }
+  private refreshVisibilityMemory(): void {
+    const tier = this.tierLedgerHiddenState?.itemCount ?? 0;
+    const children = this.hiddenChildState?.childParents.size ?? 0;
+    changeMemoryCounter('tier_visibility_items', tier - this.tierMemoryItems);
+    changeMemoryCounter('hidden_child_items', children - this.childMemoryItems);
+    this.tierMemoryItems = tier;
+    this.childMemoryItems = children;
+  }
   private visibilityJournal = false;
   private visibilityFeedPresent = false;
   private visibilitySqlMemo: TierVisibilityMemo | undefined;
@@ -5168,6 +5198,7 @@ export class LocalConnectorStore {
             moving: (row.flags & VISIBILITY_MEMBER_BITS.moving) !== 0 };
           for (const flag of VISIBILITY_PK_FLAGS) if (flags[flag]) for (const pk of pks) memo.lists[flag].add(pk);
           if (flags.moving) memo.value.moving += 1;
+          memo.itemCount += pks.length;
           memo.members.set(tierLedgerIdentityKey(identity), { pks, flags });
         }
         if (rows.length < VISIBILITY_PUBLISH_CHUNK) break;
@@ -5524,6 +5555,7 @@ export class LocalConnectorStore {
           }
         }
         if (previous.flags.moving) memo.value.moving -= 1;
+        memo.itemCount -= previous.pks.length;
         memo.members.delete(key);
       }
     }
@@ -5535,8 +5567,10 @@ export class LocalConnectorStore {
         if (this.visibilitySqlMemo === memo) this.db.query('INSERT OR IGNORE INTO temp.tier_visibility_pks VALUES (?, ?)').run(flag, pk);
       }
       if (flags.moving) memo.value.moving += 1;
+      memo.itemCount += pks.length;
       memo.members.set(key, { pks, flags });
     }
+    this.refreshVisibilityMemory();
   }
 
   /** Whether this store's copy of an item may be served for any layer. */
@@ -12983,6 +13017,7 @@ export class LocalConnectorStore {
     const failed = this.embeddingFailureState;
     for (const localItemId of localItemIds) {
       if (failed?.has(localItemId)) continue;
+      if (!queue.has(localItemId)) changeMemoryCounter('embedding_queue', 1);
       queue.set(localItemId, provider);
     }
     if (deferredReason !== undefined) this.embeddingDeferral = deferredReason;
@@ -13015,7 +13050,7 @@ export class LocalConnectorStore {
   completeQueuedEmbedding(localItemIds: Iterable<string>): void {
     const queue = this.embeddingQueueState;
     if (!queue) return;
-    for (const localItemId of localItemIds) queue.delete(localItemId);
+    for (const localItemId of localItemIds) if (queue.delete(localItemId)) changeMemoryCounter('embedding_queue', -1);
   }
 
   /**
@@ -13025,7 +13060,7 @@ export class LocalConnectorStore {
    */
   markEmbeddingFailed(localItemId: string, errorKind: string): void {
     (this.embeddingFailureState ??= new Map()).set(localItemId, errorKind);
-    this.embeddingQueueState?.delete(localItemId);
+    if (this.embeddingQueueState?.delete(localItemId)) changeMemoryCounter('embedding_queue', -1);
   }
 
   /** How many items this process skipped because their embedding failed. */

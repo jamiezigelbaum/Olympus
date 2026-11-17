@@ -81,7 +81,7 @@ function linuxDesktopEntryPaths(layout) {
 }
 
 // src/core/linux-engine-layout.ts
-import { lstatSync, mkdirSync, readFileSync as readFileSync2, readdirSync, realpathSync } from "fs";
+import fs, { mkdirSync, realpathSync } from "fs";
 import { homedir as homedir2 } from "os";
 import { dirname as dirname2, isAbsolute as isAbsolute2, join as join3, relative, resolve, sep } from "path";
 
@@ -111,6 +111,12 @@ function validatedBootId(platform, value) {
 }
 
 // src/core/linux-engine-layout.ts
+var layoutMemo = new Map;
+var receiptMemo = new Map;
+function memoEnabled() {
+  const role = process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim();
+  return process.env.OLYMPUS_ENGINE_HOST === "1" || role === "front" || role === "background";
+}
 function absolute(value, name) {
   if (!isAbsolute2(value) || /[\x00-\x1f\x7f]/.test(value))
     throw new Error(`${name} must be an absolute path without control characters.`);
@@ -134,7 +140,7 @@ function rawLayout(env, recordedDataDir) {
     const info = stat(path);
     if (!info)
       return false;
-    return !info.isDirectory() || info.isSymbolicLink() || readdirSync(path).some((name) => path !== xdgDataDir || name !== "engine");
+    return !info.isDirectory() || info.isSymbolicLink() || fs.readdirSync(path).some((name) => path !== xdgDataDir || name !== "engine");
   };
   const dataDir = recordedDataDir ?? (hasData(xdgDataDir) ? xdgDataDir : legacyDirs.find(hasData) ?? xdgDataDir);
   const stateDir = join3(stateHome, "olympus/engine"), cacheDir = join3(cacheHome, "olympus/engine");
@@ -175,7 +181,7 @@ function rawLayout(env, recordedDataDir) {
 }
 function stat(path) {
   try {
-    return lstatSync(path);
+    return fs.lstatSync(path);
   } catch (e) {
     if (e.code === "ENOENT")
       return;
@@ -216,12 +222,20 @@ function assertLinuxManagedPath(path, uid = process.getuid(), leaf = "file") {
   }
 }
 function readLinuxEngineReceipt(path, uid = process.getuid()) {
+  if (!memoEnabled())
+    return readLinuxEngineReceiptFromDisk(path, uid);
+  const key = JSON.stringify([path, uid]);
+  if (!receiptMemo.has(key))
+    receiptMemo.set(key, readLinuxEngineReceiptFromDisk(path, uid));
+  return structuredClone(receiptMemo.get(key));
+}
+function readLinuxEngineReceiptFromDisk(path, uid) {
   if (!stat(path))
     return;
   assertLinuxManagedPath(path, uid);
-  if ((lstatSync(path).mode & 63) !== 0)
+  if ((fs.lstatSync(path).mode & 63) !== 0)
     throw new Error(`${path} must be private (0600).`);
-  const receipt = JSON.parse(readFileSync2(path, "utf8"));
+  const receipt = JSON.parse(fs.readFileSync(path, "utf8"));
   if (receipt.schema !== "olympus.engine.install.v1" || receipt.uid !== uid || !receipt.layout)
     throw new Error(`${path} is a foreign or invalid install receipt.`);
   if (!["installed", "recovery_pending", "data_retained"].includes(receipt.installationState))
@@ -265,13 +279,26 @@ function resolveLinuxEngineLayout(env = process.env) {
   const home = absolute(env.HOME || homedir2(), "HOME");
   const configHome = absolute(env.XDG_CONFIG_HOME || join3(home, ".config"), "XDG_CONFIG_HOME");
   const candidates = [...new Set([join3(home, ".config/olympus/install-receipt.json"), join3(configHome, "olympus/install-receipt.json")])];
+  const memo = memoEnabled();
+  const uid = process.getuid?.();
+  const key = JSON.stringify([home, configHome, env.XDG_DATA_HOME || "", env.XDG_STATE_HOME || "", env.XDG_CACHE_HOME || "", env.XDG_RUNTIME_DIR || "", candidates, uid]);
+  const cached = memo ? layoutMemo.get(key) : undefined;
+  if (cached)
+    return { ...cached };
   const present = candidates.filter((p) => stat(p));
   if (present.length > 1)
     throw new Error(`Found multiple Olympus install receipts: ${present.join(", ")}. Select one installation after moving the other aside.`);
   const receipt = present[0] ? readLinuxEngineReceipt(present[0]) : undefined;
   if (receipt && receipt.layout.home !== home)
     throw new Error(`${present[0]} belongs to another home.`);
-  return receipt?.layout ?? rawLayout(env);
+  const layout = receipt?.layout ?? rawLayout(env);
+  if (memo) {
+    layoutMemo.set(key, { ...layout });
+    for (const path of candidates)
+      if (!present.includes(path))
+        receiptMemo.set(JSON.stringify([path, uid]), undefined);
+  }
+  return layout;
 }
 function standaloneLinuxDataDir(env = process.env) {
   if (process.platform !== "linux")

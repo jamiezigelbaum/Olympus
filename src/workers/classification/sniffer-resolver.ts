@@ -1,3 +1,4 @@
+import { changeMemoryCounter } from '../../core/memory-counters.ts';
 import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from './sniffer-decision.ts';
 // The sniffer's background pass (design section 2.2): resolve pending items.
 //
@@ -398,7 +399,9 @@ export async function completeSnifferQuestion(model: AnalystModel, options: {
     ...(options.onAlive ? { onAlive: options.onAlive } : {}),
     snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext },
   };
-  return await model.complete(request) as SnifferModelCompletion;
+  changeMemoryCounter('judge_in_flight', 1);
+  try { return await model.complete(request) as SnifferModelCompletion; }
+  finally { changeMemoryCounter('judge_in_flight', -1); }
 }
 
 /** Same cache, screens, transport and parser as the background pass; no item queue is overwritten. */

@@ -21,6 +21,7 @@ import {
   READ_POOL_SIZE,
   readOnPool,
   readPoolDiagnostics,
+  readPoolMemoryCounts,
   readPoolThreadsForTests,
   releaseOffThreadReads,
   setReadPoolClockForTests,
@@ -89,6 +90,23 @@ function losingReplies(drop: (reply: { id?: number; diagnostic?: string; rows?: 
 }
 
 describe('read pool', () => {
+  test('memory counts include idle snapshot connections and retiring workers until close', async () => {
+    const path = storeFile();
+    expect(readPoolMemoryCounts()).toEqual({ read_workers: 0, read_connections: 0 });
+    // The connection total lives in shared memory, independent of diagnostic replies.
+    losingReplies(reply => reply.diagnostic === 'open');
+    await readOnPool(path, COUNT);
+    const first = await openOffThreadSnapshot(path);
+    const second = await openOffThreadSnapshot(path);
+    expect(readPoolMemoryCounts()).toEqual({ read_workers: 1, read_connections: 3 });
+    await first.close(); await second.close();
+    expect(readPoolMemoryCounts()).toEqual({ read_workers: 1, read_connections: 3 });
+    shutdownReadPool();
+    expect(readPoolMemoryCounts().read_workers).toBe(1);
+    await waitFor(() => readPoolMemoryCounts().read_workers === 0, { description: 'memory counters release stopped readers' });
+    expect(readPoolMemoryCounts()).toEqual({ read_workers: 0, read_connections: 0 });
+  });
+
   test('a scan snapshot runs on its own worker of the store, never queued behind a slow shared read', async () => {
     const path = storeFile();
     const started: string[] = [];

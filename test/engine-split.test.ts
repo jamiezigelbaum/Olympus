@@ -3,7 +3,7 @@
 // front's write guard, and the host's background-then-front order. With
 // worker.engineSplit off nothing here changes what runs.
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { configFromPluginConfig } from '../src/core/config.ts';
@@ -1047,15 +1047,20 @@ describe('state the front shows from the snapshot', () => {
     const answer = (instance: string) => (async () => Response.json({ id: 'command-0110', state: 'done', instance_id: instance })) as unknown as typeof fetch;
     let fetchImpl = answer('background-1');
     const front = createEngineFront({ env, socketPath: join(root, 'engine.sock'), authToken: TOKEN, now: clock.now, fetch: ((input: RequestInfo | URL, init?: RequestInit) => fetchImpl(input, init)) as typeof fetch });
+    expect(front.backgroundActivity()).toBe('idle');
     try {
       mkdirSync(dirname(engineStatusSnapshotPath(env)), { recursive: true });
       const publisher = startEngineStatusPublisher({
         path: engineStatusSnapshotPath(env), instanceId: 'background-1', now: clock.date,
         setInterval: clock.setInterval, clearInterval: (timer) => clock.clearInterval(timer as never),
-        collect: () => ({ scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: {} }),
+        collect: () => ({ activity: 'judging', scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: {} }),
       });
       await front.client.post({ kind: 'archive_changed' });
       expect(front.status()).toMatchObject({ stale: false });
+      const snapshotPath = engineStatusSnapshotPath(env);
+      renameSync(snapshotPath, `${snapshotPath}.held`);
+      try { expect(front.backgroundActivity()).toBe('judging'); }
+      finally { renameSync(`${snapshotPath}.held`, snapshotPath); }
       // The background restarted: its successor answers, the old file is still on disk.
       fetchImpl = answer('background-2');
       await front.client.post({ kind: 'archive_changed' });

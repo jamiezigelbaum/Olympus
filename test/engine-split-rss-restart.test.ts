@@ -29,7 +29,7 @@ function harness(options: { thresholdMb?: number; supervised?: boolean; previous
   const logs: string[] = [];
   const monitor = startEngineRssRestart({
     thresholdMb: options.thresholdMb ?? 3072,
-    rss: () => state.rssMb * MB,
+    sample: () => ({ rss: state.rssMb * MB, anon: state.rssMb * MB }),
     batchRunning: () => state.batch,
     restart: () => { restarts.push(clock.now()); return options.supervised ?? true; },
     record: (value) => recorded.push(value),
@@ -64,7 +64,10 @@ describe('the background restarts itself when its memory passes the threshold', 
     // Recorded before the process goes, so the next background carries it on.
     expect(recorded).toEqual([monitor.restarts()]);
     // One line per restart that a sampler can count by its fixed prefix.
-    expect(logs).toEqual([`[engine-split] rss_restart rss_mb=3100 threshold_mb=3072 restarts=1 waited_ms=${ENGINE_RSS_CHECK_INTERVAL_MS * 3}`]);
+    expect(logs).toHaveLength(2);
+    expect(logs[0]).toContain('[olympus] memory');
+    expect(logs[1]).toStartWith(`[engine-split] rss_restart rss_mb=3100 threshold_mb=3072 restarts=1 waited_ms=${ENGINE_RSS_CHECK_INTERVAL_MS * 3} over_threshold_s=180 `);
+    expect(logs[1]).toContain('rss_anon_mb=3100');
     // A restart already on its way is not asked for again.
     await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 3);
     expect(restarts).toHaveLength(1);
@@ -79,7 +82,7 @@ describe('the background restarts itself when its memory passes the threshold', 
     expect(restarts).toEqual([]);
     await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 2);
     expect(restarts).toHaveLength(1);
-    expect(logs[0]).toMatch(/^\[engine-split\] rss_restart rss_mb=4000 threshold_mb=3072 restarts=1 waited_ms=\d+$/);
+    expect(logs.find(line => line.startsWith('[engine-split] rss_restart'))).toMatch(/^\[engine-split\] rss_restart rss_mb=4000 threshold_mb=3072 restarts=1 waited_ms=600000 over_threshold_s=600 at=/);
     monitor.stop();
   });
 
@@ -115,7 +118,7 @@ describe('the background restarts itself when its memory passes the threshold', 
     await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 3);
     expect(restarts).toHaveLength(1);
     expect(monitor.restarts()).toEqual({ count: 0 });
-    expect(logs).toEqual(['[engine-split] rss_over_threshold rss_mb=3200 threshold_mb=3072: nothing supervises this process, so it keeps running.']);
+    expect(logs.filter(line => line.startsWith('[engine-split]'))).toEqual(['[engine-split] rss_over_threshold rss_mb=3200 threshold_mb=3072: nothing supervises this process, so it keeps running.']);
     monitor.stop();
   });
 

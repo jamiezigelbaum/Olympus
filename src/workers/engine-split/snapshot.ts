@@ -1,3 +1,4 @@
+import type { MemoryActivity } from '../../core/memory-counters.ts';
 /**
  * State the background publishes for the front (docs/design/engine-split.md,
  * part 3, "State from background to front"): scheduler status, the judge's
@@ -20,6 +21,8 @@ export const ENGINE_STATUS_STALE_MS = 30_000;
 
 export interface EngineStatusSnapshot {
   schema: typeof ENGINE_STATUS_SNAPSHOT_SCHEMA;
+  /** Fixed activity word shared with the memory diagnostic; no store reads. */
+  activity?: MemoryActivity;
   /** The background instance that wrote it; a new one means it restarted. */
   instance_id: string;
   written_at: string;

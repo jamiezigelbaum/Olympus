@@ -1,3 +1,4 @@
+import { changeMemoryCounter } from './memory-counters.ts';
 /**
  * One person across sources (#1076): the shared, source-agnostic people index.
  *
@@ -724,6 +725,7 @@ function personFromRow(row: PersonRow, identities: PeopleIdentity[]): PeoplePers
 export class LocalPeopleIndex {
   private readonly db: Database;
   private people: PeoplePerson[];
+  private memoryIdentities = 0;
   private bySender: Map<string, PeoplePerson>;
   private readonly now: () => Date;
   private readonly readOnly: boolean;
@@ -775,6 +777,10 @@ export class LocalPeopleIndex {
   }
 
   close(): void {
+    if (this.closed) return;
+    changeMemoryCounter('people', -this.people.length);
+    changeMemoryCounter('identities', -this.memoryIdentities);
+    this.memoryIdentities = 0;
     this.closed = true;
     this.readWorker?.close();
     this.readWorker = undefined;
@@ -845,6 +851,7 @@ export class LocalPeopleIndex {
       await new Promise<void>((resolve) => { setImmediate(resolve); });
     }
     let afterIdentity: string | undefined;
+    let identityCount = 0;
     for (;;) {
       const rows = await reader.read<IdentityRow>(`SELECT ${IDENTITY_COLUMNS} FROM people_identities
         ${afterIdentity === undefined ? '' : 'WHERE identity_key > ?'} ORDER BY identity_key LIMIT ${PEOPLE_RELOAD_PAGE_ROWS}`,
@@ -855,6 +862,7 @@ export class LocalPeopleIndex {
         if (!person) continue;
         const identity = identityFromRow(row);
         person.identities.push(identity);
+        identityCount += 1;
         if (identity.senderId) bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
         else if (identity.senderLabel) bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
       }
@@ -864,7 +872,7 @@ export class LocalPeopleIndex {
     await reader.finish();
     if (this.closed) throw new Error('People index is closed');
     // Readers retain the entire old snapshot until these references swap.
-    this.setPeople(people, bySender);
+    this.setPeople(people, bySender, identityCount);
   }
 
   /** Rebuild the derived people from fresh observations; corrections and cards stay. */
@@ -1096,16 +1104,20 @@ export class LocalPeopleIndex {
     this.setPeople(people);
   }
 
-  private setPeople(people: PeoplePerson[], bySender?: Map<string, PeoplePerson>): void {
+  private setPeople(people: PeoplePerson[], bySender?: Map<string, PeoplePerson>, identityCount = 0): void {
     if (!bySender) {
       bySender = new Map();
       for (const person of people) {
         for (const identity of person.identities) {
+          identityCount += 1;
           if (identity.senderId) bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
           else if (identity.senderLabel) bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
         }
       }
     }
+    changeMemoryCounter('people', people.length - this.people.length);
+    changeMemoryCounter('identities', identityCount - this.memoryIdentities);
+    this.memoryIdentities = identityCount;
     this.people = people;
     this.bySender = bySender;
   }

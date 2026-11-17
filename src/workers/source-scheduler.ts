@@ -1,3 +1,4 @@
+import { changeMemoryCounter } from '../core/memory-counters.ts';
 import { SOURCE_RATE_LIMITED } from '../core/provider-rate-limits.ts';
 import { ReadwiseApiError } from './readwise/api.ts';
 import { createHash } from 'node:crypto';
@@ -1150,10 +1151,12 @@ export class SourceScheduler {
       if (this.stops !== stops) return;
     }
     this.executingStates.add(state);
+    changeMemoryCounter(`tasks_${state.task.kind}`, 1);
     const leave = controlPathHeadroom.enter(`${state.source.sourceId}/${state.task.kind}`);
     try {
       await this.runTask(state, dueAt, provenance);
     } finally {
+      changeMemoryCounter(`tasks_${state.task.kind}`, -1);
       leave();
     }
   }

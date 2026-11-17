@@ -163,13 +163,21 @@ import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
 const connections = new Map();
-// [request running, last request finished], read by the request thread.
+// [request running, last request finished, native connections held], read by the request thread.
 let progress;
+let connectionTotal;
+const noteConnections = (delta) => {
+  if (connectionTotal) {
+    Atomics.add(progress, 2, delta);
+    Atomics.add(connectionTotal, 0, delta);
+  } else postMessage({ diagnostic: 'connections', delta });
+};
 const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
   /*olympus-mmap-pragma*/
+  noteConnections(1);
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
@@ -179,6 +187,7 @@ const open = (path) => {
 // otherwise open one connection per snapshot.
 const IDLE_SNAPSHOT_CONNECTIONS = 8;
 const idleSnapshots = new Map();
+const close = (db) => { db.close(); noteConnections(-1); };
 const snapshotConnection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -190,7 +199,7 @@ const snapshotConnection = (path) => {
       held.db.exec('PRAGMA busy_timeout = 10000');
       return held;
     }
-    try { held.db.close(); } catch {}
+    try { close(held.db); } catch {}
   }
   return { db: open(path), file, path };
 };
@@ -199,19 +208,19 @@ const connection = (path) => {
   const file = stat.dev + ':' + stat.ino;
   const held = connections.get(path);
   if (held && held.file === file) return held.db;
-  if (held) held.db.close();
+  if (held) close(held.db);
   const db = open(path);
   connections.set(path, { db, file });
   return db;
 };
 self.onmessage = (event) => {
   const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
-  if (op === 'progress') { progress = new Int32Array(event.data.buffer); return; }
+  if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
   if (op === 'release') {
     const held = connections.get(path);
     connections.delete(path);
-    try { held?.db.close(); } catch {}
-    for (const idle of idleSnapshots.get(path) ?? []) { try { idle.db.close(); } catch {} }
+    try { held && close(held.db); } catch {}
+    for (const idle of idleSnapshots.get(path) ?? []) { try { close(idle.db); } catch {} }
     idleSnapshots.delete(path);
     // A snapshot still open on the released store closes, rather than idles, when it ends.
     for (const open of snapshots.values()) if (open.path === path) open.discard = true;
@@ -223,7 +232,7 @@ self.onmessage = (event) => {
       const held = snapshotConnection(path);
       // perRead: no transaction is held between reads, so each read is its
       // own short one and a checkpoint can pass it between reads.
-      if (!perRead) { try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; } }
+      if (!perRead) { try { held.db.exec('BEGIN'); } catch (error) { close(held.db); throw error; } }
       held.perRead = perRead === true;
       snapshots.set(snapshot, held);
       postMessage({ id, ok: true, rows: null });
@@ -234,7 +243,7 @@ self.onmessage = (event) => {
         let reusable = false;
         try { if (!held.perRead) held.db.exec('COMMIT'); reusable = true; } finally {
           const idle = idleSnapshots.get(held.path) ?? [];
-          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
+          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else close(held.db);
         }
       }
       postMessage({ id, ok: true, rows: null });
@@ -266,11 +275,12 @@ interface ReaderThread {
   lane: ReadPoolLane;
   releaseWhenIdle?: boolean;
   worker: Worker;
-  /** What the reader says it is doing: [request running, last request finished]. */
+  /** [request running, last request finished, native connections held]. */
   progress?: Int32Array;
   pending: Map<number, Pending>;
   /** Snapshots open on this thread. */
   snapshots: number;
+  connections: number;
   /** The pool query running here, if any. */
   job?: PoolJob | undefined;
   /** Terminated, and still counted until its "close" event says it stopped. */
@@ -306,6 +316,14 @@ interface PoolJob {
 
 // Every thread the pool started that has not stopped, retired ones included.
 const threads: ReaderThread[] = [];
+let heldConnections = 0;
+// Shared by every reader: logging loads one integer, even if a worker loses its reply.
+// Lazy so the Node plugin entry can drop the pool along with bun:sqlite.
+let connectionTotal: Int32Array | undefined;
+/** Includes retiring workers until their close event; O(1), with no store names. */
+export function readPoolMemoryCounts(): { read_workers: number; read_connections: number } {
+  return { read_workers: threads.length, read_connections: connectionTotal ? Atomics.load(connectionTotal, 0) : heldConnections };
+}
 let nextId = 1;
 // lostReplies: readers retired because a request they finished never got
 // its reply here; retries: requests run again on a fresh reader after one;
@@ -353,15 +371,23 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
     counters.starts += 1;
     if (startedStores.has(store)) counters.restarts += 1;
     startedStores.add(store);
-    const started: ReaderThread = { store, lane, worker, pending: new Map(), snapshots: 0 };
+    const started: ReaderThread = { store, lane, worker, pending: new Map(), snapshots: 0, connections: 0 };
     if (typeof SharedArrayBuffer === 'function') {
-      const buffer = new SharedArrayBuffer(8);
+      const buffer = new SharedArrayBuffer(12);
+      connectionTotal ??= new Int32Array(new SharedArrayBuffer(4));
       started.progress = new Int32Array(buffer);
-      worker.postMessage({ op: 'progress', buffer });
+      worker.postMessage({ op: 'progress', buffer, connections: connectionTotal.buffer });
     }
+    let closed = false;
     worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string; errorName?: string; errorFrame?: string; op?: string; sqlHead?: string; ms?: number }>) => {
+      if (closed) return;
       const message = event.data;
-      const diagnostic = message as unknown as { diagnostic?: string; path: string; ms: number };
+      const diagnostic = message as unknown as { diagnostic?: string; path: string; ms: number; delta: number };
+      if (diagnostic.diagnostic === 'connections') {
+        started.connections += diagnostic.delta;
+        heldConnections += diagnostic.delta;
+        return;
+      }
       if (diagnostic.diagnostic === 'open') {
         counters.opens += 1;
         counters.openMs += diagnostic.ms;
@@ -387,9 +413,16 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
       retire(started, new Error(event.message || 'off-thread reader stopped'));
     };
     worker.addEventListener('close', () => {
+      closed = true;
       // Stopped: its place in the pool is free.
       const at = threads.indexOf(started);
-      if (at >= 0) threads.splice(at, 1);
+      if (at >= 0) {
+        if (connectionTotal && started.progress) {
+          Atomics.sub(connectionTotal, 0, Atomics.exchange(started.progress, 2, 0));
+        } else heldConnections -= started.connections;
+        started.connections = 0;
+        threads.splice(at, 1);
+      }
       if (!started.retired) retire(started, new Error('off-thread reader stopped'));
       dispatch();
     });
