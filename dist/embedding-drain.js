@@ -20446,7 +20446,8 @@ var SOURCE_ANSWER_SCHEMA = {
     status: { enum: ["answered", "withheld"] },
     answer: { type: "string", maxLength: MAX_ANSWER },
     citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
-    private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
+    private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN },
+    deep_read: { type: "object", additionalProperties: false, required: ["id", "sectionsTotal"], properties: { id: { type: "string", pattern: "^dr_[A-Za-z0-9_-]+$" }, sectionsTotal: { type: "integer", minimum: 0 } } }
   }
 };
 var ANONYMOUS_ANSWERED_SCHEMA = {

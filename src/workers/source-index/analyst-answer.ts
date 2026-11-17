@@ -72,7 +72,7 @@ import { parentLabelReleaseInputs, type ParentLabelResolver } from '../../core/p
 import { answerReleaseWithheldReasonOffThread, recordReleaseManifest, checkReleaseChunks, chunkCoverageNote, releaseCandidateHashes, releasedTextDigest, releasePassageHashes, type ChunkReleaseResult, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { buildFollowUp, searchCutShort, weakSearch, type FollowUpCandidate, type SourceAnswerFollowUp } from '../../core/follow-up.ts';
-import { sourceLabel } from '../../core/remote-result.ts';
+import { sourceLabel, remoteDeepReadFields } from '../../core/remote-result.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
 import { withCachedKeywordExpansion, type CachedKeywordExpansion } from '../../core/source-index/keyword-context.ts';
@@ -86,6 +86,8 @@ import {
   type SourceIndexVisibilityGate,
 } from '../../core/source-index/router.ts';
 import { mergeRetrievalDegradations, RESERVED_HEAD_SEATS } from '../../core/source-index/retrieval.ts';
+import { triggerDeepRead } from './deep-read-trigger.ts';
+import type { DeepReadJobs } from '../engine/runtime/deep-read-jobs.ts';
 import {
   assertEvidencePackModelEligible,
   assertModelTrustTierAllowed,
@@ -174,6 +176,7 @@ export interface AnalystAnswerLanes {
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
+  deepRead?: () => DeepReadJobs | undefined;
   requestOnDemandRead?: RequestOnDemandRead;
   // How long a question waits for the reads it started before it answers.
   onDemandReadWaitMs?: number;
@@ -819,6 +822,12 @@ export function createAnalystSourceIndexAnswerHandler(
       recordSourceAnswerReleaseDecision(decision.decision);
 
       const released = decision.decision === 'allow' || decision.decision === 'redact';
+      const deepRead = await triggerDeepRead(detail, analystResult, options.deepRead?.());
+      // A withheld answer withholds the unread item's title too; the private
+      // job still runs, and its handle and content-free notice can be returned.
+      const deepReadNotice = released ? deepRead.notice : deepRead.notice
+        ? remoteDeepReadFields({ deep_read: deepRead.job, deep_read_notice: deepRead.notice, deep_read_refused: deepRead.refused }, '').remoteNotice.trim()
+        : undefined;
 
       const totalLatencyMs = Date.now() - startedAt;
       const phaseTimings = {
@@ -843,7 +852,10 @@ export function createAnalystSourceIndexAnswerHandler(
         ...(followUp?.names ?? []),
       ], constraints: releaseConstraints });
       return {
-        answer,
+        answer: deepReadNotice ? `${answer}\n\n${deepReadNotice}` : answer,
+        ...(deepRead.job ? { deep_read: deepRead.job } : {}),
+        ...(deepReadNotice ? { deep_read_notice: deepReadNotice } : {}),
+        ...(deepRead.refused ? { deep_read_refused: deepRead.refused } : {}),
         evidence: released && !readingOnly
           ? releasedEvidence(analystResult.citations, detail, releaseSecureContent)
           : [],

@@ -3541,6 +3541,7 @@ export async function main(): Promise<void> {
       const sourceReranker = createBuiltInRerankerResolver();
       sourceReranker();
       return createAnalystSourceIndexAnswerHandler({
+        deepRead: () => deepReadJobs,
         requestOnDemandRead: requestFileRead,
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,

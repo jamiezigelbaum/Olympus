@@ -9435,7 +9435,8 @@ var init_remote_result = __esm(() => {
       status: { enum: ["answered", "withheld"] },
       answer: { type: "string", maxLength: MAX_ANSWER },
       citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
-      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
+      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN },
+      deep_read: { type: "object", additionalProperties: false, required: ["id", "sectionsTotal"], properties: { id: { type: "string", pattern: "^dr_[A-Za-z0-9_-]+$" }, sectionsTotal: { type: "integer", minimum: 0 } } }
     }
   };
   ANONYMOUS_ANSWERED_SCHEMA = {
@@ -18138,6 +18139,14 @@ var init_evidence_pack = __esm(() => {
     [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
   ]);
 });
+
+// src/core/deep-read-refused.ts
+var init_deep_read_refused = () => {};
+
+// src/workers/source-index/deep-read-trigger.ts
+var init_deep_read_trigger = __esm(() => {
+  init_deep_read_refused();
+});
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
@@ -18162,6 +18171,7 @@ var init_analyst_answer = __esm(() => {
   init_source_corpus_registry();
   init_keyword_context();
   init_router();
+  init_deep_read_trigger();
   init_source_model_policy();
   init_sovereignty();
   init_types();
@@ -24592,6 +24602,9 @@ function parseSourceIndexAnswerResult(value) {
   return {
     answer,
     evidence: value.evidence,
+    ...typeof value.deep_read_notice === "string" ? { deep_read_notice: value.deep_read_notice } : {},
+    ...typeof value.deep_read_refused === "string" ? { deep_read_refused: value.deep_read_refused } : {},
+    ...value.deep_read && typeof value.deep_read === "object" && typeof value.deep_read.id === "string" && Number.isSafeInteger(value.deep_read.sectionsTotal) ? { deep_read: value.deep_read } : {},
     audit: {
       searched_corpora: audit.searched_corpora.filter((corpus) => typeof corpus === "string"),
       skipped_corpora: audit.skipped_corpora,

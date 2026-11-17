@@ -428,6 +428,28 @@ function pendingOutput(raw: unknown): Record<string, unknown> | undefined {
   };
 }
 
+/** Local notices can name an unread Private item; every remote surface strips that name. */
+export function remoteDeepReadFields(record: Record<string, unknown>, answer: string) {
+  // A local deep-read notice names the unread item. Remote callers get only
+  // the job handle and counts; that title has not passed the answer release gate.
+  const localNotice = typeof record.deep_read_notice === 'string' ? record.deep_read_notice : undefined;
+  const ordinaryAnswer = localNotice && answer.endsWith(`\n\n${localNotice}`)
+    ? answer.slice(0, -localNotice.length - 2) : answer;
+  const deepRead = asRecord(record.deep_read);
+  const job = deepRead && typeof deepRead.id === 'string' && /^dr_[A-Za-z0-9_-]+$/.test(deepRead.id)
+    && typeof deepRead.sectionsTotal === 'number' && Number.isSafeInteger(deepRead.sectionsTotal) && deepRead.sectionsTotal >= 0
+    ? { id: deepRead.id, sectionsTotal: deepRead.sectionsTotal } : undefined;
+  const refusalReasons: Record<string, string> = {
+    no_private_model: 'No private model is configured.', model_unavailable: 'The private model is unavailable.',
+    not_found: 'The item is no longer available here.', nothing_readable: 'The item has no readable content here.', invalid_set: 'The item could not be selected.',
+  };
+  const reason = typeof record.deep_read_refused === 'string' && Object.hasOwn(refusalReasons, record.deep_read_refused)
+    ? refusalReasons[record.deep_read_refused] : 'The full read could not be started.';
+  const remoteNotice = job ? '\n\nReading the full item for this question; the answer follows in Private answers. Poll source_deep_read_status with the deep_read id.'
+    : localNotice ? `\n\nThe full item was not read: ${reason} Use source_deep_read to request the full read.` : '';
+  return { ordinaryAnswer, remoteNotice, job };
+}
+
 function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<string, unknown> {
   const record = asRecord(raw);
   if (!record || typeof record.answer !== 'string' || !Array.isArray(record.evidence)) {
@@ -440,9 +462,9 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
     if ('withhold' in recheck) return withheldAnswer(recheck.withhold, evidence.length);
     dropped = recheck.dropped;
   }
-  // The raw answer is scanned whole as well: only the Secret note (fixed text) is taken out first.
-  if (isSecretLike(record.answer)) return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
-  const answer = scannedText(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER, 'multiline');
+  const { ordinaryAnswer, remoteNotice, job } = remoteDeepReadFields(record, record.answer);
+  if (isSecretLike(ordinaryAnswer)) return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
+  const answer = scannedText(withoutSecretLocationCoverageNotes(ordinaryAnswer), MAX_ANSWER, 'multiline');
   if (answer.secret) return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
   const citations: Array<Record<string, unknown>> = [];
   // What the agent receives, by name, for the owner's list of what each AI app received.
@@ -460,7 +482,8 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
   return {
     kind: 'source_answer',
     status: 'answered',
-    answer: (answer.text ?? '').slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
+    answer: (answer.text ?? '').slice(0, MAX_ANSWER - coverageSuffix.length - remoteNotice.length) + coverageSuffix + remoteNotice,
+    ...(job ? { deep_read: job } : {}),
     citations,
     ...(followUp ? { follow_up: followUp } : {}),
   };
@@ -915,6 +938,7 @@ const SOURCE_ANSWER_SCHEMA = {
     answer: { type: 'string', maxLength: MAX_ANSWER },
     citations: { type: 'array', maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
     private_note: { type: 'string', pattern: REMOTE_PRIVATE_NOTE_PATTERN },
+    deep_read: { type: 'object', additionalProperties: false, required: ['id', 'sectionsTotal'], properties: { id: { type: 'string', pattern: '^dr_[A-Za-z0-9_-]+$' }, sectionsTotal: { type: 'integer', minimum: 0 } } },
   },
 } as const;
 

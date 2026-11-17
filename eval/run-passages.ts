@@ -1,3 +1,8 @@
+import { resolveLocalAnalystWindow, localAnalystPromptBudget } from '../src/workers/source-index/local-analyst-window.ts';
+import { maxTokensForChars } from '../src/core/analyst-delphi.ts';
+import { DEFAULT_ANALYST_MAX_OUTPUT_CHARS } from '../src/core/analyst.ts';
+import { triggerDeepRead } from '../src/workers/source-index/deep-read-trigger.ts';
+import { createDeepReadJobs, type DeepReadJobs } from '../src/workers/engine/runtime/deep-read-jobs.ts';
 // Passage retrieval eval, with optional deterministic grading of local Analyst answers.
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
@@ -103,7 +108,12 @@ export interface PassageSummary {
   /** With --narrow: of the questions checked, how many the unnarrowed run would have asked, and how many offered the true scope. */
   followUp?: { checked: number; triggered: number; trueScopeOffered: number; triggeredAndOffered: number };
 }
+export interface PassageDeepRead {
+  triggered: boolean; refused: string | null; sectionsTotal: number; sectionsDone: number;
+  seconds: number; correctByMeaning: boolean | null; citesExpected: boolean | null;
+}
 export interface PassageRow {
+  deepRead?: PassageDeepRead;
   questionId: string; shape: string; families: string[]; tiers: string[];
   seatsFilled: number; answerable: boolean; object: HitScore; passage: HitScore;
   funnel?: FunnelRow; judge?: QuestionJudgement;
@@ -182,7 +192,7 @@ export interface PassageReceipt {
   /** Messages each side of a conversation hit (OLYMPUS_CONVERSATION_WINDOW); absent when 0. */
   conversationWindow?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
-  summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
+  summary: { deepReadStarted?: number; overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
     /** By the expected item's stored chunks (1_chunk, 2-3_chunks, 4+_chunks), when counted. */
     byLength: Record<string, PassageSummary> };
   questions?: PassageRow[];
@@ -355,6 +365,8 @@ export async function runPassageEval(input: {
   judgeQuestion?: (question: string, quote: string) => Promise<QuestionJudgement>;
   /** Answer the exact fitted pack; only deterministic scores enter the receipt. */
   answer?: AnswerFn;
+  /** Run-level opt-in; the engine and eval share the same trigger and jobs. */
+  deepReadJobs?: DeepReadJobs;
   /**
    * Answer the same fitted pack with each arm, `answerRepeats` times each
    * (default 1), so arms are compared on identical evidence. The first arm is
@@ -442,12 +454,15 @@ export async function runPassageEval(input: {
     const seatedIds = needed.flatMap((_, index) => pack.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
     const citedByAnswer = new WeakMap<PassageAnswer, number[]>();
     const packKey = input.answerStore ? fittedPackKey(pack) : '';
+    let deepRead: PassageDeepRead | undefined;
+    let ordinaryResult: AnalystResult | undefined;
     const answerWith = async (ask: AnswerFn, arm = 'off', repeat = 0): Promise<PassageAnswer> => {
       const answerStarted = performance.now();
       const storeKey = `${question.id}|${arm}|${repeat}|${packKey}`;
       try {
         const stored = input.answerStore?.get(storeKey);
         const result = stored?.result ?? await ask(question, pack);
+        ordinaryResult ??= result;
         const citedIds = needed.flatMap((_, index) => result.citations.some(citation =>
           pack.candidates.some(candidate => candidate.provenance.sourceItem.providerItemId === citation.provenance.sourceItem.providerItemId
             && resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds)
@@ -480,6 +495,31 @@ export async function runPassageEval(input: {
       step('answer');
       answer = await answerWith(input.answer);
     }
+    if (input.deepReadJobs) {
+      deepRead = { triggered: false, refused: null, sectionsTotal: 0, sectionsDone: 0, seconds: 0, correctByMeaning: null, citesExpected: null };
+      if (ordinaryResult) {
+        const started = performance.now();
+        const triggered = await triggerDeepRead(detail, ordinaryResult, input.deepReadJobs);
+        deepRead.refused = triggered.refused ?? null;
+        if (triggered.job) {
+          deepRead.triggered = true;
+          deepRead.sectionsTotal = triggered.job.sectionsTotal;
+          const result = await input.deepReadJobs.wait(triggered.job.id);
+          const view = input.deepReadJobs.status(triggered.job.id)[0]!;
+          deepRead.sectionsDone = view.sectionsDone;
+          deepRead.seconds = (performance.now() - started) / 1000;
+          if (result) {
+            deepRead.citesExpected = gradePassageAnswer(question, result, detail).cited ?? false;
+            const expectedText = (question.expectedEvidence ?? []).map(item => item.quote).filter(Boolean).join('\n') || (question.expectedAnswerContains ?? []).join('; ');
+            const score = deepRead;
+            if (input.judgeAnswer && expectedText) judgeLater.push(async () => {
+              const verdict = await input.judgeAnswer!(question.question, expectedText, result.answer);
+              score.correctByMeaning = verdict === null ? null : verdict === 'correct';
+            });
+          }
+        }
+      }
+    }
     const citedIds = answer ? citedByAnswer.get(answer) : undefined;
     const expectedStores = (question.expectedEvidence ?? []).map(e => stores.get(e.corpusId));
     const answerable = question.shape !== 'coverage_negative';
@@ -510,7 +550,7 @@ export async function runPassageEval(input: {
       tiers: expectedStores.length ? [...new Set(expectedStores.map((store, i) => store?.tier ?? question.expectedEvidence![i]!.corpusId.split('.')[0]!))] : ['unknown'],
       seatsFilled: pack.candidates.length, answerable, object: score(objectRank, ks), passage: score(passageRank, ks),
       ...(funnel ? { funnel } : {}), ...(judge ? { judge } : {}),
-      ...(answer ? { answer } : {}), ...(arms ? { arms } : {}),
+      ...(answer ? { answer } : {}), ...(deepRead ? { deepRead } : {}), ...(arms ? { arms } : {}),
       ...(needed.length > 1 ? { neededEvidence: { needed: needed.length, packed: packedIds.length, seated: seatedIds.length, packedIds, seatedIds,
         ...(citedIds ? { cited: citedIds.length, citedIds } : {}) } } : {}),
       ...(detail.rerank ? { rerank: { outcome: detail.rerank.outcome, scored: detail.rerank.scored, promoted: detail.rerank.promoted, elapsedMs: detail.rerank.elapsedMs } } : {}),
@@ -530,7 +570,7 @@ export async function runPassageEval(input: {
     ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth, semanticPoolSeats: rerankPoolSemanticSeats() } : {}),
     ...(conversationWindowPerSide() > 0 ? { conversationWindow: conversationWindowPerSide() } : {}),
     storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
-    summary: summaries(rows, ks),
+    summary: { ...summaries(rows, ks), ...(input.deepReadJobs ? { deepReadStarted: rows.filter(row => row.deepRead?.triggered).length } : {}) },
     ...(split === 'open' ? { questions: rows } : {}),
     degradedIds: rows.filter(row => row.degraded).map(row => row.questionId),
   };
@@ -751,7 +791,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const arg = rest[index]!;
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
-      if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer' || key === '--judge-answers') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
+      if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer' || key === '--judge-answers' || key === '--deep-read-trigger') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
       if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes', '--answer-arms', '--answer-repeats', '--only', '--answers', '--narrow', '--keyword-expansion'].includes(key!)) throw new Error('Unsupported passage eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Passage eval option requires a value.');
@@ -771,6 +811,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   if (values.has('--answer-repeats') && !armNames) throw new Error('--answer-repeats needs --answer-arms.');
   const answerRepeats = positiveInteger(values.get('--answer-repeats'), 1);
   const only = values.get('--only')?.split(',').map(id => id.trim()).filter(Boolean);
+  if (values.has('--deep-read-trigger')) values.set('--answer', 'yes');
+  if (values.has('--deep-read-trigger') && armNames && (armNames.length !== 1 || armNames[0] !== 'off')) throw new Error('--deep-read-trigger requires the single off answer arm.');
   if (values.has('--answers') && !values.has('--answer')) throw new Error('--answers needs --answer or --answer-arms.');
   if (values.has('--answer') && provider !== 'local') throw Object.assign(new Error('--answer requires a local Analyst.'), { code: 'LOCAL_MODEL_REQUIRED' });
   const dataset: unknown = JSON.parse(readFileSync(datasetPath ?? 'eval/private/passage-questions.json', 'utf8'));
@@ -793,6 +835,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   try {
     const config = loadConfig();
     let answer: AnswerFn | undefined;
+    let deepReadJobs: DeepReadJobs | undefined;
     let answerArms: Array<{ name: string; answer: AnswerFn }> | undefined;
     const answerCalls: Record<string, { calls: number; wallMs: number; promptTokens: number; cachedTokens: number; promptMs: number; outputTokens: number; outputMs: number }> = {};
     // --answers <file>: answers kept between runs (private text: owner-only file, never in git). An answer is reused
@@ -838,6 +881,17 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
         } }, { auditSuspiciousDrafts: true, evidenceFormat: 'compact', readingNotes });
         return (_question, pack) => analyst.analyze(withPromptBudget(pack, promptBytes!), { localOnly: true });
       };
+      if (values.has('--deep-read-trigger')) {
+        const endpoint = lane ? config.argus.lanes[lane] : config.argus.modelProfiles[profile];
+        const window = await resolveLocalAnalystWindow({ model: endpoint.model, baseUrl: endpoint.baseUrl });
+        const deepBudget = localAnalystPromptBudget(undefined, window, maxTokensForChars(DEFAULT_ANALYST_MAX_OUTPUT_CHARS));
+        deepReadJobs = createDeepReadJobs({
+          stores: () => opened.stores,
+          lanes: () => lanes(''),
+          model: async () => ({ analyst: createAnalyst(delphiModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }), modelId: endpoint.model, promptBytes: deepBudget.bytes }),
+          inbox: () => undefined,
+        });
+      }
       answer = answerBy('off');
       if (armNames) answerArms = armNames.map(name => ({ name, answer: answerBy(name) }));
     }
@@ -918,6 +972,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       ...(probe ? { probeLanes: probe } : {}),
       ...(judge ? { judgeQuestion: judge } : {}),
       ...(judgeAnswer ? { judgeAnswer } : {}),
+      ...(deepReadJobs ? { deepReadJobs } : {}),
       ...(answerArms ? { answerArms, answerRepeats } : answer ? { answer } : {}),
       ...(only ? { only } : {}), ...(answerStore ? { answerStore } : {}),
       itemChunks: itemChunks.count,
