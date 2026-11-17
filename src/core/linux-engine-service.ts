@@ -137,7 +137,7 @@ export function systemdMust(exec: EngineExec, args: string[]): string {
 
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync, removeFileDurablySync, syncDirectorySync } from './atomic-file.ts';
-import { createLinuxPrivateDirectory, legacyLinuxSettings, isLegacyLinuxSetting, LEGACY_LINUX_SETTINGS_DIRECTORIES, LEGACY_LINUX_POLICY_FILES, linuxEngineEnvironment, linuxEngineLayoutsEqual, preflightLinuxEngineLayout, publishLinuxEngineReceipt, readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
+import { createLinuxPrivateDirectory, legacyLinuxSettings, isLegacyLinuxSetting, LEGACY_LINUX_SETTINGS_DIRECTORIES, LEGACY_LINUX_POLICY_FILES, linuxEngineEnvironment, linuxEngineLayoutsEqual, preflightLinuxEngineLayout, publishLinuxEngineReceipt, writeLinuxEngineReceiptFile, readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { resolveInstallationPrivacyState, engineBuildIdentity, engineServicePaths, reconcileEngineConfig, seedEngineSovereignty, resolveEngineProgram, waitForQuietEngine, waitForEngineHealthy,
  type EngineInstallOptions, type EngineInstallResult, type EngineServiceOptions, type EngineHealthDeps, type EngineHealthProof, type EngineLifecycleCheckpoint, type EngineRollbackResult } from './engine-service.ts';
 import { reapRecordedEngineChildren, readEngineChildren, parseProcessTable } from './engine-children.ts';
@@ -828,7 +828,7 @@ export function syncLinuxOpenHandlerReceipt(options: EngineServiceOptions, prese
    const info=lstatSync(layout.openHandlerPath);if(!info.isFile()||info.isSymbolicLink()||info.uid!==process.getuid!())throw new Error('The Linux desktop handler is not an owned regular file.');
    publishLinuxEngineReceipt(layout,{machineArtifacts:[...others,{path:layout.openHandlerPath,kind:'file',sha256:linuxMachineArtifactDigest(layout.openHandlerPath,'file')}],
     mimeOwnership:{path:layout.mimeappsPath,scheme:'x-scheme-handler/olympus',desktopId:'ai.olympusplugin.open.desktop'},openHandlerPending:false});
-  }else{const next={...receipt,machineArtifacts:others,openHandlerPending:false};delete next.mimeOwnership;writePrivateFileAtomicSync(layout.receiptPath,`${JSON.stringify(next,null,2)}\n`);}
+  }else{const next={...receipt,machineArtifacts:others,openHandlerPending:false};delete next.mimeOwnership;writeLinuxEngineReceiptFile(layout.receiptPath,`${JSON.stringify(next,null,2)}\n`);}
  });
 }
 export function beginLinuxOpenHandlerMutation(options:EngineServiceOptions):void{
@@ -837,7 +837,7 @@ export function beginLinuxOpenHandlerMutation(options:EngineServiceOptions):void
 function publishRecoveryPendingReceipt(layout:LinuxEngineLayout):void{
  const receipt=readLinuxEngineReceipt(layout.receiptPath);if(!receipt)throw new Error('Recovery ownership receipt disappeared.');
  const next={...receipt,installationState:'recovery_pending' as const,ownedUnitLinks:[],machineArtifacts:[],openHandlerPending:false};delete next.mimeOwnership;
- writePrivateFileAtomicSync(layout.receiptPath,`${JSON.stringify(next,null,2)}\n`);
+ writeLinuxEngineReceiptFile(layout.receiptPath,`${JSON.stringify(next,null,2)}\n`);
 }
 function shellQuote(value: string): string {
  if (/\0|\r|\n/.test(value)) throw new Error('Launcher paths may not contain control characters.');
@@ -1046,7 +1046,7 @@ export async function recoverInterruptedLinuxEngineInstall(
   cleanupTransactionTrees(transaction);
   refreshMachineArtifacts(layout,false);
   const priorReceipt=snapshotText(transaction.before.receipt);
-  if(priorReceipt!==null)writePrivateFileAtomicSync(layout.receiptPath,priorReceipt);else publishRecoveryPendingReceipt(layout);
+  if(priorReceipt!==null)writeLinuxEngineReceiptFile(layout.receiptPath,priorReceipt);else publishRecoveryPendingReceipt(layout);
   transaction.phase='recovered';writeInstallTransaction(layout,transaction);
   cleanupTransactionBackup(transaction);removeFileDurablySync(transactionPath(layout));
   return {recovered:true,restored};
