@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { beatP95, gate, memoryMaxBytes, sqliteGuards } from '../scripts/loop-stall-test.ts';
+import { beatP95, gate, memoryMaxBytes, sampledBeatSite, sqliteGuards, summarizeBeats } from '../scripts/loop-stall-test.ts';
 import { join } from 'node:path';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -89,12 +89,17 @@ test('fixture rebuilds an old shape with substantial embedded Personal and Priva
 }, 60_000);
 
 // A red engine may never become green by losing a sampler or a workload.
-test('loop-stall gate passes on worst stalls under 1 s with the workload complete and no WAL over the limit', () => {
-  const healthy = { background: { max_ms: 29_999, over_budget: 40, beats: 1 }, front: { max_ms: 999, over_budget: 40, beats: 1 }, workload_ok: true, wal_ok: true, ack_ok: true };
+test('loop-stall gate uses after-ready limits with the workload complete and no WAL over the limit', () => {
+  const healthy = {
+    background: { max_ms: 29_999, over_budget: 1, beats: 1, pre_ready_ms: 107_372 },
+    front: { max_ms: 999, over_budget: 1, beats: 1, pre_ready_ms: 50_000 },
+    workload_ok: true, wal_ok: true, ack_ok: true,
+  };
   expect(gate(healthy)).toBe(true);
   expect(gate({ ...healthy, background: { ...healthy.background, max_ms: 30_000 } })).toBe(false);
   expect(gate({ ...healthy, ack_ok: false })).toBe(false);
   expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 3_700 }, runCase: 'boot-after-upgrade' })).toBe(true);
+  expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 30_000 }, runCase: 'boot-after-upgrade' })).toBe(false);
   expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 3_700 }, runCase: 'steady' })).toBe(false);
   expect(beatP95({ max_ms: 1, over_budget: 0, beats: 100, buckets: [90, 4, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0] })).toBe(50);
   expect(beatP95({ max_ms: 1, over_budget: 0, beats: 0 })).toBeUndefined();
@@ -102,6 +107,47 @@ test('loop-stall gate passes on worst stalls under 1 s with the workload complet
   expect(gate({ ...healthy, background: { ...healthy.background, beats: 0 } })).toBe(false);
   expect(gate({ ...healthy, workload_ok: false })).toBe(false);
   expect(gate({ ...healthy, wal_ok: false })).toBe(false);
+});
+
+test('beat reporting splits at readiness and attributes each worst hold to its own samples', () => {
+  const startup = { startMs: 25, endMs: 107_397 };
+  const worst = { startMs: 107_422, endMs: 109_422 };
+  const later = { startMs: 109_447, endMs: 110_947 };
+  const timing = { spawnedAt: 0, readyAt: startup.endMs, stoppedAt: later.endMs };
+  const traces = [
+    { timestamp: 1110, frames: [{ name: 'readItemPages' }] },
+    { timestamp: 1000.002, frames: [{ name: 'spawn' }] },
+  ];
+  const sampledLater = sampledBeatSite(later, traces, 1000)!;
+  expect(sampledLater.site).toBe('readItemPages');
+  expect(sampledBeatSite(startup, traces, 1000)).toBeUndefined();
+  expect(sampledBeatSite(worst, traces, 1000)).toBeUndefined();
+  for (const role of ['background', 'front'] as const) {
+    const result = summarizeBeats(role, [startup, worst, later], [sampledLater], timing);
+    expect(result.loop).toMatchObject({
+      max_ms: 2000, worst_site: 'unsampled', beats: 2, over_1s: 2,
+      pre_ready_ms: 107_372, pre_ready_site: 'unsampled', spawn_to_ready_ms: 107_397,
+    });
+    expect(beatP95(result.loop)).toBe(5000);
+    expect(result.sites).toEqual([
+      { site: 'unsampled', count: 1, total_s: 2, worst_ms: 2000 },
+      { site: 'readItemPages', count: 1, total_s: 1.5, worst_ms: 1500 },
+    ]);
+  }
+  const sampledStartup = sampledBeatSite(startup, [{ timestamp: 1050, frames: [{ name: 'openStore' }] }], 1000)!;
+  const bootOnly = summarizeBeats('background', [startup], [sampledStartup], { ...timing, stoppedAt: timing.readyAt });
+  expect(bootOnly.loop).toMatchObject({ max_ms: 0, beats: 0, over_1s: 0, pre_ready_site: 'openStore' });
+  expect(beatP95(bootOnly.loop)).toBeUndefined();
+});
+
+test('an unfinished hold belongs to its readiness phase', () => {
+  const beat = { startMs: 25, endMs: 30 };
+  const timing = { spawnedAt: 0, stoppedAt: 40_000 };
+  const boot = summarizeBeats('front', [beat], [], timing).loop;
+  expect(boot).toMatchObject({ pre_ready_ms: 39_945, max_ms: 0, over_1s: 0, spawn_to_ready_ms: null });
+  const ready = summarizeBeats('front', [beat], [], { ...timing, readyAt: 20 }).loop;
+  expect(ready).toMatchObject({ pre_ready_ms: 0, max_ms: 39_945, worst_site: 'unsampled', beats: 1, over_1s: 1 });
+  expect(beatP95(ready)).toBe(10);
 });
 
 test('loop-stall gate fails on a WAL over 64 MB at the end and lists reads held over 2 s', () => {
