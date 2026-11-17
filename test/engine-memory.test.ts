@@ -6,7 +6,6 @@ import { changeMemoryCounter, memoryHolderCounts, memoryActivity, type MemoryCou
 import { createTestClock } from './helpers/test-clock.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { cloudProvider } from './helpers/tier-fixtures.ts';
-import { completeSnifferQuestion } from '../src/workers/classification/sniffer-resolver.ts';
 import { LocalPeopleIndex } from '../src/core/people-index.ts';
 
 const MB = 1024 * 1024;
@@ -101,20 +100,6 @@ test('people snapshot replacements and close keep the process counts current', (
   expect(memoryHolderCounts()).toEqual(before);
 });
 
-test('judge items in flight count overlapping submissions and release on failure', async () => {
-  const before = memoryHolderCounts().judge_in_flight;
-  let complete!: (value: { text: string; modelId: string }) => void;
-  let fail!: (reason: Error) => void;
-  const first = completeSnifferQuestion({ complete: () => new Promise(resolve => { complete = resolve; }) }, { pass: 'content', material: 'fixture' });
-  const second = completeSnifferQuestion({ complete: () => new Promise((_, reject) => { fail = reject; }) }, { pass: 'content', material: 'fixture' });
-  expect(memoryHolderCounts().judge_in_flight).toBe(before + 2);
-  complete({ text: '{}', modelId: 'fixture' }); await first;
-  expect(memoryHolderCounts().judge_in_flight).toBe(before + 1);
-  fail(new Error('fixture'));
-  await expect(second).rejects.toThrow('fixture');
-  expect(memoryHolderCounts().judge_in_flight).toBe(before);
-});
-
 test('store open, queue replacement/deletion and close keep totals without counting duplicate items', () => {
   const before = memoryHolderCounts();
   const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'fixture', family: 'file', trustDomain: 'internal' });
@@ -174,7 +159,7 @@ test('real diagnostic production with large holder counts stays under 50 ms (tar
   // Drop the preceding fixtures' garbage before measuring the live diagnostic.
   Bun.gc(true);
   const populated: Partial<Record<MemoryCounter, number>> = { connector_stores: 22, tier_visibility_items: 2_000_000,
-    hidden_child_items: 1_000_000, embedding_queue: 100_000, people: 100_000, identities: 500_000, judge_in_flight: 8 };
+    hidden_child_items: 1_000_000, embedding_queue: 100_000, people: 100_000, identities: 500_000 };
   for (const [key, value] of Object.entries(populated)) changeMemoryCounter(key as MemoryCounter, value);
   // Discard the preceding fixtures' unreachable build copies before timing steady-state emission.
   Bun.gc(true);

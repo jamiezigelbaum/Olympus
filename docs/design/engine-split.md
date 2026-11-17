@@ -332,8 +332,7 @@ the cause).
   connector_stores, read_workers/read_connections (retiring workers included
   until close; one shared connection counter), tier_visibility_items
   (installed memo's item copies), hidden_child_items (installed memo's distinct
-  child identities), people/identities, embedding_queue and judge_in_flight
-  (submitted items including model-slot waits); transient build/result copies
+  child identities), people/identities and embedding_queue; transient build/result copies
   are excluded, and the front reads activity from its already-polled snapshot.
   The existing `[engine-split] rss_restart rss_mb=...` prefix and fields remain,
   followed by over_threshold_s, at (ISO time) and the identical diagnostic

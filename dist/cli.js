@@ -46058,7 +46058,7 @@ function memoryHolderCounts() {
   return holders;
 }
 function memoryActivity(judging, recount) {
-  if (judging || counts.judge_in_flight > 0)
+  if (judging)
     return "judging";
   if (counts.tasks_embed > 0)
     return "embedding";
@@ -46079,7 +46079,6 @@ var init_memory_counters = __esm(() => {
     embedding_queue: 0,
     people: 0,
     identities: 0,
-    judge_in_flight: 0,
     tasks_embed: 0,
     tasks_sync: 0,
     tasks_extract: 0,
@@ -165479,12 +165478,7 @@ async function completeSnifferQuestion(model, options) {
     ...options.onAlive ? { onAlive: options.onAlive } : {},
     snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext }
   };
-  changeMemoryCounter("judge_in_flight", 1);
-  try {
-    return await model.complete(request);
-  } finally {
-    changeMemoryCounter("judge_in_flight", -1);
-  }
+  return await model.complete(request);
 }
 async function resolveReleaseWindow(options) {
   const { request, store, lane, signal } = options;
@@ -166012,7 +166006,6 @@ function finish(report, monotonicNow, passStarted) {
 }
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, SNIFFER_MAX_CONCURRENT_CLOUD_CALLS = 32, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, failedSlotWaits, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
-  init_memory_counters();
   init_limit_stops();
   init_owner_limit_state();
   init_answer_activity();

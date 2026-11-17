@@ -6,7 +6,6 @@ const counts = {
   embedding_queue: 0,
   people: 0,
   identities: 0,
-  judge_in_flight: 0,
   tasks_embed: 0,
   tasks_sync: 0,
   tasks_extract: 0,
@@ -20,7 +19,7 @@ export function memoryHolderCounts() {
 }
 export type MemoryActivity = 'judging' | 'embedding' | 'recount' | 'import' | 'extract' | 'idle';
 export function memoryActivity(judging: boolean, recount: boolean): MemoryActivity {
-  if (judging || counts.judge_in_flight > 0) return 'judging';
+  if (judging) return 'judging';
   if (counts.tasks_embed > 0) return 'embedding';
   if (recount) return 'recount';
   if (counts.tasks_sync > 0 || counts.tasks_watch > 0) return 'import';

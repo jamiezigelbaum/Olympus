@@ -10389,7 +10389,6 @@ var counts = {
   embedding_queue: 0,
   people: 0,
   identities: 0,
-  judge_in_flight: 0,
   tasks_embed: 0,
   tasks_sync: 0,
   tasks_extract: 0,
