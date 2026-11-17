@@ -574,8 +574,9 @@ export function pickerImportJourney(fx: LegFixture, path: string, bounds: Import
     source: 'archive import: the owner\'s drop zone (Import an archive, Upload folder, or choose a file)',
     mutates: true,
     steps: [
+      // A source's own import (the front check's Gmail mbox) sits in that source's card and is not an archive here.
       ...openDashboardSteps('Open the dashboard: no archive is imported yet, and Import an archive is offered',
-        [{ present: { role: 'button', name: A.importAction }, frame: 'panel' }, { absent: { css: 'li.archive' }, frame: 'panel' }],
+        [{ present: { role: 'button', name: A.importAction }, frame: 'panel' }, { absent: { css: 'li.archive:not([data-source-import="true"])' }, frame: 'panel' }],
         (bounds.openS ?? OPEN_S) * 1_000),
       {
         name: 'Press Import an archive: the drop zone opens',
