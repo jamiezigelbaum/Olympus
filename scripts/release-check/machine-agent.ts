@@ -2727,6 +2727,17 @@ async function main(): Promise<void> {
       await new Promise(() => undefined);
       return;
     }
+    // Approval is per prompt: an owner description saved by a later journey changes the prompt key, and the fixture judge then
+    // waits for an approval nobody gives (run 44133021292). Approve the current prompt again; a run without the fixture judge is left alone.
+    case 'fixture-judge-reapprove': {
+      const read = () => { try { return JSON.parse(olympus(['tier', 'classifier', 'status']).stdout) as { modelId?: string; approved?: boolean }; } catch { return undefined; } };
+      const before = read();
+      if (before?.modelId !== FIXTURE_JUDGE_MODEL) return emit({ ok: true, skipped: 'the fixture judge is not the selected classifier' });
+      if (before.approved === true) return emit({ ok: true, reapproved: false });
+      const approval = olympus(['tier', 'classifier', 'approve', '--why', 'Synthetic VM fixtures: deterministic per-item marker judge on loopback.']);
+      const after = read();
+      return emit({ ok: approval.code === 0 && after?.approved === true, reapproved: true, ...(after?.approved === true ? {} : { detail: 'the fixture judge is still not approved for the current prompt' }) });
+    }
     case 'fixture-judge-stats': {
       const response = await fetch(`http://127.0.0.1:${FIXTURE_JUDGE_PORT}/stats`, { signal: AbortSignal.timeout(5_000) });
       const latency = resolveSourceAnswerLatencyLogPath();

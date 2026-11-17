@@ -1393,6 +1393,10 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
   let modelTouched = false;
   let modelOn: ModelObservation | undefined;
   try {
+    // The privacy journey's owner description changes the judge's prompt, and approval is per prompt.
+    const judge = await run.agent('fixture-judge-reapprove', '', 60_000);
+    const judged = judge.result as { ok?: boolean; reapproved?: boolean; skipped?: string; detail?: string } | undefined;
+    if (!judged?.skipped) run.add({ id: 'setup.fixture-judge-approved', title: 'The fixture judge is approved for the current prompt before the archive imports', status: judged?.ok === true ? 'pass' : 'fail', detail: judged?.ok === true ? (judged.reapproved ? 'approved again after the prompt changed' : 'already approved') : (judged?.detail ?? agentDetail(judge)) });
     // 1. The owner chooses a file in the picker (nothing is listed yet).
     const picker = await call<ImportObservation>('archive-import', `${flags(pickerFx)} --via picker --reset-folder --clean`, stepS);
     addAll(importChecks(picker, pickerFx, os));
