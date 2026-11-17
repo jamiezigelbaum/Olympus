@@ -321,19 +321,25 @@ the cause).
   interrupted pass is not a failure (#803, PR #1096). The owner-busy
   state for the shared model is re-sent by the front when the background
   comes back. Both roles emit an ISO-timestamped `[olympus] memory` line
-  every five minutes and immediately before an RSS restart, with anonymous
-  peaks sampled on the existing minute check even when restarting is disabled.
-  Fields include role/pid/uptime_s, activity (judging, embedding, recount,
-  import, extract, idle; shared with the status snapshot), rss_total_mb,
-  Linux rss_anon_mb/rss_file_mb/swap_mb and peak_anon_mb since the previous
-  line (unavailable measurements omitted), plus JSC heap_size_mb,
-  heap_capacity_mb, extra_memory_mb and object_count read only on emission.
+  every five minutes and immediately before an RSS restart. A separate
+  five-second timer samples anonymous RSS even when restarting is disabled.
+  The restart decision still checks fresh RSS once a minute. Fields include
+  role/pid/uptime_s, rss_total_mb, Linux rss_anon_mb/rss_file_mb/swap_mb, and
+  activity at emission. Activity is a comma-separated list of active labels
+  (judging, embedding, recount, import, extract, visibility_rebuild_bootstrap,
+  visibility_rebuild_incremental, people_refresh), or idle. The largest
+  anonymous sample since the previous line supplies peak_anon_mb, peak_at
+  (ISO time), peak_activity and peak_heap_size_mb. Ties keep the first sample.
+  Unavailable measurements are omitted. JSC heap_size_mb, heap_capacity_mb,
+  extra_memory_mb and object_count are measured at emission, with a separate
+  heap size reading when a sample sets a new peak.
   Maintained process-local counts, read without SQL or a walk, size
   connector_stores, read_workers/read_connections (retiring workers included
   until close; one shared connection counter), tier_visibility_items
   (installed memo's item copies), hidden_child_items (installed memo's distinct
   child identities), people/identities and embedding_queue; transient build/result copies
-  are excluded, and the front reads activity from its already-polled snapshot.
+  are excluded. The front adds its local visibility and people labels to
+  the primary background task from its already-polled status snapshot.
   The existing `[engine-split] rss_restart rss_mb=...` prefix and fields remain,
   followed by over_threshold_s, at (ISO time) and the identical diagnostic
   fields, so a restart records its state.

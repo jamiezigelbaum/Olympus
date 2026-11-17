@@ -10397,6 +10397,14 @@ var counts = {
 function changeMemoryCounter(key, delta) {
   counts[key] += delta;
 }
+var scopedActivity = {
+  visibility_rebuild_bootstrap: 0,
+  visibility_rebuild_incremental: 0,
+  people_refresh: 0
+};
+function changeMemoryActivity(label, delta) {
+  scopedActivity[label] += delta;
+}
 
 // src/core/boot-progress.ts
 import { existsSync as existsSync11, lstatSync as lstatSync6, mkdirSync as mkdirSync8, readdirSync, readFileSync as readFileSync13, realpathSync as realpathSync4, rmSync as rmSync6 } from "node:fs";
@@ -24423,27 +24431,30 @@ function visibilityFlagged(row) {
 }
 function runHiddenStepsHere(steps) {
   let step = steps.next();
-  while (!step.done)
-    step = steps.next(step.value ? step.value.find.here() : undefined);
+  while (!step.done) {
+    let found;
+    try {
+      found = step.value?.find.here();
+    } catch (error) {
+      step = steps.throw(error);
+      continue;
+    }
+    step = steps.next(found);
+  }
   return step.value;
 }
 async function runHiddenStepsInTurns(steps) {
   await ingestionTurn();
   let step = steps.next();
   while (!step.done) {
-    if (step.value) {
-      let found;
-      try {
-        found = await step.value.find.offThread();
-      } catch (error) {
-        step = steps.throw(error);
-        continue;
-      }
-      step = steps.next(found);
+    let found;
+    try {
+      found = step.value ? await step.value.find.offThread() : await ingestionTurn();
+    } catch (error) {
+      step = steps.throw(error);
       continue;
     }
-    await ingestionTurn();
-    step = steps.next();
+    step = steps.next(found);
   }
   return step.value;
 }
@@ -25838,109 +25849,129 @@ class LocalConnectorStore {
     return { ledgerChanges, storeChanges };
   }
   *tierLedgerHiddenSteps() {
-    const ledger = this.visibilityLedger();
-    this.registerVisibilityWriter(ledger);
-    if (!ledger) {
-      if (this.visibilitySqlMemo)
-        this.db.exec("DELETE FROM temp.tier_visibility_pks");
-      this.visibilitySqlMemo = undefined;
-      this.tierLedgerHiddenMemo = undefined;
-      return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
-    }
-    const version = this.visibilityFeedPresent ? 0 : this.db.query("PRAGMA data_version").get().data_version;
-    const prior = this.tierLedgerHiddenMemo;
-    const same = prior?.ledger === ledger && prior.dataVersion === version;
-    const priorLedgerCursor = prior?.ledgerCursor;
-    const priorStoreCursor = prior?.storeCursor;
-    let ledgerChanges;
-    let storeChanges;
-    if (this.hiddenSetIncrementalOffLoop) {
-      ({ ledgerChanges, storeChanges } = yield* this.hiddenChangesSteps(ledger, same ? priorLedgerCursor : undefined, same ? priorStoreCursor : undefined));
-      if (this.tierLedgerHiddenMemo !== prior || prior?.ledgerCursor !== priorLedgerCursor || prior?.storeCursor !== priorStoreCursor)
-        return yield* this.tierLedgerHiddenSteps();
-    } else {
-      ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
-      storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
-    }
-    let base = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined ? prior : undefined;
-    if (!base && this.visibilityFeedPresent) {
-      const saved = yield* this.savedVisibilitySteps(ledger);
-      if (saved)
-        ({ memo: base, ledgerChanges, storeChanges } = saved);
-      if (this.tierLedgerHiddenMemo !== prior)
-        return yield* this.tierLedgerHiddenSteps();
-    }
-    const incremental = base !== undefined;
-    const memo = base ?? emptyTierVisibilityMemo(ledger, this.ledgerIdOf(ledger), ledgerChanges.cursor, storeChanges.cursor, version);
-    const startLedgerCursor = memo.ledgerCursor;
-    const startStoreCursor = memo.storeCursor;
-    for (const flag of VISIBILITY_PK_FLAGS)
-      memo.value[flag] = memo.lists[flag].values;
-    const changed = incremental ? [...new Map([...ledgerChanges.identities, ...storeChanges.identities].map((identity) => [tierLedgerIdentityKey(identity), identity])).values()] : undefined;
-    const updates = [];
-    const prepare = function* (store, identities, flags) {
-      const conversationOf = (identity) => normalizeConversationId(identity.providerConversationId);
-      const rows = store.hiddenSetIncrementalOffLoop ? yield { find: store.incrementalHiddenFinder(ledger, () => runSteps(store.itemRowsForIdentitiesSteps(identities, conversationOf)), () => store.itemRowsForIdentitiesOffThread(identities, conversationOf)) } : yield* store.itemRowsForIdentitiesSteps(identities, conversationOf);
-      const pks = new Map;
-      for (const row of rows) {
-        const list = pks.get(row.idx);
-        if (list)
-          list.push(row.item_pk);
-        else
-          pks.set(row.idx, [row.item_pk]);
-      }
-      const byKey = new Map(flags.map((row) => [tierLedgerIdentityKey(row), row]));
-      return identities.map((identity, idx) => ({ identity, pks: pks.get(idx) ?? [], flags: byKey.get(tierLedgerIdentityKey(identity)) }));
+    let activity;
+    const setIncremental = (incremental) => {
+      const next = incremental ? "visibility_rebuild_incremental" : "visibility_rebuild_bootstrap";
+      if (activity === next)
+        return;
+      if (activity)
+        changeMemoryActivity(activity, -1);
+      changeMemoryActivity(next, 1);
+      activity = next;
     };
-    if (changed) {
-      let flags;
-      if (this.hiddenSetIncrementalOffLoop) {
-        flags = yield { find: this.incrementalHiddenFinder(ledger, () => [...ledger.corpusVisibilityPages(this.corpusId, changed)].flat(), () => ledgerReadOffThread(ledger, incrementalVisibilityReads(ledger, this.corpusId, changed), BACKGROUND_READS)) };
-      } else {
-        flags = [];
-        for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) {
-          flags.push(...page);
+    try {
+      for (;; ) {
+        const ledger = this.visibilityLedger();
+        this.registerVisibilityWriter(ledger);
+        if (!ledger) {
+          if (this.visibilitySqlMemo)
+            this.db.exec("DELETE FROM temp.tier_visibility_pks");
+          this.visibilitySqlMemo = undefined;
+          this.tierLedgerHiddenMemo = undefined;
+          return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+        }
+        const version = this.visibilityFeedPresent ? 0 : this.db.query("PRAGMA data_version").get().data_version;
+        const prior = this.tierLedgerHiddenMemo;
+        const same = prior?.ledger === ledger && prior.dataVersion === version;
+        setIncremental(same);
+        const priorLedgerCursor = prior?.ledgerCursor;
+        const priorStoreCursor = prior?.storeCursor;
+        let ledgerChanges;
+        let storeChanges;
+        if (this.hiddenSetIncrementalOffLoop) {
+          ({ ledgerChanges, storeChanges } = yield* this.hiddenChangesSteps(ledger, same ? priorLedgerCursor : undefined, same ? priorStoreCursor : undefined));
+          if (this.tierLedgerHiddenMemo !== prior || prior?.ledgerCursor !== priorLedgerCursor || prior?.storeCursor !== priorStoreCursor)
+            continue;
+        } else {
+          ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+          storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+        }
+        let base = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined ? prior : undefined;
+        if (!base)
+          setIncremental(false);
+        if (!base && this.visibilityFeedPresent) {
+          const saved = yield* this.savedVisibilitySteps(ledger);
+          if (saved)
+            ({ memo: base, ledgerChanges, storeChanges } = saved);
+          if (this.tierLedgerHiddenMemo !== prior)
+            continue;
+        }
+        const incremental = base !== undefined;
+        const memo = base ?? emptyTierVisibilityMemo(ledger, this.ledgerIdOf(ledger), ledgerChanges.cursor, storeChanges.cursor, version);
+        const startLedgerCursor = memo.ledgerCursor;
+        const startStoreCursor = memo.storeCursor;
+        for (const flag of VISIBILITY_PK_FLAGS)
+          memo.value[flag] = memo.lists[flag].values;
+        const changed = incremental ? [...new Map([...ledgerChanges.identities, ...storeChanges.identities].map((identity) => [tierLedgerIdentityKey(identity), identity])).values()] : undefined;
+        const updates = [];
+        const prepare = function* (store, identities, flags) {
+          const conversationOf = (identity) => normalizeConversationId(identity.providerConversationId);
+          const rows = store.hiddenSetIncrementalOffLoop ? yield { find: store.incrementalHiddenFinder(ledger, () => runSteps(store.itemRowsForIdentitiesSteps(identities, conversationOf)), () => store.itemRowsForIdentitiesOffThread(identities, conversationOf)) } : yield* store.itemRowsForIdentitiesSteps(identities, conversationOf);
+          const pks = new Map;
+          for (const row of rows) {
+            const list = pks.get(row.idx);
+            if (list)
+              list.push(row.item_pk);
+            else
+              pks.set(row.idx, [row.item_pk]);
+          }
+          const byKey = new Map(flags.map((row) => [tierLedgerIdentityKey(row), row]));
+          return identities.map((identity, idx) => ({ identity, pks: pks.get(idx) ?? [], flags: byKey.get(tierLedgerIdentityKey(identity)) }));
+        };
+        if (changed) {
+          let flags;
+          if (this.hiddenSetIncrementalOffLoop) {
+            flags = yield { find: this.incrementalHiddenFinder(ledger, () => [...ledger.corpusVisibilityPages(this.corpusId, changed)].flat(), () => ledgerReadOffThread(ledger, incrementalVisibilityReads(ledger, this.corpusId, changed), BACKGROUND_READS)) };
+          } else {
+            flags = [];
+            for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) {
+              flags.push(...page);
+              yield;
+            }
+          }
+          updates.push(...yield* prepare(this, changed, flags));
+        } else {
+          const found = yield { find: this.visibilityBootstrapFinder(ledger) };
+          for (let start = 0;start < found.length; start += IDENTITY_LOOKUP_SLICE) {
+            if (start > 0)
+              yield;
+            this.applyVisibilityUpdates(memo, found.slice(start, start + IDENTITY_LOOKUP_SLICE));
+          }
           yield;
         }
+        if (this.tierLedgerHiddenMemo !== prior || incremental && (memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor)) {
+          continue;
+        }
+        const touched = updates.filter(({ identity, pks, flags }) => flags !== undefined || pks.length > 0 || memo.members.has(tierLedgerIdentityKey(identity))).map(({ identity }) => identity);
+        try {
+          this.applyVisibilityUpdates(memo, updates);
+        } catch (error) {
+          this.tierLedgerHiddenMemo = undefined;
+          this.visibilitySqlMemo = undefined;
+          throw error;
+        }
+        if (this.visibilityJournal && this.visibilitySqlMemo !== memo) {
+          this.db.transaction(() => {
+            this.db.exec("DELETE FROM temp.tier_visibility_pks");
+            for (const flag of VISIBILITY_PK_FLAGS)
+              this.db.query(`INSERT INTO temp.tier_visibility_pks
+              SELECT ?, value FROM json_each(?)`).run(flag, JSON.stringify(memo.value[flag]));
+          })();
+          this.visibilitySqlMemo = memo;
+        }
+        memo.ledgerCursor = ledgerChanges.cursor;
+        memo.storeCursor = storeChanges.cursor;
+        this.tierLedgerHiddenMemo = memo;
+        const moved = !incremental || memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor || base !== prior;
+        if (!this.readOnly && this.visibilityFeedPresent && moved) {
+          this.notePublish(memo, incremental ? { ledger: startLedgerCursor, store: startStoreCursor } : undefined, touched);
+        }
+        return memo.value;
       }
-      updates.push(...yield* prepare(this, changed, flags));
-    } else {
-      const found = yield { find: this.visibilityBootstrapFinder(ledger) };
-      for (let start = 0;start < found.length; start += IDENTITY_LOOKUP_SLICE) {
-        if (start > 0)
-          yield;
-        this.applyVisibilityUpdates(memo, found.slice(start, start + IDENTITY_LOOKUP_SLICE));
-      }
-      yield;
+    } finally {
+      if (activity)
+        changeMemoryActivity(activity, -1);
     }
-    if (this.tierLedgerHiddenMemo !== prior || incremental && (memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor)) {
-      return yield* this.tierLedgerHiddenSteps();
-    }
-    const touched = updates.filter(({ identity, pks, flags }) => flags !== undefined || pks.length > 0 || memo.members.has(tierLedgerIdentityKey(identity))).map(({ identity }) => identity);
-    try {
-      this.applyVisibilityUpdates(memo, updates);
-    } catch (error) {
-      this.tierLedgerHiddenMemo = undefined;
-      this.visibilitySqlMemo = undefined;
-      throw error;
-    }
-    if (this.visibilityJournal && this.visibilitySqlMemo !== memo) {
-      this.db.transaction(() => {
-        this.db.exec("DELETE FROM temp.tier_visibility_pks");
-        for (const flag of VISIBILITY_PK_FLAGS)
-          this.db.query(`INSERT INTO temp.tier_visibility_pks
-          SELECT ?, value FROM json_each(?)`).run(flag, JSON.stringify(memo.value[flag]));
-      })();
-      this.visibilitySqlMemo = memo;
-    }
-    memo.ledgerCursor = ledgerChanges.cursor;
-    memo.storeCursor = storeChanges.cursor;
-    this.tierLedgerHiddenMemo = memo;
-    const moved = !incremental || memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor || base !== prior;
-    if (!this.readOnly && this.visibilityFeedPresent && moved) {
-      this.notePublish(memo, incremental ? { ledger: startLedgerCursor, store: startStoreCursor } : undefined, touched);
-    }
-    return memo.value;
   }
   ledgerIdOf(ledger) {
     try {
@@ -28077,23 +28108,33 @@ ${parentKey(ref)}`, { ref, origin });
     return JSON.stringify([ledgerCursor, storeCursor, laneStores.map((store) => [store.corpusId, store.childVisibilityMarker?.()])]);
   }
   peopleObservations() {
-    const tierHidden = this.tierHiddenItemPks();
-    return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+    changeMemoryActivity("people_refresh", 1);
+    try {
+      const tierHidden = this.tierHiddenItemPks();
+      return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+    } finally {
+      changeMemoryActivity("people_refresh", -1);
+    }
   }
   async peopleObservationsOffThread() {
-    if (!offThreadReadsSupported(this.dbPath))
+    changeMemoryActivity("people_refresh", 1);
+    try {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.peopleObservations();
+      for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+        const marker = this.visibilityMarker();
+        const tierHidden = await this.tierHiddenItemPksInTurns();
+        const steps = this.peopleObservationSteps(tierHidden);
+        let step = steps.next();
+        while (!step.done)
+          step = steps.next(await readInBackground(this.dbPath, step.value));
+        if (this.visibilityMarker() === marker)
+          return this.peopleObservationsFromRows(step.value);
+      }
       return this.peopleObservations();
-    for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
-      const marker = this.visibilityMarker();
-      const tierHidden = await this.tierHiddenItemPksInTurns();
-      const steps = this.peopleObservationSteps(tierHidden);
-      let step = steps.next();
-      while (!step.done)
-        step = steps.next(await readInBackground(this.dbPath, step.value));
-      if (this.visibilityMarker() === marker)
-        return this.peopleObservationsFromRows(step.value);
+    } finally {
+      changeMemoryActivity("people_refresh", -1);
     }
-    return this.peopleObservations();
   }
   *peopleObservationSteps(tierHidden) {
     return yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held]);

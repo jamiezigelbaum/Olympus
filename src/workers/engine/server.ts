@@ -1,4 +1,4 @@
-import { memoryActivity } from '../../core/memory-counters.ts';
+import { memoryActivity, statusMemoryActivity } from '../../core/memory-counters.ts';
 import { createMemoryDiagnostic } from '../engine-split/memory.ts';
 import { readTinfoilStatus } from '../../core/analyst-tinfoil.ts';
 import { rerankOutcomeCounts } from '../../core/evidence-reranker.ts';
@@ -6683,10 +6683,10 @@ export async function main(): Promise<void> {
   // The split's background: its private command socket, then the status
   // snapshot, then ready. The front waits for ready before it serves.
   const currentMemoryActivity = () => engineRole === 'front'
-    ? engineFront?.backgroundActivity() ?? 'idle'
+    ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? 'idle')
     : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
   const memoryDiagnostic = createMemoryDiagnostic({ role: engineRole, activity: currentMemoryActivity, readers: readPoolMemoryCounts });
-  // Both roles use the same minute check. The background's existing restart tick owns its sampling.
+  // Both roles sample peaks even where restarting is disabled.
   const frontMemory = engineRole !== 'background' ? startEngineRssRestart({
     thresholdMb: 0, batchRunning: () => false, restart: () => false, record: () => {},
     previous: { count: 0 }, memory: memoryDiagnostic,
@@ -6841,7 +6841,7 @@ export async function main(): Promise<void> {
       env: process.env,
       instanceId: commands.instanceId,
       collect: () => ({
-        activity: currentMemoryActivity(),
+        activity: statusMemoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false),
         scheduler: sourceScheduler?.status() ?? null,
         judge: (() => {
           const backlog = tierSniffer?.backlog();

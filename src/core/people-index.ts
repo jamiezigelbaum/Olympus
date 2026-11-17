@@ -1,4 +1,4 @@
-import { changeMemoryCounter } from './memory-counters.ts';
+import { changeMemoryActivity, changeMemoryCounter } from './memory-counters.ts';
 /**
  * One person across sources (#1076): the shared, source-agnostic people index.
  *
@@ -789,17 +789,22 @@ export class LocalPeopleIndex {
 
   /** Synchronous reload for the writable index and callers outside the front. */
   reload(): void {
-    if (!this.readOnly) {
-      this.loadPeople();
-      return;
-    }
-    this.db.exec('BEGIN');
+    changeMemoryActivity('people_refresh', 1);
     try {
-      this.loadPeople();
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      if (!this.readOnly) {
+        this.loadPeople();
+        return;
+      }
+      this.db.exec('BEGIN');
+      try {
+        this.loadPeople();
+        this.db.exec('COMMIT');
+      } catch (error) {
+        this.db.exec('ROLLBACK');
+        throw error;
+      }
+    } finally {
+      changeMemoryActivity('people_refresh', -1);
     }
   }
 
@@ -811,6 +816,7 @@ export class LocalPeopleIndex {
    */
   reloadIfChanged(): Promise<void> {
     if (this.reloading) return this.reloading;
+    changeMemoryActivity('people_refresh', 1);
     this.reloading = Promise.resolve().then(async () => {
       if (!this.readOnly) throw new Error('Off-thread people reload requires a read-only index');
       if (this.closed) throw new Error('People index is closed');
@@ -824,7 +830,10 @@ export class LocalPeopleIndex {
         if (this.readWorker === reader) this.readWorker = undefined;
         throw error;
       }
-    }).finally(() => { this.reloading = undefined; });
+    }).finally(() => {
+      this.reloading = undefined;
+      changeMemoryActivity('people_refresh', -1);
+    });
     return this.reloading;
   }
 
@@ -1177,15 +1186,20 @@ function linkStores(index: LocalPeopleIndex, stores: readonly PeopleObservationS
  * (its senders drop out until the next one); the others still link.
  */
 export async function refreshPeopleIndex(index: LocalPeopleIndex, stores: readonly PeopleObservationSource[]): Promise<PeoplePerson[]> {
-  const observations: PeopleSenderObservation[] = [];
-  for (const store of authoredStores(stores)) {
-    try {
-      observations.push(...await readStoreObservations(store));
-    } catch {
-      // Unreadable now; the next refresh tries again.
+  changeMemoryActivity('people_refresh', 1);
+  try {
+    const observations: PeopleSenderObservation[] = [];
+    for (const store of authoredStores(stores)) {
+      try {
+        observations.push(...await readStoreObservations(store));
+      } catch {
+        // Unreadable now; the next refresh tries again.
+      }
     }
+    return linkStores(index, stores, observations);
+  } finally {
+    changeMemoryActivity('people_refresh', -1);
   }
-  return linkStores(index, stores, observations);
 }
 
 /** A sync or visibility change rebuilds the people index at most this often. */
@@ -1253,9 +1267,13 @@ export class PeopleIndexRefresher {
   }
 
   private rebuildOnce(force: boolean): Promise<PeoplePerson[]> {
-    this.inFlight ??= this.rebuild(force).finally(() => {
-      this.inFlight = undefined;
-    });
+    if (!this.inFlight) {
+      changeMemoryActivity('people_refresh', 1);
+      this.inFlight = this.rebuild(force).finally(() => {
+        this.inFlight = undefined;
+        changeMemoryActivity('people_refresh', -1);
+      });
+    }
     return this.inFlight;
   }
 

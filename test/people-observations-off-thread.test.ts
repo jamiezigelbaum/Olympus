@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { Database } from 'bun:sqlite';
 import type { SourceConnector } from '../src/core/contracts.ts';
+import { memoryActivity } from '../src/core/memory-counters.ts';
 import type { PeopleSenderObservation } from '../src/core/people-index.ts';
 import { isSecureSensitivity, SOURCE_TRUST_TIERS } from '../src/core/source-index/types.ts';
 import { setReadPoolObserverForTests, type StoreRead } from '../src/workers/connector-store/off-thread-reads.ts';
@@ -196,6 +197,7 @@ describe('people observations off the main thread (#1305)', () => {
     // The item is held for classification after the hidden set was taken and before the pool reads.
     let reads = 0;
     setReadPoolObserverForTests(() => {
+      expect(memoryActivity(false, false)).toContain('people_refresh');
       reads += 1;
       if (reads === 1) ledgerDb.query(`UPDATE tier_copies SET embed_hold = 1 WHERE provider_item_id = ? AND copy_state = 'current'`).run(target.provider_item_id);
     }, { snapshots: true });

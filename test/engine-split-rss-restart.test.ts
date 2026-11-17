@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { configFromPluginConfig } from '../src/core/config.ts';
+import { MEMORY_SAMPLE_INTERVAL_MS } from '../src/workers/engine-split/memory.ts';
 import {
   ENGINE_RSS_CHECK_INTERVAL_MS,
   ENGINE_RSS_RESTART_DEFAULT_MB,
@@ -43,11 +44,16 @@ function harness(options: { thresholdMb?: number; supervised?: boolean; previous
 }
 
 describe('the background restarts itself when its memory passes the threshold', () => {
-  test('below the threshold nothing happens', async () => {
-    const { clock, restarts, monitor } = harness();
-    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 5);
+  test('a peak between minute checks is logged without triggering a restart', async () => {
+    const { clock, state, restarts, logs, monitor } = harness();
+    state.rssMb = 4000;
+    await clock.advance(MEMORY_SAMPLE_INTERVAL_MS);
+    state.rssMb = 500;
+    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 5 - MEMORY_SAMPLE_INTERVAL_MS);
     expect(restarts).toEqual([]);
     expect(monitor.restarts()).toEqual({ count: 0 });
+    expect(logs[0]).toContain('rss_anon_mb=500');
+    expect(logs[0]).toContain('peak_anon_mb=4000');
     monitor.stop();
   });
 

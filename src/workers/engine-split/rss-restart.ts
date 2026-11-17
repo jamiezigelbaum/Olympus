@@ -14,7 +14,7 @@
  * the status snapshot (`rss_restarts`), carried from one background to the
  * next through the snapshot it left.
  */
-import { createMemoryDiagnostic, processMemory, type ProcessMemory } from './memory.ts';
+import { createMemoryDiagnostic, MEMORY_SAMPLE_INTERVAL_MS, processMemory, type ProcessMemory } from './memory.ts';
 import type { EngineStatusRead } from './snapshot.ts';
 
 export { ENGINE_RSS_RESTART_DEFAULT_MB } from '../../core/config.ts';
@@ -61,10 +61,10 @@ export function startEngineRssRestart(input: {
   let restarts: EngineRssRestarts = input.previous;
   let overSince: number | undefined;
   let done = false;
+  const sample = input.sample ?? processMemory;
   const check = (): void => {
-    const sampled = (input.sample ?? processMemory)();
-    memory.sample(sampled);
-    const periodic = () => { if (memory.due()) memory.write(sampled); };
+    const sampled = sample();
+    const periodic = () => { if (memory.dueOnMinuteCheck()) memory.write(sampled); };
     if (done || input.thresholdMb <= 0) { periodic(); return; }
     const rssMb = Math.round((input.rss?.() ?? sampled.anon ?? sampled.rss) / (1024 * 1024));
     if (rssMb < input.thresholdMb) { overSince = undefined; periodic(); return; }
@@ -84,10 +84,14 @@ export function startEngineRssRestart(input: {
     }
     log(`[engine-split] rss_restart rss_mb=${rssMb} threshold_mb=${input.thresholdMb} restarts=${next.count} waited_ms=${waited} over_threshold_s=${Math.floor(waited / 1000)} ${fields}`);
   };
-  const timer = (input.setInterval ?? ((callback, ms) => { const handle = setInterval(callback, ms); handle.unref?.(); return handle; }))(check, ENGINE_RSS_CHECK_INTERVAL_MS);
+  const setTimer = input.setInterval ?? ((callback, ms) => { const handle = setInterval(callback, ms); handle.unref?.(); return handle; });
+  const clearTimer = input.clearInterval ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>));
+  // Only the diagnostic observes the fast samples. The minute check reads fresh RSS for its own decision.
+  const sampler = setTimer(() => memory.sample(sample()), MEMORY_SAMPLE_INTERVAL_MS);
+  const timer = setTimer(check, ENGINE_RSS_CHECK_INTERVAL_MS);
   return {
     restarts: () => restarts,
-    stop: () => (input.clearInterval ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>)))(timer),
+    stop: () => { clearTimer(sampler); clearTimer(timer); },
   };
 }
 

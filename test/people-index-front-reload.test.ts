@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalPeopleIndex, type PeoplePerson } from '../src/core/people-index.ts';
+import { memoryActivity } from '../src/core/memory-counters.ts';
 import type { PeopleReadWorker } from '../src/core/people-read-worker.ts';
 import { frontLoopSqlHealth, frontLoopSqlSites, resetFrontLoopSqlGuardForTests, watchFrontLoopSql } from '../src/core/front-loop-sql-guard.ts';
 import { installMainThreadSqlTrace } from '../src/workers/connector-store/main-thread-sql-trace.ts';
@@ -185,7 +186,9 @@ describe('front people reload', () => {
     let second: Promise<void> | undefined;
     let third: Promise<void> | undefined;
     const page = spyOn(reader, 'read').mockImplementation(async (sql, params) => {
+      expect(memoryActivity(false, false)).toContain('people_refresh');
       const rows = await read(sql, params);
+      expect(memoryActivity(false, false)).toContain('people_refresh');
       if (++pages === 1) {
         // The first SELECT has pinned the worker's transaction, not this thread's.
         expect(internal.db.inTransaction).toBe(false);
@@ -211,6 +214,7 @@ describe('front people reload', () => {
     restores.push(() => { page.mockRestore(); swap.mockRestore(); });
     const first = index.reloadIfChanged();
     await first;
+    expect(memoryActivity(false, false)).toEqual(['idle']);
     expect(second).toBe(first);
     expect(third).toBe(first);
     expect(snapshots).toHaveLength(2);
@@ -252,6 +256,7 @@ describe('front people reload', () => {
     writer.query('UPDATE people_identities SET keys_json = ? WHERE identity_key = ?').run('{bad json', key);
     try {
       await reloadFailure(index);
+      expect(memoryActivity(false, false)).toEqual(['idle']);
       expect(internal.db.inTransaction).toBe(false);
       expect(index.list()).toBe(oldPeople);
       expect(index.personForSender('provider-0', 'alexandra.0@example.com')).toBe(oldSender);

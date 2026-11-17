@@ -5,6 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { SourceConnector } from '../src/core/contracts.ts';
+import { memoryActivity } from '../src/core/memory-counters.ts';
 import {
   LocalPeopleIndex,
   PEOPLE_INDEX_MIN_REBUILD_MS,
@@ -188,6 +189,7 @@ describe('people index refresh reads only what changed (#1305)', () => {
     }) as typeof index.rebuild;
     const refresher = new PeopleIndexRefresher(index, () => [mail.store], { now: () => clock.now() });
     await expect(refresher.refresh()).rejects.toThrow('database is locked');
+    expect(memoryActivity(false, false)).toEqual(['idle']);
     expect(index.personForSender('mail', 'quinn@example.com')).toBeUndefined();
 
     await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS);
@@ -214,8 +216,10 @@ describe('people index refresh reads only what changed (#1305)', () => {
     const first = refresher.refresh();
     const second = refresher.refresh();
     const third = refresher.refreshIfChanged();
+    expect(memoryActivity(false, false)).toContain('people_refresh');
     release();
     const [a, b] = await Promise.all([first, second, third]);
+    expect(memoryActivity(false, false)).toEqual(['idle']);
     expect(mail.state.reads).toBe(1);
     expect(b).toEqual(a);
     expect(index.personForSender('mail', 'quinn@example.com')).toBeDefined();

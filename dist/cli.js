@@ -46057,20 +46057,37 @@ function memoryHolderCounts() {
   const { tasks_embed, tasks_sync, tasks_extract, tasks_watch, ...holders } = counts;
   return holders;
 }
-function memoryActivity(judging, recount) {
-  if (judging)
-    return "judging";
-  if (counts.tasks_embed > 0)
-    return "embedding";
-  if (recount)
-    return "recount";
-  if (counts.tasks_sync > 0 || counts.tasks_watch > 0)
-    return "import";
-  if (counts.tasks_extract > 0)
-    return "extract";
-  return "idle";
+function changeMemoryActivity(label, delta) {
+  scopedActivity[label] += delta;
 }
-var counts;
+function taskActivities(judging, recount) {
+  const labels = [];
+  if (judging)
+    labels.push("judging");
+  if (counts.tasks_embed > 0)
+    labels.push("embedding");
+  if (recount)
+    labels.push("recount");
+  if (counts.tasks_sync > 0 || counts.tasks_watch > 0)
+    labels.push("import");
+  if (counts.tasks_extract > 0)
+    labels.push("extract");
+  return labels;
+}
+function statusMemoryActivity(judging, recount) {
+  return taskActivities(judging, recount)[0] ?? "idle";
+}
+function memoryActivity(judging, recount, background) {
+  const labels = background === undefined ? taskActivities(judging, recount) : background === "idle" ? [] : [background];
+  if (scopedActivity.visibility_rebuild_bootstrap > 0)
+    labels.push("visibility_rebuild_bootstrap");
+  if (scopedActivity.visibility_rebuild_incremental > 0)
+    labels.push("visibility_rebuild_incremental");
+  if (scopedActivity.people_refresh > 0)
+    labels.push("people_refresh");
+  return labels.length ? labels : ["idle"];
+}
+var counts, scopedActivity;
 var init_memory_counters = __esm(() => {
   counts = {
     connector_stores: 0,
@@ -46083,6 +46100,11 @@ var init_memory_counters = __esm(() => {
     tasks_sync: 0,
     tasks_extract: 0,
     tasks_watch: 0
+  };
+  scopedActivity = {
+    visibility_rebuild_bootstrap: 0,
+    visibility_rebuild_incremental: 0,
+    people_refresh: 0
   };
 });
 
@@ -64673,27 +64695,30 @@ function visibilityFlagged(row) {
 }
 function runHiddenStepsHere(steps) {
   let step = steps.next();
-  while (!step.done)
-    step = steps.next(step.value ? step.value.find.here() : undefined);
+  while (!step.done) {
+    let found;
+    try {
+      found = step.value?.find.here();
+    } catch (error) {
+      step = steps.throw(error);
+      continue;
+    }
+    step = steps.next(found);
+  }
   return step.value;
 }
 async function runHiddenStepsInTurns(steps) {
   await ingestionTurn();
   let step = steps.next();
   while (!step.done) {
-    if (step.value) {
-      let found;
-      try {
-        found = await step.value.find.offThread();
-      } catch (error) {
-        step = steps.throw(error);
-        continue;
-      }
-      step = steps.next(found);
+    let found;
+    try {
+      found = step.value ? await step.value.find.offThread() : await ingestionTurn();
+    } catch (error) {
+      step = steps.throw(error);
       continue;
     }
-    await ingestionTurn();
-    step = steps.next();
+    step = steps.next(found);
   }
   return step.value;
 }
@@ -69251,109 +69276,129 @@ var init_local_index = __esm(() => {
       return { ledgerChanges, storeChanges };
     }
     *tierLedgerHiddenSteps() {
-      const ledger = this.visibilityLedger();
-      this.registerVisibilityWriter(ledger);
-      if (!ledger) {
-        if (this.visibilitySqlMemo)
-          this.db.exec("DELETE FROM temp.tier_visibility_pks");
-        this.visibilitySqlMemo = undefined;
-        this.tierLedgerHiddenMemo = undefined;
-        return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
-      }
-      const version = this.visibilityFeedPresent ? 0 : this.db.query("PRAGMA data_version").get().data_version;
-      const prior = this.tierLedgerHiddenMemo;
-      const same = prior?.ledger === ledger && prior.dataVersion === version;
-      const priorLedgerCursor = prior?.ledgerCursor;
-      const priorStoreCursor = prior?.storeCursor;
-      let ledgerChanges;
-      let storeChanges;
-      if (this.hiddenSetIncrementalOffLoop) {
-        ({ ledgerChanges, storeChanges } = yield* this.hiddenChangesSteps(ledger, same ? priorLedgerCursor : undefined, same ? priorStoreCursor : undefined));
-        if (this.tierLedgerHiddenMemo !== prior || prior?.ledgerCursor !== priorLedgerCursor || prior?.storeCursor !== priorStoreCursor)
-          return yield* this.tierLedgerHiddenSteps();
-      } else {
-        ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
-        storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
-      }
-      let base = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined ? prior : undefined;
-      if (!base && this.visibilityFeedPresent) {
-        const saved = yield* this.savedVisibilitySteps(ledger);
-        if (saved)
-          ({ memo: base, ledgerChanges, storeChanges } = saved);
-        if (this.tierLedgerHiddenMemo !== prior)
-          return yield* this.tierLedgerHiddenSteps();
-      }
-      const incremental = base !== undefined;
-      const memo = base ?? emptyTierVisibilityMemo(ledger, this.ledgerIdOf(ledger), ledgerChanges.cursor, storeChanges.cursor, version);
-      const startLedgerCursor = memo.ledgerCursor;
-      const startStoreCursor = memo.storeCursor;
-      for (const flag of VISIBILITY_PK_FLAGS)
-        memo.value[flag] = memo.lists[flag].values;
-      const changed = incremental ? [...new Map([...ledgerChanges.identities, ...storeChanges.identities].map((identity) => [tierLedgerIdentityKey(identity), identity])).values()] : undefined;
-      const updates = [];
-      const prepare = function* (store, identities, flags) {
-        const conversationOf = (identity) => normalizeConversationId(identity.providerConversationId);
-        const rows = store.hiddenSetIncrementalOffLoop ? yield { find: store.incrementalHiddenFinder(ledger, () => runSteps(store.itemRowsForIdentitiesSteps(identities, conversationOf)), () => store.itemRowsForIdentitiesOffThread(identities, conversationOf)) } : yield* store.itemRowsForIdentitiesSteps(identities, conversationOf);
-        const pks = new Map;
-        for (const row of rows) {
-          const list = pks.get(row.idx);
-          if (list)
-            list.push(row.item_pk);
-          else
-            pks.set(row.idx, [row.item_pk]);
-        }
-        const byKey = new Map(flags.map((row) => [tierLedgerIdentityKey(row), row]));
-        return identities.map((identity, idx) => ({ identity, pks: pks.get(idx) ?? [], flags: byKey.get(tierLedgerIdentityKey(identity)) }));
+      let activity;
+      const setIncremental = (incremental) => {
+        const next = incremental ? "visibility_rebuild_incremental" : "visibility_rebuild_bootstrap";
+        if (activity === next)
+          return;
+        if (activity)
+          changeMemoryActivity(activity, -1);
+        changeMemoryActivity(next, 1);
+        activity = next;
       };
-      if (changed) {
-        let flags;
-        if (this.hiddenSetIncrementalOffLoop) {
-          flags = yield { find: this.incrementalHiddenFinder(ledger, () => [...ledger.corpusVisibilityPages(this.corpusId, changed)].flat(), () => ledgerReadOffThread(ledger, incrementalVisibilityReads(ledger, this.corpusId, changed), BACKGROUND_READS)) };
-        } else {
-          flags = [];
-          for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) {
-            flags.push(...page);
+      try {
+        for (;; ) {
+          const ledger = this.visibilityLedger();
+          this.registerVisibilityWriter(ledger);
+          if (!ledger) {
+            if (this.visibilitySqlMemo)
+              this.db.exec("DELETE FROM temp.tier_visibility_pks");
+            this.visibilitySqlMemo = undefined;
+            this.tierLedgerHiddenMemo = undefined;
+            return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+          }
+          const version = this.visibilityFeedPresent ? 0 : this.db.query("PRAGMA data_version").get().data_version;
+          const prior = this.tierLedgerHiddenMemo;
+          const same = prior?.ledger === ledger && prior.dataVersion === version;
+          setIncremental(same);
+          const priorLedgerCursor = prior?.ledgerCursor;
+          const priorStoreCursor = prior?.storeCursor;
+          let ledgerChanges;
+          let storeChanges;
+          if (this.hiddenSetIncrementalOffLoop) {
+            ({ ledgerChanges, storeChanges } = yield* this.hiddenChangesSteps(ledger, same ? priorLedgerCursor : undefined, same ? priorStoreCursor : undefined));
+            if (this.tierLedgerHiddenMemo !== prior || prior?.ledgerCursor !== priorLedgerCursor || prior?.storeCursor !== priorStoreCursor)
+              continue;
+          } else {
+            ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+            storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+          }
+          let base = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined ? prior : undefined;
+          if (!base)
+            setIncremental(false);
+          if (!base && this.visibilityFeedPresent) {
+            const saved = yield* this.savedVisibilitySteps(ledger);
+            if (saved)
+              ({ memo: base, ledgerChanges, storeChanges } = saved);
+            if (this.tierLedgerHiddenMemo !== prior)
+              continue;
+          }
+          const incremental = base !== undefined;
+          const memo = base ?? emptyTierVisibilityMemo(ledger, this.ledgerIdOf(ledger), ledgerChanges.cursor, storeChanges.cursor, version);
+          const startLedgerCursor = memo.ledgerCursor;
+          const startStoreCursor = memo.storeCursor;
+          for (const flag of VISIBILITY_PK_FLAGS)
+            memo.value[flag] = memo.lists[flag].values;
+          const changed = incremental ? [...new Map([...ledgerChanges.identities, ...storeChanges.identities].map((identity) => [tierLedgerIdentityKey(identity), identity])).values()] : undefined;
+          const updates = [];
+          const prepare = function* (store, identities, flags) {
+            const conversationOf = (identity) => normalizeConversationId(identity.providerConversationId);
+            const rows = store.hiddenSetIncrementalOffLoop ? yield { find: store.incrementalHiddenFinder(ledger, () => runSteps(store.itemRowsForIdentitiesSteps(identities, conversationOf)), () => store.itemRowsForIdentitiesOffThread(identities, conversationOf)) } : yield* store.itemRowsForIdentitiesSteps(identities, conversationOf);
+            const pks = new Map;
+            for (const row of rows) {
+              const list = pks.get(row.idx);
+              if (list)
+                list.push(row.item_pk);
+              else
+                pks.set(row.idx, [row.item_pk]);
+            }
+            const byKey = new Map(flags.map((row) => [tierLedgerIdentityKey(row), row]));
+            return identities.map((identity, idx) => ({ identity, pks: pks.get(idx) ?? [], flags: byKey.get(tierLedgerIdentityKey(identity)) }));
+          };
+          if (changed) {
+            let flags;
+            if (this.hiddenSetIncrementalOffLoop) {
+              flags = yield { find: this.incrementalHiddenFinder(ledger, () => [...ledger.corpusVisibilityPages(this.corpusId, changed)].flat(), () => ledgerReadOffThread(ledger, incrementalVisibilityReads(ledger, this.corpusId, changed), BACKGROUND_READS)) };
+            } else {
+              flags = [];
+              for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) {
+                flags.push(...page);
+                yield;
+              }
+            }
+            updates.push(...yield* prepare(this, changed, flags));
+          } else {
+            const found = yield { find: this.visibilityBootstrapFinder(ledger) };
+            for (let start = 0;start < found.length; start += IDENTITY_LOOKUP_SLICE) {
+              if (start > 0)
+                yield;
+              this.applyVisibilityUpdates(memo, found.slice(start, start + IDENTITY_LOOKUP_SLICE));
+            }
             yield;
           }
+          if (this.tierLedgerHiddenMemo !== prior || incremental && (memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor)) {
+            continue;
+          }
+          const touched = updates.filter(({ identity, pks, flags }) => flags !== undefined || pks.length > 0 || memo.members.has(tierLedgerIdentityKey(identity))).map(({ identity }) => identity);
+          try {
+            this.applyVisibilityUpdates(memo, updates);
+          } catch (error) {
+            this.tierLedgerHiddenMemo = undefined;
+            this.visibilitySqlMemo = undefined;
+            throw error;
+          }
+          if (this.visibilityJournal && this.visibilitySqlMemo !== memo) {
+            this.db.transaction(() => {
+              this.db.exec("DELETE FROM temp.tier_visibility_pks");
+              for (const flag of VISIBILITY_PK_FLAGS)
+                this.db.query(`INSERT INTO temp.tier_visibility_pks
+              SELECT ?, value FROM json_each(?)`).run(flag, JSON.stringify(memo.value[flag]));
+            })();
+            this.visibilitySqlMemo = memo;
+          }
+          memo.ledgerCursor = ledgerChanges.cursor;
+          memo.storeCursor = storeChanges.cursor;
+          this.tierLedgerHiddenMemo = memo;
+          const moved = !incremental || memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor || base !== prior;
+          if (!this.readOnly && this.visibilityFeedPresent && moved) {
+            this.notePublish(memo, incremental ? { ledger: startLedgerCursor, store: startStoreCursor } : undefined, touched);
+          }
+          return memo.value;
         }
-        updates.push(...yield* prepare(this, changed, flags));
-      } else {
-        const found = yield { find: this.visibilityBootstrapFinder(ledger) };
-        for (let start = 0;start < found.length; start += IDENTITY_LOOKUP_SLICE) {
-          if (start > 0)
-            yield;
-          this.applyVisibilityUpdates(memo, found.slice(start, start + IDENTITY_LOOKUP_SLICE));
-        }
-        yield;
+      } finally {
+        if (activity)
+          changeMemoryActivity(activity, -1);
       }
-      if (this.tierLedgerHiddenMemo !== prior || incremental && (memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor)) {
-        return yield* this.tierLedgerHiddenSteps();
-      }
-      const touched = updates.filter(({ identity, pks, flags }) => flags !== undefined || pks.length > 0 || memo.members.has(tierLedgerIdentityKey(identity))).map(({ identity }) => identity);
-      try {
-        this.applyVisibilityUpdates(memo, updates);
-      } catch (error) {
-        this.tierLedgerHiddenMemo = undefined;
-        this.visibilitySqlMemo = undefined;
-        throw error;
-      }
-      if (this.visibilityJournal && this.visibilitySqlMemo !== memo) {
-        this.db.transaction(() => {
-          this.db.exec("DELETE FROM temp.tier_visibility_pks");
-          for (const flag of VISIBILITY_PK_FLAGS)
-            this.db.query(`INSERT INTO temp.tier_visibility_pks
-          SELECT ?, value FROM json_each(?)`).run(flag, JSON.stringify(memo.value[flag]));
-        })();
-        this.visibilitySqlMemo = memo;
-      }
-      memo.ledgerCursor = ledgerChanges.cursor;
-      memo.storeCursor = storeChanges.cursor;
-      this.tierLedgerHiddenMemo = memo;
-      const moved = !incremental || memo.ledgerCursor !== startLedgerCursor || memo.storeCursor !== startStoreCursor || base !== prior;
-      if (!this.readOnly && this.visibilityFeedPresent && moved) {
-        this.notePublish(memo, incremental ? { ledger: startLedgerCursor, store: startStoreCursor } : undefined, touched);
-      }
-      return memo.value;
     }
     ledgerIdOf(ledger) {
       try {
@@ -71490,23 +71535,33 @@ ${parentKey(ref)}`, { ref, origin });
       return JSON.stringify([ledgerCursor, storeCursor, laneStores.map((store) => [store.corpusId, store.childVisibilityMarker?.()])]);
     }
     peopleObservations() {
-      const tierHidden = this.tierHiddenItemPks();
-      return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+      changeMemoryActivity("people_refresh", 1);
+      try {
+        const tierHidden = this.tierHiddenItemPks();
+        return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+      } finally {
+        changeMemoryActivity("people_refresh", -1);
+      }
     }
     async peopleObservationsOffThread() {
-      if (!offThreadReadsSupported(this.dbPath))
+      changeMemoryActivity("people_refresh", 1);
+      try {
+        if (!offThreadReadsSupported(this.dbPath))
+          return this.peopleObservations();
+        for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+          const marker = this.visibilityMarker();
+          const tierHidden = await this.tierHiddenItemPksInTurns();
+          const steps = this.peopleObservationSteps(tierHidden);
+          let step = steps.next();
+          while (!step.done)
+            step = steps.next(await readInBackground(this.dbPath, step.value));
+          if (this.visibilityMarker() === marker)
+            return this.peopleObservationsFromRows(step.value);
+        }
         return this.peopleObservations();
-      for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
-        const marker = this.visibilityMarker();
-        const tierHidden = await this.tierHiddenItemPksInTurns();
-        const steps = this.peopleObservationSteps(tierHidden);
-        let step = steps.next();
-        while (!step.done)
-          step = steps.next(await readInBackground(this.dbPath, step.value));
-        if (this.visibilityMarker() === marker)
-          return this.peopleObservationsFromRows(step.value);
+      } finally {
+        changeMemoryActivity("people_refresh", -1);
       }
-      return this.peopleObservations();
     }
     *peopleObservationSteps(tierHidden) {
       return yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held]);
@@ -81658,22 +81713,28 @@ class LocalPeopleIndex {
     closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : {});
   }
   reload() {
-    if (!this.readOnly) {
-      this.loadPeople();
-      return;
-    }
-    this.db.exec("BEGIN");
+    changeMemoryActivity("people_refresh", 1);
     try {
-      this.loadPeople();
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
+      if (!this.readOnly) {
+        this.loadPeople();
+        return;
+      }
+      this.db.exec("BEGIN");
+      try {
+        this.loadPeople();
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      changeMemoryActivity("people_refresh", -1);
     }
   }
   reloadIfChanged() {
     if (this.reloading)
       return this.reloading;
+    changeMemoryActivity("people_refresh", 1);
     this.reloading = Promise.resolve().then(async () => {
       if (!this.readOnly)
         throw new Error("Off-thread people reload requires a read-only index");
@@ -81691,6 +81752,7 @@ class LocalPeopleIndex {
       }
     }).finally(() => {
       this.reloading = undefined;
+      changeMemoryActivity("people_refresh", -1);
     });
     return this.reloading;
   }
@@ -82008,9 +82070,13 @@ class PeopleIndexRefresher {
     return linkStores(this.index, stores, observations);
   }
   rebuildOnce(force) {
-    this.inFlight ??= this.rebuild(force).finally(() => {
-      this.inFlight = undefined;
-    });
+    if (!this.inFlight) {
+      changeMemoryActivity("people_refresh", 1);
+      this.inFlight = this.rebuild(force).finally(() => {
+        this.inFlight = undefined;
+        changeMemoryActivity("people_refresh", -1);
+      });
+    }
     return this.inFlight;
   }
   async rebuild(force) {
@@ -184610,7 +184676,7 @@ function processMemory(status, platform = process.platform) {
   const anon = kb("RssAnon"), file = kb("RssFile"), swap = kb("VmSwap");
   return { rss, ...anon === undefined ? {} : { anon }, ...file === undefined ? {} : { file }, ...swap === undefined ? {} : { swap } };
 }
-function memoryFields(context, memory, peakAnon, heap = heapStats()) {
+function memoryFields(context, memory, peak, heap = heapStats()) {
   const mb = (bytes) => Math.round(bytes / MB * 100) / 100;
   const holders = memoryHolderCounts();
   const fields = {
@@ -184619,7 +184685,12 @@ function memoryFields(context, memory, peakAnon, heap = heapStats()) {
     ...memory.anon === undefined ? {} : { rss_anon_mb: mb(memory.anon) },
     ...memory.file === undefined ? {} : { rss_file_mb: mb(memory.file) },
     ...memory.swap === undefined ? {} : { swap_mb: mb(memory.swap) },
-    ...peakAnon === undefined ? {} : { peak_anon_mb: mb(peakAnon) },
+    ...peak === undefined ? {} : {
+      peak_anon_mb: mb(peak.anon),
+      peak_at: peak.at,
+      peak_activity: peak.activity,
+      peak_heap_size_mb: mb(peak.heapSize)
+    },
     heap_size_mb: mb(heap.heapSize),
     heap_capacity_mb: mb(heap.heapCapacity),
     extra_memory_mb: mb(heap.extraMemorySize),
@@ -184631,17 +184702,19 @@ function memoryFields(context, memory, peakAnon, heap = heapStats()) {
 function createMemoryDiagnostic(input) {
   const now = input.now ?? Date.now;
   const log = input.log ?? ((line) => console.warn(line));
+  const activity = () => input.activity?.().join(",") || "idle";
+  const heap = input.heap ?? heapStats;
   let lastLineAt = now();
-  let peakAnon;
-  let samplesSinceLine = 0;
+  let peak;
+  let checksSinceLine = 0;
   return {
     sample(memory) {
-      samplesSinceLine += 1;
-      if (memory.anon !== undefined)
-        peakAnon = Math.max(peakAnon ?? 0, memory.anon);
+      if (memory.anon === undefined || peak && memory.anon <= peak.anon)
+        return;
+      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: heap().heapSize };
     },
-    due() {
-      return samplesSinceLine >= 5 || now() - lastLineAt >= MEMORY_LOG_INTERVAL_MS;
+    dueOnMinuteCheck() {
+      return ++checksSinceLine >= 5 || now() - lastLineAt >= MEMORY_LOG_INTERVAL_MS;
     },
     write(memory) {
       const at = new Date(now()).toISOString();
@@ -184649,18 +184722,18 @@ function createMemoryDiagnostic(input) {
         role: input.role,
         pid: process.pid,
         uptime_s: Math.floor((input.uptime ?? process.uptime)()),
-        activity: input.activity?.() ?? "idle",
+        activity: activity(),
         ...input.readers?.() ?? { read_workers: 0, read_connections: 0 }
-      }, memory, peakAnon, (input.heap ?? heapStats)());
+      }, memory, peak, heap());
       log(`${at} [olympus] memory ${fields}`);
-      peakAnon = undefined;
-      samplesSinceLine = 0;
+      peak = undefined;
+      checksSinceLine = 0;
       lastLineAt = now();
       return `at=${at} ${fields}`;
     }
   };
 }
-var MB, MEMORY_LOG_INTERVAL_MS;
+var MB, MEMORY_SAMPLE_INTERVAL_MS = 5000, MEMORY_LOG_INTERVAL_MS;
 var init_memory2 = __esm(() => {
   init_memory_counters();
   MB = 1024 * 1024;
@@ -245362,11 +245435,11 @@ function startEngineRssRestart(input) {
   let restarts = input.previous;
   let overSince;
   let done = false;
+  const sample = input.sample ?? processMemory;
   const check = () => {
-    const sampled = (input.sample ?? processMemory)();
-    memory.sample(sampled);
+    const sampled = sample();
     const periodic = () => {
-      if (memory.due())
+      if (memory.dueOnMinuteCheck())
         memory.write(sampled);
     };
     if (done || input.thresholdMb <= 0) {
@@ -245398,14 +245471,20 @@ function startEngineRssRestart(input) {
     }
     log(`[engine-split] rss_restart rss_mb=${rssMb} threshold_mb=${input.thresholdMb} restarts=${next.count} waited_ms=${waited} over_threshold_s=${Math.floor(waited / 1000)} ${fields}`);
   };
-  const timer = (input.setInterval ?? ((callback, ms) => {
+  const setTimer = input.setInterval ?? ((callback, ms) => {
     const handle = setInterval(callback, ms);
     handle.unref?.();
     return handle;
-  }))(check, ENGINE_RSS_CHECK_INTERVAL_MS);
+  });
+  const clearTimer = input.clearInterval ?? ((handle) => clearInterval(handle));
+  const sampler = setTimer(() => memory.sample(sample()), MEMORY_SAMPLE_INTERVAL_MS);
+  const timer = setTimer(check, ENGINE_RSS_CHECK_INTERVAL_MS);
   return {
     restarts: () => restarts,
-    stop: () => (input.clearInterval ?? ((handle) => clearInterval(handle)))(timer)
+    stop: () => {
+      clearTimer(sampler);
+      clearTimer(timer);
+    }
   };
 }
 var ENGINE_RSS_CHECK_INTERVAL_MS = 60000, ENGINE_RSS_RESTART_MAX_WAIT_MS;
@@ -275980,7 +276059,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
   tierSniffer?.start();
-  const currentMemoryActivity = () => engineRole === "front" ? engineFront?.backgroundActivity() ?? "idle" : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
+  const currentMemoryActivity = () => engineRole === "front" ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? "idle") : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
   const memoryDiagnostic = createMemoryDiagnostic({ role: engineRole, activity: currentMemoryActivity, readers: readPoolMemoryCounts });
   const frontMemory = engineRole !== "background" ? startEngineRssRestart({
     thresholdMb: 0,
@@ -276132,7 +276211,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       env: process.env,
       instanceId: commands.instanceId,
       collect: () => ({
-        activity: currentMemoryActivity(),
+        activity: statusMemoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false),
         scheduler: sourceScheduler?.status() ?? null,
         judge: (() => {
           const backlog = tierSniffer?.backlog();

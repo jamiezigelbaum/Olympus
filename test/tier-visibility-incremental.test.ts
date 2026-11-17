@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { expect, spyOn, test } from 'bun:test';
+import { memoryActivity } from '../src/core/memory-counters.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { TierLedger, type TierLedgerIdentity } from '../src/workers/classification/tier-ledger.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
@@ -175,6 +176,13 @@ test('a yielded refresh cannot rewind a newer cache or lose held flags when a pk
     state: 'pending' as const, contentPending: true };
   const plan = { copies: [{ corpusId: store.corpusId, trustDomain: 'internal' as const, layers: 'both' as const }], embedHold: true };
   try {
+    const bootstrap = probe.tierLedgerHiddenSteps();
+    try {
+      expect(bootstrap.next().done).toBe(false);
+      expect(memoryActivity(false, false)).toEqual(['visibility_rebuild_bootstrap']);
+      expect(() => bootstrap.throw(new Error('finder failed'))).toThrow('finder failed');
+    } finally { bootstrap.return(undefined); }
+    expect(memoryActivity(false, false)).toEqual(['idle']);
     await store.syncFromConnector(fixtureConnector(() => [{ id: 'a', name: 'Notes', text: 'ordinary' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     ledger.recordRoutedPlacement(identityOf('a'), decision, plan);
     expect(probe.tierLedgerHiddenItemPks().held).toEqual([1]);
@@ -183,10 +191,15 @@ test('a yielded refresh cannot rewind a newer cache or lose held flags when a pk
     const ldb = (ledger as unknown as { db: Database }).db;
     ldb.query("UPDATE tier_copies SET embed_hold = 0 WHERE provider_item_id = 'a'").run();
     const refresh = probe.tierLedgerHiddenSteps();
-    expect(refresh.next().done).toBe(false);
-    ledger.putWriteIntent({ identity: identityOf('a'), connectorId: 'fixture', kind: 'secret' });
-    expect(probe.tierLedgerHiddenItemPks().hidden).toEqual([1]);
-    while (!refresh.next().done) { /* resume the earlier reader */ }
+    try {
+      expect(refresh.next().done).toBe(false);
+      expect(memoryActivity(false, false)).toEqual(['visibility_rebuild_incremental']);
+      ledger.putWriteIntent({ identity: identityOf('a'), connectorId: 'fixture', kind: 'secret' });
+      expect(probe.tierLedgerHiddenItemPks().hidden).toEqual([1]);
+      expect(memoryActivity(false, false)).toEqual(['visibility_rebuild_incremental']);
+      while (!refresh.next().done) { /* resume the earlier reader */ }
+    } finally { refresh.return(undefined); }
+    expect(memoryActivity(false, false)).toEqual(['idle']);
     expect(probe.tierLedgerHiddenItemPks().hidden).toEqual([1]);
     // The ledger records the new identity before a store row is reassigned.
     // Removing the old identity's contribution after adding the new one must
