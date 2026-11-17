@@ -308,7 +308,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
       if (key === '--judge-answers' || key === '--no-baseline' || key === '--day-picker-only') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
-      if (!['--output', '--max-results', '--max-chars-per-candidate', '--prompt-bytes', '--deep-prompt-bytes', '--only', '--read', '--day-budget-sections'].includes(key!)) throw new Error('Unsupported deep-read eval option.');
+      if (!['--output', '--max-results', '--max-chars-per-candidate', '--prompt-bytes', '--deep-prompt-bytes', '--only', '--read', '--day-budget-sections', '--window-tokens'].includes(key!)) throw new Error('Unsupported deep-read eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Deep-read eval option requires a value.');
       values.set(key!, value);
@@ -376,7 +376,10 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const analyst = createAnalyst(createDelphiAnalystModel(delphi, lane ? { lane } : { profile }), { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
     // The deep read job's budget: the model's served window, as the engine sizes it (no env override).
     const endpoint = lane ? config.argus.lanes[lane] : config.argus.modelProfiles[profile];
-    const window = await resolveLocalAnalystWindow({ model: endpoint.model, baseUrl: endpoint.baseUrl });
+    // --window-tokens: the served window for an endpoint that cannot report it (the Delphi gateway), as eval:panel takes it.
+    const namedWindow = values.has('--window-tokens') ? positiveInteger(values.get('--window-tokens'), 0) : undefined;
+    const window = namedWindow ? { windowTokens: namedWindow, source: 'manifest' as const }
+      : await resolveLocalAnalystWindow({ model: endpoint.model, baseUrl: endpoint.baseUrl });
     const budget = localAnalystPromptBudget(undefined, window, maxTokensForChars(DEFAULT_ANALYST_MAX_OUTPUT_CHARS));
     const deepPromptBytes = values.has('--deep-prompt-bytes') ? positiveInteger(values.get('--deep-prompt-bytes'), budget.bytes) : budget.bytes;
     // The baseline is sized like the engine's Ask leg on this model, unless named.
@@ -401,7 +404,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       };
     } else lanes = createEvalSourceLanes({ ...opened });
     const receipt = await run({ lanes: () => lanes(''), analyst,
-      deepPromptBytes, deepPromptBytesSource: values.has('--deep-prompt-bytes') ? 'option' : budget.source,
+      deepPromptBytes, deepPromptBytesSource: values.has('--deep-prompt-bytes') || namedWindow ? 'option' : budget.source,
       ...(baseline ? { baseline } : {}), ...(judgeAnswer ? { judgeAnswer } : {}),
     });
     console.log(JSON.stringify({ storesOpened: opened.stores.length, storesSkipped: opened.skipped.length, deepPromptBytes, baselinePromptBytes: baseline ? promptBytes : undefined, ...receipt.summary }));
