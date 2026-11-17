@@ -693,7 +693,9 @@ bun run eval:deep-read -- --data-root /tmp/olympus-copy \
   with the same Analyst in the compact format, at the budget the engine gives
   a deep read: the model's served window through `localAnalystPromptBudget`
   (13,500 bytes when the window is unknown, at most 27,000).
-  `--deep-prompt-bytes` overrides it. The baseline uses the same budget unless
+  `--window-tokens N` names the window for an endpoint that cannot report
+  it (the Delphi gateway; the same option as `eval:panel`), and
+  `--deep-prompt-bytes` overrides the budget outright. The baseline uses the same budget unless
   `--prompt-bytes` (or `OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES`)
   names one.
 
