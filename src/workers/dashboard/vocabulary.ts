@@ -4067,6 +4067,8 @@ export const DASHBOARD_PRIVACY_ITEMS_COPY = {
   toastPersonal: 'Made Personal. Your AI apps can now read it.',
   toastPrivate: 'Made Private. Your AI apps no longer see it.',
   toastJudge: 'Back to the judge\'s label.',
+  saving: 'Saving…',
+  pendingRestart: 'Saving… If Olympus restarts before this is saved, you’ll be asked to press again.',
   failed: 'That did not change. Try again.',
   unreachable: 'Olympus is not responding. Try again in a moment.',
   locked: 'Open dashboard controls to see and change your items.',

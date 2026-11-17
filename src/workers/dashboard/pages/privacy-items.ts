@@ -28,6 +28,7 @@ import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 export const DASHBOARD_PRIVACY_ITEMS_PATHS = {
   find: '/dashboard/privacy/items/find',
   set: '/dashboard/privacy/items/set',
+  status: '/dashboard/privacy/items/status',
   read: '/dashboard/privacy/items/read',
 } as const;
 
@@ -98,6 +99,7 @@ const PRIVACY_ITEMS_CSS = `
 .pi .piundo .piwhy { margin: 0; flex: 1; }
 .pi .pistatus { margin: 10px 0 0; color: var(--bad); font-size: var(--fs-body); }
 .pi .pistatus:empty { display: none; }
+.pi .pistatus[data-saving] { color: var(--t2); }
 .pi .pifoot { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line2); color: var(--t3); font-size: 13px; line-height: 1.5; }
 .pi .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pi .paunlock .hint { color: var(--t2); }
@@ -262,13 +264,27 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
         body: JSON.stringify(body),
       });
     } catch (error) {
-      return { ok: false, message: C.unreachable };
+      return { ok: false, retry: true, message: C.unreachable };
     }
     var result = {};
     try { result = (await response.json()) || {}; } catch (error) { result = {}; }
     if (response.ok && result.ok === true) return { ok: true, result: result };
     var message = (result.error && result.error.message) || result.message || C.failed;
-    return { ok: false, message: message };
+    var restarting = response.status === 503 && (result.status === 'starting' || (result.error && result.error.code === 'worker_restarting'));
+    return { ok: false, retry: restarting, unknown: result.unknown === true, message: message };
+  }
+
+  async function save(id, tier) {
+    var response = await post(config.paths.set, { item_id: id, tier: tier });
+    if (!response.ok || response.result.state !== 'pending') return response;
+    var requestId = response.result.request_id;
+    saving[id] = 'pending';
+    render();
+    do {
+      await new Promise(function (resolve) { window.setTimeout(resolve, 250); });
+      response = await post(config.paths.status, { request_id: requestId });
+    } while (response.retry || (response.ok && response.result.state === 'pending'));
+    return response;
   }
 
   function narrow() { return !!(window.matchMedia && window.matchMedia('(max-width: 719px)').matches); }
@@ -305,11 +321,11 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   function row(item) {
     var open = selected === item.item_id;
     var tier = shown(item);
-    var note = changedByYou(item) ? '<span class="piyou">' + esc(C.changedByYou) + '</span>'
-      : item.moving_to ? '<span class="piyou">' + esc(fill(C.moving, { tier: item.moving_to })) + '</span>' : '';
+    var note = saving[item.item_id] ? C.saving : changedByYou(item) ? C.changedByYou
+      : item.moving_to ? fill(C.moving, { tier: item.moving_to }) : '';
     return '<li><button type="button" class="pirow" data-pi-item="' + esc(item.item_id) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
       + logo(item) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>'
-      + '<span class="piend">' + pill(tier) + note + '</span></button></li>';
+      + '<span class="piend">' + pill(tier) + (note ? '<span class="piyou">' + esc(note) + '</span>' : '') + '</span></button></li>';
   }
 
   function option(item, tier, line) {
@@ -324,10 +340,12 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     var preview = item.preview ? '<div class="piprev" data-pi-preview>' + esc(item.preview) + '</div>' : '<div class="piprev" data-pi-preview>' + esc(C.noPreview) + '</div>';
     var why = '';
     var foot = '';
+    var busy = saving[item.item_id];
+    var status = busy === 'pending' ? C.pendingRestart : busy ? C.saving : statusFor[item.item_id] || '';
     if (changedByYou(item)) {
       var said = change && change.judge ? ' ' + esc(fill(C.judgeSaid, { tier: change.judge })) : '';
       why = '<div class="piundo" data-pi-undo-row><p class="piwhy"><b>' + esc(fill(C.youChose, { tier: tier || '' })) + '</b>' + (change ? ' ' + esc(C.justNow) + '.' : '.') + said + '</p>'
-        + '<button type="button" class="btn" data-pi-undo>' + esc(C.undo) + '</button></div>';
+        + '<button type="button" class="btn" data-pi-undo' + (busy ? ' disabled' : '') + '>' + esc(C.undo) + '</button></div>';
       var effect = change && change.applies === 'next_pass' ? C.afterNextPass : tier === 'Personal' ? C.afterPersonal : C.afterPrivate;
       foot = esc(effect) + ' ' + esc(C.undoGivesBack);
     } else {
@@ -350,7 +368,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
       + '<p class="pidcap" id="pi-who">' + esc(C.whoCaption) + '</p>'
       + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>'
       + why
-      + '<p class="pistatus" data-pi-status role="status">' + esc(statusFor[item.item_id] || '') + '</p>'
+      + '<p class="pistatus" data-pi-status role="status"' + (busy ? ' data-saving' : '') + '>' + esc(status) + '</p>'
       + '<p class="pifoot" data-pi-foot>' + foot + '</p></section>';
   }
 
@@ -414,6 +432,14 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     for (var i = 0; i < items.length; i += 1) if (items[i].item_id === updated.item_id) items[i] = updated;
   }
 
+  // A restart lost the receipt: read the item's true state again before saying it was not saved.
+  async function saveFailed(id, response) {
+    if (response.unknown) { delete changes[id]; await load(); }
+    statusFor[id] = response.message;
+    if (selected !== id || response.unknown) setMessage(response.message, true);
+    render();
+  }
+
   async function choose(id, tier) {
     var item = find(id);
     if (!item || saving[id]) return;
@@ -422,11 +448,11 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     render();
     var response;
     try {
-      response = await post(config.paths.set, { item_id: id, tier: tier === 'Personal' ? 'personal' : 'private' });
+      response = await save(id, tier === 'Personal' ? 'personal' : 'private');
     } finally {
       delete saving[id];
     }
-    if (!response.ok || response.result.ok === false) { statusFor[id] = response.message; render(); return; }
+    if (!response.ok) { await saveFailed(id, response); return; }
     var previous = changes[id];
     if (counts && !previous && !item.owner_set) { counts.changed += 1; renderFilters(); }
     // What the judge had said: the label before this visit's first change, if nobody had set it before.
@@ -447,15 +473,11 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     if (item) render();
     var response;
     try {
-      response = await post(config.paths.set, { item_id: id, tier: 'judge' });
+      response = await save(id, 'judge');
     } finally {
       delete saving[id];
     }
-    if (!response.ok || response.result.ok === false) {
-      if (item) statusFor[id] = response.message; else setMessage(response.message, true);
-      render();
-      return;
-    }
+    if (!response.ok) { await saveFailed(id, response); return; }
     delete changes[id];
     if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
     if (item) merge(response.result.item, item);

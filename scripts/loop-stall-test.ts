@@ -45,6 +45,8 @@ import { createWorkerFetch } from '../src/core/worker-transport.ts';
 import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
 import { LOOP_LAG_BUCKETS_MS } from '../src/core/engine-heartbeat.ts';
 import { controlPathHeadroom, freezeLogLine, summarizeCpuSamples, tracesInStalls } from '../src/workers/control-path-headroom.ts';
+import { ownerTierItemId } from '../src/workers/classification/tier-owner-items.ts';
+import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH } from '../src/workers/http.ts';
 
 // v6: each build keeps a pristine copy and each run starts from it, so every run has judging to do (plan, 16 Nov 2026).
 const VERSION = 6;
@@ -311,7 +313,7 @@ export async function attachEngineFixture(stores: LocalConnectorStore[], role: s
     timers.push(starter);
   }
   let stopRecount = () => {};
-  return { answerModel, stop() { stopped = true; for (const timer of timers) clearInterval(timer); stopRecount(); service?.stop(); installed?.close(); jobs?.close(); ledger.close(); } };
+  return { answerModel, storePaths: mounted.map(store => store.dbPath), stop() { stopped = true; for (const timer of timers) clearInterval(timer); stopRecount(); service?.stop(); installed?.close(); jobs?.close(); ledger.close(); } };
 }
 
 interface Loop { max_ms: number; over_budget: number; beats: number; buckets?: number[] }
@@ -706,7 +708,7 @@ function coldFiles(dir: string) {
 }
 type RunCase = 'steady' | 'boot-after-upgrade';
 async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean }) {
-  const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number } };
+  const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number; items: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
   const isCapped = capped(memoryMaxBytes(memoryMax));
   if (!isCapped) console.error(`WARNING: run is not under MemoryMax<=${memoryMax} and MemorySwapMax=0; this is not a qualified receipt. Use: systemd-run --user --scope -p MemoryMax=${memoryMax} -p MemorySwapMax=0 -- bun scripts/loop-stall-test.ts run --dir ${JSON.stringify(dir)} --memory-max ${memoryMax}`);
@@ -773,6 +775,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const forwarded: Array<{ ms: number; status: number; error?: unknown }> = [];
   const asks: Array<{ ms: number; status: number; evidence_ms: unknown }> = [];
   const acks: Array<{ at: string; ms: number; status: number; loop_held_ms?: number; error?: string }> = [];
+  const clicks: Array<{ ms: number; status: number; received: boolean; settled_ms?: number; saved?: boolean; error?: unknown }> = [];
+  const pendingClicks = new Map<string, { started: number; click: typeof clicks[number] }>();
   const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
   let enginesStartedAt: number | undefined;
   const timing: Record<Role, { spawnedAt: number; stoppedAt: number; readyAt?: number }> = {
@@ -850,14 +854,49 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       if (Date.now() >= deadline || children.some(child => child.exitCode !== null)) throw new Error('Engine boot failed or timed out; see last-run.json engine_logs');
       await Bun.sleep(100);
     }
-    writeFileSync(join(dir, 'start'), 'start');
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
-    const post = async (path: string, body: object) => {
+    const origin = `http://127.0.0.1:${port}`;
+    const bearer = { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}` };
+    const post = async (path: string, body: object, headers: Record<string, string> = bearer) => {
       const start = performance.now();
-      const response = await workerFetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(Math.min(60_000, Math.max(1, deadline - Date.now()))) });
+      const response = await workerFetch(origin + path, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(Math.min(60_000, Math.max(1, deadline - Date.now()))) });
       const json = await response.json() as Record<string, unknown>;
-      return { ms: performance.now() - start, status: response.status, json };
+      return { ms: performance.now() - start, status: response.status, json, cookie: response.headers.get('Set-Cookie')?.split(';')[0] };
     };
+    const owner = await post('/dashboard/control/session', {}, { ...bearer, Origin: origin });
+    if (!owner.cookie || typeof owner.json.csrf_token !== 'string') throw new Error(`Cannot open dashboard controls (HTTP ${owner.status}).`);
+    const local = await post(DASHBOARD_LOCAL_CONTROL_SESSION_PATH, {}, { Origin: origin, Cookie: owner.cookie, 'X-Olympus-CSRF': owner.json.csrf_token });
+    if (!local.cookie || typeof local.json.csrf_token !== 'string') throw new Error(`Cannot unlock the local Privacy dashboard (HTTP ${local.status}).`);
+    const privacyHeaders = { Origin: origin, Cookie: local.cookie, 'X-Olympus-CSRF': local.json.csrf_token };
+    let clickSequence = 0;
+    const click = async () => {
+      const started = performance.now();
+      // Seeded Personal rows, away from the read probe's item and the judge's held rows.
+      const first = Math.min(13, shape.shape.items - 1);
+      const count = Math.ceil((shape.shape.items - first) / 20);
+      const itemId = ownerTierItemId(identity(first + (clickSequence++ % count) * 20));
+      try {
+        const { ms, status, json } = await post('/dashboard/privacy/items/set', { item_id: itemId, tier: 'private' }, privacyHeaders);
+        const received = status === 202 && json.state === 'pending' && typeof json.request_id === 'string';
+        const sample = { ms, status, received, ...(received ? {} : { error: json.error ?? json.message }) };
+        clicks.push(sample);
+        if (received) pendingClicks.set(json.request_id as string, { started, click: sample });
+      } catch (error) {
+        clicks.push({ ms: performance.now() - started, status: 0, received: false, error: String(error) });
+      }
+    };
+    const pollClicks = async () => {
+      await Promise.all([...pendingClicks].map(async ([id, entry]) => {
+        const result = await post('/dashboard/privacy/items/status', { request_id: id }, privacyHeaders);
+        if (result.json.state === 'pending') return;
+        entry.click.settled_ms = Math.round(performance.now() - entry.started);
+        entry.click.saved = result.status === 200 && result.json.ok === true;
+        if (!entry.click.saved) entry.click.error = result.json.error ?? result.json.message;
+        pendingClicks.delete(id);
+      }));
+    };
+    writeFileSync(join(dir, 'start'), 'start');
+    let pollingClicks = false;
     let nextAsk = Date.now(), nextRead = Date.now(), nextAck = Date.now(), nextDash = Date.now(), askSequence = 0, ackSequence = 0;
     const statusPath = engineStatusSnapshotPath(env);
     while (Date.now() < deadline) {
@@ -865,6 +904,13 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       if (Date.now() >= nextAck) {
         // Command acknowledgement on the background socket, timed to the 202, and the status snapshot's age, once a second.
         nextAck += 1000;
+        requests.push(click());
+        if (pendingClicks.size > 0 && !pollingClicks) {
+          pollingClicks = true;
+          requests.push(pollClicks()
+            .catch(error => { requestErrors.push(`privacy status: ${error.message}`); })
+            .finally(() => { pollingClicks = false; }));
+        }
         const start = performance.now();
         requests.push(fetch('http://localhost/engine/commands', { unix: env.OLYMPUS_ENGINE_BACKGROUND_SOCKET, method: 'POST', headers: { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: `loopstall-ack-${ackSequence++}`, command: { kind: 'dashboard_samples', samples: [] } }), signal: AbortSignal.timeout(60_000) } as RequestInit)
@@ -955,7 +1001,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   if (existsSync(join(dir, 'workloads.json'))) workloads = JSON.parse(readFileSync(join(dir, 'workloads.json'), 'utf8'));
   const workload_ok = finished && errors.length === 0 && workloads.failures.length === 0 && workloads.sync_items > 0 && workloads.embed_passes_started > 0 && workloads.judge_passes > 0 && workloads.recounts_started > 0
     && modelCalls.judge > 0 && asks.some(ask => ask.status === 200 && typeof ask.evidence_ms === 'number') && forwarded.some(read => read.status === 200);
-  // Command acknowledgement (control thread, 540d012): every ack under 1 s, and the status snapshot never over 10 s old once written.
+  // The socket probe still measures the control thread and the status snapshot.
   const ackOk = acks.filter(ack => ack.status === 202 || ack.status === 200);
   const ackSummary = { count: acks.length, ok: ackOk.length, max_ms: Math.max(0, ...acks.map(ack => ack.ms)), over_1s: acks.filter(ack => ack.ms >= LOOP_STALL_LIMIT_MS || !(ack.status === 202 || ack.status === 200)).slice(0, 50),
     max_loop_held_ms: Math.max(0, ...acks.map(ack => ack.loop_held_ms ?? 0)), status_max_age_ms: Math.max(0, ...statusAges.map(row => row.age_ms)), status_reads: statusAges.length,
@@ -964,10 +1010,15 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   // Typical case beside the worst (plan, 16 Nov 2026), reported only until two runs show the measurement is steady:
   // click acknowledgement p95 under 100 ms, dashboard reads p95 under 300 ms, both worst under 1 s.
   const dashOk = dashReads.filter(read => read.status === 200);
-  const typical = { ack_p95_ms: percentile(acks.map(ack => ack.ms), 0.95), dashboard_p95_ms: percentile(dashReads.map(read => read.ms), 0.95), dashboard_max_ms: Math.max(0, ...dashReads.map(read => read.ms)),
+  const typical = { ack_p95_ms: percentile(clicks.map(click => click.ms), 0.95), dashboard_p95_ms: percentile(dashReads.map(read => read.ms), 0.95), dashboard_max_ms: Math.max(0, ...dashReads.map(read => read.ms)),
     dashboard_reads: dashReads.length, dashboard_failed: dashReads.length - dashOk.length, dashboard_failures: dashReads.filter(read => read.status !== 200).slice(0, 10),
     front_beat_p95_ms: beatP95(front) ?? null, background_beat_p95_ms: beatP95(background) ?? null };
-  const ack_ok = ackOk.length > 0 && ackSummary.over_1s.length === 0 && ackSummary.status_max_age_ms <= 10_000 && !ackSummary.no_control_thread;
+  const clickSummary = { count: clicks.length, max_ms: Math.round(Math.max(0, ...clicks.map(click => click.ms))),
+    over_1s: clicks.filter(click => !click.received || click.ms >= LOOP_STALL_LIMIT_MS).slice(0, 50),
+    settled: clicks.filter(click => click.settled_ms !== undefined).length, pending: pendingClicks.size,
+    max_settled_ms: Math.max(0, ...clicks.map(click => click.settled_ms ?? 0)),
+    failures: clicks.filter(click => click.saved === false), samples: clicks };
+  const ack_ok = clickSummary.count > 0 && clickSummary.over_1s.length === 0;
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
   const checkpoint = sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000);
@@ -982,14 +1033,12 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   // report to the plan with the reason, not an automatic fail.
   const padded_wal_level_s = firstLevel ? Math.round((Date.parse(firstLevel.at) - (enginesStartedAt ?? started)) / 100) / 10 : null;
   // One bar for the 600k gate and the quick cold test (plan, 16 Nov 2026).
-  // Boot after upgrade (plan, 16 Nov 2026 17:50Z): acknowledgement is reported, not gating, like the boot front; a missing control
-  // thread still fails.
-  const ackGates = options.runCase !== 'boot-after-upgrade';
-  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ackGates ? ack_ok : !ackSummary.no_control_thread, runCase: options.runCase });
+  const control_ok = !ackSummary.no_control_thread && (options.runCase === 'boot-after-upgrade' || ackSummary.status_max_age_ms <= 10_000);
+  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ack_ok && control_ok, runCase: options.runCase });
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint, checkpoint_timing,
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -1003,7 +1052,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     const p95 = beatP95(loop);
     console.log(`${options.runCase} ${role}: after-ready p95 beat ${p95 === undefined ? 'n/a' : `<= ${p95} ms`}, worst ${Math.round(loop.max_ms)} ms at ${loop.worst_site}, beats over 1 s: ${loop.over_1s}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s); pre-ready hold ${Math.round(loop.pre_ready_ms)} ms at ${loop.pre_ready_site} (reported)`);
   }
-  console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ackGates ? `${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s)` : `reported, not gated (${ack_ok ? 'under' : 'over'} 1 s)`}`);
+  console.log(`${options.runCase} Make Private receipt: worst ${clickSummary.max_ms} ms over ${clickSummary.count} posts (${clickSummary.over_1s.length} at or over 1 s or failed); ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s). Settlement (reported): worst ${clickSummary.max_settled_ms} ms across ${clickSummary.settled} settled, ${clickSummary.pending} pending at cutoff.`);
+  console.log(`${options.runCase} socket ack (reported): worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}.`);
   console.log(`${options.runCase} anonymous memory (reported): ${Object.entries(anonSampler.peaks).map(([role, entry]) => `${role} peak ${entry.peak_anon_mib} MiB at ${entry.at_s} s, last ${entry.last_anon_mib} MiB`).join('; ') || 'not sampled'}`);
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
   // Report only for 1.5 (plan, 16 Nov 2026): the allowance list is incomplete, so an unlisted site is usually one no run had reached.
@@ -1014,7 +1064,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const peaks = Object.entries(guards.wal_peak).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, bytes]) => `${label} ${Math.round(bytes / 1048576)} MB`).join(', ') || 'no wal lines';
   console.log(`${options.runCase} WAL: peak ${peaks}${options.runCase === 'boot-after-upgrade' ? ` (from each file's first rewind; padded ledger at or under 64 MB after ${padded_wal_level_s ?? 'never'} s from the engines' start, bar 300 s, predicted about 60 s${padded_wal_level_s === null || padded_wal_level_s > 300 ? '; OVER 5 MIN: report to the plan with the reason' : ''})` : ''}; over 64 MB (reported): ${guards.wal_peak_over.map(row => `${row.label} ${row.crossings}x, ${row.over_s} s over, longest ${row.longest_s} s`).join('; ') || 'none'}; bar: back under 64 MB within 60 s (${guards.wal_slow_back.length} not), none over 1 GB (${guards.wal_over_1gb.length}), none over at end (${guards.wal_over_limit.length}); ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
   console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}, judge model calls ${modelCalls.judge}); ${workload_ok ? 'PASS' : 'FAIL'}`);
-  console.log(`${options.runCase} release bar (front under ${frontLimitMs(options.runCase) / 1000} s, ${ackGates ? 'ack under 1 s' : 'ack reported'}, background under 30 s, work done, WAL back under 64 MB within 60 s and never over 1 GB): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
+  console.log(`${options.runCase} release bar (front under ${frontLimitMs(options.runCase) / 1000} s, Make Private receipt under 1 s, background under 30 s, work done, WAL back under 64 MB within 60 s and never over 1 GB): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
   console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));
   rmSync(runDir, { recursive: true, force: true });
   // A run that judged nothing did not exercise the background's long holds (plan, 16 Nov 2026): it counts as not run, not as a pass.
