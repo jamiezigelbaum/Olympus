@@ -8058,6 +8058,13 @@ var init_operation_caller = __esm(() => {
   UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
   inProcessRemoteRequests = new WeakSet;
 });
+
+// src/core/sqlite-store.ts
+var checkpointFiles;
+var init_sqlite_store = __esm(() => {
+  checkpointFiles = new Map;
+});
+
 // src/core/store-write-guard.ts
 var init_store_write_guard = () => {};
 // src/core/source-watch.ts
@@ -8075,6 +8082,7 @@ var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MI
 var init_source_watch = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_sqlite_store();
   init_store_write_guard();
   SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
   SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
@@ -9147,6 +9155,12 @@ var init_backup_paths = () => {};
 // src/workers/dashboard/session-marker.ts
 var init_session_marker = () => {};
 
+// src/workers/engine-split/click-trace.ts
+var CLICK_ID_HEADER = "X-Olympus-Click-Id", clickTraces;
+var init_click_trace = __esm(() => {
+  clickTraces = new WeakMap;
+});
+
 // src/core/request-peer.ts
 var ownerSockets, peers;
 var init_request_peer = __esm(() => {
@@ -9187,6 +9201,7 @@ var DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADE
 var init_http = __esm(() => {
   init_backup_paths();
   init_session_marker();
+  init_click_trace();
   init_request_peer();
   init_worker_auth();
   init_dashboard_launch();
@@ -16369,6 +16384,7 @@ var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();
   init_sqlite_migrations();
+  init_sqlite_store();
   init_store_write_guard();
   PEOPLE_LINK_REASON_TEXT = Object.freeze({
     owner: "You on every source",
@@ -16391,7 +16407,9 @@ var init_gmail_mail_record = __esm(() => {
 });
 
 // src/workers/google-connectors/request-budget.ts
-var init_request_budget = () => {};
+var init_request_budget = __esm(() => {
+  init_sqlite_store();
+});
 
 // src/workers/google-connectors/gmail.ts
 var GMAIL_PROVIDER = "gmail";
@@ -16473,6 +16491,7 @@ var STOP_WORDS2;
 var init_secret_locations = __esm(() => {
   init_fts();
   init_sqlite_migrations();
+  init_sqlite_store();
   init_store_write_guard();
   init_engine();
   init_tier_classifier();
@@ -16519,6 +16538,7 @@ var init_secret_locations = __esm(() => {
 // src/workers/classification/sniffer-store.ts
 var init_sniffer_store = __esm(() => {
   init_sqlite_migrations();
+  init_sqlite_store();
   init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
@@ -16556,6 +16576,7 @@ var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe
     AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
+  init_sqlite_store();
   init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
@@ -16744,6 +16765,7 @@ var init_unreadable_files = __esm(() => {
 var openLedgerPaths;
 var init_job_names = __esm(() => {
   init_olympus_layout();
+  init_sqlite_store();
   openLedgerPaths = new Map;
 });
 
@@ -17208,6 +17230,7 @@ var WAITING_QUESTION_LIMITS;
 var init_waiting_private_questions = __esm(() => {
   init_app_release_capture();
   init_sqlite_migrations();
+  init_sqlite_store();
   init_olympus_layout();
   WAITING_QUESTION_LIMITS = Object.freeze({
     questionBytes: 2048,
@@ -17225,6 +17248,7 @@ var init_remote_connections = __esm(() => {
   init_worker_auth();
   init_operation_caller();
   init_sqlite_migrations();
+  init_sqlite_store();
   init_remote_oauth_store();
   init_waiting_private_questions();
   init_tokens();
@@ -17238,6 +17262,7 @@ var init_app_release_log = __esm(() => {
   init_olympus_layout();
   init_remote_connections();
   init_sqlite_migrations();
+  init_sqlite_store();
   DAY_MS2 = 24 * 60 * 60000;
   openLogPaths = new Map;
 });
@@ -17461,10 +17486,11 @@ var init_commands = __esm(() => {
   init_operation_error();
   init_http();
   init_answer_activity();
+  init_click_trace();
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
   forwardedRecordIds = new WeakMap;
-  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade", CLICK_ID_HEADER.toLowerCase()]);
 });
 
 // src/workers/classification/chunk-release.ts
@@ -17547,6 +17573,7 @@ var init_local_index = __esm(() => {
   init_manifest();
   init_media_judge();
   init_types();
+  init_sqlite_store();
   CONCEPT_COUNT_MAX_AGE_MS = 5 * 60000;
   CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
   ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
@@ -17701,6 +17728,7 @@ var init_local_index = __esm(() => {
 // src/core/source-storage.ts
 var CAPTURE_CLAIM_RECLAIM_AGE_MS;
 var init_source_storage = __esm(() => {
+  init_sqlite_store();
   init_store_write_guard();
   init_secret_locations();
   init_sniffer_store();
@@ -18332,6 +18360,7 @@ var init_live_control2 = __esm(() => {
   init_provider_rate_limits();
   init_olympus_layout();
   init_sqlite_migrations();
+  init_sqlite_store();
   init_owner_limit_settings();
   init_connector2();
   providerStops = createProviderRateLimitReporter("x");
@@ -18352,6 +18381,7 @@ var init_reconcile_state = __esm(() => {
   init_source_storage();
   init_connector2();
   init_sqlite_migrations();
+  init_sqlite_store();
   FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
 });
 
@@ -18387,6 +18417,7 @@ var init_source_input = __esm(() => {
 
 // src/workers/x-bookmarks/archive-import.ts
 var init_archive_import = __esm(() => {
+  init_sqlite_store();
   init_source_input();
   init_connector2();
 });
@@ -19575,6 +19606,7 @@ var init_state = __esm(() => {
 // src/workers/archive-import/media-bindings.ts
 var init_media_bindings = __esm(() => {
   init_sqlite_migrations();
+  init_sqlite_store();
   init_scope_safe_fs();
   init_source_placement();
   init_source_storage();
@@ -19688,12 +19720,15 @@ var init_reaction_index = __esm(() => {
 
 // src/workers/whatsapp/spool-index.ts
 var init_spool_index = __esm(() => {
+  init_sqlite_store();
   init_spool_file_identity();
   init_reaction_index();
 });
 
 // src/workers/whatsapp/spool-resets.ts
-var init_spool_resets = () => {};
+var init_spool_resets = __esm(() => {
+  init_sqlite_store();
+});
 
 // src/workers/whatsapp/match-keys.ts
 var init_match_keys = __esm(() => {
@@ -19733,6 +19768,7 @@ var init_live_connector = __esm(() => {
 var DISK_FLOOR_MIN_BYTES, ANSWER_HEAD_MAX_BYTES;
 var init_media_fetch = __esm(() => {
   init_source_inputs();
+  init_sqlite_store();
   init_secrets_disposition();
   init_tier_rejudge();
   init_child_media();
@@ -19780,6 +19816,7 @@ var init_job_store = __esm(() => {
   init_source_size_limits();
   init_off_thread_reads();
   init_sqlite_migrations();
+  init_sqlite_store();
   init_store_write_guard();
   init_job_names();
   NETWORK_ERROR_KINDS = new Set([
@@ -21026,6 +21063,7 @@ var init_source_dashboard = __esm(() => {
   init_phases();
   init_credential_health();
   init_status();
+  init_sqlite_store();
   init_public_source_capabilities();
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
@@ -21533,6 +21571,7 @@ var init_this_computer = __esm(() => {
 var init_source_scheduler_state = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_sqlite_store();
   init_limit_stops();
   init_scheduler_limit_stops();
 });
@@ -21647,6 +21686,7 @@ var init_data_lifecycle = __esm(() => {
   init_source_corpus_registry();
   init_public_source_capabilities();
   init_worker_service();
+  init_sqlite_store();
   init_media_cache();
   init_store_identity();
   init_mail_source_scope();
@@ -22178,6 +22218,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_data_lifecycle();
   init_dropbox_files();
   init_store();
+  init_sqlite_store();
   init_archive_formats();
   init_store2();
   SOURCE_DEFINITIONS = {

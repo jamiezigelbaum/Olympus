@@ -529,7 +529,7 @@ function repointMediaPaths(storePath: string, pictureFor: (sha256: string) => st
     })();
     return moved;
   } finally {
-    closeSqliteStore(db);
+    closeSqliteStore(db, { checkpoint: true });
   }
 }
 
@@ -575,7 +575,7 @@ function recordRestoredScope(storePath: string, sourceId: string, providerAccoun
       JSON.stringify({ provider: definition.provider, generations, providerAccountId }),
     );
   } finally {
-    closeSqliteStore(db);
+    closeSqliteStore(db, { checkpoint: true });
   }
 }
 
@@ -607,6 +607,6 @@ function repointLedgerHint(storePath: string, ledgerFor: (ledgerId: string) => s
     db.query('UPDATE sync_runs SET cursor = ? WHERE sync_run_id = ? AND connector_id = ?')
       .run(JSON.stringify({ ...binding, ledgerPath }), TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
   } finally {
-    closeSqliteStore(db);
+    closeSqliteStore(db, { checkpoint: true });
   }
 }

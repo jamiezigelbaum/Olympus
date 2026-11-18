@@ -823,7 +823,7 @@ function writeLoginInto(from: string, to: string): boolean {
     }
     return true;
   } finally {
-    closeSqliteStore(db);
+    closeSqliteStore(db, { checkpoint: true });
   }
 }
 

@@ -38,6 +38,7 @@ import { Database } from 'bun:sqlite';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import type { LiveMatchKeys, TimePrecision } from './match-keys.ts';
 import type { WhatsAppReactionEntry } from './reaction-index.ts';
@@ -146,7 +147,7 @@ export class WhatsAppSpoolIndex {
   }
 
   close(): void {
-    try { this.db.close(); } catch { /* already closed */ }
+    try { closeSqliteStore(this.db, { checkpoint: false }); } catch { /* already closed */ }
   }
 
   /** Everything before this place is indexed. */

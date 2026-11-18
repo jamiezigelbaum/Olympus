@@ -27,6 +27,9 @@
 //
 // A WAL a long read holds cannot be rewound by anyone. That file is named in
 // the log with the read's site and bulk work does not wait on it.
+// A quiet tier ledger can go without another write indefinitely. If a pass
+// fully copies an oversized ledger WAL, the next paced pass can truncate it
+// after verifying that the WAL is unchanged and still fully copied.
 
 import { oldestOffThreadSnapshot } from '../connector-store/off-thread-reads.ts';
 
@@ -34,6 +37,7 @@ import { oldestOffThreadSnapshot } from '../connector-store/off-thread-reads.ts'
 export const SQLITE_CHECKPOINT_AT_BYTES = 4 * 1024 * 1024;
 /** WAL content at which bulk work waits for a pass, so the next commit rewinds the file. Passes trail the writing by a second and a rewind can miss once or twice (peaks ran 20 to 35 MB past the mark on the cold test), so this sits well under the 64 MB limit. */
 export const SQLITE_WAL_ROOM_BYTES = 16 * 1024 * 1024;
+const TIER_LEDGER_WAL_LIMIT_BYTES = 64 * 1024 * 1024;
 /** A file that changed since its last pass is checkpointed again this soon; a quiet one at the idle pace. */
 export const SQLITE_CHECKPOINT_HOT_MS = 1_000;
 export const SQLITE_CHECKPOINT_IDLE_MS = 5_000;
@@ -69,11 +73,12 @@ const connections = new Map();
 let finished;
 self.onmessage = ({ data }) => {
   if (data.finished) { finished = new Int32Array(data.finished); return; }
-  const { id, path, atBytes } = data;
+  const { id, path, atBytes, truncateIdleWal, idleWalMtimeMs } = data;
   let reply;
   try {
-    let walBytes = 0;
-    try { walBytes = statSync(path + '-wal').size; } catch (error) { if (!error || error.code !== 'ENOENT') throw error; }
+    let wal;
+    try { wal = statSync(path + '-wal'); } catch (error) { if (!error || error.code !== 'ENOENT') throw error; }
+    const walBytes = wal?.size ?? 0;
     if (walBytes < atBytes) {
       reply = { id, ok: true, skipped: true, walBytes };
     } else {
@@ -88,12 +93,20 @@ self.onmessage = ({ data }) => {
         connections.set(path, held);
       }
       const started = performance.now();
-      // PASSIVE only. TRUNCATE takes the writer lock and holds it through its
-      // fsync and truncate, which on a busy disk outlasted a loop writer's 10 s
-      // busy wait: syncs failed with "database is locked" on the lane 6 gate
-      // (16 Nov).
-      const row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
-      reply = { id, ok: true, ms: performance.now() - started, busy: row.busy, log: row.log, checkpointed: row.checkpointed, walBytes, frameBytes: held.frameBytes };
+      // TRUNCATE takes the writer lock through fsync. Limit it to quiet
+      // oversized ledgers that already had all their pages copied.
+      let row = held.db.query('PRAGMA wal_checkpoint(PASSIVE)').get();
+      let nextIdleWalMtimeMs;
+      let truncated = false;
+      if (truncateIdleWal && walBytes >= ${TIER_LEDGER_WAL_LIMIT_BYTES} && row.busy === 0 && row.checkpointed === row.log) {
+        nextIdleWalMtimeMs = wal.mtimeMs;
+        if (idleWalMtimeMs === wal.mtimeMs && statSync(path + '-wal').mtimeMs === wal.mtimeMs) {
+          row = held.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
+          truncated = row.busy === 0;
+          if (truncated) nextIdleWalMtimeMs = undefined;
+        }
+      }
+      reply = { id, ok: true, ms: performance.now() - started, busy: row.busy, log: row.log, checkpointed: row.checkpointed, walBytes: truncated ? 0 : walBytes, frameBytes: held.frameBytes, truncated, idleWalMtimeMs: nextIdleWalMtimeMs };
     }
   } catch (error) {
     reply = { id, ok: false, error: error && error.name ? error.name : 'Error' };
@@ -102,7 +115,12 @@ self.onmessage = ({ data }) => {
   postMessage(reply);
 };`;
 
-export interface SqliteCheckpointFile { label: string; dbPath: string }
+export interface SqliteCheckpointFile {
+  /** A short name for the log: a corpus id or a file kind, never a path. */
+  label: string;
+  dbPath: string;
+  truncateIdleWal?: boolean;
+}
 
 export interface SqliteCheckpointRoomStats { passes: number; waits: number; totalMs: number; worstMs: number; rewinds: number; rewindsMissed: number }
 
@@ -121,7 +139,7 @@ export interface SqliteCheckpointer {
 
 interface PassReply {
   id: number; ok: boolean; skipped?: boolean; lost?: boolean; ms?: number; busy?: number; log?: number; checkpointed?: number;
-  walBytes?: number; frameBytes?: number; error?: string;
+  walBytes?: number; frameBytes?: number; truncated?: boolean; idleWalMtimeMs?: number; error?: string;
 }
 
 interface FileState extends SqliteCheckpointFile {
@@ -130,6 +148,7 @@ interface FileState extends SqliteCheckpointFile {
   lastLog: number | undefined;
   lastCheckpointed: number | undefined;
   lastPassAt: number;
+  idleWalMtimeMs: number | undefined;
   hot: boolean;
   /** A read holds the WAL: passes copy nothing new, so bulk work does not wait on this file. */
   held: boolean;
@@ -142,7 +161,7 @@ interface FileState extends SqliteCheckpointFile {
   queued: Job | undefined;
 }
 
-interface Job { id: number; state: FileState; resolve: (reply: PassReply) => void; seenFinished: number }
+interface Job { id: number; state: FileState; makesRoom: boolean; resolve: (reply: PassReply) => void; seenFinished: number }
 interface PoolWorker { worker: Worker; finished: Int32Array | undefined; job: Job | undefined }
 
 export function startSqliteCheckpointer(options: {
@@ -221,7 +240,11 @@ export function startSqliteCheckpointer(options: {
       job.state.queued = undefined;
       job.state.running = true;
       entry.job = job;
-      entry.worker.postMessage({ id: job.id, path: job.state.dbPath, atBytes });
+      entry.worker.postMessage({
+        id: job.id, path: job.state.dbPath, atBytes,
+        truncateIdleWal: !job.makesRoom && job.state.truncateIdleWal,
+        idleWalMtimeMs: job.state.hot ? undefined : job.state.idleWalMtimeMs,
+      });
     }
   }
 
@@ -234,7 +257,7 @@ export function startSqliteCheckpointer(options: {
         queue.splice(queue.indexOf(waiting), 1);
         waiting.resolve({ id: waiting.id, ok: true, lost: true });
       }
-      const job: Job = { id: nextId++, state, resolve, seenFinished: 0 };
+      const job: Job = { id: nextId++, state, makesRoom, resolve, seenFinished: 0 };
       state.queued = job;
       if (makesRoom) queue.unshift(job); else queue.push(job);
       pump();
@@ -257,6 +280,7 @@ export function startSqliteCheckpointer(options: {
       return;
     }
     if (reply.lost) return;
+    state.idleWalMtimeMs = reply.idleWalMtimeMs;
     stats.passes += 1;
     const expectedRewind = state.awaitRewind;
     state.awaitRewind = madeRoom;
@@ -280,7 +304,7 @@ export function startSqliteCheckpointer(options: {
       const read = oldestOffThreadSnapshot(state.dbPath);
       log(`[olympus] sqlite wal held: ${state.label} wal_bytes=${walBytes} frames=${frames} checkpointed=${copied} oldest_read_ms=${Math.round(read?.ageMs ?? 0)}${read ? ` oldest_read_lane=${read.lane} oldest_read_site=${read.site}` : ' (no read open in this process)'}; no work waits on this file until the read ends.`);
     }
-    if ((reply.ms ?? 0) >= CHECKPOINT_NOTABLE_MS || (walBytes >= CHECKPOINT_NOTABLE_BYTES && state.lastCheckpointed !== copied)) {
+    if (reply.truncated || (reply.ms ?? 0) >= CHECKPOINT_NOTABLE_MS || (walBytes >= CHECKPOINT_NOTABLE_BYTES && state.lastCheckpointed !== copied)) {
       log(`[olympus] sqlite checkpoint: ${state.label} wal_bytes=${walBytes} ms=${Math.round(reply.ms ?? 0)} busy=${reply.busy} frames=${frames} checkpointed=${copied}`);
     }
     state.hot = state.lastLog === undefined || frames !== state.lastLog || copied < frames;
@@ -380,9 +404,13 @@ export function startSqliteCheckpointer(options: {
       for (const file of files) {
         current.add(file.dbPath);
         const known = states.get(file.dbPath);
-        if (known) { known.label = file.label; continue; }
+        if (known) {
+          known.label = file.label;
+          if (file.truncateIdleWal) known.truncateIdleWal = true;
+          continue;
+        }
         states.set(file.dbPath, {
-          ...file, live: 0, lastLog: undefined, lastCheckpointed: undefined, lastPassAt: -Infinity, hot: false, held: false,
+          ...file, live: 0, lastLog: undefined, lastCheckpointed: undefined, lastPassAt: -Infinity, idleWalMtimeMs: undefined, hot: false, held: false,
           firstDone: false, awaitRewind: false, stuckPasses: 0, running: false, queued: undefined,
         });
       }

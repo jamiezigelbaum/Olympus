@@ -152,6 +152,7 @@ export interface StepTrace {
   actual: string;
   ok: boolean;
   ms: number;
+  failedAt?: string;
   /** Where the page was after the step (path, query and fragment). */
   at: string;
   /** The screenshot taken after the step, relative to the traces folder. */
@@ -581,6 +582,7 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
     const shot = `${journey.id}/${String(index + 1).padStart(2, '0')}-${slug(step.name)}.jpg`;
     const trace: StepTrace = {
       n: index + 1, name: step.name, action: describeAction(step.do), expected, actual, ok, ms: now() - stepStarted, at: at.replace(/token=[^&#]*/g, 'token=…'),
+      ...(!ok ? { failedAt: new Date(now()).toISOString() } : {}),
       consoleErrors: consoleErrors.map((message) => message.slice(0, 300)), failedRequests, findings,
     };
     if (await screenshotWithin(driver, shot)) trace.screenshot = shot;

@@ -27,7 +27,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
-import { closeSqliteStore, loopWalAutocheckpointPragma } from '../../core/sqlite-store.ts';
+import { closeSqliteStore, loopWalAutocheckpointPragma, type SqliteCloseOptions } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import {
   PERSONAL_FIRST_REASON,
@@ -871,7 +871,7 @@ export class TierLedger {
       }
       // FULL stays: a decision is never lost to a power cut. The size limit
       // truncates a WAL that grew while reads held it (6 GB, 16 Nov) once it resets.
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma());
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath, 'tier-ledger'));
       applySqliteMmap(db);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       // The owner's overridden items, for the cleared-override search
@@ -881,7 +881,7 @@ export class TierLedger {
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
-      if (db) closeSqliteStore(db, { checkpoint: !this.readOnly });
+      if (db) closeSqliteStore(db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
       throw error;
     }
     this.db = db;
@@ -905,11 +905,9 @@ export class TierLedger {
     return sqliteSchemaUsable(this.db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION);
   }
 
-  close(): void {
+  close(options?: SqliteCloseOptions): void {
     try {
-      // Checkpointed close, like every Olympus store: the ledger is safe to
-      // hand to another process the moment this returns.
-      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : options);
     } finally {
       const listeners = this.closeListeners ?? [];
       this.closeListeners = undefined;
@@ -4892,7 +4890,7 @@ function readSqliteWithoutWriting<T>(dbPath: string, busyTimeoutMs: number, read
       if (isSqliteBusy(error)) return undefined;
       // Try the next way of opening it.
     } finally {
-      if (db) closeSqliteStore(db, { checkpoint: false });
+      if (db) closeSqliteStore(db, { checkpoint: false, readOnly: 'readonly' in mode });
     }
   }
   return undefined;

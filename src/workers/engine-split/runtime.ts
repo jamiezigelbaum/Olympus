@@ -18,6 +18,7 @@ import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { removeFileDurablySync } from '../../core/atomic-file.ts';
 import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
+import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-trace.ts';
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
@@ -469,13 +470,13 @@ export function createEngineFrontRoutes(input: {
 }): (request: Request) => Promise<Response | undefined> | undefined {
   const pid = input.pid ?? process.pid;
   type Outcome = { answer: EngineForwardedResponse } | { unanswered: string } | { failed: string };
-  const exchange = async (kind: EngineForwardedKind, forwarded: EngineForwardedRequest, onReceived?: (receipt: EngineCommandReceipt) => void): Promise<Outcome> => {
+  const exchange = async (kind: EngineForwardedKind, forwarded: EngineForwardedRequest, onReceived?: (receipt: EngineCommandReceipt) => void, clickTrace?: ClickTrace): Promise<Outcome> => {
     let receipt;
     try {
       receipt = await input.client.send(
         { kind, request: forwarded, ...(kind === 'delete_source_data' ? { frontPid: pid } : {}) },
         // Extraction and embedding batches can run for minutes, as they did in the one process.
-        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : OWNER_ACTION_WAIT_MS), ...(onReceived ? { onReceived } : {}) },
+        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : OWNER_ACTION_WAIT_MS), ...(onReceived ? { onReceived } : {}), ...(clickTrace ? { clickTrace } : {}) },
       );
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : 'The background engine is not answering.' };
@@ -525,7 +526,7 @@ export function createEngineFrontRoutes(input: {
       if (identity) release = protection.hold(identity);
       pendingPrivacyItems.add(id);
       received.resolve(pending(id, 202));
-    }).then(outcome => {
+    }, clickTraces.get(request)).then(outcome => {
       release?.();
       if (id) {
         pendingPrivacyItems.delete(id);
@@ -549,7 +550,7 @@ export function createEngineFrontRoutes(input: {
   return (request) => {
     if (request.method !== 'POST') return undefined;
     const path = new URL(request.url).pathname;
-    if (input.pendingItemProtection && (path === '/dashboard/privacy/items/set' || path === '/dashboard/privacy/items/status')
+    if (input.pendingItemProtection && (path === PRIVACY_ITEM_SET_PATH || path === '/dashboard/privacy/items/status')
       && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local') {
       if (!input.gate.isOpen()) return Promise.resolve(restartingResponse(request));
       return path.endsWith('/status') ? privacyItemStatus(request) : changePrivacyItem(request, input.pendingItemProtection);

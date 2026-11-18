@@ -3,8 +3,8 @@
  *
  * rc.4 failed on the owner's machine twice over: its front crashed on every start, and the failed update left the data root
  * one ledger file short. The upgrade leg with the split on now does what that machine did: the earlier release holds a store
- * set (Gmail with an attachment, Telegram), the owner's engine.json has `worker.engineSplit` on, and the candidate's public
- * installer runs over it. It runs twice:
+ * set (Gmail with an attachment, Telegram), and the candidate's public installer runs over it with its shipping defaults.
+ * Only the explicit override experiment sets `worker.engineSplit` in engine.json. The installer runs twice:
  * - first a copy of the candidate whose front exits as soon as it would serve, which is after the background has finished its boot
  *   work and migrated the stores: the installer must report the failure, and the earlier release must be running and healthy
  *   again with every store file it had, the ones the candidate retires included;

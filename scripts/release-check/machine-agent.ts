@@ -1,3 +1,6 @@
+import { DASHBOARD_UNLOCK_HEADER } from '../../src/core/dashboard-launch.ts';
+import { readBootProgress, readFrontProgress, type BootProgress } from '../../src/core/boot-progress.ts';
+import { citedFixture, firstEvidenceMs, observeAsk, QUALIFY_QUESTION, type AskObservation, type PrivacyObservation } from './qualify.ts';
 /**
  * The release check's in-machine half. The harness bundles this file, a driver
  * puts the bundle on a throwaway machine, and the harness then runs one
@@ -63,9 +66,9 @@ import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import type { StoreView } from './archive-leg.ts';
-import { frontSteadyStage, logMark, seedFrontStoreSet, seedTelegramAfterUpdate, watchFront, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
+import { frontSteadyStage, logMark, logSince, seedFrontStoreSet, seedTelegramAfterUpdate, watchFront, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
 import { compareStoreFiles, leftoverFileNames, storeFiles } from './upgrade-split.ts';
-import { cutoverReport, watchCutover } from './cutover.ts';
+import { cutoverReport, hiddenCopyBuilds, watchCutover } from './cutover.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -223,12 +226,12 @@ function readPolicy(): PolicyState | null {
 }
 
 /** A dashboard control session: what the dashboard page itself holds after sign-in. */
-async function ownerSession(timeoutMs?: number): Promise<{
+async function ownerSession(timeoutMs?: number, bearerToken?: string): Promise<{
   request?: (path: string, init?: RequestInit) => Promise<Response>;
   call(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<{ status: number; json: any; text: string }>;
 }> {
   const p = platform();
-  const bearer = workerBearer(timeoutMs);
+  const bearer = bearerToken ?? workerBearer(timeoutMs);
   const origin = WORKER_ORIGIN;
   const mint = await p.workerFetch('/dashboard/control/session', {
     method: 'POST',
@@ -238,12 +241,13 @@ async function ownerSession(timeoutMs?: number): Promise<{
   });
   if (mint.status !== 200) throw new Error(`dashboard control session answered ${mint.status}`);
   const cookie = (mint.headers.getSetCookie?.() ?? []).map((line) => line.split(';')[0]).join('; ');
-  const minted = await mint.json() as { csrf_token?: string };
+  const minted = await mint.json() as { csrf_token?: string; unlock_key?: string };
   const request = (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
     headers.set('cookie', cookie);
     headers.set('origin', origin);
     headers.set('x-olympus-csrf', minted.csrf_token ?? '');
+    if (minted.unlock_key && (init.method ?? 'GET') === 'GET') headers.set(DASHBOARD_UNLOCK_HEADER, minted.unlock_key);
     return p.workerFetch(path, { ...init, headers });
   };
   return {
@@ -383,24 +387,8 @@ export async function saveFreshInstallPrivacyChoice(input: {
   /** The worker bearer, read the owner's way (`olympus dashboard token`). */
   bearer: () => string;
 }): Promise<void> {
-  const opened = await input.workerFetch('/dashboard/control/session', {
-    method: 'POST', headers: { authorization: `Bearer ${input.bearer()}`, origin: WORKER_ORIGIN },
-  });
-  if (opened.status !== 200) throw new Error(`dashboard control session answered ${opened.status}`);
-  const ownerCookie = opened.headers.getSetCookie().map(line => line.split(';')[0]).join('; ');
-  // The page's CSRF token goes with the cookie: the cookie alone mints nothing (#1187).
-  const { csrf_token: ownerCsrf } = await opened.json() as { csrf_token?: string };
-  const mint = await input.workerFetch('/dashboard/control/session/local', {
-    method: 'POST', headers: { origin: WORKER_ORIGIN, cookie: ownerCookie, 'x-olympus-csrf': ownerCsrf ?? '' },
-  });
-  if (mint.status !== 200) throw new Error(`local dashboard control session answered ${mint.status}`);
-  const cookie = mint.headers.getSetCookie().map(line => line.split(';')[0]).join('; ');
-  const { csrf_token } = await mint.json() as { csrf_token?: string };
-  if (!cookie || !csrf_token) throw new Error('local dashboard control session returned no cookie or CSRF token');
-  const post = (path: string, choice: string) => input.workerFetch(path, {
-    method: 'POST', headers: { cookie, origin: WORKER_ORIGIN, 'x-olympus-csrf': csrf_token, 'content-type': 'application/json' },
-    body: JSON.stringify({ choice }),
-  });
+  const local = await mintLocalDashboard(input.workerFetch, input.bearer);
+  const post = (path: string, choice: string) => local(path, { choice });
   if (input.computerChoicePending) {
     const computer = await post('/dashboard/engine/computer-use', 'everyday');
     if (computer.status !== 200) throw new Error(`dashboard computer choice answered ${computer.status}`);
@@ -412,6 +400,28 @@ export async function saveFreshInstallPrivacyChoice(input: {
   const policy = validateSovereigntyConfig(input.readPolicy() as SovereigntyConfig);
   const expected = validateSovereigntyConfig(structuredClone(noSensitivePreset) as unknown as SovereigntyConfig);
   if (JSON.stringify(policy) !== JSON.stringify(expected)) throw new Error('dashboard saved policy does not match no-sensitive');
+}
+
+/** A local unlock, with the same cookie and CSRF exchange the dashboard uses. */
+async function mintLocalDashboard(workerFetch: Platform['workerFetch'], bearer: () => string) {
+  const signal = AbortSignal.timeout(10_000);
+  const opened = await workerFetch('/dashboard/control/session', {
+    method: 'POST', headers: { authorization: `Bearer ${bearer()}`, origin: WORKER_ORIGIN }, signal,
+  });
+  if (opened.status !== 200) throw new Error(`dashboard control session answered ${opened.status}`);
+  const ownerCookie = opened.headers.getSetCookie().map(line => line.split(';')[0]).join('; ');
+  const { csrf_token: ownerCsrf } = await opened.json() as { csrf_token?: string };
+  const mint = await workerFetch('/dashboard/control/session/local', {
+    method: 'POST', headers: { origin: WORKER_ORIGIN, cookie: ownerCookie, 'x-olympus-csrf': ownerCsrf ?? '' }, signal,
+  });
+  if (mint.status !== 200) throw new Error(`local dashboard control session answered ${mint.status}`);
+  const cookie = mint.headers.getSetCookie().map(line => line.split(';')[0]).join('; ');
+  const { csrf_token } = await mint.json() as { csrf_token?: string };
+  if (!cookie || !csrf_token) throw new Error('local dashboard control session returned no cookie or CSRF token');
+  return (path: string, body: unknown, timeoutMs = 10_000) => workerFetch(path, {
+    method: 'POST', headers: { cookie, origin: WORKER_ORIGIN, 'x-olympus-csrf': csrf_token, 'content-type': 'application/json' },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs),
+  });
 }
 
 /** Restarts the engine the owner's way and waits for it (models included). */
@@ -490,12 +500,15 @@ async function prepareSource(earlierRelease = false): Promise<never> {
     say('worker.engineSplit turned on in engine.json');
   }
   const restart = olympus(['engine', 'restart'], { timeoutMs: 180_000 });
-  if (restart.code !== 0) emit({ ok: false, step: 'engine-restart', detail: restart.stderr.slice(0, 300) });
-  const readyMs = await waitForEngine(300_000);
-  // With the switch on, the restarted engine must run as a front and a background. Linux reads the roles from /proc;
-  // macOS reads them from ps environments, or reports null when ps cannot expose them.
-  const engineSplit = config.engineSplit ? ownEngineRoles() : undefined;
-  emit({ ok: true, rules: config.tierRules.length, engineReadyMs: readyMs, ...(engineSplit !== undefined ? { engineSplit } : {}) });
+  if (restart.code !== 0) emit({ ok: false, engineSplitWritten: config.engineSplit === true, step: 'engine-restart', detail: restart.stderr.slice(0, 300) });
+  const engineSplitWritten = config.engineSplit === true;
+  try {
+    const readyMs = await waitForEngine(300_000);
+    // Linux reads the roles from /proc; macOS reads ps environments.
+    emit({ ok: true, rules: config.tierRules.length, engineReadyMs: readyMs, engineSplit: ownEngineRoles(), engineSplitWritten });
+  } catch (error) {
+    emit({ ok: false, engineSplitWritten, step: 'engine-ready', detail: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 /**
@@ -1847,6 +1860,72 @@ async function archiveSearch(question: string): Promise<{ ok: boolean; isError: 
   };
 }
 
+async function askWhileIndexing(local: Awaited<ReturnType<typeof mintLocalDashboard>>): Promise<AskObservation> {
+  const engineLogs = platform().engineLogPaths.slice(0, 2);
+  const mark = logMark(engineLogs);
+  const started = performance.now();
+  let status = 0;
+  let body: unknown;
+  try {
+    const response = await local('/dashboard/private-answers', { action: 'ask', question: QUALIFY_QUESTION.text }, 180_000);
+    status = response.status;
+    body = await response.json();
+  } catch {
+    // A failed response can still have reached evidence retrieval.
+  }
+  const ms = Math.round(performance.now() - started);
+  return observeAsk(status, body, ms, firstEvidenceMs(logSince(engineLogs, mark)));
+}
+
+async function qualifyPrivacyCommand(): Promise<never> {
+  const obs: PrivacyObservation = {};
+  const localSession = () => mintLocalDashboard(platform().workerFetch, () => workerBearer(5_000));
+  const path = '/dashboard/privacy/items';
+  const title = QUALIFY_QUESTION.citedTitle!;
+  const fixtureVisibility = async () => {
+    const result = await archiveSearch(QUALIFY_QUESTION.text);
+    const payload = result.structured as { evidence?: unknown } | null;
+    return result.ok && !result.isError && Array.isArray(payload?.evidence) ? citedFixture(payload.evidence) : undefined;
+  };
+  try {
+    let local = await localSession();
+    const find = async () => {
+      const response = await local(`${path}/find`, { query: title });
+      const body = await response.json() as { ok?: boolean; items?: { title?: string; item_id?: string; tier?: string; owner_choice?: string }[] };
+      return response.ok && body.ok ? body.items?.find(item => item.title === title) : undefined;
+    };
+    const item = await find();
+    if (!item?.item_id || (item.owner_choice ?? item.tier) !== 'Personal' || await fixtureVisibility() !== true) {
+      throw new Error('The Personal fixture was not demonstrably visible before the change');
+    }
+    const started = performance.now();
+    let response = await local(`${path}/set`, { item_id: item.item_id, tier: 'private' });
+    let body = await response.json() as { ok?: boolean; state?: string; request_id?: string };
+    if (!response.ok || body.ok !== true) throw new Error(`Make it Private answered HTTP ${response.status}`);
+    obs.ackMs = Math.ceil(performance.now() - started);
+    if (body.state !== 'pending') obs.finishMs = obs.ackMs;
+    const hidden = fixtureVisibility().then(visible => visible === false, () => false);
+    const requestId = body.request_id;
+    while (body.state === 'pending' && performance.now() - started < 120_000) {
+      if (!requestId) throw new Error('The pending reply had no receipt id');
+      await sleep(250);
+      response = await local(`${path}/status`, { request_id: requestId });
+      body = await response.json() as typeof body;
+      if (!response.ok || body.ok !== true) throw new Error(`Privacy receipt answered HTTP ${response.status}`);
+    }
+    if (body.state !== 'pending') obs.finishMs ??= Math.round(performance.now() - started);
+    obs.withheldAfterAck = await hidden;
+    const restarted = await restartEngine(300_000);
+    if (!restarted.ok) throw new Error('The engine did not return ready after restart');
+    local = await localSession();
+    obs.ownerChoiceAfterRestart = (await find())?.owner_choice === 'Private';
+    obs.withheldAfterRestart = await fixtureVisibility() === false;
+  } catch (error) {
+    obs.detail = error instanceof Error ? error.message : 'Qualification failed';
+  }
+  emit({ ok: true, ...obs });
+}
+
 /**
  * The three tier stores an archive family writes to (Private, Personal, Public), read-only: how many live items an archive has in each, and
  * how many rows (items, chunks, search rows) carry its word. The word is only in message bodies, so a row that holds it holds content.
@@ -2250,7 +2329,13 @@ function storeFilesCommand(save: string | undefined, compare: string | undefined
 }
 
 async function archiveChangedCommand(seed: string, sizes: number[]): Promise<never> {
-  emit({ ...(await changedStage(archiveHost(), { seed, sizes })) });
+  const local = await mintLocalDashboard(platform().workerFetch, () => workerBearer(5_000)).catch(() => undefined);
+  let ask: Promise<AskObservation> | undefined;
+  const changed = await changedStage(archiveHost(), {
+    seed, sizes,
+    ...(local ? { onIndexing: () => { ask ??= askWhileIndexing(local); } } : {}),
+  });
+  emit({ ...changed, ...(ask ? { qualifyAsk: await ask } : {}) });
 }
 
 /** The last step of the leg, run whatever came before: every archive off the Archives line and the fixtures folder gone. */
@@ -2833,13 +2918,48 @@ async function main(): Promise<void> {
       const seconds = Number(flag('--seconds', '2100'));
       if (!Number.isFinite(seconds) || seconds <= 0) emit({ ok: false, detail: 'cutover-watch requires a positive duration' });
       const p = platform();
-      await watchCutover(WORKDIR, p.dataDir, seconds, p.workerFetch, async () => (await ownerSession(5_000)).request);
+      const fresh = rest.includes('--fresh');
+      const splitStartup = rest.includes('--split-startup');
+      const engineLogs = p.engineLogPaths.slice(0, 2);
+      const offsets = logMark(engineLogs);
+      const instance = (progress: BootProgress | undefined) => progress && `${progress.pid}:${progress.startedAt}`;
+      const previousFront = instance(readFrontProgress());
+      const previousBoot = instance(readBootProgress());
+      const newFront = () => {
+        const front = instance(readFrontProgress());
+        return front !== previousFront ? front : undefined;
+      };
+      let frontBoot: string | undefined;
+      let backgroundBoot: string | undefined;
+      let lastSizes = '';
+      let superseded = false;
+      // Read the installed token once; re-minting after a restart must never stop the probe loop on a synchronous CLI call.
+      const bearer = workerBearer(5_000);
+      await watchCutover(WORKDIR, p.dataDir, seconds, p.workerFetch, async () => (await ownerSession(5_000, bearer)).request, {
+        fresh,
+        newFront,
+        ...(splitStartup ? { observeBuilds: () => {
+          const front = newFront();
+          const boot = instance(readBootProgress());
+          const background = boot !== previousBoot ? boot : undefined;
+          // A restart later in the journey must not supply a missing startup receipt.
+          if ((front && frontBoot && front !== frontBoot) || (background && backgroundBoot && background !== backgroundBoot)) superseded = true;
+          if (superseded || !front || !background) return undefined;
+          frontBoot ??= front;
+          backgroundBoot ??= background;
+          const sizes = logMark(engineLogs).join(',');
+          if (sizes === lastSizes) return undefined;
+          lastSizes = sizes;
+          return hiddenCopyBuilds(logSince(engineLogs, offsets));
+        } } : {}),
+      });
       emit({ ok: true });
     }
     case 'cutover-report': {
       const summary = await cutoverReport(WORKDIR);
       emit({ ok: summary !== undefined, summary });
     }
+    case 'qualify-private': return await qualifyPrivacyCommand();
     case 'engine-build': return await engineBuild(rest.includes('--earlier-release'));
     case 'snapshot-state': return await snapshotState();
     case 'set-policy-setting': return await setPolicySetting();

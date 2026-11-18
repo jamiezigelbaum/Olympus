@@ -153,10 +153,10 @@ export class InstalledTierClassification implements InstalledTierClassificationP
     return store;
   }
 
-  close(): void {
+  close(options?: Parameters<TierSnifferStore['close']>[0]): void {
     for (const store of this.snifferStores.values()) {
       try {
-        store.close();
+        store.close(options);
       } catch {
         // Closing is best effort at shutdown.
       }

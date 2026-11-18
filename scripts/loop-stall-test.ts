@@ -602,6 +602,37 @@ function readPressure(): PressureTotals {
   return totals;
 }
 /** One sample a second: milliseconds stalled in that second, per scope and kind. Returns the samples and a stop. */
+/** Host paging counters for the run's delta: pages read in, pages swapped out and in, major faults (Linux only). */
+function readVmstat(): Record<string, number> {
+  const totals: Record<string, number> = {};
+  try {
+    for (const line of readFileSync('/proc/vmstat', 'utf8').split('\n')) {
+      const [key, value] = line.split(' ');
+      if (key && ['pgpgin', 'pgpgout', 'pswpin', 'pswpout', 'pgmajfault'].includes(key)) totals[key] = Number(value);
+    }
+  } catch { /* not Linux */ }
+  return totals;
+}
+
+/**
+ * The background's main loop thread, sampled by scripts/front-thread-timeline.ts for the whole run, then summarized over each
+ * background freeze or held-loop line: time running, waiting for CPU, blocked on page faults, on disk, and the top wait channel.
+ */
+function startBackgroundTimeline(pid: number, out: string): { stop(): Promise<void> } | undefined {
+  if (process.platform !== 'linux') return undefined;
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, 'front-thread-timeline.ts'), '--pid', String(pid), '--out', out, '--seconds', '14400'], { stdout: 'ignore', stderr: 'ignore' });
+  return { stop: async () => { child.kill('SIGTERM'); await child.exited; } };
+}
+
+function summarizeBackgroundTimeline(timeline: string, freezes: Array<{ at: string; role: string; line: string }>, freezePath: string): unknown[] | string {
+  if (!existsSync(timeline)) return 'no timeline was written';
+  writeFileSync(freezePath, freezes.filter(entry => entry.role === 'background').map(entry => `${entry.at} ${entry.line}`).join('\n') + '\n');
+  const run = spawnSync(process.execPath, [join(import.meta.dir, 'front-thread-timeline.ts'), '--summarize', timeline, '--freezes', freezePath, '--role', 'background'], { encoding: 'utf8', timeout: 120_000 });
+  if (run.status !== 0) return `summarize exited ${run.status}: ${(run.stderr || '').slice(-300)}`;
+  return run.stdout.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return line; } })
+    .sort((a: any, b: any) => (b?.window_ms ?? 0) - (a?.window_ms ?? 0)).slice(0, 30);
+}
+
 function samplePressure(): { samples: Array<{ at: string } & Record<string, number | string>>; stop(): void } {
   const samples: Array<{ at: string } & Record<string, number | string>> = [];
   let last = readPressure();
@@ -820,9 +851,15 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   // The engine's SQLite settings and WAL lines, kept whole (output keeps only its tail), each with when it arrived.
   const sqliteLines: Array<{ at: string; role: Role; line: string }> = [];
   const freezeLines: Array<{ at: string; role: Role; line: string }> = [];
+  // The product's per-click trace (ingress, each command POST attempt, control receipt, answer), joined to clicks by id.
+  const clickTrace = new Map<string, string[]>();
   const keepEngineLine = (role: Role, line: string) => {
     if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:') || line.includes('[olympus] sqlite checkpoint:') || line.includes('[olympus] sqlite wal room:') || line.includes('[olympus] sqlite wal held:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
     // Keep each freeze frame and held-loop line outside the bounded engine log tail.
+    else if (line.includes('[olympus:click-trace]')) {
+      const id = / id=(\S+)/.exec(line)?.[1];
+      if (id) { const lines = clickTrace.get(id) ?? []; if (lines.length < 20) lines.push(line.slice(0, 400)); clickTrace.set(id, lines); }
+    }
     else if (line.includes('[olympus:control-path]') && (line.includes('freeze frames') || line.includes('loop held for'))) freezeLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus:control-path]')).slice(0, 4000) });
   };
   const pumps: Promise<void>[] = [];
@@ -830,7 +867,9 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const forwarded: Array<{ ms: number; status: number; error?: unknown }> = [];
   const asks: Array<{ ms: number; status: number; evidence_ms: unknown }> = [];
   const acks: Array<{ at: string; ms: number; status: number; loop_held_ms?: number; error?: string }> = [];
-  const clicks: Array<{ ms: number; status: number; received: boolean; settled_ms?: number; saved?: boolean; error?: unknown }> = [];
+  // Each click carries its own id (sent as X-Olympus-Click-Id) and send time, so a late acknowledgement can be matched to
+  // the front's ingress, command POST attempts and control receipt in the engine logs (lane 1, 18 Nov).
+  const clicks: Array<{ id: string; sent_at: string; ms: number; status: number; received: boolean; request_id?: string; settled_ms?: number; saved?: boolean; error?: unknown }> = [];
   const pendingClicks = new Map<string, { started: number; click: typeof clicks[number] }>();
   const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
   let enginesStartedAt: number | undefined;
@@ -873,6 +912,9 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const started = Date.now();
   let finished = false;
   const pressureSampler = samplePressure();
+  const vmstatAtStart = readVmstat();
+  let backgroundTimeline: ReturnType<typeof startBackgroundTimeline>;
+  const backgroundTimelinePath = join(metrics, 'background.timeline.jsonl');
   const roles: Array<{ role: string; pid: number }> = [];
   const anonSampler = sampleAnonMemory(() => roles, () => enginesStartedAt ?? Date.now());
   let walAtOpen: Record<string, number> = {};
@@ -889,6 +931,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       });
       children.push(child);
       roles.push({ role, pid: child.pid });
+      if (role === 'background') backgroundTimeline = startBackgroundTimeline(child.pid, backgroundTimelinePath);
       void child.exited.then(() => { timing[role].stoppedAt ||= nowMs(); });
       writeFileSync(pidFile, JSON.stringify(children.map(entry => entry.pid)));
       for (const stream of [child.stdout, child.stderr]) pumps.push((async () => {
@@ -926,18 +969,20 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     let clickSequence = 0;
     const click = async () => {
       const started = performance.now();
+      const id = `${options.runCase}-click-${clickSequence + 1}`;
+      const sent_at = new Date().toISOString();
       // Seeded Personal rows, away from the read probe's item and the judge's held rows.
       const first = Math.min(13, shape.shape.items - 1);
       const count = Math.ceil((shape.shape.items - first) / 20);
       const itemId = ownerTierItemId(identity(first + (clickSequence++ % count) * 20));
       try {
-        const { ms, status, json } = await post('/dashboard/privacy/items/set', { item_id: itemId, tier: 'private' }, privacyHeaders);
+        const { ms, status, json } = await post('/dashboard/privacy/items/set', { item_id: itemId, tier: 'private' }, { ...privacyHeaders, 'X-Olympus-Click-Id': id });
         const received = status === 202 && json.state === 'pending' && typeof json.request_id === 'string';
-        const sample = { ms, status, received, ...(received ? {} : { error: json.error ?? json.message }) };
+        const sample = { id, sent_at, ms, status, received, ...(received ? { request_id: json.request_id as string } : { error: json.error ?? json.message }) };
         clicks.push(sample);
         if (received) pendingClicks.set(json.request_id as string, { started, click: sample });
       } catch (error) {
-        clicks.push({ ms: performance.now() - started, status: 0, received: false, error: String(error) });
+        clicks.push({ id, sent_at, ms: performance.now() - started, status: 0, received: false, error: String(error) });
       }
     };
     const pollClicks = async () => {
@@ -1020,6 +1065,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     for (const role of ROLES) if (timing[role].spawnedAt) timing[role].stoppedAt ||= nowMs();
     pressureSampler.stop();
     anonSampler.stop();
+    await backgroundTimeline?.stop();
     for (const child of children) child.kill('SIGKILL');
     await Promise.all(children.map(child => child.exited)); await Promise.all(pumps);
     await Promise.allSettled(requests);
@@ -1069,7 +1115,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     dashboard_reads: dashReads.length, dashboard_failed: dashReads.length - dashOk.length, dashboard_failures: dashReads.filter(read => read.status !== 200).slice(0, 10),
     front_beat_p95_ms: beatP95(front) ?? null, background_beat_p95_ms: beatP95(background) ?? null };
   const clickSummary = { count: clicks.length, max_ms: Math.round(Math.max(0, ...clicks.map(click => click.ms))),
-    over_1s: clicks.filter(click => !click.received || click.ms >= LOOP_STALL_LIMIT_MS).slice(0, 50),
+    over_1s: clicks.filter(click => !click.received || click.ms >= LOOP_STALL_LIMIT_MS).slice(0, 50).map(click => ({ ...click, trace: clickTrace.get(click.id) ?? [] })),
+    traced: clicks.filter(click => clickTrace.has(click.id)).length,
     settled: clicks.filter(click => click.settled_ms !== undefined).length, pending: pendingClicks.size,
     max_settled_ms: Math.max(0, ...clicks.map(click => click.settled_ms ?? 0)),
     failures: clicks.filter(click => click.saved === false), samples: clicks };
@@ -1095,6 +1142,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
+    vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
+    background_timeline: summarizeBackgroundTimeline(backgroundTimelinePath, freezeLines, join(metrics, 'background.freezes.log')),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint, checkpoint_timing,
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };

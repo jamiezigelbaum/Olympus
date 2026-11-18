@@ -301,7 +301,7 @@ import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connecto
 import { sqliteFilesHealth, startSqliteWalSampler } from './sqlite-wal-sampler.ts';
 import { readPoolDiagnostics, readPoolMemoryCounts, sampleReadPoolMemory } from '../connector-store/off-thread-reads.ts';
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
-import { setSqliteCheckpointsOffLoop } from '../../core/sqlite-store.ts';
+import { setSqliteCheckpointsOffLoop, sqliteFilesForOffLoopCheckpoints } from '../../core/sqlite-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { createPendingGovernance, createPendingItemProtection, createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { judgeBoosts } from '../classification/judge-boost.ts';
@@ -310,6 +310,7 @@ import {
   enableSourceRegistryAdoption,
   openConnectorStore,
   openSecretLocations,
+  openStoreReadOnlyForClose,
   recordAccountPlacement,
   recordProviderAccount,
   type StorageAccount,
@@ -664,7 +665,7 @@ export async function main(): Promise<void> {
   // The background's loop connections leave checkpoints to a worker of their
   // own (sqlite-checkpointer.ts), from before the first store opens.
   const checkpointer = engineRole === 'background' ? startSqliteCheckpointer() : undefined;
-  setSqliteCheckpointsOffLoop(checkpointer !== undefined);
+  setSqliteCheckpointsOffLoop(checkpointer !== undefined, openStoreReadOnlyForClose);
   // Bulk work makes room for a WAL that needs rewinding: its turns wait for one checkpoint pass, off the loop.
   if (checkpointer) controlPathHeadroom.setRoomGate(() => checkpointer.room());
   // Every statement that holds this process's loop past LOOP_SLOW_SQL_MS is
@@ -2342,15 +2343,18 @@ export async function main(): Promise<void> {
   // the stores are known, before boot's own writes: with the loop's automatic
   // checkpoint off, a boot that ran before the first sample let the ledger's
   // WAL reach 2.19 GB unfolded (lane 6 boot leg on 01f40a09, 16 Nov).
-  const walSampler = engineRole === 'background' ? startSqliteWalSampler(() => [
-    ...connectorStores.map((store) => ({ label: store.corpusId, dbPath: store.dbPath, settings: () => store.sqliteJournalSettings() })),
-    ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
-      label: `tier-ledger-${index + 1}`, dbPath: ledger.dbPath, settings: () => ledger.sqliteJournalSettings(),
-    })),
-    ...[...new Set(tierLanes.map((lane) => lane.ledger))].map((ledger, index) => ({
-      label: `judge-queue-${index + 1}`, dbPath: tierSnifferPathForLedger(ledger.dbPath),
-    })),
-  ], { afterSample: (files) => checkpointer?.tick(files) }) : undefined;
+  const walSampler = engineRole === 'background' ? startSqliteWalSampler(() => {
+    const ledgers = [...new Set(tierLanes.map((lane) => lane.ledger))];
+    const mounted = [
+      ...connectorStores.map((store) => ({ label: store.corpusId, dbPath: store.dbPath, settings: () => store.sqliteJournalSettings() })),
+      ...ledgers.map((ledger, index) => ({
+        label: `tier-ledger-${index + 1}`, dbPath: ledger.dbPath, settings: () => ledger.sqliteJournalSettings(), truncateIdleWal: true,
+      })),
+      ...ledgers.map((ledger, index) => ({ label: `judge-queue-${index + 1}`, dbPath: tierSnifferPathForLedger(ledger.dbPath) })),
+    ];
+    const paths = new Set(mounted.map((file) => file.dbPath));
+    return [...mounted, ...[...sqliteFilesForOffLoopCheckpoints()].filter((file) => !paths.has(file.dbPath))];
+  }, { afterSample: (files) => checkpointer?.tick(files) }) : undefined;
   // Test-only workloads; the hook requires an explicitly named synthetic fixture.
   const loopStallModule = '../../../scripts/loop-stall-test.ts';
   const loopStallFixture = process.env.NODE_ENV === 'test' && process.env.OLYMPUS_LOOP_STALL_DIR
@@ -6360,7 +6364,7 @@ export async function main(): Promise<void> {
           },
         })),
         // The brief route must pass both bearer and owner-socket authorization.
-        withWorkerBearerAuth(withEngineBriefRoute(frontWorkerFetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
+        withWorkerBearerAuth(withEngineBriefRoute(frontWorkerFetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret, tracePrivacyClicks: !!frontRoutes }),
       )),
     )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };
@@ -7008,7 +7012,7 @@ export async function main(): Promise<void> {
     tierSniffer?.stop();
     localPacer.stop();
     archiveImportDashboard.close();
-    installedTierClassification.close();
+    installedTierClassification.close({ checkpoint: true });
     void Promise.all(Object.values(captures).map((capture) => capture.stop())).catch(() => undefined);
     stopBuiltInModelOnShutdown(workerBuiltInModel?.model);
     // The built-in transcriber's server, if this process started one.

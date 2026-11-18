@@ -1,13 +1,18 @@
 // The background's checkpoints run on a worker, not inline on a loop commit
 // (16 Nov 2026 gate: a 6 GB ledger WAL and 1-3 s keyed writes).
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync, truncateSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, test } from 'bun:test';
-import { loopWalAutocheckpointPragma, setSqliteCheckpointsOffLoop } from '../src/core/sqlite-store.ts';
+import { afterEach, expect, spyOn, test } from 'bun:test';
+import { ENGINE_ROLE_ENV, engineRoleFromEnv } from '../src/core/engine-split.ts';
+import { openStoreReadOnlyForClose } from '../src/core/source-storage.ts';
+import { loopWalAutocheckpointPragma, setSqliteCheckpointsOffLoop, sqliteFilesForOffLoopCheckpoints } from '../src/core/sqlite-store.ts';
+import { withLedgerAt } from '../src/workers/classification/tier-cli.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { ControlPathHeadroom } from '../src/workers/control-path-headroom.ts';
 import { startSqliteCheckpointer } from '../src/workers/engine/sqlite-checkpointer.ts';
+import { startSqliteWalSampler } from '../src/workers/engine/sqlite-wal-sampler.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
 const roots: string[] = [];
@@ -20,6 +25,69 @@ test('loop connections turn the automatic checkpoint off only while the worker c
   expect(loopWalAutocheckpointPragma()).toBe('');
   setSqliteCheckpointsOffLoop(true);
   expect(loopWalAutocheckpointPragma()).toContain('wal_autocheckpoint = 0');
+});
+
+test('the background defers a transient ledger close to the worker, and the worker truncates an idle WAL', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'olympus-checkpointer-'));
+  roots.push(root);
+  const path = join(root, 'unmounted.tier-ledger.sqlite');
+  const limit = 64 * 1024 * 1024;
+  const lines: string[] = [];
+  const checkpointer = startSqliteCheckpointer({ hotMs: 25, idleMs: 25, log: (line) => lines.push(line) })!;
+  const previousRole = process.env[ENGINE_ROLE_ENV];
+  process.env[ENGINE_ROLE_ENV] = 'background';
+  setSqliteCheckpointsOffLoop(engineRoleFromEnv() === 'background', openStoreReadOnlyForClose);
+  const exec = spyOn(Database.prototype, 'exec');
+  const walPath = `${path}-wal`;
+  const walBytes = () => existsSync(walPath) ? statSync(walPath).size : 0;
+  let sampler: ReturnType<typeof startSqliteWalSampler> | undefined;
+  try {
+    // No mounted store or open writer holds this WAL after withLedgerAt returns.
+    withLedgerAt(path, undefined, (ledger) => ledger.writeMeta('test-sentinel', 'committed'));
+    expect(exec.mock.calls.filter(([sql]) => /wal_checkpoint/i.test(sql))).toEqual([]);
+    expect(walBytes()).toBeGreaterThan(0);
+    // SQLite can retain allocated WAL space past its last valid frame.
+    // Model that tail sparsely while keeping the ledger's committed frames real.
+    truncateSync(walPath, limit + 4096);
+    expect(walBytes()).toBeGreaterThan(limit);
+    sampler = startSqliteWalSampler(() => [...sqliteFilesForOffLoopCheckpoints()], {
+      intervalMs: 5, log: () => {}, afterSample: (files) => checkpointer.tick(files),
+    });
+    await waitFor(() => walBytes() === 0 && checkpointer.roomStats().passes >= 2, {
+      description: 'the worker truncated the unmounted ledger WAL without a subsequent write',
+    });
+    expect(lines.some((line) => line.includes('sqlite checkpoint: tier-ledger-open-1 wal_bytes=0 '))).toBe(true);
+    expect(exec.mock.calls.filter(([sql]) => /wal_checkpoint/i.test(sql))).toEqual([]);
+    const reader = new TierLedger({ dbPath: path, readOnly: true });
+    try {
+      expect(reader.readMeta('test-sentinel')).toBe('committed');
+    } finally {
+      reader.close();
+    }
+  } finally {
+    if (previousRole === undefined) delete process.env[ENGINE_ROLE_ENV];
+    else process.env[ENGINE_ROLE_ENV] = previousRole;
+    exec.mockRestore();
+    sampler?.stop();
+    checkpointer.stop();
+  }
+});
+
+test('an explicit shutdown close checkpoints the ledger even when the worker owns routine checkpoints', () => {
+  const root = mkdtempSync(join(tmpdir(), 'olympus-checkpointer-'));
+  roots.push(root);
+  const path = join(root, 'shutdown.tier-ledger.sqlite');
+  setSqliteCheckpointsOffLoop(true, openStoreReadOnlyForClose);
+  const ledger = new TierLedger({ dbPath: path });
+  ledger.writeMeta('shutdown-test', 'committed');
+  const exec = spyOn(Database.prototype, 'exec');
+  try {
+    ledger.close({ checkpoint: true });
+    expect(exec.mock.calls).toContainEqual(['PRAGMA wal_checkpoint(TRUNCATE);']);
+    expect(existsSync(`${path}-wal`) ? statSync(`${path}-wal`).size : 0).toBe(0);
+  } finally {
+    exec.mockRestore();
+  }
 });
 
 test('a large WAL is checkpointed by the worker without the writer lock, and the writer\'s next commit cuts it back', async () => {
