@@ -10,6 +10,7 @@ import type { OperationContext } from '../src/core/operations.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import type { ReleaseCheck } from '../src/core/release-manifest.ts';
+import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
@@ -27,10 +28,10 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()!();
 });
 
-async function gardenLane() {
+async function gardenLane(sniffer: TierSniffer = JUDGED_PERSONAL_SNIFFER) {
   // These short fixtures already have whole-item judgments. No new window
   // record or model call is needed to exercise the later tier-change race.
-  registerInstalledTierClassification({ forLedger: () => ({ sniffer: JUDGED_PERSONAL_SNIFFER, releaseJudge: {
+  registerInstalledTierClassification({ forLedger: () => ({ sniffer, releaseJudge: {
     modelId: 'fixture', promptVersion: 'fixture', read: () => undefined,
     record: () => { throw new Error('short items need no window records'); },
     resolve: async () => { throw new Error('short items need no new calls'); },
@@ -83,6 +84,21 @@ describe('remote search: tiers reread before release', () => {
     const lane = await gardenLane();
     const raw = await searchReleasedEvidence({ lanes: lane.lanes, question: 'violet turnips garden', releaseCheck: lane.releaseCheck });
     expect(JSON.stringify(searchToolResult(raw).content)).toContain(SENTENCE);
+  });
+
+  test('Personal evidence search withholds a held Private keyword match', async () => {
+    const lane = await gardenLane({ id: 'waiting', judge: () => ({ verdict: 'undecided', queued: true }) });
+    const query = 'violet turnips';
+    const identity = identityOf('garden');
+    expect(lane.fixture.ledger.copies(identity)).toContainEqual(expect.objectContaining({
+      corpusId: CORPORA.secure_local, state: 'current', embedHold: true,
+    }));
+    expect(lane.fixture.stores.secure_local!.searchItems(query, 10).map(hit => hit.sourceItem.providerItemId)).toEqual(['garden']);
+
+    const raw = await searchReleasedEvidence({ lanes: lane.lanes, question: query, releaseCheck: lane.releaseCheck });
+    expect(raw.evidence).toEqual([]);
+    expect(JSON.stringify(searchToolResult(raw))).not.toContain('garden-notes');
+    expect(JSON.stringify(searchToolResult(raw))).not.toContain(SENTENCE);
   });
 
   for (const target of [

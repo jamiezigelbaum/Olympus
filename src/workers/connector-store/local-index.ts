@@ -12213,7 +12213,7 @@ export class LocalConnectorStore {
       if (binding && (!ledger || ledger.ledgerId() !== binding.ledgerId)) return false;
       if (!ledger) return true;
       const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
-      if (!state || !state.record.routed) return true;
+      if (!state?.record?.routed) return true;
       const { record, copies } = state;
       if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') return false;
       const here = copies.find((copy) => copy.corpusId === this.corpusId

@@ -23,7 +23,7 @@ import {
   type ParentNamesTier,
 } from '../../core/parent-label.ts';
 import type { SourceClassificationTier } from '../../core/contracts.ts';
-import { copyServingLayer, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import { copyServingLayer, itemNamesHeldForJudgment, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import type { UnreadableParent } from '../file-extraction/unreadable-files.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 import type { TierVisibilityScope } from './tier-visibility.ts';
@@ -98,12 +98,13 @@ function resolveOne(
 
   // What the ledger has decided for the names, when it has decided anything.
   let decided: ParentNamesTier | undefined;
-  if (state) {
+  if (state?.hidingIntent) return undefined;
+  if (state?.record) {
     const { record } = state;
     if (record.metadataPending) return undefined;
     const keys = [record.metadataTier, record.targetMetadataTier];
     if (keys.includes('secrets')) return undefined;
-    let highest: ParentNamesTier = 'public';
+    let highest: ParentNamesTier = itemNamesHeldForJudgment(record, state.copies) ? 'private' : 'public';
     for (const key of keys) {
       if (key === null || key === 'secrets') continue;
       if (RANK[LEDGER_TIER[key]] > RANK[highest]) highest = LEDGER_TIER[key];
@@ -113,7 +114,7 @@ function resolveOne(
 
   let tier: ParentNamesTier;
   let namesStore: LocalConnectorStore | undefined;
-  if (state && state.record.routed) {
+  if (state?.record?.routed) {
     tier = decided!;
     // The copy that serves the names now; none means the names are hidden or gone.
     const serving = copyServingLayer(state.copies.filter((copy) => copy.state === 'current'), 'metadata');

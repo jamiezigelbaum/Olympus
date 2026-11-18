@@ -42123,13 +42123,7 @@ function* copiesSteps(list) {
       else
         result.set(key, [copyFromRow(row)]);
     }
-    const pending = yield {
-      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
-        WHERE kind IN ('deletion', 'secret')
-          AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
-      params,
-      mode: "all"
-    };
+    const pending = yield* hidingIntentsSteps(values, params);
     for (const row of pending) {
       const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
       if (hidden) {
@@ -42140,6 +42134,15 @@ function* copiesSteps(list) {
     }
   }
   return result;
+}
+function* hidingIntentsSteps(values, params) {
+  return yield {
+    sql: `SELECT provider, account_scope, conversation_key, provider_item_id, kind FROM tier_write_intents
+      WHERE kind IN ('deletion', 'secret')
+        AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+    params,
+    mode: "all"
+  };
 }
 function* personalFirstWaitingSteps(list) {
   const result = new Set;
@@ -43843,6 +43846,14 @@ class TierLedger {
         if (state && override)
           state.override = override;
       }
+      for (const row of yield* hidingIntentsSteps(values, params)) {
+        const key = tierLedgerIdentityKey(identityFromRow(row));
+        const state = result.get(key);
+        if (state)
+          state.hidingIntent = row.kind;
+        else
+          result.set(key, { copies: [], hidingIntent: row.kind });
+      }
     }
     return result;
   }
@@ -45161,6 +45172,9 @@ function trustDomainRank(domain) {
 }
 function copyServingLayer(copies, layer) {
   return copies.find((copy) => copy.layers === "both" || copy.layers === layer);
+}
+function itemNamesHeldForJudgment(record, copies, corpusId) {
+  return record.metadataPending || contentHeldForJudgment(record) && !copies.some((copy) => copy.state === "current" && copy.layers === "metadata" && (corpusId === undefined || copy.corpusId === corpusId));
 }
 function ownerPriorOf(json) {
   try {
@@ -54907,7 +54921,7 @@ function recheckRelease(evidence, manifests, check) {
   }
   if (verdicts.some((verdict) => verdict.tier === "secret"))
     return { withhold: REMOTE_ANSWER_CHANGED };
-  if (verdicts.some((verdict) => verdict.tier === "unknown"))
+  if (verdicts.some((verdict) => verdict.tier === "unknown" || verdict.pendingDeletion))
     return { withhold: REMOTE_ANSWER_UNVERIFIED };
   if (verdicts.some((verdict) => verdict.hiddenByParent === true))
     return { withhold: REMOTE_ANSWER_UNVERIFIED };
@@ -56346,7 +56360,7 @@ function* judge(lane, parents, depth) {
     } else {
       const state = states?.get(tierLedgerIdentityKey(identity));
       const copies = state?.copies ?? [];
-      visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
+      visible = copies.length === 0 ? state?.record?.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
       if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity)))
         visible = true;
     }
@@ -63723,15 +63737,26 @@ function* effectiveItemVerdicts(scopes, inputs) {
       const state = states.get(tierLedgerIdentityKey(identity));
       if (!state)
         continue;
-      const { record, copies, override } = state;
+      const { record, copies, override, hidingIntent } = state;
+      if (hidingIntent === "secret") {
+        verdicts[index] = { tier: "secret", gone: false };
+        continue;
+      }
+      const pendingDeletion = hidingIntent === "deletion";
+      if (!record) {
+        if (pendingDeletion)
+          verdicts[index] = { tier: "legacy", gone: true, pendingDeletion: true };
+        continue;
+      }
       const namesOnly = inputs[index].layer === "names";
       const tiers = namesOnly ? [record.metadataTier, record.targetMetadataTier] : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
       if (override?.kind === "tier")
         tiers.push(override.tier);
-      const held = record.metadataPending || !namesOnly && contentHeldForJudgment(record);
+      const held = namesOnly ? itemNamesHeldForJudgment(record, copies, inputs[index].corpusId) : record.metadataPending || contentHeldForJudgment(record);
       verdicts[index] = {
         tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
-        gone: record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata"))
+        gone: pendingDeletion || record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata")),
+        ...pendingDeletion ? { pendingDeletion: true } : {}
       };
     }
     const lane = childLane(scope);
@@ -74173,7 +74198,7 @@ ${parentKey(ref)}`, { ref, origin });
         if (!ledger)
           return true;
         const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
-        if (!state || !state.record.routed)
+        if (!state?.record?.routed)
           return true;
         const { record, copies } = state;
         if (record.contentTier === "secrets" || record.metadataTier === "secrets")
@@ -184771,7 +184796,7 @@ function parseOwnerTierItemId(itemId) {
 }
 function namesAbovePersonal(state) {
   const { record } = state;
-  if (!record || record.metadataPending)
+  if (!record || state.namesHeld)
     return true;
   return [record.metadataTier, record.targetMetadataTier, state.ownerTier].some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank("private"));
 }
@@ -184945,6 +184970,9 @@ function readLocatedState(items, context) {
       const override = ledger.getOverride(item.identity);
       if (record && !state.record)
         state.record = record;
+      if (record && itemNamesHeldForJudgment(record, record.contentPending ? ledger.copies(item.identity) : [])) {
+        state.namesHeld = true;
+      }
       if (override?.kind === "tier") {
         state.ownerSet = true;
         state.ownerTier = override.tier;
@@ -222723,8 +222751,8 @@ function createEmailSourceWorker(options = {}) {
                 unreadCorpora.add(store.corpusId);
               }
             }
-            const privateNames = new Set(tagged.filter((hit) => unreadCorpora.has(hit.corpusId)));
-            const secretNames = new Set;
+            const privateNames = new Set;
+            const hiddenNames = new Set(tagged.filter((hit) => unreadCorpora.has(hit.corpusId)));
             for (const scope of verdictScopes.values()) {
               const governed = tagged.filter((hit) => scope.corpusIds.has(hit.corpusId));
               try {
@@ -222735,20 +222763,21 @@ function createEmailSourceWorker(options = {}) {
                   layer: "names"
                 }))));
                 governed.forEach((hit, index) => {
-                  if (verdicts[index].tier === "secret")
-                    secretNames.add(hit);
-                  else if (!["legacy", "public_or_personal"].includes(verdicts[index].tier))
+                  const verdict = verdicts[index];
+                  if (verdict.tier === "secret" || verdict.tier === "unknown" || verdict.pendingDeletion)
+                    hiddenNames.add(hit);
+                  else if (verdict.tier === "private")
                     privateNames.add(hit);
                 });
               } catch {
                 for (const hit of governed)
-                  privateNames.add(hit);
+                  hiddenNames.add(hit);
               }
             }
             const hitIsPrivate = (hit) => privateNames.has(hit) || hit.trustTier === undefined || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier });
             const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
             let privateTierWithheld = 0;
-            for (const hit of secretNames)
+            for (const hit of hiddenNames)
               visible.delete(hit);
             if (!searchedSecureLocal) {
               for (const hit of [...visible]) {
@@ -240821,14 +240850,16 @@ function resolveOne(request, stores, scopes) {
     return;
   const state = scope?.ledger.itemStatesForMany([parent]).values().next().value;
   let decided;
-  if (state) {
+  if (state?.hidingIntent)
+    return;
+  if (state?.record) {
     const { record } = state;
     if (record.metadataPending)
       return;
     const keys = [record.metadataTier, record.targetMetadataTier];
     if (keys.includes("secrets"))
       return;
-    let highest = "public";
+    let highest = itemNamesHeldForJudgment(record, state.copies) ? "private" : "public";
     for (const key of keys) {
       if (key === null || key === "secrets")
         continue;
@@ -240839,7 +240870,7 @@ function resolveOne(request, stores, scopes) {
   }
   let tier;
   let namesStore;
-  if (state && state.record.routed) {
+  if (state?.record?.routed) {
     tier = decided;
     const serving = copyServingLayer(state.copies.filter((copy) => copy.state === "current"), "metadata");
     if (!serving)

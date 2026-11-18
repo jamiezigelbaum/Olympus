@@ -537,7 +537,8 @@ function withheldAnswer(message: string, heldBack = 0): Record<string, unknown> 
  * Revalidates an answer against its release manifests: withholds when one is
  * missing, cannot be read, names an input now Secret or unprovable, names an
  * input now Private when Private derivatives would not be released now, or
- * does not cover a cited item, or drew on a child item whose parent is gone.
+ * does not cover a cited item, drew on an item pending deletion, or drew
+ * on a child whose parent is gone.
  * Otherwise the citations of gone items are dropped.
  */
 function recheckRelease(
@@ -562,7 +563,7 @@ function recheckRelease(
     return { withhold: REMOTE_ANSWER_UNVERIFIED };
   }
   if (verdicts.some((verdict) => verdict.tier === 'secret')) return { withhold: REMOTE_ANSWER_CHANGED };
-  if (verdicts.some((verdict) => verdict.tier === 'unknown')) return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  if (verdicts.some((verdict) => verdict.tier === 'unknown' || verdict.pendingDeletion)) return { withhold: REMOTE_ANSWER_UNVERIFIED };
   // An answer that drew on a child whose parent is gone is withheld whole: what it said of the child
   // may be in its prose, and a dropped citation would leave that standing.
   if (verdicts.some((verdict) => verdict.hiddenByParent === true)) return { withhold: REMOTE_ANSWER_UNVERIFIED };

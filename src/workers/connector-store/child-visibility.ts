@@ -468,7 +468,7 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
       const copies = state?.copies ?? [];
       visible = copies.length === 0
         // Never routed: the store that holds its row serves it. Routed with no copy left: nothing does.
-        ? state?.record.routed !== true && active.length > 0
+        ? state?.record?.routed !== true && active.length > 0
         : copies.some((copy) => copy.state === 'current' && active.some((row) => row.corpusId === copy.corpusId));
       // A Secret whose copies were settled but whose location row is not written yet (the row is
       // still active) is present, and its own parent still decides its children like any other
