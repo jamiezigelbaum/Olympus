@@ -682,7 +682,7 @@ export class LocalFileExtractionJobStore {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
     } else {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;${loopWalAutocheckpointPragma(this.dbPath)}`);
-      applySqliteMmap(this.db);
+      applySqliteMmap(this.db, this.dbPath);
     }
 
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);

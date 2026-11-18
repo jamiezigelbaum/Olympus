@@ -5,10 +5,31 @@ import {
 } from '../../../core/source-storage.ts';
 import { accountFolderMigrationEnabled, migrateAccountFolders, type AccountMigrationOptions, type AccountMigrationReport } from '../../../core/source-account-migration.ts';
 import { messagingMoveFacts, repointMovedMessagingAccounts } from '../../../core/messaging-account-move.ts';
-import { deleteMarkedAccounts, type DeleteMarkedAccountsReport } from '../../../data-lifecycle.ts';
+import { deleteMarkedAccounts, lifecycleStoreLayouts, type DeleteMarkedAccountsReport } from '../../../data-lifecycle.ts';
+import { lifecycleSourceIds } from '../../../core/account-files.ts';
+import { sharedDataPath } from '../../../core/olympus-layout.ts';
+import { declaredConnectorStoreMounts } from '../../../core/source-placement.ts';
+import type { EngineRole } from '../../../core/engine-split.ts';
+import { tierLedgerPathForStore } from '../../classification/tier-ledger-path.ts';
+import { configureSqliteMmap, logSqliteMmapPolicy } from '../../connector-store/sqlite-mmap.ts';
 import { TierLedgerSchemaError } from '../../classification/tier-ledger.ts';
 import { assertStoreTierLedgerCanOpen } from '../../classification/tier-set-binding.ts';
 import { createDefaultSecretStore, type SecretStore } from '../../../core/secret-store.ts';
+
+export function configureEngineSqliteMmap(role: EngineRole, env: NodeJS.ProcessEnv): void {
+  const stores = lifecycleSourceIds().flatMap(sourceId => lifecycleStoreLayouts(sourceId, { env }).flat());
+  const mounts = declaredConnectorStoreMounts(env);
+  if (mounts !== 'unreadable') {
+    for (const { dbPath } of mounts) {
+      if (dbPath && dbPath !== ':memory:') stores.push(dbPath);
+    }
+  }
+  // Reserve paths before SQLite opens. Include both layouts and lazy stores
+  // so either role can restart or mount another lane without redividing the
+  // budget while older readers still hold their mappings.
+  const paths = [...stores, ...stores.map(tierLedgerPathForStore), sharedDataPath('file-extraction-jobs', env)];
+  logSqliteMmapPolicy(role, configureSqliteMmap(paths, env.OLYMPUS_SQLITE_MMAP));
+}
 
 /**
  * The least time between two scheduler status snapshots for the ingestion

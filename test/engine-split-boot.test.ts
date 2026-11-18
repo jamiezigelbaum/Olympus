@@ -153,6 +153,7 @@ describe('the engine split boots as two processes', () => {
       ...bootEnv,
       OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true',
       OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath,
+      OLYMPUS_SQLITE_MMAP: 'bounded',
     };
     // Local files, connected with a folder approved, and its store already holding an item.
     connectThisComputerSource(registryPath, 'local.files');
@@ -176,6 +177,13 @@ describe('the engine split boots as two processes', () => {
     await waitFor(() => front.output().includes('worker listening') || /FrontStoreWriteError|error/i.test(front.output()), { timeoutMs: 60_000 });
     expect(front.output()).not.toContain('FrontStoreWriteError');
     expect(front.output()).toContain('worker listening');
+    if (process.platform === 'linux') {
+      const logPolicy = (output: string) => [...output.matchAll(/\[olympus\] engine (?:front|background) SQLite file map (bounded \([^\n]+\))/g)]
+        .map(match => match[1]);
+      const backgroundPolicy = logPolicy(background.output());
+      expect(backgroundPolicy).toHaveLength(1);
+      expect(logPolicy(front.output())).toEqual(backgroundPolicy);
+    }
 
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
     const status = await workerFetch(`http://127.0.0.1:${port}/v1/source/index/status`, {

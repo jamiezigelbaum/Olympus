@@ -3914,7 +3914,7 @@ export class LocalConnectorStore {
         : creatingFile
         ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath)
         : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath));
-      applySqliteMmap(this.db);
+      applySqliteMmap(this.db, this.dbPath);
       // New stores need no conversion. Existing stores are converted only by
       // background reclaim, after the sweep, never by opening a request's store.
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
