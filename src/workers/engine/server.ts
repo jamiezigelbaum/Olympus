@@ -301,7 +301,7 @@ import { readPoolDiagnostics, readPoolMemoryCounts } from '../connector-store/of
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
 import { setSqliteCheckpointsOffLoop } from '../../core/sqlite-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
-import { createPendingGovernance, createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
+import { createPendingGovernance, createPendingItemProtection, createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { judgeBoosts } from '../classification/judge-boost.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
@@ -1503,7 +1503,8 @@ export async function main(): Promise<void> {
     judgeNow: engineFront ? frontJudgeNow(engineFront.client) : runChunkJudgment,
     boost: raiseJudgeBoosts,
   };
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities));
+  const pendingItemProtection = engineFront ? createPendingItemProtection() : undefined;
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities), pendingItemProtection);
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
@@ -3549,6 +3550,7 @@ export async function main(): Promise<void> {
           tierScopes,
           () => secureDerivativeDefault ?? 'allow',
           chunkReleaseOptions,
+          pendingItemProtection,
         ),
         queryPlanner: createAnalystQueryPlanner(loopStallFixture?.answerModel ?? localSourceAnswerModel),
         reranker: sourceReranker,
@@ -4908,6 +4910,8 @@ export async function main(): Promise<void> {
   });
   // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
   const ownerTierItemsContext: OwnerTierItemsContext = {
+    // Synthetic fixture mounts live outside the installed account layouts the CLI enumerates.
+    ...(loopStallFixture ? { storePaths: loopStallFixture.storePaths } : {}),
     // The same outcome, and the same no-job rule, the store's status counts use.
     extractionOutcome: extractionOutcomeFor,
     contentAllowed: (identity, localItemId, locator) => {
@@ -4958,6 +4962,7 @@ export async function main(): Promise<void> {
       tierScopes,
       () => secureDerivativeDefault ?? 'allow',
       chunkReleaseOptions,
+      pendingItemProtection,
     ),
     // Local callers read Private, so only items still waiting for their
     // judgment (found by words, not yet by meaning) are counted for them.
@@ -5561,6 +5566,7 @@ export async function main(): Promise<void> {
     tierScopes,
     () => secureDerivativeDefault ?? 'allow',
     chunkReleaseOptions,
+    pendingItemProtection,
   );
   // Private answers on this computer (design background-agents.md, section
   // B): Ask privately, and Answer on a question waiting here. Planning none,
@@ -6274,6 +6280,7 @@ export async function main(): Promise<void> {
   const frontGate = engineFront ? createFrontGate() : undefined;
   const frontRoutes = engineFront ? createEngineFrontRoutes({
     client: engineFront.client,
+    pendingItemProtection: pendingItemProtection!,
     gate: frontGate!,
     restartFront: () => {
       // Only the front: the background is already restarting for the delete.

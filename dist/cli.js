@@ -3398,6 +3398,7 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/archive-import/stop" },
     { method: "POST", path: "/dashboard/privacy/items/find" },
     { method: "POST", path: "/dashboard/privacy/items/set" },
+    { method: "POST", path: "/dashboard/privacy/items/status" },
     { method: "POST", path: "/dashboard/privacy/items/read" },
     { method: "POST", path: "/dashboard/privacy/judge-check" },
     { method: "POST", path: "/dashboard/agents/pairing-code" },
@@ -62785,6 +62786,7 @@ var init_http = __esm(() => {
   DASHBOARD_PRIVACY_ITEM_PATHS = [
     "/dashboard/privacy/items/find",
     "/dashboard/privacy/items/set",
+    "/dashboard/privacy/items/status",
     "/dashboard/privacy/items/read",
     "/dashboard/privacy/judge-check"
   ];
@@ -63533,11 +63535,33 @@ var init_chunk_release = __esm(() => {
 });
 
 // src/workers/connector-store/tier-visibility.ts
+function createPendingItemProtection() {
+  const held = new Map;
+  return {
+    get size() {
+      return held.size;
+    },
+    hold(identity) {
+      const key = tierLedgerIdentityKey(identity);
+      held.set(key, (held.get(key) ?? 0) + 1);
+      return () => {
+        const count = held.get(key);
+        if (count === 1)
+          held.delete(key);
+        else
+          held.set(key, count - 1);
+      };
+    },
+    has(identity) {
+      return held.size > 0 && held.has(tierLedgerIdentityKey(identity));
+    }
+  };
+}
 function childLane(scope) {
   const stores = scope.stores;
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
 }
-function createTierVisibilityGate(scopes, onHeldMatches) {
+function createTierVisibilityGate(scopes, onHeldMatches, pending) {
   const readOptions = { personalFirst: onHeldMatches !== undefined };
   const governedBy = (scope, hits) => hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
   const unreadCorpora = (governed, unread) => {
@@ -63548,10 +63572,11 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
     if (unread.size > 0)
       report?.onUnchecked?.([...unread].sort());
   };
+  const servable = (hits) => pending?.size ? hits.filter((hit) => !pending.has(hit.sourceItem)) : hits;
   const gate = (hits, report) => {
     const current = scopes();
     if (current.length === 0 || hits.length === 0)
-      return hits;
+      return servable(hits);
     const reads = new Map;
     const unread = new Set;
     for (const scope of current) {
@@ -63567,12 +63592,12 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
     }
     const visible = visibilityHere(judgeVisibility(current, hits, reads, onHeldMatches));
     reportUnread(unread, report);
-    return visible;
+    return servable(visible);
   };
   gate.offThread = async (hits, report) => {
     if (scopes().length === 0 || hits.length === 0)
-      return hits;
-    return judgedAwaited(() => judgedOffThread(hits, report), () => gate(hits, report));
+      return servable(hits);
+    return servable(await judgedAwaited(() => judgedOffThread(hits, report), () => gate(hits, report)));
   };
   const judgedOffThread = async (hits, report) => {
     const unread = new Set;
@@ -63754,18 +63779,26 @@ function* effectiveItemVerdicts(scopes, inputs) {
   }
   return verdicts;
 }
-function createReleaseTierCheck(scopes, secureDerivativeDefault, chunkOptions = {}) {
+function createReleaseTierCheck(scopes, secureDerivativeDefault, chunkOptions = {}, pending) {
+  const servable = (inputs, verdicts) => {
+    if (pending?.size)
+      inputs.forEach((input, index) => {
+        if (pending.has(input))
+          verdicts[index] = { ...verdicts[index], gone: true };
+      });
+    return verdicts;
+  };
   const check = {
     secureDerivativeDefault,
     chunks: (inputs, options) => releaseChunks(inputs, scopes, check, { ...chunkOptions, ...options }),
-    inputs: (inputs) => visibilityHere(effectiveItemVerdicts(scopes, inputs)),
-    inputsOffThread: (inputs) => judgedAwaited(async () => {
+    inputs: (inputs) => servable(inputs, visibilityHere(effectiveItemVerdicts(scopes, inputs))),
+    inputsOffThread: async (inputs) => servable(inputs, await judgedAwaited(async () => {
       const unchanged = scopes().map((scope) => childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
       const verdicts = await visibilityOffThread(effectiveItemVerdicts(scopes, inputs));
       if (unchanged.some((check) => !check()))
         throw new VisibilityChangedError;
       return verdicts;
-    }, () => visibilityHere(effectiveItemVerdicts(scopes, inputs)))
+    }, () => visibilityHere(effectiveItemVerdicts(scopes, inputs))))
   };
   return check;
 }
@@ -95992,6 +96025,9 @@ var init_vocabulary = __esm(() => {
     toastPersonal: "Made Personal. Your AI apps can now read it.",
     toastPrivate: "Made Private. Your AI apps no longer see it.",
     toastJudge: "Back to the judge's label.",
+    saving: "Saving…",
+    pendingRestart: "Saving… If Olympus restarts before this is saved, you’ll be asked to press again.",
+    unconfirmed: "Olympus restarted before it could confirm this change. Check the item, and press again if it did not change.",
     failed: "That did not change. Try again.",
     unreachable: "Olympus is not responding. Try again in a moment.",
     locked: "Open dashboard controls to see and change your items.",
@@ -136478,7 +136514,7 @@ function buildSourceIngestionLedgerSnapshot(status, options = {}) {
 function openSourceDashboardFileReadOnly(dbPath = defaultSourceDashboardHistoryDbPath()) {
   const db = new Database23(dbPath, { readonly: true, create: false });
   try {
-    db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+    db.exec("PRAGMA busy_timeout = 0; PRAGMA query_only = ON;");
     return db;
   } catch (error) {
     closeSqliteStore(db, { checkpoint: false });
@@ -136493,7 +136529,7 @@ class SqliteSourceIngestionLedgerStore {
     if (dbPath !== ":memory:")
       mkdirSync47(dirname78(dbPath), { recursive: true, mode: 448 });
     this.db = new Database23(dbPath);
-    this.db.exec("PRAGMA busy_timeout = 10000;");
+    this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138465,7 +138501,7 @@ class SqliteSourceDashboardHistory {
     if (dbPath !== ":memory:")
       mkdirSync48(dirname79(dbPath), { recursive: true, mode: 448 });
     this.db = new Database24(dbPath);
-    this.db.exec("PRAGMA busy_timeout = 10000;");
+    this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (
@@ -138756,15 +138792,20 @@ function buildSourceDashboardViewModel(options) {
     settled_pass: dashboardHasSettledPass(card)
   }));
   options.history?.record(samples);
-  const cardsWithProgress = cards.map((card, index) => {
-    const progress = options.history?.progressFor(samples[index], now);
-    const movement = options.history?.movementFor?.(samples[index], now);
-    return {
-      ...card,
-      ...progress ? { progress } : {},
-      ...movement ? { movement } : {}
-    };
+  const readHistory = (reader) => ({
+    cards: cards.map((card, index) => {
+      const progress = reader.progressFor(samples[index], now);
+      const movement = reader.movementFor?.(samples[index], now);
+      return {
+        ...card,
+        ...progress ? { progress } : {},
+        ...movement ? { movement } : {}
+      };
+    }),
+    sampleCount: reader.sampleCount()
   });
+  const history = options.history?.readForDashboard ? options.history.readForDashboard(readHistory) : options.history && readHistory(options.history);
+  const cardsWithProgress = history?.cards ?? cards;
   const summary = summarize(cardsWithProgress, unassignedCorpora);
   const trustCards = trustDomainCards(cardsWithProgress, unassignedCorpora, options.sovereigntyEngine);
   const excludedByConfiguration = excludedByConfigurationFrom(options.ingestionLedger?.excluded_by_configuration);
@@ -138794,7 +138835,7 @@ function buildSourceDashboardViewModel(options) {
     folder_picker: folderPicker,
     sources: cardsWithProgress,
     history: {
-      sample_count: options.history?.sampleCount() ?? 0,
+      sample_count: history?.sampleCount ?? 0,
       eta_available: cardsWithProgress.some((card) => card.progress?.eta_minutes !== undefined)
     },
     first_run: summary.connected_sources === 0,
@@ -184657,7 +184698,7 @@ var init_remote_relay_runtime = __esm(() => {
 
 // src/workers/engine-split/memory.ts
 import { readFileSync as readFileSync94 } from "node:fs";
-import { heapStats } from "bun:jsc";
+import { heapSize, heapStats } from "bun:jsc";
 function processMemory(status, platform = process.platform) {
   const rss = process.memoryUsage.rss();
   if (platform !== "linux")
@@ -184676,8 +184717,7 @@ function processMemory(status, platform = process.platform) {
   const anon = kb("RssAnon"), file = kb("RssFile"), swap = kb("VmSwap");
   return { rss, ...anon === undefined ? {} : { anon }, ...file === undefined ? {} : { file }, ...swap === undefined ? {} : { swap } };
 }
-function memoryFields(context, memory, peak, heap = heapStats()) {
-  const mb = (bytes) => Math.round(bytes / MB * 100) / 100;
+function memoryFields(context, memory, peak, heap = heapStats(), floor, burstsOverThreshold = 0) {
   const holders = memoryHolderCounts();
   const fields = {
     ...context,
@@ -184691,6 +184731,8 @@ function memoryFields(context, memory, peak, heap = heapStats()) {
       peak_activity: peak.activity,
       peak_heap_size_mb: mb(peak.heapSize)
     },
+    ...floor === undefined ? {} : floor.anon === undefined ? { floor_rss_mb: mb(floor.rss) } : { floor_anon_mb: mb(floor.anon) },
+    bursts_over_threshold: burstsOverThreshold,
     heap_size_mb: mb(heap.heapSize),
     heap_capacity_mb: mb(heap.heapCapacity),
     extra_memory_mb: mb(heap.extraMemorySize),
@@ -184704,14 +184746,37 @@ function createMemoryDiagnostic(input) {
   const log = input.log ?? ((line) => console.warn(line));
   const activity = () => input.activity?.().join(",") || "idle";
   const heap = input.heap ?? heapStats;
+  const peakHeapSize = input.peakHeapSize ?? heapSize;
   let lastLineAt = now();
   let peak;
+  const samples = [];
+  let nextSample = 0;
   let checksSinceLine = 0;
+  let burstsSinceLine = 0;
+  const floor = () => {
+    if (samples.length === 0)
+      return;
+    let rss = Infinity;
+    let anon = Infinity;
+    for (const sample of samples) {
+      rss = Math.min(rss, sample.rss);
+      anon = anon === undefined || sample.anon === undefined ? undefined : Math.min(anon, sample.anon);
+    }
+    return { rss, anon, full: samples.length === MEMORY_FLOOR_WINDOW_MAX_SAMPLES };
+  };
   return {
-    sample(memory) {
+    sample(memory, rss = memory.anon ?? memory.rss) {
+      samples[nextSample] = { rss, anon: memory.anon };
+      nextSample = (nextSample + 1) % MEMORY_FLOOR_WINDOW_MAX_SAMPLES;
       if (memory.anon === undefined || peak && memory.anon <= peak.anon)
         return;
-      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: heap().heapSize };
+      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: peakHeapSize() };
+    },
+    floor,
+    recordBurst(rss, floorRss, thresholdMb) {
+      if (++burstsSinceLine === 1) {
+        log(`[olympus] memory restart not taken: burst rss_mb=${mb(rss)} floor_mb=${mb(floorRss)} threshold_mb=${thresholdMb}`);
+      }
     },
     dueOnMinuteCheck() {
       return ++checksSinceLine >= 5 || now() - lastLineAt >= MEMORY_LOG_INTERVAL_MS;
@@ -184724,20 +184789,22 @@ function createMemoryDiagnostic(input) {
         uptime_s: Math.floor((input.uptime ?? process.uptime)()),
         activity: activity(),
         ...input.readers?.() ?? { read_workers: 0, read_connections: 0 }
-      }, memory, peak, heap());
+      }, memory, peak, heap(), floor(), burstsSinceLine);
       log(`${at} [olympus] memory ${fields}`);
       peak = undefined;
       checksSinceLine = 0;
+      burstsSinceLine = 0;
       lastLineAt = now();
       return `at=${at} ${fields}`;
     }
   };
 }
-var MB, MEMORY_SAMPLE_INTERVAL_MS = 5000, MEMORY_LOG_INTERVAL_MS;
+var MB, MEMORY_SAMPLE_INTERVAL_MS = 5000, MEMORY_LOG_INTERVAL_MS, MEMORY_FLOOR_WINDOW_MAX_SAMPLES, mb = (bytes) => Math.round(bytes / MB * 100) / 100;
 var init_memory2 = __esm(() => {
   init_memory_counters();
   MB = 1024 * 1024;
   MEMORY_LOG_INTERVAL_MS = 5 * 60000;
+  MEMORY_FLOOR_WINDOW_MAX_SAMPLES = 5 * 60000 / MEMORY_SAMPLE_INTERVAL_MS;
 });
 
 // src/workers/classification/tier-owner-items.ts
@@ -210837,13 +210904,27 @@ function privacyItemsClientScript(input) {
         body: JSON.stringify(body),
       });
     } catch (error) {
-      return { ok: false, message: C.unreachable };
+      return { ok: false, retry: true, message: C.unreachable };
     }
     var result = {};
     try { result = (await response.json()) || {}; } catch (error) { result = {}; }
     if (response.ok && result.ok === true) return { ok: true, result: result };
     var message = (result.error && result.error.message) || result.message || C.failed;
-    return { ok: false, message: message };
+    var restarting = response.status === 503 && (result.status === 'starting' || (result.error && result.error.code === 'worker_restarting'));
+    return { ok: false, retry: restarting, unknown: result.unknown === true, message: message };
+  }
+
+  async function save(id, tier) {
+    var response = await post(config.paths.set, { item_id: id, tier: tier });
+    if (!response.ok || response.result.state !== 'pending') return response;
+    var requestId = response.result.request_id;
+    saving[id] = 'pending';
+    render();
+    do {
+      await new Promise(function (resolve) { window.setTimeout(resolve, 250); });
+      response = await post(config.paths.status, { request_id: requestId });
+    } while (response.retry || (response.ok && response.result.state === 'pending'));
+    return response;
   }
 
   function narrow() { return !!(window.matchMedia && window.matchMedia('(max-width: 719px)').matches); }
@@ -210880,11 +210961,11 @@ function privacyItemsClientScript(input) {
   function row(item) {
     var open = selected === item.item_id;
     var tier = shown(item);
-    var note = changedByYou(item) ? '<span class="piyou">' + esc(C.changedByYou) + '</span>'
-      : item.moving_to ? '<span class="piyou">' + esc(fill(C.moving, { tier: item.moving_to })) + '</span>' : '';
+    var note = saving[item.item_id] ? C.saving : changedByYou(item) ? C.changedByYou
+      : item.moving_to ? fill(C.moving, { tier: item.moving_to }) : '';
     return '<li><button type="button" class="pirow" data-pi-item="' + esc(item.item_id) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
       + logo(item) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>'
-      + '<span class="piend">' + pill(tier) + note + '</span></button></li>';
+      + '<span class="piend">' + pill(tier) + (note ? '<span class="piyou">' + esc(note) + '</span>' : '') + '</span></button></li>';
   }
 
   function option(item, tier, line) {
@@ -210899,10 +210980,12 @@ function privacyItemsClientScript(input) {
     var preview = item.preview ? '<div class="piprev" data-pi-preview>' + esc(item.preview) + '</div>' : '<div class="piprev" data-pi-preview>' + esc(C.noPreview) + '</div>';
     var why = '';
     var foot = '';
+    var busy = saving[item.item_id];
+    var status = busy === 'pending' ? C.pendingRestart : busy ? C.saving : statusFor[item.item_id] || '';
     if (changedByYou(item)) {
       var said = change && change.judge ? ' ' + esc(fill(C.judgeSaid, { tier: change.judge })) : '';
       why = '<div class="piundo" data-pi-undo-row><p class="piwhy"><b>' + esc(fill(C.youChose, { tier: tier || '' })) + '</b>' + (change ? ' ' + esc(C.justNow) + '.' : '.') + said + '</p>'
-        + '<button type="button" class="btn" data-pi-undo>' + esc(C.undo) + '</button></div>';
+        + '<button type="button" class="btn" data-pi-undo' + (busy ? ' disabled' : '') + '>' + esc(C.undo) + '</button></div>';
       var effect = change && change.applies === 'next_pass' ? C.afterNextPass : tier === 'Personal' ? C.afterPersonal : C.afterPrivate;
       foot = esc(effect) + ' ' + esc(C.undoGivesBack);
     } else {
@@ -210925,7 +211008,7 @@ function privacyItemsClientScript(input) {
       + '<p class="pidcap" id="pi-who">' + esc(C.whoCaption) + '</p>'
       + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>'
       + why
-      + '<p class="pistatus" data-pi-status role="status">' + esc(statusFor[item.item_id] || '') + '</p>'
+      + '<p class="pistatus" data-pi-status role="status"' + (busy ? ' data-saving' : '') + '>' + esc(status) + '</p>'
       + '<p class="pifoot" data-pi-foot>' + foot + '</p></section>';
   }
 
@@ -210989,6 +211072,30 @@ function privacyItemsClientScript(input) {
     for (var i = 0; i < items.length; i += 1) if (items[i].item_id === updated.item_id) items[i] = updated;
   }
 
+  // A restart lost the receipt: read the item's true state again before saying it was not saved.
+  // A restart lost the receipt, so the outcome is unknown: read the item's true
+  // state again and say what it shows. wanted is the tier asked for, or null for Undo.
+  async function saveFailed(id, response, wanted) {
+    var message = response.message;
+    if (response.unknown) {
+      delete changes[id];
+      await load();
+      var now = find(id);
+      var landed = now && (wanted ? now.owner_set === true && shown(now) === wanted : now.owner_set !== true);
+      if (landed) {
+        delete statusFor[id];
+        render();
+        showToast(wanted === 'Personal' ? C.toastPersonal : wanted ? C.toastPrivate : C.toastJudge, wanted ? id : null);
+        return;
+      }
+      // Not in the list now (a filter or a search moved it out): the page cannot tell.
+      if (!now) message = C.unconfirmed;
+    }
+    statusFor[id] = message;
+    if (selected !== id || response.unknown) setMessage(message, true);
+    render();
+  }
+
   async function choose(id, tier) {
     var item = find(id);
     if (!item || saving[id]) return;
@@ -210997,11 +211104,11 @@ function privacyItemsClientScript(input) {
     render();
     var response;
     try {
-      response = await post(config.paths.set, { item_id: id, tier: tier === 'Personal' ? 'personal' : 'private' });
+      response = await save(id, tier === 'Personal' ? 'personal' : 'private');
     } finally {
       delete saving[id];
     }
-    if (!response.ok || response.result.ok === false) { statusFor[id] = response.message; render(); return; }
+    if (!response.ok) { await saveFailed(id, response, tier); return; }
     var previous = changes[id];
     if (counts && !previous && !item.owner_set) { counts.changed += 1; renderFilters(); }
     // What the judge had said: the label before this visit's first change, if nobody had set it before.
@@ -211022,15 +211129,11 @@ function privacyItemsClientScript(input) {
     if (item) render();
     var response;
     try {
-      response = await post(config.paths.set, { item_id: id, tier: 'judge' });
+      response = await save(id, 'judge');
     } finally {
       delete saving[id];
     }
-    if (!response.ok || response.result.ok === false) {
-      if (item) statusFor[id] = response.message; else setMessage(response.message, true);
-      render();
-      return;
-    }
+    if (!response.ok) { await saveFailed(id, response, null); return; }
     delete changes[id];
     if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
     if (item) merge(response.result.item, item);
@@ -211190,6 +211293,7 @@ var DASHBOARD_PRIVACY_ITEMS_PATHS, PRIVACY_ITEMS_LIST_ID = "your-items", PRIVACY
 .pi .piundo .piwhy { margin: 0; flex: 1; }
 .pi .pistatus { margin: 10px 0 0; color: var(--bad); font-size: var(--fs-body); }
 .pi .pistatus:empty { display: none; }
+.pi .pistatus[data-saving] { color: var(--t2); }
 .pi .pifoot { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line2); color: var(--t3); font-size: 13px; line-height: 1.5; }
 .pi .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pi .paunlock .hint { color: var(--t2); }
@@ -211227,6 +211331,7 @@ var init_privacy_items = __esm(() => {
   DASHBOARD_PRIVACY_ITEMS_PATHS = {
     find: "/dashboard/privacy/items/find",
     set: "/dashboard/privacy/items/set",
+    status: "/dashboard/privacy/items/status",
     read: "/dashboard/privacy/items/read"
   };
 });
@@ -244477,6 +244582,8 @@ class EngineCommandClient {
     let receipt = await this.postUntil(id, command, deadline);
     if (receipt.state === "received" && OWNER_ACTION_KINDS.has(command.kind))
       this.held.set(id, this.now());
+    if (receipt.state === "received")
+      options.onReceived?.(receipt);
     deadline = this.now() + silenceMs;
     let attempt = 0;
     while (receipt.state === "received") {
@@ -245142,11 +245249,10 @@ function tierCommandOnlyReads(body) {
 }
 function createEngineFrontRoutes(input) {
   const pid = input.pid ?? process.pid;
-  const exchange = async (kind, request) => {
-    const forwarded = await requestToForwarded(request);
+  const exchange = async (kind, forwarded, onReceived) => {
     let receipt;
     try {
-      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : OWNER_ACTION_WAIT_MS) });
+      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : OWNER_ACTION_WAIT_MS), ...onReceived ? { onReceived } : {} });
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : "The background engine is not answering." };
     }
@@ -245154,21 +245260,78 @@ function createEngineFrontRoutes(input) {
       return { failed: receipt.error ?? "The background could not run this." };
     return { answer: receipt.result };
   };
-  const send = async (kind, request) => {
-    const outcome = await exchange(kind, request);
+  const responseFor = (outcome) => {
     if ("unanswered" in outcome)
       return Response.json({ error: { code: "engine_background_unavailable", message: outcome.unanswered } }, { status: 503 });
     if ("failed" in outcome)
       return Response.json({ error: { code: "engine_background_failed", message: outcome.failed } }, { status: 502 });
-    try {
-      input.afterAnswer?.(kind);
-    } catch {}
     return new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
+  };
+  const answer = (kind, outcome) => {
+    if ("answer" in outcome) {
+      try {
+        input.afterAnswer?.(kind);
+      } catch {}
+    }
+    return responseFor(outcome);
+  };
+  const pendingPrivacyItems = new Set;
+  const settledPrivacyItems = new Map;
+  const pending = (id, status) => Response.json({ ok: true, request_id: id, state: "pending" }, { status, headers: { "Cache-Control": "no-store" } });
+  const changePrivacyItem = async (request, protection) => {
+    const forwarded = await requestToForwarded(request);
+    const body = await new Response(forwarded.body).json().then((value) => value, () => null);
+    let identity;
+    if (body?.tier === "private" && typeof body.item_id === "string" && body.item_id.trim()) {
+      try {
+        identity = parseOwnerTierItemId(body.item_id);
+      } catch (error) {
+        if (!(error instanceof OperationError))
+          throw error;
+        return Response.json({ error: error.toJSON() }, { status: 400 });
+      }
+    }
+    const received = Promise.withResolvers();
+    let id;
+    let release;
+    const settling = exchange("tier_override", forwarded, (receipt) => {
+      id = receipt.id;
+      if (identity)
+        release = protection.hold(identity);
+      pendingPrivacyItems.add(id);
+      received.resolve(pending(id, 202));
+    }).then((outcome) => {
+      release?.();
+      if (id) {
+        pendingPrivacyItems.delete(id);
+        settledPrivacyItems.set(id, outcome);
+        if (settledPrivacyItems.size > 1000)
+          settledPrivacyItems.delete(settledPrivacyItems.keys().next().value);
+      }
+      return outcome;
+    });
+    return Promise.race([received.promise, settling.then((outcome) => answer("tier_override", outcome))]);
+  };
+  const privacyItemStatus = async (request) => {
+    const id = (await request.json().then((value) => value, () => null))?.request_id;
+    if (typeof id === "string") {
+      if (pendingPrivacyItems.has(id))
+        return pending(id, 200);
+      const outcome = settledPrivacyItems.get(id);
+      if (outcome)
+        return responseFor(outcome);
+    }
+    return Response.json({ ok: false, unknown: true, message: "Not saved. Olympus restarted before this change was saved. Press again." }, { status: 404 });
   };
   return (request) => {
     if (request.method !== "POST")
       return;
     const path = new URL(request.url).pathname;
+    if (input.pendingItemProtection && (path === "/dashboard/privacy/items/set" || path === "/dashboard/privacy/items/status") && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local") {
+      if (!input.gate.isOpen())
+        return Promise.resolve(restartingResponse(request));
+      return path.endsWith("/status") ? privacyItemStatus(request) : changePrivacyItem(request, input.pendingItemProtection);
+    }
     const kind = forwardedKindFor(path);
     if (!kind)
       return;
@@ -245178,11 +245341,11 @@ function createEngineFrontRoutes(input) {
       if (path === "/v1/cli/tier" && tierCommandOnlyReads(await request.clone().text()))
         return;
       if (kind !== "delete_source_data")
-        return send(kind, request);
+        return answer(kind, await exchange(kind, await requestToForwarded(request)));
       input.gate.close();
       let outcome;
       try {
-        outcome = await exchange(kind, request);
+        outcome = await exchange(kind, await requestToForwarded(request));
       } catch {
         outcome = { unanswered: "The delete could not be sent." };
       }
@@ -245302,6 +245465,8 @@ var init_runtime4 = __esm(() => {
   init_answer_activity();
   init_commands();
   init_snapshot();
+  init_tier_owner_items();
+  init_http();
   controlPlanes = new Map;
   SOURCE_SYNC_WAIT_MS = 35 * 60000;
   DATA_EXPORT_WAIT_MS = 3 * 60 * 60000;
@@ -245436,8 +245601,8 @@ function startEngineRssRestart(input) {
   let overSince;
   let done = false;
   const sample = input.sample ?? processMemory;
-  const check = () => {
-    const sampled = sample();
+  const threshold = input.thresholdMb * 1024 * 1024;
+  const check = (sampled, rss) => {
     const periodic = () => {
       if (memory.dueOnMinuteCheck())
         memory.write(sampled);
@@ -245446,9 +245611,11 @@ function startEngineRssRestart(input) {
       periodic();
       return;
     }
-    const rssMb = Math.round((input.rss?.() ?? sampled.anon ?? sampled.rss) / (1024 * 1024));
-    if (rssMb < input.thresholdMb) {
+    const floor = memory.floor();
+    if (!floor?.full || floor.rss <= threshold) {
       overSince = undefined;
+      if (floor && rss > threshold && floor.rss < threshold)
+        memory.recordBurst(rss, floor.rss, input.thresholdMb);
       periodic();
       return;
     }
@@ -245459,6 +245626,7 @@ function startEngineRssRestart(input) {
       return;
     }
     done = true;
+    const rssMb = Math.round(rss / (1024 * 1024));
     const next = { count: restarts.count + 1, last: { at: new Date(now()).toISOString(), rss_mb: rssMb } };
     const previous = restarts;
     restarts = next;
@@ -245477,14 +245645,19 @@ function startEngineRssRestart(input) {
     return handle;
   });
   const clearTimer = input.clearInterval ?? ((handle) => clearInterval(handle));
-  const sampler = setTimer(() => memory.sample(sample()), MEMORY_SAMPLE_INTERVAL_MS);
-  const timer = setTimer(check, ENGINE_RSS_CHECK_INTERVAL_MS);
+  let samplesSinceCheck = 0;
+  const sampler = setTimer(() => {
+    const sampled = sample();
+    const rss = input.rss?.() ?? sampled.anon ?? sampled.rss;
+    memory.sample(sampled, rss);
+    if (++samplesSinceCheck * MEMORY_SAMPLE_INTERVAL_MS < ENGINE_RSS_CHECK_INTERVAL_MS)
+      return;
+    samplesSinceCheck = 0;
+    check(sampled, rss);
+  }, MEMORY_SAMPLE_INTERVAL_MS);
   return {
     restarts: () => restarts,
-    stop: () => {
-      clearTimer(sampler);
-      clearTimer(timer);
-    }
+    stop: () => clearTimer(sampler)
   };
 }
 var ENGINE_RSS_CHECK_INTERVAL_MS = 60000, ENGINE_RSS_RESTART_MAX_WAIT_MS;
@@ -245576,6 +245749,7 @@ var init_front_scheduler = __esm(() => {
 });
 
 // src/workers/engine-split/front-history.ts
+import { SQLiteError } from "bun:sqlite";
 import { existsSync as existsSync122 } from "node:fs";
 function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()) {
   assertWritableStoreOpenAllowed("dashboard history", path);
@@ -245594,18 +245768,26 @@ function openReadOnlyDashboardHistory(path) {
 }
 function createFrontDashboardHistory(input) {
   const now = input.now ?? (() => Date.now());
+  const log = input.log ?? ((line) => console.warn(line));
   const minIntervalMs = input.minIntervalMs ?? 30000;
   let reader;
   let lastSent = Number.NEGATIVE_INFINITY;
-  const read = () => {
-    if (!reader && existsSync122(input.path)) {
-      try {
+  let lastReadWarning = Number.NEGATIVE_INFINITY;
+  const read = (query) => {
+    try {
+      if (!reader && existsSync122(input.path))
         reader = openReadOnlyDashboardHistory(input.path);
-      } catch {
-        reader = undefined;
+      return reader && query(reader);
+    } catch (error) {
+      if (!(error instanceof SQLiteError))
+        throw error;
+      const at = now();
+      if (at - lastReadWarning >= minIntervalMs) {
+        lastReadWarning = at;
+        log(`[engine-split] dashboard history unavailable: sqlite_code=${error.code ?? error.errno}`);
       }
+      return;
     }
-    return reader;
   };
   return {
     record(samples) {
@@ -245616,9 +245798,10 @@ function createFrontDashboardHistory(input) {
         return;
       });
     },
-    progressFor: (sample, at) => read()?.progressFor(sample, at),
-    movementFor: (sample, at) => read()?.movementFor(sample, at),
-    sampleCount: () => read()?.sampleCount() ?? 0
+    readForDashboard: read,
+    progressFor: (sample, at) => read((history) => history.progressFor(sample, at)),
+    movementFor: (sample, at) => read((history) => history.movementFor(sample, at)),
+    sampleCount: () => read((history) => history.sampleCount()) ?? 0
   };
 }
 var init_front_history = __esm(() => {
@@ -272044,7 +272227,8 @@ async function main() {
     judgeNow: engineFront ? frontJudgeNow(engineFront.client) : runChunkJudgment,
     boost: raiseJudgeBoosts
   };
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities));
+  const pendingItemProtection = engineFront ? createPendingItemProtection() : undefined;
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities), pendingItemProtection);
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
     scopes: tierScopes
@@ -273574,7 +273758,7 @@ ${key}`;
       requestOnDemandRead: requestFileRead,
       inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes, pack, request, corpusIds }),
       analyst: defaultLocalAnalyst,
-      releaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions),
+      releaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions, pendingItemProtection),
       queryPlanner: createAnalystQueryPlanner(loopStallFixture?.answerModel ?? localSourceAnswerModel),
       reranker: sourceReranker,
       ...cloudAnalyst ? { cloudAnalyst } : {},
@@ -274559,6 +274743,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     fileEnv: () => readWorkerSetupEnv()
   });
   const ownerTierItemsContext = {
+    ...loopStallFixture ? { storePaths: loopStallFixture.storePaths } : {},
     extractionOutcome: extractionOutcomeFor,
     contentAllowed: (identity, localItemId, locator) => {
       for (const store of connectorStores) {
@@ -274606,7 +274791,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
     deepRead: () => deepReadJobs,
-    sourceAnswerReleaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions),
+    sourceAnswerReleaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions, pendingItemProtection),
     pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     archiveImportAgent: archiveImportDashboard.agent,
     ownerTierItems: ownerTierItemsEngine,
@@ -275117,7 +275302,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     ...openCitedFile ? { openFile: openCitedFile } : {}
   });
-  const remoteReleaseCheck = createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions);
+  const remoteReleaseCheck = createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions, pendingItemProtection);
   if (sourceAnswerLanes) {
     await Promise.resolve().then(() => init_deep_read_jobs());
     await Promise.resolve().then(() => init_local_analyst_window());
@@ -275715,6 +275900,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const frontGate = engineFront ? createFrontGate() : undefined;
   const frontRoutes = engineFront ? createEngineFrontRoutes({
     client: engineFront.client,
+    pendingItemProtection,
     gate: frontGate,
     restartFront: () => {
       if (!restartFrontOnly())

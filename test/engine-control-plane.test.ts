@@ -17,13 +17,22 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createUnixSocketFetch } from '../src/core/worker-transport.ts';
+import { answerReleaseWithheldReasonOffThread } from '../src/core/release-manifest.ts';
+import { ownerTierItemId } from '../src/workers/classification/tier-owner-items.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
+import { createPendingItemProtection, createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { EngineCommandClient } from '../src/workers/engine-split/client.ts';
 import { frontEngineState } from '../src/workers/engine-split/front-state.ts';
 import { EngineCommandError, type EngineCommandEnvelope, type EngineForwardedRequest, type EngineForwardedResponse } from '../src/workers/engine-split/commands.ts';
 import { EngineCommandMirror } from '../src/workers/engine-split/control-mirror.ts';
-import { createEngineFront, engineStatusSnapshotPath, startEngineBackgroundServer, startEngineBackgroundStatus } from '../src/workers/engine-split/runtime.ts';
+import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineStatusSnapshotPath, startEngineBackgroundServer, startEngineBackgroundStatus } from '../src/workers/engine-split/runtime.ts';
 import { readEngineStatusSnapshot, type EngineStatusRead } from '../src/workers/engine-split/snapshot.ts';
 import { waitFor } from './helpers/test-clock.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
+import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture } from './helpers/tier-fixtures.ts';
 
 const TOKEN = 'control-plane-fixture-token-0123456789abcdef';
 const CHILD = join(import.meta.dir, 'fixtures', 'engine-control-blocked-child.ts');
@@ -46,6 +55,106 @@ function home(): { root: string; env: Record<string, string>; socketPath: string
 const override = (note: string): EngineCommandEnvelope['command'] => ({
   kind: 'tier_override', request: { path: '/v1/cli/tier', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ note }) },
 });
+
+test('Make Private returns a receipt during a held background, protects one item, and reports settlement', async () => {
+  const { root, env, socketPath } = home();
+  const dbPath = join(root, 'held.sqlite');
+  const lock = new Database(dbPath);
+  stops.push(() => lock.close());
+  lock.exec('PRAGMA journal_mode = WAL');
+  lock.exec('CREATE TABLE held (at INTEGER)');
+  const fixture = openTierFixture(root, { embed: false });
+  const specs = [
+    { id: 'raise', name: 'orchard raise', text: 'Ordinary orchard notes.' },
+    { id: 'raise', conversation: 'another', name: 'orchard other', text: 'Other orchard notes.' },
+    { id: 'lower', name: 'orchard lower', text: 'More orchard notes.' },
+  ];
+  const lowered = identityOf('lower');
+  fixture.ledger.setOverride(lowered, { kind: 'tier', tier: 'secure' });
+  await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const ledgerPath = fixture.ledger.dbPath;
+  const storePaths = [fixture.paths.internal, fixture.paths.secure_local];
+  fixture.close();
+
+  const ledger = new TierLedger({ dbPath: ledgerPath, readOnly: true });
+  const store = new LocalConnectorStore({ dbPath: storePaths[0]!, corpusId: CORPORA.internal, trustDomain: 'internal', family: 'file', tierLedger: ledger, readOnly: true });
+  stops.push(() => { store.close(); ledger.close(); });
+  const child = spawnProcess(process.execPath, [CHILD, socketPath, dbPath, root, ...storePaths], { env: { ...env, FIXTURE_TOKEN: TOKEN }, stdio: 'inherit' });
+  stops.push(() => child.kill('SIGKILL'));
+  const front = createEngineFront({ env, socketPath, authToken: TOKEN });
+  stops.push(() => front.stop());
+  const protection = createPendingItemProtection();
+  const scopes = () => [{ ledger, corpusIds: new Set([CORPORA.internal]), stores: () => [store] }];
+  const visibility = createTierVisibilityGate(scopes, undefined, protection);
+  const release = createReleaseTierCheck(scopes, () => 'allow', {}, protection);
+  const worker = createEmailSourceWorker({ connectorStores: [store], sourceIndexVisibilityGate: visibility });
+  const routes = createEngineFrontRoutes({ client: front.client, pendingItemProtection: protection, gate: createFrontGate(), restartFront: () => {} });
+  const serve = withWorkerBearerAuth(async request => (await routes(request)) ?? worker.fetch(request), { authToken: TOKEN });
+  const origin = 'http://127.0.0.1:28190';
+  const local = await ownerLocalMint(serve, origin, TOKEN);
+  expect(local.status).toBe(200);
+  const csrf = (await local.json() as { csrf_token: string }).csrf_token;
+  const cookie = local.headers.get('Set-Cookie')!.split(';')[0]!;
+  const post = (path: string, body: object, headers: Record<string, string> = {}) => serve(new Request(origin + path, {
+    method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
+  }));
+  const dashboard = (action: string, body: object) => post('/dashboard/privacy/items/' + action, body, { Cookie: cookie, 'X-Olympus-CSRF': csrf });
+  const search = async () => {
+    const result = await post('/v1/source/index/search', { corpus_id: CORPORA.internal, query: 'orchard', all_tiers: false }, { Authorization: `Bearer ${TOKEN}` });
+    expect(result.status).toBe(200);
+    return (await result.json() as { hits: Array<{ sourceItem: { providerItemId: string; providerConversationId?: string } }> }).hits
+      .map(hit => hit.sourceItem.providerConversationId ?? hit.sourceItem.providerItemId).sort();
+  };
+  const raised = identityOf('raise');
+  const missing = { ...raised, providerItemId: 'missing' };
+  const input = { ...raised, corpusId: CORPORA.internal, privateAtAnswer: false, layer: 'names' as const };
+  const answer = [{ inputs: [input], constraints: { secureDerivativeDefault: 'allow' as const, includeSecureLocalContent: false } }];
+  const lowerInput = { ...input, ...lowered };
+  const begin = async (identity: Parameters<typeof ownerTierItemId>[0], tier: string) => {
+    const start = performance.now();
+    const response = await dashboard('set', { item_id: ownerTierItemId(identity), tier });
+    expect(response.status).toBe(202);
+    const receipt = await response.json() as { request_id: string; state: string };
+    expect(receipt.state).toBe('pending');
+    expect(performance.now() - start).toBeLessThan(1_000);
+    return receipt.request_id;
+  };
+  const poll = async (request_id: string) => (await dashboard('status', { request_id })).json() as Promise<Record<string, unknown>>;
+
+  await waitFor(() => readEngineStatusSnapshot(engineStatusSnapshotPath(env)), { timeoutMs: 30_000 });
+  expect(await search()).toEqual(['another', 'raise']);
+  expect(await answerReleaseWithheldReasonOffThread(answer, release)).toBeUndefined();
+  lock.exec('BEGIN IMMEDIATE');
+  writeFileSync(join(root, 'block'), '');
+  await waitFor(() => (front.status()?.snapshot.loop_held_ms ?? 0) > 1_000, { timeoutMs: 30_000 });
+
+  const raiseId = await begin(raised, 'private');
+  const refusalId = await begin(missing, 'private');
+  const lowerId = await begin(lowered, 'personal');
+  expect(new Set([raiseId, refusalId, lowerId]).size).toBe(3);
+  expect(protection.has(raised)).toBe(true);
+  expect(protection.has(missing)).toBe(true);
+  expect(protection.has(lowered)).toBe(false);
+  expect(await poll(raiseId)).toMatchObject({ state: 'pending', request_id: raiseId });
+  expect((await post('/dashboard/privacy/items/status', { request_id: raiseId }, { Authorization: `Bearer ${TOKEN}` })).status).toBe(403);
+  expect(await search()).toEqual(['another']);
+  expect(await release.inputsOffThread!([lowerInput])).toMatchObject([{ tier: 'private' }]);
+  expect(await answerReleaseWithheldReasonOffThread(answer, release)).toBeDefined();
+  expect(existsSync(join(root, 'released'))).toBe(false);
+
+  lock.exec('COMMIT');
+  const settled = (id: string) => waitFor(async () => {
+    const result = await poll(id);
+    return result.state === 'pending' ? undefined : result;
+  }, { timeoutMs: 30_000 });
+  expect(await settled(raiseId)).toMatchObject({ ok: true, changed: 'set' });
+  expect(await settled(refusalId)).toMatchObject({ ok: false, code: 'not_found', message: 'Olympus no longer holds that item.' });
+  expect(await settled(lowerId)).toMatchObject({ ok: true, changed: 'set' });
+  expect(protection.has(raised)).toBe(false);
+  expect(protection.has(missing)).toBe(false);
+  expect(await search()).toEqual(['another']);
+  expect(await answerReleaseWithheldReasonOffThread(answer, release)).toBeDefined();
+}, 60_000);
 
 describe('the background loop held in synchronous SQLite for 60 s', () => {
   test('commands are acknowledged within 1 s, status keeps publishing with its age, and the front waits on the loop for neither', async () => {

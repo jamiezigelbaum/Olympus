@@ -534,7 +534,8 @@ const MAX_SAMPLES_PER_CORPUS = 720;
 export function openSourceDashboardFileReadOnly(dbPath = defaultSourceDashboardHistoryDbPath()): Database {
   const db = new Database(dbPath, { readonly: true, create: false });
   try {
-    db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+    // History is optional on the front's request thread. Never wait on a lock.
+    db.exec('PRAGMA busy_timeout = 0; PRAGMA query_only = ON;');
     return db;
   } catch (error) {
     closeSqliteStore(db, { checkpoint: false });
@@ -549,7 +550,7 @@ export class SqliteSourceIngestionLedgerStore {
     assertWritableStoreOpenAllowed('ingestion ledger', dbPath);
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     this.db = new Database(dbPath);
-    this.db.exec('PRAGMA busy_timeout = 10000;');
+    this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -5,11 +5,13 @@
  * (`dashboard_samples`), which records them. No sample text exists: a
  * sample is ids, a time and counts.
  */
+import { SQLiteError } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import { openSourceDashboardFileReadOnly } from '../source-ingestion-ledger.ts';
 import { defaultSourceDashboardHistoryDbPath, SqliteSourceDashboardHistory, type SourceDashboardHistory, type SourceDashboardHistorySample } from '../source-dashboard.ts';
+import type { EngineCommandClient } from './client.ts';
 
 /** The worker's writable dashboard history: refused in the engine split's front, which never records. */
 export function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()): SqliteSourceDashboardHistory {
@@ -20,9 +22,7 @@ export function openWritableDashboardHistory(path = defaultSourceDashboardHistor
 /**
  * The dashboard history's own reads (`progressFor`, `movementFor`,
  * `sampleCount`, which only query) on a read-only, query-only connection.
- * The history class opens its file writable, and the dashboard's guarded
- * files stay as reviewed (config/dashboard-design-review.json), so the
- * reader borrows the class's methods over this connection instead.
+ * Share the history class's read methods without running its writable constructor.
  */
 export function openReadOnlyDashboardHistory(path: string): Pick<SqliteSourceDashboardHistory, 'progressFor' | 'movementFor' | 'sampleCount' | 'close'> {
   const db = openSourceDashboardFileReadOnly(path);
@@ -35,25 +35,34 @@ export function openReadOnlyDashboardHistory(path: string): Pick<SqliteSourceDas
     close: () => closeSqliteStore(db, { checkpoint: false }),
   };
 }
-import type { EngineCommandClient } from './client.ts';
 
 export function createFrontDashboardHistory(input: {
   path: string;
   client: Pick<EngineCommandClient, 'post'>;
-  /** Samples are sent at most this often; the background records one batch per interval. */
+  /** Minimum interval between sample batches and between history read warnings. */
   minIntervalMs?: number;
   now?: () => number;
+  log?: (line: string) => void;
 }): SourceDashboardHistory {
   const now = input.now ?? (() => Date.now());
+  const log = input.log ?? ((line: string) => console.warn(line));
   const minIntervalMs = input.minIntervalMs ?? 30_000;
   let reader: ReturnType<typeof openReadOnlyDashboardHistory> | undefined;
   let lastSent = Number.NEGATIVE_INFINITY;
-  const read = (): ReturnType<typeof openReadOnlyDashboardHistory> | undefined => {
-    if (!reader && existsSync(input.path)) {
-      try { reader = openReadOnlyDashboardHistory(input.path); }
-      catch { reader = undefined; }
+  let lastReadWarning = Number.NEGATIVE_INFINITY;
+  const read = <T>(query: (history: NonNullable<typeof reader>) => T): T | undefined => {
+    try {
+      if (!reader && existsSync(input.path)) reader = openReadOnlyDashboardHistory(input.path);
+      return reader && query(reader);
+    } catch (error) {
+      if (!(error instanceof SQLiteError)) throw error;
+      const at = now();
+      if (at - lastReadWarning >= minIntervalMs) {
+        lastReadWarning = at;
+        log(`[engine-split] dashboard history unavailable: sqlite_code=${error.code ?? error.errno}`);
+      }
+      return undefined;
     }
-    return reader;
   };
   return {
     record(samples: SourceDashboardHistorySample[]) {
@@ -61,8 +70,9 @@ export function createFrontDashboardHistory(input: {
       lastSent = now();
       void input.client.post({ kind: 'dashboard_samples', samples: samples as unknown as Record<string, unknown>[] }).catch(() => undefined);
     },
-    progressFor: (sample, at) => read()?.progressFor(sample, at),
-    movementFor: (sample, at) => read()?.movementFor(sample, at),
-    sampleCount: () => read()?.sampleCount() ?? 0,
+    readForDashboard: read,
+    progressFor: (sample, at) => read((history) => history.progressFor(sample, at)),
+    movementFor: (sample, at) => read((history) => history.movementFor(sample, at)),
+    sampleCount: () => read((history) => history.sampleCount()) ?? 0,
   };
 }

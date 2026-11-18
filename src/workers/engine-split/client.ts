@@ -42,6 +42,8 @@ export interface EngineSendOptions {
   timeoutMs?: number;
   /** Reuse an id (the caller's own retry). */
   id?: string;
+  /** The first acknowledgment, before polling for the result. */
+  onReceived?: (receipt: EngineCommandReceipt) => void;
 }
 
 export class EngineCommandUnavailableError extends Error {
@@ -123,6 +125,7 @@ export class EngineCommandClient {
     let deadline = this.now() + silenceMs;
     let receipt = await this.postUntil(id, command, deadline);
     if (receipt.state === 'received' && OWNER_ACTION_KINDS.has(command.kind)) this.held.set(id, this.now());
+    if (receipt.state === 'received') options.onReceived?.(receipt);
     deadline = this.now() + silenceMs;
     let attempt = 0;
     while (receipt.state === 'received') {
