@@ -694,7 +694,7 @@ export async function main(): Promise<void> {
     };
     setInterval(writeSqlSites, 10_000).unref?.();
   }
-  else {
+  if (engineRole === 'front') {
     beginFrontProgress(process.env);
     // A front that exits on an error says which, by code, in its progress
     // file, so an upgrade that waited on it reports the cause and not a

@@ -272473,7 +272473,8 @@ async function main() {
       } catch {}
     };
     setInterval(writeSqlSites, 1e4).unref?.();
-  } else {
+  }
+  if (engineRole === "front") {
     beginFrontProgress(process.env);
     const exitOnError = (error) => {
       failFrontProgress(error);
