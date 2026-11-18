@@ -22,15 +22,17 @@ function parse(line: string) {
   return { at, fields };
 }
 
-test('the line round trips every field and reads heap stats at a new peak and at emission', () => {
-  const clock = createTestClock(); const lines: string[] = []; let heaps = 0;
+test('a new peak reads heap size only and emission reads full heap stats', () => {
+  const clock = createTestClock(); const lines: string[] = []; let heaps = 0; let peakHeaps = 0;
   const memory = createMemoryDiagnostic({ role: 'front', now: clock.now, uptime: () => 3600,
     heap: () => { heaps++; return heap; }, readers: () => ({ read_workers: 132, read_connections: 264 }),
+    peakHeapSize: () => { peakHeaps++; return heap.heapSize; },
     activity: () => ['embedding'], log: line => lines.push(line) });
   const sampled = { rss: 130 * MB, anon: 100 * MB, file: 30 * MB, swap: 2 * MB };
-  memory.sample(sampled); expect(heaps).toBe(1);
-  memory.sample(sampled); expect(heaps).toBe(1);
-  memory.write(sampled); expect(heaps).toBe(2);
+  memory.sample(sampled); expect(peakHeaps).toBe(1);
+  memory.sample(sampled); expect(peakHeaps).toBe(1);
+  expect(heaps).toBe(0);
+  memory.write(sampled); expect(heaps).toBe(1);
   const { at, fields } = parse(lines[0]!);
   expect(fields).toEqual({ role: 'front', activity: 'embedding', pid: String(process.pid), uptime_s: '3600',
     read_workers: '132', read_connections: '264', rss_total_mb: '130', rss_anon_mb: '100', rss_file_mb: '30', swap_mb: '2', peak_anon_mb: '100',
@@ -58,7 +60,7 @@ test('five-second samples preserve burst context and five-minute lines reset pea
   const clock = createTestClock(); const lines: string[] = []; let anon = 100; let samples = 0;
   let heapSize = 32 * MB;
   let activity: MemoryActivityLabel[] = ['idle'];
-  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => ({ ...heap, heapSize }),
+  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => ({ ...heap, heapSize }), peakHeapSize: () => heapSize,
     activity: () => activity, log: line => lines.push(line) });
   const monitor = startEngineRssRestart({ thresholdMb: 0, previous: { count: 0 },
     batchRunning: () => false, restart: () => { throw new Error('disabled'); }, record: () => {}, memory,
@@ -99,7 +101,7 @@ test('minute-check jitter never stretches the logging cadence to six checks', ()
 
 test('restart carries exactly the emitted memory fields and continuous time over threshold', async () => {
   const clock = createTestClock(); const lines: string[] = []; let batch = true; let restarts = 0;
-  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => heap,
+  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => heap, peakHeapSize: () => heap.heapSize,
     activity: () => batch ? ['judging'] : ['idle'], log: line => lines.push(line) });
   const peakAt = new Date(clock.now() + MEMORY_LOG_INTERVAL_MS + MEMORY_SAMPLE_INTERVAL_MS).toISOString();
   const monitor = startEngineRssRestart({ thresholdMb: 3000, previous: { count: 0 }, memory,

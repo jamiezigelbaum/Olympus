@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { heapStats } from 'bun:jsc';
+import { heapSize, heapStats } from 'bun:jsc';
 import type { EngineRole } from '../../core/engine-split.ts';
 import { memoryHolderCounts, type MemoryActivityLabel } from '../../core/memory-counters.ts';
 
@@ -86,12 +86,14 @@ export function createMemoryDiagnostic(input: {
   now?: () => number;
   uptime?: () => number;
   heap?: typeof heapStats;
+  peakHeapSize?: () => number;
   log?: (line: string) => void;
 }) {
   const now = input.now ?? Date.now;
   const log = input.log ?? ((line: string) => console.warn(line));
   const activity = () => input.activity?.().join(',') || 'idle';
   const heap = input.heap ?? heapStats;
+  const peakHeapSize = input.peakHeapSize ?? heapSize;
   let lastLineAt = now();
   let peak: MemoryPeak | undefined;
   const samples: Pick<MemoryFloor, 'rss' | 'anon'>[] = [];
@@ -113,7 +115,9 @@ export function createMemoryDiagnostic(input: {
       samples[nextSample] = { rss, anon: memory.anon };
       nextSample = (nextSample + 1) % MEMORY_FLOOR_WINDOW_MAX_SAMPLES;
       if (memory.anon === undefined || (peak && memory.anon <= peak.anon)) return;
-      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: heap().heapSize };
+      // Building visibility sets can raise RSS on every sample. A full heap
+      // census at each peak holds the front's loop as those sets grow.
+      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: peakHeapSize() };
     },
     floor,
     recordBurst(rss: number, floorRss: number, thresholdMb: number): void {

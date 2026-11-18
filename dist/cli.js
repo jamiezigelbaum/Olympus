@@ -184697,7 +184697,7 @@ var init_remote_relay_runtime = __esm(() => {
 
 // src/workers/engine-split/memory.ts
 import { readFileSync as readFileSync94 } from "node:fs";
-import { heapStats } from "bun:jsc";
+import { heapSize, heapStats } from "bun:jsc";
 function processMemory(status, platform = process.platform) {
   const rss = process.memoryUsage.rss();
   if (platform !== "linux")
@@ -184745,6 +184745,7 @@ function createMemoryDiagnostic(input) {
   const log = input.log ?? ((line) => console.warn(line));
   const activity = () => input.activity?.().join(",") || "idle";
   const heap = input.heap ?? heapStats;
+  const peakHeapSize = input.peakHeapSize ?? heapSize;
   let lastLineAt = now();
   let peak;
   const samples = [];
@@ -184768,7 +184769,7 @@ function createMemoryDiagnostic(input) {
       nextSample = (nextSample + 1) % MEMORY_FLOOR_WINDOW_MAX_SAMPLES;
       if (memory.anon === undefined || peak && memory.anon <= peak.anon)
         return;
-      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: heap().heapSize };
+      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: peakHeapSize() };
     },
     floor,
     recordBurst(rss, floorRss, thresholdMb) {
