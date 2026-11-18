@@ -356,6 +356,36 @@ test('once a translation has outlasted the wait, later searches start at once on
   }
 }, 2_000);
 
+test('a slow translator stays slow: a store sharing its finished call, or a call still running past the wait, never brings the wait back', async () => {
+  const finishers: Array<(text: string) => void> = [];
+  registerBuiltInPrivateModel({ available: () => true, model: { async complete() {
+    return { text: await new Promise<string>((resolve) => { finishers.push(resolve); }) } as never;
+  } } });
+  const start = Date.parse('2026-11-18T18:00:00Z');
+  try {
+    setSystemTime(start);
+    await withKeywordRequestScope(() => expandSourceIndexKeywords('galaxy notary', ['spa', 'por'], {}, { waitMs: 1 }));
+    // Still running 5 s later: a new question does not wait 4 s for this model.
+    setSystemTime(start + 5_000);
+    const running = await withKeywordRequestScope(() => expandSourceIndexKeywords('zenith notary', ['spa', 'por'], {}, { waitMs: 4_000 }));
+    expect(running.get('zenith')).toBeUndefined();
+    finishers[0]!(JSON.stringify({ por: { '0': ['galaxia'] }, spa: { '0': ['galaxia'] } }));
+    setSystemTime(start + 11_000);
+    finishers[1]!(JSON.stringify({ por: { '0': ['zenite'] }, spa: { '0': ['cenit'] } }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // Another store of the same install, with fewer languages, shares the finished call and answers at once.
+    const shared = await withKeywordRequestScope(() => expandSourceIndexKeywords('galaxy notary', ['spa'], {}, { waitMs: 4_000 }));
+    expect(finishers.length).toBe(2);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    void shared;
+    // That instant answer is not the model's speed: the next new question still starts at once.
+    const next = await withKeywordRequestScope(() => expandSourceIndexKeywords('equinox notary', ['spa', 'por'], {}, { waitMs: 4_000 }));
+    expect(next.get('equinox')).toBeUndefined();
+  } finally {
+    setSystemTime();
+  }
+}, 2_000);
+
 test('a cold sample read elsewhere detects its languages in slices, so the asking thread keeps its turns (rc.20: 4.6 s on the front)', async () => {
   const db = new Database(':memory:');
   db.exec('CREATE TABLE items(item_pk INTEGER PRIMARY KEY, tombstoned INTEGER); CREATE TABLE chunks(item_pk INTEGER, bounded_text TEXT, content_hash TEXT); INSERT INTO items VALUES(1,0)');
