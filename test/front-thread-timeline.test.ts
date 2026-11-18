@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseFreeze, parseSchedstat, parseStat, summarizeFreeze, TimelineOutput } from '../scripts/front-thread-timeline.ts';
@@ -65,11 +65,99 @@ test('reports the observed split over the 30 s before a front freeze', () => {
     sample(30_030, { dRunNs: 20_000_000 }), // Outside the window.
   ];
   expect(summarizeFreeze(rows, freeze)).toEqual({
-    at: '2026-11-17T12:00:30.000Z', count: 3, totalMs: 3_700, maxMs: 1_400,
+    at: '2026-11-17T12:00:30.000Z', role: 'front', count: 3, totalMs: 3_700, maxMs: 1_400, window_ms: 30_000,
     runningMs: 47, runQueueMs: 94, blockedMajfltMs: 45, blockedBlkioMs: 20, blockedOtherMs: 20,
-    topWchan: 'folio_wait_bit_common', topWchanMs: 45, coveredMs: 1_000, lateTicks: 2, lateMs: 380,
+    topWchan: 'folio_wait_bit_common', topWchanMs: 45, coveredMs: 1_000, covered_ms: 1_000, lateTicks: 2, lateMs: 380,
   });
 });
+
+test('filters freeze frames and heartbeat holds by role', () => {
+  const prefix = `${clockAt(250_000).at} [olympus:control-path]`;
+  const front = `${prefix} freeze frames role=front count=1 total_ms=1000 max_ms=1000`;
+  const background = `${prefix} freeze frames role=background count=2 total_ms=400000 max_ms=250000`;
+  expect(parseFreeze(front, 'background')).toBeNull();
+  expect(parseFreeze(front, 'any')?.role).toBe('front');
+  expect(parseFreeze(background, 'background')).toEqual({
+    at: clockAt(250_000).at, role: 'background', count: 2, totalMs: 400_000, maxMs: 250_000, window_ms: 250_000,
+  });
+  expect(parseFreeze(background, 'any')?.role).toBe('background');
+
+  const held = `${prefix} background loop held for 10 s and still held; step: none said`;
+  expect(parseFreeze(held)).toBeNull();
+  expect(parseFreeze(held, 'background')).toEqual({
+    at: clockAt(250_000).at, role: 'background', count: null, totalMs: null, maxMs: null, window_ms: 10_000,
+  });
+  expect(parseFreeze(held.replace('10 s', '120 s'), 'any')?.window_ms).toBe(120_000);
+  expect(parseFreeze(`${prefix} background loop turned again after 60 s or more`, 'any')).toBeNull();
+});
+
+function summary(ms: number, spanMs: number): Observation {
+  return {
+    kind: 'summary', ...clockAt(ms), throughAt: clockAt(ms).at, spanMs,
+    runNs: 0, waitNs: 0, majflt: 0, blkioTicks: 0, idleRunNs: 0, pswpin: 0,
+    pressureUs: { cpu: { some: 0, full: 0 }, memory: { some: 0, full: 0 }, io: { some: 0, full: 0 } },
+    host: [],
+  };
+}
+
+async function writeTimeline(dir: string, rows: Observation[]): Promise<string> {
+  const path = join(dir, 'timeline.jsonl');
+  await writeFile(path, rows.map((row) => JSON.stringify(row) + '\n').join(''));
+  return path;
+}
+
+function summarizeTimeline(path: string, ...args: string[]): ReturnType<typeof summarizeFreeze>[] {
+  const run = Bun.spawnSync([process.execPath, join(import.meta.dir, '../scripts/front-thread-timeline.ts'), '--summarize', path, ...args]);
+  expect(run.stderr.toString()).toBe('');
+  expect(run.exitCode).toBe(0);
+  return run.stdout.toString().trim().split('\n').map((line) => JSON.parse(line));
+}
+
+test('keeps observations for a 250 s freeze across an earlier short report', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'front-thread-timeline-'));
+  try {
+    const timeline = await writeTimeline(dir, [
+      sample(50_020, { dRunNs: 20_000_000 }), summary(51_000, 1_000),
+      summary(220_000, 1_000), summary(281_000, 1_000), summary(301_000, 2_000),
+    ]);
+    const log = join(dir, 'engine.log');
+    await writeFile(log, [
+      `${clockAt(300_000).at} [olympus:control-path] freeze frames role=background count=2 total_ms=400000 max_ms=250000`,
+      `${clockAt(280_500).at} [olympus:control-path] freeze frames role=front count=1 total_ms=1000 max_ms=1000`,
+    ].join('\n'));
+    const rows = summarizeTimeline(timeline, '--freezes', log, '--role', 'any');
+    expect(rows).toMatchObject([
+      { role: 'front', window_ms: 30_000, covered_ms: 500, runningMs: 0 },
+      { role: 'background', window_ms: 250_000, covered_ms: 4_000, runningMs: 20 },
+    ]);
+    expect(summarizeTimeline(timeline, '--freezes', log)).toEqual(rows.slice(0, 1));
+    expect(summarizeTimeline(timeline, '--freezes', log, '--role', 'background', '--window-ms', '500')).toMatchObject([
+      { role: 'background', maxMs: 250_000, window_ms: 500, covered_ms: 500, runningMs: 0 },
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 10_000);
+
+test('summarizes repeated marker spans without a log', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'front-thread-timeline-'));
+  try {
+    const timeline = await writeTimeline(dir, [
+      sample(500, { dRunNs: 20_000_000 }), summary(1_000, 1_000),
+      sample(1_260, { dRunNs: 20_000_000 }), summary(2_000, 1_000),
+    ]);
+    const marker = `${clockAt(1_500).at},250`;
+    expect(summarizeTimeline(timeline, '--marker', marker, '--marker', `${clockAt(1_000).at},750`)).toMatchObject([
+      { at: clockAt(1_000).at, role: null, window_ms: 750, covered_ms: 750, runningMs: 20 },
+      { at: clockAt(1_500).at, role: null, window_ms: 250, covered_ms: 250, runningMs: 10 },
+    ]);
+    expect(summarizeTimeline(timeline, '--marker', marker, '--window-ms', '100')).toMatchObject([
+      { window_ms: 100, covered_ms: 100, runningMs: 0 },
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 10_000);
 
 test('stops within the byte cap and writes size_cap as the final JSON line', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'front-thread-timeline-'));

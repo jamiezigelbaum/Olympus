@@ -1,7 +1,7 @@
 // Linux, same user as the target. The only process data emitted are counters,
 // the main thread's state and kernel wait symbol. Host counters are contextual.
-// The engine logs aggregate freeze durations. The report describes the
-// enclosing 30 s of thread activity, excluding epoll idle time.
+// The report describes thread activity up to each log timestamp or marker,
+// excluding epoll idle time. Freeze-frame windows are at least 30 s.
 import { once } from 'node:events';
 import { closeSync, createReadStream, openSync, readSync, type WriteStream } from 'node:fs';
 import { open } from 'node:fs/promises';
@@ -15,7 +15,9 @@ const HOST_MS = 200;
 const SUMMARY_MS = 1_000;
 const END_BYTES = 128;
 const USAGE = 'bun scripts/front-thread-timeline.ts --pid PID --out FILE [--interval-ms 20] [--seconds N] [--max-mb 200]\n'
-  + 'bun scripts/front-thread-timeline.ts --summarize FILE --freezes LOG';
+  + 'bun scripts/front-thread-timeline.ts --summarize FILE [--freezes LOG] [--role front|background|any]\n'
+  + '  [--marker END_ISO,MS ...] [--window-ms N]\n'
+  + '  Supply --freezes, --marker, or both. Role defaults to front. --window-ms overrides all spans.';
 
 class TimelineError extends Error {}
 
@@ -419,13 +421,43 @@ async function capture(pid: number, path: string, intervalMs: number, seconds: n
   }
 }
 
-type Freeze = { at: string; count: number | null; totalMs: number | null; maxMs: number };
+type RoleFilter = 'front' | 'background' | 'any';
+type Freeze = {
+  at: string;
+  role: string | null;
+  count: number | null;
+  totalMs: number | null;
+  maxMs: number | null;
+  window_ms: number;
+};
 
-export function parseFreeze(line: string): Freeze | null {
-  const match = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) \[olympus:control-path\] freeze frames role=front (?:count=(\d+) )?(?:total_ms=(\d+) )?max_ms=(\d+)(?:\s|$)/.exec(line);
-  if (!match || !Number.isFinite(Date.parse(match[1]!))) return null;
-  return { at: match[1]!, count: match[2] === undefined ? null : Number(match[2]),
-    totalMs: match[3] === undefined ? null : Number(match[3]), maxMs: Number(match[4]) };
+export function parseFreeze(line: string, roleFilter: RoleFilter = 'front'): Freeze | null {
+  const header = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) \[olympus:control-path\] (.*)/.exec(line);
+  if (!header || !Number.isFinite(Date.parse(header[1]!))) return null;
+  const at = header[1]!;
+  const message = header[2]!;
+  const frames = /^freeze frames role=([\w-]+) (?:count=(\d+) )?(?:total_ms=(\d+) )?max_ms=(\d+)(?:\s|$)/.exec(message);
+  if (frames) {
+    const [, role, count, totalMs, max] = frames;
+    const maxMs = Number(max);
+    if ((roleFilter !== 'any' && roleFilter !== role) || !Number.isSafeInteger(maxMs)) return null;
+    return {
+      at, role: role!, count: count === undefined ? null : Number(count),
+      totalMs: totalMs === undefined ? null : Number(totalMs), maxMs,
+      window_ms: Math.max(FREEZE_WINDOW_MS, maxMs),
+    };
+  }
+  const held = /^([\w-]+) loop held for (\d+) s and still held; step:/.exec(message);
+  if (!held || (roleFilter !== 'any' && roleFilter !== held[1])) return null;
+  const heldMs = Number(held[2]) * 1_000;
+  if (!Number.isSafeInteger(heldMs) || heldMs <= 0) return null;
+  return { at, role: held[1]!, count: null, totalMs: null, maxMs: null, window_ms: heldMs };
+}
+
+function parseMarker(value: string): Freeze {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})),([^,]+)$/.exec(value);
+  if (!match || !Number.isFinite(Date.parse(match[1]!))) throw new TimelineError('invalid_marker');
+  return { at: match[1]!, role: null, count: null, totalMs: null, maxMs: null, window_ms: positive(match[2]!, true) };
 }
 
 type Observation = Exclude<Row, End>;
@@ -436,7 +468,7 @@ function observationEnd(row: Observation): number {
 
 export function summarizeFreeze(rows: readonly Observation[], freeze: Freeze) {
   const end = Date.parse(freeze.at);
-  const start = end - FREEZE_WINDOW_MS;
+  const start = end - freeze.window_ms;
   let runningMs = 0, runQueueMs = 0, blockedMajfltMs = 0, blockedBlkioMs = 0, blockedOtherMs = 0;
   let coveredMs = 0, lateTicks = 0, lateMs = 0;
   const waitChannels = new Map<string, number>();
@@ -501,12 +533,13 @@ export function summarizeFreeze(rows: readonly Observation[], freeze: Freeze) {
   for (const [name, ms] of waitChannels) {
     if (ms > topMs) { topWchan = name; topMs = ms; }
   }
+  coveredMs = rounded(coveredMs);
   return {
     ...freeze,
     runningMs: rounded(runningMs), runQueueMs: rounded(runQueueMs),
     blockedMajfltMs: rounded(blockedMajfltMs), blockedBlkioMs: rounded(blockedBlkioMs),
     blockedOtherMs: rounded(blockedOtherMs), topWchan, topWchanMs: rounded(topMs),
-    coveredMs: rounded(coveredMs), lateTicks, lateMs: rounded(lateMs),
+    coveredMs, covered_ms: coveredMs, lateTicks, lateMs: rounded(lateMs),
   };
 }
 
@@ -514,33 +547,48 @@ function lines(path: string) {
   return createInterface({ input: createReadStream(path, { encoding: 'utf8' }), crlfDelay: Infinity });
 }
 
-async function summarize(timelinePath: string, freezePath: string) {
-  const freezes: Freeze[] = [];
-  for await (const line of lines(freezePath)) {
-    const freeze = parseFreeze(line);
-    if (freeze) freezes.push(freeze);
+async function summarize(timelinePath: string, options: {
+  freezePath: string | undefined;
+  role: RoleFilter;
+  windowMs: number | undefined;
+  markers: Freeze[];
+}) {
+  const freezes = [...options.markers];
+  if (options.freezePath !== undefined) {
+    for await (const line of lines(options.freezePath)) {
+      const freeze = parseFreeze(line, options.role);
+      if (freeze) freezes.push(freeze);
+    }
   }
-  freezes.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const windows = freezes.map((freeze) => ({
+    end: Date.parse(freeze.at), freeze: { ...freeze, window_ms: options.windowMs ?? freeze.window_ms },
+  })).sort((a, b) => a.end - b.end);
+
+  // A later report can reach further back than the next report.
+  const earliestStart = new Array<number>(windows.length + 1).fill(Infinity);
+  for (let i = windows.length - 1; i >= 0; i--) {
+    const { end, freeze } = windows[i]!;
+    earliestStart[i] = Math.min(earliestStart[i + 1]!, end - freeze.window_ms);
+  }
 
   let next = 0;
   let recent: Observation[] = [];
   const reportThrough = (time: number) => {
-    while (next < freezes.length && Date.parse(freezes[next]!.at) <= time) {
-      console.log(JSON.stringify(summarizeFreeze(recent, freezes[next++]!)));
+    while (next < windows.length && windows[next]!.end <= time) {
+      console.log(JSON.stringify(summarizeFreeze(recent, windows[next++]!.freeze)));
     }
   };
 
   for await (const line of lines(timelinePath)) {
-    if (next === freezes.length) break;
+    if (next === windows.length) break;
     const row = JSON.parse(line) as Row;
     if (row.kind === 'end') break;
     recent.push(row);
     // A summary covers suppressed idle ticks, including CPU consumed before
     // a thread returned to epoll. Wait for it before reporting that window.
     if (row.kind === 'summary') {
-      const through = observationEnd(row);
-      reportThrough(through);
-      recent = recent.filter((entry) => observationEnd(entry) > through - FREEZE_WINDOW_MS);
+      reportThrough(observationEnd(row));
+      recent = recent.filter((entry) => observationEnd(entry) > earliestStart[next]!);
     }
   }
   reportThrough(Infinity);
@@ -564,6 +612,9 @@ async function main() {
       'max-mb': { type: 'string' },
       summarize: { type: 'string' },
       freezes: { type: 'string' },
+      role: { type: 'string' },
+      'window-ms': { type: 'string' },
+      marker: { type: 'string', multiple: true },
       help: { type: 'boolean' },
     },
   });
@@ -571,10 +622,14 @@ async function main() {
     console.log(USAGE);
     return;
   }
-  const { pid, out, seconds, summarize: timeline, freezes } = values;
-  if (timeline && freezes && ![pid, out, seconds, values['interval-ms'], values['max-mb']].some((value) => value !== undefined)) {
-    await summarize(timeline, freezes);
-  } else if (pid && out && timeline === undefined && freezes === undefined) {
+  const { pid, out, seconds, summarize: timeline, freezes, role = 'front', marker = [], 'window-ms': windowMs } = values;
+  if (timeline && (freezes || marker.length > 0) && ![pid, out, seconds, values['interval-ms'], values['max-mb']].some((value) => value !== undefined)) {
+    if (role !== 'front' && role !== 'background' && role !== 'any') throw new TimelineError('invalid_role');
+    await summarize(timeline, {
+      freezePath: freezes, role, windowMs: windowMs === undefined ? undefined : positive(windowMs, true),
+      markers: marker.map(parseMarker),
+    });
+  } else if (pid && out && ![timeline, freezes, values.role, values.marker, windowMs].some((value) => value !== undefined)) {
     await capture(positive(pid, true), out, positive(values['interval-ms'] ?? '20', true),
       seconds === undefined ? Infinity : positive(seconds), Math.floor(positive(values['max-mb'] ?? '200') * 1024 ** 2));
   } else {

@@ -438,6 +438,37 @@ the cause).
     (standing in for sleep), and a heartbeat paused through a boot step
     (`test/worker-service-split.test.ts`).
 
+### Attribute a loop hold to main-thread activity
+
+On Linux, run `bun scripts/front-thread-timeline.ts --pid PID --out FILE`
+as the target process's user. Use the PID of the front or background you
+want to measure. Then summarize that capture against a timestamped engine log.
+
+```sh
+bun scripts/front-thread-timeline.ts --summarize FILE --freezes LOG --role background
+```
+
+The default role is `front`. `--role any` accepts all logged roles and
+includes the matched role on each row. Choose the role that matches the
+captured PID when the log includes multiple processes.
+
+Each window ends at the log timestamp. A `freeze frames` report uses the
+larger of 30 s and its `max_ms`, the longest individual freeze in the report.
+A heartbeat's `loop held for N s and still held` line uses its reported
+duration, which is rounded to whole seconds by the heartbeat. The background
+status snapshot supplies a millisecond reading via `written_at` and
+`loop_held_ms`, which can be passed as a marker.
+
+Use `--marker END_ISO,MS` for a span you know, with the end timestamp and
+the duration in milliseconds. Repeat the flag for multiple spans. Markers
+work on their own or with `--freezes LOG`. `--window-ms N` overrides every
+window length, including marker lengths. Each JSON row reports `window_ms`
+and `covered_ms`, the portion supported by the capture's summary intervals.
+
+```sh
+bun scripts/front-thread-timeline.ts --summarize FILE --marker 2026-11-18T12:04:10.000Z,250000
+```
+
 The writes the front still needs are listed in the next section; each is
 either kept front-owned or becomes one command.
 
