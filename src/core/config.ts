@@ -100,8 +100,8 @@ export interface OlympusConfig {
      */
     engineSplit: boolean;
     /**
-     * With engineSplit on, the background restarts itself, between judge
-     * passes, once its RSS passes this many MB (#957). 0 turns it off.
+     * With engineSplit on, the background restarts itself between batches
+     * once its five-minute RSS floor exceeds this many MB (#957). 0 turns it off.
      * Default ENGINE_RSS_RESTART_DEFAULT_MB (workers/engine-split/rss-restart.ts).
      */
     engineSplitRssRestartMb: number;

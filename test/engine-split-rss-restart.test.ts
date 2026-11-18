@@ -1,6 +1,6 @@
 // The background's supervised restart on memory (docs/design/engine-split.md,
-// part 3, "Restart"; #957). With the switch on the background checks its own
-// RSS between batches; past the threshold it lets the judge's pass finish,
+// part 3, "Restart"; #957). With the switch on the background checks its RSS
+// floor; past the threshold it lets judge and scheduler work finish,
 // then restarts through the same clean reload a model change uses, which the
 // host's supervision restarts and which records a pass it cut short as
 // interrupted, not failed (#803).
@@ -21,6 +21,7 @@ import { ENGINE_STATUS_SNAPSHOT_SCHEMA, type EngineStatusRead } from '../src/wor
 import { createTestClock } from './helpers/test-clock.ts';
 
 const MB = 1024 * 1024;
+const FLOOR_WINDOW_MS = 5 * ENGINE_RSS_CHECK_INTERVAL_MS;
 
 function harness(options: { thresholdMb?: number; supervised?: boolean; previous?: EngineRssRestarts } = {}) {
   const clock = createTestClock();
@@ -43,7 +44,7 @@ function harness(options: { thresholdMb?: number; supervised?: boolean; previous
   return { clock, state, restarts, recorded, logs, monitor };
 }
 
-describe('the background restarts itself when its memory passes the threshold', () => {
+describe('the background restarts itself when its memory floor passes the threshold', () => {
   test('a peak between minute checks is logged without triggering a restart', async () => {
     const { clock, state, restarts, logs, monitor } = harness();
     state.rssMb = 4000;
@@ -54,6 +55,56 @@ describe('the background restarts itself when its memory passes the threshold', 
     expect(monitor.restarts()).toEqual({ count: 0 });
     expect(logs[0]).toContain('rss_anon_mb=500');
     expect(logs[0]).toContain('peak_anon_mb=4000');
+    expect(logs[0]).toContain('floor_anon_mb=500');
+    expect(logs[0]).toContain('bursts_over_threshold=0');
+    monitor.stop();
+  });
+
+  test('bursts at each minute check for an hour are counted without a restart', async () => {
+    const { clock, state, restarts, logs, monitor } = harness();
+    for (let minute = 0; minute < 60; minute++) {
+      state.rssMb = 2000;
+      await clock.advance(20_000);
+      state.rssMb = 3300;
+      await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS - 20_000);
+    }
+    expect(restarts).toEqual([]);
+    expect(monitor.restarts()).toEqual({ count: 0 });
+    expect(logs).toHaveLength(24);
+    for (let index = 0; index < logs.length; index += 2) {
+      expect(logs[index]).toBe('[olympus] memory restart not taken: burst rss_mb=3300 floor_mb=2000 threshold_mb=3072');
+      expect(logs[index + 1]).toMatch(/\[olympus\] memory .*rss_anon_mb=3300 .*peak_anon_mb=3300 .*floor_anon_mb=2000 bursts_over_threshold=5 /);
+    }
+    monitor.stop();
+  });
+
+  test('a young idle process with high RSS waits for a full window', async () => {
+    const { clock, state, restarts, logs, monitor } = harness();
+    const startedAt = clock.now();
+    state.rssMb = 5207;
+    await clock.advance(FLOOR_WINDOW_MS - 1);
+    expect(restarts).toEqual([]);
+    expect(logs).toEqual([]);
+    await clock.advance(1);
+    expect(restarts).toEqual([startedAt + FLOOR_WINDOW_MS]);
+    expect(logs[1]).toContain('floor_anon_mb=5207');
+    expect(logs[1]).toContain('waited_ms=0');
+    monitor.stop();
+  });
+
+  test('a monotonic climb restarts once the window minimum exceeds the threshold', async () => {
+    const { clock, state, restarts, logs, monitor } = harness();
+    const startedAt = clock.now();
+    const restartAt = 10 * ENGINE_RSS_CHECK_INTERVAL_MS;
+    for (let sample = 1; sample <= restartAt / MEMORY_SAMPLE_INTERVAL_MS; sample++) {
+      // At minute nine, the oldest sample is exactly at 3072 MB.
+      state.rssMb = 2484 + sample * 12;
+      await clock.advance(MEMORY_SAMPLE_INTERVAL_MS);
+      if (clock.now() < startedAt + restartAt) expect(restarts).toEqual([]);
+    }
+    expect(restarts).toEqual([startedAt + restartAt]);
+    expect(logs.at(-1)).toStartWith('[engine-split] rss_restart rss_mb=3924 threshold_mb=3072 ');
+    expect(logs.at(-1)).toContain('floor_anon_mb=3216');
     monitor.stop();
   });
 
@@ -61,7 +112,7 @@ describe('the background restarts itself when its memory passes the threshold', 
     const { clock, state, restarts, recorded, logs, monitor } = harness();
     state.rssMb = 3100;
     state.batch = true;
-    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 3);
+    await clock.advance(FLOOR_WINDOW_MS + ENGINE_RSS_CHECK_INTERVAL_MS * 2);
     expect(restarts).toEqual([]);
     state.batch = false;
     await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS);
@@ -70,10 +121,11 @@ describe('the background restarts itself when its memory passes the threshold', 
     // Recorded before the process goes, so the next background carries it on.
     expect(recorded).toEqual([monitor.restarts()]);
     // One line per restart that a sampler can count by its fixed prefix.
-    expect(logs).toHaveLength(2);
-    expect(logs[0]).toContain('[olympus] memory');
-    expect(logs[1]).toStartWith(`[engine-split] rss_restart rss_mb=3100 threshold_mb=3072 restarts=1 waited_ms=${ENGINE_RSS_CHECK_INTERVAL_MS * 3} over_threshold_s=180 `);
-    expect(logs[1]).toContain('rss_anon_mb=3100');
+    expect(logs).toHaveLength(3);
+    expect(logs[1]).toContain('[olympus] memory');
+    expect(logs[2]).toStartWith(`[engine-split] rss_restart rss_mb=3100 threshold_mb=3072 restarts=1 waited_ms=${ENGINE_RSS_CHECK_INTERVAL_MS * 3} over_threshold_s=180 `);
+    expect(logs[2]).toContain('rss_anon_mb=3100');
+    expect(logs[2]).toContain('floor_anon_mb=3100');
     // A restart already on its way is not asked for again.
     await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 3);
     expect(restarts).toHaveLength(1);
@@ -84,31 +136,35 @@ describe('the background restarts itself when its memory passes the threshold', 
     const { clock, state, restarts, logs, monitor } = harness();
     state.rssMb = 4000;
     state.batch = true;
-    await clock.advance(ENGINE_RSS_RESTART_MAX_WAIT_MS - ENGINE_RSS_CHECK_INTERVAL_MS);
+    await clock.advance(FLOOR_WINDOW_MS + ENGINE_RSS_RESTART_MAX_WAIT_MS - ENGINE_RSS_CHECK_INTERVAL_MS);
     expect(restarts).toEqual([]);
-    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 2);
+    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS);
     expect(restarts).toHaveLength(1);
     expect(logs.find(line => line.startsWith('[engine-split] rss_restart'))).toMatch(/^\[engine-split\] rss_restart rss_mb=4000 threshold_mb=3072 restarts=1 waited_ms=600000 over_threshold_s=600 at=/);
     monitor.stop();
   });
 
-  test('memory that falls back below the threshold starts the wait over', async () => {
-    const { clock, state, restarts, monitor } = harness();
+  test('a sample below the threshold between minute checks starts the wait over', async () => {
+    const { clock, state, restarts, logs, monitor } = harness();
     state.rssMb = 3500;
     state.batch = true;
-    await clock.advance(ENGINE_RSS_RESTART_MAX_WAIT_MS - ENGINE_RSS_CHECK_INTERVAL_MS);
+    await clock.advance(FLOOR_WINDOW_MS + ENGINE_RSS_RESTART_MAX_WAIT_MS - ENGINE_RSS_CHECK_INTERVAL_MS);
     state.rssMb = 2000;
-    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS);
+    await clock.advance(MEMORY_SAMPLE_INTERVAL_MS);
     state.rssMb = 3500;
-    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 2);
+    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS - MEMORY_SAMPLE_INTERVAL_MS + FLOOR_WINDOW_MS);
     expect(restarts).toEqual([]);
+    state.batch = false;
+    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS);
+    expect(restarts).toHaveLength(1);
+    expect(logs.at(-1)).toContain('waited_ms=60000');
     monitor.stop();
   });
 
   test('the count carries on from the last background\'s snapshot', async () => {
     const { clock, state, monitor } = harness({ previous: { count: 4, last: { at: '2026-11-10T00:00:00.000Z', rss_mb: 3300 } } });
     state.rssMb = 3200;
-    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS);
+    await clock.advance(FLOOR_WINDOW_MS);
     expect(monitor.restarts().count).toBe(5);
     monitor.stop();
     const read = (rss_restarts: unknown): EngineStatusRead => ({ age_ms: 0, stale: true, snapshot: { schema: ENGINE_STATUS_SNAPSHOT_SCHEMA, instance_id: 'b', written_at: '2026-11-10T00:00:00.000Z', scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: null, ...(rss_restarts === undefined ? {} : { rss_restarts }) } as EngineStatusRead['snapshot'] });
@@ -121,7 +177,7 @@ describe('the background restarts itself when its memory passes the threshold', 
   test('a background nothing would restart says so once, and keeps running', async () => {
     const { clock, state, restarts, logs, monitor } = harness({ supervised: false });
     state.rssMb = 3200;
-    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 3);
+    await clock.advance(FLOOR_WINDOW_MS + ENGINE_RSS_CHECK_INTERVAL_MS * 2);
     expect(restarts).toHaveLength(1);
     expect(monitor.restarts()).toEqual({ count: 0 });
     expect(logs.filter(line => line.startsWith('[engine-split]'))).toEqual(['[engine-split] rss_over_threshold rss_mb=3200 threshold_mb=3072: nothing supervises this process, so it keeps running.']);
@@ -131,7 +187,7 @@ describe('the background restarts itself when its memory passes the threshold', 
   test('a threshold of 0 turns it off', async () => {
     const { clock, state, restarts, monitor } = harness({ thresholdMb: 0 });
     state.rssMb = 100_000;
-    await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 3);
+    await clock.advance(FLOOR_WINDOW_MS + ENGINE_RSS_CHECK_INTERVAL_MS * 2);
     expect(restarts).toEqual([]);
     monitor.stop();
   });

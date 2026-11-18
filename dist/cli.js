@@ -184711,8 +184711,7 @@ function processMemory(status, platform = process.platform) {
   const anon = kb("RssAnon"), file = kb("RssFile"), swap = kb("VmSwap");
   return { rss, ...anon === undefined ? {} : { anon }, ...file === undefined ? {} : { file }, ...swap === undefined ? {} : { swap } };
 }
-function memoryFields(context, memory, peak, heap = heapStats()) {
-  const mb = (bytes) => Math.round(bytes / MB * 100) / 100;
+function memoryFields(context, memory, peak, heap = heapStats(), floor, burstsOverThreshold = 0) {
   const holders = memoryHolderCounts();
   const fields = {
     ...context,
@@ -184726,6 +184725,8 @@ function memoryFields(context, memory, peak, heap = heapStats()) {
       peak_activity: peak.activity,
       peak_heap_size_mb: mb(peak.heapSize)
     },
+    ...floor === undefined ? {} : floor.anon === undefined ? { floor_rss_mb: mb(floor.rss) } : { floor_anon_mb: mb(floor.anon) },
+    bursts_over_threshold: burstsOverThreshold,
     heap_size_mb: mb(heap.heapSize),
     heap_capacity_mb: mb(heap.heapCapacity),
     extra_memory_mb: mb(heap.extraMemorySize),
@@ -184741,12 +184742,34 @@ function createMemoryDiagnostic(input) {
   const heap = input.heap ?? heapStats;
   let lastLineAt = now();
   let peak;
+  const samples = [];
+  let nextSample = 0;
   let checksSinceLine = 0;
+  let burstsSinceLine = 0;
+  const floor = () => {
+    if (samples.length === 0)
+      return;
+    let rss = Infinity;
+    let anon = Infinity;
+    for (const sample of samples) {
+      rss = Math.min(rss, sample.rss);
+      anon = anon === undefined || sample.anon === undefined ? undefined : Math.min(anon, sample.anon);
+    }
+    return { rss, anon, full: samples.length === MEMORY_FLOOR_WINDOW_MAX_SAMPLES };
+  };
   return {
-    sample(memory) {
+    sample(memory, rss = memory.anon ?? memory.rss) {
+      samples[nextSample] = { rss, anon: memory.anon };
+      nextSample = (nextSample + 1) % MEMORY_FLOOR_WINDOW_MAX_SAMPLES;
       if (memory.anon === undefined || peak && memory.anon <= peak.anon)
         return;
       peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: heap().heapSize };
+    },
+    floor,
+    recordBurst(rss, floorRss, thresholdMb) {
+      if (++burstsSinceLine === 1) {
+        log(`[olympus] memory restart not taken: burst rss_mb=${mb(rss)} floor_mb=${mb(floorRss)} threshold_mb=${thresholdMb}`);
+      }
     },
     dueOnMinuteCheck() {
       return ++checksSinceLine >= 5 || now() - lastLineAt >= MEMORY_LOG_INTERVAL_MS;
@@ -184759,20 +184782,22 @@ function createMemoryDiagnostic(input) {
         uptime_s: Math.floor((input.uptime ?? process.uptime)()),
         activity: activity(),
         ...input.readers?.() ?? { read_workers: 0, read_connections: 0 }
-      }, memory, peak, heap());
+      }, memory, peak, heap(), floor(), burstsSinceLine);
       log(`${at} [olympus] memory ${fields}`);
       peak = undefined;
       checksSinceLine = 0;
+      burstsSinceLine = 0;
       lastLineAt = now();
       return `at=${at} ${fields}`;
     }
   };
 }
-var MB, MEMORY_SAMPLE_INTERVAL_MS = 5000, MEMORY_LOG_INTERVAL_MS;
+var MB, MEMORY_SAMPLE_INTERVAL_MS = 5000, MEMORY_LOG_INTERVAL_MS, MEMORY_FLOOR_WINDOW_MAX_SAMPLES, mb = (bytes) => Math.round(bytes / MB * 100) / 100;
 var init_memory2 = __esm(() => {
   init_memory_counters();
   MB = 1024 * 1024;
   MEMORY_LOG_INTERVAL_MS = 5 * 60000;
+  MEMORY_FLOOR_WINDOW_MAX_SAMPLES = 5 * 60000 / MEMORY_SAMPLE_INTERVAL_MS;
 });
 
 // src/workers/classification/tier-owner-items.ts
@@ -245553,8 +245578,8 @@ function startEngineRssRestart(input) {
   let overSince;
   let done = false;
   const sample = input.sample ?? processMemory;
-  const check = () => {
-    const sampled = sample();
+  const threshold = input.thresholdMb * 1024 * 1024;
+  const check = (sampled, rss) => {
     const periodic = () => {
       if (memory.dueOnMinuteCheck())
         memory.write(sampled);
@@ -245563,9 +245588,11 @@ function startEngineRssRestart(input) {
       periodic();
       return;
     }
-    const rssMb = Math.round((input.rss?.() ?? sampled.anon ?? sampled.rss) / (1024 * 1024));
-    if (rssMb < input.thresholdMb) {
+    const floor = memory.floor();
+    if (!floor?.full || floor.rss <= threshold) {
       overSince = undefined;
+      if (floor && rss > threshold && floor.rss < threshold)
+        memory.recordBurst(rss, floor.rss, input.thresholdMb);
       periodic();
       return;
     }
@@ -245576,6 +245603,7 @@ function startEngineRssRestart(input) {
       return;
     }
     done = true;
+    const rssMb = Math.round(rss / (1024 * 1024));
     const next = { count: restarts.count + 1, last: { at: new Date(now()).toISOString(), rss_mb: rssMb } };
     const previous = restarts;
     restarts = next;
@@ -245594,14 +245622,19 @@ function startEngineRssRestart(input) {
     return handle;
   });
   const clearTimer = input.clearInterval ?? ((handle) => clearInterval(handle));
-  const sampler = setTimer(() => memory.sample(sample()), MEMORY_SAMPLE_INTERVAL_MS);
-  const timer = setTimer(check, ENGINE_RSS_CHECK_INTERVAL_MS);
+  let samplesSinceCheck = 0;
+  const sampler = setTimer(() => {
+    const sampled = sample();
+    const rss = input.rss?.() ?? sampled.anon ?? sampled.rss;
+    memory.sample(sampled, rss);
+    if (++samplesSinceCheck * MEMORY_SAMPLE_INTERVAL_MS < ENGINE_RSS_CHECK_INTERVAL_MS)
+      return;
+    samplesSinceCheck = 0;
+    check(sampled, rss);
+  }, MEMORY_SAMPLE_INTERVAL_MS);
   return {
     restarts: () => restarts,
-    stop: () => {
-      clearTimer(sampler);
-      clearTimer(timer);
-    }
+    stop: () => clearTimer(sampler)
   };
 }
 var ENGINE_RSS_CHECK_INTERVAL_MS = 60000, ENGINE_RSS_RESTART_MAX_WAIT_MS;
