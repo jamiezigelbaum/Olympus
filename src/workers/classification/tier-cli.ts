@@ -196,7 +196,7 @@ function matchStore(dbPath: string, needle: StoreNeedle): StoreMatch[] {
     // A store without the items table (or unreadable) holds nothing to find.
     return [];
   } finally {
-    closeSqliteStore(db, { checkpoint: false });
+    closeSqliteStore(db, { checkpoint: false, readOnly: true });
   }
 }
 
@@ -316,7 +316,7 @@ export function withStore<T>(dbPath: string, fallback: T, run: (db: Database, co
     // A store that cannot be read holds nothing to list.
     return fallback;
   } finally {
-    if (db) closeSqliteStore(db, { checkpoint: false });
+    if (db) closeSqliteStore(db, { checkpoint: false, readOnly: true });
   }
 }
 
@@ -334,7 +334,7 @@ export function knownTierLedgers(context: TierCliContext = {}): Array<{ path: st
       // A store that cannot be read, or whose bound ledger is gone, lists nothing.
       bound = undefined;
     } finally {
-      closeSqliteStore(db, { checkpoint: false });
+      closeSqliteStore(db, { checkpoint: false, readOnly: true });
     }
     if (bound && existsSync(bound.path)) ledgers.set(bound.path, bound.id);
   }
@@ -660,7 +660,7 @@ function boundLedgerOf(dbPath: string): { path: string; id: string } | undefined
     // A store never bound (or unreadable) has only its own ledger.
     return undefined;
   } finally {
-    closeSqliteStore(db, { checkpoint: false });
+    closeSqliteStore(db, { checkpoint: false, readOnly: true });
   }
 }
 

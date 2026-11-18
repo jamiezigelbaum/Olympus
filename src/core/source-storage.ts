@@ -767,6 +767,20 @@ export function storeFileQuickCheck(path: string, busyTimeoutMs = 2_000): 'ok' |
   }
 }
 
+/** Keep a shared database lock until a writable handle closes, without pinning a WAL snapshot. */
+export function openStoreReadOnlyForClose(path: string): Database {
+  const db = new Database(path, { readonly: true, create: false });
+  try {
+    // If the file is locked, this connection must not make the loop wait.
+    db.exec('PRAGMA busy_timeout = 0;');
+    db.query('PRAGMA schema_version').get();
+    return db;
+  } catch (error) {
+    closeSqliteStore(db, { checkpoint: false, readOnly: true });
+    throw error;
+  }
+}
+
 /** What folding one database's write-ahead log into it came to. */
 export type StoreFileCheckpoint = 'folded' | 'busy' | 'not_a_database' | 'failed';
 

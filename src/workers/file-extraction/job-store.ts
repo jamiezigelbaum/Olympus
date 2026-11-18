@@ -16,8 +16,8 @@ import type { OnDemandReadRequest, OnDemandReadResult } from './on-demand-read.t
  *   - `busy_timeout` is the FIRST pragma on every connection. Anything ahead
  *     of it runs with timeout 0, so an open that lands inside another
  *     process's close-time checkpoint fails instantly instead of waiting.
- *   - Closing goes through `closeSqliteStore`, never a bare `db.close()`, so
- *     the file is completely checkpointed the moment `close()` returns.
+ *   - Closing goes through `closeSqliteStore`, which folds the WAL for
+ *     handover or leaves routine checkpoints to the background worker.
  *
  * Privacy posture, copied from the scheduler state store: there is no
  * free-form error column. Callers persist a categorical error kind and a
@@ -681,7 +681,7 @@ export class LocalFileExtractionJobStore {
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
     } else {
-      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;${loopWalAutocheckpointPragma()}`);
+      this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;${loopWalAutocheckpointPragma(this.dbPath)}`);
       applySqliteMmap(this.db);
     }
 
