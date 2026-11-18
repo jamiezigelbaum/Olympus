@@ -17453,6 +17453,7 @@ var init_local_index = __esm(() => {
   init_partial_search();
   init_control_path_headroom();
   init_off_thread_reads();
+  init_answer_latency_trace();
   init_provider_account_identity();
   init_operation_error();
   init_media_cache();

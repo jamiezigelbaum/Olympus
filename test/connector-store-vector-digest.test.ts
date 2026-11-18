@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,8 +12,11 @@ import type { StoreRead } from '../src/workers/connector-store/off-thread-reads.
 import { waitFor } from './helpers/test-clock.ts';
 import { storeReadHasPriority, withStoreReadPriority } from '../src/core/store-reclaim-admission.ts';
 import { createStandBack, ownerAskReason } from '../src/workers/engine/stand-back.ts';
-import { READ_POOL_RESCORE_READERS, readPoolDiagnostics, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import { OffThreadReadBusyError, READ_POOL_RESCORE_READERS, readPoolDiagnostics, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { probeVectorDigest, seededVectorRandom } from '../eval/vector-digest-probe.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { createSourceAnswerTrace, runWithSourceAnswerTrace, snapshotSourceAnswerTrace } from '../src/workers/source-index/answer-latency-trace.ts';
 
 // The digest pass is opt-in while olympus-ops#151 is open; these tests cover it on.
 const digestSetting = process.env.OLYMPUS_VECTOR_DIGEST;
@@ -679,36 +682,125 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
     const pks = (database(store).query('SELECT item_pk FROM items ORDER BY CAST(provider_item_id AS INTEGER)').all() as Array<{ item_pk: number }>).map((row) => row.item_pk);
     return { store, dir, pks };
   }
-  function counted() {
-    const reads = { digestPages: 0, rescoreStatements: 0 };
+  function counted(onContinuation?: () => void) {
+    const reads = { digestPages: 0, rescoreStatements: 0, continuationRounds: 0 };
+    let validatedSinceRescore = false;
     setReadPoolObserverForTests((_, query) => {
       if (query.sql.includes('FROM chunk_vector_digest d')) reads.digestPages += 1;
-      if (query.sql.includes('FROM json_each(?) pick')) reads.rescoreStatements += 1;
+      if (query.sql.includes('SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id')) {
+        validatedSinceRescore = true;
+      }
+      if (query.sql.includes('FROM json_each(?) pick')) {
+        reads.rescoreStatements += 1;
+        if (validatedSinceRescore) {
+          validatedSinceRescore = false;
+          reads.continuationRounds += 1;
+          onContinuation?.();
+        }
+      }
     }, { snapshots: true });
     return reads;
   }
 
-  test('90% of the best-ranked items held for judging: one digest read, one re-score batch, a full visible result', async () => {
-    const { store, dir, pks } = await seeded();
-    try {
-      // The store's own visibility set and the live ledger agree: the top 90% are held.
-      const held = new Set(pks.slice(0, count * 0.9));
-      const lane = store as unknown as {
-        vectorScanMemoExclusions(): Promise<Set<number>>;
-        visibleVectorItemPksOffThread(pks: readonly number[]): Promise<Set<number>>;
-      };
-      lane.vectorScanMemoExclusions = async () => held;
-      lane.visibleVectorItemPksOffThread = async (candidates) => new Set(candidates.filter((pk) => !held.has(pk)));
-      const reads = counted();
+  const firstVisible = count * 0.9;
+  const separated: SourceEmbeddingProvider = { ...provider, async embed(inputs) {
+    return inputs.map(({ text }) => {
+      const item = Number(/harbor note (\d+)/.exec(text)?.[1] ?? 0);
+      const cosine = item < firstVisible ? 1 - Math.floor(item / 400) / 10 : 0.45;
+      return [cosine, Math.sqrt(1 - cosine ** 2), 0];
+    });
+  } };
+
+  test.each(['memo cold', 'memo stale by one ledger write', 'item hidden after publication'])(
+    '90%% held: %s',
+    async (scenario) => {
+      const dir = mkdtempSync(join(tmpdir(), 'vector-digest-visibility-'));
+      const dbPath = join(dir, 'store.sqlite');
+      const writer = open(dbPath);
+      const ledger = new TierLedger({ dbPath: join(dir, 'tiers.sqlite') });
+      let front: LocalConnectorStore | undefined;
       try {
-        const result = await store.vectorSearchLane('harbor note', graded, 20);
-        expect(result.skippedReason).toBeUndefined();
-        expect(result.rows).toHaveLength(20);
-        expect(reads.digestPages).toBe(1);
-        expect(reads.rescoreStatements).toBeLessThanOrEqual(2);
-      } finally { setReadPoolObserverForTests(); }
-    } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
-  });
+        const source = connector(count);
+        const { items } = (await source.listItems()[Symbol.asyncIterator]().next()).value!;
+        await writer.syncFromConnector(source, { fetchContent: true });
+        await writer.embedChunks({ provider: separated });
+        await writer.ensureVectorDigestReady(modelId, 4096);
+
+        const ledgerDb = new Database(ledger.dbPath);
+        try {
+          const decision = classifyItemTiers({ signals: {}, text: 'Fixture note' });
+          const copies = [{ corpusId: writer.corpusId, trustDomain: 'internal', layers: 'both' }] as const;
+          const ledgerWriter = (ledger as unknown as { db: Database }).db;
+          ledgerWriter.exec('PRAGMA synchronous=OFF');
+          ledgerWriter.transaction(() => {
+            for (const [i, item] of (items as readonly RawItem[]).entries()) {
+              ledger.recordRoutedPlacement(item.identity, decision, { copies, embedHold: i < firstVisible });
+            }
+          })();
+
+          const store = front = new LocalConnectorStore({
+            dbPath, corpusId: writer.corpusId, family: writer.family, trustDomain: writer.trustDomain, tierLedger: ledger,
+          });
+          const memo = store as unknown as {
+            tierLedgerHiddenMemo?: { ledgerCursor: number };
+            tierHiddenCountsRefresh?: Promise<void>;
+          };
+          expect(memo.tierLedgerHiddenMemo).toBeUndefined();
+          if (scenario !== 'memo cold') {
+            await store.keepVisibilityCurrentInTurns();
+            const cursor = ledger.visibilityChangesSince().cursor;
+            expect(memo.tierLedgerHiddenMemo?.ledgerCursor).toBe(cursor);
+            const id = scenario === 'item hidden after publication' ? String(firstVisible) : '0';
+            ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = ? AND corpus_id = ?")
+              .run(id, writer.corpusId);
+            expect(ledger.visibilityChangesSince().cursor).toBeGreaterThan(cursor);
+          }
+
+          const reads = counted();
+          const trace = createSourceAnswerTrace();
+          const result = await runWithSourceAnswerTrace(trace, () => store.vectorSearchLane('harbor note', separated, 20));
+          expect(snapshotSourceAnswerTrace(trace).mainThreadSql.statements).toBe(0);
+          expect(result.skippedReason).toBeUndefined();
+          const start = firstVisible + Number(scenario === 'item hidden after publication');
+          expect(result.rows.map(row => row.sourceItem.providerItemId)).toEqual(Array.from({ length: 20 }, (_, i) => String(start + i)));
+          expect(reads.digestPages).toBe(1);
+          if (scenario === 'memo cold') {
+            expect(reads.continuationRounds).toBe(4);
+
+            // Fail the first re-score read after live judgment rejected the
+            // leading batch. The lane must name the interruption.
+            counted(() => { throw new OffThreadReadBusyError(); });
+            expect(await store.vectorSearchLane('harbor note', separated, 20))
+              .toEqual({ rows: [], skippedReason: 'vector_scan_store_busy' });
+
+            // Move the clock past the original scan deadline on continuation.
+            // The remaining work still runs and produces the same result.
+            const now = Date.now;
+            const deadline = now() + 60_000;
+            const clock = spyOn(Date, 'now');
+            try {
+              counted(() => clock.mockReturnValue(deadline + 1));
+              expect(await store.vectorSearchLane('harbor note', separated, 20, undefined, undefined, deadline)).toEqual(result);
+            } finally { clock.mockRestore(); }
+
+            ledgerDb.query('UPDATE tier_copies SET embed_hold = 1 WHERE embed_hold = 0').run();
+            counted();
+            expect(await store.vectorSearchLane('harbor note', separated, 20)).toEqual({ rows: [] });
+          } else {
+            expect(reads.rescoreStatements).toBe(1);
+            await memo.tierHiddenCountsRefresh;
+            expect(memo.tierLedgerHiddenMemo?.ledgerCursor).toBe(ledger.visibilityChangesSince().cursor);
+          }
+        } finally { ledgerDb.close(); }
+      } finally {
+        setReadPoolObserverForTests();
+        front?.close();
+        writer.close();
+        ledger.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   test('90% of the best-ranked items outside the search scope: one digest read, one re-score batch', async () => {
     const { store, dir, pks } = await seeded();
