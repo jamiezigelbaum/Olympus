@@ -35,10 +35,14 @@ test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-th
   // Two cases, each scored on its own line: a box in use, and the first boot after an upgrade left a large WAL.
   // Exit 3 is "host busy" (the IO floor was never reached): not a product result.
   // Each case starts from the pristine fixture, copied outside the memory cap.
-  const results = Object.fromEntries((['steady', 'boot-after-upgrade'] as const).map(runCase => [runCase,
-    invoke(['bun', script, 'restore', '--dir', dir], 30 * 60_000, onDisk) || invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase], 25 * 60_000, onDisk)]));
-  console.log(JSON.stringify({ phase: 'cases', results }));
-  expect(results).toEqual({ steady: 0, 'boot-after-upgrade': 0 });
+  // A file-map arm (cloud-job loop_stall_arm: on, off or bounded) runs the steady case only, with that setting for the whole engine.
+  const arm = process.env.CJ_LOOP_STALL_ARM?.trim() || undefined;
+  if (arm !== undefined && !['on', 'off', 'bounded'].includes(arm)) throw new Error(`CJ_LOOP_STALL_ARM is on, off or bounded, not ${arm}`);
+  const cases = arm ? ['steady'] as const : ['steady', 'boot-after-upgrade'] as const;
+  const results = Object.fromEntries(cases.map(runCase => [runCase,
+    invoke(['bun', script, 'restore', '--dir', dir], 30 * 60_000, onDisk) || invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase, ...(arm ? ['--sqlite-mmap', arm] : [])], 25 * 60_000, onDisk)]));
+  console.log(JSON.stringify({ phase: 'cases', arm: arm ?? 'default', results }));
+  expect(results).toEqual(Object.fromEntries(cases.map(runCase => [runCase, 0])));
 }, 235 * 60_000);
 
 test('memory cap accepts the default and warm-cache sizes and rejects invalid caps', () => {
