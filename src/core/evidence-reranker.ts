@@ -88,6 +88,18 @@ export function rerankPoolSemanticSeats(env: Readonly<Record<string, string | un
   return Number.isInteger(seats) && seats >= 0 && seats <= 48 ? seats : DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
 }
 
+// How many of its nearest vector rows each store offers those seats, whatever
+// its bar. A row below this rank is never offered, however many seats there
+// are. OLYMPUS_SEMANTIC_ROWS_PER_STORE sets it for eval arms.
+export const DEFAULT_SEMANTIC_ROWS_PER_STORE = 3;
+export const SEMANTIC_ROWS_PER_STORE_ENV = 'OLYMPUS_SEMANTIC_ROWS_PER_STORE';
+export function semanticRowsPerStore(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env[SEMANTIC_ROWS_PER_STORE_ENV]?.trim();
+  if (!raw) return DEFAULT_SEMANTIC_ROWS_PER_STORE;
+  const rows = Number(raw);
+  return Number.isInteger(rows) && rows >= 1 && rows <= 50 ? rows : DEFAULT_SEMANTIC_ROWS_PER_STORE;
+}
+
 // Every rerank outcome since this process started, for health: a timeout
 // falls back to the fused cut, and that must be countable, not silent.
 const outcomeCounts: Record<EvidenceRerankOutcome, number> = { applied: 0, failed: 0, timed_out: 0 };

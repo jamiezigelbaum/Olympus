@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { buildEvidencePackDetailed, type LocalContentProvider } from '../src/core/evidence-pack.ts';
-import { rerankPoolSemanticSeats, type EvidenceReranker } from '../src/core/evidence-reranker.ts';
+import { rerankPoolSemanticSeats, semanticRowsPerStore, type EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { withSemanticPoolSeats, type SourceIndexCorpusSearchAdapter, type SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
@@ -45,6 +45,12 @@ describe('rerankPoolSemanticSeats', () => {
     expect(rerankPoolSemanticSeats({ OLYMPUS_SEMANTIC_POOL_SEATS: '6' })).toBe(6);
     expect(rerankPoolSemanticSeats({ OLYMPUS_SEMANTIC_POOL_SEATS: '-1' })).toBe(0);
     expect(rerankPoolSemanticSeats({ OLYMPUS_SEMANTIC_POOL_SEATS: 'x' })).toBe(0);
+  });
+
+  test('rows offered per store: 3 by default, the eval switch from 1 to 50', () => {
+    expect(semanticRowsPerStore({})).toBe(3);
+    expect(semanticRowsPerStore({ OLYMPUS_SEMANTIC_ROWS_PER_STORE: '10' })).toBe(10);
+    expect(semanticRowsPerStore({ OLYMPUS_SEMANTIC_ROWS_PER_STORE: '0' })).toBe(3);
   });
 });
 
