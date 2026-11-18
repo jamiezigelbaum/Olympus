@@ -15405,10 +15405,16 @@ export class LocalConnectorStore {
   private async vectorWinnerRowsOffThread(winners: VectorWinners, accountScope: string | undefined,
     filters: ConnectorStoreSearchFilters | undefined, locate: boolean): Promise<ConnectorStoreScoredSearchRow[]> {
     if (winners.size === 0) return [];
-    const versions = new Map<string, string>();
+    // Each file's token is taken once, before its first row is read, and
+    // compared after the last: every file is then proven unchanged across one
+    // shared instant (the start of the final comparison), so the batch is one
+    // consistent state. Two reads of a file arriving together share the first
+    // token; a later one must never replace it.
+    const versions = new Map<string, Promise<string>>();
     const read: VectorRead = async (path, query) => {
       if (this.closedForPoolReads || !offThreadReadsSupported(path)) throw new VisibilityChangedError();
-      if (!versions.has(path)) versions.set(path, await readPoolDataVersion(path, this.dbPath));
+      if (!versions.has(path)) versions.set(path, readPoolDataVersion(path, this.dbPath));
+      await versions.get(path);
       return this.readVectorOnPool(path, query);
     };
     const stores = this.vectorVisibilityStores();
@@ -15434,7 +15440,7 @@ export class LocalConnectorStore {
     // A visibility or scope write while any of those reads were in flight
     // voids this batch. Worker/connection loss also voids its token.
     const unchanged = await Promise.all([...versions].map(async ([path, before]) =>
-      await readPoolDataVersion(path, this.dbPath) === before));
+      await readPoolDataVersion(path, this.dbPath) === await before));
     const current = this.vectorVisibilityStores();
     if (!unchanged.every(Boolean) || stores.length !== current.length || !stores.every((store, i) => store === current[i])
       || configuredLedger !== this.tierLedgerHandle || childLedger !== this.childLane?.ledger()

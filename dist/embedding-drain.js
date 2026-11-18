@@ -32749,7 +32749,8 @@ ${parentKey(ref)}`, { ref, origin });
       if (this.closedForPoolReads || !offThreadReadsSupported(path))
         throw new VisibilityChangedError;
       if (!versions.has(path))
-        versions.set(path, await readPoolDataVersion(path, this.dbPath));
+        versions.set(path, readPoolDataVersion(path, this.dbPath));
+      await versions.get(path);
       return this.readVectorOnPool(path, query);
     };
     const stores = this.vectorVisibilityStores();
@@ -32766,7 +32767,7 @@ ${parentKey(ref)}`, { ref, origin });
     });
     const rows = await this.vectorContentVisibleRows(ordered, read);
     const chunks = locate ? await vectorReadSteps(read, this.dbPath, this.keywordChunkMatchesSteps(rows.map((row) => ({ ...row, chunk_pk: winners.get(row.item_pk).bestChunkPk })), [], "semantic")) : undefined;
-    const unchanged = await Promise.all([...versions].map(async ([path, before]) => await readPoolDataVersion(path, this.dbPath) === before));
+    const unchanged = await Promise.all([...versions].map(async ([path, before]) => await readPoolDataVersion(path, this.dbPath) === await before));
     const current = this.vectorVisibilityStores();
     if (!unchanged.every(Boolean) || stores.length !== current.length || !stores.every((store, i) => store === current[i]) || configuredLedger !== this.tierLedgerHandle || childLedger !== this.childLane?.ledger() || defaultLedgerPath && existsSync21(defaultLedgerPath) !== defaultLedgerExists || configuredLedger?.writesHeld() || childLedger?.writesHeld() || this.boundLedgerHandle?.writesHeld())
       throw new VisibilityChangedError;
