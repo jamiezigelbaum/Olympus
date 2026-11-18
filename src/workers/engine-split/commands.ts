@@ -213,7 +213,6 @@ export type EngineCommand =
   | { kind: 'archive_changed' }
   /** Install or re-arm the built-in private model: only the background installs it (a wake). */
   | { kind: 'model_prepare' }
-  | { kind: 'front_visibility_finished'; frontPid: number }
   | { kind: 'dashboard_samples'; samples: Record<string, unknown>[] }
   | { kind: EngineForwardedKind; request: EngineForwardedRequest; frontPid?: number }
   | { kind: 'sync_now'; source: string; manual: boolean }
@@ -411,11 +410,6 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'archive_changed':
     case 'model_prepare':
       return { id, command: { kind } };
-    case 'front_visibility_finished': {
-      const frontPid = command!.frontPid;
-      if (typeof frontPid !== 'number' || !Number.isSafeInteger(frontPid) || frontPid <= 0) fail('front_visibility_finished needs a front process id.');
-      return { id, command: { kind, frontPid: frontPid as number } };
-    }
     case 'dashboard_samples': {
       const samples = command!.samples;
       if (!Array.isArray(samples) || samples.length > ENGINE_DASHBOARD_SAMPLES_MAX || samples.some((sample) => !dashboardSample(sample))) {

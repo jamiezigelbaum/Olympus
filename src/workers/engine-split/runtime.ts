@@ -5,7 +5,7 @@ import type { MemoryActivity } from '../../core/memory-counters.ts';
  * client, owner-busy relay and snapshot reader. Kept here so `main()` only
  * chooses by role (core/engine-split.ts).
  */
-import { readBootProgress, readFrontProgress, type BootProgress } from '../../core/boot-progress.ts';
+import { readBootProgress, type BootProgress } from '../../core/boot-progress.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, processAlive, readEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { engineStartingAnswer, engineStartingResponse } from '../../core/worker-front-proxy.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -181,51 +181,6 @@ export async function waitForBackgroundBootDone(input: {
   while (!backgroundBootDone(read(), input.alive)) await sleep(input.pollMs ?? 250);
 }
 
-/** The front can announce its presence before the background has bound its socket. */
-export function createBackgroundVisibilityBoot(input: {
-  env: Record<string, string | undefined>;
-  step: (step: string | undefined) => void;
-  log?: (line: string) => void;
-}) {
-  const log = input.log ?? console.log;
-  const ready = Promise.withResolvers<void>();
-  const watching = new AbortController();
-  let pending = true;
-  let frontPid: number | undefined;
-  let releaseFront: ((reason: string) => void) | undefined;
-  const waitForFront = (pid: number) => {
-    frontPid = pid;
-    const signal = Promise.withResolvers<string>();
-    releaseFront = signal.resolve;
-    void waitForProcessExit(pid, { timeoutMs: Infinity, signal: watching.signal }).then((exited) => {
-      if (exited) signal.resolve('front exited');
-    });
-    return signal.promise;
-  };
-  const complete = () => { pending = false; ready.resolve(); };
-  return {
-    pending: () => pending ? ready.promise : undefined,
-    frontFinished: (pid: number) => { if (pid === frontPid) releaseFront?.('front build finished'); },
-    async start(build: () => Promise<void>): Promise<void> {
-      const started = performance.now();
-      const front = readFrontProgress(input.env);
-      let reason = 'no front build in progress';
-      if (front?.phase === 'starting' && Number.isSafeInteger(front.pid) && front.pid > 0 && processAlive(front.pid)) {
-        input.step('waiting for the front to finish building hidden-copy sets');
-        log('[olympus] background: waiting for the front to finish building hidden-copy sets');
-        reason = await waitForFront(front.pid);
-      }
-      if (watching.signal.aborted) return;
-      watching.abort();
-      input.step('building hidden-copy sets');
-      log(`[olympus] background: starting hidden-copy build after waiting ${Math.round(performance.now() - started)} ms (${reason})`);
-      try { await build(); }
-      finally { input.step(undefined); complete(); }
-    },
-    stop() { watching.abort(); releaseFront?.('background stopping'); },
-  };
-}
-
 /**
  * What the front answers while it waits for the background's boot: it
  * listens at once, so the upgrade's wait and the dashboard read a real
@@ -271,7 +226,6 @@ export interface EngineFront {
   backgroundReady(): Promise<boolean>;
   /** Keep the starting listener in place while the previous front's Private clicks can still commit. */
   waitForPendingPrivacyRaises(): Promise<void>;
-  visibilityFinished(): void;
   stop(): void;
 }
 
@@ -320,21 +274,7 @@ export function createEngineFront(input: {
   };
   // Notice a background restart even when no page asks for status, so the
   // owner-busy signal reaches the new judge.
-  let oweVisibility = false;
-  let sendingVisibility = false;
-  const reportVisibility = async () => {
-    if (!oweVisibility || sendingVisibility) return;
-    sendingVisibility = true;
-    try {
-      const receipt = await client.send({ kind: 'front_visibility_finished', frontPid: process.pid });
-      oweVisibility = receipt.state !== 'done';
-    } catch {
-      console.warn('[engine-split] the front could not report that its hidden-copy build finished; it will retry.');
-    } finally {
-      sendingVisibility = false;
-    }
-  };
-  const poll = setInterval(() => { status(); void reportVisibility(); }, 2_000);
+  const poll = setInterval(() => { status(); }, 2_000);
   poll.unref?.();
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
   // Busy is not unreachable: the background's receipt and heartbeat say it is up.
@@ -346,9 +286,7 @@ export function createEngineFront(input: {
     while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true)) await Bun.sleep(probeMs);
   };
   return { client, ownerBusy: relay, status, backgroundActivity: () => cached?.read?.snapshot.activity ?? 'idle', completeModel, backgroundReady,
-    waitForPendingPrivacyRaises,
-    visibilityFinished: () => { oweVisibility = true; void reportVisibility(); },
-    stop: () => { clearInterval(poll); relay?.stop(); } };
+    waitForPendingPrivacyRaises, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
 // How long the front waits on a background that has stopped answering. A
@@ -598,7 +536,6 @@ export async function waitForProcessExit(pid: number, options: {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   alive?: (pid: number) => boolean;
-  signal?: AbortSignal;
 } = {}): Promise<boolean> {
   const now = options.now ?? (() => Date.now());
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -608,7 +545,7 @@ export async function waitForProcessExit(pid: number, options: {
   });
   const deadline = now() + (options.timeoutMs ?? 60_000);
   while (alive(pid)) {
-    if (options.signal?.aborted || now() >= deadline) return false;
+    if (now() >= deadline) return false;
     await sleep(options.intervalMs ?? 250);
   }
   return true;

@@ -17,7 +17,7 @@ import {
   type SourceSchedulerSource,
   type SourceSchedulerTaskRunResult,
 } from '../src/workers/source-scheduler.ts';
-import { createTestClock, waitFor } from './helpers/test-clock.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
 import { CredentialBrokerError } from '../src/workers/credential-broker/index.ts';
 import { OperationError } from '../src/core/operation-error.ts';
@@ -1040,31 +1040,6 @@ describe('source worker scheduler', () => {
     await serializedRun;
     expect(sharedStarted).toEqual(['a', 'b']);
     expect(maxSharedActive).toBe(1);
-  });
-
-  test('ingest can run again while its embedding sweep waits for boot visibility', async () => {
-    const visibility = Promise.withResolvers<void>();
-    let bootPending = true;
-    let syncs = 0;
-    const [swept] = withEmbeddingSweep([source('boot.listing', 'continuous', 1_000, undefined, [
-      task('boot.listing.sync', async () => { syncs += 1; return { status: 'idle' }; }),
-    ])], () => () => [], { visibilityBoot: () => bootPending ? visibility.promise : undefined });
-    const scheduler = new SourceScheduler({ enabled: true, tickMs: 1_000, errorBackoffMs: 5_000, maxTransientRetries: 1, sources: [swept!] });
-    const first = scheduler.runSource('boot.listing', undefined, 'operator');
-    try {
-      expect(scheduler.status().sources[0]?.tasks.find(entry => entry.kind === 'embed')).toMatchObject({
-        running: true, wait_reason: 'boot_visibility', consecutive_failures: 0,
-      });
-      await waitFor(() => scheduler.status().sources[0]?.tasks.find(entry => entry.kind === 'sync')?.running === false);
-      expect(syncs).toBe(1);
-      await scheduler.runSource('boot.listing', undefined, 'operator');
-      expect(syncs).toBe(2);
-    } finally {
-      bootPending = false;
-      visibility.resolve();
-      await first;
-    }
-    expect(scheduler.status().sources[0]?.tasks.find(entry => entry.kind === 'embed')).not.toHaveProperty('wait_reason');
   });
 
   test("a source's embedding sweep is not held behind its own long listing", async () => {
