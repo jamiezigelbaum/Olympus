@@ -1409,12 +1409,17 @@ export function dashboardGuidedSessionAgentPrompt(source: 'telegram' | 'whatsapp
   return 'Connect WhatsApp to Olympus using the packaged olympus connect whatsapp --pair command. The dashboard has no Connect/Pair button or QR display; do not send me back to it to begin pairing. Provide a complete command for a private terminal I can use on the correct Olympus host and account. Show me when to scan the QR code from WhatsApp Linked devices, confirm the connection, and start the initial sync. Do not ask me to edit files, configuration, or code.';
 }
 
-export interface SourceDashboardHistory {
-  record(samples: SourceDashboardHistorySample[]): void;
+export interface SourceDashboardHistoryReader {
   progressFor(sample: SourceDashboardHistorySample, now: Date): DashboardSourceCard['progress'];
   /** Per-phase last-rise times for this sample's corpus; optional so older fakes keep compiling. */
   movementFor?(sample: SourceDashboardHistorySample, now: Date): DashboardPhaseMovement | undefined;
   sampleCount(): number;
+}
+
+export interface SourceDashboardHistory extends SourceDashboardHistoryReader {
+  record(samples: SourceDashboardHistorySample[]): void;
+  /** Let a reader omit all history for this render if any of its reads fail. */
+  readForDashboard?<T>(read: (reader: SourceDashboardHistoryReader) => T): T | undefined;
 }
 
 export interface SourceDashboardHistorySample {
@@ -2245,7 +2250,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     this.db = new Database(dbPath);
-    this.db.exec('PRAGMA busy_timeout = 10000;');
+    this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (
@@ -2702,15 +2707,22 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     settled_pass: dashboardHasSettledPass(card),
   }));
   options.history?.record(samples);
-  const cardsWithProgress = cards.map((card, index) => {
-    const progress = options.history?.progressFor(samples[index]!, now);
-    const movement = options.history?.movementFor?.(samples[index]!, now);
-    return {
-      ...card,
-      ...(progress ? { progress } : {}),
-      ...(movement ? { movement } : {}),
-    };
+  const readHistory = (reader: SourceDashboardHistoryReader) => ({
+    cards: cards.map((card, index) => {
+      const progress = reader.progressFor(samples[index]!, now);
+      const movement = reader.movementFor?.(samples[index]!, now);
+      return {
+        ...card,
+        ...(progress ? { progress } : {}),
+        ...(movement ? { movement } : {}),
+      };
+    }),
+    sampleCount: reader.sampleCount(),
   });
+  const history = options.history?.readForDashboard
+    ? options.history.readForDashboard(readHistory)
+    : options.history && readHistory(options.history);
+  const cardsWithProgress = history?.cards ?? cards;
   const summary = summarize(cardsWithProgress, unassignedCorpora);
   const trustCards = trustDomainCards(cardsWithProgress, unassignedCorpora, options.sovereigntyEngine);
   const excludedByConfiguration = excludedByConfigurationFrom(
@@ -2756,7 +2768,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     folder_picker: folderPicker,
     sources: cardsWithProgress,
     history: {
-      sample_count: options.history?.sampleCount() ?? 0,
+      sample_count: history?.sampleCount ?? 0,
       eta_available: cardsWithProgress.some((card) => card.progress?.eta_minutes !== undefined),
     },
     first_run: summary.connected_sources === 0,

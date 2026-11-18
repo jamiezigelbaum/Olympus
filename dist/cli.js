@@ -136513,7 +136513,7 @@ function buildSourceIngestionLedgerSnapshot(status, options = {}) {
 function openSourceDashboardFileReadOnly(dbPath = defaultSourceDashboardHistoryDbPath()) {
   const db = new Database23(dbPath, { readonly: true, create: false });
   try {
-    db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+    db.exec("PRAGMA busy_timeout = 0; PRAGMA query_only = ON;");
     return db;
   } catch (error) {
     closeSqliteStore(db, { checkpoint: false });
@@ -136528,7 +136528,7 @@ class SqliteSourceIngestionLedgerStore {
     if (dbPath !== ":memory:")
       mkdirSync47(dirname78(dbPath), { recursive: true, mode: 448 });
     this.db = new Database23(dbPath);
-    this.db.exec("PRAGMA busy_timeout = 10000;");
+    this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138500,7 +138500,7 @@ class SqliteSourceDashboardHistory {
     if (dbPath !== ":memory:")
       mkdirSync48(dirname79(dbPath), { recursive: true, mode: 448 });
     this.db = new Database24(dbPath);
-    this.db.exec("PRAGMA busy_timeout = 10000;");
+    this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (
@@ -138791,15 +138791,20 @@ function buildSourceDashboardViewModel(options) {
     settled_pass: dashboardHasSettledPass(card)
   }));
   options.history?.record(samples);
-  const cardsWithProgress = cards.map((card, index) => {
-    const progress = options.history?.progressFor(samples[index], now);
-    const movement = options.history?.movementFor?.(samples[index], now);
-    return {
-      ...card,
-      ...progress ? { progress } : {},
-      ...movement ? { movement } : {}
-    };
+  const readHistory = (reader) => ({
+    cards: cards.map((card, index) => {
+      const progress = reader.progressFor(samples[index], now);
+      const movement = reader.movementFor?.(samples[index], now);
+      return {
+        ...card,
+        ...progress ? { progress } : {},
+        ...movement ? { movement } : {}
+      };
+    }),
+    sampleCount: reader.sampleCount()
   });
+  const history = options.history?.readForDashboard ? options.history.readForDashboard(readHistory) : options.history && readHistory(options.history);
+  const cardsWithProgress = history?.cards ?? cards;
   const summary = summarize(cardsWithProgress, unassignedCorpora);
   const trustCards = trustDomainCards(cardsWithProgress, unassignedCorpora, options.sovereigntyEngine);
   const excludedByConfiguration = excludedByConfigurationFrom(options.ingestionLedger?.excluded_by_configuration);
@@ -138829,7 +138834,7 @@ function buildSourceDashboardViewModel(options) {
     folder_picker: folderPicker,
     sources: cardsWithProgress,
     history: {
-      sample_count: options.history?.sampleCount() ?? 0,
+      sample_count: history?.sampleCount ?? 0,
       eta_available: cardsWithProgress.some((card) => card.progress?.eta_minutes !== undefined)
     },
     first_run: summary.connected_sources === 0,
@@ -245726,6 +245731,7 @@ var init_front_scheduler = __esm(() => {
 });
 
 // src/workers/engine-split/front-history.ts
+import { SQLiteError } from "bun:sqlite";
 import { existsSync as existsSync122 } from "node:fs";
 function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()) {
   assertWritableStoreOpenAllowed("dashboard history", path);
@@ -245744,18 +245750,26 @@ function openReadOnlyDashboardHistory(path) {
 }
 function createFrontDashboardHistory(input) {
   const now = input.now ?? (() => Date.now());
+  const log = input.log ?? ((line) => console.warn(line));
   const minIntervalMs = input.minIntervalMs ?? 30000;
   let reader;
   let lastSent = Number.NEGATIVE_INFINITY;
-  const read = () => {
-    if (!reader && existsSync122(input.path)) {
-      try {
+  let lastReadWarning = Number.NEGATIVE_INFINITY;
+  const read = (query) => {
+    try {
+      if (!reader && existsSync122(input.path))
         reader = openReadOnlyDashboardHistory(input.path);
-      } catch {
-        reader = undefined;
+      return reader && query(reader);
+    } catch (error) {
+      if (!(error instanceof SQLiteError))
+        throw error;
+      const at = now();
+      if (at - lastReadWarning >= minIntervalMs) {
+        lastReadWarning = at;
+        log(`[engine-split] dashboard history unavailable: sqlite_code=${error.code ?? error.errno}`);
       }
+      return;
     }
-    return reader;
   };
   return {
     record(samples) {
@@ -245766,9 +245780,10 @@ function createFrontDashboardHistory(input) {
         return;
       });
     },
-    progressFor: (sample, at) => read()?.progressFor(sample, at),
-    movementFor: (sample, at) => read()?.movementFor(sample, at),
-    sampleCount: () => read()?.sampleCount() ?? 0
+    readForDashboard: read,
+    progressFor: (sample, at) => read((history) => history.progressFor(sample, at)),
+    movementFor: (sample, at) => read((history) => history.movementFor(sample, at)),
+    sampleCount: () => read((history) => history.sampleCount()) ?? 0
   };
 }
 var init_front_history = __esm(() => {
