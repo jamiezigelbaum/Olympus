@@ -276469,7 +276469,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     memory: memoryDiagnostic
   }) : undefined;
   let engineBackground;
-  if (visibilityBoot) {
+  if (engineRole === "background" && visibilityBoot) {
     if (!authToken)
       throw new Error("The engine background needs the worker auth token.");
     const refreshSchedulerSources = () => {

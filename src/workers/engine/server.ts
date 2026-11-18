@@ -6709,7 +6709,7 @@ export async function main(): Promise<void> {
     previous: { count: 0 }, memory: memoryDiagnostic,
   }) : undefined;
   let engineBackground: { stop(): void } | undefined;
-  if (visibilityBoot) {
+  if (engineRole === 'background' && visibilityBoot) {
     if (!authToken) throw new Error('The engine background needs the worker auth token.');
     const refreshSchedulerSources = () => {
       sourceScheduler?.updateSources(schedulerSourcesForHandles(
