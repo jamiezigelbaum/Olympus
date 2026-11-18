@@ -434,7 +434,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
 
   // A restart lost the receipt: read the item's true state again before saying it was not saved.
   // A restart lost the receipt, so the outcome is unknown: read the item's true
-  // state again and say what it shows. `wanted` is the tier asked for, or null for Undo.
+  // state again and say what it shows. wanted is the tier asked for, or null for Undo.
   async function saveFailed(id, response, wanted) {
     var message = response.message;
     if (response.unknown) {
