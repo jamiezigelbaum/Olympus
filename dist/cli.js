@@ -42066,6 +42066,35 @@ function applySqliteMmap(db, env = process.env) {
 }
 var SQLITE_MMAP_BYTES = 2147418112;
 
+// src/workers/connector-store/sqlite-file-identity.ts
+import { CString, read } from "bun:ffi";
+import { constants as constants6 } from "bun:sqlite";
+import { fstatSync as fstatSync4 } from "node:fs";
+function sqliteFileIdentity(db, fsStat, native, NativeString, opcodes) {
+  if (!["darwin", "linux"].includes(process.platform) || !["arm64", "x64"].includes(process.arch)) {
+    throw new Error("SQLite file identity requires a supported Unix VFS");
+  }
+  const file = new BigUint64Array(1);
+  const vfs = new BigUint64Array(1);
+  if (db.fileControl(opcodes.SQLITE_FCNTL_FILE_POINTER, file) !== 0 || !file[0] || db.fileControl(opcodes.SQLITE_FCNTL_VFS_POINTER, vfs) !== 0 || !vfs[0]) {
+    throw new Error("SQLite did not expose its open file");
+  }
+  const filePtr = Number(file[0]);
+  const vfsPtr = Number(vfs[0]);
+  const name = native.ptr(vfsPtr, 24);
+  if (!name || String(new NativeString(name)) !== "unix" || native.ptr(filePtr, 8) !== vfsPtr || native.i32(vfsPtr, 4) < 28) {
+    throw new Error("SQLite file identity requires the Unix file layout");
+  }
+  const stat = fsStat(native.i32(filePtr, 24), { bigint: true });
+  if (!stat.isFile())
+    throw new Error("SQLite did not open a regular file");
+  return stat.dev + ":" + stat.ino;
+}
+function openedSqliteFileIdentity(db) {
+  return sqliteFileIdentity(db, fstatSync4, read, CString, constants6);
+}
+var init_sqlite_file_identity = () => {};
+
 // src/workers/classification/tier-ledger.ts
 import { Database as Database3 } from "bun:sqlite";
 import { randomUUID as randomUUID7 } from "node:crypto";
@@ -42380,6 +42409,7 @@ class TierLedger {
   db;
   readOnly;
   now;
+  openedFile;
   constructor(options) {
     this.dbPath = options.dbPath;
     this.readOnly = options.readOnly === true;
@@ -42398,6 +42428,8 @@ class TierLedger {
     let db;
     try {
       db = new Database3(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      if (onDisk)
+        this.openedFile = openedSqliteFileIdentity(db);
       if (this.readOnly) {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         applySqliteMmap(db);
@@ -42436,6 +42468,7 @@ class TierLedger {
     return sqliteSchemaUsable(this.db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION);
   }
   close() {
+    this.openedFile = undefined;
     try {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
@@ -42449,6 +42482,9 @@ class TierLedger {
       if (!this.readOnly && this.dbPath !== ":memory:")
         restrictLedgerFiles(this.dbPath);
     }
+  }
+  pooledFileIdentity() {
+    return this.openedFile;
   }
   recordDecision(identity, decision, stored) {
     let outcome = "unchanged";
@@ -43167,8 +43203,17 @@ class TierLedger {
         ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
         DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
       `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
+      this.noteVisibilityChange(identity);
       this.settleRevokedOwnerMove(identity);
     })();
+  }
+  noteVisibilityChange(identity) {
+    this.db.query(`INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+      VALUES (?, ?, ?, ?)`).run(...idParams(identity));
+    this.trimVisibilityChanges();
+  }
+  trimVisibilityChanges() {
+    this.db.exec("DELETE FROM tier_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM tier_visibility_changes)");
   }
   classificationRead(identity) {
     return this.db.transaction(() => ({
@@ -43231,6 +43276,9 @@ class TierLedger {
     return this.readSteps(this.itemIsSecretSteps(identity));
   }
   *itemIsSecretSteps(identity) {
+    return yield* TierLedger.itemIsSecretSteps(identity);
+  }
+  static *itemIsSecretSteps(identity) {
     const row = yield {
       sql: `SELECT override_json FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
@@ -43273,16 +43321,20 @@ class TierLedger {
         continue;
       }
       this.db.transaction(() => {
-        this.db.query(`
+        const inserted = this.db.query(`
           INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
           SELECT provider, account_scope, ?, provider_item_id, override_json, set_at FROM tier_overrides
           WHERE provider = ? AND account_scope = ? AND conversation_key = '' AND provider_item_id = ?
           ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO NOTHING
         `).run(conversations[0], identity.provider, identity.accountScope, identity.providerItemId);
-        this.db.query(`
+        const removed = this.db.query(`
           DELETE FROM tier_overrides
           WHERE provider = ? AND account_scope = ? AND conversation_key = '' AND provider_item_id = ?
         `).run(identity.provider, identity.accountScope, identity.providerItemId);
+        if (inserted.changes)
+          this.noteVisibilityChange({ ...identity, providerConversationId: conversations[0] });
+        if (removed.changes)
+          this.noteVisibilityChange(identity);
       })();
       rehomed += 1;
     }
@@ -43303,6 +43355,8 @@ class TierLedger {
       cleared = this.db.query(`
         DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity)).changes > 0;
+      if (cleared)
+        this.noteVisibilityChange(identity);
       this.settleRevokedOwnerMove(identity);
       const settled = this.readRow(identity);
       if (cleared && before && settled && !this.itemIsSecret(identity) && before.metadataTier !== "secrets" && before.contentTier !== "secrets") {
@@ -43617,6 +43671,9 @@ class TierLedger {
     return this.readSteps(copiesSteps(uniqueIdentities(identities)));
   }
   *visibilityReadSteps(identities, options = {}) {
+    return yield* TierLedger.visibilityReadSteps(identities, options);
+  }
+  static *visibilityReadSteps(identities, options = {}) {
     const list = uniqueIdentities(identities);
     const copies = yield* copiesSteps(list);
     const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
@@ -43815,6 +43872,9 @@ class TierLedger {
     return this.readSteps(this.itemStatesSteps(identities));
   }
   *itemStatesSteps(identities) {
+    return yield* TierLedger.itemStatesSteps(identities);
+  }
+  static *itemStatesSteps(identities) {
     const result = new Map;
     const list = uniqueIdentities(identities);
     for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
@@ -44113,7 +44173,7 @@ class TierLedger {
       if (existing.routed)
         throw new Error("This item is already routed.");
       this.db.query(`
-        UPDATE tier_items SET routed = 1
+        UPDATE tier_items SET routed = 1, state = state
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity));
       this.deleteCopies(identity);
@@ -44834,6 +44894,11 @@ class TierLedger {
       const copies = this.db.query("SELECT changes() AS n").get().n;
       this.db.query("DELETE FROM tier_items WHERE provider = ? AND account_scope = ?").run(provider, accountScope);
       const items = this.db.query("SELECT changes() AS n").get().n;
+      const overrides = this.db.query(`INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+        SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_overrides
+        WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
+      if (overrides.changes)
+        this.trimVisibilityChanges();
       for (const table of [
         "tier_history",
         "tier_overrides",
@@ -45964,6 +46029,7 @@ var TIER_LEDGER_SCHEMA_VERSION = 16, RETIRED_EMBEDDING_CLEARANCE_REASON = "conte
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
       )`, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
+  init_sqlite_file_identity();
   init_sqlite_migrations();
   init_store_write_guard();
   init_tier_classifier();
@@ -46128,6 +46194,9 @@ var init_memory_counters = __esm(() => {
 import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 function withSourceIndexReadProgress(report, run) {
   return progress2.run(report, run);
+}
+function withoutSourceIndexReadProgress(run) {
+  return progress2.exit(run);
 }
 function noteSourceIndexReadProgress() {
   const report = progress2.getStore();
@@ -47986,6 +48055,9 @@ function createSourceAnswerTrace(now = () => new Date) {
 }
 function runWithSourceAnswerTrace(trace, run) {
   return withStoreReadPriority(() => storage2.run(trace, run));
+}
+function withoutSourceAnswerTrace(run) {
+  return storage2.exit(run);
 }
 function currentSourceAnswerTrace() {
   return storage2.getStore();
@@ -52362,7 +52434,8 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: "application/javascript" }));
+    const source = WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma()).replace(FILE_IDENTITY_SLOT, () => sqliteFileIdentity.toString());
+    const url = URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
     counters.starts += 1;
@@ -52492,19 +52565,20 @@ function checkLostReplies() {
 }
 async function withOffThreadSnapshot(dbPath, work, options = {}) {
   const lane = options.lane ?? "shared";
+  const store = options.store ?? dbPath;
   const site = callerSite();
   if (!runtimeHasWorkers())
     throw new Error("off-thread reads are unavailable");
-  const generation = releases.get(dbPath) ?? 0;
+  const generation = releases.get(store) ?? 0;
   const askedAtMs = clock2.now();
-  const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
+  const free = options.noWait ? snapshotThreadNow(store, lane) : undefined;
   if (options.noWait && !free)
     throw new OffThreadReadBusyError;
   if (free)
     free.snapshots += 1;
-  let reader = free ?? await snapshotThread(dbPath, lane);
+  let reader = free ?? await snapshotThread(store, lane);
   try {
-    if ((releases.get(dbPath) ?? 0) !== generation)
+    if ((releases.get(store) ?? 0) !== generation)
       throw new OffThreadReadBusyError;
     let snapshot = nextId++;
     let reserveWaitMs = clock2.now() - askedAtMs;
@@ -52523,8 +52597,8 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         reader.snapshots -= 1;
         reader = undefined;
         dispatch();
-        reader = await snapshotThread(dbPath, lane);
-        if ((releases.get(dbPath) ?? 0) !== generation)
+        reader = await snapshotThread(store, lane);
+        if ((releases.get(store) ?? 0) !== generation)
           throw new OffThreadReadBusyError;
         snapshot = nextId++;
         await open();
@@ -52541,7 +52615,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
     if (!perRead)
       markRead(dbPath, snapshot, { atMs: clock2.now(), lane, site });
     try {
-      return await work(async (query) => {
+      return await work(async (query, freshSnapshot) => {
         const readId = perRead ? -nextId++ : 0;
         if (perRead)
           markRead(dbPath, readId, { atMs: clock2.now(), lane, site });
@@ -52555,7 +52629,7 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         const once = async () => {
           if (moving)
             await moving;
-          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, (ms) => {
+          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode, freshSnapshot }, (ms) => {
             sqlMs = ms;
           });
         };
@@ -52683,20 +52757,21 @@ function serveSnapshotWaiters() {
 }
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
-  const waiting = queues.get(dbPath) ?? [];
+  const store = options.store ?? dbPath;
+  const waiting = queues.get(store) ?? [];
   const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
     report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve, reject) => {
-    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
+    const job = { store, path: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
     if (Number.isFinite(deadlineAtMs))
       job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
-    if (!queues.has(dbPath)) {
-      queues.set(dbPath, waiting);
-      turns.push(dbPath);
+    if (!queues.has(store)) {
+      queues.set(store, waiting);
+      turns.push(store);
     }
     dispatch();
   }).then((rows) => {
@@ -52810,8 +52885,8 @@ function dispatch() {
     }
     reader.job = job;
     reader.executingStore = job.store;
-    observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
+    observer?.(job.path, job.read);
+    send(reader, { op: "query", path: job.path, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
       job.sqlMs = ms;
     }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
       if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
@@ -52839,9 +52914,11 @@ function dispatch() {
     });
   }
 }
-var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, lostReplyCheckMs = 2000, OffThreadReadLostError, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/", mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "", WORKER_SOURCE = `
-import { Database } from 'bun:sqlite';
-import { statSync } from 'node:fs';
+var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, lostReplyCheckMs = 2000, OffThreadReadLostError, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/", FILE_IDENTITY_SLOT = "/*olympus-file-identity*/", mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "", WORKER_SOURCE = `
+import { Database, constants } from 'bun:sqlite';
+import { CString, read } from 'bun:ffi';
+import { fstatSync, statSync } from 'node:fs';
+const sqliteFileIdentity = /*olympus-file-identity*/;
 const snapshots = new Map();
 const connections = new Map();
 // [request running, last request finished, native connections held], read by the request thread.
@@ -52856,11 +52933,24 @@ const noteConnections = (delta) => {
 const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
-  db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
-  /*olympus-mmap-pragma*/
+  let file;
+  try {
+    file = sqliteFileIdentity(db, fstatSync, read, CString, constants);
+    if (file !== pathIdentity(path)) throw new Error('SQLite file changed during open');
+    db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+    /*olympus-mmap-pragma*/
+    db.function('olympus_read_file_identity', () => file);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   noteConnections(1);
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
-  return db;
+  return { db, file, path };
+};
+const pathIdentity = (path) => {
+  const stat = statSync(path, { bigint: true });
+  return stat.dev + ':' + stat.ino;
 };
 // Snapshot connections are kept for the next snapshot instead of closed:
 // Bun 1.3.x corrupts its heap when pool threads open and close SQLite
@@ -52870,8 +52960,7 @@ const IDLE_SNAPSHOT_CONNECTIONS = 8;
 const idleSnapshots = new Map();
 const close = (db) => { db.close(); noteConnections(-1); };
 const snapshotConnection = (path) => {
-  const stat = statSync(path);
-  const file = stat.dev + ':' + stat.ino;
+  const file = pathIdentity(path);
   const idle = idleSnapshots.get(path) ?? [];
   while (idle.length > 0) {
     const held = idle.pop();
@@ -52882,20 +52971,22 @@ const snapshotConnection = (path) => {
     }
     try { close(held.db); } catch {}
   }
-  return { db: open(path), file, path };
+  return open(path);
 };
 const connection = (path) => {
-  const stat = statSync(path);
-  const file = stat.dev + ':' + stat.ino;
+  const file = pathIdentity(path);
   const held = connections.get(path);
   if (held && held.file === file) return held.db;
-  if (held) close(held.db);
-  const db = open(path);
-  connections.set(path, { db, file });
-  return db;
+  if (held) {
+    connections.delete(path);
+    close(held.db);
+  }
+  const opened = open(path);
+  connections.set(path, opened);
+  return opened.db;
 };
 self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
+  const { id, op, snapshot, path, sql, params, mode, perRead, freshSnapshot } = event.data;
   if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
   if (op === 'release') {
     const held = connections.get(path);
@@ -52929,9 +53020,14 @@ self.onmessage = (event) => {
       }
       postMessage({ id, ok: true, rows: null });
     } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
+      const held = snapshots.get(snapshot);
+      const db = op === 'query' ? connection(path) : held?.db;
       if (!db) throw new Error('unknown snapshot');
       const started = performance.now();
+      if (freshSnapshot && held && !held.perRead) {
+        if (held.file !== pathIdentity(held.path)) throw new Error('SQLite file changed during snapshot');
+        db.exec('COMMIT; BEGIN;');
+      }
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
       postMessage({ id, ok: true, rows, ms: performance.now() - started });
@@ -52947,6 +53043,7 @@ self.onmessage = (event) => {
 `, threads, heldConnections = 0, connectionTotal, nextId = 1, counters, startedStores, storeOpens, queues, turns, lostReplyCheck, openSnapshots, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
   init_read_progress();
+  init_sqlite_file_identity();
   init_answer_latency_trace();
   BACKGROUND_READS = { lane: "background" };
   OffThreadReadLostError = class OffThreadReadLostError extends Error {
@@ -56299,17 +56396,19 @@ function parentKey(parent) {
 function parentVerdicts(lane, parents) {
   return visibilityHere(parentVerdictsSteps(lane, parents));
 }
-function* parentVerdictsSteps(lane, parents) {
+function* parentVerdictsSteps(lane, parents, pooledLedger) {
   const unique = new Map;
   for (const parent of parents)
     unique.set(parentKey(parent), parent);
   try {
-    return yield* judge(lane, [...unique.values()], 0);
-  } catch {
+    return yield* judge(lane, [...unique.values()], 0, pooledLedger);
+  } catch (error) {
+    if (pooledLedger !== undefined)
+      throw error;
     return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
   }
 }
-function* judge(lane, parents, depth) {
+function* judge(lane, parents, depth, pooledLedger) {
   const verdicts = new Map;
   if (parents.length === 0)
     return verdicts;
@@ -56327,13 +56426,14 @@ function* judge(lane, parents, depth) {
       rows.set(key, list);
     }
   }
-  const ledger = lane.ledger();
+  const ledger = pooledLedger === undefined ? lane.ledger() : undefined;
   const identities = new Map;
   for (const list of rows.values()) {
     for (const row of list)
       identities.set(tierLedgerIdentityKey(row.identity), row.identity);
   }
-  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
+  const states = identities.size === 0 ? undefined : pooledLedger ? yield* visibilityRead(pooledOnly, () => pooledLedger.itemStates([...identities.values()])) : ledger ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
+  const secretSteps = (identity) => pooledLedger ? visibilityRead(pooledOnly, () => pooledLedger.itemIsSecret(identity)) : ledger ? itemSecretSteps(ledger, identity) : undefined;
   const climbing = new Map;
   for (const parent of parents) {
     const key = parentKey(parent);
@@ -56349,7 +56449,8 @@ function* judge(lane, parents, depth) {
       continue;
     }
     if (!identity) {
-      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
+      const secret = parent.identity && secretSteps(parent.identity);
+      if (secret && (yield* secret)) {
         verdicts.set(key, HIDDEN);
       } else {
         verdicts.set(key, { visible: false, gone: true });
@@ -56357,13 +56458,14 @@ function* judge(lane, parents, depth) {
       continue;
     }
     let visible;
-    if (!ledger) {
+    if (!ledger && !pooledLedger) {
       visible = active.length > 0;
     } else {
       const state = states?.get(tierLedgerIdentityKey(identity));
       const copies = state?.copies ?? [];
       visible = copies.length === 0 ? state?.record?.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity)))
+      const secret = !visible && active.length > 0 && secretSteps(identity);
+      if (secret && (yield* secret))
         visible = true;
     }
     if (visible) {
@@ -56376,13 +56478,16 @@ function* judge(lane, parents, depth) {
     }
   }
   if (climbing.size > 0) {
-    const above = yield* judge(lane, [...climbing.values()], depth + 1);
+    const above = yield* judge(lane, [...climbing.values()], depth + 1, pooledLedger);
     for (const [key, grandparent] of climbing) {
       if (above.get(parentKey(grandparent))?.visible !== true)
         verdicts.set(key, HIDDEN);
     }
   }
   return verdicts;
+}
+function pooledOnly() {
+  throw new Error("This visibility read requires the read pool");
 }
 function goneParents(lane, parents) {
   const gone = new Set;
@@ -56481,11 +56586,11 @@ function hiddenProbesByParentIdentity(lane, probes) {
   const hidden = hiddenByParentIdentity(lane, probes);
   return new Set(probes.filter((probe) => hidden.has(tierLedgerIdentityKey(probe))));
 }
-function* childrenWithHiddenParentsSteps(lane, children) {
+function* childrenWithHiddenParentsSteps(lane, children, pooledLedger) {
   const hidden = new Set;
   if (children.length === 0)
     return hidden;
-  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
+  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent), pooledLedger);
   for (const child of children) {
     if (verdicts.get(parentKey(child.parent))?.visible !== true)
       hidden.add(child.key);
@@ -56508,16 +56613,18 @@ function* childLinksSteps(lane, probes) {
 function hiddenChildKeys(lane, probes) {
   return visibilityHere(hiddenChildKeysSteps(lane, probes));
 }
-function* hiddenChildKeysSteps(lane, probes) {
+function* hiddenChildKeysSteps(lane, probes, pooledLedger) {
   if (probes.length === 0)
     return new Set;
   let links;
   try {
     links = yield* childLinksSteps(lane, probes);
-  } catch {
+  } catch (error) {
+    if (pooledLedger !== undefined)
+      throw error;
     return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
   }
-  return yield* childrenWithHiddenParentsSteps(lane, links);
+  return yield* childrenWithHiddenParentsSteps(lane, links, pooledLedger);
 }
 var VisibilityChangedError, VISIBILITY_CHANGE_RETRIES = 3, askReads, ASK_LEDGER_READS, releasing, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
@@ -59118,7 +59225,7 @@ function formatSpaceToFree(bytes) {
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { isMainThread as isMainThread4 } from "node:worker_threads";
 import { execFileSync as execFileSync2, spawn as spawn3 } from "node:child_process";
-import { closeSync as closeSync16, constants as constants6, existsSync as existsSync36, fstatSync as fstatSync4, openSync as openSync16, readdirSync as readdirSync6, readFileSync as readFileSync34, statSync as statSync16 } from "node:fs";
+import { closeSync as closeSync16, constants as constants7, existsSync as existsSync36, fstatSync as fstatSync5, openSync as openSync16, readdirSync as readdirSync6, readFileSync as readFileSync34, statSync as statSync16 } from "node:fs";
 import { homedir as homedir23 } from "node:os";
 import { delimiter as delimiter3, dirname as dirname42, isAbsolute as isAbsolute20, join as join46 } from "node:path";
 import { createInterface } from "node:readline";
@@ -59446,8 +59553,8 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
         return false;
       let fd;
       try {
-        fd = openSync16(join46(deviceDirectory, name), constants6.O_RDWR | constants6.O_NONBLOCK);
-        return fstatSync4(fd).isCharacterDevice();
+        fd = openSync16(join46(deviceDirectory, name), constants7.O_RDWR | constants7.O_NONBLOCK);
+        return fstatSync5(fd).isCharacterDevice();
       } catch {
         return false;
       } finally {
@@ -64710,18 +64817,18 @@ function runSteps(steps) {
   return step.value;
 }
 function* hiddenVisibilityFeedReads(table, after, startCursor) {
-  const store = table === "main.item_visibility_feed";
   const bounds = yield {
     sql: `SELECT (SELECT MIN(seq) FROM ${table}) AS first,
-    (SELECT MAX(seq) FROM ${table}) AS last${store ? ", (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued" : ""}`,
-    params: [],
+    (SELECT MAX(seq) FROM ${table}) AS last,
+    (SELECT seq FROM main.sqlite_sequence WHERE name = ?) AS issued`,
+    params: [table === "main.item_visibility_feed" ? "item_visibility_feed" : table],
     mode: "get"
   };
-  const latest = bounds.last ?? bounds.issued ?? 0;
+  const latest = bounds.issued ?? 0;
   if (startCursor !== undefined && latest < startCursor)
     throw new VisibilityChangedError;
   const cursor = startCursor ?? latest;
-  if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1 || store && bounds.first === null && after < latest)
+  if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1 || after < cursor && (bounds.last ?? 0) < cursor)
     return { cursor };
   const identities = new Map;
   for (let seq = after;seq < cursor; ) {
@@ -65066,6 +65173,23 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
     ]
   };
 }
+function vectorRowIdentity(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+  };
+}
+function vectorAccountKey(identity) {
+  return JSON.stringify([identity.provider, identity.accountScope]);
+}
+async function vectorReadSteps(read, path, steps) {
+  let next = steps.next();
+  while (!next.done)
+    next = steps.next(await read(path, next.value));
+  return next.value;
+}
 function foldVectorScore(bestByItem, row, queryVector) {
   const vector = decodeEmbedding(row.embedding);
   if (vector.length !== queryVector.length)
@@ -65079,7 +65203,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
   }
   return { mismatch: 0, qualified, score };
 }
-async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders) {
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders, validate) {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority), provider);
   if (after.skippedReason)
@@ -65096,7 +65220,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
   if (digestReady)
-    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, validate);
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -65140,12 +65264,13 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
     return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
   return rows;
 }
-async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders) {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, validate) {
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
   let digestPages = 0;
-  const expired = () => connectorStoreVectorDeadlineExpired(deadlineAtMs);
+  let rejectedItemPks;
+  const expired = () => !rejectedItemPks && connectorStoreVectorDeadlineExpired(deadlineAtMs);
   const cut = { skippedReason: "vector_scan_deadline_exceeded" };
   while (true) {
     if (expired())
@@ -65189,8 +65314,22 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
   let batches = 0;
   let readers;
   while (heap.length > 0) {
-    if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES) || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
-      break;
+    if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES) || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) {
+      if (!validate)
+        break;
+      const judged = await validate(bestByItem);
+      if (!judged)
+        return { skippedReason: "vector_visibility_unavailable" };
+      if (judged.rows.length === limit) {
+        return { bestByItem, dimensionMismatches, exhausted: false, validatedRows: judged.rows };
+      }
+      rejectedItemPks ??= new Set;
+      for (const itemPk of judged.rejectedItemPks) {
+        rejectedItemPks.add(itemPk);
+        bestByItem.delete(itemPk);
+      }
+      qualifiedItems = judged.rows.length;
+    }
     if (expired())
       return cutWith();
     if (batches++ > 0)
@@ -65219,6 +65358,10 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired())
           return cutWith();
+        if ((index & 31) === 0)
+          noteSourceIndexReadProgress();
+        if (rejectedItemPks?.has(row.item_pk))
+          continue;
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
@@ -65282,25 +65425,35 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECT
     ]
   };
 }
-async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
+async function scanVectorPagesOnPool(dbPath, expectedFile, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, validate) {
   const side = [];
   const sideReaders = async () => {
     const opened = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () => openOffThreadSnapshot(dbPath, { lane: "rescore", noWait: true }).catch(() => {
       return;
     })));
-    for (const reader of opened)
-      if (reader)
-        side.push(reader);
+    side.push(...opened.filter((reader) => reader !== undefined));
+    const markers = await Promise.all(side.map(async (reader) => await reader.read(VECTOR_FILE_READ)));
+    if (markers.some((marker) => marker.file !== expectedFile))
+      throw new OffThreadReadBusyError;
     return side.map((reader) => reader.read);
   };
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
-    if (error instanceof OffThreadReadBusyError)
+  let timer;
+  const validateBeforeStopping = (winners) => {
+    clearTimeout(timer);
+    return validate(winners);
+  };
+  const scan = withOffThreadSnapshot(dbPath, async (read) => {
+    const marker = await read(VECTOR_FILE_READ);
+    if (marker.file !== expectedFile)
+      return { skippedReason: "vector_visibility_unavailable" };
+    return scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders, validateBeforeStopping);
+  }, { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
+    if (error instanceof OffThreadReadBusyError || error instanceof OffThreadReadLostError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;
   });
   if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
     return scan;
-  let timer;
   const deadline = new Promise((resolve) => {
     timer = setTimeout(() => resolve({ skippedReason: "vector_scan_deadline_exceeded" }), Math.max(0, deadlineAtMs - Date.now()) + VECTOR_SCAN_BACKSTOP_GRACE_MS);
   });
@@ -65447,7 +65600,7 @@ function createConnectorStoreCorpusAdapter(options) {
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
-  const adapter = (request) => {
+  const adapter = async (request) => {
     assertConnectorStoreCorpusRequest(store, request);
     const startedAt = Date.now();
     let semanticSkippedReason;
@@ -65455,7 +65608,7 @@ function createConnectorStoreCorpusAdapter(options) {
     if (embeddingProvider && useHybrid === "hybrid") {
       if (store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
         semanticSkippedReason = "secure_local_embedding_provider_not_local";
-      } else if (!store.vectorLaneServable(embeddingProvider.modelId)) {
+      } else if (!await store.vectorLaneServableOffThread(embeddingProvider.modelId)) {
         semanticSkippedReason = "no_embedding_artifacts";
       }
     }
@@ -65520,7 +65673,7 @@ function createConnectorStoreCorpusAdapter(options) {
       })();
     return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback);
   };
-  adapter.hybridAvailability = () => {
+  adapter.hybridAvailability = async () => {
     if (!embeddingProvider) {
       return { servable: false, reason: "embedding_provider_unavailable" };
     }
@@ -65533,7 +65686,7 @@ function createConnectorStoreCorpusAdapter(options) {
         backend: embeddingProvider.backend
       };
     }
-    const servable = store.vectorLaneServable(embeddingProvider.modelId);
+    const servable = await store.vectorLaneServableOffThread(embeddingProvider.modelId);
     return {
       servable,
       ...!servable ? { reason: "no_current_embedding_artifacts" } : {},
@@ -65546,7 +65699,7 @@ function createConnectorStoreCorpusAdapter(options) {
     assertConnectorStoreCorpusRequest(store, request);
     const startedAt = Date.now();
     const none = { matchedItems: 0, contentMatchedItems: 0, saturated: false };
-    if (!embeddingProvider || (options.retrievalMode ?? "hybrid") !== "hybrid" || store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider) || !store.vectorLaneServable(embeddingProvider.modelId)) {
+    if (!embeddingProvider || (options.retrievalMode ?? "hybrid") !== "hybrid" || store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider) || !await store.vectorLaneServableOffThread(embeddingProvider.modelId)) {
       return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
     }
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
@@ -65572,7 +65725,7 @@ function createConnectorStoreCorpusAdapter(options) {
   const metadataMatches = async (request) => {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
-    const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.vectorLaneServable(embeddingProvider.modelId);
+    const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && await store.vectorLaneServableOffThread(embeddingProvider.modelId);
     const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, onPartialRows: partialKeywordRows(store, request) };
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs), options.localKeywordFallback, ftsOptions, request.deadlineAtMs);
@@ -68258,11 +68411,9 @@ function nowIso() {
   return new Date().toISOString();
 }
 function fileIdentity(path) {
-  if (path === ":memory:" || path === "")
-    return;
   try {
-    const stat = statSync17(path);
-    return { dev: stat.dev, ino: stat.ino };
+    const stat = statSync17(path, { bigint: true });
+    return stat.dev + ":" + stat.ino;
   } catch {
     return;
   }
@@ -68280,7 +68431,7 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
+`, vectorCopiesAllowed = (corpusId, copies) => !copies.some((copy) => copy.corpusId === corpusId && copy.state === "current" && copy.embedHold), TIER_BINDING_READ, ON_DEMAND_READS_PRESENT, VECTOR_FILE_READ, VECTOR_DATA_VERSION_READ, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 // core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
@@ -68351,6 +68502,7 @@ var init_local_index = __esm(() => {
   init_memory_counters();
   init_read_progress();
   init_source_size_limits();
+  init_sqlite_file_identity();
   init_store_totals();
   init_vector_digest();
   init_boot_progress();
@@ -68366,6 +68518,7 @@ var init_local_index = __esm(() => {
   init_partial_search();
   init_control_path_headroom();
   init_off_thread_reads();
+  init_answer_latency_trace();
   init_provider_account_identity();
   init_operation_error();
   init_media_cache();
@@ -68493,6 +68646,22 @@ var init_local_index = __esm(() => {
       this.name = "ConnectorStoreLocatorIdentityIndexNotReadyError";
     }
   };
+  TIER_BINDING_READ = {
+    sql: "SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?",
+    params: [TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID],
+    mode: "get"
+  };
+  ON_DEMAND_READS_PRESENT = {
+    sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'",
+    params: [],
+    mode: "get"
+  };
+  VECTOR_FILE_READ = {
+    sql: "SELECT olympus_read_file_identity() AS file, schema_version FROM pragma_schema_version",
+    params: [],
+    mode: "get"
+  };
+  VECTOR_DATA_VERSION_READ = { sql: "PRAGMA data_version", params: [], mode: "get" };
   LocalConnectorStore = class LocalConnectorStore {
     dbPath;
     openedFile;
@@ -68572,8 +68741,9 @@ var init_local_index = __esm(() => {
       }
       const creatingFile = this.dbPath === ":memory:" || !existsSync37(this.dbPath);
       this.db = new Database9(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
-      this.openedFile = fileIdentity(this.dbPath);
       try {
+        if (this.dbPath !== ":memory:")
+          this.openedFile = openedSqliteFileIdentity(this.db);
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : creatingFile ? "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma() : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma());
         applySqliteMmap(this.db);
         assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
@@ -69065,7 +69235,7 @@ var init_local_index = __esm(() => {
           if (generation === input.accountGeneration)
             continue;
           changed += this.db.query(`
-          UPDATE items SET source_scope_generation = ?, source_scope_revision = ?
+          UPDATE items SET source_scope_generation = ?, source_scope_revision = ?, item_pk = item_pk
           WHERE provider = ? AND source_scope_generation = ?
         `).run(input.accountGeneration, input.revision, input.provider, generation).changes;
         }
@@ -69090,9 +69260,9 @@ var init_local_index = __esm(() => {
       return Array.isArray(record.generations) ? record.generations.filter((value) => typeof value === "string" && value.length > 0) : [];
     }
     tierSetBinding() {
-      const row = this.db.query(`
-      SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
-    `).get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+      return this.parseTierSetBinding(this.db.query(TIER_BINDING_READ.sql).get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID));
+    }
+    parseTierSetBinding(row) {
       if (!row?.cursor)
         return;
       try {
@@ -69958,7 +70128,7 @@ var init_local_index = __esm(() => {
       if (identity.sourceVersion === undefined)
         return;
       this.db.query(`
-      UPDATE items SET source_version = ?
+      UPDATE items SET source_version = ?, item_pk = item_pk
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
         ${options.onlyTombstoned === true ? "AND tombstoned = 1" : ""}
     `).run(identity.sourceVersion, identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
@@ -70606,7 +70776,7 @@ ${parentKey(ref)}`, { ref, origin });
         WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
       `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         if (row)
-          this.rememberItemOwner(row.item_pk, connectorId, "observed", row.sync_run_id, nowIso(), "provider_listing");
+          this.rememberUnchangedItemOwner(row.item_pk, connectorId, "observed", row.sync_run_id);
       })();
     }
     reobserveRoutedCopy(item, connectorId, ownershipKind, syncRunId) {
@@ -70617,7 +70787,7 @@ ${parentKey(ref)}`, { ref, origin });
     `).get(item.identity.provider, item.identity.accountScope, normalizeConversationId(item.identity.providerConversationId), item.identity.providerItemId);
       if (!row)
         return;
-      this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
+      this.rememberUnchangedItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId);
     }
     tombstoneCopy(identity, options) {
       const syncRunId = `connector-tier-copy-${randomUUID12()}`;
@@ -71433,7 +71603,8 @@ ${parentKey(ref)}`, { ref, origin });
         this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
         if (options.keepMetadata === false) {
           this.db.query(`UPDATE items SET title = NULL, search_text = NULL, locator_uri = NULL,
-          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL
+          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL,
+          item_pk = item_pk
           WHERE item_pk = ?`).run(row.item_pk);
         }
         this.refreshFtsForItem(row.item_pk);
@@ -72223,8 +72394,13 @@ ${parentKey(ref)}`, { ref, origin });
       };
     }
     grantOnDemandRead(localItemId, sourceVersion = "") {
-      this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
-      ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
+      this.db.transaction(() => {
+        const grant = this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
+        ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version
+        WHERE on_demand_item_reads.source_version IS NOT excluded.source_version`).run(localItemId, sourceVersion);
+        if (grant.changes)
+          this.db.query("UPDATE items SET item_pk = item_pk WHERE local_item_id = ? AND tombstoned = 0").run(localItemId);
+      })();
     }
     onDemandContentHeld(identity) {
       if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get())
@@ -72236,10 +72412,13 @@ ${parentKey(ref)}`, { ref, origin });
         return false;
       try {
         const record = this.visibilityLedger()?.getCurrent(identity);
-        return !record || !record.contentRead || record.contentPending || record.metadataPending || record.state !== "current" || record.contentTier === "secrets" || record.contentTier === "secure" && this.trustDomain !== "secure_local" || record.contentTier === "private" && this.trustDomain === "public_safe";
+        return this.onDemandTierHeld(record);
       } catch {
         return true;
       }
+    }
+    onDemandTierHeld(record) {
+      return !record || !record.contentRead || record.contentPending || record.metadataPending || record.state !== "current" || record.contentTier === "secrets" || record.contentTier === "secure" && this.trustDomain !== "secure_local" || record.contentTier === "private" && this.trustDomain === "public_safe";
     }
     onDemandReadForLocator(locator) {
       const row = this.db.query("SELECT local_item_id FROM items WHERE locator_uri = ? AND tombstoned = 0 LIMIT 1").get(locator);
@@ -73541,7 +73720,7 @@ ${parentKey(ref)}`, { ref, origin });
         if (batch.length === 0)
           break;
         this.db.transaction(() => {
-          const update = this.db.query("UPDATE items SET search_text = ? WHERE item_pk = ?");
+          const update = this.db.query("UPDATE items SET search_text = ?, item_pk = item_pk WHERE item_pk = ?");
           for (const row of batch) {
             const identity = {
               family: row.family,
@@ -73646,7 +73825,7 @@ ${parentKey(ref)}`, { ref, origin });
           AND tombstoned = 0
         LIMIT 1
       `);
-        const update = this.db.query("UPDATE items SET search_text = ? WHERE item_pk = ?");
+        const update = this.db.query("UPDATE items SET search_text = ?, item_pk = item_pk WHERE item_pk = ?");
         for (const record of records) {
           const prefix = normalizeFacetNamespacePrefix(record.namespacePrefix);
           const literalEscapePrefix = normalizeFacetLiteralEscapePrefix(record.literalEscapePrefix, prefix);
@@ -74498,6 +74677,15 @@ ${parentKey(ref)}`, { ref, origin });
           ELSE item_owners.last_seen_at
         END
     `).run(itemPk, requireNonEmpty(connectorId, "Connector owner id"), ownershipKind, syncRunId, syncRunId, observedAt, observedAt, observation === "provider_listing" ? 1 : 0);
+    }
+    rememberUnchangedItemOwner(itemPk, connectorId, ownershipKind, syncRunId) {
+      this.db.transaction(() => {
+        const owner = this.db.query("SELECT ownership_kind FROM item_owners WHERE item_pk = ? AND connector_id = ?").get(itemPk, connectorId);
+        this.rememberItemOwner(itemPk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
+        if (owner?.ownership_kind !== "preservation" && owner?.ownership_kind === "observed" !== (ownershipKind === "observed")) {
+          this.db.query("UPDATE items SET item_pk = item_pk WHERE item_pk = ?").run(itemPk);
+        }
+      })();
     }
     async indexItemContent(connector, place, recordDecision, item, itemPk, maxChunkChars, gaps, onContentFetchFailure, onContentFetchSuccess) {
       let text = textFromRawItem(item);
@@ -75622,10 +75810,10 @@ ${parentKey(ref)}`, { ref, origin });
       return row !== null;
     }
     embeddingCurrencyRebuildPending(modelId) {
-      const row = this.db.query(`
-      SELECT cursor FROM sync_runs
-      WHERE sync_run_id = ? AND connector_id = ?
-    `).get(connectorStoreEmbeddingWriteAuthorityId(modelId), "connector_store_embedding_write_authority");
+      const read = embeddingAuthorityRead({ modelId });
+      return this.embeddingCurrencyPendingFromRow(this.db.query(read.sql).get(...read.params));
+    }
+    embeddingCurrencyPendingFromRow(row) {
       if (!row)
         return false;
       try {
@@ -75652,18 +75840,8 @@ ${parentKey(ref)}`, { ref, origin });
       if (this.embeddingCurrencyRebuildPending(modelId))
         return false;
       const exclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
-      const row = this.db.query(`
-      SELECT 1 AS present
-      FROM chunk_embeddings emb
-      JOIN chunks c ON c.chunk_pk = emb.chunk_pk
-      JOIN items i ON i.item_pk = emb.item_pk
-      WHERE emb.model_id = ?
-        AND i.tombstoned = 0
-        AND emb.content_hash = c.embedding_input_hash
-        ${exclusion.filter}
-      LIMIT 1
-    `).get(modelId, ...exclusion.params);
-      return row !== null;
+      const read = this.currentEmbeddingProbe(modelId, exclusion);
+      return this.db.query(read.sql).get(...read.params) !== null;
     }
     vectorLaneServable(modelId) {
       if (this.embeddingCurrencyRebuildPending(modelId))
@@ -75683,7 +75861,11 @@ ${parentKey(ref)}`, { ref, origin });
       return servable;
     }
     anyCurrentEmbedding(modelId) {
-      return this.db.query(`
+      const read = this.currentEmbeddingProbe(modelId);
+      return this.db.query(read.sql).get(...read.params) !== null;
+    }
+    currentEmbeddingProbe(modelId, exclusion = { filter: "", params: [] }) {
+      return { mode: "get", params: [modelId, ...exclusion.params], sql: `
       SELECT 1 AS present
       FROM chunk_embeddings emb
       JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -75691,8 +75873,25 @@ ${parentKey(ref)}`, { ref, origin });
       WHERE emb.model_id = ?
         AND i.tombstoned = 0
         AND emb.content_hash = c.embedding_input_hash
+        ${exclusion.filter}
       LIMIT 1
-    `).get(modelId) !== null;
+    ` };
+    }
+    async vectorLaneServableOffThread(modelId) {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.vectorLaneServable(modelId);
+      const authority = await this.readVectorOnPool(this.dbPath, embeddingAuthorityRead({ modelId }));
+      if (this.embeddingCurrencyPendingFromRow(authority))
+        return false;
+      const memo = this.vectorLaneMemo?.get(modelId);
+      if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS)
+        return true;
+      const hidden = this.tierHiddenCountsMemo?.value ?? this.tierLedgerHiddenMemo?.value;
+      const exclusion = hidden && this.embeddingWorkListExclusionFilter(0, hidden, false, false);
+      const servable = await this.readVectorOnPool(this.dbPath, this.currentEmbeddingProbe(modelId, exclusion)) !== null;
+      if (servable && hidden)
+        (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
+      return servable;
     }
     vectorLaneMemo;
     async vectorSearchItems(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
@@ -75709,7 +75908,15 @@ ${parentKey(ref)}`, { ref, origin });
       const trimmed = query.trim();
       if (!trimmed)
         return { rows: [] };
-      const before = this.embeddingReadAuthority(provider);
+      const pooled = offThreadReadsSupported(this.dbPath);
+      let before;
+      try {
+        before = pooled ? embeddingAuthorityFromRow(await this.readVectorOnPool(this.dbPath, embeddingAuthorityRead(provider)), provider) : this.embeddingReadAuthority(provider);
+      } catch (error) {
+        if (!(error instanceof OffThreadReadBusyError))
+          throw error;
+        return { rows: [], skippedReason: "vector_scan_store_busy" };
+      }
       if (before.skippedReason)
         return { rows: [], skippedReason: before.skippedReason };
       let queryVector;
@@ -75757,39 +75964,64 @@ ${parentKey(ref)}`, { ref, origin });
         ...selectedAccount ? { accountScope: selectedAccount } : {},
         ...filters ? { filters } : {}
       };
-      const excludedItemPks = this.vectorScanExcludedItemPks();
+      const pooled = offThreadReadsSupported(this.dbPath);
+      const excludedItemPks = pooled ? await this.vectorScanMemoExclusions() : this.vectorScanExcludedItemPks();
       if (excludedItemPks)
         pageOptions.excludedItemPks = excludedItemPks;
-      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
+      const validate = async (winners) => {
+        try {
+          return await this.validateVectorWinners(winners, limit, selectedAccount, filters, input.locate, pooled);
+        } catch (error) {
+          if (!pooled)
+            throw error;
+          return;
+        }
+      };
+      const scanned = pooled ? await scanVectorPagesOnPool(this.dbPath, this.openedFile, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, validate) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, validate);
       if ("skippedReason" in scanned)
         return { rows: [], skippedReason: scanned.skippedReason };
-      const { bestByItem, dimensionMismatches } = scanned;
-      const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-      const rankedItems = [];
-      let candidateOffset = 0;
-      while (rankedItems.length < limit && candidateOffset < candidates.length) {
-        const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
-        const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
-        for (const candidate of batch)
-          if (visible.has(candidate[0]))
-            rankedItems.push(candidate);
-        candidateOffset += batch.length;
-      }
-      const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
-      const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
-      const laneRows = searchRows.flatMap((row) => {
-        const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
-        if (winner === undefined)
-          return [];
-        if (!input.locate)
-          return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
-        const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, "semantic");
-        return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
-      });
+      const rows = scanned.validatedRows ?? (await validate(scanned.bestByItem))?.rows;
+      if (!rows)
+        return { rows: [], skippedReason: "vector_visibility_unavailable" };
       return {
-        rows: laneRows,
-        ...scanned.cutReason !== undefined ? { skippedReason: scanned.cutReason } : laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
+        rows,
+        ...scanned.cutReason !== undefined ? { skippedReason: scanned.cutReason } : rows.length === 0 && scanned.dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
       };
+    }
+    async validateVectorWinners(bestByItem, limit, accountScope, filters, locate, pooled) {
+      const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+      const winners = new Map;
+      const rejectedItemPks = [];
+      let candidateOffset = 0;
+      let batchSize = limit;
+      while (true) {
+        while (winners.size < limit && candidateOffset < candidates.length) {
+          const batch = candidates.slice(candidateOffset, candidateOffset + batchSize);
+          const itemPks = batch.map(([itemPk]) => itemPk);
+          const visible = pooled ? await this.visibleVectorItemPksOffThread(itemPks, accountScope, filters) : this.visibleVectorItemPks(itemPks, accountScope, filters);
+          for (const [itemPk, winner] of batch) {
+            candidateOffset += 1;
+            if (visible.has(itemPk))
+              winners.set(itemPk, winner);
+            else
+              rejectedItemPks.push(itemPk);
+            if (winners.size === limit)
+              break;
+          }
+          batchSize = Math.min(200, batchSize * 2);
+        }
+        const rows = pooled ? await this.vectorWinnerRowsOffThread(winners, accountScope, filters, locate) : this.vectorWinnerRowsHere(winners, accountScope, filters, locate);
+        const needsMore = rows.size < winners.size && candidateOffset < candidates.length;
+        for (const itemPk of winners.keys()) {
+          if (rows.has(itemPk))
+            continue;
+          winners.delete(itemPk);
+          rejectedItemPks.push(itemPk);
+        }
+        if (!needsMore) {
+          return { rows: [...rows.values()], rejectedItemPks };
+        }
+      }
     }
     vectorScanExcludedItemPks() {
       if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
@@ -75812,6 +76044,37 @@ ${parentKey(ref)}`, { ref, origin });
       } catch {
         return;
       }
+      return this.vectorExclusions(base, children);
+    }
+    async vectorScanMemoExclusions() {
+      const memo = this.tierLedgerHiddenMemo;
+      if (!memo || !this.visibilityFeedPresent)
+        return;
+      try {
+        const read = (path, query) => this.readVectorOnPool(path, query);
+        const ledgerCursor = memo.ledgerCursor;
+        const storeCursor = memo.storeCursor;
+        const child = this.hiddenChildMemo;
+        const members = child ? this.vectorVisibilityStores() : [];
+        const paths = new Map(members.map((store) => [store, child?.storeCursors.get(store)]));
+        const ledgerPath = await this.vectorVisibilityLedgerPath(read);
+        if (ledgerPath !== memo.ledger.dbPath)
+          return;
+        const [ledger, own, ...siblings] = await Promise.all([
+          vectorReadSteps(read, ledgerPath, hiddenVisibilityFeedReads("tier_visibility_changes")),
+          vectorReadSteps(read, this.dbPath, hiddenVisibilityFeedReads("main.item_visibility_feed")),
+          ...members.map((store) => vectorReadSteps(read, store.dbPath, hiddenVisibilityFeedReads("main.item_visibility_feed")))
+        ]);
+        const childCurrent = child && child.ledger === memo.ledger && child.ledgerCursor === ledgerCursor && child.storeCursors.size === members.length && members.every((store, at) => paths.get(store) === siblings[at]?.cursor);
+        if (ledger.cursor > ledgerCursor || own.cursor > storeCursor || child && !childCurrent) {
+          withoutSourceAnswerTrace(() => withoutSourceIndexReadProgress(() => this.refreshTierHiddenCountsInTurns()));
+        }
+        return this.vectorExclusions(memo.value, child?.ledger === memo.ledger ? [...child.hiddenParents.values()].flat() : []);
+      } catch {
+        return;
+      }
+    }
+    vectorExclusions(base, children) {
       const memo = this.tierLedgerHiddenMemo;
       const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
       const cached = this.vectorScanExclusion;
@@ -75828,7 +76091,7 @@ ${parentKey(ref)}`, { ref, origin });
       return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
     }
     vectorScanExclusion;
-    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
+    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, validate) {
       const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
       try {
@@ -75841,7 +76104,7 @@ ${parentKey(ref)}`, { ref, origin });
           const params = query.params;
           return query.mode === "all" ? statement.all(...params) : statement.get(...params);
         };
-        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit);
+        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, undefined, validate);
       } finally {
         try {
           scanDb.exec("ROLLBACK;");
@@ -75975,31 +76238,37 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
-    visibleVectorItemPks(itemPks, accountScope, filters) {
-      const visible = new Set;
+    vectorItemPksRead(itemPks, accountScope, filters, includeTombstones = false) {
       const selectedFilters = connectorStoreFilterSql(filters);
-      for (let offset = 0;offset < itemPks.length; offset += 200) {
-        const batch = itemPks.slice(offset, offset + 200);
-        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
-        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
-        for (const row of this.tierVisibleRows(rows, (row) => ({
-          provider: row.provider,
-          accountScope: row.account_scope,
-          providerItemId: row.provider_item_id,
-          ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-        }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
-          visible.add(row.item_pk);
-      }
-      return visible;
+      return {
+        sql: `SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM items i WHERE i.item_pk IN (${itemPks.map(() => "?").join(",")}) ${includeTombstones ? "" : "AND i.tombstoned = 0"}
+        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`,
+        params: [...itemPks, ...accountScope ? [accountScope] : [], ...selectedFilters.params],
+        mode: "all"
+      };
     }
-    searchRowsByItemPks(itemPks, accountScope, filters) {
-      if (itemPks.length === 0)
-        return [];
-      const placeholders = itemPks.map(() => "?").join(", ");
-      const selectedAccount = normalizeOptionalAccountScope(accountScope);
+    visibleVectorItemPks(itemPks, accountScope, filters) {
+      const read = this.vectorItemPksRead(itemPks, accountScope, filters);
+      const rows = this.db.query(read.sql).all(...read.params);
+      return new Set(this.tierVisibleRows(rows, vectorRowIdentity, () => "content", false, (copies) => vectorCopiesAllowed(this.corpusId, copies)).map((row) => row.item_pk));
+    }
+    async visibleVectorItemPksOffThread(itemPks, accountScope, filters) {
+      const rows = await this.readVectorOnPool(this.dbPath, this.vectorItemPksRead(itemPks, accountScope, filters));
+      const visible = await this.vectorContentVisibleRows(rows, (path, query) => this.readVectorOnPool(path, query), this.vectorVisibilityStores(), this.vectorLedgerHandles());
+      return new Set(visible.map((row) => row.item_pk));
+    }
+    readVectorOnPool(path, query) {
+      if (this.closedForPoolReads || !offThreadReadsSupported(path))
+        throw new OffThreadReadBusyError;
+      return readOnPool(path, query, { store: this.dbPath });
+    }
+    vectorWinnerItemsRead(itemPks, accountScope, filters, metadataOnly) {
       const selectedFilters = connectorStoreFilterSql(filters);
-      const rows = this.db.query(`
+      return {
+        mode: "all",
+        params: [...itemPks, ...accountScope ? [accountScope] : [], ...selectedFilters.params, ...metadataOnly?.params ?? []],
+        sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -76008,16 +76277,327 @@ ${parentKey(ref)}`, { ref, origin });
         i.trust_tier, i.sync_run_id,
         0 AS rank
       FROM items i
-      WHERE i.item_pk IN (${placeholders})
+      WHERE i.item_pk IN (${itemPks.map(() => "?").join(", ")})
         AND i.tombstoned = 0
-        ${selectedAccount ? "AND i.account_scope = ?" : ""}
+        ${accountScope ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
-    `).all(...itemPks, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
+        ${metadataOnly?.sql ? `AND NOT ${metadataOnly.sql}` : ""}
+      `
+      };
+    }
+    vectorWinnerRowsHere(winners, accountScope, filters, locate) {
+      const result = new Map;
+      if (winners.size === 0)
+        return result;
+      const read = this.vectorWinnerItemsRead([...winners.keys()], accountScope, filters);
+      const rows = this.db.query(read.sql).all(...read.params);
       const byPk = new Map(rows.map((row) => [row.item_pk, row]));
-      return itemPks.flatMap((itemPk) => {
-        const row = byPk.get(itemPk);
-        return row ? [searchRowFromItemRow(row)] : [];
+      for (const [pk, winner] of winners) {
+        const item = byPk.get(pk);
+        if (item?.local_item_id !== winner.localItemId)
+          continue;
+        const row = searchRowFromItemRow(item);
+        const { bestCosine } = winner;
+        if (!locate) {
+          result.set(pk, { ...row, contentMatched: true, bestCosine });
+          continue;
+        }
+        const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, "semantic");
+        result.set(pk, { ...row, ...chunk ? { chunk } : {}, bestCosine });
+      }
+      return result;
+    }
+    vectorVisibilityStores() {
+      const stores = this.childLane ? this.childLane.mountedStores?.() : [this];
+      if (!stores || !stores.includes(this) || !stores.every((store) => store instanceof LocalConnectorStore) || stores.some((store) => store.db.inTransaction || !offThreadReadsSupported(store.dbPath) || store.fileReplacedOrRemoved() || store.closedForPoolReads)) {
+        throw new VisibilityChangedError;
+      }
+      return stores;
+    }
+    vectorLedgerHandles() {
+      return { configured: this.tierLedgerHandle, bound: this.boundLedgerHandle, child: this.childLane?.ledger() };
+    }
+    vectorVisibilityContext() {
+      const stores = this.vectorVisibilityStores();
+      const handles = this.vectorLedgerHandles();
+      const fallbackPath = !handles.configured && !this.tierLedgerDisabled ? tierLedgerPathForStore(this.dbPath) : undefined;
+      return { stores, handles, childLane: this.childLane, fallbackPath, fallbackFile: fallbackPath && fileIdentity(fallbackPath) };
+    }
+    checkVectorVisibilityContext(context, snapshots) {
+      const current = this.vectorVisibilityStores();
+      const ledgers = this.vectorLedgerHandles();
+      const { stores, childLane, handles, fallbackPath, fallbackFile } = context;
+      if (stores.length !== current.length || !stores.every((store, i) => store === current[i]) || childLane !== this.childLane || handles.configured !== ledgers.configured || handles.bound !== ledgers.bound || handles.child !== ledgers.child || fallbackPath && fallbackFile !== fileIdentity(fallbackPath))
+        throw new VisibilityChangedError;
+      for (const ledger of new Set(Object.values(handles)))
+        if (ledger)
+          this.assertVectorLedgerHandle(ledger);
+      const identities = new Map;
+      for (const snapshot of snapshots) {
+        if (snapshot.candidates.size === 0)
+          continue;
+        for (const [path, file] of snapshot.files) {
+          if (!identities.has(path))
+            identities.set(path, fileIdentity(path));
+          if (identities.get(path) !== file)
+            throw new VisibilityChangedError;
+        }
+      }
+    }
+    async vectorVisibilityLedgerPath(read, handles = this.vectorLedgerHandles()) {
+      const binding = this.parseTierSetBinding(await read(this.dbPath, TIER_BINDING_READ));
+      const handle = handles.configured ?? (binding ? handles.bound : undefined);
+      if (handle) {
+        this.assertVectorLedgerHandle(handle);
+        const ledger = await this.vectorLedgerSchema(read, handle.dbPath);
+        if (!ledger || ledger.file !== handle.pooledFileIdentity() || binding && ledger.id !== binding.ledgerId) {
+          throw new TierLedgerUnavailableError(this.corpusId);
+        }
+        return handle.dbPath;
+      }
+      if (binding) {
+        for (const path of tierSetLedgerCandidates(this.dbPath, binding.ledgerPath)) {
+          if (!offThreadReadsSupported(path) || !existsSync37(path))
+            continue;
+          if ((await this.vectorLedgerSchema(read, path))?.id === binding.ledgerId)
+            return path;
+        }
+        throw new TierLedgerUnavailableError(this.corpusId);
+      }
+      if (this.tierLedgerDisabled)
+        return;
+      const path = tierLedgerPathForStore(this.dbPath);
+      if (!existsSync37(path))
+        return;
+      if (!await this.vectorLedgerSchema(read, path))
+        throw new TierLedgerUnavailableError(this.corpusId);
+      return path;
+    }
+    assertVectorLedgerHandle(handle) {
+      const file = handle.pooledFileIdentity();
+      if (!file || file !== fileIdentity(handle.dbPath))
+        throw new TierLedgerUnavailableError(this.corpusId);
+      if (handle.writesHeld())
+        throw new VisibilityChangedError;
+    }
+    async vectorLedgerSchema(read, path) {
+      const row = await read(path, {
+        sql: `SELECT (SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id') AS id,
+        olympus_read_file_identity() AS file, version, compatible_version FROM schema_version WHERE store_id = ?`,
+        params: [TIER_LEDGER_SQLITE_STORE_ID],
+        mode: "get"
       });
+      if (row && (row.version === TIER_LEDGER_SCHEMA_VERSION || row.version > TIER_LEDGER_SCHEMA_VERSION && Number.isInteger(row.compatible_version) && row.compatible_version <= TIER_LEDGER_SCHEMA_VERSION))
+        return row;
+      return;
+    }
+    async vectorContentVisibleRows(rows, read, visibilityStores, handles, dependencies) {
+      if (rows.length === 0)
+        return [];
+      const ledgerPath = await this.vectorVisibilityLedgerPath(read, handles);
+      if (dependencies && ledgerPath)
+        dependencies.ledgerPath = ledgerPath;
+      const identities = rows.map(vectorRowIdentity);
+      const granted = await read(this.dbPath, ON_DEMAND_READS_PRESENT) ? await read(this.dbPath, {
+        sql: `SELECT i.item_pk FROM items i JOIN on_demand_item_reads r ON i.local_item_id = r.local_item_id
+        AND COALESCE(i.source_version, '') = r.source_version
+        WHERE i.item_pk IN (${rows.map(() => "?").join(",")}) AND i.tombstoned = 0`,
+        params: rows.map((row) => row.item_pk),
+        mode: "all"
+      }) : [];
+      const grantedPks = new Set(granted.map((row) => row.item_pk));
+      const itemStates = (path, items) => vectorReadSteps(read, path, TierLedger.itemStatesSteps(items));
+      const onDemand = ledgerPath && granted.length > 0 ? await itemStates(ledgerPath, rows.filter((row) => grantedPks.has(row.item_pk)).map(vectorRowIdentity)) : undefined;
+      const visibility = ledgerPath ? await vectorReadSteps(read, ledgerPath, TierLedger.visibilityReadSteps(identities)) : undefined;
+      const served = rows.filter((row) => {
+        const key = tierLedgerIdentityKey(vectorRowIdentity(row));
+        const itemCopies = visibility?.copies.get(key);
+        return (!grantedPks.has(row.item_pk) || !this.onDemandTierHeld(onDemand?.get(key)?.record)) && !visibility?.routedWithoutCopies.has(key) && tierRowVisible(itemCopies, this.corpusId, "content") && vectorCopiesAllowed(this.corpusId, itemCopies ?? []);
+      });
+      const stores = visibilityStores.map((store) => ({
+        corpusId: store.corpusId,
+        parentLinksOf: pooledOnly,
+        parentLinksOfOffThread: async (probes) => {
+          const links = await vectorReadSteps(read, store.dbPath, store.parentLinksOfSteps(probes));
+          for (const [key, parent] of links)
+            dependencies?.parentScopes.set(key, vectorAccountKey(parent));
+          return links;
+        },
+        parentStandings: pooledOnly,
+        parentStandingsOffThread: async (parents) => vectorReadSteps(read, store.dbPath, store.parentStandingsSteps(parents)),
+        itemStandings: pooledOnly
+      }));
+      const laneLedger = handles.child;
+      if (laneLedger && served.length > 0) {
+        this.assertVectorLedgerHandle(laneLedger);
+        const marker = await read(laneLedger.dbPath, VECTOR_FILE_READ);
+        if (marker.file !== laneLedger.pooledFileIdentity())
+          throw new TierLedgerUnavailableError(this.corpusId);
+      }
+      const parentLedgerPath = laneLedger?.dbPath ?? ledgerPath;
+      if (dependencies && parentLedgerPath)
+        dependencies.parentLedgerPath = parentLedgerPath;
+      const parentLedger = parentLedgerPath ? {
+        itemStates: (items) => {
+          for (const item of items)
+            dependencies?.parentLedgerKeys.add(tierLedgerIdentityKey(item));
+          return itemStates(parentLedgerPath, items);
+        },
+        itemIsSecret: (item) => {
+          dependencies?.parentLedgerKeys.add(tierLedgerIdentityKey(item));
+          return vectorReadSteps(read, parentLedgerPath, TierLedger.itemIsSecretSteps(item));
+        }
+      } : null;
+      const hidden = await visibilityOffThread(hiddenChildKeysSteps({ stores: () => stores, ledger: () => {
+        return;
+      } }, served.map(vectorRowIdentity), parentLedger));
+      return served.filter((row) => !hidden.has(tierLedgerIdentityKey(vectorRowIdentity(row))));
+    }
+    async vectorWinnerRowsOffThread(winners, accountScope, filters, locate) {
+      if (winners.size === 0)
+        return new Map;
+      const snapshots = [];
+      let pending = winners;
+      let context;
+      try {
+        for (let attempt = 0;attempt < VISIBILITY_CHANGE_RETRIES; attempt += 1) {
+          try {
+            context ??= this.vectorVisibilityContext();
+            snapshots.push(await this.judgeVectorWinnerSnapshot(pending, accountScope, filters, locate, context));
+            const changed = new Set((await Promise.all(snapshots.map((snapshot) => snapshot.changed()))).flat());
+            this.checkVectorVisibilityContext(context, snapshots);
+            if (changed.size === 0) {
+              const rows = new Map(snapshots.flatMap((snapshot) => [...snapshot.rows]));
+              return new Map([...winners.keys()].flatMap((pk) => rows.has(pk) ? [[pk, rows.get(pk)]] : []));
+            }
+            pending = new Map([...winners].filter(([pk]) => changed.has(pk)));
+            for (const snapshot of snapshots) {
+              for (const pk of changed) {
+                snapshot.candidates.delete(pk);
+                snapshot.rows.delete(pk);
+              }
+            }
+          } catch (error) {
+            if (!(error instanceof VisibilityChangedError))
+              throw error;
+            await Promise.all(snapshots.splice(0).map((snapshot) => snapshot.close()));
+            pending = winners;
+            context = undefined;
+          }
+        }
+        throw new VisibilityChangedError;
+      } finally {
+        await Promise.all(snapshots.map((snapshot) => snapshot.close()));
+      }
+    }
+    async judgeVectorWinnerSnapshot(winners, accountScope, filters, locate, context) {
+      const { stores, handles, fallbackPath, fallbackFile } = context;
+      const storePaths = new Map(stores.map((store) => [store.dbPath, store]));
+      const files = new Map;
+      const fileIdentities = new Map;
+      const opened = [];
+      const close = async () => {
+        await Promise.all(opened.map((snapshot) => snapshot.close()));
+      };
+      const open = async (path) => {
+        if (!offThreadReadsSupported(path))
+          throw new VisibilityChangedError;
+        const snapshot = await openOffThreadSnapshot(path, { store: this.dbPath });
+        opened.push(snapshot);
+        const marker = await snapshot.read(VECTOR_FILE_READ);
+        fileIdentities.set(path, marker.file);
+        const store = storePaths.get(path);
+        if (store && marker.file !== store.openedFile || path === fallbackPath && marker.file !== fallbackFile) {
+          throw new VisibilityChangedError;
+        }
+        const feed = store ? store.visibilityFeedPresent ? "main.item_visibility_feed" : undefined : "tier_visibility_changes";
+        const token = feed ? (await vectorReadSteps((_, query) => snapshot.read(query), path, hiddenVisibilityFeedReads(feed))).cursor : (await snapshot.read(VECTOR_DATA_VERSION_READ)).data_version;
+        return { snapshot, marker, feed, token };
+      };
+      const read = async (path, query) => {
+        let file = files.get(path);
+        if (!file)
+          files.set(path, file = open(path));
+        return (await file).snapshot.read(query);
+      };
+      try {
+        const binding = await read(this.dbPath, TIER_BINDING_READ);
+        const metadataOnly = connectorStoreMetadataOnlySql(filters, Boolean((filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length) && await read(this.dbPath, ON_DEMAND_READS_PRESENT)));
+        const raw = await read(this.dbPath, this.vectorWinnerItemsRead([...winners.keys()], accountScope, filters, metadataOnly));
+        const byPk = new Map(raw.map((row) => [row.item_pk, row]));
+        const ordered = [...winners].flatMap(([pk, winner]) => {
+          const row = byPk.get(pk);
+          return row?.local_item_id === winner.localItemId ? [row] : [];
+        });
+        const dependencies = {
+          parentLedgerKeys: new Set,
+          parentScopes: new Map
+        };
+        const rows = await this.vectorContentVisibleRows(ordered, read, stores, handles, dependencies);
+        const chunks = locate ? await vectorReadSteps(read, this.dbPath, this.keywordChunkMatchesSteps(rows.map((row) => ({ ...row, chunk_pk: winners.get(row.item_pk).bestChunkPk })), [], "semantic")) : undefined;
+        const candidates = new Set(winners.keys());
+        const identities = new Map(ordered.map((row) => [row.item_pk, tierLedgerIdentityKey(vectorRowIdentity(row))]));
+        const rejectedPks = [...candidates].filter((pk) => !identities.has(pk));
+        if (rejectedPks.length > 0) {
+          const rejected = await read(this.dbPath, this.vectorItemPksRead(rejectedPks, undefined, undefined, true));
+          for (const row of rejected)
+            identities.set(row.item_pk, tierLedgerIdentityKey(vectorRowIdentity(row)));
+        }
+        const changed = async () => {
+          if (candidates.size === 0)
+            return [];
+          const fences = await Promise.all([...files].map(async ([path, file]) => {
+            const { snapshot, marker, feed, token } = await file;
+            const fresh = await snapshot.read(VECTOR_FILE_READ, true);
+            if (marker.file !== fresh.file)
+              throw new VisibilityChangedError;
+            if (marker.schema_version !== fresh.schema_version)
+              return;
+            if (path === this.dbPath && (await snapshot.read(TIER_BINDING_READ))?.cursor !== binding?.cursor)
+              return;
+            if (!feed) {
+              const version = await snapshot.read(VECTOR_DATA_VERSION_READ);
+              return version.data_version === token ? [] : undefined;
+            }
+            const { identities: changes } = await vectorReadSteps((_, query) => snapshot.read(query), path, hiddenVisibilityFeedReads(feed, token));
+            return changes && this.changedVectorWinners(path, storePaths.has(path), changes, candidates, identities, dependencies);
+          }));
+          return fences.some((fence) => fence === undefined) ? [...candidates] : fences.flatMap((fence) => fence ?? []);
+        };
+        return {
+          candidates,
+          files: fileIdentities,
+          changed,
+          close,
+          rows: new Map(rows.map((item, index) => {
+            const row = searchRowFromItemRow(item);
+            const bestCosine = winners.get(item.item_pk).bestCosine;
+            const chunk = chunks?.get(index);
+            return [item.item_pk, { ...row, ...chunk ? { chunk } : {}, ...locate ? {} : { contentMatched: true }, bestCosine }];
+          }))
+        };
+      } catch (error) {
+        await close();
+        throw error;
+      }
+    }
+    changedVectorWinners(path, store, changes, candidates, identities, dependencies) {
+      if (changes.length === 0)
+        return [];
+      const keys = new Set(changes.map(tierLedgerIdentityKey));
+      const scopes = store && dependencies.parentScopes.size > 0 ? new Set(changes.map(vectorAccountKey)) : undefined;
+      const parentLedgerScopes = path === dependencies.parentLedgerPath ? new Set(changes.filter((identity) => dependencies.parentLedgerKeys.has(tierLedgerIdentityKey(identity))).map(vectorAccountKey)) : undefined;
+      const affected = [];
+      for (const pk of candidates) {
+        const key = identities.get(pk);
+        if (!key)
+          continue;
+        const direct = (store || path === dependencies.ledgerPath) && keys.has(key);
+        const parentScope = dependencies.parentScopes.get(key);
+        if (direct || parentScope !== undefined && (parentLedgerScopes?.has(parentScope) || scopes?.has(parentScope)))
+          affected.push(pk);
+      }
+      return affected;
     }
     async keywordLanguages() {
       if (!offThreadReadsSupported(this.dbPath))
@@ -76368,7 +76948,7 @@ ${parentKey(ref)}`, { ref, origin });
       const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
       return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
     }
-    *keywordChunkMatchesSteps(rows, queryTerms) {
+    *keywordChunkMatchesSteps(rows, queryTerms, lane = "keyword") {
       const wanted = [...rows.entries()].filter(([, row]) => row.chunk_pk !== null && row.chunk_pk !== undefined);
       const matches = new Map;
       if (wanted.length === 0)
@@ -76397,7 +76977,7 @@ ${parentKey(ref)}`, { ref, origin });
         if (row.chunk_pk !== row.want_chunk_pk)
           continue;
         const itemOffset = chunks.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-        matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, "keyword", queryTerms));
+        matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, lane, queryTerms));
       }
       return matches;
     }
@@ -76779,10 +77359,7 @@ ${parentKey(ref)}`, { ref, origin });
       return rows.map((row) => row.scope);
     }
     fileReplacedOrRemoved() {
-      if (!this.openedFile)
-        return false;
-      const current = fileIdentity(this.dbPath);
-      return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
+      return this.openedFile !== undefined && fileIdentity(this.dbPath) !== this.openedFile;
     }
     async prepareStatusCounts(scope) {
       await this.refreshTierHiddenCountsInTurns();
@@ -102084,7 +102661,15 @@ class TieredStoreSet {
   static CHILD_SWEEP_PAGE = 200;
   childLane = {
     ledger: () => this.ledger,
-    stores: () => this.openStores()
+    stores: () => this.openStores(),
+    mountedStores: () => TIER_DOMAIN_ORDER.flatMap((domain) => {
+      const leg = this.legs.get(domain);
+      if (leg?.store)
+        return [leg.store];
+      if (leg?.spec.exists?.())
+        throw new Error("A child visibility store has yet to mount");
+      return [];
+    })
   };
   syncsRunning = 0;
   syncsIdle = [];
@@ -106037,7 +106622,7 @@ function onDemandFailedCoverageNote(count) {
 }
 
 // src/core/analyst-openclaw-infer.ts
-import { accessSync as accessSync6, constants as constants8 } from "node:fs";
+import { accessSync as accessSync6, constants as constants9 } from "node:fs";
 import { isAbsolute as isAbsolute25 } from "node:path";
 function resolveOpenClawCommand() {
   return resolveOpenClawExecutable() ?? DEFAULT_COMMAND;
@@ -106046,7 +106631,7 @@ function resolveOpenClawCommand() {
 class SpawnOpenClawRunner {
   async run(command, args, options = {}) {
     if (isAbsolute25(command))
-      accessSync6(command, constants8.X_OK);
+      accessSync6(command, constants9.X_OK);
     const child = Bun.spawn([command, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     const timeout = options.timeoutMs ? setTimeout(() => child.kill(), options.timeoutMs) : undefined;
     try {
@@ -106434,6 +107019,12 @@ async function routePreparedSourceIndexSearch(options) {
       context: request.context
     })
   ]));
+  const knownRetrievalStates = new Map;
+  for (const [corpusId, answer] of retrievalStates)
+    answer.then((known) => {
+      knownRetrievalStates.set(corpusId, known);
+    });
+  const prepareClock = options.laneClock ?? REAL_LANE_CLOCK;
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
   let prepareKeywordsMaxMs = 0;
   let prepareSemanticMaxMs = 0;
@@ -106447,7 +107038,13 @@ async function routePreparedSourceIndexSearch(options) {
   const prepareStartedAt = Date.now();
   await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
-    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable;
+    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && await new Promise((resolve) => {
+      const timer = prepareClock.setTimeout(() => resolve(false), semanticPrepareBudgetMs);
+      retrievalStates.get(corpus.corpusId).then((known) => {
+        prepareClock.clearTimeout(timer);
+        resolve(known.hybridServable);
+      });
+    });
     const [keywordsMs, semanticMs] = await Promise.all([
       timed(async () => {
         const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
@@ -106484,11 +107081,15 @@ async function routePreparedSourceIndexSearch(options) {
         partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
       }
     };
-    const retrievalState = retrievalStates.get(corpus.corpusId).state;
+    const unreadRetrievalState = () => assessSourceIndexRetrievalState({
+      declaredMode: corpus.activationMode,
+      hybridAvailability: { servable: false, reason: "hybrid_capability_unreported" }
+    });
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneUntilIdle((report) => {
       progress = report;
       return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
+        await retrievalStates.get(corpus.corpusId);
         if (metadataMatches) {
           const response = await metadataMatches(corpusRequest);
           if (request.readWide)
@@ -106511,6 +107112,7 @@ async function routePreparedSourceIndexSearch(options) {
         return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
       }));
     }, laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
+    const retrievalState = knownRetrievalStates.get(corpus.corpusId)?.state ?? unreadRetrievalState();
     return { corpus, outcome, retrievalState, partial };
   }));
   for (const { corpus, outcome, retrievalState, partial } of laneOutcomes) {
@@ -106793,10 +107395,10 @@ function semanticLaneDegradation(corpusId, state, response) {
     occurrences: 1
   };
 }
-function retrievalStateForAdapter(adapter, request) {
+async function retrievalStateForAdapter(adapter, request) {
   let hybridAvailability;
   try {
-    hybridAvailability = adapter.hybridAvailability?.(request);
+    hybridAvailability = await adapter.hybridAvailability?.(request);
   } catch {
     hybridAvailability = { servable: false, reason: "hybrid_capability_unreported" };
   }
@@ -119986,7 +120588,7 @@ var init_archive_target = __esm(() => {
 });
 
 // src/workers/archive-import/input-media.ts
-import { closeSync as closeSync23, constants as constants9, openSync as openSync23, rmSync as rmSync23, writeSync as writeSync6 } from "node:fs";
+import { closeSync as closeSync23, constants as constants10, openSync as openSync23, rmSync as rmSync23, writeSync as writeSync6 } from "node:fs";
 function archiveInputMediaLocator(ref) {
   if (!ARCHIVE_ID.test(ref.archiveId) || !BINDING_ID.test(ref.bindingId))
     throw new Error("An archive media locator needs a plain archive and binding id.");
@@ -120040,7 +120642,7 @@ function readArchiveInputMedia(locator, deps, options = {}) {
   return out;
 }
 function copyArchiveInputMediaToFile(locator, deps, options, dest) {
-  const out = openSync23(dest, constants9.O_WRONLY | constants9.O_CREAT | constants9.O_EXCL, 384);
+  const out = openSync23(dest, constants10.O_WRONLY | constants10.O_CREAT | constants10.O_EXCL, 384);
   let written = 0;
   try {
     serveArchiveInputMedia(locator, deps, options.maxBytes, {
@@ -121292,7 +121894,7 @@ var init_connector_source = __esm(() => {
 });
 
 // src/workers/whatsapp/child-media.ts
-import { closeSync as closeSync24, constants as constants10, fstatSync as fstatSync6, openSync as openSync24, readSync as readSync7, realpathSync as realpathSync17, rmSync as rmSync26, statSync as statSync30 } from "node:fs";
+import { closeSync as closeSync24, constants as constants11, fstatSync as fstatSync7, openSync as openSync24, readSync as readSync7, realpathSync as realpathSync17, rmSync as rmSync26, statSync as statSync30 } from "node:fs";
 import { isAbsolute as isAbsolute28, join as join84, relative as relative13, resolve as resolve22 } from "node:path";
 function whatsAppMediaFileLocator(path) {
   return `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
@@ -121335,14 +121937,14 @@ function createWhatsAppChildReader(options) {
 function withConfinedFile(path, roots, maxBytes, use) {
   let fd;
   try {
-    fd = openSync24(path, constants10.O_RDONLY | constants10.O_NOFOLLOW);
+    fd = openSync24(path, constants11.O_RDONLY | constants11.O_NOFOLLOW);
   } catch (error) {
     if (error.code === "ELOOP")
       throw new FileExtractionSourceError("source_permission_denied");
     throw new FileExtractionSourceError("source_item_not_found");
   }
   try {
-    const opened = fstatSync6(fd);
+    const opened = fstatSync7(fd);
     if (!opened.isFile())
       throw new FileExtractionSourceError("source_content_unavailable");
     let real;
@@ -121363,7 +121965,7 @@ function withConfinedFile(path, roots, maxBytes, use) {
   }
 }
 function copyBounded(fd, maxBytes, dest) {
-  const out = openSync24(dest, constants10.O_WRONLY | constants10.O_CREAT | constants10.O_EXCL, 384);
+  const out = openSync24(dest, constants11.O_WRONLY | constants11.O_CREAT | constants11.O_EXCL, 384);
   const chunk = Buffer.allocUnsafe(Math.min(COPY_CHUNK_BYTES, maxBytes + 1));
   let total = 0;
   try {
@@ -121469,7 +122071,7 @@ var init_child_media = __esm(() => {
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile7, realpath as realpath2, stat as stat4 } from "node:fs/promises";
-import { closeSync as closeSync25, constants as constants11, openSync as openSync25, readSync as readSync8, rmSync as rmSync27 } from "node:fs";
+import { closeSync as closeSync25, constants as constants12, openSync as openSync25, readSync as readSync8, rmSync as rmSync27 } from "node:fs";
 import { basename as basename14, join as join85, relative as relative14, resolve as resolve23, sep as sep19 } from "node:path";
 
 class WhatsAppExtractionSource {
@@ -121630,7 +122232,7 @@ function nodeErrorCode(error) {
   return typeof code === "string" ? code : undefined;
 }
 function copyDescriptor(fd, size, dest) {
-  const out = openSync25(dest, constants11.O_WRONLY | constants11.O_CREAT | constants11.O_EXCL, 384);
+  const out = openSync25(dest, constants12.O_WRONLY | constants12.O_CREAT | constants12.O_EXCL, 384);
   const chunk = Buffer.allocUnsafe(Math.min(1024 * 1024, Math.max(1, size)));
   let total = 0;
   try {
@@ -131247,7 +131849,7 @@ var init_model_stream2 = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { accessSync as accessSync8, constants as constants13, readFileSync as readFileSync58 } from "node:fs";
+import { accessSync as accessSync8, constants as constants14, readFileSync as readFileSync58 } from "node:fs";
 import { delimiter as delimiter6, isAbsolute as isAbsolute31, join as join98 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform = currentPlatform2()) {
   const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || sharedDataPath("built-in-transcription", env);
@@ -131323,7 +131925,7 @@ function builtInTranscriptionEnabled(env = process.env, platform = currentPlatfo
 function audioDecoderPresent(platform = currentPlatform2(), env = process.env) {
   const executable = (path) => {
     try {
-      accessSync8(path, constants13.X_OK);
+      accessSync8(path, constants14.X_OK);
       return true;
     } catch {
       return false;
@@ -147005,7 +147607,7 @@ import { execFile as execFile3 } from "node:child_process";
 import { createHash as createHash82, randomUUID as randomUUID30 } from "node:crypto";
 import {
   accessSync as accessSync9,
-  constants as constants14,
+  constants as constants15,
   lstatSync as lstatSync41,
   mkdirSync as mkdirSync55,
   readFileSync as readFileSync69,
@@ -147134,7 +147736,7 @@ function managedToolExecutable(tool, host = {}) {
     }
     verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
     const real = realpathSync20(join112(versionDir, asset.executable));
-    accessSync9(real, constants14.X_OK);
+    accessSync9(real, constants15.X_OK);
     return real;
   } catch {
     return;
@@ -149598,7 +150200,7 @@ var init_zkapi_confinement_linux = __esm(() => {
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn7, execFileSync as execFileSync5 } from "node:child_process";
 import { createHash as createHash84, randomUUID as randomUUID31 } from "node:crypto";
-import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync30, constants as constants15, existsSync as existsSync81, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync4, readdirSync as readdirSync25, readFileSync as readFileSync72, readlinkSync as readlinkSync5, realpathSync as realpathSync22, rmSync as rmSync35, statSync as statSync37, writeFileSync as writeFileSync21 } from "node:fs";
+import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync30, constants as constants16, existsSync as existsSync81, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync4, readdirSync as readdirSync25, readFileSync as readFileSync72, readlinkSync as readlinkSync5, realpathSync as realpathSync22, rmSync as rmSync35, statSync as statSync37, writeFileSync as writeFileSync21 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir32, tmpdir as tmpdir12 } from "node:os";
 import { delimiter as delimiter7, dirname as dirname90, isAbsolute as isAbsolute33, join as join115, resolve as resolvePath } from "node:path";
@@ -150358,7 +150960,7 @@ function resolveExecutable(name, explicit, env, platform = process.platform, tru
   const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join115(dir, name));
   for (const candidate of candidates) {
     try {
-      accessSync10(candidate, constants15.X_OK);
+      accessSync10(candidate, constants16.X_OK);
       if (statSync37(candidate).isFile())
         return candidate;
     } catch {}
@@ -151847,7 +152449,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
     stat: (path) => statSync37(path),
     executable: (path) => {
       try {
-        accessSync10(path, constants15.X_OK);
+        accessSync10(path, constants16.X_OK);
         return true;
       } catch {
         return false;
@@ -153473,7 +154075,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync15 } from "node:child_process";
-import { chmodSync as chmodSync36, closeSync as closeSync31, constants as constants16, copyFileSync as copyFileSync3, existsSync as existsSync83, fstatSync as fstatSync7, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync44, linkSync as linkSync4, mkdirSync as mkdirSync57, openSync as openSync30, readFileSync as readFileSync74, readlinkSync as readlinkSync6, readdirSync as readdirSync27, realpathSync as realpathSync23, renameSync as renameSync17, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync22 } from "node:fs";
+import { chmodSync as chmodSync36, closeSync as closeSync31, constants as constants17, copyFileSync as copyFileSync3, existsSync as existsSync83, fstatSync as fstatSync8, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync44, linkSync as linkSync4, mkdirSync as mkdirSync57, openSync as openSync30, readFileSync as readFileSync74, readlinkSync as readlinkSync6, readdirSync as readdirSync27, realpathSync as realpathSync23, renameSync as renameSync17, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync22 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename18, dirname as dirname92, join as join117, relative as relative19, resolve as resolve25, sep as sep23 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
@@ -153616,9 +154218,9 @@ function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
   assertLinuxManagedPath(path);
   if (!existsSync83(path))
     return;
-  const fd = openSync30(path, constants16.O_RDWR | constants16.O_NOFOLLOW);
+  const fd = openSync30(path, constants17.O_RDWR | constants17.O_NOFOLLOW);
   try {
-    const info = fstatSync7(fd);
+    const info = fstatSync8(fd);
     if (!info.isFile() || info.nlink !== 1 || (info.mode & 63) !== 0)
       throw new Error(`${path} is not a private, singly-linked log.`);
     if (info.size < maxBytes)
@@ -153631,7 +154233,7 @@ function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
       else if (existsSync83(dest))
         renameSync17(dest, `${path}.${i + 1}`);
     }
-    copyFileSync3(path, `${path}.1`, constants16.COPYFILE_EXCL);
+    copyFileSync3(path, `${path}.1`, constants17.COPYFILE_EXCL);
     ftruncateSync(fd, 0);
   } finally {
     closeSync31(fd);
@@ -153745,7 +154347,7 @@ function inheritedLockDescriptor(lockPath, exclude) {
       if (!Number.isSafeInteger(fd) || fd < 3 || fd === exclude)
         continue;
       try {
-        const info = fstatSync7(fd);
+        const info = fstatSync8(fd);
         if (info.dev === target.dev && info.ino === target.ino)
           return fd;
       } catch {}
@@ -153759,9 +154361,9 @@ function openLifecycleLock(layout) {
   preflightLinuxEngineLayout(layout);
   createLinuxPrivateDirectory(layout.runtimeDir);
   assertLinuxManagedPath(layout.lifecycleLockPath);
-  const fd = openSync30(layout.lifecycleLockPath, constants16.O_RDWR | constants16.O_CREAT | constants16.O_NOFOLLOW, 384);
+  const fd = openSync30(layout.lifecycleLockPath, constants17.O_RDWR | constants17.O_CREAT | constants17.O_NOFOLLOW, 384);
   try {
-    const info = fstatSync7(fd);
+    const info = fstatSync8(fd);
     if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 511) !== 384 || info.nlink !== 1) {
       throw new Error("The Linux lifecycle lock must be a private, singly-linked owner file (0600).");
     }
@@ -153878,7 +154480,7 @@ function linuxMachineArtifactDigest(path, kind) {
   return hash.digest("hex");
 }
 function syncCopiedFile(path) {
-  const fd = openSync30(path, constants16.O_RDONLY | constants16.O_NOFOLLOW);
+  const fd = openSync30(path, constants17.O_RDONLY | constants17.O_NOFOLLOW);
   try {
     fsyncSync8(fd);
   } finally {
@@ -154319,7 +154921,7 @@ function migrateLegacySettings(layout, transaction, options) {
     }
     createLinuxPrivateDirectory(dirname92(target));
     const temporary = legacyMigrationTemporary(layout, transaction, name);
-    const fd = openSync30(temporary, constants16.O_WRONLY | constants16.O_CREAT | constants16.O_EXCL | constants16.O_NOFOLLOW, 384);
+    const fd = openSync30(temporary, constants17.O_WRONLY | constants17.O_CREAT | constants17.O_EXCL | constants17.O_NOFOLLOW, 384);
     try {
       writeFileSync22(fd, snapshotBytes(snapshots[name]));
       fsyncSync8(fd);
@@ -158540,7 +159142,7 @@ __export(exports_consult_settings, {
   parseConsultWriterChoice: () => parseConsultWriterChoice,
   readConsultSettings: () => readConsultSettings
 });
-import { closeSync as closeSync32, constants as constants17, fstatSync as fstatSync8, openSync as openSync31, readSync as readSync11 } from "node:fs";
+import { closeSync as closeSync32, constants as constants18, fstatSync as fstatSync9, openSync as openSync31, readSync as readSync11 } from "node:fs";
 import { join as join120 } from "node:path";
 function consultStandardMode(settings) {
   return settings.standardMode ?? CONSULT_STANDARD_MODE_WHEN_UNSET;
@@ -158715,7 +159317,7 @@ function readConsultSettings(location = {}) {
       return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
     let descriptor;
     try {
-      descriptor = openSync31(path, constants17.O_RDONLY | constants17.O_NOFOLLOW | constants17.O_NONBLOCK);
+      descriptor = openSync31(path, constants18.O_RDONLY | constants18.O_NOFOLLOW | constants18.O_NONBLOCK);
     } catch (error) {
       const code = errorCode(error);
       if (code === "ENOENT" || code === "ENOTDIR")
@@ -158726,7 +159328,7 @@ function readConsultSettings(location = {}) {
     }
     try {
       __consultSettingsTestHooks.afterOpen?.(path);
-      const stats = fstatSync8(descriptor);
+      const stats = fstatSync9(descriptor);
       if (!stats.isFile())
         return invalid3("not_a_regular_file");
       if ((stats.mode & 18) !== 0)
@@ -191030,7 +191632,7 @@ var init_dashboard_messaging_runner = __esm(() => {
 
 // src/workers/engine/dashboard/dashboard-messaging-service.ts
 import { spawn as spawn13 } from "node:child_process";
-import { closeSync as closeSync36, constants as constants18, fstatSync as fstatSync9, openSync as openSync35, readFileSync as readFileSync97 } from "node:fs";
+import { closeSync as closeSync36, constants as constants19, fstatSync as fstatSync10, openSync as openSync35, readFileSync as readFileSync97 } from "node:fs";
 import { arch, platform as platform2, release } from "node:os";
 import { basename as basename22, join as join137 } from "node:path";
 function sourceOf(value) {
@@ -191080,9 +191682,9 @@ function retainApprovedCaptureScope(source, env) {
 function readQr(path) {
   if (basename22(path) !== "qr.png")
     throw new Error("Invalid QR artifact.");
-  const fd = openSync35(path, constants18.O_RDONLY | (constants18.O_NOFOLLOW ?? 0));
+  const fd = openSync35(path, constants19.O_RDONLY | (constants19.O_NOFOLLOW ?? 0));
   try {
-    const stat = fstatSync9(fd);
+    const stat = fstatSync10(fd);
     if (!stat.isFile() || stat.size > 1024 * 1024 || (stat.mode & 63) !== 0 || typeof process.getuid === "function" && stat.uid !== process.getuid())
       throw new Error("Invalid QR artifact.");
     const bytes = readFileSync97(fd);
@@ -222800,7 +223402,7 @@ function createEmailSourceWorker(options = {}) {
               const searchRequest = parseConnectorStoreIndexSearchRequestRecord(store === connectorStore ? record : { ...record, corpus_id: store.corpusId }, store, connectorStoreAccountScopes.get(store.corpusId), store.family === "chat" ? connectorStorePrincipals.get(store.corpusId) : undefined, connectorStorePrincipals.get(store.corpusId), connectorStoreFilterCapabilities);
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
-              const retrievalMode = searchRequest.retrievalMode ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId) ? "hybrid" : "keyword");
+              const retrievalMode = searchRequest.retrievalMode ?? (searchEmbeddingProvider && await store.vectorLaneServableOffThread(searchEmbeddingProvider.modelId) ? "hybrid" : "keyword");
               const combinedFilters = searchRequest.filters || mandatoryScope?.filters ? normalizeConnectorStoreSearchFilters({
                 ...searchRequest.filters,
                 ...mandatoryScope?.filters

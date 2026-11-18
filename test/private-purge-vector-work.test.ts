@@ -1,7 +1,8 @@
 import { expect, spyOn, test } from 'bun:test';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
-test('a small vector result validates only its ranked candidates once, rather than the corpus', async () => {
+test('a small vector result validates only ranked candidates and rechecks them after hydration', async () => {
   const tmp = tempDir();
   const f = openTierFixture(tmp.dir);
   try {
@@ -9,17 +10,19 @@ test('a small vector result validates only its ranked candidates once, rather th
       id: `garden-${n}`, name: `Garden ${n}`, text: 'Ordinary orchard notes.',
     }))), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     // Both the pooled and the here path judge through these steps.
-    const original = f.ledger.visibilityReadSteps.bind(f.ledger);
     const checked: string[] = [];
-    spyOn(f.ledger, 'visibilityReadSteps').mockImplementation((identities, options) => {
+    const original = TierLedger.visibilityReadSteps;
+    const observer = spyOn(TierLedger, 'visibilityReadSteps').mockImplementation((identities, options) => {
       checked.push(...identities.map(identity => identity.providerItemId));
       return original(identities, options);
     });
-    const result = await f.stores.internal!.vectorSearchLane('Ordinary orchard notes.', f.cloud, 2);
-    expect(result.rows).toHaveLength(2);
-    expect(checked).toHaveLength(2);
-    expect(new Set(checked).size).toBe(2);
-    expect(new Set(result.rows.map(row => row.sourceItem.providerItemId))).toEqual(new Set(checked));
+    try {
+      const result = await f.stores.internal!.vectorSearchLane('Ordinary orchard notes.', f.cloud, 2);
+      expect(result.rows).toHaveLength(2);
+      expect(checked).toHaveLength(4);
+      expect(new Set(checked.slice(0, 2))).toEqual(new Set(checked.slice(2)));
+      expect(new Set(result.rows.map(row => row.sourceItem.providerItemId))).toEqual(new Set(checked));
+    } finally { observer.mockRestore(); }
   } finally { f.close(); tmp.cleanup(); }
 });
 
@@ -30,9 +33,9 @@ test('candidate validation still fails closed when the tier ledger becomes unrea
     await f.set.sync(fixtureConnector(() => [{ id: 'garden', name: 'Garden', text: 'Ordinary orchard notes.' }]),
       { fetchContent: true, placement: FIXTURE_PLACEMENT });
     // Fail the copies read inside the shared steps, wherever they run.
-    const original = f.ledger.visibilityReadSteps.bind(f.ledger);
+    const original = TierLedger.visibilityReadSteps;
     let failed = 0;
-    spyOn(f.ledger, 'visibilityReadSteps').mockImplementation(function* (identities, options) {
+    const observer = spyOn(TierLedger, 'visibilityReadSteps').mockImplementation(function* (identities, options) {
       const steps = original(identities, options);
       let step = steps.next();
       while (!step.done) {
@@ -41,7 +44,11 @@ test('candidate validation still fails closed when the tier ledger becomes unrea
       }
       return step.value;
     });
-    expect((await f.stores.internal!.vectorSearchLane('Ordinary orchard notes.', f.cloud, 2)).rows).toEqual([]);
-    expect(failed).toBeGreaterThan(0);
+    try {
+      expect(await f.stores.internal!.vectorSearchLane('Ordinary orchard notes.', f.cloud, 2)).toEqual({
+        rows: [], skippedReason: 'vector_visibility_unavailable',
+      });
+      expect(failed).toBeGreaterThan(0);
+    } finally { observer.mockRestore(); }
   } finally { f.close(); tmp.cleanup(); }
 });

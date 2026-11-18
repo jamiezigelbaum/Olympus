@@ -21,6 +21,7 @@
 // sender, text or excerpt. The file is created owner-only (0600).
 
 import { applySqliteMmap } from '../connector-store/sqlite-mmap.ts';
+import { openedSqliteFileIdentity } from '../connector-store/sqlite-file-identity.ts';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
@@ -801,6 +802,7 @@ export class TierLedger {
   private readonly db: Database;
   private readonly readOnly: boolean;
   private readonly now: () => Date;
+  private openedFile: string | undefined;
 
   constructor(options: TierLedgerOptions) {
     this.dbPath = options.dbPath;
@@ -822,6 +824,7 @@ export class TierLedger {
     let db: Database | undefined;
     try {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      if (onDisk) this.openedFile = openedSqliteFileIdentity(db);
       if (this.readOnly) {
         db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
         applySqliteMmap(db);
@@ -868,6 +871,7 @@ export class TierLedger {
   }
 
   close(): void {
+    this.openedFile = undefined;
     try {
       // Checkpointed close, like every Olympus store: the ledger is safe to
       // hand to another process the moment this returns.
@@ -880,6 +884,11 @@ export class TierLedger {
       }
       if (!this.readOnly && this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
     }
+  }
+
+  /** Identity of the ledger this handle governs, even if its pathname has moved. */
+  pooledFileIdentity(): string | undefined {
+    return this.openedFile;
   }
 
   /**
@@ -2025,8 +2034,20 @@ export class TierLedger {
         ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
         DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
       `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
+      this.noteVisibilityChange(identity);
       this.settleRevokedOwnerMove(identity);
     })();
+  }
+
+  /** Override writes do not run the copy and item feed triggers. */
+  private noteVisibilityChange(identity: TierLedgerIdentity): void {
+    this.db.query(`INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+      VALUES (?, ?, ?, ?)`).run(...idParams(identity));
+    this.trimVisibilityChanges();
+  }
+
+  private trimVisibilityChanges(): void {
+    this.db.exec('DELETE FROM tier_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM tier_visibility_changes)');
   }
 
   /**
@@ -2122,6 +2143,10 @@ export class TierLedger {
   // A missing or moving parent still needs its Secret override checked, on
   // the same read connection as the rest of an asynchronous parent judgment.
   *itemIsSecretSteps(identity: TierLedgerIdentity): Generator<LedgerRead, boolean, unknown> {
+    return yield* TierLedger.itemIsSecretSteps(identity);
+  }
+
+  static *itemIsSecretSteps(identity: TierLedgerIdentity): Generator<LedgerRead, boolean, unknown> {
     const row = (yield { sql: `SELECT override_json FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
       params: idParams(identity), mode: 'get' }) as { override_json: string } | null;
@@ -2178,16 +2203,18 @@ export class TierLedger {
         continue;
       }
       this.db.transaction(() => {
-        this.db.query(`
+        const inserted = this.db.query(`
           INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
           SELECT provider, account_scope, ?, provider_item_id, override_json, set_at FROM tier_overrides
           WHERE provider = ? AND account_scope = ? AND conversation_key = '' AND provider_item_id = ?
           ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO NOTHING
         `).run(conversations[0]!, identity.provider, identity.accountScope, identity.providerItemId);
-        this.db.query(`
+        const removed = this.db.query(`
           DELETE FROM tier_overrides
           WHERE provider = ? AND account_scope = ? AND conversation_key = '' AND provider_item_id = ?
         `).run(identity.provider, identity.accountScope, identity.providerItemId);
+        if (inserted.changes) this.noteVisibilityChange({ ...identity, providerConversationId: conversations[0]! });
+        if (removed.changes) this.noteVisibilityChange(identity);
       })();
       rehomed += 1;
     }
@@ -2225,6 +2252,7 @@ export class TierLedger {
       cleared = this.db.query(`
         DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity)).changes > 0;
+      if (cleared) this.noteVisibilityChange(identity);
       this.settleRevokedOwnerMove(identity);
       const settled = this.readRow(identity);
       if (cleared && before && settled && !this.itemIsSecret(identity)
@@ -2703,6 +2731,13 @@ export class TierLedger {
     identities: readonly TierLedgerIdentity[],
     options: { personalFirst?: boolean } = {},
   ): Generator<LedgerRead, TierVisibilityReads, unknown> {
+    return yield* TierLedger.visibilityReadSteps(identities, options);
+  }
+
+  static *visibilityReadSteps(
+    identities: readonly TierLedgerIdentity[],
+    options: { personalFirst?: boolean } = {},
+  ): Generator<LedgerRead, TierVisibilityReads, unknown> {
     const list = uniqueIdentities(identities);
     const copies = yield* copiesSteps(list);
     const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
@@ -3046,6 +3081,12 @@ export class TierLedger {
   // Release and parent checks can await these reads on the pool; a cold ledger
   // must not make the Ask read every governed item on the request thread.
   *itemStatesSteps(
+    identities: readonly TierLedgerIdentity[],
+  ): Generator<LedgerRead, Map<string, TierLedgerItemState>, unknown> {
+    return yield* TierLedger.itemStatesSteps(identities);
+  }
+
+  static *itemStatesSteps(
     identities: readonly TierLedgerIdentity[],
   ): Generator<LedgerRead, Map<string, TierLedgerItemState>, unknown> {
     const result = new Map<string, TierLedgerItemState>();
@@ -3501,7 +3542,7 @@ export class TierLedger {
       if (!existing) throw new Error('Adopting a placement needs a recorded decision first.');
       if (existing.routed) throw new Error('This item is already routed.');
       this.db.query(`
-        UPDATE tier_items SET routed = 1
+        UPDATE tier_items SET routed = 1, state = state
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity));
       this.deleteCopies(identity);
@@ -4614,6 +4655,11 @@ export class TierLedger {
       const copies = (this.db.query('SELECT changes() AS n').get() as { n: number }).n;
       this.db.query('DELETE FROM tier_items WHERE provider = ? AND account_scope = ?').run(provider, accountScope);
       const items = (this.db.query('SELECT changes() AS n').get() as { n: number }).n;
+      // Override-only identities have no item row to fire the feed trigger.
+      const overrides = this.db.query(`INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+        SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_overrides
+        WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
+      if (overrides.changes) this.trimVisibilityChanges();
       for (const table of [
         'tier_history',
         'tier_overrides',

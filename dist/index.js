@@ -16170,10 +16170,14 @@ var init_credential_health = __esm(() => {
   CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS = 10 * 60 * 1000;
   CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
 });
+// src/workers/connector-store/sqlite-file-identity.ts
+var init_sqlite_file_identity = () => {};
+
 // src/workers/connector-store/off-thread-reads.ts
 var startedStores, storeOpens, queues, openSnapshots, releases;
 var init_off_thread_reads = __esm(() => {
   init_read_progress();
+  init_sqlite_file_identity();
   init_answer_latency_trace();
   startedStores = new Set;
   storeOpens = new Map;
@@ -16508,6 +16512,7 @@ var init_sniffer_store = __esm(() => {
 var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
           AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')`, RELABEL_UNREAD_CANDIDATES_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
+  init_sqlite_file_identity();
   init_sqlite_migrations();
   init_store_write_guard();
   init_tier_classifier();
@@ -17439,6 +17444,7 @@ var init_local_index = __esm(() => {
   init_memory_counters();
   init_read_progress();
   init_source_size_limits();
+  init_sqlite_file_identity();
   init_store_totals();
   init_vector_digest();
   init_boot_progress();
@@ -17454,6 +17460,7 @@ var init_local_index = __esm(() => {
   init_partial_search();
   init_control_path_headroom();
   init_off_thread_reads();
+  init_answer_latency_trace();
   init_provider_account_identity();
   init_operation_error();
   init_media_cache();

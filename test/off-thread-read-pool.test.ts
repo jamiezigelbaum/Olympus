@@ -6,12 +6,13 @@
 // closed store's pool connections are released.
 
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdtempSync, readdirSync, readlinkSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readlinkSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { withSourceIndexReadProgress } from '../src/core/source-index/read-progress.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { openedSqliteFileIdentity } from '../src/workers/connector-store/sqlite-file-identity.ts';
 import {
   BACKGROUND_READS,
   OffThreadReadBusyError,
@@ -287,6 +288,27 @@ describe('read pool', () => {
     moved.exec('VACUUM INTO ' + "'" + path.replaceAll("'", "''") + "'");
     moved.close();
     expect(await withOffThreadSnapshot(path, async (read) => (await read(COUNT) as { c: number }).c)).toBe(3);
+  });
+
+  test('a held SQLite handle and a pool connection report the identities of the files they opened', async () => {
+    const path = storeFile();
+    const original = new Database(path, { readonly: true });
+    const identity: StoreRead = { mode: 'get', sql: 'SELECT olympus_read_file_identity() AS file', params: [] };
+    try {
+      const first = openedSqliteFileIdentity(original);
+      expect(await readOnPool(path, identity)).toEqual({ file: first });
+      rmSync(path);
+      const replacement = new Database(path);
+      try {
+        replacement.exec('CREATE TABLE replacement (n INTEGER)');
+        const stat = statSync(path, { bigint: true });
+        const second = stat.dev + ':' + stat.ino;
+        expect(second).not.toBe(first);
+        expect(openedSqliteFileIdentity(original)).toBe(first);
+        expect(await readOnPool(path, identity)).toEqual({ file: second });
+        expect(await withOffThreadSnapshot(path, async (read) => read(identity))).toEqual({ file: second });
+      } finally { replacement.close(); }
+    } finally { original.close(); }
   });
 
   test('a status snapshot waits for a thread no search runs on: a search past its deadline does not take the snapshot down with it', async () => {

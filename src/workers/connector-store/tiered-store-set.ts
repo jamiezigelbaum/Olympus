@@ -375,6 +375,12 @@ export class TieredStoreSet {
   private readonly childLane: ChildVisibilityLane = {
     ledger: () => this.ledger,
     stores: () => this.openStores(),
+    mountedStores: () => TIER_DOMAIN_ORDER.flatMap(domain => {
+      const leg = this.legs.get(domain);
+      if (leg?.store) return [leg.store];
+      if (leg?.spec.exists?.()) throw new Error('A child visibility store has yet to mount');
+      return [];
+    }),
   };
 
   /** Syncs in flight: the sweep never works while one is. */

@@ -23,6 +23,7 @@ import { currentSourceIndexReadProgress, noteSourceIndexReadProgress, type Sourc
 // a time either way; the snapshot's transaction is on its own connection.
 
 import { SQLITE_MMAP_BYTES, sqliteMmapEnabled } from './sqlite-mmap.ts';
+import { sqliteFileIdentity } from './sqlite-file-identity.ts';
 import { errorFromBoundary } from '../../core/log-redaction.ts';
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
 import { beginSourceAnswerPoolRead, poolSqlSite, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
@@ -33,6 +34,10 @@ export interface StoreRead {
   params: readonly unknown[];
   mode: 'get' | 'all';
 }
+
+/** A fresh read ends the old transaction and pins a new one on the same connection. */
+type SnapshotRead = (query: StoreRead, freshSnapshot?: true) => Promise<unknown>;
+type SnapshotOptions = { lane?: ReadPoolLane; noWait?: boolean; perRead?: boolean; store?: string };
 
 /** Workers per store, including a terminated worker until it has stopped. */
 export const READ_POOL_SIZE = 1;
@@ -157,10 +162,13 @@ export function setReadPoolWorkerFactoryForTests(factory?: (url: string) => Work
 // plain text: a call or an interpolation there would keep the plugin bundle
 // from dropping the source (plugin-bundle-no-bun-sqlite).
 const MMAP_PRAGMA_SLOT = '/*olympus-mmap-pragma*/';
+const FILE_IDENTITY_SLOT = '/*olympus-file-identity*/';
 const mmapPragma = (): string => (sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : '');
 const WORKER_SOURCE = `
-import { Database } from 'bun:sqlite';
-import { statSync } from 'node:fs';
+import { Database, constants } from 'bun:sqlite';
+import { CString, read } from 'bun:ffi';
+import { fstatSync, statSync } from 'node:fs';
+const sqliteFileIdentity = /*olympus-file-identity*/;
 const snapshots = new Map();
 const connections = new Map();
 // [request running, last request finished, native connections held], read by the request thread.
@@ -175,11 +183,24 @@ const noteConnections = (delta) => {
 const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
-  db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
-  /*olympus-mmap-pragma*/
+  let file;
+  try {
+    file = sqliteFileIdentity(db, fstatSync, read, CString, constants);
+    if (file !== pathIdentity(path)) throw new Error('SQLite file changed during open');
+    db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+    /*olympus-mmap-pragma*/
+    db.function('olympus_read_file_identity', () => file);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   noteConnections(1);
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
-  return db;
+  return { db, file, path };
+};
+const pathIdentity = (path) => {
+  const stat = statSync(path, { bigint: true });
+  return stat.dev + ':' + stat.ino;
 };
 // Snapshot connections are kept for the next snapshot instead of closed:
 // Bun 1.3.x corrupts its heap when pool threads open and close SQLite
@@ -189,8 +210,7 @@ const IDLE_SNAPSHOT_CONNECTIONS = 8;
 const idleSnapshots = new Map();
 const close = (db) => { db.close(); noteConnections(-1); };
 const snapshotConnection = (path) => {
-  const stat = statSync(path);
-  const file = stat.dev + ':' + stat.ino;
+  const file = pathIdentity(path);
   const idle = idleSnapshots.get(path) ?? [];
   while (idle.length > 0) {
     const held = idle.pop();
@@ -201,20 +221,22 @@ const snapshotConnection = (path) => {
     }
     try { close(held.db); } catch {}
   }
-  return { db: open(path), file, path };
+  return open(path);
 };
 const connection = (path) => {
-  const stat = statSync(path);
-  const file = stat.dev + ':' + stat.ino;
+  const file = pathIdentity(path);
   const held = connections.get(path);
   if (held && held.file === file) return held.db;
-  if (held) close(held.db);
-  const db = open(path);
-  connections.set(path, { db, file });
-  return db;
+  if (held) {
+    connections.delete(path);
+    close(held.db);
+  }
+  const opened = open(path);
+  connections.set(path, opened);
+  return opened.db;
 };
 self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
+  const { id, op, snapshot, path, sql, params, mode, perRead, freshSnapshot } = event.data;
   if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
   if (op === 'release') {
     const held = connections.get(path);
@@ -248,9 +270,14 @@ self.onmessage = (event) => {
       }
       postMessage({ id, ok: true, rows: null });
     } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
+      const held = snapshots.get(snapshot);
+      const db = op === 'query' ? connection(path) : held?.db;
       if (!db) throw new Error('unknown snapshot');
       const started = performance.now();
+      if (freshSnapshot && held && !held.perRead) {
+        if (held.file !== pathIdentity(held.path)) throw new Error('SQLite file changed during snapshot');
+        db.exec('COMMIT; BEGIN;');
+      }
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
       postMessage({ id, ok: true, rows, ms: performance.now() - started });
@@ -291,6 +318,7 @@ interface ReaderThread {
 
 interface PoolJob {
   store: string;
+  path: string;
   read: StoreRead;
   deadlineAtMs: number;
   resolve: (rows: unknown) => void;
@@ -364,7 +392,8 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
   const limit = lane === 'shared' ? READ_POOL_SIZE : lane === 'rescore' ? READ_POOL_RESCORE_READERS : 1;
   if (threads.filter(reader => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers()) return undefined;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: 'application/javascript' }));
+    const source = WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma()).replace(FILE_IDENTITY_SLOT, () => sqliteFileIdentity.toString());
+    const url = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
     const worker = workerFactory(url);
     // The reader never keeps a finished command alive.
     (worker as Worker & { unref?: () => void }).unref?.();
@@ -508,26 +537,27 @@ function checkLostReplies(): void {
  */
 export async function withOffThreadSnapshot<T>(
   dbPath: string,
-  work: (read: (query: StoreRead) => Promise<unknown>) => Promise<T>,
-  options: { lane?: ReadPoolLane; noWait?: boolean; perRead?: boolean } = {},
+  work: (read: SnapshotRead) => Promise<T>,
+  options: SnapshotOptions = {},
 ): Promise<T> {
   const lane = options.lane ?? 'shared';
+  const store = options.store ?? dbPath;
   // Before the first await, while the caller's frames are still on the stack.
   const site = callerSite();
   if (!runtimeHasWorkers()) throw new Error('off-thread reads are unavailable');
   // Tied to the store's lifetime: a release while the snapshot waits for a
   // thread, or between its reservation and its open, cancels it.
-  const generation = releases.get(dbPath) ?? 0;
+  const generation = releases.get(store) ?? 0;
   // noWait: a helper that is only worth having now (a re-score reader)
   // takes a free worker or none.
   const askedAtMs = clock.now();
-  const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
+  const free = options.noWait ? snapshotThreadNow(store, lane) : undefined;
   if (options.noWait && !free) throw new OffThreadReadBusyError();
   if (free) free.snapshots += 1;
   // The reserved worker; undefined only while a fresh one is being taken.
-  let reader: ReaderThread | undefined = free ?? await snapshotThread(dbPath, lane);
+  let reader: ReaderThread | undefined = free ?? await snapshotThread(store, lane);
   try {
-    if ((releases.get(dbPath) ?? 0) !== generation) throw new OffThreadReadBusyError();
+    if ((releases.get(store) ?? 0) !== generation) throw new OffThreadReadBusyError();
     let snapshot = nextId++;
     // The wait for the store's worker, counted once, on the snapshot's first
     // read: a lane's time behind other snapshots shows in its queue wait.
@@ -556,8 +586,8 @@ export async function withOffThreadSnapshot<T>(
         reader!.snapshots -= 1;
         reader = undefined;
         dispatch();
-        reader = await snapshotThread(dbPath, lane);
-        if ((releases.get(dbPath) ?? 0) !== generation) throw new OffThreadReadBusyError();
+        reader = await snapshotThread(store, lane);
+        if ((releases.get(store) ?? 0) !== generation) throw new OffThreadReadBusyError();
         snapshot = nextId++;
         await open();
       })();
@@ -571,7 +601,7 @@ export async function withOffThreadSnapshot<T>(
     }
     if (!perRead) markRead(dbPath, snapshot, { atMs: clock.now(), lane, site });
     try {
-      return await work(async (query) => {
+      return await work(async (query, freshSnapshot) => {
         const readId = perRead ? -(nextId++) : 0;
         if (perRead) markRead(dbPath, readId, { atMs: clock.now(), lane, site });
         if (observeSnapshots) observer?.(dbPath, query, { lane, site });
@@ -583,7 +613,7 @@ export async function withOffThreadSnapshot<T>(
         let sqlMs = 0;
         const once = async (): Promise<unknown> => {
           if (moving) await moving;
-          return send(reader!, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }, (ms) => {
+          return send(reader!, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode, freshSnapshot }, (ms) => {
             sqlMs = ms;
           });
         };
@@ -681,8 +711,8 @@ function snapshotThreadNow(store: string, lane: ReadPoolLane): ReaderThread | un
  */
 export function openOffThreadSnapshot(
   dbPath: string,
-  options: { lane?: ReadPoolLane; noWait?: boolean } = {},
-): Promise<{ read: (query: StoreRead) => Promise<unknown>; close: () => Promise<void> }> {
+  options: SnapshotOptions = {},
+): Promise<{ read: SnapshotRead; close: () => Promise<void> }> {
   return new Promise((resolve, reject) => {
     let opened = false;
     const done = withOffThreadSnapshot(dbPath, (read) => new Promise<void>((release) => {
@@ -732,22 +762,24 @@ function serveSnapshotWaiters(): void {
  * when `deadlineAtMs` (on the pool's clock) passes before the rows are back.
  * The caller checks offThreadReadsSupported first.
  */
-export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineAtMs?: number } = {}): Promise<unknown> {
+export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineAtMs?: number; store?: string } = {}): Promise<unknown> {
   // A caller that gives no deadline waits for its rows however long they take.
   const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
-  const waiting = queues.get(dbPath) ?? [];
+  // A read of a related file may belong to this store's worker and lifetime.
+  const store = options.store ?? dbPath;
+  const waiting = queues.get(store) ?? [];
   const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock.now() >= deadlineAtMs) {
     report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: 'refused' });
     return Promise.reject(new OffThreadReadBusyError());
   }
   return new Promise<unknown>((resolve, reject) => {
-    const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock.now(), report };
+    const job: PoolJob = { store, path: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock.now(), report };
     if (Number.isFinite(deadlineAtMs)) job.timer = clock.setTimeout(() => missedDeadline(job), deadlineAtMs - clock.now());
     waiting.push(job);
-    if (!queues.has(dbPath)) {
-      queues.set(dbPath, waiting);
-      turns.push(dbPath);
+    if (!queues.has(store)) {
+      queues.set(store, waiting);
+      turns.push(store);
     }
     dispatch();
   }).then((rows) => { noteSourceIndexReadProgress(); return rows; });
@@ -858,12 +890,12 @@ function dispatch(): void {
     if (job.lane) { job.lane(); job.lane.began?.(); job.running = true; }
     reader.job = job;
     reader.executingStore = job.store;
-    observer?.(job.store, job.read);
+    observer?.(job.path, job.read);
     // The caller gives up at its own deadline; the executor is kept until
     // SQLite answers. A reply lost on its way back would hold it for good,
     // so a lost one retires the worker (it keeps its slot until it has
     // stopped) and, if the caller still waits, the query runs again once.
-    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
+    send(reader, { op: 'query', path: job.path, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
       job.sqlMs = ms;
     })
       .then(
