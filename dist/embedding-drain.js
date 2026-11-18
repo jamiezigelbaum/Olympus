@@ -24927,7 +24927,6 @@ var VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
 var VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
 var VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
 var vectorDigestBackfillHold = () => false;
-var visibilityBootPending;
 var VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000;
 function nextVectorDigestBackfillRows(rows, turnMs) {
   if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
@@ -25890,10 +25889,7 @@ class LocalConnectorStore {
     })();
     return this.tierHiddenCountsRefresh;
   }
-  async tierHiddenItemPksInTurns(bootBuild = false) {
-    const boot = bootBuild ? undefined : visibilityBootPending?.();
-    if (boot)
-      await boot;
+  async tierHiddenItemPksInTurns() {
     const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
     return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
   }
@@ -25916,7 +25912,7 @@ class LocalConnectorStore {
     return runHiddenStepsHere(this.tierLedgerHiddenSteps());
   }
   async keepVisibilityCurrentInTurns() {
-    await this.tierHiddenItemPksInTurns(true);
+    await this.tierHiddenItemPksInTurns();
     if (!this.readOnly)
       await this.publishVisibility();
   }
@@ -26482,7 +26478,7 @@ class LocalConnectorStore {
     }
   }
   refreshVisibilityIfBehind(options = {}) {
-    if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing || visibilityBootPending?.())
+    if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing)
       return;
     try {
       const ledger = this.visibilityRegisteredLedger;
@@ -28336,9 +28332,6 @@ ${parentKey(ref)}`, { ref, origin });
     }
   }
   async peopleObservationsOffThread() {
-    const boot = visibilityBootPending?.();
-    if (boot)
-      await boot;
     changeMemoryActivity("people_refresh", 1);
     try {
       if (!offThreadReadsSupported(this.dbPath))
@@ -31803,9 +31796,6 @@ ${parentKey(ref)}`, { ref, origin });
     this.embeddingDeferral = reason;
   }
   async embedChunks(options) {
-    const boot = visibilityBootPending?.();
-    if (boot)
-      await boot;
     if (this.dbPath === ":memory:")
       return this.embedChunksUnderLease(options);
     return withFileLease(`${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`, () => this.embedChunksUnderLease(options), {
@@ -33825,9 +33815,6 @@ ${parentKey(ref)}`, { ref, origin });
     return step.value;
   }
   async statusOffThread(scope, options = {}) {
-    const boot = visibilityBootPending?.();
-    if (boot)
-      await boot;
     if (!offThreadReadsSupported(this.dbPath))
       return this.status(scope, options);
     return withOffThreadSnapshot(this.dbPath, async (read) => {

@@ -602,6 +602,63 @@ function readPressure(): PressureTotals {
   return totals;
 }
 /** One sample a second: milliseconds stalled in that second, per scope and kind. Returns the samples and a stop. */
+/** Host memory lines that show how much of RAM the file map and swap hold, in MiB (Linux only). */
+function readMeminfo(): Record<string, number> {
+  const kib: Record<string, number> = {};
+  try { for (const line of readFileSync('/proc/meminfo', 'utf8').split('\n')) { const m = /^(\w+):\s+(\d+) kB/.exec(line); if (m) kib[m[1]!] = Number(m[2]); } } catch { return {}; }
+  const mib = (value: number | undefined) => Math.round((value ?? 0) / 1024);
+  return { mapped_mib: mib(kib.Mapped), cached_mib: mib(kib.Cached), swap_used_mib: mib((kib.SwapTotal ?? 0) - (kib.SwapFree ?? 0)) };
+}
+
+/** The run's own cgroup (the 8 GB scope): swap it holds and its file-mapped, file and anonymous memory, in MiB. */
+function readCgroupMemory(): Record<string, number | string> {
+  try {
+    const path = /^0::(.*)$/m.exec(readFileSync('/proc/self/cgroup', 'utf8'))?.[1];
+    if (!path) return { error: 'no cgroup v2 path' };
+    const base = join('/sys/fs/cgroup', path);
+    const read = (name: string) => { try { return readFileSync(join(base, name), 'utf8').trim(); } catch { return undefined; } };
+    const stat = Object.fromEntries((read('memory.stat') ?? '').split('\n').map(line => line.split(' ')).filter(parts => parts.length === 2).map(([key, value]) => [key!, Number(value)]));
+    const mib = (value: number | string | undefined) => value === undefined || value === 'max' ? value : Math.round(Number(value) / 1024 / 1024);
+    const out: Record<string, number | string> = {};
+    for (const [key, value] of Object.entries({ swap_current_mib: mib(read('memory.swap.current')), current_mib: mib(read('memory.current')), file_mapped_mib: mib(stat.file_mapped), file_mib: mib(stat.file), anon_mib: mib(stat.anon) })) if (value !== undefined) out[key] = value;
+    return out;
+  } catch (error) { return { error: String(error).slice(0, 200) }; }
+}
+
+/** Per engine role: read() copying (rchar, syscr, read_bytes from /proc/PID/io) from readiness to the end, and the process's own memory at the end. */
+function sampleProcessIo(pids: () => Array<{ role: string; pid: number }>, ready: (role: string) => boolean) {
+  type Io = Record<string, number>;
+  const readIo = (pid: number): Io | undefined => {
+    try { return Object.fromEntries(readFileSync(`/proc/${pid}/io`, 'utf8').trim().split('\n').map(line => line.split(': ')).map(([key, value]) => [key!, Number(value)])); } catch { return undefined; }
+  };
+  const readStatus = (pid: number) => {
+    try {
+      const text = readFileSync(`/proc/${pid}/status`, 'utf8');
+      const mib = (name: string) => Math.round(Number(new RegExp(`^${name}:\\s+(\\d+) kB`, 'm').exec(text)?.[1] ?? 0) / 1024);
+      return { rss_anon_mib: mib('RssAnon'), rss_file_mib: mib('RssFile'), vm_swap_mib: mib('VmSwap') };
+    } catch { return undefined; }
+  };
+  const state: Record<string, { atReady?: Io; last?: Io; status?: ReturnType<typeof readStatus> }> = {};
+  const tick = () => {
+    for (const { role, pid } of pids()) {
+      const entry = state[role] ??= {};
+      const io = readIo(pid);
+      if (!io) continue;
+      if (!entry.atReady && ready(role)) entry.atReady = io;
+      entry.last = io;
+      entry.status = readStatus(pid) ?? entry.status;
+    }
+  };
+  const timer = setInterval(tick, 1000);
+  return {
+    stop: () => { tick(); clearInterval(timer); },
+    summary: () => Object.fromEntries(Object.entries(state).map(([role, entry]) => {
+      const delta = (key: string) => entry.atReady && entry.last ? (entry.last[key] ?? 0) - (entry.atReady[key] ?? 0) : null;
+      return [role, { from_ready: Boolean(entry.atReady), rchar_gb: delta('rchar') === null ? null : Math.round(delta('rchar')! / 1e7) / 100, syscr: delta('syscr'), read_bytes_gb: delta('read_bytes') === null ? null : Math.round(delta('read_bytes')! / 1e7) / 100, at_end: entry.status ?? null }];
+    })),
+  };
+}
+
 /** Host paging counters for the run's delta: pages read in, pages swapped out and in, major faults (Linux only). */
 function readVmstat(): Record<string, number> {
   const totals: Record<string, number> = {};
@@ -793,7 +850,7 @@ function coldFiles(dir: string) {
   }
 }
 type RunCase = 'steady' | 'boot-after-upgrade';
-async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean }) {
+async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean; sqliteMmap?: 'on' | 'off' | 'bounded'; swapReading?: boolean }) {
   const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number; items: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
   const isCapped = capped(memoryMaxBytes(memoryMax));
@@ -822,6 +879,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const portProbe = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
   const port = portProbe.port; portProbe.stop(true);
   const env = { PATH: process.env.PATH ?? '', ...environment(dir), HOME: runDir, XDG_CONFIG_HOME: join(runDir, 'c'), XDG_STATE_HOME: join(runDir, 's'), XDG_RUNTIME_DIR: runDir,
+    // The arm's file-map setting for the whole engine (front, background and their read workers inherit it); 'on' is the default.
+    ...(options.sqliteMmap && options.sqliteMmap !== 'on' ? { OLYMPUS_SQLITE_MMAP: options.sqliteMmap } : {}),
     OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: 'synthetic-loop-stall-token',
     OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(runDir, 'background.sock'), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
     OLYMPUS_TIER_SNIFFER_ENABLED: 'false', OLYMPUS_UPDATE_CHECK: 'off', OLYMPUS_BUILT_IN_ANALYST: 'false',
@@ -913,10 +972,18 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   let finished = false;
   const pressureSampler = samplePressure();
   const vmstatAtStart = readVmstat();
+  const meminfoAtStart = readMeminfo();
   let backgroundTimeline: ReturnType<typeof startBackgroundTimeline>;
   const backgroundTimelinePath = join(metrics, 'background.timeline.jsonl');
   const roles: Array<{ role: string; pid: number }> = [];
   const anonSampler = sampleAnonMemory(() => roles, () => enginesStartedAt ?? Date.now());
+  const ioSampler = sampleProcessIo(() => roles, role => readReady(role as Role));
+  let cgroupAtEnd: ReturnType<typeof readCgroupMemory> = {};
+  // The scope's memory each minute: with a swap allowance (--swap-reading) this is the swap refill over time.
+  const cgroupSamples: Array<{ at_s: number } & ReturnType<typeof readCgroupMemory>> = [];
+  const cgroupStarted = Date.now();
+  const cgroupTimer = setInterval(() => cgroupSamples.push({ at_s: Math.round((Date.now() - cgroupStarted) / 1000), ...readCgroupMemory() }), 60_000);
+  let meminfoAtEnd: ReturnType<typeof readMeminfo> = {};
   let walAtOpen: Record<string, number> = {};
   try {
     walAtOpen = walSizes(dir);
@@ -1065,6 +1132,10 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     for (const role of ROLES) if (timing[role].spawnedAt) timing[role].stoppedAt ||= nowMs();
     pressureSampler.stop();
     anonSampler.stop();
+    ioSampler.stop();
+    clearInterval(cgroupTimer);
+    cgroupAtEnd = readCgroupMemory();
+    meminfoAtEnd = readMeminfo();
     await backgroundTimeline?.stop();
     for (const child of children) child.kill('SIGKILL');
     await Promise.all(children.map(child => child.exited)); await Promise.all(pumps);
@@ -1142,6 +1213,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
+    sqlite_mmap: options.sqliteMmap ?? 'default', process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
+    ...(options.swapReading ? { swap_reading: true, counts_as_gate: false } : {}),
     vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
     background_timeline: summarizeBackgroundTimeline(backgroundTimelinePath, freezeLines, join(metrics, 'background.freezes.log')),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
@@ -1184,12 +1257,14 @@ if (import.meta.main) {
   const number = (name: string, fallback: string) => { const n = Number(flag(name, fallback)); if (!Number.isSafeInteger(n) || n < 1) throw new Error(`Invalid --${name}`); return n; };
   if (dir && command === 'pad-wal') padWal(resolve(dir), number('wal-mb', '2048'));
   if (dir && command === 'restore') { restorePristine(resolve(dir)); writeFileSync(join(resolve(dir), 'restored'), new Date().toISOString()); process.exit(0); }
-  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case steady|boot-after-upgrade] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600]');
+  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case steady|boot-after-upgrade] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600] [--sqlite-mmap on|off|bounded] [--swap-reading]');
   const runCase = flag('case', 'steady') as RunCase;
+  const sqliteMmap = flag('sqlite-mmap') as 'on' | 'off' | 'bounded' | undefined;
+  if (sqliteMmap !== undefined && !['on', 'off', 'bounded'].includes(sqliteMmap)) throw new Error('Invalid --sqlite-mmap; use on, off or bounded');
   if (!['steady', 'boot-after-upgrade'].includes(runCase)) throw new Error('Invalid --case; use steady or boot-after-upgrade');
   if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
   else {
-    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick') });
+    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick'), ...(sqliteMmap ? { sqliteMmap } : {}), swapReading: args.includes('--swap-reading') });
     // Exit 3 is "host busy" and 4 "not run" (no judging): neither measured the engine.
     process.exitCode = result === 'host_busy' ? 3 : result === 'not_run' ? 4 : result ? 0 : 1;
   }

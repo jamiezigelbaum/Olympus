@@ -21,8 +21,14 @@ export interface EvalExpectedEvidence {
   corpusId: string;
   /** Verbatim item text, normalized to 6–40 words, used only for retrieval evals. */
   quote?: string;
-  alternates?: readonly { corpusId: string; providerItemId: string }[];
+  alternates?: readonly { corpusId: string; providerItemId: string; providerConversationId?: string }[];
   providerItemId?: string; // fill for precise grading; omit to require >=1 citation
+  /**
+   * The gold item's conversation, where its provider id repeats across
+   * conversations in one store (Telegram numbers messages per chat). Filled
+   * by eval/fill-gold-conversations.ts; absent means the id alone decides.
+   */
+  providerConversationId?: string;
   /** Exact Castor-visible locator required for citation canonicality checks. */
   uri?: string;
   /**
@@ -80,4 +86,17 @@ export function validatePassageDataset(value: unknown): asserts value is EvalDat
       if (e.alternates !== undefined && (!Array.isArray(e.alternates) || e.alternates.some((a: { corpusId: string; providerItemId: string }) => !a || typeof a.corpusId !== 'string' || !a.corpusId || typeof a.providerItemId !== 'string' || !a.providerItemId))) return fail();
     }
   }
+}
+
+/** One gold identity (an expected item or an alternate). */
+export interface EvalGoldIdentity { corpusId: string; providerItemId?: string; providerConversationId?: string }
+
+/** Whether an item in a corpus is this gold item: store, provider id, and conversation when the gold names one. */
+export function isGoldItem(
+  gold: EvalGoldIdentity,
+  corpusId: string | undefined,
+  item: { providerItemId: string; providerConversationId?: string | undefined },
+): boolean {
+  return gold.corpusId === corpusId && gold.providerItemId === item.providerItemId
+    && (gold.providerConversationId === undefined || gold.providerConversationId === item.providerConversationId);
 }

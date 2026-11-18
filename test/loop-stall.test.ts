@@ -35,10 +35,20 @@ test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-th
   // Two cases, each scored on its own line: a box in use, and the first boot after an upgrade left a large WAL.
   // Exit 3 is "host busy" (the IO floor was never reached): not a product result.
   // Each case starts from the pristine fixture, copied outside the memory cap.
-  const results = Object.fromEntries((['steady', 'boot-after-upgrade'] as const).map(runCase => [runCase,
-    invoke(['bun', script, 'restore', '--dir', dir], 30 * 60_000, onDisk) || invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', 'MemorySwapMax=0', '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase], 25 * 60_000, onDisk)]));
-  console.log(JSON.stringify({ phase: 'cases', results }));
-  expect(results).toEqual({ steady: 0, 'boot-after-upgrade': 0 });
+  // A file-map arm (cloud-job loop_stall_arm: on, off or bounded) runs the steady case only, with that setting for the whole engine.
+  // With a -swap suffix (on-swap, off-swap, bounded-swap) the scope gets a 4G swap allowance: a swap reading, not a gate pass.
+  const armInput = process.env.CJ_LOOP_STALL_ARM?.trim() || undefined;
+  const armMatch = armInput === undefined ? undefined : /^(on|off|bounded)(-swap)?$/.exec(armInput);
+  if (armInput !== undefined && !armMatch) throw new Error(`CJ_LOOP_STALL_ARM is on, off or bounded, optionally with -swap, not ${armInput}`);
+  const arm = armMatch?.[1];
+  const swapReading = Boolean(armMatch?.[2]);
+  const cases = arm ? ['steady'] as const : ['steady', 'boot-after-upgrade'] as const;
+  const results = Object.fromEntries(cases.map(runCase => [runCase,
+    invoke(['bun', script, 'restore', '--dir', dir], 30 * 60_000, onDisk) || invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', `MemorySwapMax=${swapReading ? '4G' : '0'}`, '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase, ...(arm ? ['--sqlite-mmap', arm] : []), ...(swapReading ? ['--swap-reading'] : [])], 25 * 60_000, onDisk)]));
+  console.log(JSON.stringify({ phase: 'cases', arm: armInput ?? 'default', swap_reading: swapReading, results }));
+  // A swap reading measures; its gate verdict (0 or 1) is reported, not required.
+  if (swapReading) expect(Object.values(results).every(code => code === 0 || code === 1)).toBe(true);
+  else expect(results).toEqual(Object.fromEntries(cases.map(runCase => [runCase, 0])));
 }, 235 * 60_000);
 
 test('memory cap accepts the default and warm-cache sizes and rejects invalid caps', () => {

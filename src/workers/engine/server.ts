@@ -271,7 +271,7 @@ import {
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
 import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RESOURCE } from './runtime/source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
-import { setVectorDigestBackfillHold, setVisibilityBootWait } from '../connector-store/local-index.ts';
+import { setVectorDigestBackfillHold } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
 import {
@@ -489,7 +489,6 @@ import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/en
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { frontLoopSqlHealth, watchFrontLoopSql } from '../../core/front-loop-sql-guard.ts';
 import {
-  createBackgroundVisibilityBoot,
   createEngineFront,
   createEngineFrontRoutes,
   createFrontGate,
@@ -662,8 +661,6 @@ export async function main(): Promise<void> {
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
-  const visibilityBoot = engineRole === 'background' ? createBackgroundVisibilityBoot({ env: process.env, step: setEngineStep }) : undefined;
-  setVisibilityBootWait(() => visibilityBoot?.pending());
   // The background's loop connections leave checkpoints to a worker of their
   // own (sqlite-checkpointer.ts), from before the first store opens.
   const checkpointer = engineRole === 'background' ? startSqliteCheckpointer() : undefined;
@@ -2364,9 +2361,11 @@ export async function main(): Promise<void> {
     ? await ((await import(loopStallModule)) as typeof import('../../../scripts/loop-stall-test.ts')).attachEngineFixture(connectorStores, engineRole)
     : undefined;
   // Every store's hidden-copy set, built and then kept current on a timer.
-  // The front starts before listening and reports completion separately. The
-  // background saves each set after that build (or at once without a front),
-  // so a future front can read a saved set inside the ledger's feed.
+  // The front does it before it reports ready, so an Ask (the first included)
+  // applies a small delta at most instead of building a set on its thread.
+  // The background (or the single worker) does it after it starts and saves
+  // each set, so the front's start reads from a saved set inside the ledger's
+  // feed. A store mounted later is built on the next tick.
   let visibilityKeeping = false;
   async function keepVisibilityCurrent(when: 'before ready' | 'after start' | 'refresh'): Promise<void> {
     if (visibilityKeeping || sourceRuntimeClosed) return;
@@ -4467,7 +4466,6 @@ export async function main(): Promise<void> {
       trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
       onProgress: (target) => { if (embedsOnThisComputer(target.provider)) localPacer.noteLocalWork(); },
       holdForAsk: () => standBack.holds('embed'),
-      ...(visibilityBoot ? { visibilityBoot: visibilityBoot.pending } : {}),
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
@@ -6484,19 +6482,16 @@ export async function main(): Promise<void> {
     : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
   // Only the wait is bounded: Promise.race does not cancel `warming`. A set
   // rebuilt from the ledger keeps building after the front listens, in turns.
-  const frontVisibility = engineFront ? keepVisibilityCurrent('before ready') : undefined;
-  if (frontVisibility) {
+  if (engineFront) {
+    const warming = keepVisibilityCurrent('before ready');
     let bound: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([frontVisibility, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
+    await Promise.race([warming, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
     clearTimeout(bound);
   }
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') { finishBootProgress(); setEngineStep(undefined); }
-  void frontVisibility?.then(() => {
-    finishFrontProgress();
-    engineFront!.visibilityFinished();
-  });
+  if (engineFront) finishFrontProgress();
   if (listens) {
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and
   // OpenClaw-hosted installs alike. Dashboard-only backends without this
@@ -6698,10 +6693,8 @@ export async function main(): Promise<void> {
   }, 2_000) : undefined;
   frontMountRetry?.unref?.();
   // Keeps each store's set current, and saved by a writer; see keepVisibilityCurrent.
-  if (engineRole === 'single') void keepVisibilityCurrent('after start');
-  const visibilityRefresh = setInterval(() => {
-    if (!visibilityBoot?.pending()) void keepVisibilityCurrent('refresh');
-  }, VISIBILITY_REFRESH_MS);
+  if (!engineFront) void keepVisibilityCurrent('after start');
+  const visibilityRefresh = setInterval(() => { void keepVisibilityCurrent('refresh'); }, VISIBILITY_REFRESH_MS);
   visibilityRefresh.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
@@ -6740,7 +6733,7 @@ export async function main(): Promise<void> {
     previous: { count: 0 }, memory: memoryDiagnostic,
   }) : undefined;
   let engineBackground: { stop(): void } | undefined;
-  if (engineRole === 'background' && visibilityBoot) {
+  if (engineRole === 'background') {
     if (!authToken) throw new Error('The engine background needs the worker auth token.');
     const refreshSchedulerSources = () => {
       sourceScheduler?.updateSources(schedulerSourcesForHandles(
@@ -6768,7 +6761,6 @@ export async function main(): Promise<void> {
       // own answers so the judge steps aside for them on the one server.
       ...(answerBuiltInModel ? { modelComplete: (request: AnalystModelRequest) => answerBuiltInModel.complete(request) } : {}),
       handlers: {
-        front_visibility_finished: ({ frontPid }) => { visibilityBoot.frontFinished(frontPid); },
         model_prepare: () => {
           if (workerBuiltInModel) void workerBuiltInModel.model.prepare();
           return { preparing: workerBuiltInModel !== undefined };
@@ -6931,7 +6923,7 @@ export async function main(): Promise<void> {
     };
     commands.markReady();
     finishBootProgress();
-    void visibilityBoot.start(() => keepVisibilityCurrent('after start'));
+    setEngineStep(undefined);
     // What the dashboard and status show, recounted here on its own pace and
     // kept for the front, which never counts (status-recount.ts).
     const refreshSnapshot = sourceIndexStatus?.refreshSnapshot;
@@ -7008,7 +7000,6 @@ export async function main(): Promise<void> {
     shuttingDown = true;
     privateAgentListeners?.close();
     sourceRuntimeClosed = true;
-    visibilityBoot?.stop();
     loopStallFixture?.stop();
     localFilesCleanupRecovery?.close();
     sourceScheduler?.stop();

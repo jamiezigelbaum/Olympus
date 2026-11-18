@@ -50,6 +50,7 @@
     "src/core/native-process-service.ts#DEFAULT_STOP_GRACE_MS": "c",
     "src/core/native-relay-service.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
     "src/core/native-telegram-service.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
+    "src/core/native-worker-service.ts#DEFAULT_ENGINE_BACKGROUND_WAIT_MS": "c",
     "src/core/native-worker-service.ts#DEFAULT_WORKER_STARTUP_TIMEOUT_MS": "c",
     "src/core/native-worker-service.ts#ENDPOINT_OCCUPANCY_TIMEOUT_MS": "c",
     "src/core/native-worker-service.ts#READINESS_PROBE_TIMEOUT_MS": "c",
