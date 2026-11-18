@@ -1350,19 +1350,18 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   const result = done.result;
   const traces = Array.isArray(result?.traces) ? result.traces as JourneyTrace[] : [];
   run.recordJourneyFailures(traces, 'journeys', trace => `journeys --out ~/rc/journey-rerun --skip-screens --only ${sh(trace.id)}`);
-  let missed = 0;
-  for (const journey of JOURNEYS) {
-    if (!journey.machine && !unmet.includes(journey) && (!options.onlyJourneys?.length || options.onlyJourneys.includes(journey.id))
-      && !traces.some(trace => trace.id === journey.id)) {
-      missed++;
-      run.skipJourney(journey.id, 'journeys', 'journeys.ran');
+  // Journeys the machine never walked because the leg itself failed are listed as skipped because of journeys.ran.
+  if (result?.ok !== true) {
+    for (const journey of JOURNEYS) {
+      if (!journey.machine && !unmet.includes(journey) && (!options.onlyJourneys?.length || options.onlyJourneys.includes(journey.id))
+        && !traces.some(trace => trace.id === journey.id)) run.skipJourney(journey.id, 'journeys', 'journeys.ran');
     }
   }
   if (!result || !Array.isArray(result.traces)) {
     run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: agentDetail(done) });
     return;
   }
-  if (result.ok !== true || missed > 0) run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: String(result.detail ?? 'the machine reported a problem') });
+  if (result.ok !== true) run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: String(result.detail ?? 'the machine reported a problem') });
   const scratch = join(outDir, '_journeys');
   rmSync(scratch, { recursive: true, force: true });
   mkdirSync(scratch, { recursive: true });
@@ -2002,7 +2001,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
   if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
   await runArchiveScaleLeg(run, options.outDir, deadline);
-  await finishCutoverWatch(run, Date.now() < deadline);
+  await finishCutoverWatch(run, Date.now() < deadline && !options.skipArchive);
   if (Date.now() < deadline) await runPrivacyQualification(run);
   if (Date.now() < deadline) await runRelayConsentCheck(run);
   if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
@@ -2122,7 +2121,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
           if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
           if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
           if (options.archiveScale) await run.inLeg('archive', () => runArchiveScaleLeg(run, options.outDir, deadline));
-          await finishCutoverWatch(run, Date.now() < deadline);
+          await finishCutoverWatch(run, Date.now() < deadline && !options.skipArchive);
           // With the split on, the front must survive a restart on a store set like a real one (rc.4, ops#151).
           if (checksSplit(options) && !options.skipArchive && Date.now() < deadline) await run.inLeg('archive', () => runFrontSteady(run));
           // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
