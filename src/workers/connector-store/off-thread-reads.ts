@@ -163,6 +163,7 @@ import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
 const connections = new Map();
+const openDatabases = new Map();
 // [request running, last request finished, native connections held], read by the request thread.
 let progress;
 let connectionTotal;
@@ -177,6 +178,7 @@ const open = (path) => {
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
   /*olympus-mmap-pragma*/
+  openDatabases.set(db, undefined);
   noteConnections(1);
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
@@ -187,7 +189,7 @@ const open = (path) => {
 // otherwise open one connection per snapshot.
 const IDLE_SNAPSHOT_CONNECTIONS = 8;
 const idleSnapshots = new Map();
-const close = (db) => { db.close(); noteConnections(-1); };
+const close = (db) => { db.close(); openDatabases.delete(db); noteConnections(-1); };
 const snapshotConnection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -216,6 +218,31 @@ const connection = (path) => {
 self.onmessage = (event) => {
   const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
   if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
+  if (op === 'memory') {
+    const at = Date.now();
+    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
+    let cacheBytes = 0;
+    let measured = 0;
+    for (const [db, cached] of openDatabases) {
+      let bytes = cached;
+      if (bytes === undefined) {
+        try {
+          using cacheSize = db.prepare('PRAGMA main.cache_size');
+          const size = cacheSize.values()[0][0];
+          if (size < 0) bytes = -size * 1024;
+          else {
+            using pageSize = db.prepare('PRAGMA main.page_size');
+            bytes = size * pageSize.values()[0][0];
+          }
+          openDatabases.set(db, bytes);
+        } catch { continue; } // Coverage in the reply shows a failed probe.
+      }
+      cacheBytes += bytes;
+      measured++;
+    }
+    postMessage({ diagnostic: 'memory', at, heapUsed, external, arrayBuffers, cacheBytes, measured });
+    return;
+  }
   if (op === 'release') {
     const held = connections.get(path);
     connections.delete(path);
@@ -281,6 +308,7 @@ interface ReaderThread {
   /** Snapshots open on this thread. */
   snapshots: number;
   connections: number;
+  memory?: ReaderMemory;
   /** The pool query running here, if any. */
   job?: PoolJob | undefined;
   /** Terminated, and still counted until its "close" event says it stopped. */
@@ -316,6 +344,38 @@ interface PoolJob {
 
 // Every thread the pool started that has not stopped, retired ones included.
 const threads: ReaderThread[] = [];
+interface ReaderMemory {
+  at: number;
+  heapUsed: number;
+  external: number;
+  arrayBuffers: number;
+  cacheBytes: number;
+  measured: number;
+}
+
+/** Poll idle readers only, and use replies from earlier ticks. Never wait behind SQL. */
+export function sampleReadPoolMemory() {
+  const now = Date.now();
+  let workers = 0, connections = 0, cache = 0, heap = 0, external = 0, arrayBuffers = 0, age = 0;
+  for (const reader of threads) {
+    const measured = reader.memory;
+    if (measured) {
+      workers++;
+      connections += measured.measured;
+      cache += measured.cacheBytes;
+      heap += measured.heapUsed;
+      external += measured.external;
+      arrayBuffers += measured.arrayBuffers;
+      age = Math.max(age, now - measured.at);
+    }
+    if (!reader.retired && reader.pending.size === 0 && !reader.job) reader.worker.postMessage({ op: 'memory' });
+  }
+  return {
+    read_heap_workers: workers, read_heap_age_ms: age, read_heap_size_mb: heap,
+    read_extra_memory_mb: external, ...(arrayBuffers > 0 ? { read_array_buffers_mb: arrayBuffers } : {}),
+    sqlite_read_connections_sampled: connections, sqlite_read_cache_budget_mb: cache,
+  };
+}
 let heldConnections = 0;
 // Shared by every reader: logging loads one integer, even if a worker loses its reply.
 // Lazy so the Node plugin entry can drop the pool along with bun:sqlite.
@@ -383,6 +443,10 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
       if (closed) return;
       const message = event.data;
       const diagnostic = message as unknown as { diagnostic?: string; path: string; ms: number; delta: number };
+      if (diagnostic.diagnostic === 'memory') {
+        started.memory = message as unknown as ReaderMemory;
+        return;
+      }
       if (diagnostic.diagnostic === 'connections') {
         started.connections += diagnostic.delta;
         heldConnections += diagnostic.delta;

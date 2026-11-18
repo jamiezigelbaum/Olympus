@@ -7501,6 +7501,24 @@ var init_model_transport = __esm(() => {
   };
 });
 
+// src/core/memory-counters.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+function addMemoryPayloadBytes(bytes) {
+  payloadScope.getStore()?.(bytes);
+}
+function memoryPayloadByteCounter() {
+  return payloadScope.getStore();
+}
+function addMemoryPayloadText(text) {
+  const add = payloadScope.getStore();
+  if (add)
+    add(Buffer.byteLength(text));
+}
+var payloadScope;
+var init_memory_counters = __esm(() => {
+  payloadScope = new AsyncLocalStorage;
+});
+
 // src/core/secret-patterns.ts
 var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
@@ -7705,7 +7723,7 @@ var init_opsec = __esm(() => {
 });
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 function recordReleaseManifest(manifest) {
   storage.getStore()?.manifests.push({
     inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
@@ -7723,12 +7741,12 @@ function withheldSourceAnswer(reason) {
 var chunkProvenance, storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
   chunkProvenance = new WeakMap;
-  storage = new AsyncLocalStorage;
+  storage = new AsyncLocalStorage2;
   withheldAnswers = new WeakSet;
 });
 
 // src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 function noteSourceAnswerProgress(stage) {
   progressSink.getStore()?.(stage);
 }
@@ -7740,11 +7758,11 @@ var init_source_answer_jobs = __esm(() => {
   SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
   SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
   SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-  progressSink = new AsyncLocalStorage2;
+  progressSink = new AsyncLocalStorage3;
 });
 
 // src/core/model-stream.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_IDLE_TIMEOUT_MS) {
   const controller = new AbortController;
   let timer;
@@ -7778,6 +7796,8 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
     }
   };
   try {
+    if (typeof init.body === "string")
+      addMemoryPayloadText(init.body);
     const response = await Promise.race([fetchModelEndpoint(fetchImpl, url, { ...init, signal: controller.signal }), stopped]);
     if (!response.body)
       return response;
@@ -7838,6 +7858,7 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
       }
       if (next.done)
         break;
+      addMemoryPayloadBytes(next.value.byteLength);
       if (next.value.byteLength) {
         arm();
         progress.getStore()?.(model);
@@ -7894,9 +7915,10 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
 }
 var MODEL_IDLE_TIMEOUT_MS = 60000, progress, ModelStreamError, ModelIdleError;
 var init_model_stream = __esm(() => {
+  init_memory_counters();
   init_model_transport();
   init_source_answer_jobs();
-  progress = new AsyncLocalStorage3;
+  progress = new AsyncLocalStorage4;
   ModelStreamError = class ModelStreamError extends Error {
     model;
     constructor(model) {
@@ -9003,10 +9025,10 @@ function isExecutableFile(path) {
 var init_openclaw_executable = () => {};
 
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var progress2;
 var init_read_progress = __esm(() => {
-  progress2 = new AsyncLocalStorage4;
+  progress2 = new AsyncLocalStorage5;
 });
 
 // src/core/read-wide.ts
@@ -9031,13 +9053,13 @@ var init_partial_search = __esm(() => {
 });
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage5;
-  disabled = new AsyncLocalStorage5;
-  cachedOnly = new AsyncLocalStorage5;
-  requestContext = new AsyncLocalStorage5;
+  context = new AsyncLocalStorage6;
+  disabled = new AsyncLocalStorage6;
+  cachedOnly = new AsyncLocalStorage6;
+  requestContext = new AsyncLocalStorage6;
 });
 // src/core/store-reclaim-admission.ts
 var init_store_reclaim_admission = __esm(() => {
@@ -9046,14 +9068,14 @@ var init_store_reclaim_admission = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 var poolSqlSites, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage6;
-  laneStorage = new AsyncLocalStorage6;
+  storage2 = new AsyncLocalStorage7;
+  laneStorage = new AsyncLocalStorage7;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -9175,10 +9197,10 @@ var init_http = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage7;
+  storage3 = new AsyncLocalStorage8;
   completedPrivateAnswers = new Set;
   JOB_QUESTION_TTL_MS = 30 * 60000;
   jobQuestions = new Map;
@@ -14507,7 +14529,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", CLAIM_RULE = `Each citation's "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.`, ANALYST_SYSTEM, NOTES_MAX = 12, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`, compactSystem = (notes = "off") => [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence below.",
   "Each evidence item starts with its number and name, then its date and source, then its text in source_data.",
@@ -14541,7 +14563,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage8;
+  analystAbortSignalStorage = new AsyncLocalStorage9;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -16340,8 +16362,6 @@ var init_ingest_filter = __esm(() => {
     "2fa code"
   ].join("|"), "i");
 });
-// src/core/memory-counters.ts
-var init_memory_counters = () => {};
 // src/core/people-index.ts
 var PEOPLE_LINK_REASON_TEXT, PEOPLE_AUTHORED_FAMILIES;
 var init_people_index = __esm(() => {
@@ -16556,6 +16576,13 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/workers/engine-split/sqlite-memory.ts
+var stores, byDatabase;
+var init_sqlite_memory = __esm(() => {
+  stores = new Set;
+  byDatabase = new WeakMap;
+});
+
 // src/core/source-size-limits.ts
 var SOURCE_FILE_SIZE_CEILING, SOURCE_SIZE_LIMITS;
 var init_source_size_limits = __esm(() => {
@@ -16669,15 +16696,16 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
+  init_memory_counters();
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage9;
+  priorityQueryEmbedding = new AsyncLocalStorage10;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -17073,11 +17101,11 @@ var init_media_cache = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage10;
+  readAuthorization = new AsyncLocalStorage11;
 });
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
@@ -17250,7 +17278,9 @@ var init_litert_runtime = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-var init_remote_litert_runtime = () => {};
+var init_remote_litert_runtime = __esm(() => {
+  init_memory_counters();
+});
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 var init_runtime = () => {};
@@ -17469,6 +17499,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_memory_counters();
+  init_sqlite_memory();
   init_read_progress();
   init_source_size_limits();
   init_store_totals();
@@ -17936,6 +17967,7 @@ var init_local_analyst_window = __esm(() => {
 // src/workers/classification/sniffer-decision.ts
 var endpoints;
 var init_sniffer_decision = __esm(() => {
+  init_memory_counters();
   init_model_transport();
   init_sniffer_lane();
   init_sniffer();
@@ -18918,6 +18950,14 @@ async function runExtractionCommand(request, internals = {}) {
     }
     const stdout = [];
     const stderr = [];
+    const notePipeBytes = memoryPayloadByteCounter();
+    let pipeBytes = 0;
+    const collect = (chunks) => (chunk) => {
+      chunks.push(chunk);
+      pipeBytes += chunk.byteLength;
+      notePipeBytes?.(chunk.byteLength);
+      lastProgress = Date.now();
+    };
     let settled = false;
     const useTimeout = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0;
     const groupCpuMs = internals.groupCpuMs ?? processGroupCpuMs;
@@ -18954,14 +18994,8 @@ async function runExtractionCommand(request, internals = {}) {
         ...outcome.ok ? {} : { terminationFailed: outcome.code }
       }));
     }, stallCheckIntervalMs(request.timeoutMs)) : undefined;
-    child.stdout.on("data", (chunk) => {
-      stdout.push(chunk);
-      lastProgress = Date.now();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr.push(chunk);
-      lastProgress = Date.now();
-    });
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
     child.on("error", (error) => {
       if (settled)
         return;
@@ -18972,6 +19006,7 @@ async function runExtractionCommand(request, internals = {}) {
       reject(error);
     });
     child.on("close", (code) => {
+      notePipeBytes?.(-pipeBytes);
       if (settled)
         return;
       settled = true;
@@ -18996,6 +19031,7 @@ async function runExtractionCommand(request, internals = {}) {
 }
 var ExtractionCommandError, ExtractionCommandTimeoutError, execFileAsync2, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
 var init_command_runner = __esm(() => {
+  init_memory_counters();
   init_descendant_groups();
   init_native_process_service();
   ExtractionCommandError = class ExtractionCommandError extends Error {
@@ -20542,6 +20578,7 @@ var init_remote_vlm = __esm(() => {
 
 // src/workers/file-extraction/extractors/model-stream.ts
 var init_model_stream2 = __esm(() => {
+  init_memory_counters();
   init_http_timeout();
 });
 
@@ -20635,6 +20672,7 @@ var init_store_sink = __esm(() => {
 // src/workers/file-extraction/runner.ts
 var SOURCE_PARK_FALLBACK_MS, SINK_SKIP_SETTLEMENTS, ITEM_REF_FIELDS, PDF_MIME_TYPES;
 var init_runner = __esm(() => {
+  init_memory_counters();
   init_source_size_limits();
   init_control_path_headroom();
   init_media_cache();

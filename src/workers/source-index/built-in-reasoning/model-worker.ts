@@ -21,7 +21,12 @@ const stopAll = () => Promise.all([
   ...[...liteRtHelpers.values()].map(helper => helper.release()),
 ]);
 const send = (reply: ModelThreadReply) => port.postMessage(reply);
-port.on('message', async (message: { id: number; request: ModelThreadRequest; cancel?: number; shutdown?: boolean }) => {
+port.on('message', async (message: { id: number; request: ModelThreadRequest; cancel?: number; shutdown?: boolean; sampleMemory?: boolean }) => {
+  if (message.sampleMemory) {
+    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
+    send({ id: 0, memory: { at: Date.now(), heapUsed, external, arrayBuffers } });
+    return;
+  }
   if (message.shutdown) {
     try { await stopAll(); }
     finally { Atomics.store(workerData.shutdown, 0, 1); Atomics.notify(workerData.shutdown, 0); }

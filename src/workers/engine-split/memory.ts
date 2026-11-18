@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { heapSize, heapStats } from 'bun:jsc';
 import type { EngineRole } from '../../core/engine-split.ts';
-import { memoryHolderCounts, type MemoryActivityLabel } from '../../core/memory-counters.ts';
+import { memoryHolderCounts, memoryPayloadCounts, type MemoryActivityLabel } from '../../core/memory-counters.ts';
 
 const MB = 1024 * 1024;
 export const MEMORY_SAMPLE_INTERVAL_MS = 5_000;
@@ -37,26 +36,33 @@ export interface MemoryContext {
   activity: string;
   pid: number;
   uptime_s: number;
-  read_workers: number;
-  read_connections: number;
 }
 interface MemoryPeak {
   anon: number;
   at: string;
   activity: string;
-  heapSize: number;
+  attribution: MemoryAttribution;
 }
 interface MemoryFloor {
   rss: number;
   anon: number | undefined;
   full: boolean;
+  attribution?: MemoryAttribution;
 }
 const mb = (bytes: number) => Math.round(bytes / MB * 100) / 100;
 
+/** Numeric fields named *_mb hold bytes until formatting. */
+type MemoryAttribution = Record<string, number | string>;
+
+function attributionFields(fields: MemoryAttribution | undefined, prefix = ''): MemoryAttribution {
+  return Object.fromEntries(Object.entries(fields ?? {}).map(([key, value]) =>
+    [prefix + key, key.endsWith('_mb') && typeof value === 'number' ? mb(value) : value]));
+}
+
 /** Fixed schema only: no caller-supplied labels, ids, paths or names enter the line. */
-export function memoryFields(
-  context: MemoryContext, memory: ProcessMemory, peak: MemoryPeak | undefined, heap = heapStats(),
-  floor?: MemoryFloor, burstsOverThreshold = 0,
+function memoryFields(
+  context: MemoryContext, memory: ProcessMemory, peak: MemoryPeak | undefined,
+  floor?: MemoryFloor, burstsOverThreshold = 0, attribution?: MemoryAttribution,
 ): string {
   const holders = memoryHolderCounts();
   const fields = {
@@ -66,15 +72,16 @@ export function memoryFields(
     ...(memory.file === undefined ? {} : { rss_file_mb: mb(memory.file) }),
     ...(memory.swap === undefined ? {} : { swap_mb: mb(memory.swap) }),
     ...(peak === undefined ? {} : {
-      peak_anon_mb: mb(peak.anon), peak_at: peak.at, peak_activity: peak.activity, peak_heap_size_mb: mb(peak.heapSize),
+      peak_anon_mb: mb(peak.anon), peak_at: peak.at, peak_activity: peak.activity,
+      ...attributionFields(peak.attribution, 'peak_'),
     }),
     ...(floor === undefined ? {} : floor.anon === undefined
       ? { floor_rss_mb: mb(floor.rss) }
       : { floor_anon_mb: mb(floor.anon) }),
     bursts_over_threshold: burstsOverThreshold,
-    heap_size_mb: mb(heap.heapSize), heap_capacity_mb: mb(heap.heapCapacity),
-    extra_memory_mb: mb(heap.extraMemorySize), object_count: heap.objectCount,
     ...holders,
+    ...attributionFields(attribution),
+    ...attributionFields(floor?.attribution, 'floor_'),
   };
   return Object.entries(fields).map(([key, value]) => `${key}=${value}`).join(' ');
 }
@@ -85,59 +92,69 @@ export function createMemoryDiagnostic(input: {
   readers?: () => { read_workers: number; read_connections: number };
   now?: () => number;
   uptime?: () => number;
-  heap?: typeof heapStats;
-  peakHeapSize?: () => number;
+  heap?: () => Pick<NodeJS.MemoryUsage, 'heapUsed' | 'heapTotal' | 'external' | 'arrayBuffers'>;
+  sampleHolders?: () => MemoryAttribution;
   log?: (line: string) => void;
 }) {
   const now = input.now ?? Date.now;
   const log = input.log ?? ((line: string) => console.warn(line));
   const activity = () => input.activity?.().join(',') || 'idle';
-  const heap = input.heap ?? heapStats;
-  const peakHeapSize = input.peakHeapSize ?? heapSize;
+  const heap = input.heap ?? process.memoryUsage;
+  const readAttribution = (): MemoryAttribution => {
+    const usage = heap();
+    return {
+      heap_size_mb: usage.heapUsed, heap_capacity_mb: usage.heapTotal, extra_memory_mb: usage.external,
+      ...(input.readers?.() ?? { read_workers: 0, read_connections: 0 }),
+      ...(usage.arrayBuffers > 0 ? { array_buffers_mb: usage.arrayBuffers } : {}),
+      ...memoryPayloadCounts(), ...input.sampleHolders?.(),
+    };
+  };
   let lastLineAt = now();
   let peak: MemoryPeak | undefined;
-  const samples: Pick<MemoryFloor, 'rss' | 'anon'>[] = [];
+  const samples: Pick<MemoryFloor, 'rss' | 'anon' | 'attribution'>[] = [];
+  let latest: MemoryAttribution | undefined;
   let nextSample = 0;
   let checksSinceLine = 0;
-  let burstsSinceLine = 0;
   const floor = (): MemoryFloor | undefined => {
     if (samples.length === 0) return undefined;
     let rss = Infinity;
     let anon: number | undefined = Infinity;
+    let rssAttribution: MemoryAttribution | undefined;
+    let anonAttribution: MemoryAttribution | undefined;
     for (const sample of samples) {
-      rss = Math.min(rss, sample.rss);
-      anon = anon === undefined || sample.anon === undefined ? undefined : Math.min(anon, sample.anon);
+      if (sample.rss < rss) { rss = sample.rss; rssAttribution = sample.attribution; }
+      if (sample.anon === undefined) anon = undefined;
+      else if (anon !== undefined && sample.anon < anon) {
+        anon = sample.anon;
+        anonAttribution = sample.attribution;
+      }
     }
-    return { rss, anon, full: samples.length === MEMORY_FLOOR_WINDOW_MAX_SAMPLES };
+    const attribution = anon === undefined ? rssAttribution : anonAttribution;
+    return { rss, anon, full: samples.length === MEMORY_FLOOR_WINDOW_MAX_SAMPLES, ...(attribution && { attribution }) };
   };
   return {
     sample(memory: ProcessMemory, rss = memory.anon ?? memory.rss): void {
-      samples[nextSample] = { rss, anon: memory.anon };
+      latest = readAttribution();
+      samples[nextSample] = { rss, anon: memory.anon, attribution: latest };
       nextSample = (nextSample + 1) % MEMORY_FLOOR_WINDOW_MAX_SAMPLES;
       if (memory.anon === undefined || (peak && memory.anon <= peak.anon)) return;
-      // Building visibility sets can raise RSS on every sample. A full heap
-      // census at each peak holds the front's loop as those sets grow.
-      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: peakHeapSize() };
+      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), attribution: latest };
     },
     floor,
-    recordBurst(rss: number, floorRss: number, thresholdMb: number): void {
-      if (++burstsSinceLine === 1) {
-        log(`[olympus] memory restart not taken: burst rss_mb=${mb(rss)} floor_mb=${mb(floorRss)} threshold_mb=${thresholdMb}`);
-      }
-    },
     // Called on the minute check. Counting those checks keeps timer jitter from skipping to minute six.
     dueOnMinuteCheck(): boolean { return ++checksSinceLine >= 5 || now() - lastLineAt >= MEMORY_LOG_INTERVAL_MS; },
     /** Returns the same fields for the restart line. */
-    write(memory: ProcessMemory): string {
+    write(memory: ProcessMemory, burst?: { count: number; rss: number; floor: number; thresholdMb: number }): string {
       const at = new Date(now()).toISOString();
+      if (burst) {
+        log(`${at} [olympus] memory restart not taken: burst rss_mb=${mb(burst.rss)} floor_mb=${mb(burst.floor)} threshold_mb=${burst.thresholdMb}`);
+      }
       const fields = memoryFields({ role: input.role, pid: process.pid,
         uptime_s: Math.floor((input.uptime ?? process.uptime)()), activity: activity(),
-        ...(input.readers?.() ?? { read_workers: 0, read_connections: 0 }),
-      }, memory, peak, heap(), floor(), burstsSinceLine);
+      }, memory, peak, floor(), burst?.count ?? 0, latest ?? readAttribution());
       log(`${at} [olympus] memory ${fields}`);
       peak = undefined;
       checksSinceLine = 0;
-      burstsSinceLine = 0;
       lastLineAt = now();
       return `at=${at} ${fields}`;
     },

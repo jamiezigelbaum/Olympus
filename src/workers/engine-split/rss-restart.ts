@@ -63,13 +63,26 @@ export function startEngineRssRestart(input: {
   let done = false;
   const sample = input.sample ?? processMemory;
   const threshold = input.thresholdMb * 1024 * 1024;
+  let aboveInPreviousSample = false;
+  let burstCandidates = 0;
+  let largestCandidate = 0;
+  let windowMin = Infinity;
   const check = (sampled: ProcessMemory, rss: number): void => {
-    const periodic = () => { if (memory.dueOnMinuteCheck()) memory.write(sampled); };
-    if (done || input.thresholdMb <= 0) { periodic(); return; }
     const floor = memory.floor();
+    const write = (includeBursts: boolean) => {
+      const low = Math.min(floor?.rss ?? Infinity, windowMin);
+      const burst = includeBursts && burstCandidates > 0 && low <= threshold
+        ? { count: burstCandidates, rss: largestCandidate, floor: low, thresholdMb: input.thresholdMb }
+        : undefined;
+      burstCandidates = largestCandidate = 0;
+      aboveInPreviousSample = false;
+      windowMin = Infinity;
+      return memory.write(sampled, burst);
+    };
+    const periodic = () => { if (memory.dueOnMinuteCheck()) write(true); };
+    if (done || input.thresholdMb <= 0) { periodic(); return; }
     if (!floor?.full || floor.rss <= threshold) {
       overSince = undefined;
-      if (floor && rss > threshold && floor.rss < threshold) memory.recordBurst(rss, floor.rss, input.thresholdMb);
       periodic();
       return;
     }
@@ -82,7 +95,7 @@ export function startEngineRssRestart(input: {
     const previous = restarts;
     restarts = next;
     input.record(next);
-    const fields = memory.write(sampled);
+    const fields = write(false);
     if (!input.restart()) {
       restarts = previous;
       log(`[engine-split] rss_over_threshold rss_mb=${rssMb} threshold_mb=${input.thresholdMb}: nothing supervises this process, so it keeps running.`);
@@ -99,6 +112,16 @@ export function startEngineRssRestart(input: {
     const sampled = sample();
     const rss = input.rss?.() ?? sampled.anon ?? sampled.rss;
     memory.sample(sampled, rss);
+    if (input.thresholdMb > 0) {
+      // Track sampled excursions even when they begin and end between restart checks.
+      const above = rss > threshold;
+      if (above) {
+        if (!aboveInPreviousSample) burstCandidates++;
+        largestCandidate = Math.max(largestCandidate, rss);
+      }
+      windowMin = Math.min(windowMin, rss);
+      aboveInPreviousSample = above;
+    }
     if (++samplesSinceCheck * MEMORY_SAMPLE_INTERVAL_MS < ENGINE_RSS_CHECK_INTERVAL_MS) return;
     samplesSinceCheck = 0;
     check(sampled, rss);

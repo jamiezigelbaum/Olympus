@@ -57,6 +57,43 @@ var __esm = (fn, res, err) => () => {
   return res;
 };
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
+var __dispose = Symbol.dispose || /* @__PURE__ */ Symbol.for("Symbol.dispose");
+var __asyncDispose = Symbol.asyncDispose || /* @__PURE__ */ Symbol.for("Symbol.asyncDispose");
+var __using = (stack, value, async) => {
+  if (value != null) {
+    if (typeof value !== "object" && typeof value !== "function")
+      throw TypeError('Object expected to be assigned to "using" declaration');
+    var dispose;
+    if (async)
+      dispose = value[__asyncDispose];
+    if (dispose === undefined)
+      dispose = value[__dispose];
+    if (typeof dispose !== "function")
+      throw TypeError("Object not disposable");
+    stack.push([async, dispose, value]);
+  } else if (async) {
+    stack.push([async]);
+  }
+  return value;
+};
+var __callDispose = (stack, error, hasError) => {
+  var E = typeof SuppressedError === "function" ? SuppressedError : function(e, s, m, _) {
+    return _ = Error(m), _.name = "SuppressedError", _.error = e, _.suppressed = s, _;
+  }, fail = (e) => error = hasError ? new E(e, error, "An error was suppressed during disposal") : (hasError = true, e), next = (it) => {
+    while (it = stack.pop()) {
+      try {
+        var result = it[1] && it[1].call(it[2]);
+        if (it[0])
+          return Promise.resolve(result).then(next, (e) => (fail(e), next()));
+      } catch (e) {
+        fail(e);
+      }
+    }
+    if (hasError)
+      throw error;
+  };
+  return next();
+};
 
 // connect-relay/shared/mcp-log.ts
 function rpcCallNames(body) {
@@ -22393,6 +22430,121 @@ var init_dist4 = __esm(() => {
   init_secure_client();
 });
 
+// src/core/memory-counters.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+function changeMemoryCounter(key, delta) {
+  counts[key] += delta;
+}
+function memoryHolderCounts() {
+  const { tasks_embed, tasks_sync, tasks_extract, tasks_watch, ...holders } = counts;
+  return holders;
+}
+async function withMemoryPayload(kind, run) {
+  const counter = payloads[kind];
+  let bytes = 0;
+  let active = true;
+  counter.count++;
+  try {
+    return await payloadScope.run((delta) => {
+      if (!active)
+        return;
+      bytes += delta;
+      counter.bytes += delta;
+    }, run);
+  } finally {
+    active = false;
+    counter.count--;
+    counter.bytes -= bytes;
+  }
+}
+function addMemoryPayloadBytes(bytes) {
+  payloadScope.getStore()?.(bytes);
+}
+function memoryPayloadByteCounter() {
+  return payloadScope.getStore();
+}
+function addMemoryPayloadText(text) {
+  const add = payloadScope.getStore();
+  if (add)
+    add(Buffer.byteLength(text));
+}
+function memoryPayloadJson(value) {
+  const json = JSON.stringify(value);
+  addMemoryPayloadText(json);
+  return json;
+}
+function noteMemoryPayloadResponse(response) {
+  const bytes = Number(response.headers.get("content-length"));
+  if (Number.isSafeInteger(bytes) && bytes > 0)
+    addMemoryPayloadBytes(bytes);
+}
+function memoryPayloadCounts() {
+  return {
+    judge_payloads: payloads.judge.count,
+    judge_payload_bytes: payloads.judge.bytes,
+    embed_payloads: payloads.embed.count,
+    embed_payload_bytes: payloads.embed.bytes,
+    extract_payloads: payloads.extract.count,
+    extract_payload_bytes: payloads.extract.bytes
+  };
+}
+function changeMemoryActivity(label, delta) {
+  scopedActivity[label] += delta;
+}
+function taskActivities(judging, recount) {
+  const labels = [];
+  if (judging)
+    labels.push("judging");
+  if (counts.tasks_embed > 0)
+    labels.push("embedding");
+  if (recount)
+    labels.push("recount");
+  if (counts.tasks_sync > 0 || counts.tasks_watch > 0)
+    labels.push("import");
+  if (counts.tasks_extract > 0)
+    labels.push("extract");
+  return labels;
+}
+function statusMemoryActivity(judging, recount) {
+  return taskActivities(judging, recount)[0] ?? "idle";
+}
+function memoryActivity(judging, recount, background) {
+  const labels = background === undefined ? taskActivities(judging, recount) : background === "idle" ? [] : [background];
+  if (scopedActivity.visibility_rebuild_bootstrap > 0)
+    labels.push("visibility_rebuild_bootstrap");
+  if (scopedActivity.visibility_rebuild_incremental > 0)
+    labels.push("visibility_rebuild_incremental");
+  if (scopedActivity.people_refresh > 0)
+    labels.push("people_refresh");
+  return labels.length ? labels : ["idle"];
+}
+var counts, payloads, payloadScope, scopedActivity;
+var init_memory_counters = __esm(() => {
+  counts = {
+    connector_stores: 0,
+    tier_visibility_items: 0,
+    hidden_child_items: 0,
+    embedding_queue: 0,
+    people: 0,
+    identities: 0,
+    tasks_embed: 0,
+    tasks_sync: 0,
+    tasks_extract: 0,
+    tasks_watch: 0
+  };
+  payloads = {
+    judge: { count: 0, bytes: 0 },
+    embed: { count: 0, bytes: 0 },
+    extract: { count: 0, bytes: 0 }
+  };
+  payloadScope = new AsyncLocalStorage;
+  scopedActivity = {
+    visibility_rebuild_bootstrap: 0,
+    visibility_rebuild_incremental: 0,
+    people_refresh: 0
+  };
+});
+
 // src/core/owner-config-read.ts
 import { chmodSync as chmodSync2, linkSync as linkSync2, readFileSync as readFileSync12, statSync as statSync3, lstatSync as lstatSync11 } from "node:fs";
 import { randomUUID as randomUUID4 } from "node:crypto";
@@ -24261,7 +24413,7 @@ var init_opsec = __esm(() => {
 
 // src/core/release-manifest.ts
 import { createHash as createHash5 } from "node:crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 function chunkCoverageNote(result) {
   return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
 }
@@ -24445,12 +24597,12 @@ function withheldSourceAnswer(reason) {
 var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000, chunkProvenance, UNPROVED_PASSAGE = "unproved:", storage, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
   chunkProvenance = new WeakMap;
-  storage = new AsyncLocalStorage;
+  storage = new AsyncLocalStorage2;
   withheldAnswers = new WeakSet;
 });
 
 // src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 import { createHash as createHash6, randomBytes as randomBytes7, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
@@ -25042,11 +25194,11 @@ var init_source_answer_jobs = __esm(() => {
   SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
   SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
   JOB_ID_PATTERN = /^saj_[A-Za-z0-9_-]{43}$/;
-  progressSink = new AsyncLocalStorage2;
+  progressSink = new AsyncLocalStorage3;
 });
 
 // src/core/model-stream.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 function withModelProgress(listener, work) {
   const parent = progress.getStore();
   return progress.run((model) => {
@@ -25087,6 +25239,8 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
     }
   };
   try {
+    if (typeof init.body === "string")
+      addMemoryPayloadText(init.body);
     const response = await Promise.race([fetchModelEndpoint(fetchImpl, url, { ...init, signal: controller.signal }), stopped]);
     if (!response.body)
       return response;
@@ -25147,6 +25301,7 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
       }
       if (next.done)
         break;
+      addMemoryPayloadBytes(next.value.byteLength);
       if (next.value.byteLength) {
         arm();
         progress.getStore()?.(model);
@@ -25203,9 +25358,10 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
 }
 var MODEL_IDLE_TIMEOUT_MS = 60000, progress, ModelStreamError, ModelIdleError;
 var init_model_stream = __esm(() => {
+  init_memory_counters();
   init_model_transport();
   init_source_answer_jobs();
-  progress = new AsyncLocalStorage3;
+  progress = new AsyncLocalStorage4;
   ModelStreamError = class ModelStreamError extends Error {
     model;
     constructor(model) {
@@ -25660,7 +25816,7 @@ var init_stopwords_iso = __esm(() => {
 });
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 function withKeywordExpansionDisabled(run) {
   return disabled.run(true, run);
 }
@@ -25701,10 +25857,10 @@ function withKeywordAlternatives(query, alternatives, run) {
 }
 var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage4;
-  disabled = new AsyncLocalStorage4;
-  cachedOnly = new AsyncLocalStorage4;
-  requestContext = new AsyncLocalStorage4;
+  context = new AsyncLocalStorage5;
+  disabled = new AsyncLocalStorage5;
+  cachedOnly = new AsyncLocalStorage5;
+  requestContext = new AsyncLocalStorage5;
 });
 
 // src/core/source-index/keyword-stopwords.ts
@@ -26567,7 +26723,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel) {
   if (!request.localOnly)
     return;
@@ -27571,7 +27727,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage5;
+  analystAbortSignalStorage = new AsyncLocalStorage6;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -35339,6 +35495,7 @@ function modelThreadHandleId() {
 
 class ModelThread {
   worker;
+  memory;
   nextId = 1;
   pending = new Map;
   pids = new Map;
@@ -35351,6 +35508,10 @@ class ModelThread {
     };
     process.once("exit", onExit);
     this.worker.on("message", (reply) => {
+      if (reply.memory) {
+        this.memory = reply.memory;
+        return;
+      }
       if (reply.handle !== undefined) {
         if (reply.pid === undefined)
           this.pids.delete(reply.handle);
@@ -35402,6 +35563,20 @@ class ModelThread {
       failed(new Error("The built-in model worker stopped."));
     });
     this.worker.unref();
+  }
+  sampleMemory() {
+    if (this.pending.size === 0)
+      this.worker.postMessage({ sampleMemory: true });
+    const sampled = this.memory;
+    return {
+      model_workers: 1,
+      ...sampled && {
+        model_heap_size_mb: sampled.heapUsed,
+        model_extra_memory_mb: sampled.external,
+        model_heap_age_ms: Math.max(0, Date.now() - sampled.at),
+        ...sampled.arrayBuffers > 0 ? { model_array_buffers_mb: sampled.arrayBuffers } : {}
+      }
+    };
   }
   call(request, options = {}) {
     if (options.signal?.aborted)
@@ -35458,6 +35633,9 @@ function modelThread() {
     });
   }
   return shared;
+}
+function sampleModelWorkerMemory() {
+  return shared?.sampleMemory() ?? { model_workers: 0 };
 }
 var shared, nextHandle = 1;
 var init_off_thread = () => {};
@@ -46102,67 +46280,119 @@ var init_tier_set_binding = __esm(() => {
   tierLedgerIsWithin = pathResolvesWithin;
 });
 
-// src/core/memory-counters.ts
-function changeMemoryCounter(key, delta) {
-  counts[key] += delta;
+// src/workers/engine-split/sqlite-memory.ts
+function trackSqliteStoreMemory(db, hasTempStore) {
+  const store = { db: new WeakRef(db), hasTempStore };
+  byDatabase.set(db, store);
+  stores.add(store);
 }
-function memoryHolderCounts() {
-  const { tasks_embed, tasks_sync, tasks_extract, tasks_watch, ...holders } = counts;
-  return holders;
+function untrackSqliteStoreMemory(db) {
+  const store = byDatabase.get(db);
+  if (store)
+    stores.delete(store);
+  byDatabase.delete(db);
 }
-function changeMemoryActivity(label, delta) {
-  scopedActivity[label] += delta;
+function pragmaNumber(db, sql) {
+  let __stack = [];
+  try {
+    const statement = __using(__stack, db.prepare(sql), 0);
+    return Number(statement.values()[0]?.[0] ?? 0);
+  } catch (_catch) {
+    var _err = _catch, _hasErr = 1;
+  } finally {
+    __callDispose(__stack, _err, _hasErr);
+  }
 }
-function taskActivities(judging, recount) {
-  const labels = [];
-  if (judging)
-    labels.push("judging");
-  if (counts.tasks_embed > 0)
-    labels.push("embedding");
-  if (recount)
-    labels.push("recount");
-  if (counts.tasks_sync > 0 || counts.tasks_watch > 0)
-    labels.push("import");
-  if (counts.tasks_extract > 0)
-    labels.push("extract");
-  return labels;
-}
-function statusMemoryActivity(judging, recount) {
-  return taskActivities(judging, recount)[0] ?? "idle";
-}
-function memoryActivity(judging, recount, background) {
-  const labels = background === undefined ? taskActivities(judging, recount) : background === "idle" ? [] : [background];
-  if (scopedActivity.visibility_rebuild_bootstrap > 0)
-    labels.push("visibility_rebuild_bootstrap");
-  if (scopedActivity.visibility_rebuild_incremental > 0)
-    labels.push("visibility_rebuild_incremental");
-  if (scopedActivity.people_refresh > 0)
-    labels.push("people_refresh");
-  return labels.length ? labels : ["idle"];
-}
-var counts, scopedActivity;
-var init_memory_counters = __esm(() => {
-  counts = {
-    connector_stores: 0,
-    tier_visibility_items: 0,
-    hidden_child_items: 0,
-    embedding_queue: 0,
-    people: 0,
-    identities: 0,
-    tasks_embed: 0,
-    tasks_sync: 0,
-    tasks_extract: 0,
-    tasks_watch: 0
+function sampleSqliteStoreMemory() {
+  if (!probing) {
+    probing = true;
+    const remaining = stores.values();
+    let sampleGlobal = true;
+    const probeNext = () => {
+      const next = remaining.next();
+      if (next.done) {
+        probing = false;
+        return;
+      }
+      const store = next.value;
+      const db = store.db.deref();
+      if (!db) {
+        stores.delete(store);
+        setImmediate(probeNext);
+        return;
+      }
+      try {
+        if (store.cacheBudget === undefined) {
+          const size = pragmaNumber(db, "PRAGMA main.cache_size");
+          store.cacheBudget = size < 0 ? -size * 1024 : size * pragmaNumber(db, "PRAGMA main.page_size");
+        }
+        store.tempPages = store.hasTempStore ? pragmaNumber(db, "PRAGMA temp.page_count") * pragmaNumber(db, "PRAGMA temp.page_size") : 0;
+        store.sampledAt = Date.now();
+        if (sampleGlobal) {
+          if (supportsMemstat === undefined) {
+            let __stack = [];
+            try {
+              const modules = __using(__stack, db.prepare("SELECT 1 FROM pragma_module_list WHERE name = 'sqlite_memstat'"), 0);
+              supportsMemstat = modules.get() !== null;
+            } catch (_catch) {
+              var _err = _catch, _hasErr = 1;
+            } finally {
+              __callDispose(__stack, _err, _hasErr);
+            }
+          }
+          if (supportsMemstat) {
+            let __stack2 = [];
+            try {
+              const memory = __using(__stack2, db.prepare("SELECT value, hiwtr FROM sqlite_memstat WHERE name = 'MEMORY_USED'"), 0);
+              const result = memory.get();
+              allocation = result ? { used: result.value, highwater: result.hiwtr, at: Date.now() } : undefined;
+            } catch (_catch2) {
+              var _err2 = _catch2, _hasErr2 = 1;
+            } finally {
+              __callDispose(__stack2, _err2, _hasErr2);
+            }
+          }
+          sampleGlobal = false;
+        }
+      } catch {
+        probeErrors++;
+      }
+      setImmediate(probeNext);
+    };
+    setImmediate(probeNext);
+  }
+  let cacheBudget = 0, tempPages = 0, measured = 0, age = 0;
+  const now = Date.now();
+  for (const store of stores.values()) {
+    if (store.sampledAt === undefined)
+      continue;
+    measured++;
+    cacheBudget += store.cacheBudget ?? 0;
+    tempPages += store.tempPages ?? 0;
+    age = Math.max(age, now - store.sampledAt);
+  }
+  return {
+    sqlite_memory_status: allocation ? "available" : supportsMemstat === undefined ? "pending" : "unavailable",
+    ...allocation ? {
+      sqlite_memory_used_mb: allocation.used,
+      sqlite_memory_highwater_mb: allocation.highwater,
+      sqlite_memory_age_ms: Math.max(0, now - allocation.at)
+    } : {},
+    sqlite_store_connections_sampled: measured,
+    sqlite_store_age_ms: age,
+    sqlite_store_cache_budget_mb: cacheBudget,
+    sqlite_store_temp_pages_mb: tempPages,
+    sqlite_probe_errors: probeErrors
   };
-  scopedActivity = {
-    visibility_rebuild_bootstrap: 0,
-    visibility_rebuild_incremental: 0,
-    people_refresh: 0
-  };
+}
+var stores, byDatabase, probing = false, supportsMemstat, allocation, probeErrors = 0;
+var init_sqlite_memory = __esm(() => {
+  stores = new Set;
+  byDatabase = new WeakMap;
 });
 
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 function withSourceIndexReadProgress(report, run) {
   return progress2.run(report, run);
 }
@@ -46177,7 +46407,7 @@ function currentSourceIndexReadProgress() {
 }
 var progress2;
 var init_read_progress = __esm(() => {
-  progress2 = new AsyncLocalStorage6;
+  progress2 = new AsyncLocalStorage7;
 });
 
 // src/core/limit-stops.ts
@@ -46757,7 +46987,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 import { createHash as createHash20 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -46867,14 +47097,18 @@ async function discardBody2(response) {
 async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
   const timedOut = (attempts) => new TransientSourceEmbeddingError(provider, "timeout", attempts, budget.budgetMs);
   let attempt = 0;
+  if (typeof init.body === "string")
+    addMemoryPayloadText(init.body);
   for (;; ) {
     let reason;
     let waitMs;
     try {
       const response = await fetchModelEndpoint(fetchImpl, url, init);
       attempt += 1;
-      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
+      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status)) {
+        noteMemoryPayloadResponse(response);
         return response;
+      }
       reason = response.status;
       const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
       const requestedMs = retryAfterMs(response);
@@ -47602,12 +47836,13 @@ function mediaJudgeMethods(provider) {
 }
 var priorityQueryEmbedding, SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError, REAL_QUERY_EMBEDDING_WAIT_TIMERS, STARTING_MODEL_FIRST_RETRY_MS = 250, STARTING_MODEL_MAX_RETRY_MS = 1000;
 var init_embeddings = __esm(() => {
+  init_memory_counters();
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage7;
+  priorityQueryEmbedding = new AsyncLocalStorage8;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -47920,7 +48155,7 @@ var init_store_reclaim_admission = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 import { createHash as createHash21, randomUUID as randomUUID8 } from "node:crypto";
 function poolSqlSite(sql) {
   return sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "?").replace(/\b\d+(?:\.\d+)?\b/g, "N").replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)").replace(/\s+/g, " ").trim().slice(0, POOL_SQL_SITE_CHARS);
@@ -48363,8 +48598,8 @@ var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage8;
-  laneStorage = new AsyncLocalStorage8;
+  storage2 = new AsyncLocalStorage9;
+  laneStorage = new AsyncLocalStorage9;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -52368,6 +52603,33 @@ var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 function readInBackground(dbPath, query) {
   return withOffThreadSnapshot(dbPath, async (read) => read(query), BACKGROUND_READS);
 }
+function sampleReadPoolMemory() {
+  const now = Date.now();
+  let workers = 0, connections = 0, cache = 0, heap = 0, external = 0, arrayBuffers = 0, age = 0;
+  for (const reader of threads) {
+    const measured = reader.memory;
+    if (measured) {
+      workers++;
+      connections += measured.measured;
+      cache += measured.cacheBytes;
+      heap += measured.heapUsed;
+      external += measured.external;
+      arrayBuffers += measured.arrayBuffers;
+      age = Math.max(age, now - measured.at);
+    }
+    if (!reader.retired && reader.pending.size === 0 && !reader.job)
+      reader.worker.postMessage({ op: "memory" });
+  }
+  return {
+    read_heap_workers: workers,
+    read_heap_age_ms: age,
+    read_heap_size_mb: heap,
+    read_extra_memory_mb: external,
+    ...arrayBuffers > 0 ? { read_array_buffers_mb: arrayBuffers } : {},
+    sqlite_read_connections_sampled: connections,
+    sqlite_read_cache_budget_mb: cache
+  };
+}
 function readPoolMemoryCounts() {
   return { read_workers: threads.length, read_connections: connectionTotal ? Atomics.load(connectionTotal, 0) : heldConnections };
 }
@@ -52419,6 +52681,10 @@ function startThread(store, lane = "shared") {
         return;
       const message = event.data;
       const diagnostic = message;
+      if (diagnostic.diagnostic === "memory") {
+        started.memory = message;
+        return;
+      }
       if (diagnostic.diagnostic === "connections") {
         started.connections += diagnostic.delta;
         heldConnections += diagnostic.delta;
@@ -52881,6 +53147,7 @@ import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
 const connections = new Map();
+const openDatabases = new Map();
 // [request running, last request finished, native connections held], read by the request thread.
 let progress;
 let connectionTotal;
@@ -52895,6 +53162,7 @@ const open = (path) => {
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
   /*olympus-mmap-pragma*/
+  openDatabases.set(db, undefined);
   noteConnections(1);
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
@@ -52905,7 +53173,7 @@ const open = (path) => {
 // otherwise open one connection per snapshot.
 const IDLE_SNAPSHOT_CONNECTIONS = 8;
 const idleSnapshots = new Map();
-const close = (db) => { db.close(); noteConnections(-1); };
+const close = (db) => { db.close(); openDatabases.delete(db); noteConnections(-1); };
 const snapshotConnection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -52934,6 +53202,31 @@ const connection = (path) => {
 self.onmessage = (event) => {
   const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
   if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
+  if (op === 'memory') {
+    const at = Date.now();
+    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
+    let cacheBytes = 0;
+    let measured = 0;
+    for (const [db, cached] of openDatabases) {
+      let bytes = cached;
+      if (bytes === undefined) {
+        try {
+          using cacheSize = db.prepare('PRAGMA main.cache_size');
+          const size = cacheSize.values()[0][0];
+          if (size < 0) bytes = -size * 1024;
+          else {
+            using pageSize = db.prepare('PRAGMA main.page_size');
+            bytes = size * pageSize.values()[0][0];
+          }
+          openDatabases.set(db, bytes);
+        } catch { continue; } // Coverage in the reply shows a failed probe.
+      }
+      cacheBytes += bytes;
+      measured++;
+    }
+    postMessage({ diagnostic: 'memory', at, heapUsed, external, arrayBuffers, cacheBytes, measured });
+    return;
+  }
   if (op === 'release') {
     const held = connections.get(path);
     connections.delete(path);
@@ -54123,7 +54416,7 @@ var init_source_item_read = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 function privateQuestionKey(ref) {
   if (!ref || typeof ref !== "object")
     return;
@@ -54286,7 +54579,7 @@ function recordRemoteOperation(input) {
 }
 var storage3, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage9;
+  storage3 = new AsyncLocalStorage10;
   PROVIDER_APP_NAMES = {
     openai: "ChatGPT",
     anthropic: "Claude",
@@ -55719,7 +56012,7 @@ var init_remote_result = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
 function currentAccess(authorized) {
   try {
     return authorized();
@@ -55741,7 +56034,7 @@ function currentRemoteReadAccess() {
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage10;
+  readAuthorization = new AsyncLocalStorage11;
 });
 
 // src/workers/classification/installed-tier-classification-registry.ts
@@ -59663,7 +59956,7 @@ class RemoteLiteRtEmbedder {
     const response = await fetch(new URL(path, this.url), {
       method: texts ? "POST" : "GET",
       headers,
-      ...texts ? { body: JSON.stringify({ texts }) } : {},
+      ...texts ? { body: memoryPayloadJson({ texts }) } : {},
       signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
       redirect: "error"
     });
@@ -59671,10 +59964,13 @@ class RemoteLiteRtEmbedder {
       await response.body?.cancel();
       throw new Error("Remote request failed.");
     }
+    noteMemoryPayloadResponse(response);
     return await response.json();
   }
 }
-var init_remote_litert_runtime = () => {};
+var init_remote_litert_runtime = __esm(() => {
+  init_memory_counters();
+});
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { realpathSync as realpathSync12 } from "node:fs";
@@ -61685,22 +61981,22 @@ var init_tier_move = __esm(() => {
 });
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
 function runPrivacyReleaseInference(work) {
-  privacyReleaseInference ??= new AsyncLocalStorage11;
-  localInferencePriority ??= new AsyncLocalStorage11;
+  privacyReleaseInference ??= new AsyncLocalStorage12;
+  localInferencePriority ??= new AsyncLocalStorage12;
   return privacyReleaseInference.run(true, () => localInferencePriority.run("owner", work));
 }
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage11;
+  localInferenceGuards ??= new AsyncLocalStorage12;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage11;
+  localInferencePriority ??= new AsyncLocalStorage12;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage11;
+  localInferencePriority ??= new AsyncLocalStorage12;
   return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
 }
 function currentLocalInferencePriority() {
@@ -68381,6 +68677,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 `, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, IMAGE_CONTENT_PAGE_KEYS = 20000, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_memory_counters();
+  init_sqlite_memory();
   init_read_progress();
   init_source_size_limits();
   init_store_totals();
@@ -68655,6 +68952,7 @@ var init_local_index = __esm(() => {
         }
         reportFrontStoreOpened();
         changeMemoryCounter("connector_stores", 1);
+        trackSqliteStoreMemory(this.db, this.visibilityJournal);
       } catch (error) {
         closeSqliteStore(this.db, { checkpoint: !this.readOnly });
         throw error;
@@ -68756,6 +69054,7 @@ var init_local_index = __esm(() => {
       if (this.closedForPoolReads)
         return;
       changeMemoryCounter("connector_stores", -1);
+      untrackSqliteStoreMemory(this.db);
       this.tierLedgerHiddenMemo = undefined;
       this.hiddenChildMemo = undefined;
       this.visibilitySqlMemo = undefined;
@@ -75333,13 +75632,22 @@ ${parentKey(ref)}`, { ref, origin });
           text: buildConnectorStoreEmbeddingText(row),
           ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
         }));
+        const embedPayload = (run) => withMemoryPayload("embed", () => {
+          const inputs = inputsFor(batch);
+          for (const input of inputs) {
+            addMemoryPayloadText(input.text);
+            if (input.title)
+              addMemoryPayloadText(input.title);
+          }
+          return run(inputs);
+        });
         let vectors;
         const embedStarted = Date.now();
         const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
         let judgedBatch;
         try {
           if (judgeNow) {
-            const returned = await judging.embedWithImageVectors(inputsFor(batch));
+            const returned = await embedPayload((inputs) => judging.embedWithImageVectors(inputs));
             vectors = returned.vectors;
             judgedBatch = new Map;
             const currentJudge = mediaJudgeId(judging);
@@ -75353,7 +75661,7 @@ ${parentKey(ref)}`, { ref, origin });
               } catch {}
             }
           } else {
-            vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+            vectors = await embedPayload((inputs) => provider.embed(inputs, { taskType: "RETRIEVAL_DOCUMENT" }));
           }
         } catch (error) {
           if (!(error instanceof SourceEmbeddingInputsFailedError))
@@ -75380,7 +75688,7 @@ ${parentKey(ref)}`, { ref, origin });
           batch = recheck.kept;
           if (batch.length === 0)
             continue;
-          vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+          vectors = await embedPayload((inputs) => provider.embed(inputs, { taskType: "RETRIEVAL_DOCUMENT" }));
         }
         const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
         AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`).get(JSON.stringify([...new Set(batch.map((row) => row.item_pk))]));
@@ -104079,14 +104387,18 @@ function createDecisionSnifferModel(lane, full, options = {}) {
       });
     }, Math.min(LIVENESS_PROBE_MS, Math.max(50, Math.floor(idleMs / 4))));
     try {
+      const json = JSON.stringify(body);
+      if (json !== undefined)
+        addMemoryPayloadText(json);
       const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json", ...options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {} },
-        body: JSON.stringify(body),
+        body: json,
         signal: signal ? AbortSignal.any([idle.signal, signal]) : idle.signal
       });
       if (!response.ok)
         throw new NativeRequestError([404, 405, 501].includes(response.status));
+      noteMemoryPayloadResponse(response);
       return await response.json();
     } catch (error) {
       throw error instanceof NativeRequestError ? error : new NativeRequestError(false, idle.signal.aborted);
@@ -104243,6 +104555,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
 }
 var REPLY_TO_TIER = '{"verdicts":[{"i":1,"tier":"', PLACEHOLDER = "CALIBRATION_ITEM_PLACEHOLDER", DECISION_CALL_IDLE_MS = 60000, LIVENESS_PROBE_MS = 15000, NativeRequestError, endpoints;
 var init_sniffer_decision = __esm(() => {
+  init_memory_counters();
   init_model_transport();
   init_sniffer_lane();
   init_sniffer();
@@ -116147,6 +116460,14 @@ async function runExtractionCommand(request, internals = {}) {
     }
     const stdout = [];
     const stderr = [];
+    const notePipeBytes = memoryPayloadByteCounter();
+    let pipeBytes = 0;
+    const collect = (chunks) => (chunk) => {
+      chunks.push(chunk);
+      pipeBytes += chunk.byteLength;
+      notePipeBytes?.(chunk.byteLength);
+      lastProgress = Date.now();
+    };
     let settled = false;
     const useTimeout = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0;
     const groupCpuMs = internals.groupCpuMs ?? processGroupCpuMs;
@@ -116183,14 +116504,8 @@ async function runExtractionCommand(request, internals = {}) {
         ...outcome.ok ? {} : { terminationFailed: outcome.code }
       }));
     }, stallCheckIntervalMs(request.timeoutMs)) : undefined;
-    child.stdout.on("data", (chunk) => {
-      stdout.push(chunk);
-      lastProgress = Date.now();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr.push(chunk);
-      lastProgress = Date.now();
-    });
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
     child.on("error", (error) => {
       if (settled)
         return;
@@ -116201,6 +116516,7 @@ async function runExtractionCommand(request, internals = {}) {
       reject(error);
     });
     child.on("close", (code) => {
+      notePipeBytes?.(-pipeBytes);
       if (settled)
         return;
       settled = true;
@@ -116225,6 +116541,7 @@ async function runExtractionCommand(request, internals = {}) {
 }
 var ExtractionCommandError, ExtractionCommandTimeoutError, execFileAsync, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
 var init_command_runner = __esm(() => {
+  init_memory_counters();
   init_descendant_groups();
   init_native_process_service();
   ExtractionCommandError = class ExtractionCommandError extends Error {
@@ -131237,8 +131554,10 @@ function idleClock(windowMs) {
 async function readChatCompletion(response, clock) {
   clock.touch();
   const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("text/event-stream") || !response.body)
+  if (!contentType.includes("text/event-stream") || !response.body) {
+    noteMemoryPayloadResponse(response);
     return response.json();
+  }
   const reader = response.body.getReader();
   const decoder = new TextDecoder;
   let buffered = "";
@@ -131276,6 +131595,7 @@ async function readChatCompletion(response, clock) {
     const { done, value } = next;
     if (done)
       break;
+    addMemoryPayloadBytes(value.byteLength);
     clock.touch();
     buffered += decoder.decode(value, { stream: true });
     let newline = buffered.indexOf(`
@@ -131296,6 +131616,7 @@ async function readChatCompletion(response, clock) {
   return { choices: [{ message: { content } }] };
 }
 var init_model_stream2 = __esm(() => {
+  init_memory_counters();
   init_http_timeout();
 });
 
@@ -133362,7 +133683,7 @@ async function settleOneJob(input) {
   const renewal = setInterval(() => renewJobLease(input), input.leaseRenewMs ?? EXTRACTION_LEASE_RENEW_MS);
   renewal.unref?.();
   try {
-    outcome = await settleOneJobHeld(input, staged);
+    outcome = await withMemoryPayload("extract", () => settleOneJobHeld(input, staged));
   } catch (error) {
     console.error(`[olympus:file-extraction] job_internal_error job_id=${input.job.jobId} extractor_kind=${input.job.extractorKind} ` + `reason=${boundedLogErrorMessage(error)}`);
     outcome = retryable(EXTRACTION_ERROR_KIND_INTERNAL_ERROR, error);
@@ -133454,6 +133775,7 @@ async function settleOneJobHeld(input, staged) {
         staged.file = fetchedFile;
       } else {
         fetched = await source.fetch(job.ref, { ...maxBytes !== undefined ? { maxBytes } : {} });
+        addMemoryPayloadBytes(fetched.bytes.byteLength);
         if (maxBytes !== undefined && fetched.bytes.byteLength > maxBytes) {
           input.jobs.recordSizeRefusal(job.jobId, job.leaseToken, { sizeBytes: fetched.bytes.byteLength, maxBytes });
           return { status: "skipped_too_large", errorKind: "source_too_large" };
@@ -133557,6 +133879,7 @@ async function settleOneJobHeld(input, staged) {
       ...output.egressDestination ? { egressDestination: output.egressDestination } : {}
     };
   }
+  addMemoryPayloadText(output.text);
   if (output.text.trim() === "") {
     return {
       status: "metadata_only",
@@ -133947,6 +134270,7 @@ function withMediaTypeFromName(ref) {
 }
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, EXTRACTION_LEASE_RENEW_MS = 60000, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", PLAN_REFUSED_UNROUTABLE_RECORD = "unroutable_record_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
+  init_memory_counters();
   init_source_size_limits();
   init_control_path_headroom();
   init_media_cache();
@@ -164890,7 +165214,7 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-import-allowance.ts
-import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
 function withGmailImportRunOnce(run) {
   const permission = { active: true };
   return operatorImport.run(permission, async () => {
@@ -164976,7 +165300,7 @@ var init_gmail_import_allowance = __esm(() => {
   init_limit_stops();
   registerLimit({ id: "gmail.import_allowance", kind: "requests", scope: "source", label: "Gmail import request allowance reached", unit: "requests", continue: "run_once" });
   GMAIL_IMPORT_LIMIT_SUBJECT = JSON.stringify(["gmail.email", "internal.email", "gmail.import_allowance"]);
-  operatorImport = new AsyncLocalStorage12;
+  operatorImport = new AsyncLocalStorage13;
   GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
   GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
   GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
@@ -165684,7 +166008,11 @@ async function completeSnifferQuestion(model, options) {
     ...options.onAlive ? { onAlive: options.onAlive } : {},
     snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext }
   };
-  return await model.complete(request);
+  return withMemoryPayload("judge", async () => {
+    addMemoryPayloadText(request.system);
+    addMemoryPayloadText(request.prompt);
+    return await model.complete(request);
+  });
 }
 async function resolveReleaseWindow(options) {
   const { request, store, lane, signal } = options;
@@ -166212,6 +166540,7 @@ function finish(report, monotonicNow, passStarted) {
 }
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, SNIFFER_MAX_CONCURRENT_CLOUD_CALLS = 32, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, failedSlotWaits, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
+  init_memory_counters();
   init_limit_stops();
   init_owner_limit_state();
   init_answer_activity();
@@ -184797,7 +185126,6 @@ var init_remote_relay_runtime = __esm(() => {
 
 // src/workers/engine-split/memory.ts
 import { readFileSync as readFileSync94 } from "node:fs";
-import { heapSize, heapStats } from "bun:jsc";
 function processMemory(status, platform = process.platform) {
   const rss = process.memoryUsage.rss();
   if (platform !== "linux")
@@ -184816,7 +185144,10 @@ function processMemory(status, platform = process.platform) {
   const anon = kb("RssAnon"), file = kb("RssFile"), swap = kb("VmSwap");
   return { rss, ...anon === undefined ? {} : { anon }, ...file === undefined ? {} : { file }, ...swap === undefined ? {} : { swap } };
 }
-function memoryFields(context, memory, peak, heap = heapStats(), floor, burstsOverThreshold = 0) {
+function attributionFields(fields, prefix = "") {
+  return Object.fromEntries(Object.entries(fields ?? {}).map(([key, value]) => [prefix + key, key.endsWith("_mb") && typeof value === "number" ? mb(value) : value]));
+}
+function memoryFields(context, memory, peak, floor, burstsOverThreshold = 0, attribution) {
   const holders = memoryHolderCounts();
   const fields = {
     ...context,
@@ -184828,15 +185159,13 @@ function memoryFields(context, memory, peak, heap = heapStats(), floor, burstsOv
       peak_anon_mb: mb(peak.anon),
       peak_at: peak.at,
       peak_activity: peak.activity,
-      peak_heap_size_mb: mb(peak.heapSize)
+      ...attributionFields(peak.attribution, "peak_")
     },
     ...floor === undefined ? {} : floor.anon === undefined ? { floor_rss_mb: mb(floor.rss) } : { floor_anon_mb: mb(floor.anon) },
     bursts_over_threshold: burstsOverThreshold,
-    heap_size_mb: mb(heap.heapSize),
-    heap_capacity_mb: mb(heap.heapCapacity),
-    extra_memory_mb: mb(heap.extraMemorySize),
-    object_count: heap.objectCount,
-    ...holders
+    ...holders,
+    ...attributionFields(attribution),
+    ...attributionFields(floor?.attribution, "floor_")
   };
   return Object.entries(fields).map(([key, value]) => `${key}=${value}`).join(" ");
 }
@@ -184844,55 +185173,74 @@ function createMemoryDiagnostic(input) {
   const now = input.now ?? Date.now;
   const log = input.log ?? ((line) => console.warn(line));
   const activity = () => input.activity?.().join(",") || "idle";
-  const heap = input.heap ?? heapStats;
-  const peakHeapSize = input.peakHeapSize ?? heapSize;
+  const heap = input.heap ?? process.memoryUsage;
+  const readAttribution = () => {
+    const usage = heap();
+    return {
+      heap_size_mb: usage.heapUsed,
+      heap_capacity_mb: usage.heapTotal,
+      extra_memory_mb: usage.external,
+      ...input.readers?.() ?? { read_workers: 0, read_connections: 0 },
+      ...usage.arrayBuffers > 0 ? { array_buffers_mb: usage.arrayBuffers } : {},
+      ...memoryPayloadCounts(),
+      ...input.sampleHolders?.()
+    };
+  };
   let lastLineAt = now();
   let peak;
   const samples = [];
+  let latest;
   let nextSample = 0;
   let checksSinceLine = 0;
-  let burstsSinceLine = 0;
   const floor = () => {
     if (samples.length === 0)
       return;
     let rss = Infinity;
     let anon = Infinity;
+    let rssAttribution;
+    let anonAttribution;
     for (const sample of samples) {
-      rss = Math.min(rss, sample.rss);
-      anon = anon === undefined || sample.anon === undefined ? undefined : Math.min(anon, sample.anon);
+      if (sample.rss < rss) {
+        rss = sample.rss;
+        rssAttribution = sample.attribution;
+      }
+      if (sample.anon === undefined)
+        anon = undefined;
+      else if (anon !== undefined && sample.anon < anon) {
+        anon = sample.anon;
+        anonAttribution = sample.attribution;
+      }
     }
-    return { rss, anon, full: samples.length === MEMORY_FLOOR_WINDOW_MAX_SAMPLES };
+    const attribution = anon === undefined ? rssAttribution : anonAttribution;
+    return { rss, anon, full: samples.length === MEMORY_FLOOR_WINDOW_MAX_SAMPLES, ...attribution && { attribution } };
   };
   return {
     sample(memory, rss = memory.anon ?? memory.rss) {
-      samples[nextSample] = { rss, anon: memory.anon };
+      latest = readAttribution();
+      samples[nextSample] = { rss, anon: memory.anon, attribution: latest };
       nextSample = (nextSample + 1) % MEMORY_FLOOR_WINDOW_MAX_SAMPLES;
       if (memory.anon === undefined || peak && memory.anon <= peak.anon)
         return;
-      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), heapSize: peakHeapSize() };
+      peak = { anon: memory.anon, at: new Date(now()).toISOString(), activity: activity(), attribution: latest };
     },
     floor,
-    recordBurst(rss, floorRss, thresholdMb) {
-      if (++burstsSinceLine === 1) {
-        log(`[olympus] memory restart not taken: burst rss_mb=${mb(rss)} floor_mb=${mb(floorRss)} threshold_mb=${thresholdMb}`);
-      }
-    },
     dueOnMinuteCheck() {
       return ++checksSinceLine >= 5 || now() - lastLineAt >= MEMORY_LOG_INTERVAL_MS;
     },
-    write(memory) {
+    write(memory, burst) {
       const at = new Date(now()).toISOString();
+      if (burst) {
+        log(`${at} [olympus] memory restart not taken: burst rss_mb=${mb(burst.rss)} floor_mb=${mb(burst.floor)} threshold_mb=${burst.thresholdMb}`);
+      }
       const fields = memoryFields({
         role: input.role,
         pid: process.pid,
         uptime_s: Math.floor((input.uptime ?? process.uptime)()),
-        activity: activity(),
-        ...input.readers?.() ?? { read_workers: 0, read_connections: 0 }
-      }, memory, peak, heap(), floor(), burstsSinceLine);
+        activity: activity()
+      }, memory, peak, floor(), burst?.count ?? 0, latest ?? readAttribution());
       log(`${at} [olympus] memory ${fields}`);
       peak = undefined;
       checksSinceLine = 0;
-      burstsSinceLine = 0;
       lastLineAt = now();
       return `at=${at} ${fields}`;
     }
@@ -188421,7 +188769,7 @@ var init_built_in_reranker = __esm(() => {
 });
 
 // src/workers/classification/judge-pacing.ts
-import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
 import { createHash as createHash96 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
@@ -188438,7 +188786,7 @@ class JudgeRateLimitPacer {
   lastSeq = 0;
   reportSeq = 0;
   blockedUntil = 0;
-  calls = new AsyncLocalStorage13;
+  calls = new AsyncLocalStorage14;
   constructor(clock = realClock) {
     this.clock = clock;
   }
@@ -192486,7 +192834,7 @@ class VeniceVlmClient {
           Authorization: `Bearer ${this.apiKey}`
         },
         signal: timeout.signal,
-        body: JSON.stringify({
+        body: memoryPayloadJson({
           model: this.model,
           temperature: 0,
           stream: true,
@@ -192593,6 +192941,7 @@ var init_venice_client = __esm(() => {
   init_model_transport();
   init_bounded_text();
   init_model_stream2();
+  init_memory_counters();
   init_remote_vlm();
 });
 
@@ -239861,9 +240210,9 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/engine/runtime/source-answer-lanes.ts
-import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
-  const context = new AsyncLocalStorage14;
+  const context = new AsyncLocalStorage15;
   let inFlight = 0;
   let lastEndedAt;
   const release = () => {
@@ -245128,7 +245477,7 @@ var init_control_plane = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
 import { randomUUID as randomUUID42 } from "node:crypto";
 import { lstatSync as lstatSync56, rmSync as rmSync49 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
@@ -245403,7 +245752,7 @@ function restartingResponse(request) {
 function createFrontGate() {
   let open = true;
   let generation = 0;
-  const current = new AsyncLocalStorage15;
+  const current = new AsyncLocalStorage16;
   return {
     isOpen: () => open,
     close() {
@@ -245807,20 +246156,30 @@ function startEngineRssRestart(input) {
   let done = false;
   const sample = input.sample ?? processMemory;
   const threshold = input.thresholdMb * 1024 * 1024;
+  let aboveInPreviousSample = false;
+  let burstCandidates = 0;
+  let largestCandidate = 0;
+  let windowMin = Infinity;
   const check = (sampled, rss) => {
+    const floor = memory.floor();
+    const write = (includeBursts) => {
+      const low = Math.min(floor?.rss ?? Infinity, windowMin);
+      const burst = includeBursts && burstCandidates > 0 && low <= threshold ? { count: burstCandidates, rss: largestCandidate, floor: low, thresholdMb: input.thresholdMb } : undefined;
+      burstCandidates = largestCandidate = 0;
+      aboveInPreviousSample = false;
+      windowMin = Infinity;
+      return memory.write(sampled, burst);
+    };
     const periodic = () => {
       if (memory.dueOnMinuteCheck())
-        memory.write(sampled);
+        write(true);
     };
     if (done || input.thresholdMb <= 0) {
       periodic();
       return;
     }
-    const floor = memory.floor();
     if (!floor?.full || floor.rss <= threshold) {
       overSince = undefined;
-      if (floor && rss > threshold && floor.rss < threshold)
-        memory.recordBurst(rss, floor.rss, input.thresholdMb);
       periodic();
       return;
     }
@@ -245836,7 +246195,7 @@ function startEngineRssRestart(input) {
     const previous = restarts;
     restarts = next;
     input.record(next);
-    const fields = memory.write(sampled);
+    const fields = write(false);
     if (!input.restart()) {
       restarts = previous;
       log(`[engine-split] rss_over_threshold rss_mb=${rssMb} threshold_mb=${input.thresholdMb}: nothing supervises this process, so it keeps running.`);
@@ -245855,6 +246214,16 @@ function startEngineRssRestart(input) {
     const sampled = sample();
     const rss = input.rss?.() ?? sampled.anon ?? sampled.rss;
     memory.sample(sampled, rss);
+    if (input.thresholdMb > 0) {
+      const above = rss > threshold;
+      if (above) {
+        if (!aboveInPreviousSample)
+          burstCandidates++;
+        largestCandidate = Math.max(largestCandidate, rss);
+      }
+      windowMin = Math.min(windowMin, rss);
+      aboveInPreviousSample = above;
+    }
     if (++samplesSinceCheck * MEMORY_SAMPLE_INTERVAL_MS < ENGINE_RSS_CHECK_INTERVAL_MS)
       return;
     samplesSinceCheck = 0;
@@ -247225,7 +247594,7 @@ class OpenAICompatibleVlmClient {
         method: "POST",
         headers: this.headers(),
         signal: timeout.signal,
-        body: JSON.stringify({
+        body: memoryPayloadJson({
           model: this.model,
           temperature: 0,
           stream: true,
@@ -247375,6 +247744,7 @@ var DEFAULT_LOCAL_VLM_TIMEOUT_MS = 180000;
 var init_openai_compatible_client = __esm(() => {
   init_bounded_text();
   init_model_stream2();
+  init_memory_counters();
   init_remote_vlm();
   init_local_model_policy();
   init_model_transport();
@@ -247968,7 +248338,7 @@ function createTinfoilJudgeModel(options) {
       const response = await fetch2("https://tinfoil.invalid/v1/decisions", {
         method: "POST",
         ...request.signal ? { signal: request.signal } : {},
-        body: JSON.stringify({
+        body: memoryPayloadJson({
           model: TINFOIL_JUDGE_MODEL,
           input,
           questions: [{
@@ -247981,6 +248351,7 @@ function createTinfoilJudgeModel(options) {
       });
       let chance;
       try {
+        noteMemoryPayloadResponse(response);
         const data = await response.json();
         const answer = Array.isArray(data.answers) && data.answers.length === 1 ? data.answers[0] : undefined;
         const probabilities = answer && answer.type === "choice" && answer.name === "tier" && answer.refusal == null && answer.error == null ? answer.probabilities : undefined;
@@ -248005,6 +248376,7 @@ function createTinfoilJudgeModel(options) {
 var init_sniffer_tinfoil = __esm(() => {
   init_analyst_tinfoil();
   init_sniffer();
+  init_memory_counters();
 });
 
 // src/workers/engine/runtime/judging-models.ts
@@ -276459,7 +276831,24 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }
   tierSniffer?.start();
   const currentMemoryActivity = () => engineRole === "front" ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? "idle") : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
-  const memoryDiagnostic = createMemoryDiagnostic({ role: engineRole, activity: currentMemoryActivity, readers: readPoolMemoryCounts });
+  const memoryDiagnostic = createMemoryDiagnostic({
+    role: engineRole,
+    activity: currentMemoryActivity,
+    readers: readPoolMemoryCounts,
+    ...engineRole === "background" && {
+      sampleHolders: () => {
+        const readers = sampleReadPoolMemory();
+        const stores = sampleSqliteStoreMemory();
+        return {
+          ...readers,
+          ...stores,
+          ...sampleModelWorkerMemory(),
+          sqlite_connections_sampled: readers.sqlite_read_connections_sampled + stores.sqlite_store_connections_sampled,
+          sqlite_cache_budget_mb: readers.sqlite_read_cache_budget_mb + stores.sqlite_store_cache_budget_mb
+        };
+      }
+    }
+  });
   const frontMemory = engineRole !== "background" ? startEngineRssRestart({
     thresholdMb: 0,
     batchRunning: () => false,
@@ -276849,6 +277238,8 @@ var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_MOUNT_LOOK
 var init_server5 = __esm(async () => {
   init_memory_counters();
   init_memory2();
+  init_sqlite_memory();
+  init_off_thread();
   init_analyst_tinfoil();
   init_evidence_reranker();
   init_local_analyst_window();

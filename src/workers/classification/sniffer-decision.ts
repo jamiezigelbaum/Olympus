@@ -1,5 +1,6 @@
 // Native llama.cpp decision transport. The full adapter remains the fallback.
 // Endpoint state serializes every probe, prime and decision across clients.
+import { addMemoryPayloadText, noteMemoryPayloadResponse } from '../../core/memory-counters.ts';
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { fetchModelEndpoint } from '../../core/model-transport.ts';
 import { assertSnifferProfileAllowed, initialSnifferMode, snifferLaneOffersDecision, snifferLaneUsesUnion, type SnifferLane } from './sniffer-lane.ts';
@@ -138,13 +139,16 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
         .finally(() => { probing = false; });
     }, Math.min(LIVENESS_PROBE_MS, Math.max(50, Math.floor(idleMs / 4))));
     try {
+      const json = JSON.stringify(body);
+      if (json !== undefined) addMemoryPayloadText(json);
       const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {}) },
-        body: JSON.stringify(body),
+        body: json,
         signal: signal ? AbortSignal.any([idle.signal, signal]) : idle.signal,
       });
       if (!response.ok) throw new NativeRequestError([404, 405, 501].includes(response.status));
+      noteMemoryPayloadResponse(response);
       return await response.json() as T;
     } catch (error) {
       // Neither server errors (which can echo a prompt) nor fetch causes escape.

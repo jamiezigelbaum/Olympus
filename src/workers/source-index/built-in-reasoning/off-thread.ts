@@ -40,6 +40,7 @@ export type ModelThreadReply = {
   log?: string;
   handle?: number;
   pid?: number | undefined;
+  memory?: { at: number; heapUsed: number; external: number; arrayBuffers: number };
 };
 
 let shared: ModelThread | undefined;
@@ -49,6 +50,7 @@ export function modelThreadHandleId(): number { return nextHandle++; }
 /** Also accepts a worker path so responsiveness is testable with blocking fixtures. */
 export class ModelThread {
   private worker: Worker;
+  private memory: ModelThreadReply['memory'];
   private nextId = 1;
   private pending = new Map<number, {
     resolve: (result: unknown) => void; reject: (error: Error) => void;
@@ -70,6 +72,7 @@ export class ModelThread {
     };
     process.once('exit', onExit);
     this.worker.on('message', (reply: ModelThreadReply) => {
+      if (reply.memory) { this.memory = reply.memory; return; }
       if (reply.handle !== undefined) {
         if (reply.pid === undefined) this.pids.delete(reply.handle);
         else this.pids.set(reply.handle, reply.pid);
@@ -97,6 +100,19 @@ export class ModelThread {
     this.worker.on('error', failed);
     this.worker.on('exit', () => { process.removeListener('exit', onExit); failed(new Error('The built-in model worker stopped.')); });
     this.worker.unref();
+  }
+
+  sampleMemory() {
+    if (this.pending.size === 0) this.worker.postMessage({ sampleMemory: true });
+    const sampled = this.memory;
+    return {
+      model_workers: 1,
+      ...(sampled && {
+        model_heap_size_mb: sampled.heapUsed, model_extra_memory_mb: sampled.external,
+        model_heap_age_ms: Math.max(0, Date.now() - sampled.at),
+        ...(sampled.arrayBuffers > 0 ? { model_array_buffers_mb: sampled.arrayBuffers } : {}),
+      }),
+    };
   }
 
   call<T>(request: ModelThreadRequest, options: {
@@ -149,4 +165,8 @@ export function modelThread(): ModelThread {
     process.once('beforeExit', () => { if (shared === current) void current.call({ kind: 'shutdown' }).catch(() => {}); });
   }
   return shared;
+}
+
+export function sampleModelWorkerMemory() {
+  return shared?.sampleMemory() ?? { model_workers: 0 };
 }

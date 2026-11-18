@@ -1,5 +1,6 @@
 // Optional transport for the same pinned LiteRT model. No remote error body,
 // URL, credentials or input is included in diagnostics.
+import { memoryPayloadJson, noteMemoryPayloadResponse } from '../../../core/memory-counters.ts';
 import { readFileSync } from 'node:fs';
 import type { LiteRtDevice, LiteRtEmbedder, LiteRtEmbedItem } from './litert-runtime.ts';
 
@@ -109,11 +110,12 @@ export class RemoteLiteRtEmbedder implements LiteRtEmbedder {
     if (texts) headers['Content-Type'] = 'application/json';
     const response = await fetch(new URL(path, this.url), {
       method: texts ? 'POST' : 'GET', headers,
-      ...(texts ? { body: JSON.stringify({ texts }) } : {}),
+      ...(texts ? { body: memoryPayloadJson({ texts }) } : {}),
       signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30_000),
       redirect: 'error',
     });
     if (!response.ok) { await response.body?.cancel(); throw new Error('Remote request failed.'); }
+    noteMemoryPayloadResponse(response);
     return await response.json() as Record<string, unknown>;
   }
 }

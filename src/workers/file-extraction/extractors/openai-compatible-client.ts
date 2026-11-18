@@ -16,6 +16,7 @@ import type {
 } from '../types.ts';
 import { normalizeExtractedText } from './bounded-text.ts';
 import { idleClock, readChatCompletion } from './model-stream.ts';
+import { memoryPayloadJson } from '../../../core/memory-counters.ts';
 import { requireLocalHttpBaseUrl, requireNonEmpty } from './remote-vlm.ts';
 import { assertLocalModelIdNotCloudForwarding } from '../../../core/local-model-policy.ts';
 import { fetchModelEndpoint, isModelEndpointRedirectError } from '../../../core/model-transport.ts';
@@ -67,7 +68,7 @@ export class OpenAICompatibleVlmClient implements VlmClient {
         method: 'POST',
         headers: this.headers(),
         signal: timeout.signal,
-        body: JSON.stringify({
+        body: memoryPayloadJson({
           model: this.model,
           temperature: 0,
           // Streamed so the clock counts only silence, never a long answer still arriving.

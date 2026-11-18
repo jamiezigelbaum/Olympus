@@ -12,6 +12,7 @@
  * architecture guard reads a single-line block comment as a regex literal.
  */
 
+import { addMemoryPayloadBytes, noteMemoryPayloadResponse } from '../../../core/memory-counters.ts';
 import { untilAborted } from '../../../core/http-timeout.ts';
 
 export interface IdleClock {
@@ -56,7 +57,10 @@ export function idleClock(windowMs: number): IdleClock {
 export async function readChatCompletion(response: Response, clock: Pick<IdleClock, 'touch' | 'signal'>): Promise<unknown> {
   clock.touch();
   const contentType = response.headers.get('content-type') ?? '';
-  if (!contentType.includes('text/event-stream') || !response.body) return response.json();
+  if (!contentType.includes('text/event-stream') || !response.body) {
+    noteMemoryPayloadResponse(response);
+    return response.json();
+  }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffered = '';
@@ -90,6 +94,7 @@ export async function readChatCompletion(response: Response, clock: Pick<IdleClo
     }
     const { done, value } = next;
     if (done) break;
+    addMemoryPayloadBytes(value.byteLength);
     clock.touch();
     buffered += decoder.decode(value, { stream: true });
     let newline = buffered.indexOf('\n');
