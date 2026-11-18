@@ -68293,7 +68293,7 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_SEMANTIC_ROWS = 3, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_SEMANTIC_ROWS = 3, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -75789,8 +75789,33 @@ ${parentKey(ref)}`, { ref, origin });
       if ("skippedReason" in scanned)
         return { rows: [], skippedReason: scanned.skippedReason };
       const { bestByItem, dimensionMismatches } = scanned;
+      let sliceStarted = performance.now();
       const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-      const rankedItems = candidates.length > 0 ? await visibilityAwaited(() => this.rankVisibleVectorItems(candidates, limit, selectedAccount, filters), this.childVisibilityLane()) : [];
+      let rankedItems = [];
+      let visibleInBatch = [];
+      let candidateOffset = 0;
+      const canFill = () => rankedItems.length < limit && (visibleInBatch.length > 0 || candidateOffset < candidates.length);
+      while (true) {
+        if (performance.now() - sliceStarted >= VECTOR_VISIBILITY_SLICE_MS) {
+          noteSourceIndexReadProgress();
+          await yieldConnectorStoreVectorScan();
+          sliceStarted = performance.now();
+        }
+        if (canFill()) {
+          if (visibleInBatch.length === 0) {
+            const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
+            candidateOffset += batch.length;
+            const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+            visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
+          }
+          rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
+          continue;
+        }
+        const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
+        rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
+        if (!canFill())
+          break;
+      }
       const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
       const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
       const laneRows = searchRows.flatMap((row) => {
@@ -75806,18 +75831,6 @@ ${parentKey(ref)}`, { ref, origin });
         rows: laneRows,
         ...scanned.cutReason !== undefined ? { skippedReason: scanned.cutReason } : laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
       };
-    }
-    *rankVisibleVectorItems(candidates, limit, accountScope, filters) {
-      const ranked = [];
-      for (let offset = 0;ranked.length < limit && offset < candidates.length; ) {
-        const batch = candidates.slice(offset, offset + Math.min(200, limit - ranked.length));
-        const visible = yield* this.visibleVectorItemPks(batch.map(([pk]) => pk), accountScope, filters);
-        for (const candidate of batch)
-          if (visible.has(candidate[0]))
-            ranked.push(candidate);
-        offset += batch.length;
-      }
-      return ranked;
     }
     vectorScanExcludedItemPks() {
       if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
@@ -76003,22 +76016,23 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
-    *visibleVectorItemPks(itemPks, accountScope, filters) {
+    visibleVectorItemPks(itemPks, accountScope, filters) {
+      const visible = new Set;
       const selectedFilters = connectorStoreFilterSql(filters);
-      const rows = yield* this.visibilityStoreRead({
-        sql: `SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-      FROM items i WHERE i.item_pk IN (${itemPks.map(() => "?").join(",")}) AND i.tombstoned = 0
-      ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`,
-        params: [...itemPks, ...accountScope ? [accountScope] : [], ...selectedFilters.params],
-        mode: "all"
-      });
-      const visible = yield* this.tierVisibleRowsSteps(rows, (row) => ({
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-      }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold));
-      return new Set(visible.map((row) => row.item_pk));
+      for (let offset = 0;offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
+        const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
+        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
+        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
+        for (const row of this.tierVisibleRows(rows, (row) => ({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+        }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
+          visible.add(row.item_pk);
+      }
+      return visible;
     }
     searchRowsByItemPks(itemPks, accountScope, filters) {
       if (itemPks.length === 0)

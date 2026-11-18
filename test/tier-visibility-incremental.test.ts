@@ -8,7 +8,6 @@ import { SecretLocationsIndex } from '../src/workers/classification/secret-locat
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
-import { visibilityOffThread, type VisibilityRead } from '../src/workers/connector-store/child-visibility.ts';
 import { createSourceAnswerTrace, runWithSourceAnswerTrace } from '../src/workers/source-index/answer-latency-trace.ts';
 import type { SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, cloudProvider, localProvider, localId, tempDir } from './helpers/tier-fixtures.ts';
@@ -26,7 +25,7 @@ test.each(['deletion', 'secret'] as const)('a pending %s hides an unrouted item 
     family: 'file', trustDomain: 'internal', tierLedger: ledger });
   const probe = store as unknown as StoreProbe & {
     tierHiddenItemPksInTurns(): Promise<{ hidden: number[] }>;
-    visibleVectorItemPks(pks: readonly number[]): Generator<VisibilityRead, Set<number>, unknown>;
+    visibleVectorItemPks(pks: readonly number[]): Set<number>;
   };
   try {
     const connector = fixtureConnector(() => [{ id: 'a', name: 'Orchard', text: 'Orchard notes' }]);
@@ -44,7 +43,7 @@ test.each(['deletion', 'secret'] as const)('a pending %s hides an unrouted item 
     const { item_pk: pk } = probe.db.query('SELECT item_pk FROM items').get() as { item_pk: number };
     await runWithSourceAnswerTrace(createSourceAnswerTrace(), async () => {
       expect(await gate.offThread!([hit])).toEqual([hit]);
-      expect(await visibilityOffThread(probe.visibleVectorItemPks([pk]))).toEqual(new Set([pk]));
+      expect(probe.visibleVectorItemPks([pk])).toEqual(new Set([pk]));
       expect((await store.vectorSearchLane(query, provider, 5)).rows).toHaveLength(1);
       expect((await probe.tierHiddenItemPksInTurns()).hidden).toEqual([]);
 
@@ -54,7 +53,7 @@ test.each(['deletion', 'secret'] as const)('a pending %s hides an unrouted item 
         gateOffThread: (await gate.offThread!([hit])).length,
         keyword: store.searchItems(query, 5).length,
         keywordOffThread: (await store.searchItemsDetailedOffThread(query, 5)).rows.length,
-        vectorWinners: (await visibilityOffThread(probe.visibleVectorItemPks([pk]))).size,
+        vectorWinners: probe.visibleVectorItemPks([pk]).size,
         hiddenPks: (await probe.tierHiddenItemPksInTurns()).hidden,
       }).toEqual({ gate: 0, gateOffThread: 0, keyword: 0, keywordOffThread: 0, vectorWinners: 0, hiddenPks: [pk] });
       expect((await store.vectorSearchLane(query, provider, 5)).rows).toEqual([]);
