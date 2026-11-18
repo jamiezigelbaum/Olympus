@@ -830,7 +830,9 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const forwarded: Array<{ ms: number; status: number; error?: unknown }> = [];
   const asks: Array<{ ms: number; status: number; evidence_ms: unknown }> = [];
   const acks: Array<{ at: string; ms: number; status: number; loop_held_ms?: number; error?: string }> = [];
-  const clicks: Array<{ ms: number; status: number; received: boolean; settled_ms?: number; saved?: boolean; error?: unknown }> = [];
+  // Each click carries its own id (sent as X-Olympus-Click-Id) and send time, so a late acknowledgement can be matched to
+  // the front's ingress, command POST attempts and control receipt in the engine logs (lane 1, 18 Nov).
+  const clicks: Array<{ id: string; sent_at: string; ms: number; status: number; received: boolean; request_id?: string; settled_ms?: number; saved?: boolean; error?: unknown }> = [];
   const pendingClicks = new Map<string, { started: number; click: typeof clicks[number] }>();
   const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
   let enginesStartedAt: number | undefined;
@@ -926,18 +928,20 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     let clickSequence = 0;
     const click = async () => {
       const started = performance.now();
+      const id = `${options.runCase}-click-${clickSequence + 1}`;
+      const sent_at = new Date().toISOString();
       // Seeded Personal rows, away from the read probe's item and the judge's held rows.
       const first = Math.min(13, shape.shape.items - 1);
       const count = Math.ceil((shape.shape.items - first) / 20);
       const itemId = ownerTierItemId(identity(first + (clickSequence++ % count) * 20));
       try {
-        const { ms, status, json } = await post('/dashboard/privacy/items/set', { item_id: itemId, tier: 'private' }, privacyHeaders);
+        const { ms, status, json } = await post('/dashboard/privacy/items/set', { item_id: itemId, tier: 'private' }, { ...privacyHeaders, 'X-Olympus-Click-Id': id });
         const received = status === 202 && json.state === 'pending' && typeof json.request_id === 'string';
-        const sample = { ms, status, received, ...(received ? {} : { error: json.error ?? json.message }) };
+        const sample = { id, sent_at, ms, status, received, ...(received ? { request_id: json.request_id as string } : { error: json.error ?? json.message }) };
         clicks.push(sample);
         if (received) pendingClicks.set(json.request_id as string, { started, click: sample });
       } catch (error) {
-        clicks.push({ ms: performance.now() - started, status: 0, received: false, error: String(error) });
+        clicks.push({ id, sent_at, ms: performance.now() - started, status: 0, received: false, error: String(error) });
       }
     };
     const pollClicks = async () => {
