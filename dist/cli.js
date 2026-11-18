@@ -48072,6 +48072,142 @@ var init_vector_digest = __esm(() => {
   init_embeddings();
 });
 
+// src/core/evidence-reranker.ts
+function rerankPoolSemanticSeats(env = process.env) {
+  const raw = env[SEMANTIC_POOL_SEATS_ENV]?.trim();
+  if (!raw)
+    return DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
+  const seats = Number(raw);
+  return Number.isInteger(seats) && seats >= 0 && seats <= 48 ? seats : DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
+}
+function semanticRowsPerStore(env = process.env) {
+  const raw = env[SEMANTIC_ROWS_PER_STORE_ENV]?.trim();
+  if (!raw)
+    return DEFAULT_SEMANTIC_ROWS_PER_STORE;
+  const rows = Number(raw);
+  return Number.isInteger(rows) && rows >= 1 && rows <= 50 ? rows : DEFAULT_SEMANTIC_ROWS_PER_STORE;
+}
+function rerankOutcomeCounts() {
+  return { ...outcomeCounts };
+}
+async function rerankCandidates(options) {
+  const timers = options.timers ?? systemTimers;
+  const keep = Math.max(0, Math.floor(options.keep));
+  const startedAt = timers.now();
+  const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
+  const scoredIndexes = passages.flatMap((passage, index) => passage ? [index] : []);
+  const fusedCut = (outcome, scored) => {
+    options.onScores?.([], outcome);
+    return counted({
+      kept: options.items.slice(0, keep),
+      audit: {
+        rerankerId: options.reranker.id,
+        outcome,
+        scored,
+        kept: Math.min(keep, options.items.length),
+        promoted: 0,
+        elapsedMs: timers.now() - startedAt
+      }
+    });
+  };
+  if (scoredIndexes.length === 0)
+    return fusedCut("applied", 0);
+  const controller = new AbortController;
+  let timer;
+  let settled = false;
+  let stalled;
+  const timedOut = new Promise((resolve) => {
+    stalled = resolve;
+  });
+  const stallMs = options.stallMs ?? DEFAULT_RERANK_STALL_MS;
+  const restartStallClock = () => {
+    if (settled)
+      return;
+    if (timer !== undefined)
+      timers.clearTimeout(timer);
+    timer = timers.setTimeout(() => {
+      settled = true;
+      stalled("timed_out");
+      controller.abort();
+    }, stallMs);
+  };
+  restartStallClock();
+  let scores;
+  try {
+    const scoring = options.reranker.score({
+      query: options.query,
+      passages: scoredIndexes.map((index) => passages[index]),
+      signal: controller.signal,
+      onProgress: restartStallClock
+    });
+    scoring.catch(() => {
+      return;
+    });
+    scores = await Promise.race([scoring, timedOut]);
+  } catch {
+    return fusedCut("failed", 0);
+  } finally {
+    settled = true;
+    timers.clearTimeout(timer);
+  }
+  if (scores === "timed_out")
+    return fusedCut("timed_out", 0);
+  if (scores.length !== scoredIndexes.length || scores.some((score) => typeof score !== "number" || Number.isNaN(score))) {
+    return fusedCut("failed", 0);
+  }
+  if (options.onScores)
+    options.onScores(scoredIndexes.map((index, position) => ({ item: options.items[index], score: scores[position] })), "applied");
+  const scoreByIndex = new Map(scoredIndexes.map((index, position) => [index, scores[position]]));
+  const order = options.items.map((_, index) => index).sort((left, right) => {
+    const leftScore = scoreByIndex.get(left);
+    const rightScore = scoreByIndex.get(right);
+    if (leftScore !== undefined && rightScore !== undefined && leftScore !== rightScore)
+      return rightScore - leftScore;
+    if (leftScore === undefined && rightScore !== undefined)
+      return 1;
+    if (leftScore !== undefined && rightScore === undefined)
+      return -1;
+    return left - right;
+  });
+  const keptOrder = order.slice(0, keep);
+  return counted({
+    kept: keptOrder.map((index) => options.items[index]),
+    audit: {
+      rerankerId: options.reranker.id,
+      outcome: "applied",
+      scored: scoredIndexes.length,
+      kept: keptOrder.length,
+      promoted: keptOrder.filter((index) => index >= keep).length,
+      elapsedMs: timers.now() - startedAt
+    }
+  });
+}
+function rerankPassage(title, chunks) {
+  const parts = [title?.trim() ?? "", ...chunks.map((chunk) => chunk.trim())].filter(Boolean);
+  return clipPassage(parts.join(`
+`));
+}
+function clipPassage(text) {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > RERANK_PASSAGE_CHARS ? collapsed.slice(0, RERANK_PASSAGE_CHARS) : collapsed;
+}
+function rerankPoolSize(reranker, maxResults) {
+  const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
+  return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
+}
+var RERANK_PASSAGE_CHARS = 12000, DEFAULT_RERANK_STALL_MS = 1e4, DEFAULT_RERANK_POOL_SIZE = 30, RERANK_POOL_STORE_DEPTH = 10, DEFAULT_RERANK_POOL_SEMANTIC_SEATS = 0, SEMANTIC_POOL_SEATS_ENV = "OLYMPUS_SEMANTIC_POOL_SEATS", DEFAULT_SEMANTIC_ROWS_PER_STORE = 3, SEMANTIC_ROWS_PER_STORE_ENV = "OLYMPUS_SEMANTIC_ROWS_PER_STORE", outcomeCounts, counted = (result) => {
+  outcomeCounts[result.audit.outcome] += 1;
+  return result;
+}, MAX_RERANK_POOL_SIZE = 400, systemTimers;
+var init_evidence_reranker = __esm(() => {
+  outcomeCounts = { applied: 0, failed: 0, timed_out: 0 };
+  systemTimers = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (handle) => clearTimeout(handle)
+  };
+});
+
 // src/core/front-loop-sql-guard.ts
 function watchFrontLoopSql(options) {
   watch = {
@@ -66190,7 +66326,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const vettedRows = new Set(vectorRows.map((row) => row.sourceItem.localItemId));
   const semanticNeighbourHits = scoredVectorRows.filter((row) => !vettedRows.has(row.sourceItem.localItemId)).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope));
   const semanticRows = contentBar === undefined || scoredVectorRows.length === 0 ? undefined : {
-    hits: [...scoredVectorRows].sort((left, right) => right.bestCosine - left.bestCosine).slice(0, CONNECTOR_STORE_SEMANTIC_ROWS).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
+    hits: [...scoredVectorRows].sort((left, right) => right.bestCosine - left.bestCosine).slice(0, semanticRowsPerStore()).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
     bar: contentBar
   };
   return {
@@ -68679,7 +68815,7 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_SEMANTIC_ROWS = 3, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -68760,6 +68896,7 @@ var init_local_index = __esm(() => {
   init_store_totals();
   init_vector_digest();
   init_boot_progress();
+  init_evidence_reranker();
   init_engine_heartbeat();
   init_main_thread_sql_trace();
   init_store_reclaim_admission();
@@ -106710,135 +106847,6 @@ var init_analyst_openclaw_infer = __esm(() => {
       this.name = "OpenClawInferError";
       this.safeReason = message;
     }
-  };
-});
-
-// src/core/evidence-reranker.ts
-function rerankPoolSemanticSeats(env = process.env) {
-  const raw = env[SEMANTIC_POOL_SEATS_ENV]?.trim();
-  if (!raw)
-    return DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
-  const seats = Number(raw);
-  return Number.isInteger(seats) && seats >= 0 && seats <= 48 ? seats : DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
-}
-function rerankOutcomeCounts() {
-  return { ...outcomeCounts };
-}
-async function rerankCandidates(options) {
-  const timers = options.timers ?? systemTimers;
-  const keep = Math.max(0, Math.floor(options.keep));
-  const startedAt = timers.now();
-  const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
-  const scoredIndexes = passages.flatMap((passage, index) => passage ? [index] : []);
-  const fusedCut = (outcome, scored) => {
-    options.onScores?.([], outcome);
-    return counted({
-      kept: options.items.slice(0, keep),
-      audit: {
-        rerankerId: options.reranker.id,
-        outcome,
-        scored,
-        kept: Math.min(keep, options.items.length),
-        promoted: 0,
-        elapsedMs: timers.now() - startedAt
-      }
-    });
-  };
-  if (scoredIndexes.length === 0)
-    return fusedCut("applied", 0);
-  const controller = new AbortController;
-  let timer;
-  let settled = false;
-  let stalled;
-  const timedOut = new Promise((resolve) => {
-    stalled = resolve;
-  });
-  const stallMs = options.stallMs ?? DEFAULT_RERANK_STALL_MS;
-  const restartStallClock = () => {
-    if (settled)
-      return;
-    if (timer !== undefined)
-      timers.clearTimeout(timer);
-    timer = timers.setTimeout(() => {
-      settled = true;
-      stalled("timed_out");
-      controller.abort();
-    }, stallMs);
-  };
-  restartStallClock();
-  let scores;
-  try {
-    const scoring = options.reranker.score({
-      query: options.query,
-      passages: scoredIndexes.map((index) => passages[index]),
-      signal: controller.signal,
-      onProgress: restartStallClock
-    });
-    scoring.catch(() => {
-      return;
-    });
-    scores = await Promise.race([scoring, timedOut]);
-  } catch {
-    return fusedCut("failed", 0);
-  } finally {
-    settled = true;
-    timers.clearTimeout(timer);
-  }
-  if (scores === "timed_out")
-    return fusedCut("timed_out", 0);
-  if (scores.length !== scoredIndexes.length || scores.some((score) => typeof score !== "number" || Number.isNaN(score))) {
-    return fusedCut("failed", 0);
-  }
-  if (options.onScores)
-    options.onScores(scoredIndexes.map((index, position) => ({ item: options.items[index], score: scores[position] })), "applied");
-  const scoreByIndex = new Map(scoredIndexes.map((index, position) => [index, scores[position]]));
-  const order = options.items.map((_, index) => index).sort((left, right) => {
-    const leftScore = scoreByIndex.get(left);
-    const rightScore = scoreByIndex.get(right);
-    if (leftScore !== undefined && rightScore !== undefined && leftScore !== rightScore)
-      return rightScore - leftScore;
-    if (leftScore === undefined && rightScore !== undefined)
-      return 1;
-    if (leftScore !== undefined && rightScore === undefined)
-      return -1;
-    return left - right;
-  });
-  const keptOrder = order.slice(0, keep);
-  return counted({
-    kept: keptOrder.map((index) => options.items[index]),
-    audit: {
-      rerankerId: options.reranker.id,
-      outcome: "applied",
-      scored: scoredIndexes.length,
-      kept: keptOrder.length,
-      promoted: keptOrder.filter((index) => index >= keep).length,
-      elapsedMs: timers.now() - startedAt
-    }
-  });
-}
-function rerankPassage(title, chunks) {
-  const parts = [title?.trim() ?? "", ...chunks.map((chunk) => chunk.trim())].filter(Boolean);
-  return clipPassage(parts.join(`
-`));
-}
-function clipPassage(text) {
-  const collapsed = text.replace(/\s+/g, " ").trim();
-  return collapsed.length > RERANK_PASSAGE_CHARS ? collapsed.slice(0, RERANK_PASSAGE_CHARS) : collapsed;
-}
-function rerankPoolSize(reranker, maxResults) {
-  const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
-  return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
-}
-var RERANK_PASSAGE_CHARS = 12000, DEFAULT_RERANK_STALL_MS = 1e4, DEFAULT_RERANK_POOL_SIZE = 30, RERANK_POOL_STORE_DEPTH = 10, DEFAULT_RERANK_POOL_SEMANTIC_SEATS = 0, SEMANTIC_POOL_SEATS_ENV = "OLYMPUS_SEMANTIC_POOL_SEATS", outcomeCounts, counted = (result) => {
-  outcomeCounts[result.audit.outcome] += 1;
-  return result;
-}, MAX_RERANK_POOL_SIZE = 400, systemTimers;
-var init_evidence_reranker = __esm(() => {
-  outcomeCounts = { applied: 0, failed: 0, timed_out: 0 };
-  systemTimers = {
-    now: () => Date.now(),
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (handle) => clearTimeout(handle)
   };
 });
 

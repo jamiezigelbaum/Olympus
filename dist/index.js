@@ -16735,6 +16735,9 @@ var init_vector_digest = __esm(() => {
   init_embeddings();
 });
 
+// src/core/evidence-reranker.ts
+var init_evidence_reranker = () => {};
+
 // src/core/front-loop-sql-guard.ts
 var init_front_loop_sql_guard = () => {};
 
@@ -17532,6 +17535,7 @@ var init_local_index = __esm(() => {
   init_store_totals();
   init_vector_digest();
   init_boot_progress();
+  init_evidence_reranker();
   init_engine_heartbeat();
   init_main_thread_sql_trace();
   init_store_reclaim_admission();
@@ -18207,9 +18211,6 @@ var init_analyst_openclaw_infer = __esm(() => {
   init_analyst();
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 });
-
-// src/core/evidence-reranker.ts
-var init_evidence_reranker = () => {};
 
 // src/core/evidence-pack.ts
 var utf82, CUT_SHORT_LANES;
