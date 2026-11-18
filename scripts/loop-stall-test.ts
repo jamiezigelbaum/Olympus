@@ -851,9 +851,15 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   // The engine's SQLite settings and WAL lines, kept whole (output keeps only its tail), each with when it arrived.
   const sqliteLines: Array<{ at: string; role: Role; line: string }> = [];
   const freezeLines: Array<{ at: string; role: Role; line: string }> = [];
+  // The product's per-click trace (ingress, each command POST attempt, control receipt, answer), joined to clicks by id.
+  const clickTrace = new Map<string, string[]>();
   const keepEngineLine = (role: Role, line: string) => {
     if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:') || line.includes('[olympus] sqlite checkpoint:') || line.includes('[olympus] sqlite wal room:') || line.includes('[olympus] sqlite wal held:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
     // Keep each freeze frame and held-loop line outside the bounded engine log tail.
+    else if (line.includes('[olympus:click-trace]')) {
+      const id = / id=(\S+)/.exec(line)?.[1];
+      if (id) { const lines = clickTrace.get(id) ?? []; if (lines.length < 20) lines.push(line.slice(0, 400)); clickTrace.set(id, lines); }
+    }
     else if (line.includes('[olympus:control-path]') && (line.includes('freeze frames') || line.includes('loop held for'))) freezeLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus:control-path]')).slice(0, 4000) });
   };
   const pumps: Promise<void>[] = [];
@@ -1109,7 +1115,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     dashboard_reads: dashReads.length, dashboard_failed: dashReads.length - dashOk.length, dashboard_failures: dashReads.filter(read => read.status !== 200).slice(0, 10),
     front_beat_p95_ms: beatP95(front) ?? null, background_beat_p95_ms: beatP95(background) ?? null };
   const clickSummary = { count: clicks.length, max_ms: Math.round(Math.max(0, ...clicks.map(click => click.ms))),
-    over_1s: clicks.filter(click => !click.received || click.ms >= LOOP_STALL_LIMIT_MS).slice(0, 50),
+    over_1s: clicks.filter(click => !click.received || click.ms >= LOOP_STALL_LIMIT_MS).slice(0, 50).map(click => ({ ...click, trace: clickTrace.get(click.id) ?? [] })),
+    traced: clicks.filter(click => clickTrace.has(click.id)).length,
     settled: clicks.filter(click => click.settled_ms !== undefined).length, pending: pendingClicks.size,
     max_settled_ms: Math.max(0, ...clicks.map(click => click.settled_ms ?? 0)),
     failures: clicks.filter(click => click.saved === false), samples: clicks };
