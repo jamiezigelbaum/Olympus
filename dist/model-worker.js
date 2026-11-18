@@ -3210,7 +3210,7 @@ function memoryPayloadJson(value) {
   return json;
 }
 function noteMemoryPayloadResponse(response) {
-  const bytes = Number(response.headers.get("content-length"));
+  const bytes = Number(response.headers?.get?.("content-length"));
   if (Number.isSafeInteger(bytes) && bytes > 0)
     addMemoryPayloadBytes(bytes);
 }

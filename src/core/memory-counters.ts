@@ -66,9 +66,12 @@ export function memoryPayloadJson(value: object): string {
   return json;
 }
 
-/** Fetch's native body buffer has no byte counter. Use its declared size when present. */
+/**
+ * Fetch's native body buffer has no byte counter. Use its declared size when present.
+ * A response without readable headers counts as nothing: measuring never fails a call.
+ */
 export function noteMemoryPayloadResponse(response: Response): void {
-  const bytes = Number(response.headers.get('content-length'));
+  const bytes = Number((response as { headers?: { get?: (name: string) => string | null } }).headers?.get?.('content-length'));
   if (Number.isSafeInteger(bytes) && bytes > 0) addMemoryPayloadBytes(bytes);
 }
 
