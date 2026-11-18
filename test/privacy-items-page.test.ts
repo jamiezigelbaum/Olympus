@@ -42,7 +42,7 @@ function render(options: NonNullable<Parameters<typeof renderDashboardLocalPage>
 }
 
 /** The page on a local session, its script run against a stubbed engine, on the shared test clock. */
-async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean; hold?: boolean } = {}) {
+async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean; hold?: boolean; pending?: boolean } = {}) {
   const html = render({ controlSessionCsrfToken: 'csrf-token', outsideHelpLocalSession: true });
   const window = new Window({ url: URL_ITEMS.href });
   windows.push(window);
@@ -56,11 +56,22 @@ async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean
   // With hold, a save answers only when the test releases it.
   let release: () => void = () => undefined;
   const gate = new Promise<void>((resolve) => { release = resolve; });
+  let received: Record<string, unknown> | undefined;
+  let settled = false;
   const fetchStub = async (path: string, init: { body: string; headers: Record<string, string> }) => {
     expect(init.headers['X-Olympus-CSRF']).toBe('csrf-token');
-    const request = JSON.parse(init.body) as Record<string, unknown>;
+    let request = JSON.parse(init.body) as Record<string, unknown>;
     posts.push({ path, body: request });
     if (options.hold && path === DASHBOARD_PRIVACY_ITEMS_PATHS.set) await gate;
+    if (options.pending && path === DASHBOARD_PRIVACY_ITEMS_PATHS.set) {
+      received = request;
+      return { ok: true, status: 202, json: async () => ({ ok: true, state: 'pending', request_id: 'privacy-click' }) };
+    }
+    if (path === DASHBOARD_PRIVACY_ITEMS_PATHS.status) {
+      expect(request).toEqual({ request_id: 'privacy-click' });
+      if (!settled) return { ok: true, status: 200, json: async () => ({ ok: true, state: 'pending' }) };
+      request = received!;
+    }
     let result: unknown;
     if (path === DASHBOARD_PRIVACY_ITEMS_PATHS.find) {
       const words = typeof request.query === 'string' ? request.query.toLowerCase() : '';
@@ -96,8 +107,30 @@ async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean
   const sets = () => posts.filter((post) => post.path === DASHBOARD_PRIVACY_ITEMS_PATHS.set).map((post) => post.body);
   const dialogOpen = () => $('[data-pi-confirm]')!.hasAttribute('open');
   const text = (selector: string) => $(selector)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-  return { window, document, clock, posts, sets, $, click, dialogOpen, text, release };
+  return { window, document, clock, posts, sets, $, click, dialogOpen, text, release: () => { settled = true; release(); } };
 }
+
+test.each([false, true])('a pending receipt leaves the row saving until the background settles (refusal %s)', async (refuse) => {
+  const p = await page([appointment()], { pending: true, refuse });
+  await p.click('[data-pi-item="oti_appt"]');
+  await p.click('[data-pi-choose="Private"]');
+  expect(p.text('[data-pi-item="oti_appt"]')).toContain('Saving…');
+  expect(p.text('[data-pi-item="oti_appt"]')).toContain('Personal');
+  expect(p.text('[data-pi-status]')).toBe(C.pendingRestart);
+  await p.clock.advance(250);
+  expect(p.posts.at(-1)).toEqual({ path: DASHBOARD_PRIVACY_ITEMS_PATHS.status, body: { request_id: 'privacy-click' } });
+  expect(p.text('[data-pi-item="oti_appt"]')).toContain('Saving…');
+  p.release();
+  await p.clock.advance(250);
+  expect(p.text('[data-pi-item="oti_appt"]')).not.toContain('Saving…');
+  if (refuse) {
+    expect(p.text('[data-pi-status]')).toBe('This item is Secret. Secret items are not changed from here.');
+    expect(p.text('[data-pi-item="oti_appt"]')).toContain('Personal');
+  } else {
+    expect(p.text('[data-pi-toast-text]')).toBe(C.toastPrivate);
+    expect(p.text('[data-pi-item="oti_appt"]')).toContain('Private');
+  }
+});
 
 describe('the Privacy tabs', () => {
   test('Your items is the third tab, after Private questions and Privacy rules and before What AI apps received', () => {

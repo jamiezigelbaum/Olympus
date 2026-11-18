@@ -11,11 +11,14 @@
 import { Database } from 'bun:sqlite';
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { EngineForwardedRequest } from '../../src/workers/engine-split/commands.ts';
+import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../../src/workers/engine-split/commands.ts';
 import { engineStatusSnapshotPath, startEngineBackgroundServer, startEngineBackgroundStatus } from '../../src/workers/engine-split/runtime.ts';
+import { createOwnerTierItems } from '../../src/workers/classification/tier-owner-items.ts';
+import { createEmailSourceWorker } from '../../src/workers/engine/index.ts';
 
-const [socketPath, dbPath, folder] = process.argv.slice(2) as [string, string, string];
+const [socketPath, dbPath, folder, ...storePaths] = process.argv.slice(2) as [string, string, string, ...string[]];
 mkdirSync(dirname(engineStatusSnapshotPath(process.env)), { recursive: true });
+const privacy = storePaths.length ? createEmailSourceWorker({ ownerTierItems: createOwnerTierItems({ storePaths }) }) : undefined;
 
 let applied = 0;
 let collected = 0;
@@ -25,6 +28,9 @@ const commands = startEngineBackgroundServer({
   instanceId: 'blocked-loop-fixture',
   handlers: {
     tier_override: ({ request }: { request: EngineForwardedRequest }) => {
+      if (privacy && request.path === '/dashboard/privacy/items/set') {
+        return privacy.fetch(forwardedRequestToRequest('http://olympus-worker.internal', request)).then(responseToForwarded);
+      }
       applied += 1;
       appendFileSync(join(folder, 'applied'), `${request.body}\n`);
       return { status: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ applied }) };

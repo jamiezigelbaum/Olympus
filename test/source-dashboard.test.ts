@@ -3,7 +3,7 @@ import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
 import { dashboardAttentionLine, dashboardStatus, dashboardWorkingSummary } from '../src/workers/dashboard/vocabulary.ts';
 import { engineBriefFromViewModel } from '../src/core/engine-brief.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -20,6 +20,7 @@ import {
   type SourceDashboardHistorySample,
   buildSourceDashboardViewModel,
   type SourceDashboardHistory,
+  type SourceDashboardViewModel,
 } from '../src/workers/source-dashboard.ts';
 import {
   createSourceCorpusRegistry,
@@ -28,8 +29,10 @@ import {
 import { createSourceExclusionMatcherFromPrefixes } from '../src/core/source-ingestion-exclusions.ts';
 import {
   buildSourceIngestionLedgerSnapshot,
+  SqliteSourceIngestionLedgerStore,
   type SourceIngestionLedgerRow,
 } from '../src/workers/source-ingestion-ledger.ts';
+import { createFrontDashboardHistory } from '../src/workers/engine-split/front-history.ts';
 import {
   readConnectedHandleRegistry,
   writeConnectedHandleRegistry,
@@ -65,6 +68,7 @@ import type {
   XBookmarksConnectorStoreSyncHandler,
   XBookmarksLiveSyncResult,
 } from '../src/workers/x-bookmarks/index.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 
 describe('multi-source source dashboard', () => {
   test('fresh install finishes with two content copies elsewhere and two unread fail-safe items, with a problem route', () => {
@@ -1271,6 +1275,113 @@ describe('multi-source source dashboard', () => {
       });
     } finally {
       history.close();
+    }
+  });
+
+  test.each([
+    ['dashboard history', SqliteSourceDashboardHistory],
+    ['ingestion ledger', SqliteSourceIngestionLedgerStore],
+  ] as const)('%s enables WAL on an existing rollback-journal database', (_name, Writer) => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-dashboard-wal-'));
+    const path = join(root, 'source-dashboard.sqlite');
+    const legacy = new Database(path);
+    try {
+      expect(legacy.query('PRAGMA journal_mode = DELETE').get()).toEqual({ journal_mode: 'delete' });
+      legacy.exec('CREATE TABLE retained_sample (value); INSERT INTO retained_sample VALUES (7);');
+    } finally {
+      legacy.close();
+    }
+    try {
+      new Writer(path).close();
+      const reader = new Database(path, { readonly: true, create: false });
+      try {
+        expect(reader.query('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' });
+        expect(reader.query('SELECT value FROM retained_sample').get()).toEqual({ value: 7 });
+      } finally {
+        reader.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['delete', 'wal'] as const)('dashboard.json serves current counts under an exclusive %s history lock and recovers', async (mode) => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-dashboard-locked-'));
+    const path = join(root, 'source-dashboard.sqlite');
+    const clock = createTestClock(Date.now());
+    const logs: string[] = [];
+    const history = createFrontDashboardHistory({
+      path,
+      now: clock.now,
+      log: (line) => logs.push(line),
+      client: { post: async () => ({ id: 'samples', state: 'received', instance_id: 'background' }) },
+    });
+    const writer = new SqliteSourceDashboardHistory(path);
+    writer.record([{
+      source_id: 'gmail.email', corpus_id: 'internal.email',
+      sampled_at: new Date(clock.now() - 3_600_000).toISOString(),
+      indexed_items: 10, content_ready_items: 10, queue_waiting: 30, queue_active: 0, queue_attention: 0,
+    }]);
+    writer.close();
+    const worker = createEmailSourceWorker({
+      sourceIndexStatus: { status: async () => statusWithInternalEmailCount(40, 40) },
+      sourceScheduler: { status: () => schedulerWithQueue(30) } as never,
+      sourceDashboard: {
+        sovereigntyEngine: fixtureSovereigntyEngine(),
+        history,
+        registryPath: join(root, 'handles.json'),
+        secretStore: memorySecretStore(),
+      },
+    });
+    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+    const refresh = async (): Promise<SourceDashboardViewModel> => {
+      const started = performance.now();
+      const response = await fetch(new Request('http://worker.test/dashboard.json', {
+        headers: { Authorization: 'Bearer dashboard-secret' },
+      }));
+      expect(response.status).toBe(200);
+      const view = await response.json() as SourceDashboardViewModel;
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(view.kind).toBe('source_dashboard');
+      expect(view.summary.total_indexed_items).toBe(40);
+      return view;
+    };
+    try {
+      const lock = new Database(path, { create: false });
+      try {
+        if (mode === 'delete') {
+          lock.exec('PRAGMA journal_mode = DELETE;');
+          // Warm the front reader before taking the rollback journal's
+          // exclusive lock, as a writer does at commit or cache spill.
+          expect((await refresh()).history).toEqual({ sample_count: 1, eta_available: true });
+        } else {
+          // WAL with normal locking permits concurrent reads. Exclusive
+          // locking mode makes the read fail even after the WAL fix.
+          lock.exec('PRAGMA locking_mode = EXCLUSIVE;');
+        }
+        lock.exec('BEGIN EXCLUSIVE; UPDATE source_dashboard_samples SET indexed_items = 11;');
+        for (let poll = 0; poll < 3; poll++) {
+          const view = await refresh();
+          expect(view.history).toEqual({ sample_count: 0, eta_available: false });
+          expect(view.sources.find(({ source_id }) => source_id === 'gmail.email')?.coverage.indexed_items).toBe(40);
+          expect(view.sources.every(({ progress, movement }) => !progress && !movement)).toBe(true);
+        }
+        expect(logs).toHaveLength(1);
+        expect(logs[0]).toContain('sqlite_code=SQLITE_BUSY');
+        await clock.advance(30_000);
+        expect((await refresh()).history).toEqual({ sample_count: 0, eta_available: false });
+        expect(logs).toHaveLength(2);
+        lock.exec('ROLLBACK;');
+      } finally {
+        lock.close();
+      }
+      const recovered = await refresh();
+      expect(recovered.history).toEqual({ sample_count: 1, eta_available: true });
+      expect(recovered.sources.find(({ source_id }) => source_id === 'gmail.email')?.progress?.indexed_items_per_hour).toBeGreaterThan(0);
+      expect(logs).toHaveLength(2);
+    } finally {
+      worker.close();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

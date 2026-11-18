@@ -22,19 +22,22 @@ function parse(line: string) {
   return { at, fields };
 }
 
-test('the line round trips every field and reads heap stats at a new peak and at emission', () => {
-  const clock = createTestClock(); const lines: string[] = []; let heaps = 0;
+test('a new peak reads heap size only and emission reads full heap stats', () => {
+  const clock = createTestClock(); const lines: string[] = []; let heaps = 0; let peakHeaps = 0;
   const memory = createMemoryDiagnostic({ role: 'front', now: clock.now, uptime: () => 3600,
     heap: () => { heaps++; return heap; }, readers: () => ({ read_workers: 132, read_connections: 264 }),
+    peakHeapSize: () => { peakHeaps++; return heap.heapSize; },
     activity: () => ['embedding'], log: line => lines.push(line) });
   const sampled = { rss: 130 * MB, anon: 100 * MB, file: 30 * MB, swap: 2 * MB };
-  memory.sample(sampled); expect(heaps).toBe(1);
-  memory.sample(sampled); expect(heaps).toBe(1);
-  memory.write(sampled); expect(heaps).toBe(2);
+  memory.sample(sampled); expect(peakHeaps).toBe(1);
+  memory.sample(sampled); expect(peakHeaps).toBe(1);
+  expect(heaps).toBe(0);
+  memory.write(sampled); expect(heaps).toBe(1);
   const { at, fields } = parse(lines[0]!);
   expect(fields).toEqual({ role: 'front', activity: 'embedding', pid: String(process.pid), uptime_s: '3600',
     read_workers: '132', read_connections: '264', rss_total_mb: '130', rss_anon_mb: '100', rss_file_mb: '30', swap_mb: '2', peak_anon_mb: '100',
     peak_at: at, peak_activity: 'embedding', peak_heap_size_mb: '32',
+    floor_anon_mb: '100', bursts_over_threshold: '0',
     heap_size_mb: '32', heap_capacity_mb: '64', extra_memory_mb: '8', object_count: '500000',
     ...Object.fromEntries(Object.entries(memoryHolderCounts()).map(([key, value]) => [key, String(value)])) });
   expect(`${at} [olympus] memory ${Object.entries(fields).map(([key, value]) => `${key}=${value}`).join(' ')}`).toBe(lines[0]!);
@@ -49,14 +52,15 @@ test('Linux anonymous/file/swap are distinct; other platforms omit unavailable m
   const memory = createMemoryDiagnostic({ role: 'single', heap: () => heap, log: line => lines.push(line) });
   memory.sample(sampled); memory.write(sampled);
   const { fields } = parse(lines[0]!);
-  for (const key of ['peak_anon_mb', 'peak_at', 'peak_activity', 'peak_heap_size_mb']) expect(fields).not.toHaveProperty(key);
+  for (const key of ['peak_anon_mb', 'peak_at', 'peak_activity', 'peak_heap_size_mb', 'floor_anon_mb']) expect(fields).not.toHaveProperty(key);
+  expect(fields.floor_rss_mb).toBe(String(Math.round(sampled.rss / MB * 100) / 100));
 });
 
 test('five-second samples preserve burst context and five-minute lines reset peaks with restart disabled', async () => {
   const clock = createTestClock(); const lines: string[] = []; let anon = 100; let samples = 0;
   let heapSize = 32 * MB;
   let activity: MemoryActivityLabel[] = ['idle'];
-  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => ({ ...heap, heapSize }),
+  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => ({ ...heap, heapSize }), peakHeapSize: () => heapSize,
     activity: () => activity, log: line => lines.push(line) });
   const monitor = startEngineRssRestart({ thresholdMb: 0, previous: { count: 0 },
     batchRunning: () => false, restart: () => { throw new Error('disabled'); }, record: () => {}, memory,
@@ -70,12 +74,14 @@ test('five-second samples preserve burst context and five-minute lines reset pea
   await clock.advance(MEMORY_LOG_INTERVAL_MS - 2 * MEMORY_SAMPLE_INTERVAL_MS - 1);
   expect(lines).toHaveLength(0);
   await clock.advance(1);
-  expect(samples).toBe(65); expect(lines).toHaveLength(1);
+  expect(samples).toBe(60); expect(lines).toHaveLength(1);
   expect(parse(lines[0]!).fields).toMatchObject({ rss_anon_mb: '100', activity: 'idle', heap_size_mb: '32',
+    floor_anon_mb: '100', bursts_over_threshold: '0',
     peak_anon_mb: '4406', peak_at: peakAt, peak_activity: 'visibility_rebuild_bootstrap,people_refresh', peak_heap_size_mb: '96' });
   anon = 150; await clock.advance(MEMORY_LOG_INTERVAL_MS);
-  expect(parse(lines[1]!).fields).toMatchObject({ rss_anon_mb: '150', peak_anon_mb: '150', peak_activity: 'idle', peak_heap_size_mb: '32' });
-  monitor.stop(); await clock.advance(MEMORY_LOG_INTERVAL_MS); expect(lines).toHaveLength(2); expect(samples).toBe(130);
+  expect(parse(lines[1]!).fields).toMatchObject({ rss_anon_mb: '150', floor_anon_mb: '150', bursts_over_threshold: '0',
+    peak_anon_mb: '150', peak_activity: 'idle', peak_heap_size_mb: '32' });
+  monitor.stop(); await clock.advance(MEMORY_LOG_INTERVAL_MS); expect(lines).toHaveLength(2); expect(samples).toBe(120);
 });
 
 test('minute-check jitter never stretches the logging cadence to six checks', () => {
@@ -95,17 +101,18 @@ test('minute-check jitter never stretches the logging cadence to six checks', ()
 
 test('restart carries exactly the emitted memory fields and continuous time over threshold', async () => {
   const clock = createTestClock(); const lines: string[] = []; let batch = true; let restarts = 0;
-  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => heap,
+  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => heap, peakHeapSize: () => heap.heapSize,
     activity: () => batch ? ['judging'] : ['idle'], log: line => lines.push(line) });
-  const peakAt = new Date(clock.now() + MEMORY_SAMPLE_INTERVAL_MS).toISOString();
+  const peakAt = new Date(clock.now() + MEMORY_LOG_INTERVAL_MS + MEMORY_SAMPLE_INTERVAL_MS).toISOString();
   const monitor = startEngineRssRestart({ thresholdMb: 3000, previous: { count: 0 }, memory,
-    batchRunning: () => batch, restart: () => { expect(lines[0]).toContain('[olympus] memory'); restarts++; return true; },
+    batchRunning: () => batch, restart: () => { expect(lines.at(-1)).toContain('[olympus] memory'); restarts++; return true; },
     record: () => {}, sample: () => ({ rss: 4500 * MB, anon: 4406 * MB, file: 94 * MB, swap: 0 }),
     now: clock.now, setInterval: clock.setInterval, clearInterval: timer => clock.clearInterval(timer as Parameters<typeof clock.clearInterval>[0]), log: line => lines.push(line) });
-  await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 2); batch = false; await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS);
-  const parsed = parse(lines[0]!);
-  expect(parsed.fields).toMatchObject({ activity: 'idle', peak_at: peakAt, peak_activity: 'judging', peak_heap_size_mb: '32' });
-  expect(lines[1]).toBe(`[engine-split] rss_restart rss_mb=4406 threshold_mb=3000 restarts=1 waited_ms=120000 over_threshold_s=120 at=${parsed.at} ${lines[0]!.split(' memory ')[1]}`);
+  await clock.advance(MEMORY_LOG_INTERVAL_MS + ENGINE_RSS_CHECK_INTERVAL_MS); batch = false; await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS);
+  const parsed = parse(lines[1]!);
+  expect(parsed.fields).toMatchObject({ activity: 'idle', floor_anon_mb: '4406', bursts_over_threshold: '0',
+    peak_at: peakAt, peak_activity: 'judging', peak_heap_size_mb: '32' });
+  expect(lines[2]).toBe(`[engine-split] rss_restart rss_mb=4406 threshold_mb=3000 restarts=1 waited_ms=120000 over_threshold_s=120 at=${parsed.at} ${lines[1]!.split(' memory ')[1]}`);
   expect(restarts).toBe(1); monitor.stop();
 });
 

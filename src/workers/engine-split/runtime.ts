@@ -20,8 +20,11 @@ import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSy
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
-import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineForwardedKind, type EngineForwardedResponse } from './commands.ts';
+import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
 import { ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
+import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
+import type { PendingItemProtection } from '../connector-store/tier-visibility.ts';
+import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER } from '../http.ts';
 
 export function engineBackgroundSocketFromEnv(env: Record<string, string | undefined>): string {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
@@ -383,6 +386,7 @@ export function createEngineFrontRoutes(input: {
   gate: FrontGate;
   restartFront: () => void;
   timeoutMs?: number;
+  pendingItemProtection?: PendingItemProtection;
   /** This front's process, which the background waits out before it deletes. */
   pid?: number;
   /**
@@ -393,17 +397,14 @@ export function createEngineFrontRoutes(input: {
   afterAnswer?: (kind: EngineForwardedKind) => void;
 }): (request: Request) => Promise<Response | undefined> | undefined {
   const pid = input.pid ?? process.pid;
-  /** The background's answer, or why there is none: the command was not answered, or it failed there. */
-  const exchange = async (kind: EngineForwardedKind, request: Request): Promise<
-    { answer: EngineForwardedResponse } | { unanswered: string } | { failed: string }
-  > => {
-    const forwarded = await requestToForwarded(request);
+  type Outcome = { answer: EngineForwardedResponse } | { unanswered: string } | { failed: string };
+  const exchange = async (kind: EngineForwardedKind, forwarded: EngineForwardedRequest, onReceived?: (receipt: EngineCommandReceipt) => void): Promise<Outcome> => {
     let receipt;
     try {
       receipt = await input.client.send(
         { kind, request: forwarded, ...(kind === 'delete_source_data' ? { frontPid: pid } : {}) },
         // Extraction and embedding batches can run for minutes, as they did in the one process.
-        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : OWNER_ACTION_WAIT_MS) },
+        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : OWNER_ACTION_WAIT_MS), ...(onReceived ? { onReceived } : {}) },
       );
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : 'The background engine is not answering.' };
@@ -411,26 +412,87 @@ export function createEngineFrontRoutes(input: {
     if (receipt.state !== 'done') return { failed: receipt.error ?? 'The background could not run this.' };
     return { answer: receipt.result as EngineForwardedResponse };
   };
-  const send = async (kind: EngineForwardedKind, request: Request): Promise<Response> => {
-    const outcome = await exchange(kind, request);
+  const responseFor = (outcome: Outcome): Response => {
     if ('unanswered' in outcome) return Response.json({ error: { code: 'engine_background_unavailable', message: outcome.unanswered } }, { status: 503 });
     if ('failed' in outcome) return Response.json({ error: { code: 'engine_background_failed', message: outcome.failed } }, { status: 502 });
-    try { input.afterAnswer?.(kind); } catch { /* the front's own timer re-reads it */ }
     return new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
+  };
+  const answer = (kind: EngineForwardedKind, outcome: Outcome): Response => {
+    if ('answer' in outcome) {
+      try { input.afterAnswer?.(kind); } catch { /* the front's own timer re-reads it */ }
+    }
+    return responseFor(outcome);
+  };
+  // The dashboard sees the same command status the client receives from the
+  // socket. Keep active ids through a background restart and retain recent
+  // results in memory so a browser poll can still see the outcome.
+  const pendingPrivacyItems = new Set<string>();
+  const settledPrivacyItems = new Map<string, Outcome>();
+  const pending = (id: string, status: number) => Response.json(
+    { ok: true, request_id: id, state: 'pending' }, { status, headers: { 'Cache-Control': 'no-store' } },
+  );
+  const changePrivacyItem = async (request: Request, protection: PendingItemProtection): Promise<Response> => {
+    const forwarded = await requestToForwarded(request);
+    const body = await new Response(forwarded.body).json().then(
+      value => value as { item_id?: unknown; tier?: unknown } | null,
+      () => null, // The background returns the route's validation error.
+    );
+    let identity: ReturnType<typeof parseOwnerTierItemId> | undefined;
+    if (body?.tier === 'private' && typeof body.item_id === 'string' && body.item_id.trim()) {
+      try {
+        identity = parseOwnerTierItemId(body.item_id);
+      } catch (error) {
+        if (!(error instanceof OperationError)) throw error;
+        return Response.json({ error: error.toJSON() }, { status: 400 });
+      }
+    }
+    const received = Promise.withResolvers<Response>();
+    let id: string | undefined;
+    let release: (() => void) | undefined;
+    const settling = exchange('tier_override', forwarded, (receipt) => {
+      id = receipt.id;
+      if (identity) release = protection.hold(identity);
+      pendingPrivacyItems.add(id);
+      received.resolve(pending(id, 202));
+    }).then(outcome => {
+      release?.();
+      if (id) {
+        pendingPrivacyItems.delete(id);
+        settledPrivacyItems.set(id, outcome);
+        if (settledPrivacyItems.size > 1_000) settledPrivacyItems.delete(settledPrivacyItems.keys().next().value!);
+      }
+      return outcome;
+    });
+    return Promise.race([received.promise, settling.then(outcome => answer('tier_override', outcome))]);
+  };
+  const privacyItemStatus = async (request: Request): Promise<Response> => {
+    const id = (await request.json().then(value => value as { request_id?: unknown } | null, () => null))?.request_id;
+    if (typeof id === 'string') {
+      if (pendingPrivacyItems.has(id)) return pending(id, 200);
+      const outcome = settledPrivacyItems.get(id);
+      if (outcome) return responseFor(outcome);
+    }
+    // A restart lost the receipt: the page reloads the item's true state and says so.
+    return Response.json({ ok: false, unknown: true, message: 'Not saved. Olympus restarted before this change was saved. Press again.' }, { status: 404 });
   };
   return (request) => {
     if (request.method !== 'POST') return undefined;
     const path = new URL(request.url).pathname;
+    if (input.pendingItemProtection && (path === '/dashboard/privacy/items/set' || path === '/dashboard/privacy/items/status')
+      && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local') {
+      if (!input.gate.isOpen()) return Promise.resolve(restartingResponse(request));
+      return path.endsWith('/status') ? privacyItemStatus(request) : changePrivacyItem(request, input.pendingItemProtection);
+    }
     const kind = forwardedKindFor(path);
     if (!kind) return undefined;
     return (async (): Promise<Response | undefined> => {
       if (!input.gate.isOpen()) return restartingResponse(request);
       if (path === '/v1/cli/tier' && tierCommandOnlyReads(await request.clone().text())) return undefined;
-      if (kind !== 'delete_source_data') return send(kind, request);
+      if (kind !== 'delete_source_data') return answer(kind, await exchange(kind, await requestToForwarded(request)));
       input.gate.close();
       let outcome: Awaited<ReturnType<typeof exchange>>;
       try {
-        outcome = await exchange(kind, request);
+        outcome = await exchange(kind, await requestToForwarded(request));
       } catch {
         outcome = { unanswered: 'The delete could not be sent.' };
       }

@@ -316,20 +316,34 @@ the cause).
 - **Stores the front keeps writing.** Its own files stay its own: remote
   connections, waiting private questions, answer jobs, dashboard
   sessions, settings files. Nothing else writes them.
-- **Restart.** The host restarts the background on exit and, with the
-  switch on, when its RSS passes a threshold between batches (#957). An
-  interrupted pass is not a failure (#803, PR #1096). The owner-busy
-  state for the shared model is re-sent by the front when the background
-  comes back. Both roles emit an ISO-timestamped `[olympus] memory` line
-  every five minutes and immediately before an RSS restart. A separate
-  five-second timer samples anonymous RSS even when restarting is disabled.
-  The restart decision still checks fresh RSS once a minute. Fields include
+- **Restart.** Once a minute the background compares its memory floor
+  with `worker.engineSplitRssRestartMb` (3072 MB by default, 0 disables
+  the restart). The floor is the minimum of the latest
+  60 five-second samples of anonymous RSS on Linux, or total RSS when
+  anonymous RSS is unavailable. A full window must be collected after
+  startup and the floor must exceed the threshold. The background then
+  waits for current judge and scheduler work to finish, up to ten minutes
+  of checks with the floor still above the threshold. It uses the clean
+  reload and exits with code 75 for the host to restart it (#957). The
+  scheduler records any pass it cuts short as interrupted (#803, PR #1096).
+  The front re-sends the owner-busy state for the shared model when the
+  background comes back. Both roles sample every five seconds even when
+  restarting is disabled and emit an ISO-timestamped `[olympus] memory`
+  line every five minutes. The background also emits it before an RSS
+  restart. Fields include
   role/pid/uptime_s, rss_total_mb, Linux rss_anon_mb/rss_file_mb/swap_mb, and
   activity at emission. Activity is a comma-separated list of active labels
   (judging, embedding, recount, import, extract, visibility_rebuild_bootstrap,
   visibility_rebuild_incremental, people_refresh), or idle. The largest
   anonymous sample since the previous line supplies peak_anon_mb, peak_at
   (ISO time), peak_activity and peak_heap_size_mb. Ties keep the first sample.
+  The sliding minimum is logged alongside the peak as floor_anon_mb (or
+  floor_rss_mb if the window includes total RSS fallback). Each minute check
+  with current memory above the threshold and the floor below it increments
+  bursts_over_threshold, reported since the last memory line. The first
+  such check in each logging interval emits
+  `[olympus] memory restart not taken: burst` with current memory, the floor
+  and the threshold in MB.
   Unavailable measurements are omitted. JSC heap_size_mb, heap_capacity_mb,
   extra_memory_mb and object_count are measured at emission, with a separate
   heap size reading when a sample sets a new peak.

@@ -151,6 +151,7 @@ export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
   '/dashboard/archive-import/remove': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
   '/dashboard/archive-import/stop': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
   '/dashboard/privacy/items/find': 'Reads the tier ledgers read-only.',
+  '/dashboard/privacy/items/status': 'Reads the front’s receipt and the background’s command outcome relayed to it.',
   '/dashboard/agents/pairing-code': 'Remote connections and keys, in the front\'s connection store.',
   '/dashboard/agents/keys': 'Remote connections and keys, in the front\'s connection store.',
   '/dashboard/agents/revoke': 'Remote connections and keys, in the front\'s connection store.',

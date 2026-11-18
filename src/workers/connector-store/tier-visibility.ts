@@ -47,6 +47,28 @@ export interface TierVisibilityScope {
   stores?: () => readonly (ChildVisibilityStore & Partial<Pick<LocalConnectorStore, 'releaseItemChunks'>>)[];
 }
 
+/** Owner raises acknowledged by the background, until each command settles. */
+export function createPendingItemProtection() {
+  const held = new Map<string, number>();
+  return {
+    get size(): number { return held.size; },
+    hold(identity: TierLedgerIdentity): () => void {
+      const key = tierLedgerIdentityKey(identity);
+      held.set(key, (held.get(key) ?? 0) + 1);
+      return () => {
+        const count = held.get(key)!;
+        if (count === 1) held.delete(key);
+        else held.set(key, count - 1);
+      };
+    },
+    has(identity: TierLedgerIdentity): boolean {
+      return held.size > 0 && held.has(tierLedgerIdentityKey(identity));
+    },
+  };
+}
+
+export type PendingItemProtection = ReturnType<typeof createPendingItemProtection>;
+
 function childLane(scope: TierVisibilityScope): { ledger: () => TierLedger; stores: () => readonly ChildVisibilityStore[] } | undefined {
   const stores = scope.stores;
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
@@ -61,6 +83,7 @@ function childLane(scope: TierVisibilityScope): { ledger: () => TierLedger; stor
 export function createTierVisibilityGate(
   scopes: () => readonly TierVisibilityScope[],
   onHeldMatches?: (identities: readonly TierLedgerIdentity[]) => void,
+  pending?: PendingItemProtection,
 ): SourceIndexVisibilityGate {
   const readOptions = { personalFirst: onHeldMatches !== undefined };
   const governedBy = (scope: TierVisibilityScope, hits: readonly SourceIndexRoutedSearchHit[]) =>
@@ -73,9 +96,11 @@ export function createTierVisibilityGate(
   const reportUnread = (unread: ReadonlySet<string>, report: SourceIndexVisibilityGateReport | undefined) => {
     if (unread.size > 0) report?.onUnchecked?.([...unread].sort());
   };
+  const servable = (hits: readonly SourceIndexRoutedSearchHit[]) =>
+    pending?.size ? hits.filter(hit => !pending.has(hit.sourceItem)) : hits;
   const gate: SourceIndexVisibilityGate = (hits, report) => {
     const current = scopes();
-    if (current.length === 0 || hits.length === 0) return hits;
+    if (current.length === 0 || hits.length === 0) return servable(hits);
     const reads = new Map<TierVisibilityScope, TierVisibilityReads | undefined>();
     const unread = new Set<string>();
     for (const scope of current) {
@@ -90,14 +115,14 @@ export function createTierVisibilityGate(
     }
     const visible = visibilityHere(judgeVisibility(current, hits, reads, onHeldMatches));
     reportUnread(unread, report);
-    return visible;
+    return servable(visible);
   };
   // The same judgment with each ledger read in one snapshot on the read pool,
   // for the search's own fan-out, which can wait for it (#1305).
   gate.offThread = async (hits, report) => {
-    if (scopes().length === 0 || hits.length === 0) return hits;
+    if (scopes().length === 0 || hits.length === 0) return servable(hits);
     // A write during the pooled judgment takes it again, then judges here once.
-    return judgedAwaited(() => judgedOffThread(hits, report), () => gate(hits, report));
+    return servable(await judgedAwaited(() => judgedOffThread(hits, report), () => gate(hits, report)));
   };
   const judgedOffThread = async (
     hits: readonly SourceIndexRoutedSearchHit[],
@@ -344,18 +369,27 @@ export function createReleaseTierCheck(
   scopes: () => readonly TierVisibilityScope[],
   secureDerivativeDefault: () => 'allow' | 'approval',
   chunkOptions: Pick<ChunkReleaseOptions, 'judgeNow' | 'boost'> = {},
+  pending?: PendingItemProtection,
 ): ReleaseCheck {
+  // A hold may arrive during a pooled ledger read. Apply it at the same exit
+  // that hands off the verdicts, where a gone input withholds the whole answer.
+  const servable = (inputs: Parameters<ReleaseCheck['inputs']>[0], verdicts: ReleaseInputVerdict[]) => {
+    if (pending?.size) inputs.forEach((input, index) => {
+      if (pending.has(input)) verdicts[index] = { ...verdicts[index]!, gone: true };
+    });
+    return verdicts;
+  };
   const check: ReleaseCheck = {
     secureDerivativeDefault,
     chunks: (inputs, options) => releaseChunks(inputs, scopes, check, { ...chunkOptions, ...options }),
-    inputs: (inputs) => visibilityHere(effectiveItemVerdicts(scopes, inputs)),
+    inputs: (inputs) => servable(inputs, visibilityHere(effectiveItemVerdicts(scopes, inputs))),
     // A write during the pooled check takes it again, then checks here once.
-    inputsOffThread: (inputs) => judgedAwaited(async () => {
+    inputsOffThread: async (inputs) => servable(inputs, await judgedAwaited(async () => {
       const unchanged = scopes().map(scope => childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
       const verdicts = await visibilityOffThread(effectiveItemVerdicts(scopes, inputs));
       if (unchanged.some(check => !check())) throw new VisibilityChangedError();
       return verdicts;
-    }, () => visibilityHere(effectiveItemVerdicts(scopes, inputs))),
+    }, () => visibilityHere(effectiveItemVerdicts(scopes, inputs)))),
   };
   return check;
 }
