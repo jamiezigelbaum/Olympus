@@ -2951,6 +2951,7 @@ function modelThreadHandleId() {
 
 class ModelThread {
   worker;
+  memory;
   nextId = 1;
   pending = new Map;
   pids = new Map;
@@ -2963,6 +2964,10 @@ class ModelThread {
     };
     process.once("exit", onExit);
     this.worker.on("message", (reply) => {
+      if (reply.memory) {
+        this.memory = reply.memory;
+        return;
+      }
       if (reply.handle !== undefined) {
         if (reply.pid === undefined)
           this.pids.delete(reply.handle);
@@ -3014,6 +3019,20 @@ class ModelThread {
       failed(new Error("The built-in model worker stopped."));
     });
     this.worker.unref();
+  }
+  sampleMemory() {
+    if (this.pending.size === 0)
+      this.worker.postMessage({ sampleMemory: true });
+    const sampled = this.memory;
+    return {
+      model_workers: 1,
+      ...sampled && {
+        model_heap_size_mb: sampled.heapUsed,
+        model_extra_memory_mb: sampled.external,
+        model_heap_age_ms: Math.max(0, Date.now() - sampled.at),
+        ...sampled.arrayBuffers > 0 ? { model_array_buffers_mb: sampled.arrayBuffers } : {}
+      }
+    };
   }
   call(request, options = {}) {
     if (options.signal?.aborted)
@@ -6392,8 +6411,76 @@ function unquoteEnvValue(value) {
   return trimmed;
 }
 
+// src/core/memory-counters.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var counts = {
+  connector_stores: 0,
+  tier_visibility_items: 0,
+  hidden_child_items: 0,
+  embedding_queue: 0,
+  people: 0,
+  identities: 0,
+  tasks_embed: 0,
+  tasks_sync: 0,
+  tasks_extract: 0,
+  tasks_watch: 0
+};
+function changeMemoryCounter(key, delta) {
+  counts[key] += delta;
+}
+var payloads = {
+  judge: { count: 0, bytes: 0 },
+  embed: { count: 0, bytes: 0 },
+  extract: { count: 0, bytes: 0 }
+};
+var payloadScope = new AsyncLocalStorage;
+async function withMemoryPayload(kind, run) {
+  const counter = payloads[kind];
+  let bytes = 0;
+  let active = true;
+  counter.count++;
+  try {
+    return await payloadScope.run((delta) => {
+      if (!active)
+        return;
+      bytes += delta;
+      counter.bytes += delta;
+    }, run);
+  } finally {
+    active = false;
+    counter.count--;
+    counter.bytes -= bytes;
+  }
+}
+function addMemoryPayloadBytes(bytes) {
+  payloadScope.getStore()?.(bytes);
+}
+function addMemoryPayloadText(text) {
+  const add = payloadScope.getStore();
+  if (add)
+    add(Buffer.byteLength(text));
+}
+function memoryPayloadJson(value) {
+  const json = JSON.stringify(value);
+  addMemoryPayloadText(json);
+  return json;
+}
+function noteMemoryPayloadResponse(response) {
+  const bytes = Number(response.headers?.get?.("content-length"));
+  if (Number.isSafeInteger(bytes) && bytes > 0)
+    addMemoryPayloadBytes(bytes);
+}
+var scopedActivity = {
+  visibility_rebuild_bootstrap: 0,
+  visibility_rebuild_incremental: 0,
+  people_refresh: 0
+};
+function changeMemoryActivity(label, delta) {
+  scopedActivity[label] += delta;
+}
+
 // src/core/model-stream.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 
 // src/core/zkapi-consult-settings.ts
 import { readFileSync as readFileSync11, statSync as statSync7 } from "node:fs";
@@ -6694,7 +6781,7 @@ function isFetchRedirectRefusal(error) {
 }
 
 // src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 
 // node_modules/entities/dist/esm/decode-codepoint.js
 var _a;
@@ -7818,7 +7905,7 @@ var SHARED_SECRET_PATTERNS = [
 ];
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
 function chunkCoverageNote(result) {
   return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
@@ -7836,24 +7923,24 @@ async function checkReleaseChunks(check, inputs, options) {
   };
 }
 var chunkProvenance = new WeakMap;
-var storage = new AsyncLocalStorage;
+var storage = new AsyncLocalStorage2;
 var withheldAnswers = new WeakSet;
 
 // src/core/source-answer-jobs.ts
 var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
 var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
 var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-var progressSink = new AsyncLocalStorage2;
+var progressSink = new AsyncLocalStorage3;
 
 // src/core/model-stream.ts
-var progress = new AsyncLocalStorage3;
+var progress = new AsyncLocalStorage4;
 
 // src/core/read-wide.ts
 var matchingProvenances = new WeakSet;
 var wideProvenances = new WeakSet;
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 
 // node_modules/n-gram/index.js
 var bigram = nGram(2);
@@ -8241,14 +8328,14 @@ var stopwords_iso_default = {
 };
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
-var context = new AsyncLocalStorage4;
-var disabled = new AsyncLocalStorage4;
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+var context = new AsyncLocalStorage5;
+var disabled = new AsyncLocalStorage5;
 function keywordExpansionDisabled() {
   return disabled.getStore() === true;
 }
-var cachedOnly = new AsyncLocalStorage4;
-var requestContext = new AsyncLocalStorage4;
+var cachedOnly = new AsyncLocalStorage5;
+var requestContext = new AsyncLocalStorage5;
 function keywordAlternatives(query) {
   if (keywordExpansionDisabled())
     return;
@@ -8947,7 +9034,7 @@ function visibilityCheckTimeoutGap(corpusId) {
 var DOCUMENT_FAMILIES = new Set(["file", "note"]);
 
 // src/core/analyst.ts
-var analystAbortSignalStorage = new AsyncLocalStorage5;
+var analystAbortSignalStorage = new AsyncLocalStorage6;
 var CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.";
 var CLAIM_RULE = `Each citation's "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.`;
 var ANALYST_SYSTEM = [
@@ -10380,31 +10467,6 @@ var OTP_SUBJECT = new RegExp([
   "\\botp\\b",
   "2fa code"
 ].join("|"), "i");
-
-// src/core/memory-counters.ts
-var counts = {
-  connector_stores: 0,
-  tier_visibility_items: 0,
-  hidden_child_items: 0,
-  embedding_queue: 0,
-  people: 0,
-  identities: 0,
-  tasks_embed: 0,
-  tasks_sync: 0,
-  tasks_extract: 0,
-  tasks_watch: 0
-};
-function changeMemoryCounter(key, delta) {
-  counts[key] += delta;
-}
-var scopedActivity = {
-  visibility_rebuild_bootstrap: 0,
-  visibility_rebuild_incremental: 0,
-  people_refresh: 0
-};
-function changeMemoryActivity(label, delta) {
-  scopedActivity[label] += delta;
-}
 
 // src/core/boot-progress.ts
 import { existsSync as existsSync11, lstatSync as lstatSync6, mkdirSync as mkdirSync8, readdirSync, readFileSync as readFileSync13, realpathSync as realpathSync4, rmSync as rmSync6 } from "node:fs";
@@ -16111,9 +16173,24 @@ function overrideFromJson(json) {
   return;
 }
 
+// src/workers/engine-split/sqlite-memory.ts
+var stores = new Set;
+var byDatabase = new WeakMap;
+function trackSqliteStoreMemory(db, hasTempStore) {
+  const store = { db: new WeakRef(db), hasTempStore };
+  byDatabase.set(db, store);
+  stores.add(store);
+}
+function untrackSqliteStoreMemory(db) {
+  const store = byDatabase.get(db);
+  if (store)
+    stores.delete(store);
+  byDatabase.delete(db);
+}
+
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var progress2 = new AsyncLocalStorage6;
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+var progress2 = new AsyncLocalStorage7;
 function noteSourceIndexReadProgress() {
   const report = progress2.getStore();
   if (!report)
@@ -16370,7 +16447,7 @@ function readStoreWriteSequence(db) {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 import { createHash as createHash7 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -16510,7 +16587,7 @@ function contaminatedEmbeddingEpoch(modelId, epochId) {
 }
 
 // src/workers/source-index/embeddings.ts
-var priorityQueryEmbedding = new AsyncLocalStorage7;
+var priorityQueryEmbedding = new AsyncLocalStorage8;
 function priorityQueryEmbeddingRequested() {
   return priorityQueryEmbedding.getStore() === true;
 }
@@ -16615,14 +16692,18 @@ async function discardBody2(response) {
 async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
   const timedOut = (attempts) => new TransientSourceEmbeddingError(provider, "timeout", attempts, budget.budgetMs);
   let attempt = 0;
+  if (typeof init.body === "string")
+    addMemoryPayloadText(init.body);
   for (;; ) {
     let reason;
     let waitMs;
     try {
       const response = await fetchModelEndpoint(fetchImpl, url, init);
       attempt += 1;
-      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
+      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status)) {
+        noteMemoryPayloadResponse(response);
         return response;
+      }
       reason = response.status;
       const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
       const requestedMs = retryAfterMs(response);
@@ -17522,7 +17603,7 @@ function noteFrontLoopStatement(dbPath, site) {
 }
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 
 // src/core/store-reclaim-admission.ts
 import { join as join17 } from "node:path";
@@ -17557,8 +17638,8 @@ function poolSqlSite(sql) {
 var SLOW_MAIN_THREAD_SQL_MS = 250;
 var SLOW_MAIN_THREAD_SQL_KEPT = 20;
 var SITE_TALLY_MS = 25;
-var storage2 = new AsyncLocalStorage8;
-var laneStorage = new AsyncLocalStorage8;
+var storage2 = new AsyncLocalStorage9;
+var laneStorage = new AsyncLocalStorage9;
 function beginSourceAnswerPoolRead(site) {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
@@ -19054,6 +19135,7 @@ import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
 const connections = new Map();
+const openDatabases = new Map();
 // [request running, last request finished, native connections held], read by the request thread.
 let progress;
 let connectionTotal;
@@ -19068,6 +19150,7 @@ const open = (path) => {
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
   /*olympus-mmap-pragma*/
+  openDatabases.set(db, undefined);
   noteConnections(1);
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
@@ -19078,7 +19161,7 @@ const open = (path) => {
 // otherwise open one connection per snapshot.
 const IDLE_SNAPSHOT_CONNECTIONS = 8;
 const idleSnapshots = new Map();
-const close = (db) => { db.close(); noteConnections(-1); };
+const close = (db) => { db.close(); openDatabases.delete(db); noteConnections(-1); };
 const snapshotConnection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -19107,6 +19190,31 @@ const connection = (path) => {
 self.onmessage = (event) => {
   const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
   if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
+  if (op === 'memory') {
+    const at = Date.now();
+    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
+    let cacheBytes = 0;
+    let measured = 0;
+    for (const [db, cached] of openDatabases) {
+      let bytes = cached;
+      if (bytes === undefined) {
+        try {
+          using cacheSize = db.prepare('PRAGMA main.cache_size');
+          const size = cacheSize.values()[0][0];
+          if (size < 0) bytes = -size * 1024;
+          else {
+            using pageSize = db.prepare('PRAGMA main.page_size');
+            bytes = size * pageSize.values()[0][0];
+          }
+          openDatabases.set(db, bytes);
+        } catch { continue; } // Coverage in the reply shows a failed probe.
+      }
+      cacheBytes += bytes;
+      measured++;
+    }
+    postMessage({ diagnostic: 'memory', at, heapUsed, external, arrayBuffers, cacheBytes, measured });
+    return;
+  }
   if (op === 'release') {
     const held = connections.get(path);
     connections.delete(path);
@@ -19198,6 +19306,10 @@ function startThread(store, lane = "shared") {
         return;
       const message = event.data;
       const diagnostic = message;
+      if (diagnostic.diagnostic === "memory") {
+        started.memory = message;
+        return;
+      }
       if (diagnostic.diagnostic === "connections") {
         started.connections += diagnostic.delta;
         heldConnections += diagnostic.delta;
@@ -20232,7 +20344,7 @@ function ensureOwnerOnlyDir(dir) {
 }
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
 
 // src/core/source-item-read.ts
 var SOURCE_ITEM_READ_REFUSALS = [
@@ -20248,8 +20360,8 @@ var SOURCE_ITEM_READ_REFUSALS = [
 ];
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
-var storage3 = new AsyncLocalStorage9;
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+var storage3 = new AsyncLocalStorage10;
 var completedPrivateAnswers = new Set;
 var JOB_QUESTION_TTL_MS = 30 * 60000;
 var jobQuestions = new Map;
@@ -20730,7 +20842,7 @@ function currentAccess(authorized) {
     return "unavailable";
   }
 }
-var readAuthorization = new AsyncLocalStorage10;
+var readAuthorization = new AsyncLocalStorage11;
 function currentRemoteReadAccess() {
   const authorized = readAuthorization.getStore();
   return authorized ? currentAccess(authorized) : "active";
@@ -22478,7 +22590,7 @@ class RemoteLiteRtEmbedder {
     const response = await fetch(new URL(path, this.url), {
       method: texts ? "POST" : "GET",
       headers,
-      ...texts ? { body: JSON.stringify({ texts }) } : {},
+      ...texts ? { body: memoryPayloadJson({ texts }) } : {},
       signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
       redirect: "error"
     });
@@ -22486,6 +22598,7 @@ class RemoteLiteRtEmbedder {
       await response.body?.cancel();
       throw new Error("Remote request failed.");
     }
+    noteMemoryPayloadResponse(response);
     return await response.json();
   }
 }
@@ -25167,6 +25280,7 @@ class LocalConnectorStore {
       }
       reportFrontStoreOpened();
       changeMemoryCounter("connector_stores", 1);
+      trackSqliteStoreMemory(this.db, this.visibilityJournal);
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       throw error;
@@ -25268,6 +25382,7 @@ class LocalConnectorStore {
     if (this.closedForPoolReads)
       return;
     changeMemoryCounter("connector_stores", -1);
+    untrackSqliteStoreMemory(this.db);
     this.tierLedgerHiddenMemo = undefined;
     this.hiddenChildMemo = undefined;
     this.visibilitySqlMemo = undefined;
@@ -31845,13 +31960,22 @@ ${parentKey(ref)}`, { ref, origin });
         text: buildConnectorStoreEmbeddingText(row),
         ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
       }));
+      const embedPayload = (run) => withMemoryPayload("embed", () => {
+        const inputs = inputsFor(batch);
+        for (const input of inputs) {
+          addMemoryPayloadText(input.text);
+          if (input.title)
+            addMemoryPayloadText(input.title);
+        }
+        return run(inputs);
+      });
       let vectors;
       const embedStarted = Date.now();
       const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
       let judgedBatch;
       try {
         if (judgeNow) {
-          const returned = await judging.embedWithImageVectors(inputsFor(batch));
+          const returned = await embedPayload((inputs) => judging.embedWithImageVectors(inputs));
           vectors = returned.vectors;
           judgedBatch = new Map;
           const currentJudge = mediaJudgeId(judging);
@@ -31865,7 +31989,7 @@ ${parentKey(ref)}`, { ref, origin });
             } catch {}
           }
         } else {
-          vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+          vectors = await embedPayload((inputs) => provider.embed(inputs, { taskType: "RETRIEVAL_DOCUMENT" }));
         }
       } catch (error) {
         if (!(error instanceof SourceEmbeddingInputsFailedError))
@@ -31892,7 +32016,7 @@ ${parentKey(ref)}`, { ref, origin });
         batch = recheck.kept;
         if (batch.length === 0)
           continue;
-        vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+        vectors = await embedPayload((inputs) => provider.embed(inputs, { taskType: "RETRIEVAL_DOCUMENT" }));
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
         AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`).get(JSON.stringify([...new Set(batch.map((row) => row.item_pk))]));

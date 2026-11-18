@@ -53,10 +53,12 @@ describe('the background restarts itself when its memory floor passes the thresh
     await clock.advance(ENGINE_RSS_CHECK_INTERVAL_MS * 5 - MEMORY_SAMPLE_INTERVAL_MS);
     expect(restarts).toEqual([]);
     expect(monitor.restarts()).toEqual({ count: 0 });
-    expect(logs[0]).toContain('rss_anon_mb=500');
-    expect(logs[0]).toContain('peak_anon_mb=4000');
-    expect(logs[0]).toContain('floor_anon_mb=500');
-    expect(logs[0]).toContain('bursts_over_threshold=0');
+    expect(logs).toHaveLength(2);
+    expect(logs[0]).toContain('[olympus] memory restart not taken: burst rss_mb=4000 floor_mb=500 threshold_mb=3072');
+    expect(logs[1]).toContain('rss_anon_mb=500');
+    expect(logs[1]).toContain('peak_anon_mb=4000');
+    expect(logs[1]).toContain('floor_anon_mb=500');
+    expect(logs[1]).toContain('bursts_over_threshold=1');
     monitor.stop();
   });
 
@@ -72,7 +74,7 @@ describe('the background restarts itself when its memory floor passes the thresh
     expect(monitor.restarts()).toEqual({ count: 0 });
     expect(logs).toHaveLength(24);
     for (let index = 0; index < logs.length; index += 2) {
-      expect(logs[index]).toBe('[olympus] memory restart not taken: burst rss_mb=3300 floor_mb=2000 threshold_mb=3072');
+      expect(logs[index]).toContain(' [olympus] memory restart not taken: burst rss_mb=3300 floor_mb=2000 threshold_mb=3072');
       expect(logs[index + 1]).toMatch(/\[olympus\] memory .*rss_anon_mb=3300 .*peak_anon_mb=3300 .*floor_anon_mb=2000 bursts_over_threshold=5 /);
     }
     monitor.stop();

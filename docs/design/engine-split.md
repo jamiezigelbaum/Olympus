@@ -336,20 +336,39 @@ the cause).
   (judging, embedding, recount, import, extract, visibility_rebuild_bootstrap,
   visibility_rebuild_incremental, people_refresh), or idle. The largest
   anonymous sample since the previous line supplies peak_anon_mb, peak_at
-  (ISO time), peak_activity and peak_heap_size_mb. Ties keep the first sample.
-  The sliding minimum is logged alongside the peak as floor_anon_mb (or
-  floor_rss_mb if the window includes total RSS fallback). Each minute check
-  with current memory above the threshold and the floor below it increments
-  bursts_over_threshold, reported since the last memory line. The first
-  such check in each logging interval emits
-  `[olympus] memory restart not taken: burst` with current memory, the floor
-  and the threshold in MB.
-  Unavailable measurements are omitted. JSC heap_size_mb, heap_capacity_mb,
-  extra_memory_mb and object_count are measured at emission, with a separate
-  heap size reading when a sample sets a new peak.
-  Maintained process-local counts, read without SQL or a walk, size
-  connector_stores, read_workers/read_connections (retiring workers included
-  until close; one shared connection counter), tier_visibility_items
+  (ISO time), peak_activity and peak_heap_size_mb. Peak ties keep the first
+  sample. The sliding minimum is logged as floor_anon_mb or floor_rss_mb
+  when the window includes total RSS fallback. Each excursion above the
+  threshold seen by the five-second sampler contributes to
+  bursts_over_threshold when the window includes a reading at or below the
+  threshold. A window with bursts emits one timestamped
+  `[olympus] memory restart not taken: burst` just before its summary, with
+  the largest sample, the floor and the threshold in MB.
+  The lightweight Bun process.memoryUsage counters supply heap_size_mb,
+  heap_capacity_mb and extra_memory_mb at emission, peak and floor. Extra
+  memory can overlap heap size. Bun 1.4.4 reports arrayBuffers as zero even
+  for a live ArrayBuffer, so the separate field is emitted only when the
+  runtime reports bytes.
+  The background requests samples from idle read-pool and built-in model
+  workers and uses their latest replies. The heap report includes coverage
+  and age, since a busy worker may have older data. SQLite memory use and
+  its process high-water mark are reported where the native SQLite memstat
+  module is available. Stock Bun 1.4.4 lacks it. The fallback reports the
+  combined suggested page-cache budget of sampled read-pool and connector
+  store connections, plus logical temp-database pages in connector stores.
+  Coverage fields show how many connections contributed. Cache budgets and
+  temp pages describe capacity and file layout. SQLite heap allocations,
+  including live pager pages, statements and sorters, require memstat.
+  Payload fields count active judge calls, document embedding batches, and
+  extraction jobs and their observed bytes. They account for logical UTF-8
+  text, request JSON, response chunks or declared response lengths, and
+  known extraction input buffers and child output. These sizes can cover
+  multiple representations over the life of a call or job. Unreported
+  native buffers and allocation overhead remain outside these counters.
+  The same fields are preserved with peak_ and floor_ prefixes.
+  Maintained process-local counts size connector_stores,
+  read_workers/read_connections (retiring workers included until close,
+  with one shared connection counter), tier_visibility_items
   (installed memo's item copies), hidden_child_items (installed memo's distinct
   child identities), people/identities and embedding_queue; transient build/result copies
   are excluded. The front adds its local visibility and people labels to

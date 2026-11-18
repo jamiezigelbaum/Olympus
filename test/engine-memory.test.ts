@@ -1,15 +1,15 @@
 import { expect, test } from 'bun:test';
-import { heapStats } from 'bun:jsc';
 import { createMemoryDiagnostic, MEMORY_LOG_INTERVAL_MS, MEMORY_SAMPLE_INTERVAL_MS, processMemory } from '../src/workers/engine-split/memory.ts';
 import { startEngineRssRestart, ENGINE_RSS_CHECK_INTERVAL_MS } from '../src/workers/engine-split/rss-restart.ts';
-import { changeMemoryActivity, changeMemoryCounter, memoryHolderCounts, memoryActivity, statusMemoryActivity, type MemoryActivityLabel, type MemoryCounter } from '../src/core/memory-counters.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { addMemoryPayloadBytes, changeMemoryActivity, changeMemoryCounter, memoryHolderCounts, memoryActivity, statusMemoryActivity, withMemoryPayload, type MemoryActivityLabel, type MemoryCounter } from '../src/core/memory-counters.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
+import { sampleSqliteStoreMemory } from '../src/workers/engine-split/sqlite-memory.ts';
 import { cloudProvider } from './helpers/tier-fixtures.ts';
 import { LocalPeopleIndex } from '../src/core/people-index.ts';
 
 const MB = 1024 * 1024;
-const heap = { ...heapStats(), heapSize: 32 * MB, heapCapacity: 64 * MB, extraMemorySize: 8 * MB, objectCount: 500_000 };
+const heap = { heapUsed: 32 * MB, heapTotal: 64 * MB, external: 8 * MB, arrayBuffers: 0 };
 function parse(line: string) {
   const [at, prefix, kind, ...tokens] = line.split(' ');
   expect(prefix).toBe('[olympus]'); expect(kind).toBe('memory');
@@ -22,23 +22,29 @@ function parse(line: string) {
   return { at, fields };
 }
 
-test('a new peak reads heap size only and emission reads full heap stats', () => {
-  const clock = createTestClock(); const lines: string[] = []; let heaps = 0; let peakHeaps = 0;
+test('emission uses the cheap samples at the peak, floor and end of the window', async () => {
+  const clock = createTestClock(); const lines: string[] = []; let heaps = 0;
   const memory = createMemoryDiagnostic({ role: 'front', now: clock.now, uptime: () => 3600,
     heap: () => { heaps++; return heap; }, readers: () => ({ read_workers: 132, read_connections: 264 }),
-    peakHeapSize: () => { peakHeaps++; return heap.heapSize; },
+    sampleHolders: () => ({ read_heap_workers: heaps, read_heap_size_mb: heaps * MB }),
     activity: () => ['embedding'], log: line => lines.push(line) });
   const sampled = { rss: 130 * MB, anon: 100 * MB, file: 30 * MB, swap: 2 * MB };
-  memory.sample(sampled); expect(peakHeaps).toBe(1);
-  memory.sample(sampled); expect(peakHeaps).toBe(1);
-  expect(heaps).toBe(0);
-  memory.write(sampled); expect(heaps).toBe(1);
+  memory.sample(sampled);
+  await withMemoryPayload('embed', async () => {
+    addMemoryPayloadBytes(4096);
+    memory.sample({ ...sampled, anon: 120 * MB });
+  });
+  memory.sample(sampled);
+  memory.write(sampled); expect(heaps).toBe(3);
   const { at, fields } = parse(lines[0]!);
-  expect(fields).toEqual({ role: 'front', activity: 'embedding', pid: String(process.pid), uptime_s: '3600',
-    read_workers: '132', read_connections: '264', rss_total_mb: '130', rss_anon_mb: '100', rss_file_mb: '30', swap_mb: '2', peak_anon_mb: '100',
+  expect(fields).toMatchObject({ role: 'front', activity: 'embedding', pid: String(process.pid), uptime_s: '3600',
+    read_workers: '132', read_connections: '264', rss_total_mb: '130', rss_anon_mb: '100', rss_file_mb: '30', swap_mb: '2', peak_anon_mb: '120',
     peak_at: at, peak_activity: 'embedding', peak_heap_size_mb: '32',
     floor_anon_mb: '100', bursts_over_threshold: '0',
-    heap_size_mb: '32', heap_capacity_mb: '64', extra_memory_mb: '8', object_count: '500000',
+    heap_size_mb: '32', heap_capacity_mb: '64', extra_memory_mb: '8',
+    read_heap_size_mb: '3', peak_read_heap_size_mb: '2', floor_read_heap_size_mb: '1',
+    embed_payloads: '0', embed_payload_bytes: '0',
+    peak_embed_payloads: '1', peak_embed_payload_bytes: '4096', floor_embed_payload_bytes: '0',
     ...Object.fromEntries(Object.entries(memoryHolderCounts()).map(([key, value]) => [key, String(value)])) });
   expect(`${at} [olympus] memory ${Object.entries(fields).map(([key, value]) => `${key}=${value}`).join(' ')}`).toBe(lines[0]!);
 });
@@ -56,11 +62,25 @@ test('Linux anonymous/file/swap are distinct; other platforms omit unavailable m
   expect(fields.floor_rss_mb).toBe(String(Math.round(sampled.rss / MB * 100) / 100));
 });
 
+test('SQLite fallback probes open stores off the sampling turn and forgets closed stores', async () => {
+  const store = new LocalConnectorStore({ corpusId: 'memory-test', family: 'file', trustDomain: 'internal', dbPath: ':memory:' });
+  try {
+    expect(sampleSqliteStoreMemory().sqlite_store_connections_sampled).toBe(0);
+    await waitFor(() => sampleSqliteStoreMemory().sqlite_store_connections_sampled === 1);
+    const sample = sampleSqliteStoreMemory();
+    expect(sample.sqlite_store_cache_budget_mb).toBeGreaterThan(0);
+    expect(sample.sqlite_store_temp_pages_mb).toBeGreaterThan(0);
+    expect(sample.sqlite_probe_errors).toBe(0);
+    expect(sample.sqlite_memory_status).not.toBe('pending');
+  } finally { store.close(); }
+  expect(sampleSqliteStoreMemory().sqlite_store_connections_sampled).toBe(0);
+});
+
 test('five-second samples preserve burst context and five-minute lines reset peaks with restart disabled', async () => {
   const clock = createTestClock(); const lines: string[] = []; let anon = 100; let samples = 0;
   let heapSize = 32 * MB;
   let activity: MemoryActivityLabel[] = ['idle'];
-  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => ({ ...heap, heapSize }), peakHeapSize: () => heapSize,
+  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => ({ ...heap, heapUsed: heapSize }),
     activity: () => activity, log: line => lines.push(line) });
   const monitor = startEngineRssRestart({ thresholdMb: 0, previous: { count: 0 },
     batchRunning: () => false, restart: () => { throw new Error('disabled'); }, record: () => {}, memory,
@@ -101,7 +121,7 @@ test('minute-check jitter never stretches the logging cadence to six checks', ()
 
 test('restart carries exactly the emitted memory fields and continuous time over threshold', async () => {
   const clock = createTestClock(); const lines: string[] = []; let batch = true; let restarts = 0;
-  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => heap, peakHeapSize: () => heap.heapSize,
+  const memory = createMemoryDiagnostic({ role: 'background', now: clock.now, heap: () => heap,
     activity: () => batch ? ['judging'] : ['idle'], log: line => lines.push(line) });
   const peakAt = new Date(clock.now() + MEMORY_LOG_INTERVAL_MS + MEMORY_SAMPLE_INTERVAL_MS).toISOString();
   const monitor = startEngineRssRestart({ thresholdMb: 3000, previous: { count: 0 }, memory,

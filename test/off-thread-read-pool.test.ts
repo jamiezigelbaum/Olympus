@@ -22,6 +22,7 @@ import {
   readOnPool,
   readPoolDiagnostics,
   readPoolMemoryCounts,
+  sampleReadPoolMemory,
   readPoolThreadsForTests,
   releaseOffThreadReads,
   setReadPoolClockForTests,
@@ -101,10 +102,19 @@ describe('read pool', () => {
     expect(readPoolMemoryCounts()).toEqual({ read_workers: 1, read_connections: 3 });
     await first.close(); await second.close();
     expect(readPoolMemoryCounts()).toEqual({ read_workers: 1, read_connections: 3 });
+    await waitFor(() => sampleReadPoolMemory().sqlite_read_connections_sampled === 3, { description: 'idle reader memory report' });
+    const memory = sampleReadPoolMemory();
+    expect(memory.read_heap_workers).toBe(1);
+    expect(memory.read_heap_size_mb).toBeGreaterThan(0);
+    using db = new Database(path, { readonly: true });
+    const [cacheSize] = db.query('PRAGMA cache_size').values()[0]! as number[];
+    const [pageSize] = db.query('PRAGMA page_size').values()[0]! as number[];
+    expect(memory.sqlite_read_cache_budget_mb).toBe(3 * (cacheSize! < 0 ? -1024 * cacheSize! : cacheSize! * pageSize!));
     shutdownReadPool();
     expect(readPoolMemoryCounts().read_workers).toBe(1);
     await waitFor(() => readPoolMemoryCounts().read_workers === 0, { description: 'memory counters release stopped readers' });
     expect(readPoolMemoryCounts()).toEqual({ read_workers: 0, read_connections: 0 });
+    expect(sampleReadPoolMemory().read_heap_workers).toBe(0);
   });
 
   test('a scan snapshot runs on its own worker of the store, never queued behind a slow shared read', async () => {

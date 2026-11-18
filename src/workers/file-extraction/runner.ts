@@ -1,3 +1,4 @@
+import { addMemoryPayloadBytes, addMemoryPayloadText, withMemoryPayload } from '../../core/memory-counters.ts';
 import { sourceSizeBytes, type SourceSizeLimit } from '../../core/source-size-limits.ts';
 /**
  * B11b — the batch loop: lease, fetch, extract, gate, record, sink.
@@ -1089,7 +1090,7 @@ async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
   const renewal = setInterval(() => renewJobLease(input), input.leaseRenewMs ?? EXTRACTION_LEASE_RENEW_MS);
   renewal.unref?.();
   try {
-    outcome = await settleOneJobHeld(input, staged);
+    outcome = await withMemoryPayload('extract', () => settleOneJobHeld(input, staged));
   } catch (error) {
     // Every expected failure above already settles as a value. A throw that
     // still escapes is a defect in this job's path, and it settles THIS job
@@ -1209,6 +1210,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
         staged.file = fetchedFile;
       } else {
         fetched = await source.fetch(job.ref, { ...(maxBytes !== undefined ? { maxBytes } : {}) });
+        addMemoryPayloadBytes(fetched.bytes.byteLength);
         // Defence in depth: a source that ignored the bound still cannot hand a reader more than it allows.
         if (maxBytes !== undefined && fetched.bytes.byteLength > maxBytes) {
           input.jobs.recordSizeRefusal(job.jobId, job.leaseToken, { sizeBytes: fetched.bytes.byteLength, maxBytes });
@@ -1327,6 +1329,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
       ...(output.egressDestination ? { egressDestination: output.egressDestination } : {}),
     };
   }
+  addMemoryPayloadText(output.text);
 
   // Second half of the anti-clobber rule: an indexed output whose text is
   // whitespace is empty in every way that matters to the store's chunker.

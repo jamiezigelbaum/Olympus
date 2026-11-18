@@ -1,3 +1,4 @@
+import { addMemoryPayloadText, noteMemoryPayloadResponse } from '../../core/memory-counters.ts';
 import { Buffer } from 'node:buffer';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
@@ -406,13 +407,17 @@ async function fetchEmbeddingResponse(
   const timedOut = (attempts: number) =>
     new TransientSourceEmbeddingError(provider, 'timeout', attempts, budget.budgetMs);
   let attempt = 0;
+  if (typeof init.body === 'string') addMemoryPayloadText(init.body);
   for (;;) {
     let reason: TransientEmbeddingReason;
     let waitMs: number | undefined;
     try {
       const response = await fetchModelEndpoint(fetchImpl, url, init);
       attempt += 1;
-      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status)) return response;
+      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status)) {
+        noteMemoryPayloadResponse(response);
+        return response;
+      }
       reason = response.status;
       const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
       const requestedMs = retryAfterMs(response);

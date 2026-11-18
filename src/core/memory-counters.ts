@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 /** Process-local holder sizes. Writers update at mutation sites; readers never walk or query. */
 const counts = {
   connector_stores: 0,
@@ -16,6 +18,69 @@ export function changeMemoryCounter(key: MemoryCounter, delta: number): void { c
 export function memoryHolderCounts() {
   const { tasks_embed, tasks_sync, tasks_extract, tasks_watch, ...holders } = counts;
   return holders;
+}
+
+const payloads = {
+  judge: { count: 0, bytes: 0 },
+  embed: { count: 0, bytes: 0 },
+  extract: { count: 0, bytes: 0 },
+};
+const payloadScope = new AsyncLocalStorage<(bytes: number) => void>();
+
+/** Count logical payload sizes at their existing materialization points. */
+export async function withMemoryPayload<T>(kind: keyof typeof payloads, run: () => Promise<T>): Promise<T> {
+  const counter = payloads[kind];
+  let bytes = 0;
+  let active = true;
+  counter.count++;
+  try {
+    return await payloadScope.run(delta => {
+      if (!active) return;
+      bytes += delta;
+      counter.bytes += delta;
+    }, run);
+  } finally {
+    active = false;
+    counter.count--;
+    counter.bytes -= bytes;
+  }
+}
+
+export function addMemoryPayloadBytes(bytes: number): void {
+  payloadScope.getStore()?.(bytes);
+}
+
+/** Capture the owner before subscribing to callbacks dispatched by an external handle. */
+export function memoryPayloadByteCounter() {
+  return payloadScope.getStore();
+}
+
+export function addMemoryPayloadText(text: string): void {
+  const add = payloadScope.getStore();
+  if (add) add(Buffer.byteLength(text));
+}
+
+export function memoryPayloadJson(value: object): string {
+  const json = JSON.stringify(value);
+  addMemoryPayloadText(json);
+  return json;
+}
+
+/**
+ * Fetch's native body buffer has no byte counter. Use its declared size when present.
+ * A response without readable headers counts as nothing: measuring never fails a call.
+ */
+export function noteMemoryPayloadResponse(response: Response): void {
+  const bytes = Number((response as { headers?: { get?: (name: string) => string | null } }).headers?.get?.('content-length'));
+  if (Number.isSafeInteger(bytes) && bytes > 0) addMemoryPayloadBytes(bytes);
+}
+
+export function memoryPayloadCounts() {
+  return {
+    judge_payloads: payloads.judge.count, judge_payload_bytes: payloads.judge.bytes,
+    embed_payloads: payloads.embed.count, embed_payload_bytes: payloads.embed.bytes,
+    extract_payloads: payloads.extract.count, extract_payload_bytes: payloads.extract.bytes,
+  };
 }
 export type MemoryActivity = 'judging' | 'embedding' | 'recount' | 'import' | 'extract' | 'idle';
 const scopedActivity = {

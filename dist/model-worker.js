@@ -17,6 +17,7 @@ function modelThreadHandleId() {
 
 class ModelThread {
   worker;
+  memory;
   nextId = 1;
   pending = new Map;
   pids = new Map;
@@ -29,6 +30,10 @@ class ModelThread {
     };
     process.once("exit", onExit);
     this.worker.on("message", (reply) => {
+      if (reply.memory) {
+        this.memory = reply.memory;
+        return;
+      }
       if (reply.handle !== undefined) {
         if (reply.pid === undefined)
           this.pids.delete(reply.handle);
@@ -80,6 +85,20 @@ class ModelThread {
       failed(new Error("The built-in model worker stopped."));
     });
     this.worker.unref();
+  }
+  sampleMemory() {
+    if (this.pending.size === 0)
+      this.worker.postMessage({ sampleMemory: true });
+    const sampled = this.memory;
+    return {
+      model_workers: 1,
+      ...sampled && {
+        model_heap_size_mb: sampled.heapUsed,
+        model_extra_memory_mb: sampled.external,
+        model_heap_age_ms: Math.max(0, Date.now() - sampled.at),
+        ...sampled.arrayBuffers > 0 ? { model_array_buffers_mb: sampled.arrayBuffers } : {}
+      }
+    };
   }
   call(request, options = {}) {
     if (options.signal?.aborted)
@@ -3174,8 +3193,30 @@ function isMediaCachePath(path, sha256, dir) {
   return true;
 }
 
-// src/workers/source-index/embeddings.ts
+// src/core/memory-counters.ts
 import { AsyncLocalStorage } from "node:async_hooks";
+var payloadScope = new AsyncLocalStorage;
+function addMemoryPayloadBytes(bytes) {
+  payloadScope.getStore()?.(bytes);
+}
+function addMemoryPayloadText(text) {
+  const add = payloadScope.getStore();
+  if (add)
+    add(Buffer.byteLength(text));
+}
+function memoryPayloadJson(value) {
+  const json = JSON.stringify(value);
+  addMemoryPayloadText(json);
+  return json;
+}
+function noteMemoryPayloadResponse(response) {
+  const bytes = Number(response.headers?.get?.("content-length"));
+  if (Number.isSafeInteger(bytes) && bytes > 0)
+    addMemoryPayloadBytes(bytes);
+}
+
+// src/workers/source-index/embeddings.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 
 // src/core/owner-config-read.ts
 import { chmodSync as chmodSync2, linkSync, readFileSync as readFileSync6, statSync as statSync5, lstatSync as lstatSync3 } from "node:fs";
@@ -3575,7 +3616,7 @@ function isFetchRedirectRefusal(error) {
 }
 
 // src/workers/source-index/embeddings.ts
-var priorityQueryEmbedding = new AsyncLocalStorage;
+var priorityQueryEmbedding = new AsyncLocalStorage2;
 function withPriorityQueryEmbedding(run) {
   return priorityQueryEmbedding.run(true, run);
 }
@@ -3736,7 +3777,7 @@ class RemoteLiteRtEmbedder {
     const response = await fetch(new URL(path, this.url), {
       method: texts ? "POST" : "GET",
       headers,
-      ...texts ? { body: JSON.stringify({ texts }) } : {},
+      ...texts ? { body: memoryPayloadJson({ texts }) } : {},
       signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
       redirect: "error"
     });
@@ -3744,6 +3785,7 @@ class RemoteLiteRtEmbedder {
       await response.body?.cancel();
       throw new Error("Remote request failed.");
     }
+    noteMemoryPayloadResponse(response);
     return await response.json();
   }
 }
@@ -8341,6 +8383,11 @@ var stopAll = () => Promise.all([
 ]);
 var send = (reply) => port.postMessage(reply);
 port.on("message", async (message) => {
+  if (message.sampleMemory) {
+    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
+    send({ id: 0, memory: { at: Date.now(), heapUsed, external, arrayBuffers } });
+    return;
+  }
   if (message.shutdown) {
     try {
       await stopAll();
