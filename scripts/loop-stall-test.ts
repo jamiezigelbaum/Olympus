@@ -602,6 +602,37 @@ function readPressure(): PressureTotals {
   return totals;
 }
 /** One sample a second: milliseconds stalled in that second, per scope and kind. Returns the samples and a stop. */
+/** Host paging counters for the run's delta: pages read in, pages swapped out and in, major faults (Linux only). */
+function readVmstat(): Record<string, number> {
+  const totals: Record<string, number> = {};
+  try {
+    for (const line of readFileSync('/proc/vmstat', 'utf8').split('\n')) {
+      const [key, value] = line.split(' ');
+      if (key && ['pgpgin', 'pgpgout', 'pswpin', 'pswpout', 'pgmajfault'].includes(key)) totals[key] = Number(value);
+    }
+  } catch { /* not Linux */ }
+  return totals;
+}
+
+/**
+ * The background's main loop thread, sampled by scripts/front-thread-timeline.ts for the whole run, then summarized over each
+ * background freeze or held-loop line: time running, waiting for CPU, blocked on page faults, on disk, and the top wait channel.
+ */
+function startBackgroundTimeline(pid: number, out: string): { stop(): Promise<void> } | undefined {
+  if (process.platform !== 'linux') return undefined;
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, 'front-thread-timeline.ts'), '--pid', String(pid), '--out', out, '--seconds', '14400'], { stdout: 'ignore', stderr: 'ignore' });
+  return { stop: async () => { child.kill('SIGTERM'); await child.exited; } };
+}
+
+function summarizeBackgroundTimeline(timeline: string, freezes: Array<{ at: string; role: string; line: string }>, freezePath: string): unknown[] | string {
+  if (!existsSync(timeline)) return 'no timeline was written';
+  writeFileSync(freezePath, freezes.filter(entry => entry.role === 'background').map(entry => `${entry.at} ${entry.line}`).join('\n') + '\n');
+  const run = spawnSync(process.execPath, [join(import.meta.dir, 'front-thread-timeline.ts'), '--summarize', timeline, '--freezes', freezePath, '--role', 'background'], { encoding: 'utf8', timeout: 120_000 });
+  if (run.status !== 0) return `summarize exited ${run.status}: ${(run.stderr || '').slice(-300)}`;
+  return run.stdout.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return line; } })
+    .sort((a: any, b: any) => (b?.window_ms ?? 0) - (a?.window_ms ?? 0)).slice(0, 30);
+}
+
 function samplePressure(): { samples: Array<{ at: string } & Record<string, number | string>>; stop(): void } {
   const samples: Array<{ at: string } & Record<string, number | string>> = [];
   let last = readPressure();
@@ -875,6 +906,9 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const started = Date.now();
   let finished = false;
   const pressureSampler = samplePressure();
+  const vmstatAtStart = readVmstat();
+  let backgroundTimeline: ReturnType<typeof startBackgroundTimeline>;
+  const backgroundTimelinePath = join(metrics, 'background.timeline.jsonl');
   const roles: Array<{ role: string; pid: number }> = [];
   const anonSampler = sampleAnonMemory(() => roles, () => enginesStartedAt ?? Date.now());
   let walAtOpen: Record<string, number> = {};
@@ -891,6 +925,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       });
       children.push(child);
       roles.push({ role, pid: child.pid });
+      if (role === 'background') backgroundTimeline = startBackgroundTimeline(child.pid, backgroundTimelinePath);
       void child.exited.then(() => { timing[role].stoppedAt ||= nowMs(); });
       writeFileSync(pidFile, JSON.stringify(children.map(entry => entry.pid)));
       for (const stream of [child.stdout, child.stderr]) pumps.push((async () => {
@@ -1024,6 +1059,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     for (const role of ROLES) if (timing[role].spawnedAt) timing[role].stoppedAt ||= nowMs();
     pressureSampler.stop();
     anonSampler.stop();
+    await backgroundTimeline?.stop();
     for (const child of children) child.kill('SIGKILL');
     await Promise.all(children.map(child => child.exited)); await Promise.all(pumps);
     await Promise.allSettled(requests);
@@ -1099,6 +1135,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
+    vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
+    background_timeline: summarizeBackgroundTimeline(backgroundTimelinePath, freezeLines, join(metrics, 'background.freezes.log')),
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint, checkpoint_timing,
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
