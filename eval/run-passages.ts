@@ -111,6 +111,7 @@ export interface PassageSummary {
 export interface PassageDeepRead {
   triggered: boolean; refused: string | null; sectionsTotal: number; sectionsDone: number;
   seconds: number; correctByMeaning: boolean | null; citesExpected: boolean | null;
+  skippedTooLong: number;
   /** The triggered read is of the question's expected item. */
   readsExpectedItem?: boolean;
 }
@@ -500,10 +501,14 @@ export async function runPassageEval(input: {
       answer = await answerWith(input.answer);
     }
     if (input.deepReadJobs) {
-      deepRead = { triggered: false, refused: null, sectionsTotal: 0, sectionsDone: 0, seconds: 0, correctByMeaning: null, citesExpected: null };
+      const row: PassageDeepRead = { triggered: false, refused: null, sectionsTotal: 0, sectionsDone: 0, seconds: 0, correctByMeaning: null, citesExpected: null, skippedTooLong: 0 };
+      deepRead = row;
       if (ordinaryResult) {
         const started = performance.now();
-        const triggered = await triggerDeepRead(detail, ordinaryResult, input.deepReadJobs);
+        const triggered = await triggerDeepRead(detail, ordinaryResult, input.deepReadJobs, sectionsTotal => {
+          row.skippedTooLong += 1;
+          console.error(JSON.stringify({ deepRead: 'skipped', question: question.id, sectionsTotal }));
+        });
         deepRead.refused = triggered.refused ?? null;
         if (triggered.job) {
           deepRead.triggered = true;

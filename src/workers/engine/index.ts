@@ -3549,6 +3549,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             });
             return json({ job });
           } catch (error) {
+            if (error instanceof DeepReadRefused && error.code === 'too_long') {
+              return json({
+                error: { code: error.code, message: error.message, sectionsTotal: error.sectionsTotal, estimateSeconds: error.estimateSeconds },
+                policy: { raw_email_exposed: false },
+              }, 409);
+            }
             if (error instanceof DeepReadRefused) throw new EmailSourceWorkerError(409, error.code, error.message);
             throw error;
           }

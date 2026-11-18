@@ -118,6 +118,7 @@ const JUDGE_STEP_ASIDE_MIN_MS = 5_000;
 const MAX_JOBS_KEPT = 50;
 /** The full read is the default while its estimate is under this; past it, the relevant-days read is. */
 const FULL_READ_DEFAULT_SECONDS = 3_600;
+const UNMEASURED_SECTION_LIMIT = 40;
 
 /** Hits a relevant-days read takes from each store of the set: each one adds its day and the day either side. */
 export const DEEP_READ_DAY_HITS = 200;
@@ -446,7 +447,7 @@ export function createDeepReadJobs(options: {
 
   return {
     /** Starts a deep read; resolves once the set is listed and the model chosen, while reading goes on in the background. */
-    async start(question: string, set: DeepReadSet): Promise<DeepReadJobView> {
+    async start(question: string, set: DeepReadSet, { maxSeconds }: { maxSeconds?: number } = {}): Promise<DeepReadJobView> {
       if (!question.trim()) throw new DeepReadRefused('invalid_set', 'A question is required.');
       const model = await options.model();
       if (!model) throw new DeepReadRefused('no_private_model', 'Deep read needs your own private model. Set one up in Settings, Models.');
@@ -478,6 +479,14 @@ export function createDeepReadJobs(options: {
       const read = chooseDeepRead(choices, set.read);
       const reading = read === 'relevant_days' && relevantCandidates ? relevantCandidates : candidates;
       const sectionsTotal = read === 'relevant_days' ? choices.relevantDays!.sections : fullSections;
+      if (maxSeconds !== undefined) {
+        // With no measured pace, use the section limit as the time budget for the notice.
+        const estimateSeconds = sectionsTotal * (pace ?? maxSeconds / UNMEASURED_SECTION_LIMIT);
+        if (pace === undefined ? sectionsTotal > UNMEASURED_SECTION_LIMIT : estimateSeconds > maxSeconds) {
+          const minutes = Math.max(1, Math.round(estimateSeconds / 60));
+          throw new DeepReadRefused('too_long', `A full read would take about ${minutes} minutes.`, { sectionsTotal, estimateSeconds });
+        }
+      }
       const id = `dr_${randomBytes(9).toString('base64url')}`;
       const view: DeepReadJobView = {
         id, state: 'reading', question, setLabel: label, items, unreadable, sectionsTotal, sectionsDone: 0, notes: 0,

@@ -446,6 +446,7 @@ export function remoteDeepReadFields(record: Record<string, unknown>, answer: st
   const refusalReasons: Record<string, string> = {
     no_private_model: 'No private model is configured.', model_unavailable: 'The private model is unavailable.',
     not_found: 'The item is no longer available here.', nothing_readable: 'The item has no readable content here.', invalid_set: 'The item could not be selected.',
+    too_long: 'The full read would exceed the 15-minute automatic reading limit.',
   };
   const reason = typeof record.deep_read_refused === 'string' && Object.hasOwn(refusalReasons, record.deep_read_refused)
     ? refusalReasons[record.deep_read_refused] : 'The full read could not be started.';
