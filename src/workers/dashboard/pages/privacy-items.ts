@@ -433,10 +433,26 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   }
 
   // A restart lost the receipt: read the item's true state again before saying it was not saved.
-  async function saveFailed(id, response) {
-    if (response.unknown) { delete changes[id]; await load(); }
-    statusFor[id] = response.message;
-    if (selected !== id || response.unknown) setMessage(response.message, true);
+  // A restart lost the receipt, so the outcome is unknown: read the item's true
+  // state again and say what it shows. `wanted` is the tier asked for, or null for Undo.
+  async function saveFailed(id, response, wanted) {
+    var message = response.message;
+    if (response.unknown) {
+      delete changes[id];
+      await load();
+      var now = find(id);
+      var landed = now && (wanted ? now.owner_set === true && shown(now) === wanted : now.owner_set !== true);
+      if (landed) {
+        delete statusFor[id];
+        render();
+        showToast(wanted === 'Personal' ? C.toastPersonal : wanted ? C.toastPrivate : C.toastJudge, wanted ? id : null);
+        return;
+      }
+      // Not in the list now (a filter or a search moved it out): the page cannot tell.
+      if (!now) message = C.unconfirmed;
+    }
+    statusFor[id] = message;
+    if (selected !== id || response.unknown) setMessage(message, true);
     render();
   }
 
@@ -452,7 +468,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     } finally {
       delete saving[id];
     }
-    if (!response.ok) { await saveFailed(id, response); return; }
+    if (!response.ok) { await saveFailed(id, response, tier); return; }
     var previous = changes[id];
     if (counts && !previous && !item.owner_set) { counts.changed += 1; renderFilters(); }
     // What the judge had said: the label before this visit's first change, if nobody had set it before.
@@ -477,7 +493,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     } finally {
       delete saving[id];
     }
-    if (!response.ok) { await saveFailed(id, response); return; }
+    if (!response.ok) { await saveFailed(id, response, null); return; }
     delete changes[id];
     if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
     if (item) merge(response.result.item, item);
