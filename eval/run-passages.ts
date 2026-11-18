@@ -28,7 +28,7 @@ import { parseDataRootArgs } from './data-root-args.ts';
 import { buildEvalPack, createEvalSourceLanes, configuredEvalEmbedding, prepareEvalEmbedding, type EvalStoreSearch } from './retrieval.ts';
 import { passageContainsQuote, passageWords, PASSAGE_MATCH_RULE } from './passage-match.ts';
 import { citationItemChunks, citedCopyOfExpected, resolveCitationCorpusId } from './grade.ts';
-import { validatePassageDataset, type EvalDataset, type EvalQuestion } from './types.ts';
+import { isGoldItem, validatePassageDataset, type EvalDataset, type EvalQuestion } from './types.ts';
 import { localEvalModel, type DraftModel } from './local-model.ts';
 import { answerMeaningJudge } from './answer-judge.ts';
 import { enterStage, failureCode, runEvalCli, type EvalStage } from './cli-failure.ts';
@@ -333,7 +333,7 @@ function gradePassageAnswer(question: EvalQuestion, result: AnalystResult, detai
   const itself = result.citations.some(citation => {
     const corpusId = corpusOf(citation);
     return expected.some(item => [item, ...(item.alternates ?? [])].some(identity =>
-      identity.corpusId === corpusId && identity.providerItemId === citation.provenance.sourceItem.providerItemId));
+      isGoldItem(identity, corpusId, citation.provenance.sourceItem)));
   });
   const copy = !itself && result.citations.some(citation => expected.some(item =>
     citedCopyOfExpected(item, citation.provenance, corpusOf(citation), citationItemChunks(citation.provenance, detail.pack.candidates))));
@@ -364,7 +364,7 @@ export async function runPassageEval(input: {
   /** The pack, and each store search's returned item ids in order (EvalStoreSearch) when recorded. */
   buildPack: (question: EvalQuestion) => Promise<EvidencePackBuildDetail & { storeSearches?: readonly EvalStoreSearch[] }>;
   /** Best rank of any of the expected items in a deep keyword and vector search of their stores. */
-  probeLanes?: (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>) => Promise<LaneProbe>;
+  probeLanes?: (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string; providerConversationId?: string }>) => Promise<LaneProbe>;
   /** Whether a question's pinned quote answers it, and whether it is specific enough to pick its item out. */
   judgeQuestion?: (question: string, quote: string) => Promise<QuestionJudgement>;
   /** Answer the exact fitted pack; only deterministic scores enter the receipt. */
@@ -435,7 +435,7 @@ export async function runPassageEval(input: {
       const corpusId = detail.candidateCorpusIds[originalIndex];
       for (const expected of question.expectedEvidence ?? []) {
         const identities = [expected, ...(expected.alternates ?? [])];
-        if (!identities.some(item => item.corpusId === corpusId && item.providerItemId === seat.provenance.sourceItem.providerItemId)) continue;
+        if (!identities.some(item => isGoldItem(item, corpusId, seat.provenance.sourceItem))) continue;
         objectRank ??= index + 1;
         if (!seated) {
           const packed = original.candidates[originalIndex];
@@ -452,7 +452,7 @@ export async function runPassageEval(input: {
     const matchingExpected = (candidate: EvidencePack['candidates'][number], index: number) => {
       const expected = needed[index]!;
       const corpus = resolveCitationCorpusId(candidate.provenance, detail.pack.candidates, detail.candidateCorpusIds);
-      return [expected, ...(expected.alternates ?? [])].some(item => item.corpusId === corpus && item.providerItemId === candidate.provenance.sourceItem.providerItemId);
+      return [expected, ...(expected.alternates ?? [])].some(item => isGoldItem(item, corpus, candidate.provenance.sourceItem));
     };
     const packedIds = needed.flatMap((_, index) => original.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
     const seatedIds = needed.flatMap((_, index) => pack.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
@@ -533,12 +533,12 @@ export async function runPassageEval(input: {
     const expectedStores = (question.expectedEvidence ?? []).map(e => stores.get(e.corpusId));
     const answerable = question.shape !== 'coverage_negative';
     const identities = (question.expectedEvidence ?? []).flatMap(expected => [expected, ...(expected.alternates ?? [])]);
-    const holds = (corpusId: string | undefined, providerItemId: string) => identities.some(item => item.corpusId === corpusId && item.providerItemId === providerItemId);
+    const holds = (corpusId: string | undefined, providerItemId: string, providerConversationId?: string | null) => identities.some(item => isGoldItem(item, corpusId, { providerItemId, providerConversationId: providerConversationId ?? undefined }));
     let funnel: FunnelRow | undefined;
     if (answerable && identities.length) {
       const searches = (detail.storeSearches ?? []).filter(search => identities.some(item => item.corpusId === search.corpusId));
-      const storeRanks = searches.flatMap(search => { const at = search.providerItemIds.findIndex(id => holds(search.corpusId, id)); return at < 0 ? [] : [at + 1]; });
-      const packAt = original.candidates.findIndex((candidate, index) => holds(detail.candidateCorpusIds[index], candidate.provenance.sourceItem.providerItemId));
+      const storeRanks = searches.flatMap(search => { const at = search.providerItemIds.findIndex((id, index) => holds(search.corpusId, id, search.providerConversationIds?.[index])); return at < 0 ? [] : [at + 1]; });
+      const packAt = original.candidates.findIndex((candidate, index) => holds(detail.candidateCorpusIds[index], candidate.provenance.sourceItem.providerItemId, candidate.provenance.sourceItem.providerConversationId));
       if (input.probeLanes) step('probe_lanes');
       const lanes = input.probeLanes ? await input.probeLanes(question, identities) : undefined;
       const storeRank = storeRanks.length ? Math.min(...storeRanks) : null;
@@ -655,26 +655,27 @@ const LANE_PROBE_DEPTH = 50;
  * finds the item at all, and how far down.
  */
 export function laneProbe(stores: readonly LocalConnectorStore[], embeddingFor: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined) {
-  return async (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>): Promise<LaneProbe> => {
+  return async (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string; providerConversationId?: string }>): Promise<LaneProbe> => {
     const best = (ranks: number[]) => ranks.length ? Math.min(...ranks) : null;
     const keyword: number[] = []; const vector: number[] = []; const exact: number[] = []; const margins: number[] = [];
     for (const store of stores.filter(store => items.some(item => item.corpusId === store.corpusId))) {
-      const wanted = new Set(items.filter(item => item.corpusId === store.corpusId).map(item => item.providerItemId));
-      const rankIn = (ids: string[]) => { const at = ids.findIndex(id => wanted.has(id)); return at < 0 ? [] : [at + 1]; };
-      keyword.push(...rankIn(store.searchItemsDetailed(question.question, LANE_PROBE_DEPTH).rows.map(row => row.sourceItem.providerItemId)));
+      const golds = items.filter(item => item.corpusId === store.corpusId);
+      const isWanted = (sourceItem: { providerItemId: string; providerConversationId?: string }) => golds.some(gold => isGoldItem(gold, store.corpusId, sourceItem));
+      const rankIn = (rows: ReadonlyArray<{ sourceItem: { providerItemId: string; providerConversationId?: string } }>) => { const at = rows.findIndex(row => isWanted(row.sourceItem)); return at < 0 ? [] : [at + 1]; };
+      keyword.push(...rankIn(store.searchItemsDetailed(question.question, LANE_PROBE_DEPTH).rows));
       const provider = embeddingFor(store.trustDomain);
       if (!provider) continue;
       const scored = await store.vectorSearchItemsWithScores(question.question, provider, LANE_PROBE_DEPTH);
-      vector.push(...rankIn(scored.map(row => row.sourceItem.providerItemId)));
+      vector.push(...rankIn(scored));
       const bar = calibratedSemanticRelevanceBar(provider.modelId);
-      const found = scored.find(row => wanted.has(row.sourceItem.providerItemId));
+      const found = scored.find(row => isWanted(row.sourceItem));
       if (found && bar !== undefined) margins.push(Math.round((found.bestCosine - bar) * 1000) / 1000);
       // The same search on the exact full-vector scan: an item it finds that
       // the digest does not is lost to the digest, not to the embedding.
       const digest = process.env.OLYMPUS_VECTOR_DIGEST;
       process.env.OLYMPUS_VECTOR_DIGEST = 'off';
       try {
-        exact.push(...rankIn((await store.vectorSearchItems(question.question, provider, LANE_PROBE_DEPTH)).map(row => row.sourceItem.providerItemId)));
+        exact.push(...rankIn(await store.vectorSearchItems(question.question, provider, LANE_PROBE_DEPTH)));
       } finally {
         if (digest === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = digest;
       }
@@ -723,13 +724,13 @@ export function storedChunkCounter(stores: readonly LocalConnectorStore[]) {
       return row?.n ?? undefined;
     },
     /** The item's conversation, sender and authored time, for the oracle narrowing; kept in memory only. */
-    meta(corpusId: string, providerItemId: string): ExpectedItemMeta | undefined {
+    meta(corpusId: string, providerItemId: string, providerConversationId?: string): ExpectedItemMeta | undefined {
       const store = stores.find(candidate => candidate.corpusId === corpusId);
       if (!store) return undefined;
       let db = open.get(corpusId);
       if (!db) { db = new Database(store.dbPath, { readonly: true, create: false }); db.exec('PRAGMA query_only = ON;'); open.set(corpusId, db); }
       const row = db.query(`SELECT provider_conversation_id AS conversation_id, sender_label, authored_at FROM items
-        WHERE provider_item_id = ? AND tombstoned = 0 ORDER BY item_pk LIMIT 1`).get(providerItemId) as { conversation_id: string | null; sender_label: string | null; authored_at: string | null } | null;
+        WHERE provider_item_id = ? AND tombstoned = 0 AND (? IS NULL OR provider_conversation_id = ?) ORDER BY item_pk LIMIT 1`).get(providerItemId, providerConversationId ?? null, providerConversationId ?? null) as { conversation_id: string | null; sender_label: string | null; authored_at: string | null } | null;
       if (!row) return { corpusId };
       return { corpusId, ...(row.conversation_id ? { conversationId: row.conversation_id } : {}),
         ...(row.sender_label ? { senderLabel: row.sender_label } : {}), ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
@@ -950,7 +951,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const itemChunks = storedChunkCounter(opened.stores);
     cleanups.push(itemChunks.close);
     const expectedMeta = (q: EvalQuestion): ExpectedItemMeta[] => (q.expectedEvidence ?? []).flatMap(item => [item, ...(item.alternates ?? [])])
-      .flatMap(item => item.providerItemId ? [itemChunks.meta(item.corpusId, item.providerItemId) ?? { corpusId: item.corpusId }] : []);
+      .flatMap(item => item.providerItemId ? [itemChunks.meta(item.corpusId, item.providerItemId, item.providerConversationId) ?? { corpusId: item.corpusId }] : []);
     const oracle = (q: EvalQuestion): OracleNarrow => oracleNarrow(narrowMode as NarrowMode, expectedMeta(q)[0]);
     const unnarrowedFollowUp = async (q: EvalQuestion): Promise<FollowUpCheck> => {
       scope = { applied: 'none' };
