@@ -160,8 +160,9 @@ function identityValues(batch: readonly TierLedgerIdentity[]): { values: string;
 }
 
 /** `copiesForMany`'s reads: each item's copies, a batch at a time, every copy superseded while a deletion or Secret is under way. */
-function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead, Map<string, TierCopy[]>, unknown> {
-  const result = new Map<string, TierCopy[]>();
+function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead, Pick<TierVisibilityReads, 'copies' | 'hiddenWithoutCopies'>, unknown> {
+  const copies = new Map<string, TierCopy[]>();
+  const hiddenWithoutCopies = new Set<string>();
   for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
     const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
     const rows = (yield {
@@ -172,19 +173,21 @@ function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead
     }) as TierCopyRow[];
     for (const row of rows) {
       const key = tierLedgerIdentityKey(identityFromRow(row));
-      const existing = result.get(key);
+      const existing = copies.get(key);
       if (existing) existing.push(copyFromRow(row));
-      else result.set(key, [copyFromRow(row)]);
+      else copies.set(key, [copyFromRow(row)]);
     }
     // An item whose deletion or Secret is under way (an intent not yet cleared) is hidden at once: a read in
     // the same snapshot sees every copy as superseded, whichever legs have been written so far.
     const pending = yield* hidingIntentsSteps(values, params);
     for (const row of pending) {
-      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+      const key = tierLedgerIdentityKey(identityFromRow(row));
+      const hidden = copies.get(key);
       if (hidden) for (const copy of hidden) if (copy.state !== 'superseded') copy.state = 'superseded';
+      if (!hidden) hiddenWithoutCopies.add(key);
     }
   }
-  return result;
+  return { copies, hiddenWithoutCopies };
 }
 
 type HidingIntent = 'deletion' | 'secret';
@@ -250,7 +253,8 @@ function* routedWithoutCopiesSteps(list: readonly TierLedgerIdentity[]): Generat
 /** What the search's visibility gate reads from one ledger (`visibilityReadSteps`). */
 export interface TierVisibilityReads {
   copies: Map<string, TierCopy[]>;
-  routedWithoutCopies: Set<string>;
+  /** Copyless items that were routed or have a pending deletion or Secret. */
+  hiddenWithoutCopies: Set<string>;
   /** Items still waiting Personal-first (#1316); read only when asked for. */
   personalFirstWaiting: Set<string>;
 }
@@ -581,6 +585,40 @@ const CORPUS_VISIBILITY_FLAGS_SQL = `c.provider, c.account_scope, c.conversation
       ) AS metadata_unread,
       EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
         AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
+
+const CORPUS_COPY_FLAGS_PAGE_SQL = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
+  INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
+
+// An intent hides even a legacy row. A copy in this corpus already carries
+// the hidden flag, so emit a separate entry only when that copy is absent.
+const CORPUS_INTENT_ID_SQL = 'w.provider, w.account_scope, w.conversation_key, w.provider_item_id';
+const CORPUS_INTENT_OTHER_FLAGS_SQL = '0 AS held, 0 AS held_for_judgment, 0 AS metadata_layer, 0 AS metadata_unread, 0 AS moving';
+const CORPUS_INTENT_WITHOUT_COPY_SQL = `w.kind IN ('deletion', 'secret') AND NOT EXISTS (
+  SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
+    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`;
+// Advance the cursor by rows visited even when a page has no hiding intents.
+const CORPUS_INTENT_FLAGS_PAGE_SQL = `SELECT w.rowid AS row_id, ${CORPUS_INTENT_ID_SQL},
+  ${CORPUS_INTENT_WITHOUT_COPY_SQL} AS hidden, ${CORPUS_INTENT_OTHER_FLAGS_SQL}
+  FROM tier_write_intents w WHERE w.rowid > ? ORDER BY w.rowid LIMIT 500`;
+
+function corpusVisibilityBatchRead(corpusId: string, batch: readonly TierLedgerIdentity[]): LedgerRead {
+  // The changed identities drive primary-key probes in both tables.
+  return {
+    sql: `WITH keys AS (
+      SELECT json_extract(value, '$[0]') AS provider, json_extract(value, '$[1]') AS account_scope,
+        json_extract(value, '$[2]') AS conversation_key, json_extract(value, '$[3]') AS provider_item_id
+      FROM json_each(?)
+    )
+    SELECT ${CORPUS_VISIBILITY_FLAGS_SQL} FROM keys k CROSS JOIN tier_copies c
+      USING (provider, account_scope, conversation_key, provider_item_id) WHERE c.corpus_id = ?
+    UNION ALL
+    SELECT ${CORPUS_INTENT_ID_SQL}, 1 AS hidden, ${CORPUS_INTENT_OTHER_FLAGS_SQL}
+      FROM keys k CROSS JOIN tier_write_intents w
+      USING (provider, account_scope, conversation_key, provider_item_id) WHERE ${CORPUS_INTENT_WITHOUT_COPY_SQL}`,
+    params: [JSON.stringify(batch.map(idParams)), corpusId, corpusId],
+    mode: 'all',
+  };
+}
 
 type CorpusVisibilityRow = TierIdentityRow & { hidden: number; held: number; held_for_judgment: number; metadata_layer: number; metadata_unread: number; moving: number };
 
@@ -2688,14 +2726,14 @@ export class TierLedger {
    * `tierLedgerIdentityKey`. Items with no rows are absent from the map.
    */
   copiesForMany(identities: readonly TierLedgerIdentity[]): Map<string, TierCopy[]> {
-    return this.readSteps(copiesSteps(uniqueIdentities(identities)));
+    return this.readSteps(copiesSteps(uniqueIdentities(identities))).copies;
   }
 
   /**
    * What the search's visibility gate reads, as reads a caller can make on
    * another connection in one snapshot (#1305): each item's copies
-   * (`copiesForMany`) and, of the items with none, those routed without a
-   * copy (`routedWithoutCopies`), and with `personalFirst`, of the items with
+   * (`copiesForMany`) and, of the items with none, those routed or under a
+   * deletion or Secret intent. With `personalFirst`, of the items with
    * no held copy, those still waiting Personal-first (#1316), for the judge's
    * order. `readSteps` makes them here.
    */
@@ -2704,12 +2742,15 @@ export class TierLedger {
     options: { personalFirst?: boolean } = {},
   ): Generator<LedgerRead, TierVisibilityReads, unknown> {
     const list = uniqueIdentities(identities);
-    const copies = yield* copiesSteps(list);
-    const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
-    const routedWithoutCopies = yield* routedWithoutCopiesSteps(copyless);
-    if (!options.personalFirst) return { copies, routedWithoutCopies, personalFirstWaiting: new Set() };
+    const { copies, hiddenWithoutCopies } = yield* copiesSteps(list);
+    const copyless = list.filter((identity) => {
+      const key = tierLedgerIdentityKey(identity);
+      return !copies.has(key) && !hiddenWithoutCopies.has(key);
+    });
+    for (const key of yield* routedWithoutCopiesSteps(copyless)) hiddenWithoutCopies.add(key);
+    if (!options.personalFirst) return { copies, hiddenWithoutCopies, personalFirstWaiting: new Set() };
     const unheld = list.filter((identity) => !copies.get(tierLedgerIdentityKey(identity))?.some((copy) => copy.state === 'current' && copy.embedHold));
-    return { copies, routedWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
+    return { copies, hiddenWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
   }
 
   /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
@@ -4251,52 +4292,52 @@ export class TierLedger {
     })();
   }
 
-  /** All copy flags in one indexed walk, or just the changed identities. */
+  /** Walk the copy and intent flags in pages, or read only the changed identities. */
   *corpusVisibilityPages(corpusId: string, identities?: readonly TierLedgerIdentity[]): Generator<TierCorpusVisibility[]> {
-    const flags = CORPUS_VISIBILITY_FLAGS_SQL;
-    const convert = corpusVisibilityFromRows;
     if (identities) {
-      for (let offset = 0; offset < identities.length; offset += 200) {
-        const batch = identities.slice(offset, offset + 200);
-        // Identities drive the primary-key probes; a corpus index must never
-        // tempt the planner to walk the held corpus for one changed item.
-        const rows = this.db.query(`SELECT ${flags} FROM json_each(?) j CROSS JOIN tier_copies c
-          WHERE c.provider = json_extract(j.value, '$[0]') AND c.account_scope = json_extract(j.value, '$[1]')
-            AND c.conversation_key = json_extract(j.value, '$[2]') AND c.provider_item_id = json_extract(j.value, '$[3]')
-            AND c.corpus_id = ?`)
-          .all(JSON.stringify(batch.map(identity => [...idParams(identity)])), corpusId) as Parameters<typeof convert>[0];
-        yield convert(rows);
+      for (let offset = 0; offset < identities.length; offset += IDENTITY_BATCH) {
+        const { sql, params } = corpusVisibilityBatchRead(corpusId, identities.slice(offset, offset + IDENTITY_BATCH));
+        yield corpusVisibilityFromRows(this.db.query(sql).all(...params as string[]) as CorpusVisibilityRow[]);
       }
       return;
     }
-    const query = this.db.query(`SELECT c.rowid AS row_id, ${flags} FROM tier_copies c
-      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`);
-    for (let after = 0; ;) {
-      const rows = query.all(corpusId, after) as Array<Parameters<typeof convert>[0][number] & { row_id: number }>;
-      if (rows.length === 0) return;
-      yield convert(rows);
-      after = rows.at(-1)!.row_id;
-      if (rows.length < 500) return;
+    for (const sql of [CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_FLAGS_PAGE_SQL]) {
+      const query = this.db.query(sql);
+      for (let after = 0; ;) {
+        const rows = query.all(corpusId, after) as Array<CorpusVisibilityRow & { row_id: number }>;
+        const flags = sql === CORPUS_INTENT_FLAGS_PAGE_SQL ? rows.filter(row => row.hidden) : rows;
+        if (flags.length > 0) yield corpusVisibilityFromRows(flags);
+        if (rows.length < 500) break;
+        after = rows.at(-1)!.row_id;
+      }
     }
   }
 
   /**
-   * The full walk of `corpusVisibilityPages`, as reads for the read worker,
-   * keeping only the copies some flag marks: a bootstrap applies nothing for
-   * the rest (loop-stall step-back, family 1).
+   * The same reads for the read worker, keeping only items some flag marks.
    */
-  *corpusVisibilityFlaggedSteps(corpusId: string): Generator<LedgerRead, TierCorpusVisibility[], unknown> {
-    const sql = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
-      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
+  *corpusVisibilityFlaggedSteps(corpusId: string, identities?: readonly TierLedgerIdentity[]): Generator<LedgerRead, TierCorpusVisibility[], unknown> {
     const flagged: TierCorpusVisibility[] = [];
-    for (let after = 0; ;) {
-      const rows = (yield { sql, params: [corpusId, after], mode: 'all' }) as Array<CorpusVisibilityRow & { row_id: number }>;
+    const add = (rows: CorpusVisibilityRow[]) => {
       for (const row of corpusVisibilityFromRows(rows)) {
         if (row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread) flagged.push(row);
       }
-      if (rows.length < 500) return flagged;
-      after = rows.at(-1)!.row_id;
+    };
+    if (identities) {
+      for (let offset = 0; offset < identities.length; offset += IDENTITY_BATCH) {
+        add((yield corpusVisibilityBatchRead(corpusId, identities.slice(offset, offset + IDENTITY_BATCH))) as CorpusVisibilityRow[]);
+      }
+      return flagged;
     }
+    for (const sql of [CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_FLAGS_PAGE_SQL]) {
+      for (let after = 0; ;) {
+        const rows = (yield { sql, params: [corpusId, after], mode: 'all' }) as Array<CorpusVisibilityRow & { row_id: number }>;
+        add(rows);
+        if (rows.length < 500) break;
+        after = rows.at(-1)!.row_id;
+      }
+    }
+    return flagged;
   }
 
   /**

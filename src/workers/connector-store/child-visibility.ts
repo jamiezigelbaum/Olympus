@@ -192,20 +192,20 @@ function* itemSecretSteps(ledger: TierLedger, identity: TierLedgerIdentity): Gen
   return rows.get(key) === true;
 }
 
-type CachedVisibility = { copies: TierCopy[] | undefined; routed: boolean; waiting: boolean };
+type CachedVisibility = { copies: TierCopy[] | undefined; hiddenWithoutCopies: boolean; waiting: boolean };
 
 function visibilityRows(identities: readonly TierLedgerIdentity[], read: TierVisibilityReads): Map<string, CachedVisibility> {
   return new Map(identities.map(identity => {
     const key = tierLedgerIdentityKey(identity);
-    return [key, { copies: read.copies.get(key), routed: read.routedWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
+    return [key, { copies: read.copies.get(key), hiddenWithoutCopies: read.hiddenWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
   }));
 }
 
 function visibilityFromRows(rows: ReadonlyMap<string, CachedVisibility>): TierVisibilityReads {
-  const result: TierVisibilityReads = { copies: new Map(), routedWithoutCopies: new Set(), personalFirstWaiting: new Set() };
+  const result: TierVisibilityReads = { copies: new Map(), hiddenWithoutCopies: new Set(), personalFirstWaiting: new Set() };
   for (const [key, row] of rows) {
     if (row.copies) result.copies.set(key, row.copies);
-    if (row.routed) result.routedWithoutCopies.add(key);
+    if (row.hiddenWithoutCopies) result.hiddenWithoutCopies.add(key);
     if (row.waiting) result.personalFirstWaiting.add(key);
   }
   return result;
@@ -421,10 +421,13 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
   }
 
   const ledger = lane.ledger();
-  // One read of the ledger for every parent a store knows, so they are judged against one snapshot.
+  // Read known identities together, including parents with no store row.
   const identities = new Map<string, TierLedgerIdentity>();
   for (const list of rows.values()) {
     for (const row of list) identities.set(tierLedgerIdentityKey(row.identity), row.identity);
+  }
+  for (const parent of parents) {
+    if (!rows.has(parentKey(parent)) && parent.identity) identities.set(tierLedgerIdentityKey(parent.identity), parent.identity);
   }
   const states = ledger && identities.size > 0 ? yield* visibilityRead(
     () => memoVisibilityItemsHere(ledger, 'states', () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, missing => ledger.itemStatesForMany(missing)),
@@ -436,6 +439,13 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
     const key = parentKey(parent);
     const list = rows.get(key) ?? [];
     const identity = list[0]?.identity;
+    const knownIdentity = identity ?? parent.identity;
+    const state = knownIdentity && states?.get(tierLedgerIdentityKey(knownIdentity));
+    if (state?.hidingIntent === 'deletion') {
+      // Hide immediately. The sweep still waits for the deletion to settle.
+      verdicts.set(key, HIDDEN);
+      continue;
+    }
     const active = list.filter((row) => row.active);
     // A Secret's row is a location only: present for itself, though nothing of it may be read.
     // Its classification is not a deletion and does not cascade, but where it came inside
@@ -453,7 +463,7 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
       // Secret from before rows were kept. It is not present (nothing says it is listed), and
       // it is not gone either (a classification alone is no deletion): hidden, nothing removed,
       // until its next listing writes the row.
-      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
+      if (state?.hidingIntent === 'secret' || (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity)))) {
         verdicts.set(key, HIDDEN);
       } else {
         verdicts.set(key, { visible: false, gone: true });
@@ -464,7 +474,6 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
     if (!ledger) {
       visible = active.length > 0;
     } else {
-      const state = states?.get(tierLedgerIdentityKey(identity));
       const copies = state?.copies ?? [];
       visible = copies.length === 0
         // Never routed: the store that holds its row serves it. Routed with no copy left: nothing does.
@@ -474,7 +483,8 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
       // still active) is present, and its own parent still decides its children like any other
       // item's. Once every row is a tombstone and none is a location, the provider deleted it:
       // the ledger's record of what it was says nothing about whether it is there.
-      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity))) visible = true;
+      if (!visible && active.length > 0
+        && (state?.hidingIntent === 'secret' || (yield* itemSecretSteps(ledger, identity)))) visible = true;
     }
     if (visible) {
       const above = active.find((row) => row.grandparentLocalItemId !== undefined);

@@ -7,13 +7,64 @@ import { classifyItemTiers } from '../src/workers/classification/tier-classifier
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localProvider, localId, tempDir } from './helpers/tier-fixtures.ts';
+import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { visibilityOffThread, type VisibilityRead } from '../src/workers/connector-store/child-visibility.ts';
+import { createSourceAnswerTrace, runWithSourceAnswerTrace } from '../src/workers/source-index/answer-latency-trace.ts';
+import type { SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
+import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, cloudProvider, localProvider, localId, tempDir } from './helpers/tier-fixtures.ts';
 
 interface StoreProbe {
   db: Database;
   tierLedgerHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
   itemRowsForIdentities(ids: readonly TierLedgerIdentity[], ...rest: unknown[]): unknown[];
 }
+
+test.each(['deletion', 'secret'] as const)('a pending %s hides an unrouted item from search', async (kind) => {
+  const tmp = tempDir();
+  const ledger = new TierLedger({ dbPath: `${tmp.dir}/ledger.sqlite` });
+  const store = new LocalConnectorStore({ dbPath: `${tmp.dir}/store.sqlite`, corpusId: CORPORA.internal,
+    family: 'file', trustDomain: 'internal', tierLedger: ledger });
+  const probe = store as unknown as StoreProbe & {
+    tierHiddenItemPksInTurns(): Promise<{ hidden: number[] }>;
+    visibleVectorItemPks(pks: readonly number[]): Generator<VisibilityRead, Set<number>, unknown>;
+  };
+  try {
+    const connector = fixtureConnector(() => [{ id: 'a', name: 'Orchard', text: 'Orchard notes' }]);
+    await store.syncFromConnector(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const provider = cloudProvider();
+    await store.embedChunks({ provider });
+    const identity = identityOf('a');
+    expect(ledger.isRouted(identity)).toBe(false);
+    expect(ledger.copies(identity)).toEqual([]);
+    const query = 'orchard';
+    const rows = store.searchItems(query, 5);
+    expect(rows.map(row => row.sourceItem.providerItemId)).toEqual(['a']);
+    const hit = { corpusId: store.corpusId, sourceItem: rows[0]!.sourceItem } as SourceIndexRoutedSearchHit;
+    const gate = createTierVisibilityGate(() => [{ ledger, corpusIds: new Set([store.corpusId]) }]);
+    const { item_pk: pk } = probe.db.query('SELECT item_pk FROM items').get() as { item_pk: number };
+    await runWithSourceAnswerTrace(createSourceAnswerTrace(), async () => {
+      expect(await gate.offThread!([hit])).toEqual([hit]);
+      expect(await visibilityOffThread(probe.visibleVectorItemPks([pk]))).toEqual(new Set([pk]));
+      expect((await store.vectorSearchLane(query, provider, 5)).rows).toHaveLength(1);
+      expect((await probe.tierHiddenItemPksInTurns()).hidden).toEqual([]);
+
+      ledger.putWriteIntent({ identity, connectorId: connector.id, kind });
+      expect({
+        gate: gate([hit]).length,
+        gateOffThread: (await gate.offThread!([hit])).length,
+        keyword: store.searchItems(query, 5).length,
+        keywordOffThread: (await store.searchItemsDetailedOffThread(query, 5)).rows.length,
+        vectorWinners: (await visibilityOffThread(probe.visibleVectorItemPks([pk]))).size,
+        hiddenPks: (await probe.tierHiddenItemPksInTurns()).hidden,
+      }).toEqual({ gate: 0, gateOffThread: 0, keyword: 0, keywordOffThread: 0, vectorWinners: 0, hiddenPks: [pk] });
+      expect((await store.vectorSearchLane(query, provider, 5)).rows).toEqual([]);
+
+      ledger.clearWriteIntent(identity);
+      expect((await store.searchItemsDetailedOffThread(query, 5)).rows).toHaveLength(1);
+      expect((await probe.tierHiddenItemPksInTurns()).hidden).toEqual([]);
+    });
+  } finally { store.close(); ledger.close(); tmp.cleanup(); }
+});
 
 /** Copy an API-created row's non-generated columns; only its identity changes. */
 function multiply(db: Database, table: string, count: number, changes: Record<string, string>, where: string): void {

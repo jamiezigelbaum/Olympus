@@ -18,7 +18,7 @@ import { copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { assertSqliteSchemaCanOpen } from '../src/core/sqlite-migrations.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, localId } from './helpers/tier-fixtures.ts';
+import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId } from './helpers/tier-fixtures.ts';
 import { createTestClock, waitFor } from './helpers/test-clock.ts';
 import {
   cleanups,
@@ -104,6 +104,22 @@ test('a copy raised after the reader read its cursors is not returned by its nex
     expect(raised).toBe(true);
     expect(reader.searchItems('picnic', 20).map((row) => row.sourceItem.providerItemId)).not.toContain('held');
   } finally { spy.mockRestore(); }
+});
+
+test('a saved set built before copyless intents were tracked is rebuilt', async () => {
+  const { f, writer, storeDb, pk, openReader } = await fixtureWithEveryState();
+  const connector = fixtureConnector(() => [{ id: 'legacy', name: 'Garden', text: 'Garden notes' }]);
+  await writer.syncFromConnector(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const identity = identityOf('legacy');
+  expect(f.ledger.copies(identity)).toEqual([]);
+  await writer.keepVisibilityCurrentInTurns();
+  f.ledger.putWriteIntent({ identity, connectorId: connector.id, kind: 'deletion' });
+  // The older writer advanced this stamp without adding a member for the intent.
+  expect(storeDb.query('UPDATE tier_visibility_state SET ledger_id = ?, ledger_cursor = ?')
+    .run(f.ledger.ledgerId()!, f.ledger.visibilityChangesSince().cursor).changes).toBe(1);
+
+  const reader = openReader();
+  expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('legacy'));
 });
 
 test('a retention gap in either feed never serves the saved set: a read-only connection rebuilds from the ledger', async () => {

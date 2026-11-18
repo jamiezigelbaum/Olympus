@@ -19,7 +19,7 @@ import { answerReleaseWithheldReason, type ReleaseInput, type ReleaseManifest } 
 import { REMOTE_ANSWER_UNVERIFIED, remoteOperationOutput } from '../src/core/remote-result.ts';
 import { archiveConnectorStoreDbPath, ARCHIVE_STORE_PLACEMENT } from '../src/workers/archive-import/store.ts';
 import { archiveConnectorId } from '../src/workers/archive-import/state.ts';
-import { hiddenChildKeys, hiddenProbesByParentIdentity } from '../src/workers/connector-store/child-visibility.ts';
+import { hiddenChildKeys, hiddenProbesByParentIdentity, parentKey, parentVerdicts } from '../src/workers/connector-store/child-visibility.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck, type TierVisibilityScope } from '../src/workers/connector-store/tier-visibility.ts';
 import { tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger.ts';
@@ -223,6 +223,30 @@ const SNAPSHOT = (archiveId: string) => ({
 }) as const;
 
 describe('a Secret parent is present until the provider deletes it', () => {
+  test('a pending Secret preserves the standing of a listed parent as its copies are retired', async () => {
+    const { h, archiveId, lane, identityOf } = await imported();
+    const identity = identityOf('m1');
+    const ref = { provider: identity.provider, accountScope: archiveId, parentLocalItemId: identity.localItemId, identity };
+    const judge = () => parentVerdicts({ ledger: () => lane.ledger, stores: () => lane.set.openStores() }, [ref]).get(parentKey(ref));
+    const listed = { visible: true, gone: false };
+    expect(judge()).toEqual(listed);
+
+    lane.ledger.putWriteIntent({ identity, connectorId: 'fixture', kind: 'secret' });
+    expect(judge()).toEqual(listed);
+    const db = new Database(lane.ledger.dbPath);
+    try {
+      db.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE account_scope = ? AND provider_item_id = ?")
+        .run(archiveId, identity.providerItemId);
+    } finally { db.close(); }
+    expect(lane.ledger.copies(identity).some(copy => copy.state === 'current')).toBe(false);
+    expect([judge(), judge(), ...M1_CHILDREN.map(id => readable(lane, archiveId, id))]).toEqual([listed, listed, true, true]);
+
+    await moveToSecrets(lane, identity);
+    lane.ledger.clearWriteIntent(identity);
+    expect(secretRows(h, archiveId, ['m1']).length).toBeGreaterThan(0);
+    expect([judge(), judge(), ...M1_CHILDREN.map(id => readable(lane, archiveId, id))]).toEqual([listed, listed, true, true]);
+  });
+
   test('a parent moved to Secrets keeps its children, and a full snapshot that still lists it changes nothing', async () => {
     const { h, archiveId, lane, identityOf } = await imported();
     await moveToSecrets(lane, identityOf('m1'));

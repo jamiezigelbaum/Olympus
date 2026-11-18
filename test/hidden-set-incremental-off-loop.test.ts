@@ -115,7 +115,8 @@ function observePool() {
   setReadPoolObserverForTests((path, read) => reads.push({ path, read }), { snapshots: true });
   return reads;
 }
-const isIncremental = (sql: string) => /WHERE seq >|keyed\.rowid|CROSS JOIN items i/.test(sql);
+const isLedgerFlagBatch = (sql: string) => sql.includes('FROM keys k CROSS JOIN tier_copies');
+const isIncremental = (sql: string) => isLedgerFlagBatch(sql) || /WHERE seq >|CROSS JOIN items i/.test(sql);
 
 test.each(['internal', 'secure_local'] as const)('two incremental rounds equal switch-off and synchronous sets in %s', async (domain) => {
   const h = await setup();
@@ -157,7 +158,7 @@ test.each(['internal', 'secure_local'] as const)('two incremental rounds equal s
     expect(sorted(onResult!)).toEqual(sorted(sync.tierHiddenItemPks()));
     expect(pooled.some(({ read }) => read.sql.includes('FROM tier_visibility_changes WHERE seq >'))).toBe(true);
     expect(pooled.some(({ read }) => read.sql.includes('FROM main.item_visibility_feed WHERE seq >'))).toBe(true);
-    expect(pooled.some(({ read }) => read.sql.includes('keyed.rowid'))).toBe(true);
+    expect(pooled.some(({ read }) => isLedgerFlagBatch(read.sql))).toBe(true);
     expect(pooled.some(({ read }) => read.sql.includes('CROSS JOIN items i'))).toBe(true);
     // Check the gated reads too: the stock guard workload keeps the switch
     // off, so it cannot prove that these new pool queries are keyed.
@@ -180,7 +181,7 @@ test('a write during a pooled incremental page is retried, never served, and ret
   let write: Promise<unknown> | undefined;
   let pages = 0;
   setReadPoolObserverForTests((_path, read) => {
-    if (!read.sql.includes('keyed.rowid')) return;
+    if (!isLedgerFlagBatch(read.sql)) return;
     pages++;
     if (!write) write = h.move('row-9', 'secure');
   }, { snapshots: true });
@@ -252,7 +253,7 @@ test('saved-set catch-up reads its ledger feeds on the pool and rejects retentio
   })();
   const gapReads = observePool();
   expect(sorted(await h.reader(true).tierHiddenItemPksInTurns())).toEqual(sorted(h.reader(false).tierHiddenItemPks()));
-  expect(gapReads.some(({ read }) => read.sql.includes('tier_copies_visibility_walk') && !read.sql.includes('keyed.rowid'))).toBe(true);
+  expect(gapReads.some(({ read }) => read.sql.includes('tier_copies_visibility_walk') && !isLedgerFlagBatch(read.sql))).toBe(true);
 });
 
 test('the awaited child path retries a feed read that meets a parent tombstone', async () => {

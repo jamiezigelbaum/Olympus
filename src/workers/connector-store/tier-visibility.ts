@@ -9,10 +9,9 @@
 // every hit of one query against ONE read of each set ledger, after the
 // fan-out. A flip is one ledger write, so one snapshot sees exactly one side.
 //
-// Legacy items (never routed, no copy rows) pass unchanged. A ROUTED item
-// with no copy rows left (a Secret whose copies were settled while a search
-// held one of its hits) is hidden, never mistaken for legacy. A set whose
-// ledger cannot be read fails closed for its own stores only.
+// A copyless item passes only if it was never routed and has no pending
+// deletion or Secret intent. A set whose ledger cannot be read fails closed
+// for its own stores only.
 //
 // A child item (docs/design/child-items.md, "Removal") is judged by its
 // parent as well, by the same rule every store applies where it reads
@@ -192,7 +191,7 @@ function* judgeVisibility(
       for (const hit of governed) hidden.add(hit);
       continue;
     }
-    const { copies, routedWithoutCopies } = read;
+    const { copies, hiddenWithoutCopies } = read;
     for (const hit of governed) {
       if (!hit.sourceItem.accountScope || !hit.sourceItem.provider || !hit.sourceItem.providerItemId) {
         hidden.add(hit);
@@ -202,7 +201,7 @@ function* judgeVisibility(
       const itemCopies = copies.get(key);
       if (itemCopies?.some((copy) => copy.state === 'current' && copy.embedHold)) held.add(hit);
       if (!itemCopies || itemCopies.length === 0) {
-        if (routedWithoutCopies.has(key)) hidden.add(hit);
+        if (hiddenWithoutCopies.has(key)) hidden.add(hit);
         continue;
       }
       const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === 'current'

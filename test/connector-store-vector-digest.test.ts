@@ -395,8 +395,8 @@ test('when ledger visibility hides every first-pass candidate, the lane scans wi
     const db = database(store);
     expect(vectorDigestState(db, modelId).completed).toBe(true);
     const hidden = new Set((db.query('SELECT item_pk FROM items ORDER BY item_pk LIMIT 500').all() as Array<{ item_pk: number }>).map((row) => row.item_pk));
-    const lane = store as unknown as { visibleVectorItemPks(pks: readonly number[]): Set<number> };
-    lane.visibleVectorItemPks = (pks) => new Set(pks.filter((pk) => !hidden.has(pk)));
+    const lane = store as unknown as { visibleVectorItemPks(pks: readonly number[]): Generator<never, Set<number>> };
+    lane.visibleVectorItemPks = function* (pks) { return new Set(pks.filter((pk) => !hidden.has(pk))); };
     const result = await store.vectorSearchLane('harbor note', provider, 2);
     expect(result.rows).toHaveLength(2);
   } finally { store.close(); }
@@ -695,11 +695,11 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
       const held = new Set(pks.slice(0, count * 0.9));
       const lane = store as unknown as {
         tierLedgerHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
-        visibleVectorItemPks(pks: readonly number[]): Set<number>;
+        visibleVectorItemPks(pks: readonly number[]): Generator<never, Set<number>>;
       };
       const value = { hidden: [], held: [...held], heldForJudgment: [...held], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       lane.tierLedgerHiddenItemPks = () => value;
-      lane.visibleVectorItemPks = (candidates) => new Set(candidates.filter((pk) => !held.has(pk)));
+      lane.visibleVectorItemPks = function* (candidates) { return new Set(candidates.filter((pk) => !held.has(pk))); };
       const reads = counted();
       try {
         const result = await store.vectorSearchLane('harbor note', graded, 20);

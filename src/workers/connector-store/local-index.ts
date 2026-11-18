@@ -1166,36 +1166,6 @@ function* hiddenVisibilityFeedReads(
 }
 
 /**
- * Specialize the ledger's canonical visibility finder to changed keys. Keep
- * its flag SQL AND its conversion/filtering, so privacy rules have one owner.
- * Each batch has at most 200 copies in this corpus, below its 500-row page.
- * A changed finder shape cannot be certified: the runner retries, then uses here().
- */
-function* incrementalVisibilityReads(
-  ledger: TierLedger, corpusId: string, identities: readonly TierLedgerIdentity[],
-): Generator<StoreRead, TierCorpusVisibility[], unknown> {
-  const flags: TierCorpusVisibility[] = [];
-  for (let offset = 0; offset < identities.length; offset += 200) {
-    const walk = ledger.corpusVisibilityFlaggedSteps(corpusId);
-    const first = walk.next();
-    const seek = 'AND c.rowid > ? ORDER BY c.rowid LIMIT 500';
-    if (first.done || first.value.mode !== 'all' || !first.value.sql.endsWith(seek)) throw new VisibilityChangedError();
-    const sql = first.value.sql.replace(seek, `AND c.rowid IN (
-      SELECT keyed.rowid FROM json_each(?) j CROSS JOIN tier_copies keyed
-      WHERE keyed.provider = json_extract(j.value, '$[0]') AND keyed.account_scope = json_extract(j.value, '$[1]')
-        AND keyed.conversation_key = json_extract(j.value, '$[2]') AND keyed.provider_item_id = json_extract(j.value, '$[3]')
-        AND keyed.corpus_id = ?) ORDER BY c.rowid LIMIT 500`);
-    const keys = identities.slice(offset, offset + 200).map(identity => [identity.provider, identity.accountScope,
-      normalizeConversationId(identity.providerConversationId), identity.providerItemId]);
-    const rows = yield { sql, params: [corpusId, JSON.stringify(keys), corpusId], mode: 'all' };
-    const converted = walk.next(rows);
-    if (!converted.done) throw new VisibilityChangedError();
-    flags.push(...converted.value);
-  }
-  return flags;
-}
-
-/**
  * How long the bootstrap finder waits for a write hold on the loop's
  * connections to end (a hold is kept short: every other writer waits on it)
  * before it walks on those connections instead: 100 waits of 10 ms.
@@ -4653,7 +4623,7 @@ export class LocalConnectorStore {
 
   /**
    * The tier-ledger visibility filter (design section 3.3). A row survives
-   * when its item is legacy (the ledger holds no copy of it anywhere) or when
+   * when its item is unrouted with no pending hiding intent or when
    * THIS store's copy is current and holds the row's layer. Superseded and
    * staged copies are never searched or served.
    *
@@ -4679,18 +4649,23 @@ export class LocalConnectorStore {
   ): Generator<VisibilityRead, T[], unknown> {
     rows = rows.filter((row) => layerOf(row) !== 'content' || !this.onDemandContentHeld(identityOf(row)));
     if (rows.length === 0) return [];
-    let copies: Map<string, TierCopy[]> | undefined;
+    let visibility;
     try {
       const ledger = this.visibilityLedger();
-      if (ledger && ledger.corpusHasCopies(this.corpusId)) copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf)).copies,
-        () => ledgerVisibilityOffThread(ledger, rows.map(identityOf)).then(read => read.copies));
+      if (ledger) {
+        const identities = rows.map(identityOf);
+        visibility = yield* visibilityRead(() => ledgerVisibilityHere(ledger, identities),
+          () => ledgerVisibilityOffThread(ledger, identities));
+      }
     } catch (error) {
       if (throwOnUnavailable) throw error;
       return [];
     }
-    const served = copies
+    const served = visibility
       ? rows.filter((row) => {
-        const here = copies.get(tierLedgerIdentityKey(identityOf(row)));
+        const key = tierLedgerIdentityKey(identityOf(row));
+        if (visibility.hiddenWithoutCopies.has(key)) return false;
+        const here = visibility.copies.get(key);
         return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
       })
       : [...rows];
@@ -4920,7 +4895,7 @@ export class LocalConnectorStore {
    * current ledger (tierVisibleRows, embeddingBatchRecheck).
    */
   /**
-   * The bootstrap's finder: the corpus's flagged copies from the ledger, and
+   * The bootstrap's finder: the corpus's flagged items from the ledger, and
    * this store's item pks for them. Here, on this connection (a direct
    * caller); off the thread, on the read worker over the ledger file and
    * this store's file. Copies no flag marks are left out: a bootstrap
@@ -5099,7 +5074,7 @@ export class LocalConnectorStore {
           if (this.hiddenSetIncrementalOffLoop) {
             flags = (yield { find: this.incrementalHiddenFinder(ledger,
               () => [...ledger.corpusVisibilityPages(this.corpusId, changed)].flat(),
-              () => ledgerReadOffThread(ledger, incrementalVisibilityReads(ledger, this.corpusId, changed), BACKGROUND_READS)) }) as TierCorpusVisibility[];
+              () => ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId, changed), BACKGROUND_READS)) }) as TierCorpusVisibility[];
           } else {
             flags = [];
             for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) { flags.push(...page); yield; }
@@ -5152,7 +5127,11 @@ export class LocalConnectorStore {
   }
 
   private ledgerIdOf(ledger: TierLedger): string | undefined {
-    try { return ledger.ledgerId(); } catch { return undefined; }
+    try {
+      const id = ledger.ledgerId();
+      // Saved sets built before intent-only items were included must be rebuilt.
+      return id === undefined ? undefined : `v2:${id}`;
+    } catch { return undefined; }
   }
 
   private readVisibilityState(): SavedVisibilityState | null {
@@ -14829,14 +14808,8 @@ export class LocalConnectorStore {
     const candidates = Array.from(bestByItem.entries())
       .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
       .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-    const rankedItems: Array<[number, { bestCosine: number; bestChunkPk: number; localItemId: string }]> = [];
-    let candidateOffset = 0;
-    while (rankedItems.length < limit && candidateOffset < candidates.length) {
-      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
-      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
-      for (const candidate of batch) if (visible.has(candidate[0])) rankedItems.push(candidate);
-      candidateOffset += batch.length;
-    }
+    const rankedItems = candidates.length > 0 ? await visibilityAwaited(
+      () => this.rankVisibleVectorItems(candidates, limit, selectedAccount, filters), this.childVisibilityLane()) : [];
     const searchRows = this.searchRowsByItemPks(
       rankedItems.map(([itemPk]) => itemPk),
       selectedAccount,
@@ -14862,6 +14835,19 @@ export class LocalConnectorStore {
           ? { skippedReason: 'embedding_stored_dimension_mismatch' }
           : {}),
     };
+  }
+
+  private *rankVisibleVectorItems<T>(
+    candidates: readonly [number, T][], limit: number, accountScope?: string, filters?: ConnectorStoreSearchFilters,
+  ): Generator<VisibilityRead, Array<[number, T]>, unknown> {
+    const ranked: Array<[number, T]> = [];
+    for (let offset = 0; ranked.length < limit && offset < candidates.length;) {
+      const batch = candidates.slice(offset, offset + Math.min(200, limit - ranked.length));
+      const visible = yield* this.visibleVectorItemPks(batch.map(([pk]) => pk), accountScope, filters);
+      for (const candidate of batch) if (visible.has(candidate[0])) ranked.push(candidate);
+      offset += batch.length;
+    }
+    return ranked;
   }
 
   /**
@@ -15146,27 +15132,25 @@ export class LocalConnectorStore {
   // Hydrates membrane-safe search rows for ranked item pks, preserving order.
   // Exact item PKs avoid local-id aliases across providers/accounts. Batches
   // keep candidate validation below SQLite's bind-variable ceiling.
-  private visibleVectorItemPks(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters): Set<number> {
-    const visible = new Set<number>();
+  private *visibleVectorItemPks(
+    itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters,
+  ): Generator<VisibilityRead, Set<number>, unknown> {
     const selectedFilters = connectorStoreFilterSql(filters);
-    for (let offset = 0; offset < itemPks.length; offset += 200) {
-      const batch = itemPks.slice(offset, offset + 200);
-      const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM items i WHERE i.item_pk IN (${batch.map(() => '?').join(',')}) AND i.tombstoned = 0
-        ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}`)
-        .all(...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params) as Array<{
-          item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
-        }>;
-      // Embedding admission never releases a vector to search: the copy's
-      // hold must clear, even though lexical/Private reads may already serve it.
-      // One ledger read serves both checks, and an unreadable ledger hides the batch.
-      for (const row of this.tierVisibleRows(rows, row => ({
-        provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
-        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
-      }), () => 'content', false, copies => !copies.some(copy => copy.corpusId === this.corpusId
-        && copy.state === 'current' && copy.embedHold))) visible.add(row.item_pk);
-    }
-    return visible;
+    const rows = (yield* this.visibilityStoreRead({
+      sql: `SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM items i WHERE i.item_pk IN (${itemPks.map(() => '?').join(',')}) AND i.tombstoned = 0
+      ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}`,
+      params: [...itemPks, ...(accountScope ? [accountScope] : []), ...selectedFilters.params], mode: 'all',
+    })) as Array<{ item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null }>;
+    // Embedding admission never releases a vector to search: the copy's
+    // hold must clear, even though lexical/Private reads may already serve it.
+    // One ledger read serves both checks, and an unreadable ledger hides the batch.
+    const visible = yield* this.tierVisibleRowsSteps(rows, row => ({
+      provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    }), () => 'content', false, copies => !copies.some(copy => copy.corpusId === this.corpusId
+      && copy.state === 'current' && copy.embedHold));
+    return new Set(visible.map(row => row.item_pk));
   }
 
   private searchRowsByItemPks(

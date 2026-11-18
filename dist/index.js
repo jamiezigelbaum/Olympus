@@ -16506,13 +16506,45 @@ var init_sniffer_store = __esm(() => {
 
 // src/workers/classification/tier-ledger.ts
 var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
-          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')`, RELABEL_UNREAD_CANDIDATES_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')`, RELABEL_UNREAD_CANDIDATES_SQL, CORPUS_VISIBILITY_FLAGS_SQL = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
+      c.copy_state <> 'current' OR EXISTS (SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = c.provider AND w.account_scope = c.account_scope
+          AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
+          AND w.kind IN ('secret', 'deletion')) AS hidden,
+      c.copy_state = 'current' AND c.embed_hold = 1 AS held,
+      c.copy_state = 'current' AND c.embed_hold = 1 AND c.trust_domain = 'secure_local'
+        AND c.layers IN ('content', 'both') AND EXISTS (
+          SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+            AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
+            AND t.state = 'pending' AND t.content_read = 1 AND (t.metadata_pending = 1 OR t.content_pending = 1)
+            AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+            AND COALESCE(t.target_metadata_tier, '') <> 'secrets' AND COALESCE(t.target_content_tier, '') <> 'secrets'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o WHERE o.provider = c.provider AND o.account_scope = c.account_scope
+            AND o.conversation_key = c.conversation_key AND o.provider_item_id = c.provider_item_id
+            AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+        ) AS held_for_judgment,
+      c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
+      c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
+        SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
+          AND other.conversation_key = c.conversation_key AND other.provider_item_id = c.provider_item_id
+          AND other.corpus_id <> c.corpus_id AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+      ) AS metadata_unread,
+      EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+        AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`, CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_ID_SQL = "w.provider, w.account_scope, w.conversation_key, w.provider_item_id", CORPUS_INTENT_OTHER_FLAGS_SQL = "0 AS held, 0 AS held_for_judgment, 0 AS metadata_layer, 0 AS metadata_unread, 0 AS moving", CORPUS_INTENT_WITHOUT_COPY_SQL = `w.kind IN ('deletion', 'secret') AND NOT EXISTS (
+  SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
+    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
   RELABEL_UNREAD_CANDIDATES_SQL = `SELECT rowid FROM tier_items WHERE ${RELABEL_UNREAD_WHERE} LIMIT ?`;
+  CORPUS_COPY_FLAGS_PAGE_SQL = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
+  INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
+  CORPUS_INTENT_FLAGS_PAGE_SQL = `SELECT w.rowid AS row_id, ${CORPUS_INTENT_ID_SQL},
+  ${CORPUS_INTENT_WITHOUT_COPY_SQL} AS hidden, ${CORPUS_INTENT_OTHER_FLAGS_SQL}
+  FROM tier_write_intents w WHERE w.rowid > ? ORDER BY w.rowid LIMIT 500`;
   REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
   REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
 });

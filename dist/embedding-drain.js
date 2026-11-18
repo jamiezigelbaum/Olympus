@@ -12178,7 +12178,8 @@ function identityValues(batch) {
   return { values: batch.map(() => "(?, ?, ?, ?)").join(", "), params: batch.flatMap((identity) => [...idParams(identity)]) };
 }
 function* copiesSteps(list) {
-  const result = new Map;
+  const copies = new Map;
+  const hiddenWithoutCopies = new Set;
   for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
     const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
     const rows = yield {
@@ -12190,23 +12191,26 @@ function* copiesSteps(list) {
     };
     for (const row of rows) {
       const key = tierLedgerIdentityKey(identityFromRow(row));
-      const existing = result.get(key);
+      const existing = copies.get(key);
       if (existing)
         existing.push(copyFromRow(row));
       else
-        result.set(key, [copyFromRow(row)]);
+        copies.set(key, [copyFromRow(row)]);
     }
     const pending = yield* hidingIntentsSteps(values, params);
     for (const row of pending) {
-      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+      const key = tierLedgerIdentityKey(identityFromRow(row));
+      const hidden = copies.get(key);
       if (hidden) {
         for (const copy of hidden)
           if (copy.state !== "superseded")
             copy.state = "superseded";
       }
+      if (!hidden)
+        hiddenWithoutCopies.add(key);
     }
   }
-  return result;
+  return { copies, hiddenWithoutCopies };
 }
 function* hidingIntentsSteps(values, params) {
   return yield {
@@ -12469,6 +12473,33 @@ var CORPUS_VISIBILITY_FLAGS_SQL = `c.provider, c.account_scope, c.conversation_k
       ) AS metadata_unread,
       EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
         AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
+var CORPUS_COPY_FLAGS_PAGE_SQL = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
+  INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
+var CORPUS_INTENT_ID_SQL = "w.provider, w.account_scope, w.conversation_key, w.provider_item_id";
+var CORPUS_INTENT_OTHER_FLAGS_SQL = "0 AS held, 0 AS held_for_judgment, 0 AS metadata_layer, 0 AS metadata_unread, 0 AS moving";
+var CORPUS_INTENT_WITHOUT_COPY_SQL = `w.kind IN ('deletion', 'secret') AND NOT EXISTS (
+  SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
+    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`;
+var CORPUS_INTENT_FLAGS_PAGE_SQL = `SELECT w.rowid AS row_id, ${CORPUS_INTENT_ID_SQL},
+  ${CORPUS_INTENT_WITHOUT_COPY_SQL} AS hidden, ${CORPUS_INTENT_OTHER_FLAGS_SQL}
+  FROM tier_write_intents w WHERE w.rowid > ? ORDER BY w.rowid LIMIT 500`;
+function corpusVisibilityBatchRead(corpusId, batch) {
+  return {
+    sql: `WITH keys AS (
+      SELECT json_extract(value, '$[0]') AS provider, json_extract(value, '$[1]') AS account_scope,
+        json_extract(value, '$[2]') AS conversation_key, json_extract(value, '$[3]') AS provider_item_id
+      FROM json_each(?)
+    )
+    SELECT ${CORPUS_VISIBILITY_FLAGS_SQL} FROM keys k CROSS JOIN tier_copies c
+      USING (provider, account_scope, conversation_key, provider_item_id) WHERE c.corpus_id = ?
+    UNION ALL
+    SELECT ${CORPUS_INTENT_ID_SQL}, 1 AS hidden, ${CORPUS_INTENT_OTHER_FLAGS_SQL}
+      FROM keys k CROSS JOIN tier_write_intents w
+      USING (provider, account_scope, conversation_key, provider_item_id) WHERE ${CORPUS_INTENT_WITHOUT_COPY_SQL}`,
+    params: [JSON.stringify(batch.map(idParams)), corpusId, corpusId],
+    mode: "all"
+  };
+}
 function corpusVisibilityFromRows(rows) {
   return rows.map((row) => ({
     ...identityFromRow(row),
@@ -13777,17 +13808,21 @@ class TierLedger {
     `).all(...idParams(identity)).map(copyFromRow);
   }
   copiesForMany(identities) {
-    return this.readSteps(copiesSteps(uniqueIdentities(identities)));
+    return this.readSteps(copiesSteps(uniqueIdentities(identities))).copies;
   }
   *visibilityReadSteps(identities, options = {}) {
     const list = uniqueIdentities(identities);
-    const copies = yield* copiesSteps(list);
-    const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
-    const routedWithoutCopies = yield* routedWithoutCopiesSteps(copyless);
+    const { copies, hiddenWithoutCopies } = yield* copiesSteps(list);
+    const copyless = list.filter((identity) => {
+      const key = tierLedgerIdentityKey(identity);
+      return !copies.has(key) && !hiddenWithoutCopies.has(key);
+    });
+    for (const key of yield* routedWithoutCopiesSteps(copyless))
+      hiddenWithoutCopies.add(key);
     if (!options.personalFirst)
-      return { copies, routedWithoutCopies, personalFirstWaiting: new Set };
+      return { copies, hiddenWithoutCopies, personalFirstWaiting: new Set };
     const unheld = list.filter((identity) => !copies.get(tierLedgerIdentityKey(identity))?.some((copy) => copy.state === "current" && copy.embedHold));
-    return { copies, routedWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
+    return { copies, hiddenWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
   }
   onClose(listener) {
     (this.closeListeners ??= []).push(listener);
@@ -14744,45 +14779,50 @@ class TierLedger {
     })();
   }
   *corpusVisibilityPages(corpusId, identities) {
-    const flags = CORPUS_VISIBILITY_FLAGS_SQL;
-    const convert = corpusVisibilityFromRows;
     if (identities) {
-      for (let offset = 0;offset < identities.length; offset += 200) {
-        const batch = identities.slice(offset, offset + 200);
-        const rows = this.db.query(`SELECT ${flags} FROM json_each(?) j CROSS JOIN tier_copies c
-          WHERE c.provider = json_extract(j.value, '$[0]') AND c.account_scope = json_extract(j.value, '$[1]')
-            AND c.conversation_key = json_extract(j.value, '$[2]') AND c.provider_item_id = json_extract(j.value, '$[3]')
-            AND c.corpus_id = ?`).all(JSON.stringify(batch.map((identity) => [...idParams(identity)])), corpusId);
-        yield convert(rows);
+      for (let offset = 0;offset < identities.length; offset += IDENTITY_BATCH) {
+        const { sql, params } = corpusVisibilityBatchRead(corpusId, identities.slice(offset, offset + IDENTITY_BATCH));
+        yield corpusVisibilityFromRows(this.db.query(sql).all(...params));
       }
       return;
     }
-    const query = this.db.query(`SELECT c.rowid AS row_id, ${flags} FROM tier_copies c
-      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`);
-    for (let after = 0;; ) {
-      const rows = query.all(corpusId, after);
-      if (rows.length === 0)
-        return;
-      yield convert(rows);
-      after = rows.at(-1).row_id;
-      if (rows.length < 500)
-        return;
+    for (const sql of [CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_FLAGS_PAGE_SQL]) {
+      const query = this.db.query(sql);
+      for (let after = 0;; ) {
+        const rows = query.all(corpusId, after);
+        const flags = sql === CORPUS_INTENT_FLAGS_PAGE_SQL ? rows.filter((row) => row.hidden) : rows;
+        if (flags.length > 0)
+          yield corpusVisibilityFromRows(flags);
+        if (rows.length < 500)
+          break;
+        after = rows.at(-1).row_id;
+      }
     }
   }
-  *corpusVisibilityFlaggedSteps(corpusId) {
-    const sql = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
-      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
+  *corpusVisibilityFlaggedSteps(corpusId, identities) {
     const flagged = [];
-    for (let after = 0;; ) {
-      const rows = yield { sql, params: [corpusId, after], mode: "all" };
+    const add = (rows) => {
       for (const row of corpusVisibilityFromRows(rows)) {
         if (row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread)
           flagged.push(row);
       }
-      if (rows.length < 500)
-        return flagged;
-      after = rows.at(-1).row_id;
+    };
+    if (identities) {
+      for (let offset = 0;offset < identities.length; offset += IDENTITY_BATCH) {
+        add(yield corpusVisibilityBatchRead(corpusId, identities.slice(offset, offset + IDENTITY_BATCH)));
+      }
+      return flagged;
     }
+    for (const sql of [CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_FLAGS_PAGE_SQL]) {
+      for (let after = 0;; ) {
+        const rows = yield { sql, params: [corpusId, after], mode: "all" };
+        add(rows);
+        if (rows.length < 500)
+          break;
+        after = rows.at(-1).row_id;
+      }
+    }
+    return flagged;
   }
   corpusCopyIdentities(corpusId, filter) {
     const rows = this.db.query(`
@@ -21178,16 +21218,16 @@ function* itemSecretSteps(ledger, identity) {
 function visibilityRows(identities, read) {
   return new Map(identities.map((identity) => {
     const key = tierLedgerIdentityKey(identity);
-    return [key, { copies: read.copies.get(key), routed: read.routedWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
+    return [key, { copies: read.copies.get(key), hiddenWithoutCopies: read.hiddenWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
   }));
 }
 function visibilityFromRows(rows) {
-  const result = { copies: new Map, routedWithoutCopies: new Set, personalFirstWaiting: new Set };
+  const result = { copies: new Map, hiddenWithoutCopies: new Set, personalFirstWaiting: new Set };
   for (const [key, row] of rows) {
     if (row.copies)
       result.copies.set(key, row.copies);
-    if (row.routed)
-      result.routedWithoutCopies.add(key);
+    if (row.hiddenWithoutCopies)
+      result.hiddenWithoutCopies.add(key);
     if (row.waiting)
       result.personalFirstWaiting.add(key);
   }
@@ -21279,12 +21319,22 @@ function* judge(lane, parents, depth) {
     for (const row of list)
       identities.set(tierLedgerIdentityKey(row.identity), row.identity);
   }
+  for (const parent of parents) {
+    if (!rows.has(parentKey(parent)) && parent.identity)
+      identities.set(tierLedgerIdentityKey(parent.identity), parent.identity);
+  }
   const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
   const climbing = new Map;
   for (const parent of parents) {
     const key = parentKey(parent);
     const list = rows.get(key) ?? [];
     const identity = list[0]?.identity;
+    const knownIdentity = identity ?? parent.identity;
+    const state = knownIdentity && states?.get(tierLedgerIdentityKey(knownIdentity));
+    if (state?.hidingIntent === "deletion") {
+      verdicts.set(key, HIDDEN);
+      continue;
+    }
     const active = list.filter((row) => row.active);
     const locations = list.filter((row) => row.secret);
     if (locations.length > 0) {
@@ -21295,7 +21345,7 @@ function* judge(lane, parents, depth) {
       continue;
     }
     if (!identity) {
-      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
+      if (state?.hidingIntent === "secret" || ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
         verdicts.set(key, HIDDEN);
       } else {
         verdicts.set(key, { visible: false, gone: true });
@@ -21306,10 +21356,9 @@ function* judge(lane, parents, depth) {
     if (!ledger) {
       visible = active.length > 0;
     } else {
-      const state = states?.get(tierLedgerIdentityKey(identity));
       const copies = state?.copies ?? [];
       visible = copies.length === 0 ? state?.record?.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity)))
+      if (!visible && active.length > 0 && (state?.hidingIntent === "secret" || (yield* itemSecretSteps(ledger, identity))))
         visible = true;
     }
     if (visible) {
@@ -24421,33 +24470,6 @@ function* hiddenVisibilityFeedReads(table, after, startCursor) {
   }
   return { cursor, identities: [...identities.values()] };
 }
-function* incrementalVisibilityReads(ledger, corpusId, identities) {
-  const flags = [];
-  for (let offset = 0;offset < identities.length; offset += 200) {
-    const walk = ledger.corpusVisibilityFlaggedSteps(corpusId);
-    const first = walk.next();
-    const seek = "AND c.rowid > ? ORDER BY c.rowid LIMIT 500";
-    if (first.done || first.value.mode !== "all" || !first.value.sql.endsWith(seek))
-      throw new VisibilityChangedError;
-    const sql = first.value.sql.replace(seek, `AND c.rowid IN (
-      SELECT keyed.rowid FROM json_each(?) j CROSS JOIN tier_copies keyed
-      WHERE keyed.provider = json_extract(j.value, '$[0]') AND keyed.account_scope = json_extract(j.value, '$[1]')
-        AND keyed.conversation_key = json_extract(j.value, '$[2]') AND keyed.provider_item_id = json_extract(j.value, '$[3]')
-        AND keyed.corpus_id = ?) ORDER BY c.rowid LIMIT 500`);
-    const keys = identities.slice(offset, offset + 200).map((identity) => [
-      identity.provider,
-      identity.accountScope,
-      normalizeConversationId(identity.providerConversationId),
-      identity.providerItemId
-    ]);
-    const rows = yield { sql, params: [corpusId, JSON.stringify(keys), corpusId], mode: "all" };
-    const converted = walk.next(rows);
-    if (!converted.done)
-      throw new VisibilityChangedError;
-    flags.push(...converted.value);
-  }
-  return flags;
-}
 var EMBEDDING_WORK_PAGE_ROWS = 5000;
 var VISIBILITY_HOLD_WAITS = 100;
 var VISIBILITY_HOLD_WAIT_MS = 10;
@@ -25655,18 +25677,23 @@ class LocalConnectorStore {
     rows = rows.filter((row) => layerOf(row) !== "content" || !this.onDemandContentHeld(identityOf(row)));
     if (rows.length === 0)
       return [];
-    let copies;
+    let visibility;
     try {
       const ledger = this.visibilityLedger();
-      if (ledger && ledger.corpusHasCopies(this.corpusId))
-        copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf)).copies, () => ledgerVisibilityOffThread(ledger, rows.map(identityOf)).then((read) => read.copies));
+      if (ledger) {
+        const identities = rows.map(identityOf);
+        visibility = yield* visibilityRead(() => ledgerVisibilityHere(ledger, identities), () => ledgerVisibilityOffThread(ledger, identities));
+      }
     } catch (error) {
       if (throwOnUnavailable)
         throw error;
       return [];
     }
-    const served = copies ? rows.filter((row) => {
-      const here = copies.get(tierLedgerIdentityKey(identityOf(row)));
+    const served = visibility ? rows.filter((row) => {
+      const key = tierLedgerIdentityKey(identityOf(row));
+      if (visibility.hiddenWithoutCopies.has(key))
+        return false;
+      const here = visibility.copies.get(key);
       return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
     }) : [...rows];
     const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf));
@@ -25946,7 +25973,7 @@ class LocalConnectorStore {
         if (changed) {
           let flags;
           if (this.hiddenSetIncrementalOffLoop) {
-            flags = yield { find: this.incrementalHiddenFinder(ledger, () => [...ledger.corpusVisibilityPages(this.corpusId, changed)].flat(), () => ledgerReadOffThread(ledger, incrementalVisibilityReads(ledger, this.corpusId, changed), BACKGROUND_READS)) };
+            flags = yield { find: this.incrementalHiddenFinder(ledger, () => [...ledger.corpusVisibilityPages(this.corpusId, changed)].flat(), () => ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId, changed), BACKGROUND_READS)) };
           } else {
             flags = [];
             for (const page of ledger.corpusVisibilityPages(this.corpusId, changed)) {
@@ -26000,7 +26027,8 @@ class LocalConnectorStore {
   }
   ledgerIdOf(ledger) {
     try {
-      return ledger.ledgerId();
+      const id = ledger.ledgerId();
+      return id === undefined ? undefined : `v2:${id}`;
     } catch {
       return;
     }
@@ -32284,16 +32312,7 @@ ${parentKey(ref)}`, { ref, origin });
       return { rows: [], skippedReason: scanned.skippedReason };
     const { bestByItem, dimensionMismatches } = scanned;
     const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-    const rankedItems = [];
-    let candidateOffset = 0;
-    while (rankedItems.length < limit && candidateOffset < candidates.length) {
-      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
-      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
-      for (const candidate of batch)
-        if (visible.has(candidate[0]))
-          rankedItems.push(candidate);
-      candidateOffset += batch.length;
-    }
+    const rankedItems = candidates.length > 0 ? await visibilityAwaited(() => this.rankVisibleVectorItems(candidates, limit, selectedAccount, filters), this.childVisibilityLane()) : [];
     const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
     const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
     const laneRows = searchRows.flatMap((row) => {
@@ -32309,6 +32328,18 @@ ${parentKey(ref)}`, { ref, origin });
       rows: laneRows,
       ...scanned.cutReason !== undefined ? { skippedReason: scanned.cutReason } : laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
     };
+  }
+  *rankVisibleVectorItems(candidates, limit, accountScope, filters) {
+    const ranked = [];
+    for (let offset = 0;ranked.length < limit && offset < candidates.length; ) {
+      const batch = candidates.slice(offset, offset + Math.min(200, limit - ranked.length));
+      const visible = yield* this.visibleVectorItemPks(batch.map(([pk]) => pk), accountScope, filters);
+      for (const candidate of batch)
+        if (visible.has(candidate[0]))
+          ranked.push(candidate);
+      offset += batch.length;
+    }
+    return ranked;
   }
   vectorScanExcludedItemPks() {
     if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
@@ -32494,23 +32525,22 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
   }
-  visibleVectorItemPks(itemPks, accountScope, filters) {
-    const visible = new Set;
+  *visibleVectorItemPks(itemPks, accountScope, filters) {
     const selectedFilters = connectorStoreFilterSql(filters);
-    for (let offset = 0;offset < itemPks.length; offset += 200) {
-      const batch = itemPks.slice(offset, offset + 200);
-      const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
-        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
-      for (const row of this.tierVisibleRows(rows, (row) => ({
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-      }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
-        visible.add(row.item_pk);
-    }
-    return visible;
+    const rows = yield* this.visibilityStoreRead({
+      sql: `SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM items i WHERE i.item_pk IN (${itemPks.map(() => "?").join(",")}) AND i.tombstoned = 0
+      ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`,
+      params: [...itemPks, ...accountScope ? [accountScope] : [], ...selectedFilters.params],
+      mode: "all"
+    });
+    const visible = yield* this.tierVisibleRowsSteps(rows, (row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+    }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold));
+    return new Set(visible.map((row) => row.item_pk));
   }
   searchRowsByItemPks(itemPks, accountScope, filters) {
     if (itemPks.length === 0)
