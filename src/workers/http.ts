@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { DASHBOARD_BACKUP_PATHS } from './dashboard/backup-paths.ts';
 import { dashboardSessionMarker } from './dashboard/session-marker.ts';
+import { clickTraces, logClickTrace, PRIVACY_ITEM_SET_PATH, readClickId, type ClickTrace } from './engine-split/click-trace.ts';
 import { isLoopbackAddress, requestPeerAddress, requestFromOwnerSocket } from '../core/request-peer.ts';
 import { dashboardQueryTokenFromWorkerAuthToken, normalizeWorkerAuthToken } from '../core/worker-auth.ts';
 import {
@@ -36,6 +37,7 @@ export interface WorkerBearerAuthOptions {
    */
   sessionSecret?: string;
   requireOwnerSocket?: boolean;
+  tracePrivacyClicks?: boolean;
 }
 
 /**
@@ -135,6 +137,14 @@ export function withWorkerBearerAuth(
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request: Request): Promise<Response> => {
+    const clickId = options.tracePrivacyClicks && request.method === 'POST' ? readClickId(request) : undefined;
+    const clickTrace: ClickTrace | undefined = clickId && new URL(request.url).pathname === PRIVACY_ITEM_SET_PATH
+      ? { id: clickId, ingress: performance.now(), attempts: 0 }
+      : undefined;
+    if (clickTrace) {
+      clickTraces.set(request, clickTrace);
+      logClickTrace(clickTrace.id, undefined, 'ingress', 'front', 'stage=before_session_csrf');
+    }
     const presentedAuthorization = request.headers.get('Authorization');
     const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
     const presentedGatewayCallbackPeer = request.headers.get(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
@@ -338,11 +348,15 @@ export function withWorkerBearerAuth(
         // bearer's launch ticket redeemed.
         if (isDashboardLocalGradeRoute(request)) {
           if (authorization.grade !== 'local') return dashboardLocalGradeRefusal(request);
-          return withRenewedDashboardControlCookie(
+          const response = withRenewedDashboardControlCookie(
             await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)),
             authorization,
             now(),
           );
+          if (clickTrace && response.status === 202) {
+            logClickTrace(clickTrace.id, clickTrace.requestId, 'answer', 'front', `total_ms=${Math.round(performance.now() - clickTrace.ingress)}`);
+          }
+          return response;
         }
         // A panel tool call carries which session made it, so a file token
         // the dashboard read minted for this session opens for it alone.

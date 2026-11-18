@@ -181,7 +181,7 @@
     "src/workers/dropbox-files/open-target.ts": 1,
     "src/workers/dropbox-files/provider-client.ts": 2,
     "src/workers/dropbox-files/provider-store-sync.ts": 1,
-    "src/workers/engine-split/client.ts": 2,
+    "src/workers/engine-split/client.ts": 1,
     "src/workers/engine-split/commands.ts": 2,
     "src/workers/engine-split/front-history.ts": 1,
     "src/workers/engine-split/front-scheduler.ts": 2,

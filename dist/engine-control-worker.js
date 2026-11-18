@@ -456,6 +456,18 @@ var ENGINE_MODEL_COMPLETE_PATH = "/engine/model/complete";
 // src/workers/http.ts
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 
+// src/workers/engine-split/click-trace.ts
+var CLICK_ID_HEADER = "X-Olympus-Click-Id";
+var PRIVACY_ITEM_SET_PATH = "/dashboard/privacy/items/set";
+function readClickId(request) {
+  const id = request.headers.get(CLICK_ID_HEADER);
+  return id && id.length <= 80 && !/[^A-Za-z0-9_-]/.test(id) ? id : undefined;
+}
+var clickTraces = new WeakMap;
+function logClickTrace(id, requestId, point, role, details, at = new Date().toISOString()) {
+  console.log(`${at} [olympus:click-trace] id=${id} request_id=${requestId ?? "none"} point=${point} role=${role} ${details}`);
+}
+
 // src/core/request-peer.ts
 var ownerSockets = new WeakSet;
 var peers = new WeakMap;
@@ -845,7 +857,7 @@ function forwardedRequest(kind, value) {
   return { path, headers, body };
 }
 var forwardedRecordIds = new WeakMap;
-var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade", CLICK_ID_HEADER.toLowerCase()]);
 function parseEngineCommandEnvelope(value) {
   const record = asRecord2(value);
   const id = record?.id;
@@ -1021,7 +1033,8 @@ function createEngineCommandHandler(options) {
         const envelope = parseEngineCommandEnvelope(await request.json().catch(() => {
           return;
         }));
-        let receipt = options.ledger.submit(envelope);
+        const clickId = envelope.command.kind === "tier_override" && envelope.command.request.path === PRIVACY_ITEM_SET_PATH ? readClickId(request) : undefined;
+        let receipt = options.ledger.submit(envelope, clickId);
         if (envelope.command.kind === "judge_now" && receipt.state === "received") {
           const waitMs = envelope.command.budgetMs + 100;
           let timer;
@@ -1126,7 +1139,7 @@ class EngineCommandMirror {
   get instanceId() {
     return this.options.instanceId;
   }
-  submit(envelope) {
+  submit(envelope, clickId) {
     this.prune();
     const digest = createHash("sha256").update(JSON.stringify(envelope.command)).digest("hex");
     const existing = this.entries.get(envelope.id);
@@ -1148,6 +1161,8 @@ class EngineCommandMirror {
       receipt: { id: envelope.id, state: "received", instance_id: this.options.instanceId }
     };
     this.entries.set(envelope.id, entry);
+    if (clickId)
+      logClickTrace(clickId, envelope.id, "control_receipt", "background", "served_by=control-thread");
     this.options.send(envelope);
     return this.answer(entry);
   }

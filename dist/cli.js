@@ -62282,6 +62282,19 @@ function dashboardSessionMarker(csrfToken) {
 }
 var init_session_marker = () => {};
 
+// src/workers/engine-split/click-trace.ts
+function readClickId(request) {
+  const id = request.headers.get(CLICK_ID_HEADER);
+  return id && id.length <= 80 && !/[^A-Za-z0-9_-]/.test(id) ? id : undefined;
+}
+function logClickTrace(id, requestId, point, role, details, at = new Date().toISOString()) {
+  console.log(`${at} [olympus:click-trace] id=${id} request_id=${requestId ?? "none"} point=${point} role=${role} ${details}`);
+}
+var CLICK_ID_HEADER = "X-Olympus-Click-Id", PRIVACY_ITEM_SET_PATH = "/dashboard/privacy/items/set", clickTraces;
+var init_click_trace = __esm(() => {
+  clickTraces = new WeakMap;
+});
+
 // src/core/request-peer.ts
 function requestFromOwnerSocket(request) {
   return ownerSockets.has(request);
@@ -62343,6 +62356,12 @@ function withWorkerBearerAuth(fetchHandler, options) {
   const agentMintAllowed = agentMintLimiter(now);
   const remoteAccessToggleAllowed = agentMintLimiter(now, REMOTE_ACCESS_TOGGLE_LIMIT, REMOTE_ACCESS_TOGGLE_WINDOW_MS);
   return async (request) => {
+    const clickId = options.tracePrivacyClicks && request.method === "POST" ? readClickId(request) : undefined;
+    const clickTrace = clickId && new URL(request.url).pathname === PRIVACY_ITEM_SET_PATH ? { id: clickId, ingress: performance.now(), attempts: 0 } : undefined;
+    if (clickTrace) {
+      clickTraces.set(request, clickTrace);
+      logClickTrace(clickTrace.id, undefined, "ingress", "front", "stage=before_session_csrf");
+    }
     const presentedAuthorization = request.headers.get("Authorization");
     const presentedGatewayPublicOrigin = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
     const presentedGatewayCallbackPeer = request.headers.get(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
@@ -62477,7 +62496,11 @@ function withWorkerBearerAuth(fetchHandler, options) {
         if (isDashboardLocalGradeRoute(request)) {
           if (authorization.grade !== "local")
             return dashboardLocalGradeRefusal(request);
-          return withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
+          const response = withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
+          if (clickTrace && response.status === 202) {
+            logClickTrace(clickTrace.id, clickTrace.requestId, "answer", "front", `total_ms=${Math.round(performance.now() - clickTrace.ingress)}`);
+          }
+          return response;
         }
         if (isDashboardToolsCallRoute(request)) {
           return withRenewedDashboardControlCookie(await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade)), authorization, now());
@@ -63144,6 +63167,7 @@ var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECOND
 var init_http = __esm(() => {
   init_backup_paths();
   init_session_marker();
+  init_click_trace();
   init_request_peer();
   init_worker_auth();
   init_dashboard_launch();
@@ -63444,7 +63468,7 @@ class EngineCommandLedger {
   get instanceId() {
     return this.options.instanceId;
   }
-  submit(envelope) {
+  submit(envelope, clickId) {
     this.prune();
     const body = JSON.stringify(envelope.command);
     const existing = this.entries.get(envelope.id);
@@ -63460,6 +63484,8 @@ class EngineCommandLedger {
     const settled = previous.then(() => this.apply(entry, envelope.command));
     entry.settled = settled;
     this.entries.set(envelope.id, entry);
+    if (clickId)
+      logClickTrace(clickId, envelope.id, "control_receipt", "background", "served_by=loop");
     this.chains.set(key, settled);
     settled.then(() => {
       if (this.chains.get(key) === settled)
@@ -63540,7 +63566,8 @@ function createEngineCommandHandler(options) {
         const envelope = parseEngineCommandEnvelope(await request.json().catch(() => {
           return;
         }));
-        let receipt = options.ledger.submit(envelope);
+        const clickId = envelope.command.kind === "tier_override" && envelope.command.request.path === PRIVACY_ITEM_SET_PATH ? readClickId(request) : undefined;
+        let receipt = options.ledger.submit(envelope, clickId);
         if (envelope.command.kind === "judge_now" && receipt.state === "received") {
           const waitMs = envelope.command.budgetMs + 100;
           let timer;
@@ -63633,6 +63660,7 @@ var init_commands = __esm(() => {
   init_operation_error();
   init_http();
   init_answer_activity();
+  init_click_trace();
   ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction", "pacing"];
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_JUDGE_NOW_MAX_BUDGET_MS = RELEASE_CHUNK_JUDGE_BUDGET_MS;
@@ -63685,7 +63713,7 @@ var init_commands = __esm(() => {
   SOURCE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/;
   RESOURCE = /^[\x21-\x7e]{1,200}$/;
   forwardedRecordIds = new WeakMap;
-  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade", CLICK_ID_HEADER.toLowerCase()]);
   MODEL_PRIORITIES = ["owner", "background", "maintenance"];
 });
 
@@ -245113,7 +245141,7 @@ class EngineCommandClient {
   async post(command, options = {}) {
     const id = options.id ?? this.newId();
     const deadline = this.now() + (options.timeoutMs ?? 30000);
-    return this.postUntil(id, command, deadline);
+    return this.postUntil(id, command, deadline, options.clickTrace);
   }
   applying() {
     let oldest = Number.POSITIVE_INFINITY;
@@ -245132,7 +245160,7 @@ class EngineCommandClient {
   async sendUntilSettled(id, command, options) {
     const silenceMs = options.timeoutMs ?? 60000;
     let deadline = this.now() + silenceMs;
-    let receipt = await this.postUntil(id, command, deadline);
+    let receipt = await this.postUntil(id, command, deadline, options.clickTrace);
     if (receipt.state === "received" && OWNER_ACTION_KINDS.has(command.kind))
       this.held.set(id, this.now());
     if (receipt.state === "received")
@@ -245151,32 +245179,46 @@ class EngineCommandClient {
         continue;
       }
       if (answer?.status === 404) {
-        receipt = await this.postUntil(id, command, deadline);
+        receipt = await this.postUntil(id, command, deadline, options.clickTrace);
         continue;
       }
       await this.sleep(RETRY_DELAYS_MS[Math.min(attempt++, RETRY_DELAYS_MS.length - 1)]);
     }
     return receipt;
   }
-  async postUntil(id, command, deadline) {
-    let attempt = 0;
+  async postUntil(id, command, deadline, clickTrace) {
+    if (clickTrace)
+      clickTrace.requestId = id;
+    let retry = 0;
     for (;; ) {
+      const attempt = clickTrace ? { number: ++clickTrace.attempts, startedAt: new Date().toISOString(), started: performance.now() } : undefined;
+      const headers = { "content-type": "application/json" };
+      if (clickTrace)
+        headers[CLICK_ID_HEADER] = clickTrace.id;
       const answer = await this.request(ENGINE_COMMANDS_PATH, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers,
         body: JSON.stringify({ id, command })
-      }, deadline);
-      if (answer && (answer.status === 200 || answer.status === 202))
+      }, deadline, 0, attempt);
+      const accepted = answer && (answer.status === 200 || answer.status === 202);
+      const refused = answer && answer.status >= 400 && answer.status < 500 && answer.status !== 404;
+      const retryDelay = !accepted && !refused && this.now() < deadline ? RETRY_DELAYS_MS[Math.min(retry++, RETRY_DELAYS_MS.length - 1)] : undefined;
+      if (clickTrace && attempt) {
+        const outcome = answer ? `status=${answer.status}` : `error_class=${attempt.errorClass}`;
+        const delay = retryDelay === undefined ? "" : ` retry_delay_ms=${retryDelay}`;
+        logClickTrace(clickTrace.id, id, "post_attempt", "front", `attempt=${attempt.number} ${outcome} elapsed_ms=${Math.round(performance.now() - attempt.started)}${delay}`, attempt.startedAt);
+      }
+      if (accepted)
         return answer.body;
-      if (answer && answer.status >= 400 && answer.status < 500 && answer.status !== 404) {
+      if (refused) {
         throw new Error(typeof answer.body?.error === "string" ? answer.body.error : "The background refused the command.");
       }
-      if (this.now() >= deadline)
+      if (retryDelay === undefined)
         throw new EngineCommandUnavailableError;
-      await this.sleep(RETRY_DELAYS_MS[Math.min(attempt++, RETRY_DELAYS_MS.length - 1)]);
+      await this.sleep(retryDelay);
     }
   }
-  async request(path, init, deadline, waitMs = 0) {
+  async request(path, init, deadline, waitMs = 0, attempt) {
     const limitMs = Math.max(1, Math.min(waitMs + REQUEST_GRACE_MS, deadline - this.now()));
     const controller = new AbortController;
     let timedOut;
@@ -245202,7 +245244,17 @@ class EngineCommandClient {
           this.options.onInstance?.(body.instance_id);
         return { status: response.status, body };
       })()]);
-    } catch {
+    } catch (error) {
+      if (attempt) {
+        if (error instanceof RequestTimedOut)
+          attempt.errorClass = "RequestTimedOut";
+        else if (error instanceof TypeError)
+          attempt.errorClass = "TypeError";
+        else if (error instanceof DOMException)
+          attempt.errorClass = "DOMException";
+        else
+          attempt.errorClass = error instanceof Error ? "Error" : "NonError";
+      }
       return;
     } finally {
       this.clearTimer(timer);
@@ -245282,6 +245334,7 @@ class OwnerBusyRelay {
 var EngineCommandUnavailableError, OWNER_ACTION_KINDS, RETRY_DELAYS_MS, RESULT_WAIT_MS = 1e4, REQUEST_GRACE_MS = 15000, RequestTimedOut;
 var init_client5 = __esm(() => {
   init_engine_split();
+  init_click_trace();
   init_commands();
   EngineCommandUnavailableError = class EngineCommandUnavailableError extends Error {
     code = "engine_background_unavailable";
@@ -245890,10 +245943,10 @@ function tierCommandOnlyReads(body) {
 }
 function createEngineFrontRoutes(input) {
   const pid = input.pid ?? process.pid;
-  const exchange = async (kind, forwarded, onReceived) => {
+  const exchange = async (kind, forwarded, onReceived, clickTrace) => {
     let receipt;
     try {
-      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : OWNER_ACTION_WAIT_MS), ...onReceived ? { onReceived } : {} });
+      receipt = await input.client.send({ kind, request: forwarded, ...kind === "delete_source_data" ? { frontPid: pid } : {} }, { timeoutMs: input.timeoutMs ?? (kind === "data_export" ? DATA_EXPORT_WAIT_MS : kind === "source_sync" ? SOURCE_SYNC_WAIT_MS : kind === "extraction_queue" || kind === "embed_chunks" ? 15 * 60000 : OWNER_ACTION_WAIT_MS), ...onReceived ? { onReceived } : {}, ...clickTrace ? { clickTrace } : {} });
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : "The background engine is not answering." };
     }
@@ -245941,7 +245994,7 @@ function createEngineFrontRoutes(input) {
         release = protection.hold(identity);
       pendingPrivacyItems.add(id);
       received.resolve(pending(id, 202));
-    }).then((outcome) => {
+    }, clickTraces.get(request)).then((outcome) => {
       release?.();
       if (id) {
         pendingPrivacyItems.delete(id);
@@ -245968,7 +246021,7 @@ function createEngineFrontRoutes(input) {
     if (request.method !== "POST")
       return;
     const path = new URL(request.url).pathname;
-    if (input.pendingItemProtection && (path === "/dashboard/privacy/items/set" || path === "/dashboard/privacy/items/status") && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local") {
+    if (input.pendingItemProtection && (path === PRIVACY_ITEM_SET_PATH || path === "/dashboard/privacy/items/status") && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local") {
       if (!input.gate.isOpen())
         return Promise.resolve(restartingResponse(request));
       return path.endsWith("/status") ? privacyItemStatus(request) : changePrivacyItem(request, input.pendingItemProtection);
@@ -246102,6 +246155,7 @@ var init_runtime4 = __esm(() => {
   init_atomic_file();
   init_worker_transport();
   init_client5();
+  init_click_trace();
   init_control_plane();
   init_answer_activity();
   init_commands();
@@ -276620,7 +276674,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         readOnlyFor: isDemoGrant,
         ...chatgptSurface
       }
-    })), withWorkerBearerAuth(withEngineBriefRoute(frontWorkerFetch, { view: (signal) => dashboardViewModel(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }))))))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath)
+    })), withWorkerBearerAuth(withEngineBriefRoute(frontWorkerFetch, { view: (signal) => dashboardViewModel(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret, tracePrivacyClicks: !!frontRoutes }))))))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath)
   };
   const fetchWithTierLedgerStatus = serverOptions.fetch;
   serverOptions.fetch = async (request, server) => {

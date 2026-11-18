@@ -6364,7 +6364,7 @@ export async function main(): Promise<void> {
           },
         })),
         // The brief route must pass both bearer and owner-socket authorization.
-        withWorkerBearerAuth(withEngineBriefRoute(frontWorkerFetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
+        withWorkerBearerAuth(withEngineBriefRoute(frontWorkerFetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret, tracePrivacyClicks: !!frontRoutes }),
       )),
     )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };
