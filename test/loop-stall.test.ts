@@ -93,11 +93,12 @@ test('loop-stall gate uses after-ready limits with the workload complete and no 
   const healthy = {
     background: { max_ms: 29_999, over_budget: 1, beats: 1, pre_ready_ms: 107_372 },
     front: { max_ms: 999, over_budget: 1, beats: 1, pre_ready_ms: 50_000 },
-    workload_ok: true, wal_ok: true, ack_ok: true,
+    workload_ok: true, wal_ok: true, ack_ok: true, privacy_restart_ok: true,
   };
   expect(gate(healthy)).toBe(true);
   expect(gate({ ...healthy, background: { ...healthy.background, max_ms: 30_000 } })).toBe(false);
   expect(gate({ ...healthy, ack_ok: false })).toBe(false);
+  expect(gate({ ...healthy, privacy_restart_ok: false })).toBe(false);
   expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 3_700 }, runCase: 'boot-after-upgrade' })).toBe(true);
   expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 30_000 }, runCase: 'boot-after-upgrade' })).toBe(false);
   expect(gate({ ...healthy, front: { ...healthy.front, max_ms: 3_700 }, runCase: 'steady' })).toBe(false);

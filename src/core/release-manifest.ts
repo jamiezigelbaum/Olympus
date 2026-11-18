@@ -77,9 +77,9 @@ export interface ReleaseManifest {
  *   item the ledger never classified); its tier is still its corpus's.
  * - `public_or_personal`: classified below Private.
  * - `private`: classified Private, or moving to Private.
- * - `secret`: classified Secret, or moving to Secret.
+ * - `secret`: classified Secret, moving to Secret, or subject to a Secret write.
  * - `unknown`: cannot be proven (no account scope in a tiered corpus).
- * `gone`: routed, with no current copy left anywhere.
+ * `gone`: pending deletion, or routed with no current copy left anywhere.
  * `hiddenByParent`: a child item whose parent may not be seen any more (it is
  * also `gone`). Unlike an item that moved or left, what an answer said about
  * such a child may sit in its prose and not in a citation, so a collector
@@ -88,6 +88,8 @@ export interface ReleaseManifest {
 export interface ReleaseInputVerdict {
   tier: 'legacy' | 'public_or_personal' | 'private' | 'secret' | 'unknown';
   gone: boolean;
+  /** A committed deletion intent withholds the whole answer while removal settles. */
+  pendingDeletion?: boolean;
   hiddenByParent?: boolean;
 }
 

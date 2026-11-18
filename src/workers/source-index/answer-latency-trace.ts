@@ -368,10 +368,6 @@ export function runWithSourceAnswerTrace<T>(
   return withStoreReadPriority(() => storage.run(trace, run));
 }
 
-export function withoutSourceAnswerTrace<T>(run: () => T): T {
-  return storage.exit(run);
-}
-
 export function currentSourceAnswerTrace(): MutableTrace | undefined {
   return storage.getStore();
 }

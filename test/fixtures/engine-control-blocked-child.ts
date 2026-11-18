@@ -25,7 +25,6 @@ let collected = 0;
 const commands = startEngineBackgroundServer({
   socketPath,
   authToken: process.env.FIXTURE_TOKEN!,
-  instanceId: 'blocked-loop-fixture',
   handlers: {
     tier_override: ({ request }: { request: EngineForwardedRequest }) => {
       if (privacy && request.path === '/dashboard/privacy/items/set') {
@@ -52,6 +51,7 @@ const watch = setInterval(() => {
   // until the lock is released (class 5 of the freeze report, a lock wait).
   const db = new Database(dbPath);
   db.exec('PRAGMA busy_timeout = 600000');
+  writeFileSync(join(folder, 'blocking'), '');
   db.exec('BEGIN IMMEDIATE');
   db.exec('INSERT INTO held (at) VALUES (1)');
   db.exec('COMMIT');

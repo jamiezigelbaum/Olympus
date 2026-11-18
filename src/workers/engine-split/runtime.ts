@@ -11,7 +11,7 @@ import { engineStartingAnswer, engineStartingResponse } from '../../core/worker-
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { lstatSync, rmSync } from 'node:fs';
-import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, prepareEngineBackgroundSocketDirectory } from '../../core/engine-split.ts';
+import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from '../../core/engine-split.ts';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { sharedDataPath } from '../../core/olympus-layout.ts';
@@ -223,6 +223,8 @@ export interface EngineFront {
   completeModel(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
   /** Whether the background's boot work is done and its process is alive, busy or not (the front's health reports it). */
   backgroundReady(): Promise<boolean>;
+  /** Keep the starting listener in place while the previous front's Private clicks can still commit. */
+  waitForPendingPrivacyRaises(): Promise<void>;
   stop(): void;
 }
 
@@ -276,7 +278,14 @@ export function createEngineFront(input: {
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
   // Busy is not unreachable: the background's receipt and heartbeat say it is up.
   const backgroundReady = async () => backgroundBootDone(readBootProgress(input.env));
-  return { client, ownerBusy: relay, status, backgroundActivity: () => cached?.read?.snapshot.activity ?? 'idle', completeModel, backgroundReady, stop: () => { clearInterval(poll); relay?.stop(); } };
+  const waitForPendingPrivacyRaises = async () => {
+    // The control thread can answer even when the background's loop is held.
+    // This only bounds each readiness probe. The writer keeps applying its commands.
+    const probeMs = 250;
+    while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true)) await Bun.sleep(probeMs);
+  };
+  return { client, ownerBusy: relay, status, backgroundActivity: () => cached?.read?.snapshot.activity ?? 'idle', completeModel, backgroundReady,
+    waitForPendingPrivacyRaises, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
 // How long the front waits on a background that has stopped answering. A

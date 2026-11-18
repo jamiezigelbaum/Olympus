@@ -106,10 +106,10 @@ test('held-only vectors preserve prefix search hits and metadata match counts', 
   expect(metadataAfter.hits).toEqual(metadataBefore.hits);
   expect(metadataAfter.matchCount).toEqual(metadataBefore.matchCount);
   expect(f.store.hasEmbeddings(f.privateProvider.modelId)).toBe(false);
-  expect((await adapter.hybridAvailability!(request)).servable).toBe(false);
+  expect(adapter.hybridAvailability!(request).servable).toBe(false);
   f.verdict('secure');
   expect(f.store.hasEmbeddings(f.privateProvider.modelId)).toBe(true);
-  expect((await adapter.hybridAvailability!(request)).servable).toBe(true);
+  expect(adapter.hybridAvailability!(request).servable).toBe(true);
 });
 
 test('automatic Personal move reuses held vectors with a configured identity in a fresh store', async () => {

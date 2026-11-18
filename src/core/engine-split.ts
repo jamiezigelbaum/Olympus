@@ -42,6 +42,7 @@ export function engineRoleFromEnv(env: Record<string, string | undefined> = proc
 /** The origin command URLs use. The request goes to the socket; the host name only names the route. */
 export const ENGINE_BACKGROUND_ORIGIN = 'http://olympus-background';
 export const ENGINE_READY_PATH = '/engine/ready';
+export const ENGINE_PRIVACY_READY_QUERY = 'privacy_raises_settled';
 export const ENGINE_COMMANDS_PATH = '/engine/commands';
 /** The built-in private model's completions: the background holds the model; the front asks it here. */
 export const ENGINE_MODEL_COMPLETE_PATH = '/engine/model/complete';
@@ -72,6 +73,7 @@ export interface EngineReadyBody {
   instance_id: string;
   /** Set once the background's boot work (lock, deletions, storage migration) is done. */
   schema_current: boolean;
+  privacy_raises_settled?: boolean;
 }
 
 /**
@@ -85,12 +87,14 @@ export async function engineBackgroundAnswer(
   authToken: string,
   instanceId: string | undefined,
   timeoutMs: number,
+  requireSettledPrivacyRaises = false,
 ): Promise<'ready' | 'alive' | 'down'> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
   try {
-    const response = await fetchBackground(ENGINE_BACKGROUND_ORIGIN + ENGINE_READY_PATH, {
+    const path = requireSettledPrivacyRaises ? ENGINE_READY_PATH + '?' + ENGINE_PRIVACY_READY_QUERY : ENGINE_READY_PATH;
+    const response = await fetchBackground(ENGINE_BACKGROUND_ORIGIN + path, {
       method: 'GET',
       headers: { Authorization: `Bearer ${authToken}` },
       signal: controller.signal,
@@ -101,6 +105,7 @@ export async function engineBackgroundAnswer(
     }
     const body = await response.json().catch(() => undefined) as Partial<EngineReadyBody> | undefined;
     return body?.ready === true && body.schema_current === true
+      && (!requireSettledPrivacyRaises || body.privacy_raises_settled === true)
       && (instanceId === undefined || body.instance_id === instanceId) ? 'ready' : 'alive';
   } catch (error) {
     // Out of time (this check's own abort) means it is there but busy.
@@ -120,6 +125,7 @@ export async function probeEngineBackground(
   authToken: string,
   instanceId: string | undefined,
   timeoutMs: number,
+  requireSettledPrivacyRaises = false,
 ): Promise<boolean> {
-  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) === 'ready';
+  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs, requireSettledPrivacyRaises) === 'ready';
 }

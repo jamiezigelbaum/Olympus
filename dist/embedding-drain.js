@@ -12196,13 +12196,7 @@ function* copiesSteps(list) {
       else
         result.set(key, [copyFromRow(row)]);
     }
-    const pending = yield {
-      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
-        WHERE kind IN ('deletion', 'secret')
-          AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
-      params,
-      mode: "all"
-    };
+    const pending = yield* hidingIntentsSteps(values, params);
     for (const row of pending) {
       const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
       if (hidden) {
@@ -12213,6 +12207,15 @@ function* copiesSteps(list) {
     }
   }
   return result;
+}
+function* hidingIntentsSteps(values, params) {
+  return yield {
+    sql: `SELECT provider, account_scope, conversation_key, provider_item_id, kind FROM tier_write_intents
+      WHERE kind IN ('deletion', 'secret')
+        AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+    params,
+    mode: "all"
+  };
 }
 function* personalFirstWaitingSteps(list) {
   const result = new Set;
@@ -13391,9 +13394,6 @@ class TierLedger {
     return this.readSteps(this.itemIsSecretSteps(identity));
   }
   *itemIsSecretSteps(identity) {
-    return yield* TierLedger.itemIsSecretSteps(identity);
-  }
-  static *itemIsSecretSteps(identity) {
     const row = yield {
       sql: `SELECT override_json FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
@@ -13780,9 +13780,6 @@ class TierLedger {
     return this.readSteps(copiesSteps(uniqueIdentities(identities)));
   }
   *visibilityReadSteps(identities, options = {}) {
-    return yield* TierLedger.visibilityReadSteps(identities, options);
-  }
-  static *visibilityReadSteps(identities, options = {}) {
     const list = uniqueIdentities(identities);
     const copies = yield* copiesSteps(list);
     const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
@@ -13981,9 +13978,6 @@ class TierLedger {
     return this.readSteps(this.itemStatesSteps(identities));
   }
   *itemStatesSteps(identities) {
-    return yield* TierLedger.itemStatesSteps(identities);
-  }
-  static *itemStatesSteps(identities) {
     const result = new Map;
     const list = uniqueIdentities(identities);
     for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
@@ -14016,6 +14010,14 @@ class TierLedger {
         const override = overrideFromJson(row.override_json);
         if (state && override)
           state.override = override;
+      }
+      for (const row of yield* hidingIntentsSteps(values, params)) {
+        const key = tierLedgerIdentityKey(identityFromRow(row));
+        const state = result.get(key);
+        if (state)
+          state.hidingIntent = row.kind;
+        else
+          result.set(key, { copies: [], hidingIntent: row.kind });
       }
     }
     return result;
@@ -15342,6 +15344,9 @@ function trustDomainRank(domain) {
 function copyServingLayer(copies, layer) {
   return copies.find((copy) => copy.layers === "both" || copy.layers === layer);
 }
+function itemNamesHeldForJudgment(record, copies, corpusId) {
+  return record.metadataPending || contentHeldForJudgment(record) && !copies.some((copy) => copy.state === "current" && copy.layers === "metadata" && (corpusId === undefined || copy.corpusId === corpusId));
+}
 function ownerPriorOf(json) {
   try {
     const value = JSON.parse(json);
@@ -16069,9 +16074,6 @@ function overrideFromJson(json) {
 // src/core/source-index/read-progress.ts
 import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var progress2 = new AsyncLocalStorage6;
-function withoutSourceIndexReadProgress(run) {
-  return progress2.exit(run);
-}
 function noteSourceIndexReadProgress() {
   const report = progress2.getStore();
   if (!report)
@@ -17592,9 +17594,6 @@ var CONTENT_FREE_ERROR_CLASSES = new Set([
   "TrustedAnalystTimeoutError",
   "TypeError"
 ]);
-function withoutSourceAnswerTrace(run) {
-  return storage2.exit(run);
-}
 function currentSourceAnswerTrace() {
   return storage2.getStore();
 }
@@ -19062,9 +19061,6 @@ const connection = (path) => {
   if (held && held.file === file) return held.db;
   if (held) close(held.db);
   const db = open(path);
-  // data_version is comparable only on the same connection.
-  const id = crypto.randomUUID();
-  db.function('olympus_read_connection_id', () => id);
   connections.set(path, { db, file });
   return db;
 };
@@ -19457,35 +19453,26 @@ function serveSnapshotWaiters() {
 }
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
-  const store = options.store ?? dbPath;
-  const waiting = queues.get(store) ?? [];
+  const waiting = queues.get(dbPath) ?? [];
   const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
     report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve, reject) => {
-    const job = { store, path: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
+    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
     if (Number.isFinite(deadlineAtMs))
       job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
-    if (!queues.has(store)) {
-      queues.set(store, waiting);
-      turns.push(store);
+    if (!queues.has(dbPath)) {
+      queues.set(dbPath, waiting);
+      turns.push(dbPath);
     }
     dispatch();
   }).then((rows) => {
     noteSourceIndexReadProgress();
     return rows;
   });
-}
-async function readPoolDataVersion(dbPath, store) {
-  const row = await readOnPool(dbPath, {
-    sql: "SELECT olympus_read_connection_id() AS connection, data_version FROM pragma_data_version",
-    params: [],
-    mode: "get"
-  }, { store });
-  return `${row.connection}:${row.data_version}`;
 }
 function releaseOffThreadReads(dbPath) {
   releases.set(dbPath, (releases.get(dbPath) ?? 0) + 1);
@@ -19593,8 +19580,8 @@ function dispatch() {
     }
     reader.job = job;
     reader.executingStore = job.store;
-    observer?.(job.path, job.read);
-    send(reader, { op: "query", path: job.path, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
+    observer?.(job.store, job.read);
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
       job.sqlMs = ms;
     }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
       if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
@@ -21258,19 +21245,17 @@ function parentKey(parent) {
   return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
 }
 var HIDDEN = { visible: false, gone: false };
-function* parentVerdictsSteps(lane, parents, pooledLedger) {
+function* parentVerdictsSteps(lane, parents) {
   const unique = new Map;
   for (const parent of parents)
     unique.set(parentKey(parent), parent);
   try {
-    return yield* judge(lane, [...unique.values()], 0, pooledLedger);
-  } catch (error) {
-    if (pooledLedger !== undefined)
-      throw error;
+    return yield* judge(lane, [...unique.values()], 0);
+  } catch {
     return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
   }
 }
-function* judge(lane, parents, depth, pooledLedger) {
+function* judge(lane, parents, depth) {
   const verdicts = new Map;
   if (parents.length === 0)
     return verdicts;
@@ -21288,14 +21273,13 @@ function* judge(lane, parents, depth, pooledLedger) {
       rows.set(key, list);
     }
   }
-  const ledger = pooledLedger === undefined ? lane.ledger() : undefined;
+  const ledger = lane.ledger();
   const identities = new Map;
   for (const list of rows.values()) {
     for (const row of list)
       identities.set(tierLedgerIdentityKey(row.identity), row.identity);
   }
-  const states = identities.size === 0 ? undefined : pooledLedger ? yield* visibilityRead(pooledOnly, () => pooledLedger.itemStates([...identities.values()])) : ledger ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
-  const secretSteps = (identity) => pooledLedger ? visibilityRead(pooledOnly, () => pooledLedger.itemIsSecret(identity)) : ledger ? itemSecretSteps(ledger, identity) : undefined;
+  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
   const climbing = new Map;
   for (const parent of parents) {
     const key = parentKey(parent);
@@ -21311,8 +21295,7 @@ function* judge(lane, parents, depth, pooledLedger) {
       continue;
     }
     if (!identity) {
-      const secret = parent.identity && secretSteps(parent.identity);
-      if (secret && (yield* secret)) {
+      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
         verdicts.set(key, HIDDEN);
       } else {
         verdicts.set(key, { visible: false, gone: true });
@@ -21320,14 +21303,13 @@ function* judge(lane, parents, depth, pooledLedger) {
       continue;
     }
     let visible;
-    if (!ledger && !pooledLedger) {
+    if (!ledger) {
       visible = active.length > 0;
     } else {
       const state = states?.get(tierLedgerIdentityKey(identity));
       const copies = state?.copies ?? [];
-      visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      const secret = !visible && active.length > 0 && secretSteps(identity);
-      if (secret && (yield* secret))
+      visible = copies.length === 0 ? state?.record?.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
+      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity)))
         visible = true;
     }
     if (visible) {
@@ -21340,16 +21322,13 @@ function* judge(lane, parents, depth, pooledLedger) {
     }
   }
   if (climbing.size > 0) {
-    const above = yield* judge(lane, [...climbing.values()], depth + 1, pooledLedger);
+    const above = yield* judge(lane, [...climbing.values()], depth + 1);
     for (const [key, grandparent] of climbing) {
       if (above.get(parentKey(grandparent))?.visible !== true)
         verdicts.set(key, HIDDEN);
     }
   }
   return verdicts;
-}
-function pooledOnly() {
-  throw new Error("This visibility read requires the read pool");
 }
 function* itemVerdictsSteps(lane, items) {
   const asked = new Map;
@@ -21399,11 +21378,11 @@ function* itemVerdictsSteps(lane, items) {
   }
   return out;
 }
-function* childrenWithHiddenParentsSteps(lane, children, pooledLedger) {
+function* childrenWithHiddenParentsSteps(lane, children) {
   const hidden = new Set;
   if (children.length === 0)
     return hidden;
-  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent), pooledLedger);
+  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
   for (const child of children) {
     if (verdicts.get(parentKey(child.parent))?.visible !== true)
       hidden.add(child.key);
@@ -21426,18 +21405,16 @@ function* childLinksSteps(lane, probes) {
 function hiddenChildKeys(lane, probes) {
   return visibilityHere(hiddenChildKeysSteps(lane, probes));
 }
-function* hiddenChildKeysSteps(lane, probes, pooledLedger) {
+function* hiddenChildKeysSteps(lane, probes) {
   if (probes.length === 0)
     return new Set;
   let links;
   try {
     links = yield* childLinksSteps(lane, probes);
-  } catch (error) {
-    if (pooledLedger !== undefined)
-      throw error;
+  } catch {
     return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
   }
-  return yield* childrenWithHiddenParentsSteps(lane, links, pooledLedger);
+  return yield* childrenWithHiddenParentsSteps(lane, links);
 }
 
 // src/workers/connector-store/loop-pass.ts
@@ -23721,15 +23698,26 @@ function* effectiveItemVerdicts(scopes, inputs) {
       const state = states.get(tierLedgerIdentityKey(identity));
       if (!state)
         continue;
-      const { record, copies, override } = state;
+      const { record, copies, override, hidingIntent } = state;
+      if (hidingIntent === "secret") {
+        verdicts[index] = { tier: "secret", gone: false };
+        continue;
+      }
+      const pendingDeletion = hidingIntent === "deletion";
+      if (!record) {
+        if (pendingDeletion)
+          verdicts[index] = { tier: "legacy", gone: true, pendingDeletion: true };
+        continue;
+      }
       const namesOnly = inputs[index].layer === "names";
       const tiers = namesOnly ? [record.metadataTier, record.targetMetadataTier] : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
       if (override?.kind === "tier")
         tiers.push(override.tier);
-      const held = record.metadataPending || !namesOnly && contentHeldForJudgment(record);
+      const held = namesOnly ? itemNamesHeldForJudgment(record, copies, inputs[index].corpusId) : record.metadataPending || contentHeldForJudgment(record);
       verdicts[index] = {
         tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
-        gone: record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata"))
+        gone: pendingDeletion || record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata")),
+        ...pendingDeletion ? { pendingDeletion: true } : {}
       };
     }
     const lane = childLane(scope);
@@ -24688,31 +24676,6 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
     ]
   };
 }
-function vectorRowIdentity(row) {
-  return {
-    provider: row.provider,
-    accountScope: row.account_scope,
-    providerItemId: row.provider_item_id,
-    ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-  };
-}
-async function vectorReadSteps(read, path, steps) {
-  let next = steps.next();
-  while (!next.done)
-    next = steps.next(await read(path, next.value));
-  return next.value;
-}
-var vectorCopiesAllowed = (corpusId, copies) => !copies.some((copy) => copy.corpusId === corpusId && copy.state === "current" && copy.embedHold);
-var TIER_BINDING_READ = {
-  sql: "SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?",
-  params: [TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID],
-  mode: "get"
-};
-var ON_DEMAND_READS_PRESENT = {
-  sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'",
-  params: [],
-  mode: "get"
-};
 function foldVectorScore(bestByItem, row, queryVector) {
   const vector = decodeEmbedding(row.embedding);
   if (vector.length !== queryVector.length)
@@ -24726,7 +24689,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
   }
   return { mismatch: 0, qualified, score };
 }
-async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders, validate) {
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders) {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority), provider);
   if (after.skippedReason)
@@ -24743,7 +24706,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
   if (digestReady)
-    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, validate);
+    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -24790,13 +24753,12 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
     return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
   return rows;
 }
-async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, validate) {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders) {
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
   let digestPages = 0;
-  let rejectedItemPks;
-  const expired = () => !rejectedItemPks && connectorStoreVectorDeadlineExpired(deadlineAtMs);
+  const expired = () => connectorStoreVectorDeadlineExpired(deadlineAtMs);
   const cut = { skippedReason: "vector_scan_deadline_exceeded" };
   while (true) {
     if (expired())
@@ -24840,22 +24802,8 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
   let batches = 0;
   let readers;
   while (heap.length > 0) {
-    if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES) || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) {
-      if (!validate)
-        break;
-      const judged = await validate(bestByItem);
-      if (!judged)
-        return { skippedReason: "vector_visibility_unavailable" };
-      if (judged.rows.length === limit) {
-        return { bestByItem, dimensionMismatches, exhausted: false, validatedRows: judged.rows };
-      }
-      rejectedItemPks ??= new Set;
-      for (const itemPk of judged.rejectedItemPks) {
-        rejectedItemPks.add(itemPk);
-        bestByItem.delete(itemPk);
-      }
-      qualifiedItems = judged.rows.length;
-    }
+    if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES) || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
+      break;
     if (expired())
       return cutWith();
     if (batches++ > 0)
@@ -24884,10 +24832,6 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired())
           return cutWith();
-        if ((index & 31) === 0)
-          noteSourceIndexReadProgress();
-        if (rejectedItemPks?.has(row.item_pk))
-          continue;
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
@@ -24955,7 +24899,7 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECT
   };
 }
 var VECTOR_SCAN_BACKSTOP_GRACE_MS = 250;
-async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, validate) {
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
   const side = [];
   const sideReaders = async () => {
     const opened = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () => openOffThreadSnapshot(dbPath, { lane: "rescore", noWait: true }).catch(() => {
@@ -24966,18 +24910,14 @@ async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector,
         side.push(reader);
     return side.map((reader) => reader.read);
   };
-  let timer;
-  const validateBeforeStopping = (winners) => {
-    clearTimeout(timer);
-    return validate(winners);
-  };
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders, validateBeforeStopping), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
-    if (error instanceof OffThreadReadBusyError || error instanceof OffThreadReadLostError)
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
+    if (error instanceof OffThreadReadBusyError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;
   });
   if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
     return scan;
+  let timer;
   const deadline = new Promise((resolve) => {
     timer = setTimeout(() => resolve({ skippedReason: "vector_scan_deadline_exceeded" }), Math.max(0, deadlineAtMs - Date.now()) + VECTOR_SCAN_BACKSTOP_GRACE_MS);
   });
@@ -25669,9 +25609,9 @@ class LocalConnectorStore {
     return Array.isArray(record.generations) ? record.generations.filter((value) => typeof value === "string" && value.length > 0) : [];
   }
   tierSetBinding() {
-    return this.parseTierSetBinding(this.db.query(TIER_BINDING_READ.sql).get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID));
-  }
-  parseTierSetBinding(row) {
+    const row = this.db.query(`
+      SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
+    `).get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
     if (!row?.cursor)
       return;
     try {
@@ -28815,13 +28755,10 @@ ${parentKey(ref)}`, { ref, origin });
       return false;
     try {
       const record = this.visibilityLedger()?.getCurrent(identity);
-      return this.onDemandTierHeld(record);
+      return !record || !record.contentRead || record.contentPending || record.metadataPending || record.state !== "current" || record.contentTier === "secrets" || record.contentTier === "secure" && this.trustDomain !== "secure_local" || record.contentTier === "private" && this.trustDomain === "public_safe";
     } catch {
       return true;
     }
-  }
-  onDemandTierHeld(record) {
-    return !record || !record.contentRead || record.contentPending || record.metadataPending || record.state !== "current" || record.contentTier === "secrets" || record.contentTier === "secure" && this.trustDomain !== "secure_local" || record.contentTier === "private" && this.trustDomain === "public_safe";
   }
   onDemandReadForLocator(locator) {
     const row = this.db.query("SELECT local_item_id FROM items WHERE locator_uri = ? AND tombstoned = 0 LIMIT 1").get(locator);
@@ -30834,7 +30771,7 @@ ${parentKey(ref)}`, { ref, origin });
       if (!ledger)
         return true;
       const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
-      if (!state || !state.record.routed)
+      if (!state?.record?.routed)
         return true;
       const { record, copies } = state;
       if (record.contentTier === "secrets" || record.metadataTier === "secrets")
@@ -32204,10 +32141,10 @@ ${parentKey(ref)}`, { ref, origin });
     return row !== null;
   }
   embeddingCurrencyRebuildPending(modelId) {
-    const read = embeddingAuthorityRead({ modelId });
-    return this.embeddingCurrencyPendingFromRow(this.db.query(read.sql).get(...read.params));
-  }
-  embeddingCurrencyPendingFromRow(row) {
+    const row = this.db.query(`
+      SELECT cursor FROM sync_runs
+      WHERE sync_run_id = ? AND connector_id = ?
+    `).get(connectorStoreEmbeddingWriteAuthorityId(modelId), "connector_store_embedding_write_authority");
     if (!row)
       return false;
     try {
@@ -32234,8 +32171,18 @@ ${parentKey(ref)}`, { ref, origin });
     if (this.embeddingCurrencyRebuildPending(modelId))
       return false;
     const exclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
-    const read = this.currentEmbeddingProbe(modelId, exclusion);
-    return this.db.query(read.sql).get(...read.params) !== null;
+    const row = this.db.query(`
+      SELECT 1 AS present
+      FROM chunk_embeddings emb
+      JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+      JOIN items i ON i.item_pk = emb.item_pk
+      WHERE emb.model_id = ?
+        AND i.tombstoned = 0
+        AND emb.content_hash = c.embedding_input_hash
+        ${exclusion.filter}
+      LIMIT 1
+    `).get(modelId, ...exclusion.params);
+    return row !== null;
   }
   vectorLaneServable(modelId) {
     if (this.embeddingCurrencyRebuildPending(modelId))
@@ -32255,11 +32202,7 @@ ${parentKey(ref)}`, { ref, origin });
     return servable;
   }
   anyCurrentEmbedding(modelId) {
-    const read = this.currentEmbeddingProbe(modelId);
-    return this.db.query(read.sql).get(...read.params) !== null;
-  }
-  currentEmbeddingProbe(modelId, exclusion = { filter: "", params: [] }) {
-    return { mode: "get", params: [modelId, ...exclusion.params], sql: `
+    return this.db.query(`
       SELECT 1 AS present
       FROM chunk_embeddings emb
       JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -32267,25 +32210,8 @@ ${parentKey(ref)}`, { ref, origin });
       WHERE emb.model_id = ?
         AND i.tombstoned = 0
         AND emb.content_hash = c.embedding_input_hash
-        ${exclusion.filter}
       LIMIT 1
-    ` };
-  }
-  async vectorLaneServableOffThread(modelId) {
-    if (!offThreadReadsSupported(this.dbPath))
-      return this.vectorLaneServable(modelId);
-    const authority = await this.readVectorOnPool(this.dbPath, embeddingAuthorityRead({ modelId }));
-    if (this.embeddingCurrencyPendingFromRow(authority))
-      return false;
-    const memo = this.vectorLaneMemo?.get(modelId);
-    if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS)
-      return true;
-    const hidden = this.tierHiddenCountsMemo?.value ?? this.tierLedgerHiddenMemo?.value;
-    const exclusion = hidden && this.embeddingWorkListExclusionFilter(0, hidden, false, false);
-    const servable = await this.readVectorOnPool(this.dbPath, this.currentEmbeddingProbe(modelId, exclusion)) !== null;
-    if (servable && hidden)
-      (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
-    return servable;
+    `).get(modelId) !== null;
   }
   vectorLaneMemo;
   async vectorSearchItems(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
@@ -32302,15 +32228,7 @@ ${parentKey(ref)}`, { ref, origin });
     const trimmed = query.trim();
     if (!trimmed)
       return { rows: [] };
-    const pooled = offThreadReadsSupported(this.dbPath);
-    let before;
-    try {
-      before = pooled ? embeddingAuthorityFromRow(await this.readVectorOnPool(this.dbPath, embeddingAuthorityRead(provider)), provider) : this.embeddingReadAuthority(provider);
-    } catch (error) {
-      if (!(error instanceof OffThreadReadBusyError))
-        throw error;
-      return { rows: [], skippedReason: "vector_scan_store_busy" };
-    }
+    const before = this.embeddingReadAuthority(provider);
     if (before.skippedReason)
       return { rows: [], skippedReason: before.skippedReason };
     let queryVector;
@@ -32358,66 +32276,39 @@ ${parentKey(ref)}`, { ref, origin });
       ...selectedAccount ? { accountScope: selectedAccount } : {},
       ...filters ? { filters } : {}
     };
-    const pooled = offThreadReadsSupported(this.dbPath);
-    const excludedItemPks = pooled ? await this.vectorScanMemoExclusions() : this.vectorScanExcludedItemPks();
+    const excludedItemPks = this.vectorScanExcludedItemPks();
     if (excludedItemPks)
       pageOptions.excludedItemPks = excludedItemPks;
-    const validate = async (winners) => {
-      try {
-        return await this.validateVectorWinners(winners, limit, selectedAccount, filters, input.locate, pooled);
-      } catch (error) {
-        if (!pooled)
-          throw error;
-        return;
-      }
-    };
-    const scanned = pooled ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, validate) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, validate);
+    const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
     if ("skippedReason" in scanned)
       return { rows: [], skippedReason: scanned.skippedReason };
-    const rows = scanned.validatedRows ?? (await validate(scanned.bestByItem))?.rows;
-    if (!rows)
-      return { rows: [], skippedReason: "vector_visibility_unavailable" };
-    return {
-      rows,
-      ...scanned.cutReason !== undefined ? { skippedReason: scanned.cutReason } : rows.length === 0 && scanned.dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
-    };
-  }
-  async validateVectorWinners(bestByItem, limit, accountScope, filters, locate, pooled) {
+    const { bestByItem, dimensionMismatches } = scanned;
     const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-    const winners = new Map;
-    const rejectedItemPks = [];
+    const rankedItems = [];
     let candidateOffset = 0;
-    let batchSize = limit;
-    while (true) {
-      while (winners.size < limit && candidateOffset < candidates.length) {
-        const batch = candidates.slice(candidateOffset, candidateOffset + batchSize);
-        const itemPks = batch.map(([itemPk]) => itemPk);
-        const visible = pooled ? await this.visibleVectorItemPksOffThread(itemPks, accountScope, filters) : this.visibleVectorItemPks(itemPks, accountScope, filters);
-        for (const [itemPk, winner] of batch) {
-          candidateOffset += 1;
-          if (visible.has(itemPk))
-            winners.set(itemPk, winner);
-          else
-            rejectedItemPks.push(itemPk);
-          if (winners.size === limit)
-            break;
-        }
-        batchSize = Math.min(200, batchSize * 2);
-      }
-      const rows = pooled ? await judgedAwaited(() => this.vectorWinnerRowsOffThread(winners, accountScope, filters, locate), () => {
-        throw new VisibilityChangedError;
-      }) : this.vectorWinnerRowsHere(winners, accountScope, filters, locate);
-      const needsMore = rows.size < winners.size && candidateOffset < candidates.length;
-      for (const itemPk of winners.keys()) {
-        if (rows.has(itemPk))
-          continue;
-        winners.delete(itemPk);
-        rejectedItemPks.push(itemPk);
-      }
-      if (!needsMore) {
-        return { rows: [...rows.values()], rejectedItemPks };
-      }
+    while (rankedItems.length < limit && candidateOffset < candidates.length) {
+      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+      for (const candidate of batch)
+        if (visible.has(candidate[0]))
+          rankedItems.push(candidate);
+      candidateOffset += batch.length;
     }
+    const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
+    const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
+    const laneRows = searchRows.flatMap((row) => {
+      const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
+      if (winner === undefined)
+        return [];
+      if (!input.locate)
+        return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
+      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, "semantic");
+      return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
+    });
+    return {
+      rows: laneRows,
+      ...scanned.cutReason !== undefined ? { skippedReason: scanned.cutReason } : laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
+    };
   }
   vectorScanExcludedItemPks() {
     if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
@@ -32440,37 +32331,6 @@ ${parentKey(ref)}`, { ref, origin });
     } catch {
       return;
     }
-    return this.vectorExclusions(base, children);
-  }
-  async vectorScanMemoExclusions() {
-    const memo = this.tierLedgerHiddenMemo;
-    if (!memo || !this.visibilityFeedPresent)
-      return;
-    try {
-      const read = (path, query) => this.readVectorOnPool(path, query);
-      const ledgerCursor = memo.ledgerCursor;
-      const storeCursor = memo.storeCursor;
-      const child = this.hiddenChildMemo;
-      const members = child ? this.vectorVisibilityStores() : [];
-      const paths = new Map(members.map((store) => [store, child?.storeCursors.get(store)]));
-      const ledgerPath = await this.vectorVisibilityLedgerPath(read);
-      if (ledgerPath !== memo.ledger.dbPath)
-        return;
-      const [ledger, own, ...siblings] = await Promise.all([
-        vectorReadSteps(read, ledgerPath, hiddenVisibilityFeedReads("tier_visibility_changes")),
-        vectorReadSteps(read, this.dbPath, hiddenVisibilityFeedReads("main.item_visibility_feed")),
-        ...members.map((store) => vectorReadSteps(read, store.dbPath, hiddenVisibilityFeedReads("main.item_visibility_feed")))
-      ]);
-      const childCurrent = child && child.ledger === memo.ledger && child.ledgerCursor === ledgerCursor && child.storeCursors.size === members.length && members.every((store, at) => paths.get(store) === siblings[at]?.cursor);
-      if (ledger.cursor > ledgerCursor || own.cursor > storeCursor || child && !childCurrent) {
-        withoutSourceAnswerTrace(() => withoutSourceIndexReadProgress(() => this.refreshTierHiddenCountsInTurns()));
-      }
-      return this.vectorExclusions(memo.value, child?.ledger === memo.ledger ? [...child.hiddenParents.values()].flat() : []);
-    } catch {
-      return;
-    }
-  }
-  vectorExclusions(base, children) {
     const memo = this.tierLedgerHiddenMemo;
     const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
     const cached = this.vectorScanExclusion;
@@ -32487,7 +32347,7 @@ ${parentKey(ref)}`, { ref, origin });
     return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
   }
   vectorScanExclusion;
-  async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, validate) {
+  async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
     const scanDb = this.dbPath === ":memory:" ? this.db : new Database6(this.dbPath, { readonly: true, create: false, strict: true });
     const ownsScanDb = scanDb !== this.db;
     try {
@@ -32500,7 +32360,7 @@ ${parentKey(ref)}`, { ref, origin });
         const params = query.params;
         return query.mode === "all" ? statement.all(...params) : statement.get(...params);
       };
-      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, undefined, validate);
+      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit);
     } finally {
       try {
         scanDb.exec("ROLLBACK;");
@@ -32634,37 +32494,31 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
   }
-  vectorItemPksRead(itemPks, accountScope, filters) {
-    const selectedFilters = connectorStoreFilterSql(filters);
-    return {
-      sql: `SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM items i WHERE i.item_pk IN (${itemPks.map(() => "?").join(",")}) AND i.tombstoned = 0
-        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`,
-      params: [...itemPks, ...accountScope ? [accountScope] : [], ...selectedFilters.params],
-      mode: "all"
-    };
-  }
   visibleVectorItemPks(itemPks, accountScope, filters) {
-    const read = this.vectorItemPksRead(itemPks, accountScope, filters);
-    const rows = this.db.query(read.sql).all(...read.params);
-    return new Set(this.tierVisibleRows(rows, vectorRowIdentity, () => "content", false, (copies) => vectorCopiesAllowed(this.corpusId, copies)).map((row) => row.item_pk));
-  }
-  async visibleVectorItemPksOffThread(itemPks, accountScope, filters) {
-    const rows = await this.readVectorOnPool(this.dbPath, this.vectorItemPksRead(itemPks, accountScope, filters));
-    const visible = await this.vectorContentVisibleRows(rows, (path, query) => this.readVectorOnPool(path, query));
-    return new Set(visible.map((row) => row.item_pk));
-  }
-  readVectorOnPool(path, query) {
-    if (this.closedForPoolReads || !offThreadReadsSupported(path))
-      throw new OffThreadReadBusyError;
-    return readOnPool(path, query, { store: this.dbPath });
-  }
-  vectorWinnerItemsRead(itemPks, accountScope, filters, metadataOnly) {
+    const visible = new Set;
     const selectedFilters = connectorStoreFilterSql(filters);
-    return {
-      mode: "all",
-      params: [...itemPks, ...accountScope ? [accountScope] : [], ...selectedFilters.params, ...metadataOnly?.params ?? []],
-      sql: `
+    for (let offset = 0;offset < itemPks.length; offset += 200) {
+      const batch = itemPks.slice(offset, offset + 200);
+      const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
+        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
+      for (const row of this.tierVisibleRows(rows, (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
+        visible.add(row.item_pk);
+    }
+    return visible;
+  }
+  searchRowsByItemPks(itemPks, accountScope, filters) {
+    if (itemPks.length === 0)
+      return [];
+    const placeholders = itemPks.map(() => "?").join(", ");
+    const selectedAccount = normalizeOptionalAccountScope(accountScope);
+    const selectedFilters = connectorStoreFilterSql(filters);
+    const rows = this.db.query(`
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -32673,166 +32527,16 @@ ${parentKey(ref)}`, { ref, origin });
         i.trust_tier, i.sync_run_id,
         0 AS rank
       FROM items i
-      WHERE i.item_pk IN (${itemPks.map(() => "?").join(", ")})
+      WHERE i.item_pk IN (${placeholders})
         AND i.tombstoned = 0
-        ${accountScope ? "AND i.account_scope = ?" : ""}
+        ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
-        ${metadataOnly?.sql ? `AND NOT ${metadataOnly.sql}` : ""}
-      `
-    };
-  }
-  vectorWinnerRowsHere(winners, accountScope, filters, locate) {
-    const result = new Map;
-    if (winners.size === 0)
-      return result;
-    const read = this.vectorWinnerItemsRead([...winners.keys()], accountScope, filters);
-    const rows = this.db.query(read.sql).all(...read.params);
+    `).all(...itemPks, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     const byPk = new Map(rows.map((row) => [row.item_pk, row]));
-    for (const [pk, winner] of winners) {
-      const item = byPk.get(pk);
-      if (item?.local_item_id !== winner.localItemId)
-        continue;
-      const row = searchRowFromItemRow(item);
-      const { bestCosine } = winner;
-      if (!locate) {
-        result.set(pk, { ...row, contentMatched: true, bestCosine });
-        continue;
-      }
-      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, "semantic");
-      result.set(pk, { ...row, ...chunk ? { chunk } : {}, bestCosine });
-    }
-    return result;
-  }
-  vectorVisibilityStores() {
-    const stores = this.childLane ? this.childLane.mountedStores?.() : [this];
-    if (!stores || !stores.includes(this) || !stores.every((store) => store instanceof LocalConnectorStore) || stores.some((store) => store.db.inTransaction || !offThreadReadsSupported(store.dbPath) || store.fileReplacedOrRemoved() || store.closedForPoolReads)) {
-      throw new VisibilityChangedError;
-    }
-    return stores;
-  }
-  async vectorVisibilityLedgerPath(read) {
-    const binding = this.parseTierSetBinding(await read(this.dbPath, TIER_BINDING_READ));
-    if (this.tierLedgerHandle?.writesHeld() || this.boundLedgerHandle?.writesHeld())
-      throw new VisibilityChangedError;
-    const explicit = this.tierLedgerHandle?.dbPath;
-    if (binding) {
-      const paths = [explicit, this.boundLedgerHandle?.dbPath, ...tierSetLedgerCandidates(this.dbPath, binding.ledgerPath)];
-      for (const path of new Set(paths)) {
-        if (!path || !offThreadReadsSupported(path) || !existsSync21(path))
-          continue;
-        const row = await read(path, {
-          sql: `SELECT (SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id') AS id,
-            version, compatible_version FROM schema_version WHERE store_id = ?`,
-          params: [TIER_LEDGER_SQLITE_STORE_ID],
-          mode: "get"
-        });
-        if (row?.id === binding.ledgerId && this.vectorLedgerSchemaUsable(row))
-          return path;
-      }
-      throw new TierLedgerUnavailableError(this.corpusId);
-    }
-    if (!explicit && this.tierLedgerDisabled)
-      return;
-    const path = explicit ?? tierLedgerPathForStore(this.dbPath);
-    if (!explicit && !existsSync21(path))
-      return;
-    const schema = await read(path, {
-      sql: "SELECT version, compatible_version FROM schema_version WHERE store_id = ?",
-      params: [TIER_LEDGER_SQLITE_STORE_ID],
-      mode: "get"
+    return itemPks.flatMap((itemPk) => {
+      const row = byPk.get(itemPk);
+      return row ? [searchRowFromItemRow(row)] : [];
     });
-    if (!schema || !this.vectorLedgerSchemaUsable(schema))
-      throw new TierLedgerUnavailableError(this.corpusId);
-    return path;
-  }
-  vectorLedgerSchemaUsable(row) {
-    return row.version === TIER_LEDGER_SCHEMA_VERSION || row.version > TIER_LEDGER_SCHEMA_VERSION && Number.isInteger(row.compatible_version) && row.compatible_version <= TIER_LEDGER_SCHEMA_VERSION;
-  }
-  async vectorContentVisibleRows(rows, read) {
-    if (rows.length === 0)
-      return [];
-    const ledgerPath = await this.vectorVisibilityLedgerPath(read);
-    const identities = rows.map(vectorRowIdentity);
-    const granted = await read(this.dbPath, ON_DEMAND_READS_PRESENT) ? await read(this.dbPath, {
-      sql: `SELECT i.item_pk FROM items i JOIN on_demand_item_reads r ON i.local_item_id = r.local_item_id
-        AND COALESCE(i.source_version, '') = r.source_version
-        WHERE i.item_pk IN (${rows.map(() => "?").join(",")}) AND i.tombstoned = 0`,
-      params: rows.map((row) => row.item_pk),
-      mode: "all"
-    }) : [];
-    const grantedPks = new Set(granted.map((row) => row.item_pk));
-    const itemStates = (path, items) => vectorReadSteps(read, path, TierLedger.itemStatesSteps(items));
-    const onDemand = ledgerPath && granted.length > 0 ? await itemStates(ledgerPath, rows.filter((row) => grantedPks.has(row.item_pk)).map(vectorRowIdentity)) : undefined;
-    const hasCopies = ledgerPath && await read(ledgerPath, {
-      sql: "SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1",
-      params: [this.corpusId],
-      mode: "get"
-    });
-    const copies = ledgerPath && hasCopies ? (await vectorReadSteps(read, ledgerPath, TierLedger.visibilityReadSteps(identities))).copies : undefined;
-    const served = rows.filter((row) => {
-      const key = tierLedgerIdentityKey(vectorRowIdentity(row));
-      const itemCopies = copies?.get(key);
-      return (!grantedPks.has(row.item_pk) || !this.onDemandTierHeld(onDemand?.get(key)?.record)) && tierRowVisible(itemCopies, this.corpusId, "content") && vectorCopiesAllowed(this.corpusId, itemCopies ?? []);
-    });
-    const stores = this.vectorVisibilityStores().map((store) => ({
-      corpusId: store.corpusId,
-      parentLinksOf: pooledOnly,
-      parentLinksOfOffThread: (probes) => vectorReadSteps(read, store.dbPath, store.parentLinksOfSteps(probes)),
-      parentStandings: pooledOnly,
-      parentStandingsOffThread: async (parents) => vectorReadSteps(read, store.dbPath, store.parentStandingsSteps(parents)),
-      itemStandings: pooledOnly
-    }));
-    const laneLedger = this.childLane?.ledger();
-    if (laneLedger?.writesHeld())
-      throw new VisibilityChangedError;
-    const parentLedgerPath = laneLedger?.dbPath ?? ledgerPath;
-    const parentLedger = parentLedgerPath ? {
-      itemStates: (items) => itemStates(parentLedgerPath, items),
-      itemIsSecret: (item) => vectorReadSteps(read, parentLedgerPath, TierLedger.itemIsSecretSteps(item))
-    } : null;
-    const hidden = await visibilityOffThread(hiddenChildKeysSteps({ stores: () => stores, ledger: () => {
-      return;
-    } }, served.map(vectorRowIdentity), parentLedger));
-    return served.filter((row) => !hidden.has(tierLedgerIdentityKey(vectorRowIdentity(row))));
-  }
-  async vectorWinnerRowsOffThread(winners, accountScope, filters, locate) {
-    if (winners.size === 0)
-      return new Map;
-    const versions = new Map;
-    const read = async (path, query) => {
-      if (this.closedForPoolReads || !offThreadReadsSupported(path))
-        throw new VisibilityChangedError;
-      if (!versions.has(path))
-        versions.set(path, readPoolDataVersion(path, this.dbPath));
-      await versions.get(path);
-      return this.readVectorOnPool(path, query);
-    };
-    const stores = this.vectorVisibilityStores();
-    const configuredLedger = this.tierLedgerHandle;
-    const childLedger = this.childLane?.ledger();
-    const defaultLedgerPath = !configuredLedger && !this.tierLedgerDisabled ? tierLedgerPathForStore(this.dbPath) : undefined;
-    const defaultLedgerExists = defaultLedgerPath && existsSync21(defaultLedgerPath);
-    const metadataOnly = connectorStoreMetadataOnlySql(filters, Boolean((filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length) && await read(this.dbPath, ON_DEMAND_READS_PRESENT)));
-    const raw = await read(this.dbPath, this.vectorWinnerItemsRead([...winners.keys()], accountScope, filters, metadataOnly));
-    const byPk = new Map(raw.map((row) => [row.item_pk, row]));
-    const ordered = [...winners].flatMap(([pk, winner]) => {
-      const row = byPk.get(pk);
-      return row?.local_item_id === winner.localItemId ? [row] : [];
-    });
-    const rows = await this.vectorContentVisibleRows(ordered, read);
-    const chunks = locate ? await vectorReadSteps(read, this.dbPath, this.keywordChunkMatchesSteps(rows.map((row) => ({ ...row, chunk_pk: winners.get(row.item_pk).bestChunkPk })), [], "semantic")) : undefined;
-    const unchanged = await Promise.all([...versions].map(async ([path, before]) => await readPoolDataVersion(path, this.dbPath) === await before));
-    const current = this.vectorVisibilityStores();
-    if (!unchanged.every(Boolean) || stores.length !== current.length || !stores.every((store, i) => store === current[i]) || configuredLedger !== this.tierLedgerHandle || childLedger !== this.childLane?.ledger() || defaultLedgerPath && existsSync21(defaultLedgerPath) !== defaultLedgerExists || configuredLedger?.writesHeld() || childLedger?.writesHeld() || this.boundLedgerHandle?.writesHeld())
-      throw new VisibilityChangedError;
-    return new Map(rows.map((item, index) => {
-      const row = searchRowFromItemRow(item);
-      const bestCosine = winners.get(item.item_pk).bestCosine;
-      if (!locate)
-        return [item.item_pk, { ...row, contentMatched: true, bestCosine }];
-      const chunk = chunks?.get(index);
-      return [item.item_pk, { ...row, ...chunk ? { chunk } : {}, bestCosine }];
-    }));
   }
   async keywordLanguages() {
     if (!offThreadReadsSupported(this.dbPath))
@@ -33183,7 +32887,7 @@ ${parentKey(ref)}`, { ref, origin });
     const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
     return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
   }
-  *keywordChunkMatchesSteps(rows, queryTerms, lane = "keyword") {
+  *keywordChunkMatchesSteps(rows, queryTerms) {
     const wanted = [...rows.entries()].filter(([, row]) => row.chunk_pk !== null && row.chunk_pk !== undefined);
     const matches = new Map;
     if (wanted.length === 0)
@@ -33212,7 +32916,7 @@ ${parentKey(ref)}`, { ref, origin });
       if (row.chunk_pk !== row.want_chunk_pk)
         continue;
       const itemOffset = chunks.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-      matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, lane, queryTerms));
+      matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, "keyword", queryTerms));
     }
     return matches;
   }

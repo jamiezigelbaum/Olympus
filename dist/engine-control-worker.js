@@ -449,6 +449,7 @@ function whatsappStateDirs() {
 
 // src/core/engine-split.ts
 var ENGINE_READY_PATH = "/engine/ready";
+var ENGINE_PRIVACY_READY_QUERY = "privacy_raises_settled";
 var ENGINE_COMMANDS_PATH = "/engine/commands";
 var ENGINE_MODEL_COMPLETE_PATH = "/engine/model/complete";
 
@@ -796,6 +797,17 @@ var RESOURCE = /^[\x21-\x7e]{1,200}$/;
 function asRecord2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
+function isDashboardPrivacyRaise(command) {
+  if (command.kind !== "tier_override" || command.request.path !== "/dashboard/privacy/items/set")
+    return false;
+  try {
+    return asRecord2(JSON.parse(command.request.body))?.tier === "private";
+  } catch (error) {
+    if (error instanceof SyntaxError)
+      return false;
+    throw error;
+  }
+}
 function boundedString(value, max = 512) {
   return typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined;
 }
@@ -992,6 +1004,8 @@ function createEngineCommandHandler(options) {
     if (url.pathname === ENGINE_READY_PATH && request.method === "GET") {
       const ready = options.ready();
       const body = { ready, instance_id: options.ledger.instanceId, schema_current: ready };
+      if (url.searchParams.has(ENGINE_PRIVACY_READY_QUERY))
+        body.privacy_raises_settled = !options.ledger.hasPendingPrivacyRaise();
       return Response.json(body, { status: ready ? 200 : 503 });
     }
     if (url.pathname === ENGINE_COMMANDS_PATH && request.method === "POST") {
@@ -1124,6 +1138,7 @@ class EngineCommandMirror {
       envelope,
       settled,
       settle,
+      privacyRaise: isDashboardPrivacyRaise(envelope.command),
       receipt: { id: envelope.id, state: "received", instance_id: this.options.instanceId }
     };
     this.entries.set(envelope.id, entry);
@@ -1133,6 +1148,13 @@ class EngineCommandMirror {
   get(id) {
     const entry = this.entries.get(id);
     return entry ? this.answer(entry) : undefined;
+  }
+  hasPendingPrivacyRaise() {
+    for (const entry of this.entries.values()) {
+      if (entry.privacyRaise && entry.receipt.state === "received")
+        return true;
+    }
+    return false;
   }
   async settled(id, wait) {
     const entry = this.entries.get(id);

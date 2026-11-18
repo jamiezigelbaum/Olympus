@@ -3336,12 +3336,13 @@ function engineBackgroundSocketPath(options = {}) {
 function prepareEngineBackgroundSocketDirectory(socketPath) {
   mkdirSync5(dirname10(socketPath), { recursive: true, mode: 448 });
 }
-async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) {
+async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs, requireSettledPrivacyRaises = false) {
   const controller = new AbortController;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
   try {
-    const response = await fetchBackground(ENGINE_BACKGROUND_ORIGIN + ENGINE_READY_PATH, {
+    const path = requireSettledPrivacyRaises ? ENGINE_READY_PATH + "?" + ENGINE_PRIVACY_READY_QUERY : ENGINE_READY_PATH;
+    const response = await fetchBackground(ENGINE_BACKGROUND_ORIGIN + path, {
       method: "GET",
       headers: { Authorization: `Bearer ${authToken}` },
       signal: controller.signal
@@ -3355,7 +3356,7 @@ async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, ti
     const body = await response.json().catch(() => {
       return;
     });
-    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId) ? "ready" : "alive";
+    return body?.ready === true && body.schema_current === true && (!requireSettledPrivacyRaises || body.privacy_raises_settled === true) && (instanceId === undefined || body.instance_id === instanceId) ? "ready" : "alive";
   } catch (error) {
     const name = error?.name;
     return controller.signal.aborted || name === "AbortError" || name === "TimeoutError" ? "alive" : "down";
@@ -3363,10 +3364,10 @@ async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, ti
     clearTimeout(timeout);
   }
 }
-async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
-  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) === "ready";
+async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs, requireSettledPrivacyRaises = false) {
+  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs, requireSettledPrivacyRaises) === "ready";
 }
-var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready";
+var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready", ENGINE_PRIVACY_READY_QUERY = "privacy_raises_settled";
 var init_engine_split = __esm(() => {
   init_olympus_layout();
   init_worker_transport();
@@ -17453,7 +17454,6 @@ var init_local_index = __esm(() => {
   init_partial_search();
   init_control_path_headroom();
   init_off_thread_reads();
-  init_answer_latency_trace();
   init_provider_account_identity();
   init_operation_error();
   init_media_cache();

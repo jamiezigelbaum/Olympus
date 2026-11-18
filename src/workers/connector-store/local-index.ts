@@ -1,5 +1,5 @@
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
-import { noteSourceIndexReadProgress, withoutSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
+import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
@@ -24,8 +24,7 @@ import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith 
 import { expandSourceIndexKeywords, keywordPrepareWaitMs, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { BACKGROUND_READS, OffThreadReadBusyError, OffThreadReadLostError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readInBackground, readOnPool, readPoolDataVersion, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
-import { withoutSourceAnswerTrace } from '../source-index/answer-latency-trace.ts';
+import { BACKGROUND_READS, OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readInBackground, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -101,15 +100,12 @@ import {
 import { classifyItemTier, type ClassifyItemTierInput } from '../classification/engine.ts';
 import {
   TierLedger,
-  TIER_LEDGER_SCHEMA_VERSION,
-  TIER_LEDGER_SQLITE_STORE_ID,
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   type TierCopy,
   type TierCorpusVisibility,
   type TierLedgerIdentity,
-  type TierLedgerRecord,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
 import { arrivalOrderedSniffer, conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
@@ -117,7 +113,7 @@ import type { SourceItemReadResult, SourceItemReadRefusal } from '../../core/sou
 import { checkReleaseChunks, chunkCoverageNote, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
-import { assertStoreTierLedgerCanOpen, findTierSetLedger, tierSetLedgerCandidates } from '../classification/tier-set-binding.ts';
+import { assertStoreTierLedgerCanOpen, findTierSetLedger } from '../classification/tier-set-binding.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -143,11 +139,9 @@ import {
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
   ledgerReadOffThread,
-  visibilityOffThread,
   type VisibilityRead,
   parentIdentityField,
   parentKey,
-  pooledOnly,
   parentVerdicts,
   type ChildProbe,
   type ChildVisibilityLane,
@@ -182,7 +176,6 @@ import {
   fuseRankedCandidateLanes,
   reciprocalRank,
   type FusedRankedCandidate,
-  type SourceIndexHybridAvailability,
 } from '../../core/source-index/retrieval.ts';
 import {
   normalizeSourceReactions,
@@ -2587,45 +2580,11 @@ type VectorScan =
     exhausted?: boolean;
     /** The scan ran out of time after ranking began: these are the winners found so far. */
     cutReason?: string;
-    /** A digest stop with a full, live-validated result. */
-    validatedRows?: ConnectorStoreScoredSearchRow[];
   }
   | { skippedReason: string };
 
 type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown };
 type VectorWinners = Extract<VectorScan, { bestByItem: unknown }>['bestByItem'];
-type ValidateVectorWinners = (winners: VectorWinners) => Promise<{
-  rows: ConnectorStoreScoredSearchRow[];
-  rejectedItemPks: number[];
-} | undefined>;
-type VectorRead = (path: string, read: StoreRead) => Promise<unknown>;
-type VectorVisibilityRow = Pick<ItemRow, 'item_pk' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_conversation_id'>;
-
-function vectorRowIdentity(row: VectorVisibilityRow): TierLedgerIdentity {
-  return {
-    provider: row.provider,
-    accountScope: row.account_scope,
-    providerItemId: row.provider_item_id,
-    ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
-  };
-}
-
-async function vectorReadSteps<T>(read: VectorRead, path: string, steps: Generator<StoreRead, T, unknown>): Promise<T> {
-  let next = steps.next();
-  while (!next.done) next = steps.next(await read(path, next.value));
-  return next.value;
-}
-
-const vectorCopiesAllowed = (corpusId: string, copies: readonly TierCopy[]): boolean =>
-  !copies.some(copy => copy.corpusId === corpusId && copy.state === 'current' && copy.embedHold);
-
-const TIER_BINDING_READ: StoreRead = {
-  sql: 'SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?',
-  params: [TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID], mode: 'get',
-};
-const ON_DEMAND_READS_PRESENT: StoreRead = {
-  sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [], mode: 'get',
-};
 
 /** Shared exact scoring preserves the winning chunk and deterministic ties. */
 function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVector: readonly number[]): { mismatch: number; qualified: number; score?: number } {
@@ -2661,7 +2620,6 @@ async function scanVectorPages(
   pageSize: number,
   resultLimit: number,
   sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
-  validate?: ValidateVectorWinners,
 ): Promise<VectorScan> {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
@@ -2676,7 +2634,7 @@ async function scanVectorPages(
   // vectorDigestSearchDisabled).
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
-  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, validate);
+  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
   const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -2770,14 +2728,12 @@ export async function scanDigestPages(
    * the ledger check after ranking has the final say, as for every winner.
    */
   sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
-  validate?: ValidateVectorWinners,
 ): Promise<VectorScan> {
   const heap = new VectorDigestHeap();
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
   let digestPages = 0;
-  let rejectedItemPks: Set<number> | undefined;
-  const expired = () => !rejectedItemPks && connectorStoreVectorDeadlineExpired(deadlineAtMs);
+  const expired = () => connectorStoreVectorDeadlineExpired(deadlineAtMs);
   const cut = { skippedReason: 'vector_scan_deadline_exceeded' };
   while (true) {
     if (expired()) return cut;
@@ -2816,8 +2772,8 @@ export async function scanDigestPages(
   // seen so far (never less than the floor), could still beat the K-th best
   // exact item. A count-only stop missed items the exact scan ranks highly
   // but the 256-dimension digest ranks a few hundred chunks down (#1529).
-  // Before stopping with unread candidates, check that the ranked items
-  // actually fill the requested limit under live visibility.
+  // Ledger visibility is checked once, on the ranked winners, by the lane's
+  // final step; batches of 20x the limit leave it a deep list.
   let underestimate = VECTOR_DIGEST_MIN_MARGIN;
   let candidates = 0;
   let qualifiedItems = 0;
@@ -2828,24 +2784,7 @@ export async function scanDigestPages(
     // drains the heap rather than restarting wider); the cap bounds only the
     // score-driven reading past that point.
     if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES)
-      || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) {
-      if (!validate) break;
-      const judged = await validate(bestByItem);
-      if (!judged) return { skippedReason: 'vector_visibility_unavailable' };
-      if (judged.rows.length === limit) {
-        return { bestByItem, dimensionMismatches, exhausted: false, validatedRows: judged.rows };
-      }
-      // Keep the remaining heap and the same read snapshot. A misleading
-      // stop can happen again, so remember every rejection for this request.
-      // From here the scan runs while it makes progress, through exhaustion
-      // if necessary. Its reads still report progress to the lane.
-      rejectedItemPks ??= new Set();
-      for (const itemPk of judged.rejectedItemPks) {
-        rejectedItemPks.add(itemPk);
-        bestByItem.delete(itemPk);
-      }
-      qualifiedItems = judged.rows.length;
-    }
+      || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) break;
     if (expired()) return cutWith();
     if (batches++ > 0) await yieldConnectorStoreVectorScan();
     const digestScores = new Map<number, number>();
@@ -2871,8 +2810,6 @@ export async function scanDigestPages(
       const rows = pages.flat();
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired()) return cutWith();
-        if ((index & 31) === 0) noteSourceIndexReadProgress();
-        if (rejectedItemPks?.has(row.item_pk)) continue;
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
@@ -2975,7 +2912,6 @@ async function scanVectorPagesOnPool(
   pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
   deadlineAtMs: number | undefined,
   resultLimit: number,
-  validate: ValidateVectorWinners,
 ): Promise<VectorScan> {
   // Side readers for the re-score, opened on first need and only on free
   // workers: a store whose re-score workers are all in use reads one page
@@ -2987,22 +2923,15 @@ async function scanVectorPagesOnPool(
     for (const reader of opened) if (reader) side.push(reader);
     return side.map((reader) => reader.read);
   };
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const validateBeforeStopping: ValidateVectorWinners = (winners) => {
-    // Live judgment was outside the scan deadline. Keep it and any
-    // continuation outside the pool's backstop too.
-    clearTimeout(timer);
-    return validate(winners);
-  };
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
     read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders,
-    validateBeforeStopping,
   // Its own worker of the store: the scan never queues behind keyword reads.
   ), { lane: 'scan' }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error: unknown): VectorScan => {
-    if (error instanceof OffThreadReadBusyError || error instanceof OffThreadReadLostError) return { skippedReason: 'vector_scan_store_busy' };
+    if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
     throw error;
   });
   if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs)) return scan;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<VectorScan>((resolve) => {
     // A backstop for a scan stuck in one statement or waiting for the thread.
     // It fires just after the deadline the scan checks itself, so a scan that
@@ -3035,7 +2964,7 @@ export function connectorStoreCurrentEmbeddingPageQuery(
 type EmbeddingAuthorityRow = { status: string; cursor: string | null; audit_receipt_sha256: string | null };
 
 /** The read of a model's embedding write authority (see LocalConnectorStore.embeddingReadAuthority). */
-function embeddingAuthorityRead(provider: Pick<ConnectorStoreEmbeddingAuthorityIdentity, 'modelId'>): StoreRead {
+function embeddingAuthorityRead(provider: ConnectorStoreEmbeddingAuthorityIdentity): StoreRead {
   return {
     mode: 'get',
     sql: `SELECT status, cursor, audit_receipt_sha256
@@ -4665,11 +4594,9 @@ export class LocalConnectorStore {
    * legacy.
    */
   tierSetBinding(): { ledgerId: string; ledgerPath: string } | undefined {
-    return this.parseTierSetBinding(this.db.query(TIER_BINDING_READ.sql)
-      .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null);
-  }
-
-  private parseTierSetBinding(row: { cursor: string | null } | null): { ledgerId: string; ledgerPath: string } | undefined {
+    const row = this.db.query(`
+      SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?
+    `).get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
     if (!row?.cursor) return undefined;
     try {
       const parsed = JSON.parse(row.cursor) as { ledgerId?: unknown; ledgerPath?: unknown };
@@ -9071,15 +8998,11 @@ export class LocalConnectorStore {
     if (!granted) return false;
     try {
       const record = this.visibilityLedger()?.getCurrent(identity);
-      return this.onDemandTierHeld(record);
+      return !record || !record.contentRead || record.contentPending || record.metadataPending
+        || record.state !== 'current' || record.contentTier === 'secrets'
+        || (record.contentTier === 'secure' && this.trustDomain !== 'secure_local')
+        || (record.contentTier === 'private' && this.trustDomain === 'public_safe');
     } catch { return true; }
-  }
-
-  private onDemandTierHeld(record: TierLedgerRecord | undefined): boolean {
-    return !record || !record.contentRead || record.contentPending || record.metadataPending
-      || record.state !== 'current' || record.contentTier === 'secrets'
-      || (record.contentTier === 'secure' && this.trustDomain !== 'secure_local')
-      || (record.contentTier === 'private' && this.trustDomain === 'public_safe');
   }
 
   onDemandReadForLocator(locator: string): boolean {
@@ -12290,7 +12213,7 @@ export class LocalConnectorStore {
       if (binding && (!ledger || ledger.ledgerId() !== binding.ledgerId)) return false;
       if (!ledger) return true;
       const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
-      if (!state || !state.record.routed) return true;
+      if (!state?.record?.routed) return true;
       const { record, copies } = state;
       if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') return false;
       const here = copies.find((copy) => copy.corpusId === this.corpusId
@@ -14601,11 +14524,13 @@ export class LocalConnectorStore {
   }
 
   private embeddingCurrencyRebuildPending(modelId: string): boolean {
-    const read = embeddingAuthorityRead({ modelId });
-    return this.embeddingCurrencyPendingFromRow(this.db.query(read.sql).get(...read.params as SQLQueryBindings[]) as EmbeddingAuthorityRow | null);
-  }
-
-  private embeddingCurrencyPendingFromRow(row: { cursor: string | null } | null): boolean {
+    const row = this.db.query(`
+      SELECT cursor FROM sync_runs
+      WHERE sync_run_id = ? AND connector_id = ?
+    `).get(
+      connectorStoreEmbeddingWriteAuthorityId(modelId),
+      'connector_store_embedding_write_authority',
+    ) as { cursor: string | null } | null;
     if (!row) return false;
     try {
       return parseConnectorStoreEmbeddingWriteAuthority(row.cursor).currencyRebuildPending;
@@ -14665,8 +14590,18 @@ export class LocalConnectorStore {
     // and the retrieval adapter asks it twice per query (once in the adapter
     // body, once in hybridAvailability), so on Telegram that was two full
     // 170k-row joins before any searching started.
-    const read = this.currentEmbeddingProbe(modelId, exclusion);
-    return this.db.query(read.sql).get(...read.params as SQLQueryBindings[]) !== null;
+    const row = this.db.query(`
+      SELECT 1 AS present
+      FROM chunk_embeddings emb
+      JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+      JOIN items i ON i.item_pk = emb.item_pk
+      WHERE emb.model_id = ?
+        AND i.tombstoned = 0
+        AND emb.content_hash = c.embedding_input_hash
+        ${exclusion.filter}
+      LIMIT 1
+    `).get(modelId, ...exclusion.params) as { present: number } | null;
+    return row !== null;
   }
 
   /**
@@ -14709,12 +14644,7 @@ export class LocalConnectorStore {
 
   /** Whether any live chunk has a current vector for the model, before visibility. */
   private anyCurrentEmbedding(modelId: string): boolean {
-    const read = this.currentEmbeddingProbe(modelId);
-    return this.db.query(read.sql).get(...read.params as SQLQueryBindings[]) !== null;
-  }
-
-  private currentEmbeddingProbe(modelId: string, exclusion = { filter: '', params: [] as string[] }): StoreRead {
-    return { mode: 'get', params: [modelId, ...exclusion.params], sql: `
+    return this.db.query(`
       SELECT 1 AS present
       FROM chunk_embeddings emb
       JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -14722,22 +14652,8 @@ export class LocalConnectorStore {
       WHERE emb.model_id = ?
         AND i.tombstoned = 0
         AND emb.content_hash = c.embedding_input_hash
-        ${exclusion.filter}
       LIMIT 1
-    ` };
-  }
-
-  async vectorLaneServableOffThread(modelId: string): Promise<boolean> {
-    if (!offThreadReadsSupported(this.dbPath)) return this.vectorLaneServable(modelId);
-    const authority = await this.readVectorOnPool(this.dbPath, embeddingAuthorityRead({ modelId })) as EmbeddingAuthorityRow | null;
-    if (this.embeddingCurrencyPendingFromRow(authority)) return false;
-    const memo = this.vectorLaneMemo?.get(modelId);
-    if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS) return true;
-    const hidden = this.tierHiddenCountsMemo?.value ?? this.tierLedgerHiddenMemo?.value;
-    const exclusion = hidden && this.embeddingWorkListExclusionFilter(0, hidden, false, false);
-    const servable = await this.readVectorOnPool(this.dbPath, this.currentEmbeddingProbe(modelId, exclusion)) !== null;
-    if (servable && hidden) (this.vectorLaneMemo ??= new Map()).set(modelId, Date.now());
-    return servable;
+    `).get(modelId) !== null;
   }
 
   // No initializer: a class-field initializer is a load-time side effect that
@@ -14818,16 +14734,7 @@ export class LocalConnectorStore {
     const vectorFilters = normalizeConnectorStoreSearchFilters(filters);
     const trimmed = query.trim();
     if (!trimmed) return { rows: [] };
-    const pooled = offThreadReadsSupported(this.dbPath);
-    let before: ReturnType<typeof embeddingAuthorityFromRow>;
-    try {
-      before = pooled
-        ? embeddingAuthorityFromRow(await this.readVectorOnPool(this.dbPath, embeddingAuthorityRead(provider)) as EmbeddingAuthorityRow | null, provider)
-        : this.embeddingReadAuthority(provider);
-    } catch (error) {
-      if (!(error instanceof OffThreadReadBusyError)) throw error;
-      return { rows: [], skippedReason: 'vector_scan_store_busy' };
-    }
+    const before = this.embeddingReadAuthority(provider);
     if (before.skippedReason) return { rows: [], skippedReason: before.skippedReason };
     let queryVector: number[] | undefined;
     try {
@@ -14900,82 +14807,61 @@ export class LocalConnectorStore {
       ...(selectedAccount ? { accountScope: selectedAccount } : {}),
       ...(filters ? { filters } : {}),
     };
-    const pooled = offThreadReadsSupported(this.dbPath);
-    const excludedItemPks = pooled ? await this.vectorScanMemoExclusions() : this.vectorScanExcludedItemPks();
+    const excludedItemPks = this.vectorScanExcludedItemPks();
     if (excludedItemPks) pageOptions.excludedItemPks = excludedItemPks;
-    const validate: ValidateVectorWinners = async (winners) => {
-      try {
-        return await this.validateVectorWinners(winners, limit, selectedAccount, filters, input.locate, pooled);
-      } catch (error) {
-        if (!pooled) throw error;
-        return undefined;
-      }
-    };
+    // One pass. Items the store will not serve are skipped inside the scan,
+    // so its top K are servable by construction; the live ledger check below
+    // stays the authority for each winner. (A post-ranking filter that
+    // re-ran the scan 8x wider until enough survived read the whole store on
+    // a heavily held one and ran out its deadline on every Ask: olympus-ops#151.)
     // A file store's pages are read on its read-pool thread inside one
     // snapshot (#1305): run on the request thread they held it for tens of
     // seconds on a large store, and every other lane and request waited.
-    const scanned = pooled
-      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, validate)
-      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, validate);
+    const scanned = offThreadReadsSupported(this.dbPath)
+      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit)
+      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
     if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
-    const rows = scanned.validatedRows ?? (await validate(scanned.bestByItem))?.rows;
-    if (!rows) return { rows: [], skippedReason: 'vector_visibility_unavailable' };
-    return {
-      rows,
-      ...(scanned.cutReason !== undefined
-        ? { skippedReason: scanned.cutReason }
-        : rows.length === 0 && scanned.dimensionMismatches > 0
-          ? { skippedReason: 'embedding_stored_dimension_mismatch' }
-          : {}),
-    };
-  }
-
-  private async validateVectorWinners(
-    bestByItem: VectorWinners, limit: number, accountScope: string | undefined, filters: ConnectorStoreSearchFilters | undefined,
-    locate: boolean, pooled: boolean,
-  ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; rejectedItemPks: number[] }> {
+    const { bestByItem, dimensionMismatches } = scanned;
     // Ties break on item_pk, explicitly: exactly-equal cosines are common in
     // a real corpus (duplicated and forwarded content), and the ranking must
     // not depend on whatever plan SQLite chooses. Validate in rank order:
-    // check a small batch first and widen it when the leading items are hidden.
+    // only candidates needed to fill the limit touch the live tier ledger.
     const candidates = Array.from(bestByItem.entries())
       .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
       .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-    const winners: VectorWinners = new Map();
-    const rejectedItemPks: number[] = [];
+    const rankedItems: Array<[number, { bestCosine: number; bestChunkPk: number; localItemId: string }]> = [];
     let candidateOffset = 0;
-    let batchSize = limit;
-    while (true) {
-      while (winners.size < limit && candidateOffset < candidates.length) {
-        const batch = candidates.slice(candidateOffset, candidateOffset + batchSize);
-        const itemPks = batch.map(([itemPk]) => itemPk);
-        const visible = pooled
-          ? await this.visibleVectorItemPksOffThread(itemPks, accountScope, filters)
-          : this.visibleVectorItemPks(itemPks, accountScope, filters);
-        for (const [itemPk, winner] of batch) {
-          candidateOffset += 1;
-          if (visible.has(itemPk)) winners.set(itemPk, winner);
-          else rejectedItemPks.push(itemPk);
-          if (winners.size === limit) break;
-        }
-        batchSize = Math.min(200, batchSize * 2);
-      }
-      const rows = pooled
-        ? await judgedAwaited(
-          () => this.vectorWinnerRowsOffThread(winners, accountScope, filters, locate),
-          () => { throw new VisibilityChangedError(); },
-        )
-        : this.vectorWinnerRowsHere(winners, accountScope, filters, locate);
-      const needsMore = rows.size < winners.size && candidateOffset < candidates.length;
-      for (const itemPk of winners.keys()) {
-        if (rows.has(itemPk)) continue;
-        winners.delete(itemPk);
-        rejectedItemPks.push(itemPk);
-      }
-      if (!needsMore) {
-        return { rows: [...rows.values()], rejectedItemPks };
-      }
+    while (rankedItems.length < limit && candidateOffset < candidates.length) {
+      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+      for (const candidate of batch) if (visible.has(candidate[0])) rankedItems.push(candidate);
+      candidateOffset += batch.length;
     }
+    const searchRows = this.searchRowsByItemPks(
+      rankedItems.map(([itemPk]) => itemPk),
+      selectedAccount,
+      filters,
+    );
+    const winnersByLocalItemId = new Map(
+      rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]),
+    );
+    // No await occurs between the live visibility check and hydration.
+    // Rechecking here would validate the same winners twice.
+    const laneRows = searchRows.flatMap((row) => {
+      const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
+      if (winner === undefined) return [];
+      if (!input.locate) return [{ ...row, contentMatched: true as const, bestCosine: winner.bestCosine }];
+      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, 'semantic');
+      return [{ ...row, ...(chunk ? { chunk } : {}), bestCosine: winner.bestCosine }];
+    });
+    return {
+      rows: laneRows,
+      ...(scanned.cutReason !== undefined
+        ? { skippedReason: scanned.cutReason }
+        : laneRows.length === 0 && dimensionMismatches > 0
+          ? { skippedReason: 'embedding_stored_dimension_mismatch' }
+          : {}),
+    };
   }
 
   /**
@@ -15006,44 +14892,6 @@ export class LocalConnectorStore {
       base = this.tierLedgerHiddenItemPks();
       children = this.hiddenChildItemPks();
     } catch { return undefined; }
-    return this.vectorExclusions(base, children);
-  }
-
-  // Use the published memo as an exclusion hint. A stale memo can keep out
-  // a newly released item until the next memo refresh. Live validation
-  // withholds newly hidden items even when the memo misses them.
-  private async vectorScanMemoExclusions(): Promise<{ has(itemPk: number): boolean } | undefined> {
-    const memo = this.tierLedgerHiddenMemo;
-    if (!memo || !this.visibilityFeedPresent) return undefined;
-    try {
-      const read: VectorRead = (path, query) => this.readVectorOnPool(path, query);
-      const ledgerCursor = memo.ledgerCursor;
-      const storeCursor = memo.storeCursor;
-      const child = this.hiddenChildMemo;
-      const members = child ? this.vectorVisibilityStores() : [];
-      const paths = new Map(members.map(store => [store, child?.storeCursors.get(store)]));
-      const ledgerPath = await this.vectorVisibilityLedgerPath(read);
-      if (ledgerPath !== memo.ledger.dbPath) return undefined;
-      const [ledger, own, ...siblings] = await Promise.all([
-        vectorReadSteps(read, ledgerPath, hiddenVisibilityFeedReads('tier_visibility_changes')),
-        vectorReadSteps(read, this.dbPath, hiddenVisibilityFeedReads('main.item_visibility_feed')),
-        ...members.map(store => vectorReadSteps(read, store.dbPath, hiddenVisibilityFeedReads('main.item_visibility_feed'))),
-      ]);
-      const childCurrent = child && child.ledger === memo.ledger
-        && child.ledgerCursor === ledgerCursor && child.storeCursors.size === members.length
-        && members.every((store, at) => paths.get(store) === siblings[at]?.cursor);
-      if (ledger.cursor > ledgerCursor || own.cursor > storeCursor || (child && !childCurrent)) {
-        // The background build owns saved-set reads and has its own turns.
-        void withoutSourceAnswerTrace(() => withoutSourceIndexReadProgress(() => this.refreshTierHiddenCountsInTurns()));
-      }
-      return this.vectorExclusions(memo.value, child?.ledger === memo.ledger ? [...child.hiddenParents.values()].flat() : []);
-    } catch {
-      // An unavailable optimization leaves all candidates to live validation.
-      return undefined;
-    }
-  }
-
-  private vectorExclusions(base: TierLedgerHiddenItemPks, children: readonly number[]): { has(itemPk: number): boolean } | undefined {
     // The set's lists change in place as verdicts land. The copy is kept
     // between searches while every list is the same one at the same
     // generation: rebuilt per search it cost up to a few hundred ms per big
@@ -15077,7 +14925,6 @@ export class LocalConnectorStore {
     pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
     deadlineAtMs: number | undefined,
     resultLimit: number,
-    validate: ValidateVectorWinners,
   ): Promise<VectorScan> {
     const scanDb = this.dbPath === ':memory:'
       ? this.db
@@ -15093,7 +14940,7 @@ export class LocalConnectorStore {
         const params = query.params as Array<string | number | null>;
         return query.mode === 'all' ? statement.all(...params) : statement.get(...params);
       };
-      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, undefined, validate);
+      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit);
     } finally {
       try {
         scanDb.exec('ROLLBACK;');
@@ -15296,44 +15143,42 @@ export class LocalConnectorStore {
     }>;
   }
 
-  // Exact PKs avoid local-id aliases across providers and accounts. The
-  // scorer supplies a bounded batch in rank order.
-  private vectorItemPksRead(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters): StoreRead {
-    const selectedFilters = connectorStoreFilterSql(filters);
-    return {
-      sql: `SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM items i WHERE i.item_pk IN (${itemPks.map(() => '?').join(',')}) AND i.tombstoned = 0
-        ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}`,
-      params: [...itemPks, ...(accountScope ? [accountScope] : []), ...selectedFilters.params], mode: 'all',
-    };
-  }
-
+  // Hydrates membrane-safe search rows for ranked item pks, preserving order.
+  // Exact item PKs avoid local-id aliases across providers/accounts. Batches
+  // keep candidate validation below SQLite's bind-variable ceiling.
   private visibleVectorItemPks(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters): Set<number> {
-    const read = this.vectorItemPksRead(itemPks, accountScope, filters);
-    const rows = this.db.query(read.sql).all(...read.params as SQLQueryBindings[]) as VectorVisibilityRow[];
-    return new Set(this.tierVisibleRows(rows, vectorRowIdentity, () => 'content', false,
-      copies => vectorCopiesAllowed(this.corpusId, copies)).map(row => row.item_pk));
-  }
-
-  private async visibleVectorItemPksOffThread(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters): Promise<Set<number>> {
-    const rows = await this.readVectorOnPool(this.dbPath, this.vectorItemPksRead(itemPks, accountScope, filters)) as VectorVisibilityRow[];
-    const visible = await this.vectorContentVisibleRows(rows, (path, query) => this.readVectorOnPool(path, query));
-    return new Set(visible.map(row => row.item_pk));
-  }
-
-  private readVectorOnPool(path: string, query: StoreRead): Promise<unknown> {
-    if (this.closedForPoolReads || !offThreadReadsSupported(path)) throw new OffThreadReadBusyError();
-    return readOnPool(path, query, { store: this.dbPath });
-  }
-
-  private vectorWinnerItemsRead(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters,
-    metadataOnly?: ReturnType<typeof connectorStoreMetadataOnlySql>,
-  ): StoreRead {
+    const visible = new Set<number>();
     const selectedFilters = connectorStoreFilterSql(filters);
-    return {
-      mode: 'all',
-      params: [...itemPks, ...(accountScope ? [accountScope] : []), ...selectedFilters.params, ...(metadataOnly?.params ?? [])],
-      sql: `
+    for (let offset = 0; offset < itemPks.length; offset += 200) {
+      const batch = itemPks.slice(offset, offset + 200);
+      const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        FROM items i WHERE i.item_pk IN (${batch.map(() => '?').join(',')}) AND i.tombstoned = 0
+        ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}`)
+        .all(...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params) as Array<{
+          item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+        }>;
+      // Embedding admission never releases a vector to search: the copy's
+      // hold must clear, even though lexical/Private reads may already serve it.
+      // One ledger read serves both checks, and an unreadable ledger hides the batch.
+      for (const row of this.tierVisibleRows(rows, row => ({
+        provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+      }), () => 'content', false, copies => !copies.some(copy => copy.corpusId === this.corpusId
+        && copy.state === 'current' && copy.embedHold))) visible.add(row.item_pk);
+    }
+    return visible;
+  }
+
+  private searchRowsByItemPks(
+    itemPks: number[],
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+  ): ConnectorStoreSearchRow[] {
+    if (itemPks.length === 0) return [];
+    const placeholders = itemPks.map(() => '?').join(', ');
+    const selectedAccount = normalizeOptionalAccountScope(accountScope);
+    const selectedFilters = connectorStoreFilterSql(filters);
+    const rows = this.db.query(`
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -15342,177 +15187,20 @@ export class LocalConnectorStore {
         i.trust_tier, i.sync_run_id,
         0 AS rank
       FROM items i
-      WHERE i.item_pk IN (${itemPks.map(() => '?').join(', ')})
+      WHERE i.item_pk IN (${placeholders})
         AND i.tombstoned = 0
-        ${accountScope ? 'AND i.account_scope = ?' : ''}
+        ${selectedAccount ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
-        ${metadataOnly?.sql ? `AND NOT ${metadataOnly.sql}` : ''}
-      `,
-    };
-  }
-
-  private vectorWinnerRowsHere(winners: VectorWinners, accountScope: string | undefined,
-    filters: ConnectorStoreSearchFilters | undefined, locate: boolean): Map<number, ConnectorStoreScoredSearchRow> {
-    const result = new Map<number, ConnectorStoreScoredSearchRow>();
-    if (winners.size === 0) return result;
-    const read = this.vectorWinnerItemsRead([...winners.keys()], accountScope, filters);
-    const rows = this.db.query(read.sql).all(...read.params as SQLQueryBindings[]) as ItemRow[];
-    const byPk = new Map(rows.map(row => [row.item_pk, row]));
-    for (const [pk, winner] of winners) {
-      const item = byPk.get(pk);
-      if (item?.local_item_id !== winner.localItemId) continue;
-      const row = searchRowFromItemRow(item);
-      const { bestCosine } = winner;
-      if (!locate) {
-        result.set(pk, { ...row, contentMatched: true, bestCosine });
-        continue;
-      }
-      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, 'semantic');
-      result.set(pk, { ...row, ...(chunk ? { chunk } : {}), bestCosine });
-    }
-    return result;
-  }
-
-  private vectorVisibilityStores(): readonly LocalConnectorStore[] {
-    const stores = this.childLane ? this.childLane.mountedStores?.() : [this];
-    if (!stores || !stores.includes(this) || !stores.every((store): store is LocalConnectorStore => store instanceof LocalConnectorStore)
-      || stores.some(store => store.db.inTransaction || !offThreadReadsSupported(store.dbPath)
-        || store.fileReplacedOrRemoved() || store.closedForPoolReads)) {
-      throw new VisibilityChangedError();
-    }
-    return stores;
-  }
-
-  private async vectorVisibilityLedgerPath(read: VectorRead): Promise<string | undefined> {
-    const binding = this.parseTierSetBinding(await read(this.dbPath, TIER_BINDING_READ) as { cursor: string | null } | null);
-    if (this.tierLedgerHandle?.writesHeld() || this.boundLedgerHandle?.writesHeld()) throw new VisibilityChangedError();
-    const explicit = this.tierLedgerHandle?.dbPath;
-    if (binding) {
-      const paths = [explicit, this.boundLedgerHandle?.dbPath, ...tierSetLedgerCandidates(this.dbPath, binding.ledgerPath)];
-      for (const path of new Set(paths)) {
-        if (!path || !offThreadReadsSupported(path) || !existsSync(path)) continue;
-        const row = await read(path, {
-          sql: `SELECT (SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id') AS id,
-            version, compatible_version FROM schema_version WHERE store_id = ?`,
-          params: [TIER_LEDGER_SQLITE_STORE_ID], mode: 'get',
-        }) as { id: string | null; version: number; compatible_version: number | null } | null;
-        if (row?.id === binding.ledgerId && this.vectorLedgerSchemaUsable(row)) return path;
-      }
-      throw new TierLedgerUnavailableError(this.corpusId);
-    }
-    if (!explicit && this.tierLedgerDisabled) return undefined;
-    const path = explicit ?? tierLedgerPathForStore(this.dbPath);
-    if (!explicit && !existsSync(path)) return undefined;
-    const schema = await read(path, { sql: 'SELECT version, compatible_version FROM schema_version WHERE store_id = ?',
-      params: [TIER_LEDGER_SQLITE_STORE_ID], mode: 'get' }) as { version: number; compatible_version: number | null } | null;
-    if (!schema || !this.vectorLedgerSchemaUsable(schema)) throw new TierLedgerUnavailableError(this.corpusId);
-    return path;
-  }
-
-  private vectorLedgerSchemaUsable(row: { version: number; compatible_version: number | null }): boolean {
-    return row.version === TIER_LEDGER_SCHEMA_VERSION || (row.version > TIER_LEDGER_SCHEMA_VERSION
-      && Number.isInteger(row.compatible_version) && row.compatible_version! <= TIER_LEDGER_SCHEMA_VERSION);
-  }
-
-  private async vectorContentVisibleRows<T extends VectorVisibilityRow>(rows: readonly T[], read: VectorRead): Promise<T[]> {
-    if (rows.length === 0) return [];
-    const ledgerPath = await this.vectorVisibilityLedgerPath(read);
-    const identities = rows.map(vectorRowIdentity);
-    const granted = await read(this.dbPath, ON_DEMAND_READS_PRESENT) ? await read(this.dbPath, {
-      sql: `SELECT i.item_pk FROM items i JOIN on_demand_item_reads r ON i.local_item_id = r.local_item_id
-        AND COALESCE(i.source_version, '') = r.source_version
-        WHERE i.item_pk IN (${rows.map(() => '?').join(',')}) AND i.tombstoned = 0`,
-      params: rows.map(row => row.item_pk), mode: 'all',
-    }) as Array<{ item_pk: number }> : [];
-    const grantedPks = new Set(granted.map(row => row.item_pk));
-    const itemStates = (path: string, items: readonly TierLedgerIdentity[]) =>
-      vectorReadSteps(read, path, TierLedger.itemStatesSteps(items));
-    const onDemand = ledgerPath && granted.length > 0
-      ? await itemStates(ledgerPath, rows.filter(row => grantedPks.has(row.item_pk)).map(vectorRowIdentity)) : undefined;
-    const hasCopies = ledgerPath && await read(ledgerPath, {
-      sql: 'SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1', params: [this.corpusId], mode: 'get',
+    `).all(
+      ...itemPks,
+      ...(selectedAccount ? [selectedAccount] : []),
+      ...selectedFilters.params,
+    ) as ItemRow[];
+    const byPk = new Map(rows.map((row) => [row.item_pk, row]));
+    return itemPks.flatMap((itemPk) => {
+      const row = byPk.get(itemPk);
+      return row ? [searchRowFromItemRow(row)] : [];
     });
-    const copies = ledgerPath && hasCopies
-      ? (await vectorReadSteps(read, ledgerPath, TierLedger.visibilityReadSteps(identities))).copies : undefined;
-    const served = rows.filter(row => {
-      const key = tierLedgerIdentityKey(vectorRowIdentity(row));
-      const itemCopies = copies?.get(key);
-      return (!grantedPks.has(row.item_pk) || !this.onDemandTierHeld(onDemand?.get(key)?.record))
-        && tierRowVisible(itemCopies, this.corpusId, 'content')
-        && vectorCopiesAllowed(this.corpusId, itemCopies ?? []);
-    });
-    const stores = this.vectorVisibilityStores().map(store => ({
-      corpusId: store.corpusId,
-      parentLinksOf: pooledOnly,
-      parentLinksOfOffThread: (probes: readonly ChildProbe[]) => vectorReadSteps(read, store.dbPath, store.parentLinksOfSteps(probes)),
-      parentStandings: pooledOnly,
-      parentStandingsOffThread: async (parents: readonly ParentRef[]) =>
-        vectorReadSteps(read, store.dbPath, store.parentStandingsSteps(parents)),
-      itemStandings: pooledOnly,
-    }));
-    const laneLedger = this.childLane?.ledger();
-    if (laneLedger?.writesHeld()) throw new VisibilityChangedError();
-    const parentLedgerPath = laneLedger?.dbPath ?? ledgerPath;
-    const parentLedger = parentLedgerPath ? {
-      itemStates: (items: readonly TierLedgerIdentity[]) => itemStates(parentLedgerPath, items),
-      itemIsSecret: (item: TierLedgerIdentity) => vectorReadSteps(read, parentLedgerPath, TierLedger.itemIsSecretSteps(item)),
-    } : null;
-    const hidden = await visibilityOffThread(hiddenChildKeysSteps({ stores: () => stores, ledger: () => undefined },
-      served.map(vectorRowIdentity), parentLedger));
-    return served.filter(row => !hidden.has(tierLedgerIdentityKey(vectorRowIdentity(row))));
-  }
-
-  private async vectorWinnerRowsOffThread(winners: VectorWinners, accountScope: string | undefined,
-    filters: ConnectorStoreSearchFilters | undefined, locate: boolean): Promise<Map<number, ConnectorStoreScoredSearchRow>> {
-    if (winners.size === 0) return new Map();
-    // Each file's token is taken once, before its first row is read, and
-    // compared after the last: every file is then proven unchanged across one
-    // shared instant (the start of the final comparison), so the batch is one
-    // consistent state. Two reads of a file arriving together share the first
-    // token; a later one must never replace it.
-    const versions = new Map<string, Promise<string>>();
-    const read: VectorRead = async (path, query) => {
-      if (this.closedForPoolReads || !offThreadReadsSupported(path)) throw new VisibilityChangedError();
-      if (!versions.has(path)) versions.set(path, readPoolDataVersion(path, this.dbPath));
-      await versions.get(path);
-      return this.readVectorOnPool(path, query);
-    };
-    const stores = this.vectorVisibilityStores();
-    const configuredLedger = this.tierLedgerHandle;
-    const childLedger = this.childLane?.ledger();
-    const defaultLedgerPath = !configuredLedger && !this.tierLedgerDisabled ? tierLedgerPathForStore(this.dbPath) : undefined;
-    const defaultLedgerExists = defaultLedgerPath && existsSync(defaultLedgerPath);
-    const metadataOnly = connectorStoreMetadataOnlySql(filters, Boolean(
-      (filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length)
-      && await read(this.dbPath, ON_DEMAND_READS_PRESENT),
-    ));
-    const raw = await read(this.dbPath, this.vectorWinnerItemsRead([...winners.keys()], accountScope, filters, metadataOnly)) as ItemRow[];
-    const byPk = new Map(raw.map(row => [row.item_pk, row]));
-    const ordered = [...winners].flatMap(([pk, winner]) => {
-      const row = byPk.get(pk);
-      return row?.local_item_id === winner.localItemId ? [row] : [];
-    });
-    // Rejudge the hydrated identities together, after every candidate batch
-    // has returned, before reading any winning chunk.
-    const rows = await this.vectorContentVisibleRows(ordered, read);
-    const chunks = locate ? await vectorReadSteps(read, this.dbPath, this.keywordChunkMatchesSteps(
-      rows.map(row => ({ ...row, chunk_pk: winners.get(row.item_pk)!.bestChunkPk })), [], 'semantic')) : undefined;
-    // A visibility or scope write while any of those reads were in flight
-    // voids this batch. Worker/connection loss also voids its token.
-    const unchanged = await Promise.all([...versions].map(async ([path, before]) =>
-      await readPoolDataVersion(path, this.dbPath) === await before));
-    const current = this.vectorVisibilityStores();
-    if (!unchanged.every(Boolean) || stores.length !== current.length || !stores.every((store, i) => store === current[i])
-      || configuredLedger !== this.tierLedgerHandle || childLedger !== this.childLane?.ledger()
-      || (defaultLedgerPath && existsSync(defaultLedgerPath) !== defaultLedgerExists)
-      || configuredLedger?.writesHeld() || childLedger?.writesHeld() || this.boundLedgerHandle?.writesHeld()) throw new VisibilityChangedError();
-    return new Map(rows.map((item, index) => {
-      const row = searchRowFromItemRow(item);
-      const bestCosine = winners.get(item.item_pk)!.bestCosine;
-      if (!locate) return [item.item_pk, { ...row, contentMatched: true, bestCosine }];
-      const chunk = chunks?.get(index);
-      return [item.item_pk, { ...row, ...(chunk ? { chunk } : {}), bestCosine }];
-    }));
   }
 
   /**
@@ -16095,7 +15783,6 @@ export class LocalConnectorStore {
   private *keywordChunkMatchesSteps(
     rows: ReadonlyArray<Pick<ItemRow, 'item_pk' | 'local_item_id' | 'source_version' | 'chunk_pk'>>,
     queryTerms: readonly string[],
-    lane: 'keyword' | 'semantic' = 'keyword',
   ): Generator<StoreRead, Map<number, ConnectorStoreChunkMatch | undefined>, unknown> {
     const wanted = [...rows.entries()].filter(([, row]) => row.chunk_pk !== null && row.chunk_pk !== undefined);
     const matches = new Map<number, ConnectorStoreChunkMatch | undefined>();
@@ -16121,7 +15808,7 @@ export class LocalConnectorStore {
       const row = chunks.at(-1)!;
       if (row.chunk_pk !== row.want_chunk_pk) continue;
       const itemOffset = chunks.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-      matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, lane, queryTerms));
+      matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, 'keyword', queryTerms));
     }
     return matches;
   }
@@ -17762,9 +17449,9 @@ export function createConnectorStoreCorpusAdapter(
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
-  const adapter: SourceIndexCorpusSearchAdapter = async (
+  const adapter: SourceIndexCorpusSearchAdapter = (
     request: SourceIndexCorpusSearchRequest,
-  ): Promise<SourceIndexCorpusSearchResponse> => {
+  ): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse> => {
     assertConnectorStoreCorpusRequest(store, request);
     const startedAt = Date.now();
 
@@ -17773,7 +17460,7 @@ export function createConnectorStoreCorpusAdapter(
     if (embeddingProvider && useHybrid === 'hybrid') {
       if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
         semanticSkippedReason = 'secure_local_embedding_provider_not_local';
-      } else if (!await store.vectorLaneServableOffThread(embeddingProvider.modelId)) {
+      } else if (!store.vectorLaneServable(embeddingProvider.modelId)) {
         semanticSkippedReason = 'no_embedding_artifacts';
       }
     }
@@ -17866,7 +17553,7 @@ export function createConnectorStoreCorpusAdapter(
       options.localKeywordFallback,
     );
   };
-  adapter.hybridAvailability = async (): Promise<SourceIndexHybridAvailability> => {
+  adapter.hybridAvailability = () => {
     if (!embeddingProvider) {
       return { servable: false, reason: 'embedding_provider_unavailable' };
     }
@@ -17879,7 +17566,7 @@ export function createConnectorStoreCorpusAdapter(
         backend: embeddingProvider.backend,
       };
     }
-    const servable = await store.vectorLaneServableOffThread(embeddingProvider.modelId);
+    const servable = store.vectorLaneServable(embeddingProvider.modelId);
     return {
       servable,
       ...(!servable ? { reason: 'no_current_embedding_artifacts' as const } : {}),
@@ -17903,7 +17590,7 @@ export function createConnectorStoreCorpusAdapter(
       !embeddingProvider
       || (options.retrievalMode ?? 'hybrid') !== 'hybrid'
       || (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
-      || !await store.vectorLaneServableOffThread(embeddingProvider.modelId)
+      || !store.vectorLaneServable(embeddingProvider.modelId)
     ) {
       return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
     }
@@ -17950,7 +17637,7 @@ export function createConnectorStoreCorpusAdapter(
     const hybrid = embeddingProvider !== undefined
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
-      && await store.vectorLaneServableOffThread(embeddingProvider.modelId);
+      && store.vectorLaneServable(embeddingProvider.modelId);
     const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, onPartialRows: partialKeywordRows(store, request) };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;

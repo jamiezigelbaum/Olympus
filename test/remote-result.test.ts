@@ -6,6 +6,7 @@
 // release rules. The stdio MCP and ChatGPT surfaces are unchanged.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,6 +21,8 @@ import { OperationError } from '../src/core/operation-error.ts';
 import { findOperationByName } from '../src/core/operations.ts';
 import type { OperationCaller } from '../src/core/operation-caller.ts';
 import {
+  ANSWER_RELEASE_UNVERIFIED,
+  answerReleaseWithheldReasonOffThread,
   createReleaseManifestSink,
   recordReleaseManifest,
   runWithReleaseManifestSink,
@@ -561,6 +564,40 @@ describe('the release manifest, revalidated against current tiers and rules', ()
     const output = remoteOperationOutput('source_answer', both(), { releaseCheck: check, releaseManifests: bothRead() });
     expect(output.status).toBe('answered');
     expect((output.citations as unknown[]).length).toBe(2);
+  });
+
+  test.each(['deletion', 'secret'] as const)('a pending %s withholds an answer at release', async kind => {
+    const { fixture, check } = await routed();
+    const identity = identityOf('garden');
+    expect(fixture.ledger.copies(identity)).toContainEqual(expect.objectContaining({ corpusId: CORPORA.internal, state: 'current' }));
+    expect(check.inputs([input('garden')])).toEqual([{ tier: 'public_or_personal', gone: false }]);
+    const answer = both();
+    const releaseManifests = bothRead();
+
+    fixture.ledger.putWriteIntent({ identity, connectorId: 'fixture', kind });
+    fixture.ledger.putWriteIntent({ identity: identityOf('legacy'), connectorId: 'fixture', kind });
+    fixture.ledger.putWriteIntent({ identity: identityOf('orchard'), connectorId: 'fixture', kind: 'advance' });
+
+    const output = remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests });
+    expect(output).toMatchObject({ status: 'withheld', citations: [] });
+    expect(await answerReleaseWithheldReasonOffThread(releaseManifests, check)).toBe(ANSWER_RELEASE_UNVERIFIED);
+    const [garden, orchard, legacy] = await check.inputsOffThread!([input('garden'), input('orchard'), input('legacy')]);
+    const withheld = kind === 'deletion' ? { gone: true } : { tier: 'secret' };
+    expect(garden).toMatchObject(withheld);
+    expect(legacy).toMatchObject(withheld);
+    expect(orchard).toEqual({ tier: 'public_or_personal', gone: false });
+  });
+
+  test('release withholds when the pending writes cannot be read', async () => {
+    const { fixture, check } = await routed();
+    const db = new Database(fixture.ledger.dbPath);
+    try { db.exec('DROP TABLE tier_write_intents'); }
+    finally { db.close(); }
+
+    const releaseManifests = bothRead();
+    const output = remoteOperationOutput('source_answer_result', both(), { releaseCheck: check, releaseManifests });
+    expect(output).toMatchObject({ status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
+    expect(await answerReleaseWithheldReasonOffThread(releaseManifests, check)).toBe(ANSWER_RELEASE_UNVERIFIED);
   });
 
   test('a cited input now Secret withholds', async () => {

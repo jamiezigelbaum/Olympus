@@ -32,6 +32,7 @@ import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts'
 import {
   PERSONAL_FIRST_REASON,
   TIER_KEYS,
+  contentHeldForJudgment,
   contentJudgeVerdictReason,
   maxTier,
   tierRank,
@@ -177,18 +178,31 @@ function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead
     }
     // An item whose deletion or Secret is under way (an intent not yet cleared) is hidden at once: a read in
     // the same snapshot sees every copy as superseded, whichever legs have been written so far.
-    const pending = (yield {
-      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
-        WHERE kind IN ('deletion', 'secret')
-          AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
-      params, mode: 'all',
-    }) as Array<{ provider: string; account_scope: string; conversation_key: string; provider_item_id: string }>;
+    const pending = yield* hidingIntentsSteps(values, params);
     for (const row of pending) {
-      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row as never)));
+      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
       if (hidden) for (const copy of hidden) if (copy.state !== 'superseded') copy.state = 'superseded';
     }
   }
   return result;
+}
+
+type HidingIntent = 'deletion' | 'secret';
+
+interface TierLedgerItemState {
+  record?: TierLedgerRecord;
+  copies: TierCopy[];
+  override?: ItemTierOverride;
+  hidingIntent?: HidingIntent;
+}
+
+function* hidingIntentsSteps(values: string, params: string[]): Generator<LedgerRead, Array<TierIdentityRow & { kind: HidingIntent }>, unknown> {
+  return (yield {
+    sql: `SELECT provider, account_scope, conversation_key, provider_item_id, kind FROM tier_write_intents
+      WHERE kind IN ('deletion', 'secret')
+        AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+    params, mode: 'all',
+  }) as Array<TierIdentityRow & { kind: HidingIntent }>;
 }
 
 /**
@@ -2108,10 +2122,6 @@ export class TierLedger {
   // A missing or moving parent still needs its Secret override checked, on
   // the same read connection as the rest of an asynchronous parent judgment.
   *itemIsSecretSteps(identity: TierLedgerIdentity): Generator<LedgerRead, boolean, unknown> {
-    return yield* TierLedger.itemIsSecretSteps(identity);
-  }
-
-  static *itemIsSecretSteps(identity: TierLedgerIdentity): Generator<LedgerRead, boolean, unknown> {
     const row = (yield { sql: `SELECT override_json FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
       params: idParams(identity), mode: 'get' }) as { override_json: string } | null;
@@ -2693,13 +2703,6 @@ export class TierLedger {
     identities: readonly TierLedgerIdentity[],
     options: { personalFirst?: boolean } = {},
   ): Generator<LedgerRead, TierVisibilityReads, unknown> {
-    return yield* TierLedger.visibilityReadSteps(identities, options);
-  }
-
-  static *visibilityReadSteps(
-    identities: readonly TierLedgerIdentity[],
-    options: { personalFirst?: boolean } = {},
-  ): Generator<LedgerRead, TierVisibilityReads, unknown> {
     const list = uniqueIdentities(identities);
     const copies = yield* copiesSteps(list);
     const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
@@ -3030,13 +3033,13 @@ export class TierLedger {
 
   /**
    * Each item's row and copies, read in ONE transaction so every item is
-   * judged against one ledger snapshot: one batched query for the rows and
-   * one for the copies (per 200 items). Keyed by `tierLedgerIdentityKey`;
-   * an item with no row is absent from the map (never classified).
+   * judged against one ledger snapshot, including pending writes that hide
+   * items. Keyed by `tierLedgerIdentityKey`; an item with neither a decision
+   * nor a hiding intent is absent from the map.
    */
   itemStatesForMany(
     identities: readonly TierLedgerIdentity[],
-  ): Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }> {
+  ): Map<string, TierLedgerItemState> {
     return this.readSteps(this.itemStatesSteps(identities));
   }
 
@@ -3044,14 +3047,8 @@ export class TierLedger {
   // must not make the Ask read every governed item on the request thread.
   *itemStatesSteps(
     identities: readonly TierLedgerIdentity[],
-  ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>, unknown> {
-    return yield* TierLedger.itemStatesSteps(identities);
-  }
-
-  static *itemStatesSteps(
-    identities: readonly TierLedgerIdentity[],
-  ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>, unknown> {
-    const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>();
+  ): Generator<LedgerRead, Map<string, TierLedgerItemState>, unknown> {
+    const result = new Map<string, TierLedgerItemState>();
     const list = uniqueIdentities(identities);
     for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
       const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
@@ -3079,6 +3076,12 @@ export class TierLedger {
         const state = result.get(tierLedgerIdentityKey(identityFromRow(row)));
         const override = overrideFromJson(row.override_json);
         if (state && override) state.override = override;
+      }
+      for (const row of yield* hidingIntentsSteps(values, params)) {
+        const key = tierLedgerIdentityKey(identityFromRow(row));
+        const state = result.get(key);
+        if (state) state.hidingIntent = row.kind;
+        else result.set(key, { copies: [], hidingIntent: row.kind });
       }
     }
     return result;
@@ -5222,6 +5225,12 @@ export function copyServingLayer<T extends Pick<TierCopy, 'layers'>>(
   layer: TierSearchLayer,
 ): T | undefined {
   return copies.find((copy) => copy.layers === 'both' || copy.layers === layer);
+}
+
+/** A held item's names can serve separately from its text only from a current names-only copy. */
+export function itemNamesHeldForJudgment(record: TierLedgerRecord, copies: readonly TierCopy[], corpusId?: string): boolean {
+  return record.metadataPending || (contentHeldForJudgment(record) && !copies.some(copy =>
+    copy.state === 'current' && copy.layers === 'metadata' && (corpusId === undefined || copy.corpusId === corpusId)));
 }
 
 function ownerPriorOf(json: string): OwnerPriorDecision | undefined {

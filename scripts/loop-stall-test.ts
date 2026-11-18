@@ -507,9 +507,64 @@ const BACKGROUND_PROGRESS_LIMIT_MS = 30_000;
 // beats are reported, with a 30 s sanity limit so a real hang still fails.
 export function frontLimitMs(runCase: string): number { return runCase === 'boot-after-upgrade' ? BACKGROUND_PROGRESS_LIMIT_MS : LOOP_STALL_LIMIT_MS; }
 type GateLoop = Loop & { pre_ready_ms: number };
-export function gate(input: { background: GateLoop; front: GateLoop; workload_ok: boolean; wal_ok: boolean; ack_ok: boolean; runCase?: string }) {
-  return input.workload_ok && input.wal_ok && input.ack_ok && input.background.beats > 0 && input.front.beats > 0
+export function gate(input: { background: GateLoop; front: GateLoop; workload_ok: boolean; wal_ok: boolean; ack_ok: boolean; privacy_restart_ok: boolean; runCase?: string }) {
+  return input.workload_ok && input.wal_ok && input.ack_ok && input.privacy_restart_ok && input.background.beats > 0 && input.front.beats > 0
     && input.background.max_ms < BACKGROUND_PROGRESS_LIMIT_MS && input.front.max_ms < frontLimitMs(input.runCase ?? 'steady');
+}
+
+/** Run on one throwaway item so a restart never disturbs the measured workload or reopens its large stores. */
+export async function privacyClickRestartGate(): Promise<{ pass: boolean; outcome: string; ms: number }> {
+  const started = performance.now();
+  const result = (pass: boolean, outcome: string) => ({ pass, outcome, ms: Math.round(performance.now() - started) });
+  let stage = 'fixture startup';
+  try {
+    const { privacyRestartFixture } = await import('../test/helpers/privacy-click-restart.ts');
+    const fixture = await privacyRestartFixture('private');
+    try {
+      stage = 'click receipt';
+      await fixture.pauseBeforeCommit();
+      const ack = await fixture.set();
+      const receipt = await ack.json() as { request_id?: string; state?: string };
+      if (ack.status !== 202 || receipt.state !== 'pending' || !receipt.request_id) return result(false, `set HTTP ${ack.status}, no pending receipt`);
+      const pending = await fixture.status(receipt.request_id);
+      const { state } = await pending.json() as { state?: string };
+      if (pending.status !== 200 || state !== 'pending' || (await fixture.search()).released || (await fixture.answerRelease()).released) {
+        return result(false, `status HTTP ${pending.status}, ${state === 'pending' ? 'pending item released' : 'pending receipt missing'}`);
+      }
+      stage = 'restart before commit';
+      const preCommit = fixture.readStored();
+      await fixture.restartFront();
+      try {
+        const waiting = await fixture.frontWaitingForPrivacyRaise();
+        const status = await fixture.status(receipt.request_id);
+        const search = await fixture.search();
+        const answer = await fixture.answerRelease();
+        if (!waiting || preCommit.contentTier !== 'private' || preCommit.overrideTier !== 'private'
+          || status.status !== 503 || search.status !== 503 || answer.status !== 503 || search.released || answer.released) {
+          return result(false, `pre-commit status HTTP ${status.status}, search HTTP ${search.status}, search released ${search.released}, answer HTTP ${answer.status}, answer released ${answer.released}`);
+        }
+      } finally {
+        fixture.allowCommit();
+        await fixture.waitForFrontReady();
+      }
+      stage = 'reconcile missing receipt';
+      const status = await fixture.status(receipt.request_id);
+      const { unknown } = await status.json() as { unknown?: boolean };
+      const find = await fixture.find();
+      const { items } = await find.json() as { items?: Array<{ item_id: string; tier: string; owner_choice?: string; owner_set: boolean }> };
+      const saved = fixture.readStored().overrideTier === 'secure'
+        && items?.some(item => item.item_id === fixture.itemId && (item.owner_choice || item.tier) === 'Private' && item.owner_set) === true;
+      const search = await fixture.search();
+      const answer = await fixture.answerRelease();
+      const released = search.released || answer.released;
+      return result(status.status === 404 && unknown === true && find.status === 200 && saved && search.status === 200 && answer.status === 200 && !released,
+        `receipt HTTP 202, restart HTTP 503, status HTTP ${status.status}${unknown ? ' unknown' : ''}, find HTTP ${find.status}, ${saved ? 'saved Private' : 'Private choice unconfirmed'}, released ${released}`);
+    } finally {
+      await fixture.close();
+    }
+  } catch (error) {
+    return result(false, `${stage} failed (${error instanceof Error ? error.name : 'unknown error'})`);
+  }
 }
 export function memoryMaxBytes(value: string): number {
   const match = /^(\d+)([KMGT]?)$/i.exec(value);
@@ -1019,6 +1074,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     max_settled_ms: Math.max(0, ...clicks.map(click => click.settled_ms ?? 0)),
     failures: clicks.filter(click => click.saved === false), samples: clicks };
   const ack_ok = clickSummary.count > 0 && clickSummary.over_1s.length === 0;
+  const privacy_restart = await privacyClickRestartGate();
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
   const checkpoint = sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000);
@@ -1034,11 +1090,11 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const padded_wal_level_s = firstLevel ? Math.round((Date.parse(firstLevel.at) - (enginesStartedAt ?? started)) / 100) / 10 : null;
   // One bar for the 600k gate and the quick cold test (plan, 16 Nov 2026).
   const control_ok = !ackSummary.no_control_thread && (options.runCase === 'boot-after-upgrade' || ackSummary.status_max_age_ms <= 10_000);
-  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ack_ok && control_ok, runCase: options.runCase });
+  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ack_ok && control_ok, privacy_restart_ok: privacy_restart.pass, runCase: options.runCase });
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint, checkpoint_timing,
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -1053,6 +1109,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     console.log(`${options.runCase} ${role}: after-ready p95 beat ${p95 === undefined ? 'n/a' : `<= ${p95} ms`}, worst ${Math.round(loop.max_ms)} ms at ${loop.worst_site}, beats over 1 s: ${loop.over_1s}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s); pre-ready hold ${Math.round(loop.pre_ready_ms)} ms at ${loop.pre_ready_site} (reported)`);
   }
   console.log(`${options.runCase} Make Private receipt: worst ${clickSummary.max_ms} ms over ${clickSummary.count} posts (${clickSummary.over_1s.length} at or over 1 s or failed); ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s). Settlement (reported): worst ${clickSummary.max_settled_ms} ms across ${clickSummary.settled} settled, ${clickSummary.pending} pending at cutoff.`);
+  console.log(`${options.runCase} Make Private, front restart before commit: ${privacy_restart.pass ? 'PASS' : 'FAIL'} (${privacy_restart.ms} ms), ${privacy_restart.outcome}.`);
   console.log(`${options.runCase} socket ack (reported): worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}.`);
   console.log(`${options.runCase} anonymous memory (reported): ${Object.entries(anonSampler.peaks).map(([role, entry]) => `${role} peak ${entry.peak_anon_mib} MiB at ${entry.at_s} s, last ${entry.last_anon_mib} MiB`).join('; ') || 'not sampled'}`);
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);

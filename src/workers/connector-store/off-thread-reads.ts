@@ -210,9 +210,6 @@ const connection = (path) => {
   if (held && held.file === file) return held.db;
   if (held) close(held.db);
   const db = open(path);
-  // data_version is comparable only on the same connection.
-  const id = crypto.randomUUID();
-  db.function('olympus_read_connection_id', () => id);
   connections.set(path, { db, file });
   return db;
 };
@@ -294,7 +291,6 @@ interface ReaderThread {
 
 interface PoolJob {
   store: string;
-  path: string;
   read: StoreRead;
   deadlineAtMs: number;
   resolve: (rows: unknown) => void;
@@ -736,36 +732,25 @@ function serveSnapshotWaiters(): void {
  * when `deadlineAtMs` (on the pool's clock) passes before the rows are back.
  * The caller checks offThreadReadsSupported first.
  */
-export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineAtMs?: number; store?: string } = {}): Promise<unknown> {
+export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineAtMs?: number } = {}): Promise<unknown> {
   // A caller that gives no deadline waits for its rows however long they take.
   const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
-  // A read of a related file may belong to this store's worker and lifetime.
-  const store = options.store ?? dbPath;
-  const waiting = queues.get(store) ?? [];
+  const waiting = queues.get(dbPath) ?? [];
   const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock.now() >= deadlineAtMs) {
     report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: 'refused' });
     return Promise.reject(new OffThreadReadBusyError());
   }
   return new Promise<unknown>((resolve, reject) => {
-    const job: PoolJob = { store, path: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock.now(), report };
+    const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock.now(), report };
     if (Number.isFinite(deadlineAtMs)) job.timer = clock.setTimeout(() => missedDeadline(job), deadlineAtMs - clock.now());
     waiting.push(job);
-    if (!queues.has(store)) {
-      queues.set(store, waiting);
-      turns.push(store);
+    if (!queues.has(dbPath)) {
+      queues.set(dbPath, waiting);
+      turns.push(dbPath);
     }
     dispatch();
   }).then((rows) => { noteSourceIndexReadProgress(); return rows; });
-}
-
-/** A token that changes across commits, file replacements and reader restarts. */
-export async function readPoolDataVersion(dbPath: string, store: string): Promise<string> {
-  const row = await readOnPool(dbPath, {
-    sql: 'SELECT olympus_read_connection_id() AS connection, data_version FROM pragma_data_version',
-    params: [], mode: 'get',
-  }, { store }) as { connection: string; data_version: number };
-  return `${row.connection}:${row.data_version}`;
 }
 
 /** Closes every pool connection to `dbPath` and drops its waiting queries (its store is closing). */
@@ -873,12 +858,12 @@ function dispatch(): void {
     if (job.lane) { job.lane(); job.lane.began?.(); job.running = true; }
     reader.job = job;
     reader.executingStore = job.store;
-    observer?.(job.path, job.read);
+    observer?.(job.store, job.read);
     // The caller gives up at its own deadline; the executor is kept until
     // SQLite answers. A reply lost on its way back would hold it for good,
     // so a lost one retires the worker (it keeps its slot until it has
     // stopped) and, if the caller still waits, the query runs again once.
-    send(reader, { op: 'query', path: job.path, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
+    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
       job.sqlMs = ms;
     })
       .then(

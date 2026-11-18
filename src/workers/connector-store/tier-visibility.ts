@@ -26,7 +26,7 @@ import { releaseChunks, type ChunkReleaseOptions } from '../classification/chunk
 import type { LocalConnectorStore } from './local-index.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate, SourceIndexVisibilityGateReport } from '../../core/source-index/router.ts';
 import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
-import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type TierVisibilityReads } from '../classification/tier-ledger.ts';
+import { itemNamesHeldForJudgment, tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type TierVisibilityReads } from '../classification/tier-ledger.ts';
 import {
   hiddenChildKeysSteps, itemVerdictsSteps, childVisibilityUnchanged,
   ledgerVisibilityHere, ledgerVisibilityOffThread, itemStatesOffThread, memoVisibilityItemsHere,
@@ -290,7 +290,16 @@ export function* effectiveItemVerdicts(
     for (const { index, identity } of governed) {
       const state = states.get(tierLedgerIdentityKey(identity));
       if (!state) continue;
-      const { record, copies, override } = state;
+      const { record, copies, override, hidingIntent } = state;
+      if (hidingIntent === 'secret') {
+        verdicts[index] = { tier: 'secret', gone: false };
+        continue;
+      }
+      const pendingDeletion = hidingIntent === 'deletion';
+      if (!record) {
+        if (pendingDeletion) verdicts[index] = { tier: 'legacy', gone: true, pendingDeletion: true };
+        continue;
+      }
       // An input of the names layer (a child citation's parent label) is
       // judged on the item's names alone: its content tier never limits an
       // answer that carries only its names.
@@ -303,11 +312,13 @@ export function* effectiveItemVerdicts(
       // What waits for its model question is held Private, as placement
       // holds it, though its recorded tier is the Personal default: an
       // answer read from it is Private until the model says otherwise.
-      const held = record.metadataPending || (!namesOnly && contentHeldForJudgment(record));
+      const held = namesOnly ? itemNamesHeldForJudgment(record, copies, inputs[index]!.corpusId)
+        : record.metadataPending || contentHeldForJudgment(record);
       verdicts[index] = {
         tier: tiers.includes('secrets') ? 'secret' : held || tiers.includes('secure') ? 'private' : 'public_or_personal',
-        gone: record.routed && !copies.some((copy) => copy.state === 'current'
-          && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata')),
+        gone: pendingDeletion || (record.routed && !copies.some((copy) => copy.state === 'current'
+          && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata'))),
+        ...(pendingDeletion ? { pendingDeletion: true } : {}),
       };
     }
     // A child whose parent is not served any more is gone, whatever its own
@@ -346,8 +357,8 @@ export function* effectiveItemVerdicts(
  * judged against one snapshot. A row at Secrets (or moving there) is
  * `secret`; at Private (or moving there), or held Private while its model
  * question waits (`contentHeldForJudgment`), `private`; anything else classified
- * is `public_or_personal`; a routed item with no current copy left is also
- * `gone`. An item
+ * is `public_or_personal`. A pending deletion or a routed item with no
+ * current copy left is `gone`. An item
  * no ledger governs, or one its ledger never classified (ledger rows are never
  * deleted, so no row means never classified), is `legacy`: its tier is still
  * its corpus's. An input in a governed corpus without an account cannot be

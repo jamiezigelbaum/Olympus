@@ -227,7 +227,7 @@ export interface SourceIndexCorpusSearchAdapter {
    * afterwards is reported as usual (semantic_lane_skipped).
    */
   prepareSemantic?: (query: string, budgetMs: number) => Promise<void>;
-  hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability | Promise<SourceIndexHybridAvailability>;
+  hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability;
   /**
    * The corpus's nearest semantic neighbours of the query, nearest first,
    * whatever their similarity: no relevance bar vets them, so they are never
@@ -519,10 +519,6 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   // Each corpus's retrieval state, read once (its hybridAvailability is a
   // store read): preparation uses it to decide whether a semantic lane is
   // worth warming, and the lane's honesty check below uses the same answer.
-  // The read may queue behind another query of its own store, so no corpus
-  // waits for another's: each lane awaits only its own answer, under its own
-  // idle rule, and an answer still unread when the lane ends is reported as
-  // unreported hybrid capability.
   const retrievalStates = new Map(searchableCorpora.map((corpus) => [
     corpus.corpusId,
     retrievalStateForAdapter(options.adapters[corpus.corpusId]!, {
@@ -532,9 +528,6 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       context: request.context,
     }),
   ] as const));
-  const knownRetrievalStates = new Map<string, RetrievalStateAnswer>();
-  for (const [corpusId, answer] of retrievalStates) void answer.then((known) => { knownRetrievalStates.set(corpusId, known); });
-  const prepareClock = options.laneClock ?? REAL_LANE_CLOCK;
   // Preparation never sees corpus content and owns its own bounded timeout.
   // A cold local model must not spend the store's lock/vector deadline.
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
@@ -553,15 +546,10 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     const adapter = options.adapters[corpus.corpusId]!;
     // A metadata-only search (the Private-match probe) has its own short
     // budget and reports an incomplete lane as unknown; it never waits here.
-    // Warming waits for the corpus's answer no longer than its own budget;
-    // the read itself keeps running for the lane.
     const semantic = adapter.prepareSemantic
       && semanticPrepareBudgetMs > 0
       && request.context.metadataOnly !== true
-      && await new Promise<boolean>((resolve) => {
-        const timer = prepareClock.setTimeout(() => resolve(false), semanticPrepareBudgetMs);
-        void retrievalStates.get(corpus.corpusId)!.then((known) => { prepareClock.clearTimeout(timer); resolve(known.hybridServable); });
-      });
+      && retrievalStates.get(corpus.corpusId)!.hybridServable;
     const [keywordsMs, semanticMs] = await Promise.all([
       timed(async () => {
         const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
@@ -596,14 +584,10 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
         partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
       },
     };
-    const unreadRetrievalState = (): SourceIndexRetrievalState => assessSourceIndexRetrievalState({
-      declaredMode: corpus.activationMode,
-      hybridAvailability: { servable: false, reason: 'hybrid_capability_unreported' },
-    });
+    const retrievalState = retrievalStates.get(corpus.corpusId)!.state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneUntilIdle(
       (report) => { progress = report; return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
-        await retrievalStates.get(corpus.corpusId)!;
         if (metadataMatches) {
           const response = await metadataMatches(corpusRequest);
           if (request.readWide) for (const hit of response.hits) matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
@@ -630,7 +614,6 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       corpus.corpusId,
       options.laneClock ?? REAL_LANE_CLOCK,
     );
-    const retrievalState = knownRetrievalStates.get(corpus.corpusId)?.state ?? unreadRetrievalState();
     return { corpus, outcome, retrievalState, partial };
   }));
 
@@ -1067,15 +1050,13 @@ function semanticLaneDegradation(
   };
 }
 
-interface RetrievalStateAnswer { state: SourceIndexRetrievalState; hybridServable: boolean }
-
-async function retrievalStateForAdapter(
+function retrievalStateForAdapter(
   adapter: SourceIndexCorpusSearchAdapter,
   request: SourceIndexCorpusSearchRequest,
-): Promise<RetrievalStateAnswer> {
+): { state: SourceIndexRetrievalState; hybridServable: boolean } {
   let hybridAvailability: SourceIndexHybridAvailability | undefined;
   try {
-    hybridAvailability = await adapter.hybridAvailability?.(request);
+    hybridAvailability = adapter.hybridAvailability?.(request);
   } catch {
     hybridAvailability = { servable: false, reason: 'hybrid_capability_unreported' };
   }

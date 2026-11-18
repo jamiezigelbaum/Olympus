@@ -8,9 +8,6 @@ const progress = new AsyncLocalStorage<SourceIndexReadProgress>();
 export function withSourceIndexReadProgress<T>(report: SourceIndexReadProgress, run: () => T): T {
   return progress.run(report, run);
 }
-export function withoutSourceIndexReadProgress<T>(run: () => T): T {
-  return progress.exit(run);
-}
 export function noteSourceIndexReadProgress(): void {
   const report = progress.getStore();
   if (!report) return;

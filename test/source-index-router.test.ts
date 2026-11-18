@@ -242,27 +242,6 @@ describe('source-index router per-lane retrieval deadline', () => {
     expect(observedDeadlineAtMs).toBeUndefined();
   });
 
-  test('a corpus whose hybrid availability never answers does not hold the other corpora', async () => {
-    const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora());
-    const calls: string[] = [];
-    const stuck: SourceIndexCorpusSearchAdapter = adapterFor(calls, 'public_safe.slow', 'file', 'slow-1');
-    stuck.hybridAvailability = () => new Promise(() => {});
-    const result = await routeSourceIndexSearch({
-      registry,
-      laneTimeoutMs: 20,
-      semanticPrepareBudgetMs: 5,
-      adapters: {
-        'public_safe.fast': adapterFor(calls, 'public_safe.fast', 'file', 'fast-1'),
-        'public_safe.slow': stuck,
-      },
-      request: { query: 'q', maxResults: 5, context },
-    });
-
-    expect(calls).toEqual(['public_safe.fast']);
-    expect(result.searchedCorpora).toEqual(['public_safe.fast']);
-    expect(result.hits.map((hit) => hit.corpusId)).toEqual(['public_safe.fast']);
-  });
-
   test('drops a lane that blows the deadline, reports lane_timeout, and proceeds with the rest', async () => {
     const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora());
     const calls: string[] = [];
