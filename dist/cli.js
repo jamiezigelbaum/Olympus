@@ -48375,14 +48375,31 @@ var init_store_reclaim_admission = __esm(() => {
 import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 import { createHash as createHash21, randomUUID as randomUUID8 } from "node:crypto";
 function poolSqlSite(sql) {
-  return sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "?").replace(/\b\d+(?:\.\d+)?\b/g, "N").replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)").replace(/\s+/g, " ").trim().slice(0, POOL_SQL_SITE_CHARS);
+  const shape = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) => token.startsWith("--") || token.startsWith("/*") ? " " : "?").replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, "N").replace(/\s+/g, " ").trim();
+  const hash = createHash21("sha256").update(shape).digest("hex").slice(0, 16);
+  const prefix = shape.replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)");
+  return `${prefix.slice(0, POOL_SQL_SITE_CHARS)} #${hash}`;
 }
 function withSlowestSql(reads) {
   const sites = poolSqlSites.get(reads);
-  if (!sites?.size)
-    return { ...reads };
-  const slowest = [...sites.values()].sort((left, right) => right.sql_ms - left.sql_ms).slice(0, POOL_SQL_SITES_KEPT).map((site) => ({ ...site, sql_ms: Math.round(site.sql_ms), sql_max_ms: Math.round(site.sql_max_ms) }));
-  return { ...reads, slowest_sql: slowest };
+  const slowest = sites?.size ? [...sites.values()].sort((left, right) => right.sql_ms - left.sql_ms).slice(0, POOL_SQL_SITES_KEPT).map((site) => ({
+    ...site,
+    sql_ms: preciseMs(site.sql_ms),
+    sql_max_ms: preciseMs(site.sql_max_ms),
+    ...site.sql_cpu_ms !== undefined ? { sql_cpu_ms: preciseMs(site.sql_cpu_ms), sql_cpu_max_ms: preciseMs(site.sql_cpu_max_ms) } : {}
+  })) : undefined;
+  return copyPoolDetail({ ...reads, ...slowest ? { slowest_sql: slowest } : {} });
+}
+function copyPoolDetail(pool) {
+  return {
+    ...pool,
+    ...pool.slowest_sql ? { slowest_sql: pool.slowest_sql.map((site) => ({ ...site })) } : {},
+    ...pool.vector_work ? { vector_work: { ...pool.vector_work, digest_unpack_score_ms: preciseMs(pool.vector_work.digest_unpack_score_ms) } } : {},
+    ...pool.keyword_concept_counts ? { keyword_concept_counts: pool.keyword_concept_counts.map((pass) => pass.map((count) => ({ ...count }))) } : {}
+  };
+}
+function preciseMs(ms) {
+  return Math.round(unroundedMs(ms) * 1000) / 1000;
 }
 function seatItemHash(corpusId, itemKey) {
   return createHash21("sha256").update(`${corpusId}\x00${itemKey}`).digest("hex").slice(0, SEAT_ITEM_HASH_HEX);
@@ -48390,30 +48407,88 @@ function seatItemHash(corpusId, itemKey) {
 function runInSourceAnswerLane(corpusId, run) {
   return laneStorage.run(corpusId, run);
 }
-function beginSourceAnswerPoolRead(site) {
-  const query = currentSourceAnswerTrace()?.activeQuery;
+function poolReads(query, corpusId) {
+  let reads = query.poolByCorpus.get(corpusId);
+  if (!reads) {
+    reads = {
+      reads: 0,
+      queue_wait_ms: 0,
+      queue_wait_max_ms: 0,
+      run_ms: 0,
+      run_max_ms: 0,
+      sql_ms: 0,
+      sql_max_ms: 0,
+      snapshot_reads: 0,
+      snapshot_sql_ms: 0,
+      refused: 0,
+      dropped_queued: 0,
+      past_deadline_running: 0,
+      errors: 0
+    };
+    query.poolByCorpus.set(corpusId, reads);
+  }
+  return reads;
+}
+function sourceAnswerVectorWork() {
+  const query = queryStorage.getStore();
   const corpusId = laneStorage.getStore();
   if (!query || corpusId === undefined)
     return;
-  return ({ queueWaitMs, runMs, sqlMs, outcome, snapshot }) => {
-    let reads = query.poolByCorpus.get(corpusId);
-    if (!reads) {
-      reads = {
-        reads: 0,
-        queue_wait_ms: 0,
-        queue_wait_max_ms: 0,
-        run_ms: 0,
-        run_max_ms: 0,
-        sql_ms: 0,
-        sql_max_ms: 0,
-        snapshot_reads: 0,
-        snapshot_sql_ms: 0,
-        refused: 0,
-        dropped_queued: 0,
-        past_deadline_running: 0,
-        errors: 0
-      };
-      query.poolByCorpus.set(corpusId, reads);
+  return poolReads(query, corpusId).vector_work ??= {
+    digest_pages_read: 0,
+    digest_rows_scanned: 0,
+    full_vectors_rescored: 0,
+    digest_unpack_score_ms: 0
+  };
+}
+function beginSourceAnswerConceptCounts() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  const passes = poolReads(query, corpusId).keyword_concept_counts ??= [];
+  const pass = [];
+  passes.push(pass);
+  return pass;
+}
+function beginSourceAnswerStoreTiming() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  const startedAt = performance.now();
+  const stages = {
+    adapter_elapsed_ms: 0,
+    keyword_lane_ms: 0,
+    keyword_relaxation_ms: 0,
+    keyword_revalidation_ms: 0,
+    recency_read_ms: 0,
+    fusion_ms: 0,
+    finalize_ms: 0,
+    unattributed_ms: 0
+  };
+  return { stages, finish: () => {
+    stages.adapter_elapsed_ms = performance.now() - startedAt;
+    const attributed = (stages.join_wait_ms ?? stages.keyword_lane_ms) + (stages.post_join_setup_ms ?? 0) + stages.keyword_relaxation_ms + stages.keyword_revalidation_ms + (stages.vector_revalidation_ms ?? 0) + (stages.vector_summary_ms ?? 0) + stages.recency_read_ms + stages.fusion_ms + stages.finalize_ms;
+    stages.unattributed_ms = Math.max(0, stages.adapter_elapsed_ms - attributed);
+    query.adapterStages.set(corpusId, stages);
+  } };
+}
+function beginSourceAnswerPoolRead(statement, label) {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  let site = query.sqlShapes.get(statement);
+  if (site === undefined) {
+    site = poolSqlSite(statement);
+    query.sqlShapes.set(statement, site);
+  }
+  const key = label ? `${label}\x00${site}` : site;
+  return ({ queueWaitMs, runMs, sqlMs, cpuMs, outcome, snapshot }) => {
+    const reads = poolReads(query, corpusId);
+    if (sqlMs !== undefined) {
+      reads.thread_cpu_available = reads.thread_cpu_available === true || cpuMs !== undefined;
     }
     const wait = unroundedMs(queueWaitMs);
     const ran = unroundedMs(runMs);
@@ -48422,23 +48497,26 @@ function beginSourceAnswerPoolRead(site) {
     reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
     reads.run_ms += ran;
     reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    const sql = unroundedMs(sqlMs);
+    const sql = unroundedMs(sqlMs ?? 0);
     reads.sql_ms += sql;
     reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
     if (snapshot) {
       reads.snapshot_reads += 1;
       reads.snapshot_sql_ms += sql;
     }
-    if (site !== undefined) {
-      let sites = poolSqlSites.get(reads);
-      if (!sites)
-        poolSqlSites.set(reads, sites = new Map);
-      const entry = sites.get(site) ?? { site, reads: 0, sql_ms: 0, sql_max_ms: 0 };
-      entry.reads += 1;
-      entry.sql_ms += sql;
-      entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
-      sites.set(site, entry);
+    let sites = poolSqlSites.get(reads);
+    if (!sites)
+      poolSqlSites.set(reads, sites = new Map);
+    const entry = sites.get(key) ?? { site, ...label ? { label } : {}, reads: 0, sql_ms: 0, sql_max_ms: 0 };
+    entry.reads += 1;
+    entry.sql_ms += sql;
+    entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
+    if (cpuMs !== undefined) {
+      const cpu = unroundedMs(cpuMs);
+      entry.sql_cpu_ms = (entry.sql_cpu_ms ?? 0) + cpu;
+      entry.sql_cpu_max_ms = Math.max(entry.sql_cpu_max_ms ?? 0, cpu);
     }
+    sites.set(key, entry);
     if (outcome === "refused")
       reads.refused += 1;
     else if (outcome === "dropped_queued")
@@ -48581,16 +48659,16 @@ async function observeSourceAnswerRoutedQuery(ordinal, run) {
   const attempt = trace?.activeAttempt;
   if (!trace || !attempt)
     return run();
-  const previous = trace.activeQuery;
   const query = {
     ordinal: Math.max(1, Math.floor(ordinal)),
     startedAtMs: Date.now(),
     corpusTimings: [],
-    poolByCorpus: new Map
+    poolByCorpus: new Map,
+    adapterStages: new Map,
+    sqlShapes: new Map
   };
-  trace.activeQuery = query;
   try {
-    return await run();
+    return await queryStorage.run(query, run);
   } finally {
     attempt.queries.push({
       ordinal: query.ordinal,
@@ -48601,18 +48679,15 @@ async function observeSourceAnswerRoutedQuery(ordinal, run) {
         ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
         outcome: timing.outcome,
         ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
+        ...query.adapterStages.has(timing.corpus_id) ? { adapter_stages: query.adapterStages.get(timing.corpus_id) } : {},
         ...query.poolByCorpus.has(timing.corpus_id) ? { pool: withSlowestSql(query.poolByCorpus.get(timing.corpus_id)) } : {}
       })),
       ...query.stages ? { stages: { ...query.stages } } : {}
     });
-    if (previous)
-      trace.activeQuery = previous;
-    else
-      delete trace.activeQuery;
   }
 }
 function recordSourceAnswerQueryStages(stages) {
-  const query = currentSourceAnswerTrace()?.activeQuery;
+  const query = queryStorage.getStore();
   if (!query)
     return;
   query.stages = copyQueryStages(stages);
@@ -48628,7 +48703,7 @@ function copyQueryStages(stages) {
 }
 function recordSourceAnswerCorpusTiming(timing) {
   noteSourceAnswerProgress("searching");
-  const query = currentSourceAnswerTrace()?.activeQuery;
+  const query = queryStorage.getStore();
   if (!query)
     return;
   query.corpusTimings.push({
@@ -48741,7 +48816,11 @@ function snapshotSourceAnswerTrace(trace) {
       ...attempt,
       queries: attempt.queries.map((query) => ({
         ...query,
-        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...timing.pool ? { pool: { ...timing.pool, ...timing.pool.slowest_sql ? { slowest_sql: timing.pool.slowest_sql.map((site) => ({ ...site })) } : {} } } : {} }))
+        corpus_timings: query.corpus_timings.map((timing) => ({
+          ...timing,
+          ...timing.adapter_stages ? { adapter_stages: { ...timing.adapter_stages } } : {},
+          ...timing.pool ? { pool: copyPoolDetail(timing.pool) } : {}
+        }))
       }))
     })),
     routeResolutionMs: trace.routeResolutionMs,
@@ -48810,12 +48889,13 @@ function nonNegativeCount(value) {
 function nonNegativeMs(value) {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
-var POOL_SQL_SITE_CHARS = 120, POOL_SQL_SITES_KEPT = 5, poolSqlSites, SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, SITE_TALLY_MS = 25, SITE_TALLY_KEPT = 10, SEAT_ITEM_HASH_HEX = 12, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var POOL_SQL_SITE_CHARS = 120, POOL_SQL_SITES_KEPT = 5, poolSqlSites, SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, SITE_TALLY_MS = 25, SITE_TALLY_KEPT = 10, SEAT_ITEM_HASH_HEX = 12, storage2, queryStorage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
   storage2 = new AsyncLocalStorage9;
+  queryStorage = new AsyncLocalStorage9;
   laneStorage = new AsyncLocalStorage9;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
@@ -52941,7 +53021,7 @@ function startThread(store, lane = "shared") {
       }
       started.pending.delete(message.id);
       if (typeof message.ms === "number")
-        waiting.sqlMs?.(message.ms);
+        waiting.statementTiming?.(message.ms, message.cpuMs);
       if (message.ok)
         waiting.resolve(message.rows ?? null);
       else
@@ -52986,15 +53066,15 @@ function retire(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message, sqlMs) {
+function send(reader, message, statementTiming) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    reader.pending.set(id, { resolve, reject, ...sqlMs ? { sqlMs } : {} });
+    reader.pending.set(id, { resolve, reject, ...statementTiming ? { statementTiming } : {} });
     armLostReplyCheck();
     try {
-      reader.worker.postMessage({ ...message, id });
+      reader.worker.postMessage({ ...message, id, ...statementTiming ? { measureCpu: true } : {} });
     } catch (error) {
       reader.pending.delete(id);
       reject(error instanceof Error ? error : new Error(String(error)));
@@ -53084,17 +53164,19 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
           markRead(dbPath, readId, { atMs: clock2.now(), lane, site });
         if (observeSnapshots)
           observer?.(dbPath, query, { lane, site });
-        const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
+        const report = beginSourceAnswerPoolRead(query.sql, query.site ?? (site === "unknown" ? undefined : site));
         const sentAtMs = clock2.now();
         const queueWaitMs = reserveWaitMs;
         reserveWaitMs = 0;
-        let sqlMs = 0;
+        let sqlMs;
+        let cpuMs;
         const once = async () => {
           if (moving)
             await moving;
-          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, (ms) => {
+          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, report && ((ms, cpu) => {
             sqlMs = ms;
-          });
+            cpuMs = cpu;
+          }));
         };
         const laneProgress = currentSourceIndexReadProgress();
         laneProgress?.began?.();
@@ -53109,10 +53191,10 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
             rows = await once();
           }
           noteSourceIndexReadProgress();
-          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, cpuMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
-          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, cpuMs, outcome: "error", snapshot: true });
           throw error;
         } finally {
           laneProgress?.ended?.();
@@ -53221,9 +53303,9 @@ function serveSnapshotWaiters() {
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
   const waiting = queues.get(dbPath) ?? [];
-  const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
+  const report = beginSourceAnswerPoolRead(read.sql, read.site);
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
+    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve, reject) => {
@@ -53288,7 +53370,8 @@ function settle(job, outcome) {
     job.report({
       queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
       runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
-      sqlMs: job.sqlMs ?? 0,
+      sqlMs: job.sqlMs,
+      cpuMs: job.cpuMs,
       outcome: ended
     });
   }
@@ -53348,9 +53431,10 @@ function dispatch() {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
-    }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
+      job.cpuMs = cpuMs;
+    })).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
       if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
         job.retried = true;
         counters.retries += 1;
@@ -53433,8 +53517,15 @@ const connection = (path) => {
   connections.set(path, { db, file });
   return db;
 };
+const statementTiming = (started, cpuStarted) => {
+  if (started === undefined) return {};
+  const ms = performance.now() - started;
+  if (cpuStarted === undefined) return { ms };
+  const cpu = process.threadCpuUsage(cpuStarted);
+  return { ms, cpuMs: (cpu.user + cpu.system) / 1000 };
+};
 self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
+  const { id, op, snapshot, path, sql, params, mode, perRead, measureCpu } = event.data;
   if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
   if (op === 'memory') {
     const at = Date.now();
@@ -53472,6 +53563,8 @@ self.onmessage = (event) => {
     return;
   }
   if (progress) Atomics.store(progress, 0, id);
+  let started;
+  let cpuStarted;
   try {
     if (op === 'open') {
       const held = snapshotConnection(path);
@@ -53495,14 +53588,16 @@ self.onmessage = (event) => {
     } else {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
-      const started = performance.now();
+      cpuStarted = measureCpu ? process.threadCpuUsage?.() : undefined;
+      started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows, ms: performance.now() - started });
+      postMessage({ id, ok: true, rows, ...statementTiming(started, cpuStarted) });
     }
   } catch (error) {
+    const timing = statementTiming(started, cpuStarted);
     const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
-    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
+    postMessage({ id, ok: false, ...timing, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   } finally {
     // After the reply is posted: finished, so a reply missing past here was lost.
     if (progress) { Atomics.store(progress, 1, id); Atomics.store(progress, 0, 0); }
@@ -65737,6 +65832,7 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
   return rows;
 }
 async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders) {
+  const work = sourceAnswerVectorWork();
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
@@ -65747,11 +65843,15 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
     if (expired())
       return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const packed = await read({ mode: "get", ...page });
+    const packed = await read({ mode: "get", site: "vector_digest_page", ...page });
     const excluded = options.excludedItemPks;
+    let scanned = packed.n;
+    const unpackStartedAt = work && performance.now();
     const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index, itemPk) => {
-      if ((index & 31) === 0 && expired())
+      if ((index & 31) === 0 && expired()) {
+        scanned = index;
         return false;
+      }
       if (excluded && itemPk !== undefined && excluded.has(itemPk))
         return true;
       if ((index & 31) === 0)
@@ -65759,6 +65859,11 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
       heap.append(chunkPk, scoreVectorDigest(query, digest));
       return true;
     });
+    if (work) {
+      work.digest_unpack_score_ms += performance.now() - unpackStartedAt;
+      work.digest_pages_read += 1;
+      work.digest_rows_scanned += scanned;
+    }
     if (!finished)
       return cut;
     if (packed.n < VECTOR_DIGEST_PAGE_ROWS)
@@ -65809,12 +65914,16 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         if (pagePks.length === 0)
           return [];
         const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
-        return (readers?.[lane] ?? read)({ mode: "all", ...page });
+        return (readers?.[lane] ?? read)({ mode: "all", site: "vector_digest_rescore", ...page });
       }));
       const rows = pages.flat();
+      const mismatchesBeforePage = dimensionMismatches;
       for (const [index, row] of rows.entries()) {
-        if ((index & 31) === 0 && expired())
+        if ((index & 31) === 0 && expired()) {
+          if (work)
+            work.full_vectors_rescored += index - (dimensionMismatches - mismatchesBeforePage);
           return cutWith();
+        }
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
@@ -65822,6 +65931,8 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         if (folded.score !== undefined && digestScore !== undefined)
           underestimate = Math.max(underestimate, folded.score - digestScore);
       }
+      if (work)
+        work.full_vectors_rescored += rows.length - (dimensionMismatches - mismatchesBeforePage);
       if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
         await yieldConnectorStoreVectorScan();
     }
@@ -66043,7 +66154,7 @@ function createConnectorStoreCorpusAdapter(options) {
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
-  const adapter = (request) => {
+  const adapter = (request, stages) => {
     assertConnectorStoreCorpusRequest(store, request);
     const startedAt = Date.now();
     let semanticSkippedReason;
@@ -66057,15 +66168,23 @@ function createConnectorStoreCorpusAdapter(options) {
     }
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason)
       return (async () => {
-        const keywordLane = await revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs), options.localKeywordFallback, {}, request.deadlineAtMs));
+        const markStage = startStoreStageClock(stages);
+        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+        markStage?.("keyword_lane_ms");
+        keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
+        markStage?.("keyword_relaxation_ms");
+        keywordLane = await revalidateKeywordLane(store, keywordLane);
+        markStage?.("keyword_revalidation_ms");
         const rows = keywordLane.rows;
         let recencyCut = false;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => {
           recencyCut = true;
         });
+        markStage?.("recency_read_ms");
         if (recencyRows.length === 0) {
           const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(store, row, -row.rank, options.resultProjector, filters?.locatorPathScope)), keywordLane);
-          return {
+          markStage?.("fusion_ms");
+          const response = {
             hits,
             storeRelevance: connectorStoreRelevance(keywordLane),
             latencyMs: Date.now() - startedAt,
@@ -66076,6 +66195,8 @@ function createConnectorStoreCorpusAdapter(options) {
             matchCount: keywordLane.matchCount,
             rawExposed: false
           };
+          markStage?.("finalize_ms");
+          return response;
         }
         const lanes = [
           { name: "keyword", items: rows },
@@ -66099,7 +66220,8 @@ function createConnectorStoreCorpusAdapter(options) {
           ...options.resultProjector ? { resultProjector: options.resultProjector } : {},
           ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
         }), keywordLane);
-        return {
+        markStage?.("fusion_ms");
+        const response = {
           hits,
           storeRelevance: connectorStoreRelevance(keywordLane),
           latencyMs: Date.now() - startedAt,
@@ -66113,8 +66235,10 @@ function createConnectorStoreCorpusAdapter(options) {
           matchCount: keywordLane.matchCount,
           rawExposed: false
         };
+        markStage?.("finalize_ms");
+        return response;
       })();
-    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback);
+    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, stages, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback);
   };
   adapter.hybridAvailability = () => {
     if (!embeddingProvider) {
@@ -66204,8 +66328,13 @@ function createConnectorStoreCorpusAdapter(options) {
     };
   };
   const expanded = (request) => {
+    const timing = beginSourceAnswerStoreTiming();
     assertConnectorStoreCorpusRequest(store, request);
-    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request), store);
+    const response = withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
+    return timing ? response.then((result) => {
+      timing.finish();
+      return result;
+    }) : response;
   };
   expanded.metadataMatches = (request) => {
     assertConnectorStoreCorpusRequest(store, request);
@@ -66292,17 +66421,32 @@ function connectorStoreRecencyLaneAudit(corpusId, candidateCount, cutShort = fal
     ...cutShort ? { skippedReason: RECENT_ITEMS_CUT_SHORT } : {}
   };
 }
-async function hybridConnectorStoreSearch(store, provider, request, startedAt, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback) {
+function startStoreStageClock(stages) {
+  if (!stages)
+    return;
+  let startedAt = performance.now();
+  return (stage) => {
+    const now = performance.now();
+    stages[stage] = now - startedAt;
+    startedAt = now;
+  };
+}
+async function hybridConnectorStoreSearch(store, provider, request, startedAt, stages, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback) {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
+  const markStage = startStoreStageClock(stages);
   const keywordWork = (async () => {
+    const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
     const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
     partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
+    if (stages)
+      stages.keyword_lane_ms = performance.now() - laneStartedAt;
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
   })();
   const vectorWork = (async () => {
+    const laneStartedAt = stages ? performance.now() : 0;
     const vectorStartedAt = Date.now();
     const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
@@ -66313,9 +66457,12 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
       incomplete: true,
       rawExposed: false
     });
+    if (stages)
+      stages.vector_lane_ms = performance.now() - laneStartedAt;
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
+  markStage?.("join_wait_ms");
   let keywordLane = keywordResult.lane;
   const baselineKeywordLane = keywordResult.baseline;
   let keywordElapsedMs = keywordResult.elapsedMs;
@@ -66336,19 +66483,25 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
       saturated: keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated
     } };
   }
+  markStage?.("post_join_setup_ms");
   const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
   keywordElapsedMs += Date.now() - relaxStartedAt;
+  markStage?.("keyword_relaxation_ms");
   keywordLane = await revalidateKeywordLane(store, keywordLane);
+  markStage?.("keyword_revalidation_ms");
   scoredVectorRows = await store.stillVisibleSearchRowsOffThread(scoredVectorRows);
   vectorRows = await store.stillVisibleSearchRowsOffThread(vectorRows);
+  markStage?.("vector_revalidation_ms");
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
   let recencyCut = false;
+  markStage?.("vector_summary_ms");
   const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => {
     recencyCut = true;
   });
+  markStage?.("recency_read_ms");
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId));
   const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
@@ -66378,13 +66531,14 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
     ...resultProjector ? { resultProjector } : {},
     ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
   }), keywordLane);
+  markStage?.("fusion_ms");
   const vettedRows = new Set(vectorRows.map((row) => row.sourceItem.localItemId));
   const semanticNeighbourHits = scoredVectorRows.filter((row) => !vettedRows.has(row.sourceItem.localItemId)).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope));
   const semanticRows = contentBar === undefined || scoredVectorRows.length === 0 ? undefined : {
     hits: [...scoredVectorRows].sort((left, right) => right.bestCosine - left.bestCosine).slice(0, semanticRowsPerStore()).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
     bar: contentBar
   };
-  return {
+  const response = {
     hits,
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     ...semanticNeighbourHits.length > 0 ? { semanticNeighbourHits } : {},
@@ -66421,6 +66575,8 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
     matchCount: hybridMatchCount(keywordLane.matchCount, keywordLane.matchedItemIds, vectorRows, gateArmed),
     rawExposed: false
   };
+  markStage?.("finalize_ms");
+  return response;
 }
 function hybridMatchCount(keyword, lexicalItemIds, vectorRows, gateArmed) {
   if (!gateArmed)
@@ -68954,6 +69110,7 @@ var init_local_index = __esm(() => {
   init_evidence_reranker();
   init_engine_heartbeat();
   init_main_thread_sql_trace();
+  init_answer_latency_trace();
   init_store_reclaim_admission();
   init_store_write_guard();
   init_unreadable_files();
@@ -76321,6 +76478,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
     async vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs, laneOptions = {}) {
       assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+      sourceAnswerVectorWork();
       const vectorFilters = normalizeConnectorStoreSearchFilters(filters);
       const trimmed = query.trim();
       if (!trimmed)
@@ -76774,7 +76932,8 @@ ${parentKey(ref)}`, { ref, origin });
           const bound = from === undefined ? undefined : ("bound" in from) ? from.bound : undefined;
           const atOrAbove = from === undefined ? undefined : ("atOrAbove" in from) ? from.atOrAbove : undefined;
           const top = from === undefined ? undefined : bound !== undefined ? "top" : "tied";
-          return { mode: "all", sql: `
+          const site = top === "top" ? "ranked_match_page_bounded" : top === "tied" ? "ranked_match_page_tied" : "ranked_match_page";
+          return { mode: "all", site, sql: `
         ${top === undefined ? "" : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
@@ -76976,18 +77135,22 @@ ${parentKey(ref)}`, { ref, origin });
         remember(POPULATION, items);
       }
       const counts = [];
+      const traceCounts = beginSourceAnswerConceptCounts();
       for (const group of groups) {
         const groupQuery = sourceIndexFtsGroupQuery(group, exact);
         let count = remembered(groupQuery);
+        const memoHit = count !== undefined;
         if (count === undefined) {
           count = (yield {
             mode: "get",
+            site: "concept_weight_count",
             sql: "SELECT COUNT(DISTINCT r.item_pk) AS count FROM connector_store_fts_rows r WHERE r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)",
             params: [groupQuery]
           }).count;
           remember(groupQuery, count);
         }
         counts.push(count);
+        traceCounts?.push({ matched_items: count, memo_hit: memoHit });
       }
       const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
       return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
@@ -77061,6 +77224,7 @@ ${parentKey(ref)}`, { ref, origin });
       const selectedFilters = connectorStoreFilterSql(filters);
       return {
         mode: "all",
+        site: "recentItemsRead",
         sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -219259,10 +219423,28 @@ function copyRetrievalAttempt(attempt) {
         ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs2(timing.adapter_reported_ms) } : {},
         outcome: timing.outcome,
         ...timing.error_class ? { error_class: timing.error_class } : {},
+        ...timing.adapter_stages ? { adapter_stages: copyAdapterStages(timing.adapter_stages) } : {},
         ...timing.pool ? { pool: copyPoolReads(timing.pool) } : {}
       })),
       ...query.stages ? { stages: copyQueryStages(query.stages) } : {}
     }))
+  };
+}
+function copyAdapterStages(stages) {
+  return {
+    adapter_elapsed_ms: preciseMs(stages.adapter_elapsed_ms),
+    keyword_lane_ms: preciseMs(stages.keyword_lane_ms),
+    ...stages.vector_lane_ms !== undefined ? { vector_lane_ms: preciseMs(stages.vector_lane_ms) } : {},
+    ...stages.join_wait_ms !== undefined ? { join_wait_ms: preciseMs(stages.join_wait_ms) } : {},
+    ...stages.post_join_setup_ms !== undefined ? { post_join_setup_ms: preciseMs(stages.post_join_setup_ms) } : {},
+    keyword_relaxation_ms: preciseMs(stages.keyword_relaxation_ms),
+    keyword_revalidation_ms: preciseMs(stages.keyword_revalidation_ms),
+    ...stages.vector_revalidation_ms !== undefined ? { vector_revalidation_ms: preciseMs(stages.vector_revalidation_ms) } : {},
+    ...stages.vector_summary_ms !== undefined ? { vector_summary_ms: preciseMs(stages.vector_summary_ms) } : {},
+    recency_read_ms: preciseMs(stages.recency_read_ms),
+    fusion_ms: preciseMs(stages.fusion_ms),
+    finalize_ms: preciseMs(stages.finalize_ms),
+    unattributed_ms: preciseMs(stages.unattributed_ms)
   };
 }
 function copyPoolReads(pool) {
@@ -219281,11 +219463,25 @@ function copyPoolReads(pool) {
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),
     errors: count(pool.errors),
+    ...pool.thread_cpu_available !== undefined ? { thread_cpu_available: pool.thread_cpu_available } : {},
+    ...pool.vector_work ? { vector_work: {
+      digest_pages_read: count(pool.vector_work.digest_pages_read),
+      digest_rows_scanned: count(pool.vector_work.digest_rows_scanned),
+      full_vectors_rescored: count(pool.vector_work.full_vectors_rescored),
+      digest_unpack_score_ms: preciseMs(pool.vector_work.digest_unpack_score_ms)
+    } } : {},
+    ...pool.keyword_concept_counts ? { keyword_concept_counts: pool.keyword_concept_counts.map((pass) => pass.map((entry) => ({
+      matched_items: count(entry.matched_items),
+      memo_hit: entry.memo_hit
+    }))) } : {},
     ...pool.slowest_sql?.length ? { slowest_sql: pool.slowest_sql.map((site) => ({
       site: String(site.site),
+      ...site.label ? { label: String(site.label) } : {},
       reads: count(site.reads),
-      sql_ms: nonNegativeMs2(site.sql_ms),
-      sql_max_ms: nonNegativeMs2(site.sql_max_ms)
+      sql_ms: preciseMs(site.sql_ms),
+      sql_max_ms: preciseMs(site.sql_max_ms),
+      ...site.sql_cpu_ms !== undefined ? { sql_cpu_ms: preciseMs(site.sql_cpu_ms) } : {},
+      ...site.sql_cpu_max_ms !== undefined ? { sql_cpu_max_ms: preciseMs(site.sql_cpu_max_ms) } : {}
     })) } : {}
   };
 }

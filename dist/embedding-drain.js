@@ -2405,7 +2405,7 @@ function withSqliteFiles(path) {
 }
 
 // scripts/source-embedding-drain.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 import { existsSync as existsSync24, lstatSync as lstatSync11, mkdirSync as mkdirSync14, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname25, isAbsolute as isAbsolute15 } from "node:path";
 
@@ -17623,6 +17623,7 @@ function noteFrontLoopStatement(dbPath, site) {
 
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { createHash as createHash8, randomUUID as randomUUID7 } from "node:crypto";
 
 // src/core/store-reclaim-admission.ts
 import { join as join17 } from "node:path";
@@ -17652,37 +17653,76 @@ function storeOwnerIdleMs(now = Date.now()) {
 var POOL_SQL_SITE_CHARS = 120;
 var poolSqlSites = new WeakMap;
 function poolSqlSite(sql) {
-  return sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "?").replace(/\b\d+(?:\.\d+)?\b/g, "N").replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)").replace(/\s+/g, " ").trim().slice(0, POOL_SQL_SITE_CHARS);
+  const shape = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) => token.startsWith("--") || token.startsWith("/*") ? " " : "?").replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, "N").replace(/\s+/g, " ").trim();
+  const hash = createHash8("sha256").update(shape).digest("hex").slice(0, 16);
+  const prefix = shape.replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)");
+  return `${prefix.slice(0, POOL_SQL_SITE_CHARS)} #${hash}`;
 }
 var SLOW_MAIN_THREAD_SQL_MS = 250;
 var SLOW_MAIN_THREAD_SQL_KEPT = 20;
 var SITE_TALLY_MS = 25;
 var storage2 = new AsyncLocalStorage9;
+var queryStorage = new AsyncLocalStorage9;
 var laneStorage = new AsyncLocalStorage9;
-function beginSourceAnswerPoolRead(site) {
-  const query = currentSourceAnswerTrace()?.activeQuery;
+function poolReads(query, corpusId) {
+  let reads = query.poolByCorpus.get(corpusId);
+  if (!reads) {
+    reads = {
+      reads: 0,
+      queue_wait_ms: 0,
+      queue_wait_max_ms: 0,
+      run_ms: 0,
+      run_max_ms: 0,
+      sql_ms: 0,
+      sql_max_ms: 0,
+      snapshot_reads: 0,
+      snapshot_sql_ms: 0,
+      refused: 0,
+      dropped_queued: 0,
+      past_deadline_running: 0,
+      errors: 0
+    };
+    query.poolByCorpus.set(corpusId, reads);
+  }
+  return reads;
+}
+function sourceAnswerVectorWork() {
+  const query = queryStorage.getStore();
   const corpusId = laneStorage.getStore();
   if (!query || corpusId === undefined)
     return;
-  return ({ queueWaitMs, runMs, sqlMs, outcome, snapshot }) => {
-    let reads = query.poolByCorpus.get(corpusId);
-    if (!reads) {
-      reads = {
-        reads: 0,
-        queue_wait_ms: 0,
-        queue_wait_max_ms: 0,
-        run_ms: 0,
-        run_max_ms: 0,
-        sql_ms: 0,
-        sql_max_ms: 0,
-        snapshot_reads: 0,
-        snapshot_sql_ms: 0,
-        refused: 0,
-        dropped_queued: 0,
-        past_deadline_running: 0,
-        errors: 0
-      };
-      query.poolByCorpus.set(corpusId, reads);
+  return poolReads(query, corpusId).vector_work ??= {
+    digest_pages_read: 0,
+    digest_rows_scanned: 0,
+    full_vectors_rescored: 0,
+    digest_unpack_score_ms: 0
+  };
+}
+function beginSourceAnswerConceptCounts() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  const passes = poolReads(query, corpusId).keyword_concept_counts ??= [];
+  const pass = [];
+  passes.push(pass);
+  return pass;
+}
+function beginSourceAnswerPoolRead(statement, label) {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  let site = query.sqlShapes.get(statement);
+  if (site === undefined) {
+    site = poolSqlSite(statement);
+    query.sqlShapes.set(statement, site);
+  }
+  const key = label ? `${label}\x00${site}` : site;
+  return ({ queueWaitMs, runMs, sqlMs, cpuMs, outcome, snapshot }) => {
+    const reads = poolReads(query, corpusId);
+    if (sqlMs !== undefined) {
+      reads.thread_cpu_available = reads.thread_cpu_available === true || cpuMs !== undefined;
     }
     const wait = unroundedMs(queueWaitMs);
     const ran = unroundedMs(runMs);
@@ -17691,23 +17731,26 @@ function beginSourceAnswerPoolRead(site) {
     reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
     reads.run_ms += ran;
     reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    const sql = unroundedMs(sqlMs);
+    const sql = unroundedMs(sqlMs ?? 0);
     reads.sql_ms += sql;
     reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
     if (snapshot) {
       reads.snapshot_reads += 1;
       reads.snapshot_sql_ms += sql;
     }
-    if (site !== undefined) {
-      let sites = poolSqlSites.get(reads);
-      if (!sites)
-        poolSqlSites.set(reads, sites = new Map);
-      const entry = sites.get(site) ?? { site, reads: 0, sql_ms: 0, sql_max_ms: 0 };
-      entry.reads += 1;
-      entry.sql_ms += sql;
-      entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
-      sites.set(site, entry);
+    let sites = poolSqlSites.get(reads);
+    if (!sites)
+      poolSqlSites.set(reads, sites = new Map);
+    const entry = sites.get(key) ?? { site, ...label ? { label } : {}, reads: 0, sql_ms: 0, sql_max_ms: 0 };
+    entry.reads += 1;
+    entry.sql_ms += sql;
+    entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
+    if (cpuMs !== undefined) {
+      const cpu = unroundedMs(cpuMs);
+      entry.sql_cpu_ms = (entry.sql_cpu_ms ?? 0) + cpu;
+      entry.sql_cpu_max_ms = Math.max(entry.sql_cpu_max_ms ?? 0, cpu);
     }
+    sites.set(key, entry);
     if (outcome === "refused")
       reads.refused += 1;
     else if (outcome === "dropped_queued")
@@ -18331,7 +18374,7 @@ var TINFOIL_PRICES = Object.freeze({
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 
 // src/workers/source-index/built-in-reasoning/manifest.ts
 var GIB = 1024 ** 3;
@@ -18465,15 +18508,15 @@ var SCORER_SYSTEM_PROMPT = [
 
 // src/workers/classification/sniffer-store.ts
 import { Database as Database4 } from "bun:sqlite";
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 import { chmodSync as chmodSync4, existsSync as existsSync15, mkdirSync as mkdirSync10 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 function snifferMaterialHash(pass, material) {
-  return createHash8("sha256").update(`${pass}
+  return createHash9("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 function snifferSubjectKey(subject) {
-  return createHash8("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
+  return createHash9("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
 }
 class TierSnifferStore {
   dbPath;
@@ -19070,8 +19113,8 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_PROMPT_VERSION = `p-${createHash9("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash9("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+var SNIFFER_PROMPT_VERSION = `p-${createHash10("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash10("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 // src/workers/classification/judge-spending.ts
 registerLimit({ id: "judge.spend_cap", kind: "cost", scope: "judge", label: "Privacy judge spending cap reached", unit: "usd", continue: "raise" });
 registerLimit({ id: "judge.payment", kind: "funding", scope: "judge", label: "Privacy judge provider refused payment (402)", unit: "usd", continue: "refill" });
@@ -19207,8 +19250,15 @@ const connection = (path) => {
   connections.set(path, { db, file });
   return db;
 };
+const statementTiming = (started, cpuStarted) => {
+  if (started === undefined) return {};
+  const ms = performance.now() - started;
+  if (cpuStarted === undefined) return { ms };
+  const cpu = process.threadCpuUsage(cpuStarted);
+  return { ms, cpuMs: (cpu.user + cpu.system) / 1000 };
+};
 self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
+  const { id, op, snapshot, path, sql, params, mode, perRead, measureCpu } = event.data;
   if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
   if (op === 'memory') {
     const at = Date.now();
@@ -19246,6 +19296,8 @@ self.onmessage = (event) => {
     return;
   }
   if (progress) Atomics.store(progress, 0, id);
+  let started;
+  let cpuStarted;
   try {
     if (op === 'open') {
       const held = snapshotConnection(path);
@@ -19269,14 +19321,16 @@ self.onmessage = (event) => {
     } else {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
-      const started = performance.now();
+      cpuStarted = measureCpu ? process.threadCpuUsage?.() : undefined;
+      started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows, ms: performance.now() - started });
+      postMessage({ id, ok: true, rows, ...statementTiming(started, cpuStarted) });
     }
   } catch (error) {
+    const timing = statementTiming(started, cpuStarted);
     const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
-    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
+    postMessage({ id, ok: false, ...timing, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   } finally {
     // After the reply is posted: finished, so a reply missing past here was lost.
     if (progress) { Atomics.store(progress, 1, id); Atomics.store(progress, 0, 0); }
@@ -19352,7 +19406,7 @@ function startThread(store, lane = "shared") {
       }
       started.pending.delete(message.id);
       if (typeof message.ms === "number")
-        waiting.sqlMs?.(message.ms);
+        waiting.statementTiming?.(message.ms, message.cpuMs);
       if (message.ok)
         waiting.resolve(message.rows ?? null);
       else
@@ -19397,15 +19451,15 @@ function retire(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message, sqlMs) {
+function send(reader, message, statementTiming) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    reader.pending.set(id, { resolve, reject, ...sqlMs ? { sqlMs } : {} });
+    reader.pending.set(id, { resolve, reject, ...statementTiming ? { statementTiming } : {} });
     armLostReplyCheck();
     try {
-      reader.worker.postMessage({ ...message, id });
+      reader.worker.postMessage({ ...message, id, ...statementTiming ? { measureCpu: true } : {} });
     } catch (error) {
       reader.pending.delete(id);
       reject(error instanceof Error ? error : new Error(String(error)));
@@ -19496,17 +19550,19 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
           markRead(dbPath, readId, { atMs: clock2.now(), lane, site });
         if (observeSnapshots)
           observer?.(dbPath, query, { lane, site });
-        const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
+        const report = beginSourceAnswerPoolRead(query.sql, query.site ?? (site === "unknown" ? undefined : site));
         const sentAtMs = clock2.now();
         const queueWaitMs = reserveWaitMs;
         reserveWaitMs = 0;
-        let sqlMs = 0;
+        let sqlMs;
+        let cpuMs;
         const once = async () => {
           if (moving)
             await moving;
-          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, (ms) => {
+          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, report && ((ms, cpu) => {
             sqlMs = ms;
-          });
+            cpuMs = cpu;
+          }));
         };
         const laneProgress = currentSourceIndexReadProgress();
         laneProgress?.began?.();
@@ -19521,10 +19577,10 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
             rows = await once();
           }
           noteSourceIndexReadProgress();
-          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, cpuMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
-          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, cpuMs, outcome: "error", snapshot: true });
           throw error;
         } finally {
           laneProgress?.ended?.();
@@ -19626,9 +19682,9 @@ function serveSnapshotWaiters() {
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
   const waiting = queues.get(dbPath) ?? [];
-  const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
+  const report = beginSourceAnswerPoolRead(read.sql, read.site);
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
+    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve, reject) => {
@@ -19693,7 +19749,8 @@ function settle(job, outcome) {
     job.report({
       queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
       runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
-      sqlMs: job.sqlMs ?? 0,
+      sqlMs: job.sqlMs,
+      cpuMs: job.cpuMs,
       outcome: ended
     });
   }
@@ -19753,9 +19810,10 @@ function dispatch() {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
-    }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
+      job.cpuMs = cpuMs;
+    })).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
       if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
         job.retried = true;
         counters.retries += 1;
@@ -19833,14 +19891,14 @@ function hasImmutableAccountLabel(id) {
 }
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash12, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { dirname as dirname23 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
-import { createHash as createHash10, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash11, randomUUID as randomUUID8 } from "node:crypto";
 import {
   chmodSync as chmodSync5,
   closeSync as closeSync9,
@@ -20337,7 +20395,7 @@ function refsDir(path) {
   return join19(dirname17(path), `${basename5(path)}.refs`);
 }
 function holderDigest(name) {
-  return createHash10("sha256").update(name).digest("hex").slice(0, 32);
+  return createHash11("sha256").update(name).digest("hex").slice(0, 32);
 }
 function holderName(holder) {
   const digest = holderDigest(mediaHolderName(holder));
@@ -22112,7 +22170,7 @@ function retireSecretRedactions(ledger, options = {}) {
 
 // src/workers/source-index/built-in-embedding/provider.ts
 import { isMainThread as isMainThread5 } from "node:worker_threads";
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 import { readFileSync as readFileSync17 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname22, join as join24 } from "node:path";
@@ -22960,7 +23018,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash11("sha256").update(JSON.stringify({
+    this.configHash = createHash12("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -24925,6 +24983,7 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
   return rows;
 }
 async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders) {
+  const work = sourceAnswerVectorWork();
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
@@ -24935,11 +24994,15 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
     if (expired())
       return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const packed = await read({ mode: "get", ...page });
+    const packed = await read({ mode: "get", site: "vector_digest_page", ...page });
     const excluded = options.excludedItemPks;
+    let scanned = packed.n;
+    const unpackStartedAt = work && performance.now();
     const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index, itemPk) => {
-      if ((index & 31) === 0 && expired())
+      if ((index & 31) === 0 && expired()) {
+        scanned = index;
         return false;
+      }
       if (excluded && itemPk !== undefined && excluded.has(itemPk))
         return true;
       if ((index & 31) === 0)
@@ -24947,6 +25010,11 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
       heap.append(chunkPk, scoreVectorDigest(query, digest));
       return true;
     });
+    if (work) {
+      work.digest_unpack_score_ms += performance.now() - unpackStartedAt;
+      work.digest_pages_read += 1;
+      work.digest_rows_scanned += scanned;
+    }
     if (!finished)
       return cut;
     if (packed.n < VECTOR_DIGEST_PAGE_ROWS)
@@ -24997,12 +25065,16 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         if (pagePks.length === 0)
           return [];
         const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
-        return (readers?.[lane] ?? read)({ mode: "all", ...page });
+        return (readers?.[lane] ?? read)({ mode: "all", site: "vector_digest_rescore", ...page });
       }));
       const rows = pages.flat();
+      const mismatchesBeforePage = dimensionMismatches;
       for (const [index, row] of rows.entries()) {
-        if ((index & 31) === 0 && expired())
+        if ((index & 31) === 0 && expired()) {
+          if (work)
+            work.full_vectors_rescored += index - (dimensionMismatches - mismatchesBeforePage);
           return cutWith();
+        }
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
@@ -25010,6 +25082,8 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         if (folded.score !== undefined && digestScore !== undefined)
           underestimate = Math.max(underestimate, folded.score - digestScore);
       }
+      if (work)
+        work.full_vectors_rescored += rows.length - (dimensionMismatches - mismatchesBeforePage);
       if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
         await yieldConnectorStoreVectorScan();
     }
@@ -25217,7 +25291,7 @@ class LocalConnectorStore {
   constructor(options) {
     this.hiddenSetIncrementalOffLoop = process.env.OLYMPUS_HIDDEN_SET_INCREMENTAL_OFF_LOOP?.trim() === "1";
     installMainThreadSqlTrace();
-    this.visibilityOwner = randomUUID8();
+    this.visibilityOwner = randomUUID9();
     this.visibilityNow = () => Date.now();
     this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
     this.visibilityTimers = {
@@ -25229,7 +25303,7 @@ class LocalConnectorStore {
     this.readOnly = options.readOnly === true;
     this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
     this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-    this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID8()}` : options.mediaHolder ?? this.dbPath;
+    this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID9()}` : options.mediaHolder ?? this.dbPath;
     const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
     this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
     this.family = options.family;
@@ -27318,7 +27392,7 @@ ${parentKey(ref)}`, { ref, origin });
     this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
   }
   tombstoneCopy(identity, options) {
-    const syncRunId = `connector-tier-copy-${randomUUID8()}`;
+    const syncRunId = `connector-tier-copy-${randomUUID9()}`;
     const startedAt = nowIso();
     try {
       return this.db.transaction(() => {
@@ -27351,7 +27425,7 @@ ${parentKey(ref)}`, { ref, origin });
         return "held";
       if (!row && options.record !== true)
         return "none";
-      const syncRunId = `connector-secret-retired-${randomUUID8()}`;
+      const syncRunId = `connector-secret-retired-${randomUUID9()}`;
       const now = nowIso();
       this.db.query(`
         INSERT INTO sync_runs (
@@ -27441,7 +27515,7 @@ ${parentKey(ref)}`, { ref, origin });
         }
         if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
           return "stale_claim";
-        const syncRunId = `connector-secrets-extraction-${randomUUID8()}`;
+        const syncRunId = `connector-secrets-extraction-${randomUUID9()}`;
         const startedAt = nowIso();
         this.db.query(`
           INSERT INTO sync_runs (
@@ -27562,7 +27636,7 @@ ${parentKey(ref)}`, { ref, origin });
     if (options.vectorProvider) {
       assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
     }
-    const syncRunId = `connector-tier-move-${randomUUID8()}`;
+    const syncRunId = `connector-tier-move-${randomUUID9()}`;
     const now = nowIso();
     const imported = this.db.transaction(() => {
       this.db.query(`
@@ -28025,7 +28099,7 @@ ${parentKey(ref)}`, { ref, origin });
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID8()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID9()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
       }
     } finally {
       this.releaseUnreferencedChunkMedia();
@@ -29205,7 +29279,7 @@ ${parentKey(ref)}`, { ref, origin });
         embeddingsComplete: false
       };
     }
-    const chunkTextCoherent = chunkRows.every((chunk) => createHash12("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+    const chunkTextCoherent = chunkRows.every((chunk) => createHash13("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
     if (!chunkTextCoherent) {
       return {
         chunksIndexed: 0,
@@ -29367,7 +29441,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
     const tierLedgerForWrite = this.visibilityLedger();
     const summary = this.db.transaction(() => {
-      const syncRunId = `connector-representation-restore-${randomUUID8()}`;
+      const syncRunId = `connector-representation-restore-${randomUUID9()}`;
       const startedAt = this.now().toISOString();
       this.db.query(`
         INSERT INTO sync_runs (
@@ -29720,7 +29794,7 @@ ${parentKey(ref)}`, { ref, origin });
         };
       }
       const now = this.now().toISOString();
-      const syncRunId = `connector-relinquish-${randomUUID8()}`;
+      const syncRunId = `connector-relinquish-${randomUUID9()}`;
       this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -29859,7 +29933,7 @@ ${parentKey(ref)}`, { ref, origin });
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID8()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID9()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
     if (complete)
       (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
   }
@@ -30115,8 +30189,8 @@ ${parentKey(ref)}`, { ref, origin });
       itemsUnchanged: 0,
       itemsMissing: 0
     };
-    const inputDigest = createHash12("sha256");
-    const outputDigest = createHash12("sha256");
+    const inputDigest = createHash13("sha256");
+    const outputDigest = createHash13("sha256");
     const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -30193,8 +30267,8 @@ ${parentKey(ref)}`, { ref, origin });
       ftsRowsRefreshed: 0,
       chunkEmbeddingInputsInvalidated: 0
     };
-    const inputDigest = createHash12("sha256");
-    const outputDigest = createHash12("sha256");
+    const inputDigest = createHash13("sha256");
+    const outputDigest = createHash13("sha256");
     let lastItemPk = startAfter;
     let hasMore = false;
     while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -30542,7 +30616,7 @@ ${parentKey(ref)}`, { ref, origin });
       windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
     });
     await connector.authenticate();
-    const syncRunId = `connector-sync-${randomUUID8()}`;
+    const syncRunId = `connector-sync-${randomUUID9()}`;
     const startedAt = nowIso();
     this.db.query(`
       INSERT INTO sync_runs (
@@ -32412,6 +32486,7 @@ ${parentKey(ref)}`, { ref, origin });
   }
   async vectorSearchLane(query, provider, maxResults, accountScope, filters, deadlineAtMs, laneOptions = {}) {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+    sourceAnswerVectorWork();
     const vectorFilters = normalizeConnectorStoreSearchFilters(filters);
     const trimmed = query.trim();
     if (!trimmed)
@@ -32865,7 +32940,8 @@ ${parentKey(ref)}`, { ref, origin });
         const bound = from === undefined ? undefined : ("bound" in from) ? from.bound : undefined;
         const atOrAbove = from === undefined ? undefined : ("atOrAbove" in from) ? from.atOrAbove : undefined;
         const top = from === undefined ? undefined : bound !== undefined ? "top" : "tied";
-        return { mode: "all", sql: `
+        const site = top === "top" ? "ranked_match_page_bounded" : top === "tied" ? "ranked_match_page_tied" : "ranked_match_page";
+        return { mode: "all", site, sql: `
         ${top === undefined ? "" : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
@@ -33067,18 +33143,22 @@ ${parentKey(ref)}`, { ref, origin });
       remember(POPULATION, items);
     }
     const counts = [];
+    const traceCounts = beginSourceAnswerConceptCounts();
     for (const group of groups) {
       const groupQuery = sourceIndexFtsGroupQuery(group, exact);
       let count = remembered(groupQuery);
+      const memoHit = count !== undefined;
       if (count === undefined) {
         count = (yield {
           mode: "get",
+          site: "concept_weight_count",
           sql: "SELECT COUNT(DISTINCT r.item_pk) AS count FROM connector_store_fts_rows r WHERE r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)",
           params: [groupQuery]
         }).count;
         remember(groupQuery, count);
       }
       counts.push(count);
+      traceCounts?.push({ matched_items: count, memo_hit: memoHit });
     }
     const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
     return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
@@ -33152,6 +33232,7 @@ ${parentKey(ref)}`, { ref, origin });
     const selectedFilters = connectorStoreFilterSql(filters);
     return {
       mode: "all",
+      site: "recentItemsRead",
       sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -34457,7 +34538,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash12("sha256");
+  const digest = createHash13("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -34624,7 +34705,7 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash12("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash13("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -36452,7 +36533,7 @@ function requireNonEmpty(value, label) {
   return text;
 }
 function hashString2(value) {
-  return createHash12("sha256").update(value).digest("hex");
+  return createHash13("sha256").update(value).digest("hex");
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -39048,7 +39129,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash13("sha256").update(message).digest("hex"));
+      scopeReport.errors.push(createHash14("sha256").update(message).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -39378,7 +39459,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash13("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash14("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);

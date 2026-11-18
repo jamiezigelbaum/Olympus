@@ -22,6 +22,7 @@ import type {
 } from './answer-types.ts';
 import type {
   SourceAnswerTraceAnalystLeg,
+  SourceAnswerTraceAdapterStages,
   SourceAnswerTraceOutcome,
   SourceAnswerTraceRetrievalAttempt,
   SourceAnswerTracePoolReads,
@@ -29,7 +30,7 @@ import type {
   SourceAnswerTraceSnapshot,
   SourceAnswerTraceMainThreadSql,
 } from './answer-latency-trace.ts';
-import { copyQueryStages, sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
+import { copyQueryStages, preciseMs, sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
 import { semanticSearchTimedOut } from '../../core/source-index/partial-search.ts';
 import type { OperationCallerWire } from '../../core/operation-caller.ts';
 
@@ -469,10 +470,29 @@ function copyRetrievalAttempt(
           : {}),
         outcome: timing.outcome,
         ...(timing.error_class ? { error_class: timing.error_class } : {}),
+        ...(timing.adapter_stages ? { adapter_stages: copyAdapterStages(timing.adapter_stages) } : {}),
         ...(timing.pool ? { pool: copyPoolReads(timing.pool) } : {}),
       })),
       ...(query.stages ? { stages: copyQueryStages(query.stages) } : {}),
     })),
+  };
+}
+
+function copyAdapterStages(stages: SourceAnswerTraceAdapterStages): SourceAnswerTraceAdapterStages {
+  return {
+    adapter_elapsed_ms: preciseMs(stages.adapter_elapsed_ms),
+    keyword_lane_ms: preciseMs(stages.keyword_lane_ms),
+    ...(stages.vector_lane_ms !== undefined ? { vector_lane_ms: preciseMs(stages.vector_lane_ms) } : {}),
+    ...(stages.join_wait_ms !== undefined ? { join_wait_ms: preciseMs(stages.join_wait_ms) } : {}),
+    ...(stages.post_join_setup_ms !== undefined ? { post_join_setup_ms: preciseMs(stages.post_join_setup_ms) } : {}),
+    keyword_relaxation_ms: preciseMs(stages.keyword_relaxation_ms),
+    keyword_revalidation_ms: preciseMs(stages.keyword_revalidation_ms),
+    ...(stages.vector_revalidation_ms !== undefined ? { vector_revalidation_ms: preciseMs(stages.vector_revalidation_ms) } : {}),
+    ...(stages.vector_summary_ms !== undefined ? { vector_summary_ms: preciseMs(stages.vector_summary_ms) } : {}),
+    recency_read_ms: preciseMs(stages.recency_read_ms),
+    fusion_ms: preciseMs(stages.fusion_ms),
+    finalize_ms: preciseMs(stages.finalize_ms),
+    unattributed_ms: preciseMs(stages.unattributed_ms),
   };
 }
 
@@ -492,11 +512,25 @@ function copyPoolReads(pool: SourceAnswerTracePoolReads): SourceAnswerTracePoolR
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),
     errors: count(pool.errors),
+    ...(pool.thread_cpu_available !== undefined ? { thread_cpu_available: pool.thread_cpu_available } : {}),
+    ...(pool.vector_work ? { vector_work: {
+      digest_pages_read: count(pool.vector_work.digest_pages_read),
+      digest_rows_scanned: count(pool.vector_work.digest_rows_scanned),
+      full_vectors_rescored: count(pool.vector_work.full_vectors_rescored),
+      digest_unpack_score_ms: preciseMs(pool.vector_work.digest_unpack_score_ms),
+    } } : {}),
+    ...(pool.keyword_concept_counts ? { keyword_concept_counts: pool.keyword_concept_counts.map((pass) => pass.map((entry) => ({
+      matched_items: count(entry.matched_items),
+      memo_hit: entry.memo_hit,
+    }))) } : {}),
     ...(pool.slowest_sql?.length ? { slowest_sql: pool.slowest_sql.map((site) => ({
       site: String(site.site),
+      ...(site.label ? { label: String(site.label) } : {}),
       reads: count(site.reads),
-      sql_ms: nonNegativeMs(site.sql_ms),
-      sql_max_ms: nonNegativeMs(site.sql_max_ms),
+      sql_ms: preciseMs(site.sql_ms),
+      sql_max_ms: preciseMs(site.sql_max_ms),
+      ...(site.sql_cpu_ms !== undefined ? { sql_cpu_ms: preciseMs(site.sql_cpu_ms) } : {}),
+      ...(site.sql_cpu_max_ms !== undefined ? { sql_cpu_max_ms: preciseMs(site.sql_cpu_max_ms) } : {}),
     })) } : {}),
   };
 }

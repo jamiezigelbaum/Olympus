@@ -558,17 +558,25 @@ describe('pool reads name their slowest statements without their values', () => 
   test('literals and id lists never reach the trace', async () => {
     const { poolSqlSite, createSourceAnswerTrace, runWithSourceAnswerTrace, observeSourceAnswerRetrievalAttempt, observeSourceAnswerRoutedQuery,
       runInSourceAnswerLane, beginSourceAnswerPoolRead, recordSourceAnswerCorpusTiming, snapshotSourceAnswerTrace } = await import('../src/workers/source-index/answer-latency-trace.ts');
-    const site = poolSqlSite(`SELECT x FROM chunks_fts WHERE chunks_fts MATCH 'blood work 2026' AND pk IN (12, 13)\n LIMIT 40`);
-    expect(site).toBe('SELECT x FROM chunks_fts WHERE chunks_fts MATCH ? AND pk IN (…) LIMIT N');
+    const statement = `SELECT x FROM chunks_fts WHERE chunks_fts MATCH 'blood work 2026' AND pk IN (12, 13)\n LIMIT 40 -- private note`;
+    const site = poolSqlSite(statement);
+    expect(site).toMatch(/^SELECT x FROM chunks_fts WHERE chunks_fts MATCH \? AND pk IN \(…\) LIMIT N #[a-f0-9]{16}$/);
+    expect(poolSqlSite(`SELECT x FROM chunks_fts WHERE chunks_fts MATCH 'other text' AND pk IN (14, 15) LIMIT 90`)).toBe(site);
     const trace = createSourceAnswerTrace();
     await runWithSourceAnswerTrace(trace, () => observeSourceAnswerRetrievalAttempt('hybrid', () => observeSourceAnswerRoutedQuery(1, async () => {
       runInSourceAnswerLane('internal.a', () => {
-        for (const ms of [5, 30]) beginSourceAnswerPoolRead(site)?.({ queueWaitMs: 0, runMs: ms, sqlMs: ms, outcome: 'rows' });
-        beginSourceAnswerPoolRead('SELECT N')?.({ queueWaitMs: 0, runMs: 1, sqlMs: 1, outcome: 'rows' });
+        for (const ms of [5, 30]) beginSourceAnswerPoolRead(statement, 'fts')?.({ queueWaitMs: 0, runMs: ms, sqlMs: ms, cpuMs: ms / 2, outcome: 'rows' });
+      });
+      runInSourceAnswerLane('internal.b', () => {
+        beginSourceAnswerPoolRead('SELECT 1')?.({ queueWaitMs: 0, runMs: 1, sqlMs: 1, outcome: 'rows' });
       });
       recordSourceAnswerCorpusTiming({ corpus_id: 'internal.a', elapsed_ms: 40, outcome: 'success' });
+      recordSourceAnswerCorpusTiming({ corpus_id: 'internal.b', elapsed_ms: 1, outcome: 'success' });
     })));
-    const pool = snapshotSourceAnswerTrace(trace).retrievalAttempts[0]!.queries[0]!.corpus_timings[0]!.pool!;
-    expect(pool.slowest_sql).toEqual([{ site, reads: 2, sql_ms: 35, sql_max_ms: 30 }, { site: 'SELECT N', reads: 1, sql_ms: 1, sql_max_ms: 1 }]);
+    const record = buildSourceAnswerLatencyTraceRecord({ trace: snapshotSourceAnswerTrace(trace), outcome: 'success' });
+    const [measured, unsupported] = record.retrieval_attempts[0]!.queries[0]!.corpus_timings;
+    expect(measured!.pool).toMatchObject({ thread_cpu_available: true, slowest_sql: [{ site, label: 'fts', reads: 2, sql_ms: 35, sql_max_ms: 30, sql_cpu_ms: 17.5, sql_cpu_max_ms: 15 }] });
+    expect(unsupported!.pool?.thread_cpu_available).toBe(false);
+    expect(unsupported!.pool?.slowest_sql).toEqual([{ site: poolSqlSite('SELECT 1'), reads: 1, sql_ms: 1, sql_max_ms: 1 }]);
   });
 });

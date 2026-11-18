@@ -14,6 +14,7 @@ import { semanticRowsPerStore } from '../../core/evidence-reranker.ts';
 import { setEngineStep } from '../../core/engine-heartbeat.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
+import { beginSourceAnswerConceptCounts, beginSourceAnswerStoreTiming, sourceAnswerVectorWork, type SourceAnswerTraceAdapterStages } from '../source-index/answer-latency-trace.ts';
 import { storeOwnerIdleMs, storeReadHasPriority } from '../../core/store-reclaim-admission.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
@@ -2700,6 +2701,7 @@ export async function scanDigestPages(
    */
   sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
 ): Promise<VectorScan> {
+  const work = sourceAnswerVectorWork();
   const heap = new VectorDigestHeap();
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
@@ -2709,15 +2711,25 @@ export async function scanDigestPages(
   while (true) {
     if (expired()) return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const packed = await read({ mode: 'get', ...page }) as VectorDigestPackedPage;
+    const packed = await read({ mode: 'get', site: 'vector_digest_page', ...page }) as VectorDigestPackedPage;
     const excluded = options.excludedItemPks;
+    let scanned = packed.n;
+    const unpackStartedAt = work && performance.now();
     const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index, itemPk) => {
-      if ((index & 31) === 0 && expired()) return false;
+      if ((index & 31) === 0 && expired()) {
+        scanned = index;
+        return false;
+      }
       if (excluded && itemPk !== undefined && excluded.has(itemPk)) return true;
       if ((index & 31) === 0) noteSourceIndexReadProgress();
       heap.append(chunkPk, scoreVectorDigest(query, digest));
       return true;
     });
+    if (work) {
+      work.digest_unpack_score_ms += performance.now() - unpackStartedAt!;
+      work.digest_pages_read += 1;
+      work.digest_rows_scanned += scanned;
+    }
     if (!finished) return cut;
     if (packed.n < VECTOR_DIGEST_PAGE_ROWS) break;
     afterChunkPk = packed.last_pk;
@@ -2776,17 +2788,22 @@ export async function scanDigestPages(
         const pagePks = chunkPks.slice(at + lane * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, at + (lane + 1) * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
         if (pagePks.length === 0) return [] as VectorScoreRow[];
         const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
-        return (readers?.[lane] ?? read)({ mode: 'all', ...page }) as Promise<VectorScoreRow[]>;
+        return (readers?.[lane] ?? read)({ mode: 'all', site: 'vector_digest_rescore', ...page }) as Promise<VectorScoreRow[]>;
       }));
       const rows = pages.flat();
+      const mismatchesBeforePage = dimensionMismatches;
       for (const [index, row] of rows.entries()) {
-        if ((index & 31) === 0 && expired()) return cutWith();
+        if ((index & 31) === 0 && expired()) {
+          if (work) work.full_vectors_rescored += index - (dimensionMismatches - mismatchesBeforePage);
+          return cutWith();
+        }
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
         const digestScore = digestScores.get(row.chunk_pk);
         if (folded.score !== undefined && digestScore !== undefined) underestimate = Math.max(underestimate, folded.score - digestScore);
       }
+      if (work) work.full_vectors_rescored += rows.length - (dimensionMismatches - mismatchesBeforePage);
       if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
     }
   }
@@ -14722,6 +14739,7 @@ export class LocalConnectorStore {
     laneOptions: { locate?: boolean } = {},
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+    sourceAnswerVectorWork();
     const vectorFilters = normalizeConnectorStoreSearchFilters(filters);
     const trimmed = query.trim();
     if (!trimmed) return { rows: [] };
@@ -15446,7 +15464,8 @@ export class LocalConnectorStore {
         const bound = from === undefined ? undefined : 'bound' in from ? from.bound : undefined;
         const atOrAbove = from === undefined ? undefined : 'atOrAbove' in from ? from.atOrAbove : undefined;
         const top = from === undefined ? undefined : bound !== undefined ? 'top' : 'tied';
-        return { mode: 'all', sql: `
+        const site = top === 'top' ? 'ranked_match_page_bounded' : top === 'tied' ? 'ranked_match_page_tied' : 'ranked_match_page';
+        return { mode: 'all', site, sql: `
         ${top === undefined ? '' : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
@@ -15717,18 +15736,22 @@ export class LocalConnectorStore {
       remember(POPULATION, items);
     }
     const counts: number[] = [];
+    const traceCounts = beginSourceAnswerConceptCounts();
     for (const group of groups) {
       const groupQuery = sourceIndexFtsGroupQuery(group, exact);
       let count = remembered(groupQuery);
+      const memoHit = count !== undefined;
       if (count === undefined) {
         count = ((yield {
           mode: 'get',
+          site: 'concept_weight_count',
           sql: 'SELECT COUNT(DISTINCT r.item_pk) AS count FROM connector_store_fts_rows r WHERE r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)',
           params: [groupQuery],
         }) as { count: number }).count;
         remember(groupQuery, count);
       }
       counts.push(count);
+      traceCounts?.push({ matched_items: count, memo_hit: memoHit });
     }
     const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
     return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
@@ -15877,6 +15900,7 @@ export class LocalConnectorStore {
     const selectedFilters = connectorStoreFilterSql(filters);
     return {
       mode: 'all',
+      site: 'recentItemsRead',
       sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -17458,8 +17482,12 @@ export function createConnectorStoreCorpusAdapter(
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
-  const adapter: SourceIndexCorpusSearchAdapter = (
+  const adapter: SourceIndexCorpusSearchAdapter & ((
     request: SourceIndexCorpusSearchRequest,
+    stages?: SourceAnswerTraceAdapterStages,
+  ) => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>) = (
+    request: SourceIndexCorpusSearchRequest,
+    stages?: SourceAnswerTraceAdapterStages,
   ): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse> => {
     assertConnectorStoreCorpusRequest(store, request);
     const startedAt = Date.now();
@@ -17475,12 +17503,19 @@ export function createConnectorStoreCorpusAdapter(
     }
 
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
-      const keywordLane = await revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
-        await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs),
-        options.localKeywordFallback, {}, request.deadlineAtMs));
+      const markStage = startStoreStageClock(stages);
+      let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters,
+        { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+      markStage?.('keyword_lane_ms');
+      keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
+        keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
+      markStage?.('keyword_relaxation_ms');
+      keywordLane = await revalidateKeywordLane(store, keywordLane);
+      markStage?.('keyword_revalidation_ms');
       const rows = keywordLane.rows;
       let recencyCut = false;
       const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
+      markStage?.('recency_read_ms');
       if (recencyRows.length === 0) {
         const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
           store,
@@ -17489,7 +17524,8 @@ export function createConnectorStoreCorpusAdapter(
           options.resultProjector,
           filters?.locatorPathScope,
         )), keywordLane);
-        return {
+        markStage?.('fusion_ms');
+        const response: SourceIndexCorpusSearchResponse = {
           hits,
           storeRelevance: connectorStoreRelevance(keywordLane),
           latencyMs: Date.now() - startedAt,
@@ -17502,6 +17538,8 @@ export function createConnectorStoreCorpusAdapter(
           matchCount: keywordLane.matchCount,
           rawExposed: false,
         };
+        markStage?.('finalize_ms');
+        return response;
       }
       const lanes = [
         { name: 'keyword', items: rows },
@@ -17532,7 +17570,8 @@ export function createConnectorStoreCorpusAdapter(
         ...(options.resultProjector ? { resultProjector: options.resultProjector } : {}),
         ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
       }), keywordLane);
-      return {
+      markStage?.('fusion_ms');
+      const response: SourceIndexCorpusSearchResponse = {
         hits,
         storeRelevance: connectorStoreRelevance(keywordLane),
         latencyMs: Date.now() - startedAt,
@@ -17548,6 +17587,8 @@ export function createConnectorStoreCorpusAdapter(
         matchCount: keywordLane.matchCount,
         rawExposed: false,
       };
+      markStage?.('finalize_ms');
+      return response;
     })();
 
     return hybridConnectorStoreSearch(
@@ -17555,6 +17596,7 @@ export function createConnectorStoreCorpusAdapter(
       embeddingProvider,
       request,
       startedAt,
+      stages,
       options.accountScope,
       filters,
       semanticRelevanceBar,
@@ -17697,8 +17739,13 @@ export function createConnectorStoreCorpusAdapter(
     };
   };
   const expanded: SourceIndexCorpusSearchAdapter = (request) => {
+    const timing = beginSourceAnswerStoreTiming();
     assertConnectorStoreCorpusRequest(store, request);
-    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request), store);
+    const response = withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
+    return timing ? response.then((result) => {
+      timing.finish();
+      return result;
+    }) : response;
   };
   expanded.metadataMatches = (request) => {
     assertConnectorStoreCorpusRequest(store, request);
@@ -17851,11 +17898,25 @@ function connectorStoreRecencyLaneAudit(corpusId: string, candidateCount: number
   };
 }
 
+type StoreStage = Exclude<keyof SourceAnswerTraceAdapterStages, 'adapter_elapsed_ms' | 'unattributed_ms' | 'vector_lane_ms'>;
+
+// Marks consecutive wall intervals. The parallel lanes keep their own start points.
+function startStoreStageClock(stages?: SourceAnswerTraceAdapterStages): ((stage: StoreStage) => void) | undefined {
+  if (!stages) return undefined;
+  let startedAt = performance.now();
+  return (stage) => {
+    const now = performance.now();
+    stages[stage] = now - startedAt;
+    startedAt = now;
+  };
+}
+
 async function hybridConnectorStoreSearch(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   request: SourceIndexCorpusSearchRequest,
   startedAt: number,
+  stages: SourceAnswerTraceAdapterStages | undefined,
   accountScope?: string,
   filters?: ConnectorStoreSearchFilters,
   semanticRelevanceBar?: number,
@@ -17871,16 +17932,20 @@ async function hybridConnectorStoreSearch(
   // embeddings. Run one after the other, a slow keyword lane left the vector
   // lane the remainder of the budget, and it missed the deadline on every
   // question (Sparta 2026-11-10, #1242).
+  const markStage = startStoreStageClock(stages);
   const keywordWork = (async () => {
+    const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
     const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size
       ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
       : undefined;
     partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
+    if (stages) stages.keyword_lane_ms = performance.now() - laneStartedAt;
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
   })();
   const vectorWork = (async () => {
+    const laneStartedAt = stages ? performance.now() : 0;
     const vectorStartedAt = Date.now();
     const lane = await store.vectorSearchLane(
       request.query,
@@ -17896,9 +17961,11 @@ async function hybridConnectorStoreSearch(
       hits: rows.slice(0, maxResults).map(row => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
       latencyMs: Date.now() - startedAt, incomplete: true, rawExposed: false,
     });
+    if (stages) stages.vector_lane_ms = performance.now() - laneStartedAt;
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
+  markStage?.('join_wait_ms');
   let keywordLane = keywordResult.lane;
   const baselineKeywordLane = keywordResult.baseline;
   let keywordElapsedMs = keywordResult.elapsedMs;
@@ -17928,21 +17995,27 @@ async function hybridConnectorStoreSearch(
       saturated:keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated,
     }};
   }
-  // The relaxed retry is keyword work too, so it counts toward the keyword lane's time.
+  markStage?.('post_join_setup_ms');
+  // The relaxed retry also counts toward the existing keyword lane audit.
   const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
   keywordElapsedMs += Date.now() - relaxStartedAt;
+  markStage?.('keyword_relaxation_ms');
   // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
   keywordLane = await revalidateKeywordLane(store, keywordLane);
+  markStage?.('keyword_revalidation_ms');
   scoredVectorRows = await store.stillVisibleSearchRowsOffThread(scoredVectorRows);
   vectorRows = await store.stillVisibleSearchRowsOffThread(vectorRows);
+  markStage?.('vector_revalidation_ms');
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
   let recencyCut = false;
+  markStage?.('vector_summary_ms');
   const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
+  markStage?.('recency_read_ms');
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
     ? []
@@ -17990,6 +18063,7 @@ async function hybridConnectorStoreSearch(
     ...(resultProjector ? { resultProjector } : {}),
     ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
   }), keywordLane);
+  markStage?.('fusion_ms');
 
   const vettedRows = new Set(vectorRows.map((row) => row.sourceItem.localItemId));
   const semanticNeighbourHits = scoredVectorRows
@@ -18002,7 +18076,7 @@ async function hybridConnectorStoreSearch(
       .map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
     bar: contentBar,
   };
-  return {
+  const response: SourceIndexCorpusSearchResponse = {
     hits,
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     ...(semanticNeighbourHits.length > 0 ? { semanticNeighbourHits } : {}),
@@ -18052,6 +18126,8 @@ async function hybridConnectorStoreSearch(
     matchCount: hybridMatchCount(keywordLane.matchCount, keywordLane.matchedItemIds, vectorRows, gateArmed),
     rawExposed: false,
   };
+  markStage?.('finalize_ms');
+  return response;
 }
 
 // Lexical matches always count. A vector row counts only when a relevance

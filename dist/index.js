@@ -9081,12 +9081,13 @@ var init_store_reclaim_admission = __esm(() => {
 
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-var poolSqlSites, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var poolSqlSites, storage2, queryStorage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
   storage2 = new AsyncLocalStorage7;
+  queryStorage = new AsyncLocalStorage7;
   laneStorage = new AsyncLocalStorage7;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
@@ -17553,6 +17554,7 @@ var init_local_index = __esm(() => {
   init_evidence_reranker();
   init_engine_heartbeat();
   init_main_thread_sql_trace();
+  init_answer_latency_trace();
   init_store_reclaim_admission();
   init_store_write_guard();
   init_unreadable_files();
