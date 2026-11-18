@@ -890,6 +890,16 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-11-18 — 1.5 ships after the default-configuration release check
+  and 24 hours on the owner's install.** Owner decision: 1.5 ships when the
+  full release check is clean in the default configuration on Mac and Linux,
+  both upgrade legs included, and the candidate has then run 24 hours on the
+  owner's install against written pass conditions
+  ([scripts/release-check/owner-run-24h.md](../scripts/release-check/owner-run-24h.md)).
+  This replaces the 48 hours in the 2026-11-11 entry below. The engine split
+  is on by default on Linux and macOS, so the release check runs that
+  configuration without a switch and those runs count.
+
 - **2026-11-11 — Every source holds new text until a judge has checked it.**
   Owner decision (#1316, "Yes, hold on every source", 10:26Z): new text from
   any source stays out of cloud answers (ChatGPT, Claude, Grok) until the
