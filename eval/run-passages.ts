@@ -111,6 +111,8 @@ export interface PassageSummary {
 export interface PassageDeepRead {
   triggered: boolean; refused: string | null; sectionsTotal: number; sectionsDone: number;
   seconds: number; correctByMeaning: boolean | null; citesExpected: boolean | null;
+  /** The triggered read is of the question's expected item. */
+  readsExpectedItem?: boolean;
 }
 export interface PassageRow {
   deepRead?: PassageDeepRead;
@@ -504,10 +506,15 @@ export async function runPassageEval(input: {
         if (triggered.job) {
           deepRead.triggered = true;
           deepRead.sectionsTotal = triggered.job.sectionsTotal;
+          const triggeredId = triggered.job.providerItemId;
+          deepRead.readsExpectedItem = (question.expectedEvidence ?? []).some(e => e.providerItemId === triggeredId || (e.alternates ?? []).some(a => a.providerItemId === triggeredId));
+          // Ids and numbers only, as each read starts and ends, so a stopped run still shows what it read.
+          console.error(JSON.stringify({ deepRead: 'started', question: question.id, sectionsTotal: deepRead.sectionsTotal, readsExpectedItem: deepRead.readsExpectedItem }));
           const result = await input.deepReadJobs.wait(triggered.job.id);
           const view = input.deepReadJobs.status(triggered.job.id)[0]!;
           deepRead.sectionsDone = view.sectionsDone;
           deepRead.seconds = (performance.now() - started) / 1000;
+          console.error(JSON.stringify({ deepRead: 'done', question: question.id, sectionsDone: deepRead.sectionsDone, seconds: Math.round(deepRead.seconds) }));
           if (result) {
             deepRead.citesExpected = gradePassageAnswer(question, result, detail).cited ?? false;
             const expectedText = (question.expectedEvidence ?? []).map(item => item.quote).filter(Boolean).join('\n') || (question.expectedAnswerContains ?? []).join('; ');

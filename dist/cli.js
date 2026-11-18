@@ -108212,7 +108212,7 @@ async function triggerDeepRead(detail, result, jobs) {
       throw new DeepReadRefused("no_private_model", "Deep read needs your own private model. Set one up in Settings, Models.");
     const view = await jobs.start(detail.pack.question, { selected_item: selected, whole: "item" });
     return {
-      job: { id: view.id, sectionsTotal: view.sectionsTotal },
+      job: { id: view.id, sectionsTotal: view.sectionsTotal, providerItemId: item.providerItemId },
       notice: `Reading all of "${title}" for this question: ${view.sectionsDone} of ${view.sectionsTotal} sections; the answer follows in Private answers.`
     };
   } catch (error) {
