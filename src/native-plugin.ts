@@ -302,7 +302,7 @@ const plugin = {
     const config = configFromPluginConfig(api.pluginConfig, { requireResolvedWorkerSecrets: false });
     // The engine split (core/engine-split.ts): with worker.engineSplit on, a
     // background writer is registered before the worker, which becomes its
-    // front and waits for the background's boot receipt. Captures still wait for
+    // front and starts once the background is ready. Captures still wait for
     // the front (workerIsReady below), which itself waits for the background.
     // The worker service holds the worker socket or port for the front from
     // its first start (holdEndpoint), as the engine host does, so a model

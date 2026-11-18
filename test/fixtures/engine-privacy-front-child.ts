@@ -2,7 +2,6 @@
 // checks. The starting listener stays on the socket until the front can serve.
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beginFrontProgress } from '../../src/core/boot-progress.ts';
 import { ENGINE_PRIVACY_READY_QUERY } from '../../src/core/engine-split.ts';
 import { answerReleaseWithheldReasonOffThread } from '../../src/core/release-manifest.ts';
 import { withRequestPeer } from '../../src/core/request-peer.ts';
@@ -19,7 +18,6 @@ import { CORPORA, identityOf } from '../helpers/tier-fixtures.ts';
 
 const [root, frontSocket, backgroundSocket, ledgerPath, internalPath, securePath] = process.argv.slice(2) as [string, string, string, string, string, string];
 const authToken = process.env.FIXTURE_TOKEN!;
-if (process.env.FIXTURE_WAIT_FOR_VISIBILITY === '1') beginFrontProgress(process.env);
 const ledger = new TierLedger({ dbPath: ledgerPath, readOnly: true });
 const store = new LocalConnectorStore({
   dbPath: internalPath, corpusId: CORPORA.internal, trustDomain: 'internal', family: 'file', tierLedger: ledger, readOnly: true,

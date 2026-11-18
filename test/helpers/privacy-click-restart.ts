@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createUnixSocketFetch } from '../../src/core/worker-transport.ts';
 import { TierLedger } from '../../src/workers/classification/tier-ledger.ts';
@@ -17,12 +17,11 @@ const identity = identityOf('restart-item');
 const itemId = ownerTierItemId(identity);
 const privacyPath = '/dashboard/privacy/items/';
 
-export async function privacyRestartFixture(choice: Choice, options: { waitForVisibility?: boolean } = {}) {
+export async function privacyRestartFixture(choice: Choice) {
   const root = mkdtempSync('/tmp/olympus-privacy-restart-');
   const env = {
     HOME: root, XDG_DATA_HOME: root, PATH: process.env.PATH ?? '',
     FIXTURE_TOKEN: randomUUID(), FIXTURE_SESSION_SECRET: randomUUID(),
-    ...(options.waitForVisibility ? { FIXTURE_WAIT_FOR_VISIBILITY: '1' } : {}),
   };
   const backgroundSocket = join(root, 'bg.sock');
   const frontSocket = join(root, 'front.sock');
@@ -101,13 +100,8 @@ export async function privacyRestartFixture(choice: Choice, options: { waitForVi
       if (locked) lock.exec('COMMIT');
       locked = false;
     };
-    if (options.waitForVisibility) {
-      await startFront();
-      await startBackground();
-    } else {
-      await startBackground();
-      await startFront();
-    }
+    await startBackground();
+    await startFront();
     await waitForMarker('front', 'front-ready');
     const local = await ownerLocalMint(fetchFront, origin, env.FIXTURE_TOKEN);
     const { csrf_token: csrf } = await local.json() as { csrf_token: string };
@@ -120,8 +114,6 @@ export async function privacyRestartFixture(choice: Choice, options: { waitForVi
     const dashboard = (path: string, body: object) => post(path, body, { Cookie: cookie, 'X-Olympus-CSRF': csrf });
     return {
       itemId, before, after, readStored, pauseBeforeCommit, allowCommit, dashboard, close,
-      visibilityWaiting: () => !existsSync(join(root, 'visibility-building'))
-        && readFileSync(join(root, 'visibility-step'), 'utf8').startsWith('waiting for the front'),
       async search() {
         const response = await post('/v1/source/index/search', { corpus_id: CORPORA.internal, query: 'orchard', all_tiers: false }, bearer);
         const result = await response.json() as { hits?: Array<{ sourceItem: { providerItemId: string } }> };

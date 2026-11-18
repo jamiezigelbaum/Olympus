@@ -25618,6 +25618,8 @@ function freeLoopbackPort() {
     });
   });
 }
+var WORKER_BACKGROUND_STARTING_MESSAGE = "Olympus worker is waiting for its background engine, which is starting.";
+var DEFAULT_ENGINE_BACKGROUND_WAIT_MS = 30000;
 var WORKER_SUPERVISOR_ENV = "OLYMPUS_WORKER_SUPERVISOR";
 function createNativeWorkerService(options) {
   let readyChild;
@@ -25667,6 +25669,9 @@ function createNativeWorkerService(options) {
       delete settings.env[ENGINE_ROLE_ENV];
       delete settings.env[ENGINE_BACKGROUND_SOCKET_ENV];
       if (options.engineBackground && freshConfig(input.context.config, input.initialConfig).config.worker.engineSplit) {
+        if (!await waitUntil(options.engineBackground.isReady, options.engineBackgroundWaitMs ?? DEFAULT_ENGINE_BACKGROUND_WAIT_MS, options.engineBackgroundPollMs ?? 100)) {
+          throw new NativeProcessRetryableStartError(WORKER_BACKGROUND_STARTING_MESSAGE);
+        }
         settings.env[ENGINE_ROLE_ENV] = "front";
         settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = engineBackgroundSocketPath({ env: settings.env });
       }
@@ -25988,6 +25993,16 @@ async function waitForNativeWorkerOwnership(isReady, timeoutMs = 15000) {
     await new Promise((resolve) => setTimeout(resolve, Math.min(50, Math.max(1, deadline - Date.now()))));
   } while (Date.now() <= deadline);
   throw new NativeProcessConfigurationError("Native worker is not ready or does not own its endpoint; native capture was not started.");
+}
+async function waitUntil(condition, timeoutMs, pollMs) {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  for (;; ) {
+    if (condition())
+      return true;
+    if (Date.now() >= deadline)
+      return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(pollMs, deadline - Date.now()))));
+  }
 }
 var ENGINE_BACKGROUND_SERVICE_ID = "olympus-worker-background";
 function engineBackgroundLaunch(input) {
