@@ -728,6 +728,9 @@ export async function main(): Promise<void> {
     await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
+    // The previous front's hold died with it. Let its accepted Private
+    // commands settle before this front opens stores or starts answer work.
+    await engineFront.waitForPendingPrivacyRaises();
   }
   // A retired per-store path setting would open empty stores beside the
   // account's real files: refuse to start, naming each, before anything opens

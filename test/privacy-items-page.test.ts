@@ -13,7 +13,8 @@ import {
   PRIVACY_ITEMS_TOAST_MS,
 } from '../src/workers/dashboard/pages/privacy-items.ts';
 import { DASHBOARD_PRIVACY_ITEMS_COPY as C, judgeReasonPhrase } from '../src/workers/dashboard/vocabulary.ts';
-import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
+import { privacyRestartFixture } from './helpers/privacy-click-restart.ts';
 
 const URL_ITEMS = new URL('http://127.0.0.1:8010/dashboard?privacy-items');
 
@@ -42,7 +43,10 @@ function render(options: NonNullable<Parameters<typeof renderDashboardLocalPage>
 }
 
 /** The page on a local session, its script run against a stubbed engine, on the shared test clock. */
-async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean; hold?: boolean; pending?: boolean } = {}) {
+async function page(items: Item[], options: {
+  narrow?: boolean; refuse?: boolean; hold?: boolean; pending?: boolean;
+  fetch?: (path: string, body: Record<string, unknown>) => Promise<Response>;
+} = {}) {
   const html = render({ controlSessionCsrfToken: 'csrf-token', outsideHelpLocalSession: true });
   const window = new Window({ url: URL_ITEMS.href });
   windows.push(window);
@@ -62,6 +66,7 @@ async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean
     expect(init.headers['X-Olympus-CSRF']).toBe('csrf-token');
     let request = JSON.parse(init.body) as Record<string, unknown>;
     posts.push({ path, body: request });
+    if (options.fetch) return options.fetch(path, request);
     if (options.hold && path === DASHBOARD_PRIVACY_ITEMS_PATHS.set) await gate;
     if (options.pending && path === DASHBOARD_PRIVACY_ITEMS_PATHS.set) {
       received = request;
@@ -109,6 +114,132 @@ async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean
   const text = (selector: string) => $(selector)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
   return { window, document, clock, posts, sets, $, click, dialogOpen, text, release: () => { settled = true; release(); } };
 }
+
+describe('an acknowledged Privacy click across an engine restart', () => {
+  for (const tier of ['private', 'personal'] as const) {
+    for (const point of ['background before commit', 'front before commit', 'front after commit'] as const) {
+      const label = tier === 'private' ? 'Private' : 'Personal';
+      test(`Make ${label}: ${point}`, async () => {
+        const f = await privacyRestartFixture(tier);
+        const paths = DASHBOARD_PRIVACY_ITEMS_PATHS;
+        try {
+          const replies: Array<{ path: string; status: number; body: Record<string, unknown> }> = [];
+          const p = await page([], { async fetch(path, body) {
+            const response = await f.dashboard(path, body);
+            replies.push({ path, status: response.status, body: await response.clone().json() });
+            return response;
+          } });
+          const row = `[data-pi-item="${f.itemId}"]`;
+          const withheld = async () => {
+            if (tier !== 'private') return;
+            const search = await f.search();
+            const answer = await f.answerRelease();
+            expect({ search: search.released, answer: answer.released }).toEqual({ search: false, answer: false });
+          };
+          const checked = (choice: string) => p.$(`[data-pi-choose="${choice}"]`)?.getAttribute('aria-checked');
+          const success = '[data-pi-toast]';
+          await waitFor(() => p.$(row));
+          await p.click(row);
+          expect(checked(tier === 'private' ? 'Personal' : 'Private')).toBe('true');
+          const original = { overrideTier: f.before, contentTier: f.before };
+          expect(f.readStored()).toEqual(original);
+          if (tier === 'private') {
+            expect(await f.search()).toEqual({ status: 200, released: true });
+            expect(await f.answerRelease()).toEqual({ status: 200, released: true });
+          }
+          await f.pauseBeforeCommit();
+          await p.click(`[data-pi-choose="${label}"]`);
+          if (tier === 'personal') await p.click('[data-pi-confirm-ok]');
+          await waitFor(() => p.text('[data-pi-status]') === C.pendingRestart);
+          const receipt = replies.find(reply => reply.path === paths.set)!;
+          const id = receipt.body.request_id as string;
+          expect(typeof id).toBe('string');
+          expect(receipt).toMatchObject({ status: 202, body: { ok: true, state: 'pending' } });
+          const poll = async () => {
+            const response = await f.status(id);
+            return { status: response.status, body: await response.json() };
+          };
+          const pending = { status: 200, body: { ok: true, request_id: id, state: 'pending' } };
+          expect(await poll()).toEqual(pending);
+          expect(f.readStored()).toEqual(original);
+          expect(p.$(success)!.hasAttribute('hidden')).toBe(true);
+          await withheld();
+
+          const restartingWithRaise = point === 'front before commit' && tier === 'private';
+          if (point === 'background before commit') {
+            await f.restartBackground(async () => {
+              expect(await poll()).toEqual(pending);
+              expect(f.readStored()).toEqual(original);
+              await withheld();
+            });
+            await withheld();
+            await waitFor(async () => {
+              const { body } = await poll();
+              return body.ok === true && body.state !== 'pending';
+            }, { description: 'replayed Privacy click settled' });
+          } else if (point === 'front after commit') {
+            f.allowCommit();
+            await waitFor(() => f.readStored().overrideTier === f.after);
+            await withheld();
+            await f.restartFront();
+            await f.waitForFrontReady();
+          } else {
+            await f.restartFront();
+            expect(f.readStored()).toEqual(original);
+            if (!restartingWithRaise) await f.waitForFrontReady();
+            else {
+              expect(await f.frontWaitingForPrivacyRaise()).toBe(true);
+              expect(await poll()).toMatchObject({ status: 503, body: { status: 'starting' } });
+              expect((await f.search()).status).toBe(503);
+              expect(await f.answerRelease()).toEqual({ status: 503, released: false });
+              await p.clock.advance(250);
+              await waitFor(() => replies.some(reply => reply.path === paths.status && reply.status === 503));
+              expect(p.text('[data-pi-status]')).toBe(C.pendingRestart);
+            }
+            await withheld();
+            if (restartingWithRaise) {
+              f.allowCommit();
+              await f.waitForFrontReady();
+              await withheld();
+            }
+          }
+
+          await waitFor(() => p.clock.pendingTimers() > 0);
+          await p.clock.advance(250);
+          const status = await waitFor(() => replies.find(reply => reply.path === paths.status && reply.status !== 503));
+          if (point === 'background before commit') {
+            expect(status).toMatchObject({ status: 200, body: { ok: true, item: { owner_set: true } } });
+          } else {
+            expect(status).toMatchObject({ status: 404, body: { ok: false, unknown: true, message: expect.stringContaining('Press again.') } });
+          }
+          if (point === 'front before commit' && !restartingWithRaise) {
+            await waitFor(() => p.text('[data-pi-status]').includes('Press again.'));
+            expect(p.text('[data-pi-status]')).toContain('Not saved.');
+            expect(p.$(success)!.hasAttribute('hidden')).toBe(true);
+            expect(checked('Private')).toBe('true');
+            expect(f.readStored()).toEqual(original);
+          } else {
+            await waitFor(() => !p.$(success)!.hasAttribute('hidden'));
+            expect(p.text('[data-pi-toast-text]')).toBe(tier === 'private' ? C.toastPrivate : C.toastPersonal);
+            expect(checked(label)).toBe('true');
+            // This fixture stops at the override commit, before the next
+            // placement pass. The saved choice and the old copy can differ.
+            expect(f.readStored()).toEqual({ overrideTier: f.after, contentTier: f.before });
+          }
+          await withheld();
+          // The surviving background still applies its command after the
+          // Personal page saw the old tier. Let it finish before teardown.
+          if (point === 'front before commit' && !restartingWithRaise) {
+            f.allowCommit();
+            await waitFor(() => f.readStored().overrideTier === f.after);
+          }
+        } finally {
+          await f.close();
+        }
+      }, 30_000);
+    }
+  }
+});
 
 test.each([false, true])('a pending receipt leaves the row saving until the background settles (refusal %s)', async (refuse) => {
   const p = await page([appointment()], { pending: true, refuse });

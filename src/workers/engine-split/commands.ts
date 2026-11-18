@@ -20,7 +20,7 @@
  */
 import { RELEASE_CHUNK_JUDGE_BUDGET_MS } from '../../core/release-manifest.ts';
 import { randomUUID } from 'node:crypto';
-import { ENGINE_COMMANDS_PATH, ENGINE_MODEL_COMPLETE_PATH, ENGINE_READY_PATH, type EngineReadyBody } from '../../core/engine-split.ts';
+import { ENGINE_COMMANDS_PATH, ENGINE_MODEL_COMPLETE_PATH, ENGINE_PRIVACY_READY_QUERY, ENGINE_READY_PATH, type EngineReadyBody } from '../../core/engine-split.ts';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { hasValidWorkerBearerToken } from '../http.ts';
@@ -277,6 +277,7 @@ export interface EngineCommandRecords {
   submit(envelope: EngineCommandEnvelope): EngineCommandReceipt;
   get(id: string): EngineCommandReceipt | undefined;
   settled(id: string, wait: Promise<void>): Promise<EngineCommandReceipt | undefined>;
+  hasPendingPrivacyRaise(): boolean;
 }
 
 export class EngineCommandError extends Error {
@@ -296,6 +297,17 @@ export function newEngineCommandId(): string {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+export function isDashboardPrivacyRaise(command: EngineCommand): boolean {
+  if (command.kind !== 'tier_override' || command.request.path !== '/dashboard/privacy/items/set') return false;
+  try {
+    return asRecord(JSON.parse(command.request.body))?.tier === 'private';
+  } catch (error) {
+    // The forwarded route will reject a malformed body before changing an item.
+    if (error instanceof SyntaxError) return false;
+    throw error;
+  }
 }
 
 function boundedString(value: unknown, max = 512): string | undefined {
@@ -519,6 +531,7 @@ export type EngineCommandHandlers = {
 interface LedgerEntry {
   body: string;
   receipt: EngineCommandReceipt;
+  privacyRaise: boolean;
   settled: Promise<void>;
   settledAt?: number;
 }
@@ -564,7 +577,7 @@ export class EngineCommandLedger implements EngineCommandRecords {
     const receipt: EngineCommandReceipt = { id: envelope.id, state: 'received', instance_id: this.options.instanceId };
     const key = orderKey(envelope.command);
     const previous = this.chains.get(key) ?? Promise.resolve();
-    const entry: LedgerEntry = { body, receipt, settled: Promise.resolve() };
+    const entry: LedgerEntry = { body, receipt, privacyRaise: isDashboardPrivacyRaise(envelope.command), settled: Promise.resolve() };
     const settled = previous.then(() => this.apply(entry, envelope.command));
     entry.settled = settled;
     this.entries.set(envelope.id, entry);
@@ -576,6 +589,13 @@ export class EngineCommandLedger implements EngineCommandRecords {
   get(id: string): EngineCommandReceipt | undefined {
     const entry = this.entries.get(id);
     return entry ? { ...entry.receipt } : undefined;
+  }
+
+  hasPendingPrivacyRaise(): boolean {
+    for (const entry of this.entries.values()) {
+      if (entry.privacyRaise && entry.receipt.state === 'received') return true;
+    }
+    return false;
   }
 
   /** The record once settled, or as it stands when `wait` resolves first. */
@@ -653,6 +673,7 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
     if (url.pathname === ENGINE_READY_PATH && request.method === 'GET') {
       const ready = options.ready();
       const body: EngineReadyBody = { ready, instance_id: options.ledger.instanceId, schema_current: ready };
+      if (url.searchParams.has(ENGINE_PRIVACY_READY_QUERY)) body.privacy_raises_settled = !options.ledger.hasPendingPrivacyRaise();
       return Response.json(body, { status: ready ? 200 : 503 });
     }
     if (url.pathname === ENGINE_COMMANDS_PATH && request.method === 'POST') {

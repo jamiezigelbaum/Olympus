@@ -35483,12 +35483,13 @@ function engineBackgroundSocketPath(options = {}) {
 function prepareEngineBackgroundSocketDirectory(socketPath) {
   mkdirSync11(dirname25(socketPath), { recursive: true, mode: 448 });
 }
-async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) {
+async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs, requireSettledPrivacyRaises = false) {
   const controller = new AbortController;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
   try {
-    const response = await fetchBackground(ENGINE_BACKGROUND_ORIGIN + ENGINE_READY_PATH, {
+    const path = requireSettledPrivacyRaises ? ENGINE_READY_PATH + "?" + ENGINE_PRIVACY_READY_QUERY : ENGINE_READY_PATH;
+    const response = await fetchBackground(ENGINE_BACKGROUND_ORIGIN + path, {
       method: "GET",
       headers: { Authorization: `Bearer ${authToken}` },
       signal: controller.signal
@@ -35502,7 +35503,7 @@ async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, ti
     const body = await response.json().catch(() => {
       return;
     });
-    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId) ? "ready" : "alive";
+    return body?.ready === true && body.schema_current === true && (!requireSettledPrivacyRaises || body.privacy_raises_settled === true) && (instanceId === undefined || body.instance_id === instanceId) ? "ready" : "alive";
   } catch (error) {
     const name = error?.name;
     return controller.signal.aborted || name === "AbortError" || name === "TimeoutError" ? "alive" : "down";
@@ -35510,10 +35511,10 @@ async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, ti
     clearTimeout(timeout);
   }
 }
-async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
-  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) === "ready";
+async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs, requireSettledPrivacyRaises = false) {
+  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs, requireSettledPrivacyRaises) === "ready";
 }
-var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_INSTANCE_ENV = "OLYMPUS_ENGINE_BACKGROUND_INSTANCE_ID", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready", ENGINE_COMMANDS_PATH = "/engine/commands", ENGINE_MODEL_COMPLETE_PATH = "/engine/model/complete";
+var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_INSTANCE_ENV = "OLYMPUS_ENGINE_BACKGROUND_INSTANCE_ID", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready", ENGINE_PRIVACY_READY_QUERY = "privacy_raises_settled", ENGINE_COMMANDS_PATH = "/engine/commands", ENGINE_MODEL_COMPLETE_PATH = "/engine/model/complete";
 var init_engine_split = __esm(() => {
   init_olympus_layout();
   init_worker_transport();
@@ -62823,6 +62824,17 @@ function newEngineCommandId() {
 function asRecord8(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
+function isDashboardPrivacyRaise(command) {
+  if (command.kind !== "tier_override" || command.request.path !== "/dashboard/privacy/items/set")
+    return false;
+  try {
+    return asRecord8(JSON.parse(command.request.body))?.tier === "private";
+  } catch (error) {
+    if (error instanceof SyntaxError)
+      return false;
+    throw error;
+  }
+}
 function boundedString2(value, max = 512) {
   return typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined;
 }
@@ -63063,7 +63075,7 @@ class EngineCommandLedger {
     const receipt = { id: envelope.id, state: "received", instance_id: this.options.instanceId };
     const key = orderKey(envelope.command);
     const previous = this.chains.get(key) ?? Promise.resolve();
-    const entry = { body, receipt, settled: Promise.resolve() };
+    const entry = { body, receipt, privacyRaise: isDashboardPrivacyRaise(envelope.command), settled: Promise.resolve() };
     const settled = previous.then(() => this.apply(entry, envelope.command));
     entry.settled = settled;
     this.entries.set(envelope.id, entry);
@@ -63077,6 +63089,13 @@ class EngineCommandLedger {
   get(id) {
     const entry = this.entries.get(id);
     return entry ? { ...entry.receipt } : undefined;
+  }
+  hasPendingPrivacyRaise() {
+    for (const entry of this.entries.values()) {
+      if (entry.privacyRaise && entry.receipt.state === "received")
+        return true;
+    }
+    return false;
   }
   async settled(id, wait) {
     const entry = this.entries.get(id);
@@ -63129,6 +63148,8 @@ function createEngineCommandHandler(options) {
     if (url.pathname === ENGINE_READY_PATH && request.method === "GET") {
       const ready = options.ready();
       const body = { ready, instance_id: options.ledger.instanceId, schema_current: ready };
+      if (url.searchParams.has(ENGINE_PRIVACY_READY_QUERY))
+        body.privacy_raises_settled = !options.ledger.hasPendingPrivacyRaise();
       return Response.json(body, { status: ready ? 200 : 503 });
     }
     if (url.pathname === ENGINE_COMMANDS_PATH && request.method === "POST") {
@@ -245214,10 +245235,24 @@ function createEngineFront(input) {
   poll.unref?.();
   const completeModel = (request) => completeModelInBackground(fetchBackground, input.authToken, request);
   const backgroundReady = async () => backgroundBootDone(readBootProgress(input.env));
-  return { client, ownerBusy: relay, status, backgroundActivity: () => cached?.read?.snapshot.activity ?? "idle", completeModel, backgroundReady, stop: () => {
-    clearInterval(poll);
-    relay?.stop();
-  } };
+  const waitForPendingPrivacyRaises = async () => {
+    const probeMs = 250;
+    while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true))
+      await Bun.sleep(probeMs);
+  };
+  return {
+    client,
+    ownerBusy: relay,
+    status,
+    backgroundActivity: () => cached?.read?.snapshot.activity ?? "idle",
+    completeModel,
+    backgroundReady,
+    waitForPendingPrivacyRaises,
+    stop: () => {
+      clearInterval(poll);
+      relay?.stop();
+    }
+  };
 }
 function restartingResponse(request) {
   if ((request.headers.get("accept") ?? "").includes("text/html")) {
@@ -271705,6 +271740,7 @@ async function main() {
     await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath, authToken: frontToken });
+    await engineFront.waitForPendingPrivacyRaises();
   }
   const retired = retiredPathSettings(process.env);
   if (retired.length > 0) {
