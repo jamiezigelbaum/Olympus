@@ -14,7 +14,8 @@ import type { ReviewResult } from './reviewer.ts';
 import type { OnDemandNotRun, OnDemandTimingRow } from './on-demand-timing.ts';
 import type { LimitsRow } from './fresh-limits.ts';
 
-export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
+export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip' | 'reported';
+export type CheckCounts = Record<Exclude<CheckStatus, 'reported'>, number> & { reported?: number };
 
 export interface CheckResult {
   id: string;
@@ -223,7 +224,7 @@ export interface ReleaseReport extends ReleaseReportInput {
   verdict: 'pass' | 'fail';
   /** Per stage, for an upgrade run: before, the update, after. Empty for a plain run's single stage is still listed. */
   phases: PhaseVerdict[];
-  counts: Record<CheckStatus, number>;
+  counts: CheckCounts;
   harness: HarnessRecord;
   failures: { setup: CheckResult[]; candidate: CheckResult[] };
 }
@@ -245,7 +246,7 @@ function allChecks(machine: MachineReport): CheckResult[] {
 export interface PhaseVerdict { id: string; label: string; verdict: 'pass' | 'fail' }
 
 /** A stage that recorded nothing but the report's own scan never ran, and a stage that never ran cannot pass. */
-const verdictOf = (checks: readonly CheckResult[]): 'pass' | 'fail' => (!checks.some((check) => check.id !== 'scan.report' && check.status !== 'skip') || checks.some((check) => check.status === 'fail') ? 'fail' : 'pass');
+const verdictOf = (checks: readonly CheckResult[]): 'pass' | 'fail' => (!checks.some((check) => check.id !== 'scan.report' && check.status !== 'skip' && check.status !== 'reported') || checks.some((check) => check.status === 'fail') ? 'fail' : 'pass');
 
 /** A verdict per stage of an upgrade run (before, the update, after); a plain run has one stage. */
 export function phaseVerdicts(machine: MachineReport): PhaseVerdict[] {
@@ -272,15 +273,18 @@ function askedAQuestion(agent: AgentReport): boolean {
   return agent.ran && agent.scripted !== true && agent.checks.length > 0;
 }
 
+export function countChecks(checks: readonly CheckResult[]): CheckCounts {
+  const counts: CheckCounts = { pass: 0, fail: 0, warn: 0, skip: 0 };
+  for (const { status } of checks) counts[status] = (counts[status] ?? 0) + 1;
+  return counts;
+}
+
 /**
  * Totals and the verdict. A skip never fails a run, but a run in which every agent was skipped asked the product nothing,
  * so it cannot pass. A failed check or any run problem fails it.
  */
 export function buildReport(input: ReleaseReportInput): ReleaseReport {
-  const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, warn: 0, skip: 0 };
-  for (const machine of input.machines) {
-    for (const check of allChecks(machine)) counts[check.status] += 1;
-  }
+  const counts = countChecks(input.machines.flatMap(allChecks));
   const errors = [...input.errors];
   for (const machine of input.machines) {
     // A failed setup deliberately leaves the dependent agent phases unattempted.
@@ -307,7 +311,7 @@ export function buildReport(input: ReleaseReportInput): ReleaseReport {
   return { schema: 'olympus.release-check.report.v1', ...input, errors, verdict: failed ? 'fail' : 'pass', phases, counts, harness, failures };
 }
 
-const STATUS_LABEL: Record<CheckStatus, string> = { pass: 'PASS', fail: 'FAIL', warn: 'WARN', skip: 'SKIP' };
+const STATUS_LABEL: Record<CheckStatus, string> = { pass: 'PASS', fail: 'FAIL', warn: 'WARN', skip: 'SKIP', reported: 'REPORTED' };
 
 export function escapeHtml(value: string): string {
   return value
@@ -548,7 +552,7 @@ table{width:100%;border-collapse:collapse;background:var(--card);border:1px soli
 th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 td.num{white-space:nowrap;text-align:right}
 .badge{font-size:.75rem;font-weight:700;padding:1px 7px;border-radius:4px;color:#fff;white-space:nowrap}
-.badge.pass{background:var(--pass)}.badge.fail{background:var(--fail)}.badge.warn{background:var(--warn)}.badge.skip{background:var(--skip)}
+.badge.pass{background:var(--pass)}.badge.fail{background:var(--fail)}.badge.warn{background:var(--warn)}.badge.skip,.badge.reported{background:var(--skip)}
 tr.fail td{background:color-mix(in srgb,var(--fail) 10%,transparent)}
 .shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
 figure{margin:0}figure img{width:100%;border:1px solid var(--line);border-radius:6px;background:var(--card)}
@@ -576,7 +580,7 @@ function harnessLine(harness: HarnessRecord): string {
 /** One static page; no scripts, no external requests. */
 export function renderHtml(report: ReleaseReport): string {
   const failures = failureSummary(report.machines);
-  const totals = (['pass', 'fail', 'warn', 'skip'] as const).map((s) => `${report.counts[s]} ${s}`).join(' · ');
+  const totals = (['pass', 'fail', 'warn', 'skip', 'reported'] as const).filter((s) => report.counts[s] !== undefined).map((s) => `${report.counts[s]} ${s}`).join(' · ');
   const errors = report.errors.length === 0 ? '' : `<div class="errors"><strong>Run problems</strong><ul>${report.errors.map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul></div>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`
     + `<title>Olympus release check ${escapeHtml(report.candidate.label)}</title><style>${STYLE}</style></head><body><main>`

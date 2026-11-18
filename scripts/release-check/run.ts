@@ -94,6 +94,7 @@ import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { FRONT_WATCH_S, frontSteadyChecks, type FrontAfterUpdate, type FrontStoreSet, type FrontSteadyObservation, type FrontWatch } from './front-steady.ts';
 import { bundleWhatsAppBridgeName, whatsappBridgeCheck } from './helper-files.ts';
+import { CUTOVER_DONE, CUTOVER_LOG, CUTOVER_READY, CUTOVER_STOP, cutoverChecks, type CutoverSummary } from './cutover.ts';
 import { STORES_PUT_BACK, brokenBundle, forcedFailureChecks, storesKeptCheck, type ForcedFailureObservation, type StoreFileCount } from './upgrade-split.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { JOURNEYS, type JourneyMachine } from './journeys.ts';
@@ -1617,6 +1618,40 @@ async function checkSplitUpdate(run: Run, prep: { set?: FrontStoreSet; storeFile
   run.add(storesKeptCheck(prep.storeFiles, compared.result?.ok === true ? compared.result as unknown as StoreFileCount : undefined));
 }
 
+async function startCutoverWatch(run: Run): Promise<void> {
+  const seconds = (phaseBudgetMs('upgrade') + phaseBudgetMs('engine-restart')) / 1_000 + 60;
+  // The receipt comes after the watcher has attempted the owner mint and sampled the old worker.
+  // Keep this outside a gating phase: a missing receipt means missing observations.
+  const started = await run.machine!.exec(`rm -f ~/rc/${CUTOVER_LOG} ~/rc/${CUTOVER_READY} ~/rc/${CUTOVER_STOP} ~/rc/${CUTOVER_DONE}
+${BUN_LOCATE}
+nohup "$BUN" --no-env-file ~/rc/agent.js cutover-watch --seconds ${seconds} </dev/null >/dev/null 2>&1 &
+pid=$!
+while [ ! -f ~/rc/${CUTOVER_READY} ]; do
+  kill -0 "$pid" 2>/dev/null || exit 1
+  sleep 0.25
+done
+`, { timeoutMs: 20_000 }).catch(() => undefined);
+  if (started?.code !== 0) run.log('cutover watcher did not confirm its first sample');
+}
+
+async function finishCutoverWatch(run: Run): Promise<void> {
+  // Use exec directly so an unavailable watcher or report stays observational, including on installer failure.
+  const machine = run.machine!;
+  const result = await machine.exec(`touch ~/rc/${CUTOVER_STOP}
+${BUN_LOCATE}
+"$BUN" --no-env-file ~/rc/agent.js cutover-report
+`, { timeoutMs: 15_000 }).catch(() => undefined);
+  const reply = result?.code === 0 ? parseAgentLine(result.stdout) : undefined;
+  for (const check of cutoverChecks(reply?.ok === true ? reply.summary as CutoverSummary : undefined)) run.add(check);
+  const path = `logs/${CUTOVER_LOG}`;
+  try {
+    const local = join(run.options.outDir, path);
+    await machine.get(`~/rc/${CUTOVER_LOG}`, local);
+    writeFileSync(local, redactMarkers(readFileSync(local, 'utf8'), run.markers));
+    run.stages.get('after')!.logs.push({ label: CUTOVER_LOG, path });
+  } catch { run.log('cutover samples could not be collected'); }
+}
+
 async function runArchiveScaleLeg(run: Run, outDir: string, deadline: number): Promise<void> {
   if (!run.options.archiveScale) return;
   if (run.archiveBlocked) { run.add({ id: 'archive.scale', title: 'Archive scale imports', status: 'skip', detail: 'Skipped: see archive.blocked' }); return; }
@@ -1805,14 +1840,20 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   run.use('upgrade');
   run.stage.label = `${expected.from ?? 'the earlier release'} -> ${expected.to ?? 'the candidate'}, with the candidate's public Linux installer over the existing install`;
   const split = options.engineSplit ? await prepareSplitUpdate(run, workDir, before.version) : undefined;
+  await startCutoverWatch(run);
+  let back: AgentCall;
   try {
-    await run.phase('upgrade', () => machine.upgrade(options.candidateDir));
-    run.add({ id: 'upgrade.installer', title: 'The candidate\'s installer ran over the existing install and reported a usable install', status: 'pass', detail: 'the same installer the update instructions give, with the candidate\'s tarball' });
-  } catch (error) {
-    run.add({ id: 'upgrade.installer', title: 'The candidate\'s installer ran over the existing install and reported a usable install', status: 'fail', detail: error instanceof Error ? error.message : String(error) });
-    return;
+    try {
+      await run.phase('upgrade', () => machine.upgrade(options.candidateDir));
+      run.add({ id: 'upgrade.installer', title: 'The candidate\'s installer ran over the existing install and reported a usable install', status: 'pass', detail: 'the same installer the update instructions give, with the candidate\'s tarball' });
+    } catch (error) {
+      run.add({ id: 'upgrade.installer', title: 'The candidate\'s installer ran over the existing install and reported a usable install', status: 'fail', detail: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    back = await run.phase('engine-restart', () => run.agent('await-engine', '--timeout-s 300', 330_000));
+  } finally {
+    await finishCutoverWatch(run);
   }
-  const back = await run.phase('engine-restart', () => run.agent('await-engine', '--timeout-s 300', 330_000));
   run.add({ id: 'upgrade.engine-ready', title: 'The engine came back ready (models included) after the update', status: back.result?.ok === true ? 'pass' : 'fail', detail: back.result?.ok === true ? `ready after ${Math.round(Number(back.result.readyMs) / 1000)} s` : agentDetail(back), ms: back.ms });
   if (split) await checkSplitUpdate(run, split, { ok: back.result?.ok === true, ms: back.ms, ...(back.result?.ok === true ? {} : { detail: agentDetail(back) }) });
   if (back.result?.ok !== true) return;

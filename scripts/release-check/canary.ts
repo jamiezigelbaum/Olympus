@@ -42,7 +42,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { CommandDriver, type Machine } from './machine.ts';
-import { escapeHtml, renderLimits, renderOnDemandTiming, type CheckResult, type CheckStatus } from './report.ts';
+import { countChecks, escapeHtml, renderLimits, renderOnDemandTiming, type CheckCounts, type CheckResult, type CheckStatus } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type LiveSourceSpec } from './live-accounts.ts';
 import { parseTimingAccounts, parseTimingSeedConfig, realTimingSeeds, type TimingAccounts } from './on-demand-seeds.ts';
 import { runOnDemandTiming, type OnDemandTimingResult } from './on-demand-timing.ts';
@@ -65,7 +65,7 @@ export interface CanaryReport {
   startedAt: string;
   finishedAt: string;
   verdict: CanaryVerdict;
-  counts: Record<CheckStatus, number>;
+  counts: CheckCounts;
   checks: CheckResult[];
   screens: CanaryScreen[];
   onDemandTiming?: OnDemandTimingResult;
@@ -663,8 +663,7 @@ if (import.meta.main) {
   })();
   const { checks, screens, ...extras } = result;
   checks.push(...budgetChecks);
-  const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, warn: 0, skip: 0 };
-  for (const check of checks) counts[check.status] += 1;
+  const counts = countChecks(checks);
   const sha = option('--sha');
   const harnessCommit = option('--harness-commit');
   const report: CanaryReport = {

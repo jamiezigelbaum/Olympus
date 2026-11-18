@@ -65,6 +65,7 @@ import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './a
 import type { StoreView } from './archive-leg.ts';
 import { frontSteadyStage, logMark, seedFrontStoreSet, seedTelegramAfterUpdate, watchFront, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
 import { compareStoreFiles, leftoverFileNames, storeFiles } from './upgrade-split.ts';
+import { cutoverReport, watchCutover } from './cutover.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -200,8 +201,8 @@ function mintOpeningLink(place: string): string {
   return openingLinkOrThrow(olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 }), `olympus dashboard --no-open --target ${place}`);
 }
 
-function workerBearer(): string {
-  const result = olympus(['dashboard', 'token']);
+function workerBearer(timeoutMs?: number): string {
+  const result = olympus(['dashboard', 'token'], timeoutMs === undefined ? {} : { timeoutMs });
   if (result.code !== 0 || !result.stdout.trim()) throw new Error('olympus dashboard token failed');
   return result.stdout.trim();
 }
@@ -222,27 +223,36 @@ function readPolicy(): PolicyState | null {
 }
 
 /** A dashboard control session: what the dashboard page itself holds after sign-in. */
-async function ownerSession(): Promise<{ call(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<{ status: number; json: any; text: string }> }> {
+async function ownerSession(timeoutMs?: number): Promise<{
+  request?: (path: string, init?: RequestInit) => Promise<Response>;
+  call(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<{ status: number; json: any; text: string }>;
+}> {
   const p = platform();
-  const bearer = workerBearer();
+  const bearer = workerBearer(timeoutMs);
   const origin = WORKER_ORIGIN;
   const mint = await p.workerFetch('/dashboard/control/session', {
     method: 'POST',
     headers: { authorization: `Bearer ${bearer}`, origin, 'content-type': 'application/json' },
     body: '{}',
+    ...(timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
   });
   if (mint.status !== 200) throw new Error(`dashboard control session answered ${mint.status}`);
   const cookie = (mint.headers.getSetCookie?.() ?? []).map((line) => line.split(';')[0]).join('; ');
   const minted = await mint.json() as { csrf_token?: string };
+  const request = (path: string, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers);
+    headers.set('cookie', cookie);
+    headers.set('origin', origin);
+    headers.set('x-olympus-csrf', minted.csrf_token ?? '');
+    return p.workerFetch(path, { ...init, headers });
+  };
   return {
+    ...(cookie && minted.csrf_token ? { request } : {}),
     async call(method, path, body, signal) {
-      const response = await p.workerFetch(path, {
+      const response = await request(path, {
         method,
         headers: {
           authorization: `Bearer ${bearer}`,
-          cookie,
-          origin,
-          'x-olympus-csrf': minted.csrf_token ?? '',
           ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -2819,13 +2829,24 @@ async function main(): Promise<void> {
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'data-root-snapshot': return dataRootSnapshotCommand(flag('--label'));
     case 'data-root-watch': return await dataRootWatchCommand(Number(flag('--seconds', '900')));
+    case 'cutover-watch': {
+      const seconds = Number(flag('--seconds', '2100'));
+      if (!Number.isFinite(seconds) || seconds <= 0) emit({ ok: false, detail: 'cutover-watch requires a positive duration' });
+      const p = platform();
+      await watchCutover(WORKDIR, p.dataDir, seconds, p.workerFetch, async () => (await ownerSession(5_000)).request);
+      emit({ ok: true });
+    }
+    case 'cutover-report': {
+      const summary = await cutoverReport(WORKDIR);
+      emit({ ok: summary !== undefined, summary });
+    }
     case 'engine-build': return await engineBuild(rest.includes('--earlier-release'));
     case 'snapshot-state': return await snapshotState();
     case 'set-policy-setting': return await setPolicySetting();
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
     case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|explore|archive-import|archive-drain|archive-remove|archive-model|archive-changed|archive-cleanup|archive-collect|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
+      console.error('usage: agent <prepare-source|connect-source|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|explore|archive-import|archive-drain|archive-remove|archive-model|archive-changed|archive-cleanup|archive-collect|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|cutover-watch|cutover-report|upgrade-selftest>');
       process.exit(2);
   }
 }
