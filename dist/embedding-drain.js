@@ -23923,6 +23923,8 @@ var EMBEDDING_BATCH_SIZE = 32;
 var MAX_SELECTED_EMBED_ITEM_IDS = 25000;
 var MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 var MIN_VECTOR_SCORE = 0.18;
+var VECTOR_VISIBILITY_BATCH_SIZE = 200;
+var VECTOR_VISIBILITY_SLICE_MS = 50;
 var CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time";
 var CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
   ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
@@ -32283,16 +32285,32 @@ ${parentKey(ref)}`, { ref, origin });
     if ("skippedReason" in scanned)
       return { rows: [], skippedReason: scanned.skippedReason };
     const { bestByItem, dimensionMismatches } = scanned;
+    let sliceStarted = performance.now();
     const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-    const rankedItems = [];
+    let rankedItems = [];
+    let visibleInBatch = [];
     let candidateOffset = 0;
-    while (rankedItems.length < limit && candidateOffset < candidates.length) {
-      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
-      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
-      for (const candidate of batch)
-        if (visible.has(candidate[0]))
-          rankedItems.push(candidate);
-      candidateOffset += batch.length;
+    const canFill = () => rankedItems.length < limit && (visibleInBatch.length > 0 || candidateOffset < candidates.length);
+    while (true) {
+      if (performance.now() - sliceStarted >= VECTOR_VISIBILITY_SLICE_MS) {
+        noteSourceIndexReadProgress();
+        await yieldConnectorStoreVectorScan();
+        sliceStarted = performance.now();
+      }
+      if (canFill()) {
+        if (visibleInBatch.length === 0) {
+          const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
+          candidateOffset += batch.length;
+          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+          visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
+        }
+        rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
+        continue;
+      }
+      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
+      rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
+      if (!canFill())
+        break;
     }
     const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
     const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
@@ -32497,8 +32515,8 @@ ${parentKey(ref)}`, { ref, origin });
   visibleVectorItemPks(itemPks, accountScope, filters) {
     const visible = new Set;
     const selectedFilters = connectorStoreFilterSql(filters);
-    for (let offset = 0;offset < itemPks.length; offset += 200) {
-      const batch = itemPks.slice(offset, offset + 200);
+    for (let offset = 0;offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
+      const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
       const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
         FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
         ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
