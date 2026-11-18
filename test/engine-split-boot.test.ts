@@ -77,11 +77,15 @@ describe('the engine split boots as two processes', () => {
     front.child.kill('SIGSTOP');
     const background = spawnWorker(env, 'background');
     await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000 });
+    const reason = process.platform === 'linux' ? 'default' : 'Linux only';
+    expect(background.output().match(/\[olympus\] engine background SQLite file map .+/g))
+      .toEqual([`[olympus] engine background SQLite file map off (${reason})`]);
     expect(background.output()).not.toContain('worker listening');
     expect(background.output()).toContain('waiting for the front to finish building hidden-copy sets');
     expect(background.output()).not.toContain('starting hidden-copy build');
     front.child.kill('SIGCONT');
     await waitFor(() => front.output().includes('worker listening'), { timeoutMs: 60_000 });
+    expect(front.output()).not.toContain('SQLite file map');
     expect(front.output()).not.toContain('FrontStoreWriteError');
     await waitFor(() => background.output().includes('front build finished'), { timeoutMs: 60_000 });
     expect(front.output()).toContain('hidden-copy sets in');
@@ -137,8 +141,11 @@ describe('the engine split boots as two processes', () => {
     const front = spawnWorker(env, 'front');
     await waitFor(() => readFrontProgress(env)?.pid === front.child.pid);
     front.child.kill('SIGSTOP');
-    const background = spawnWorker(env, 'background');
+    const background = spawnWorker({ ...env, OLYMPUS_SQLITE_MMAP: 'on' }, 'background');
     await waitFor(() => background.output().includes('waiting for the front to finish building hidden-copy sets'));
+    expect(background.output()).toContain(process.platform === 'linux'
+      ? '[olympus] engine background SQLite file map on (OLYMPUS_SQLITE_MMAP=on)'
+      : '[olympus] engine background SQLite file map off (Linux only)');
     expect(background.output()).not.toContain('starting hidden-copy build');
     front.child.kill('SIGKILL');
     await front.child.exited;

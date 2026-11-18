@@ -32,6 +32,7 @@
 // after verifying that the WAL is unchanged and still fully copied.
 
 import { oldestOffThreadSnapshot } from '../connector-store/off-thread-reads.ts';
+import { sqliteMmapWorkerSource } from '../connector-store/sqlite-mmap.ts';
 
 /** WAL file size below which a pass is skipped (SQLite's own default is 1000 pages, about 4 MB). */
 export const SQLITE_CHECKPOINT_AT_BYTES = 4 * 1024 * 1024;
@@ -89,6 +90,7 @@ self.onmessage = ({ data }) => {
       if (!held) {
         const db = new Database(path, { create: false });
         db.exec('PRAGMA busy_timeout = 0; PRAGMA journal_size_limit = 67108864; PRAGMA wal_autocheckpoint = 0;');
+        /*olympus-mmap-pragma*/
         held = { db, file, frameBytes: db.query('PRAGMA page_size').get().page_size + 24 };
         connections.set(path, held);
       }
@@ -211,8 +213,10 @@ export function startSqliteCheckpointer(options: {
     pump();
   };
   try {
+    // Checkpoint connections use SQLite's unmapped default unless explicitly enabled.
+    const source = sqliteMmapWorkerSource(WORKER_SOURCE, { defaultEnabled: false });
     for (let n = 0; n < WORKERS; n += 1) {
-      const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' })));
+      const worker = new Worker(URL.createObjectURL(new Blob([source], { type: 'text/javascript' })));
       (worker as unknown as { unref?: () => void }).unref?.();
       const entry: PoolWorker = { worker, finished: undefined, job: undefined };
       if (typeof SharedArrayBuffer === 'function') {

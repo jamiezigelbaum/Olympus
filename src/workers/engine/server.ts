@@ -510,6 +510,7 @@ import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rs
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
+import { sqliteMmapPolicy } from '../connector-store/sqlite-mmap.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
 import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
 import { createStandBack, ownerAskReason } from './stand-back.ts';
@@ -658,8 +659,12 @@ export async function main(): Promise<void> {
   // root. A second worker on it waits a short while (restarts overlap), then
   // exits without mounting anything (core/data-owner-lock.ts). The engine
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
-  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole });
+  if (engineRole === 'background') {
+    const { enabled, reason } = sqliteMmapPolicy();
+    console.log(`[olympus] engine background SQLite file map ${enabled ? 'on' : 'off'} (${reason})`);
+  }
   const visibilityBoot = engineRole === 'background' ? createBackgroundVisibilityBoot({ env: process.env, step: setEngineStep }) : undefined;
   setVisibilityBootWait(() => visibilityBoot?.pending());
   // The background's loop connections leave checkpoints to a worker of their

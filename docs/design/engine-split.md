@@ -313,6 +313,15 @@ the cause).
   fails `test/engine-split-boot.test.ts` and the loop-stall gate. The
   product never throws. Whether the front ends up holding no SQLite
   handle at all is decided with the database review after 1.5.
+- **SQLite file mapping.** On a 600,000-item fixture with an 8 GB cap,
+  disabling mmap in the background cut its major faults from 42,000–80,000 to
+  426–771 per run and reduced the front's worst heartbeat delays from 4,928
+  and 3,950 ms to 823 and 1,306 ms across the two valid pairs, with the front
+  still mapped. In production, page-fault wait held the front for 81 s at
+  boot while the background's mapped file RSS grew to 17 GB. On Linux the
+  background and its threads now default to unmapped SQLite reads, while
+  the front keeps its mapped reads and `OLYMPUS_SQLITE_MMAP=on` or `=off`
+  overrides the default.
 - **Stores the front keeps writing.** Its own files stay its own: remote
   connections, waiting private questions, answer jobs, dashboard
   sessions, settings files. Nothing else writes them.

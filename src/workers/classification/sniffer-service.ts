@@ -59,6 +59,7 @@ import { sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-swe
 import { applyOwnerOverridesOffThread } from '../connector-store/tier-override-settle.ts';
 import { retireSecretRedactions, retrySecretSideStoreDebtsOffThread } from '../connector-store/secrets-disposition.ts';
 import { ledgerReadOffThread } from '../connector-store/child-visibility.ts';
+import { sqliteMmapWorkerSource } from '../connector-store/sqlite-mmap.ts';
 import { sweepImageContentToPrivateOffThread } from '../connector-store/tier-image-content-sweep.ts';
 import { applyMediaJudgmentsOffThread } from '../connector-store/tier-media-judgment-sweep.ts';
 import {
@@ -2403,6 +2404,7 @@ self.onmessage = ({ data }) => {
     try {
       db = new Database(ledger.path, { readonly: true, create: false });
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      /*olympus-mmap-pragma*/
       if (ledger.expectedId !== null) {
         const row = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get();
         if (!row || row.value !== ledger.expectedId) { out.push({ unreadable: ledger.path, mismatch: true }); continue; }
@@ -2427,7 +2429,9 @@ function runBacklogCountWorker(message: unknown): Promise<BacklogWorkerResult[] 
   return new Promise((resolve) => {
     let worker: Worker;
     try {
-      worker = new Worker(URL.createObjectURL(new Blob([BACKLOG_COUNT_WORKER_SOURCE], { type: 'text/javascript' })));
+      // The backlog worker uses SQLite's unmapped default unless explicitly enabled.
+      const source = sqliteMmapWorkerSource(BACKLOG_COUNT_WORKER_SOURCE, { defaultEnabled: false });
+      worker = new Worker(URL.createObjectURL(new Blob([source], { type: 'text/javascript' })));
     } catch {
       resolve(undefined);
       return;

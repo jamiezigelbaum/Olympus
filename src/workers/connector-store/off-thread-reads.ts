@@ -22,7 +22,7 @@ import { currentSourceIndexReadProgress, noteSourceIndexReadProgress, type Sourc
 // a keyword read wait for all of it (#1305). The worker runs one statement at
 // a time either way; the snapshot's transaction is on its own connection.
 
-import { SQLITE_MMAP_BYTES, sqliteMmapEnabled } from './sqlite-mmap.ts';
+import { sqliteMmapWorkerSource } from './sqlite-mmap.ts';
 import { errorFromBoundary } from '../../core/log-redaction.ts';
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
 import { beginSourceAnswerPoolRead, poolSqlSite, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
@@ -152,12 +152,7 @@ export function setReadPoolWorkerFactoryForTests(factory?: (url: string) => Work
 // transaction: SQLite reads it in one that ends with the statement. That
 // connection is reopened when the path names a different file, and closed
 // when the store releases it.
-// The worker's connections map their file as the engine's do (sqlite-mmap.ts).
-// Filled in when a thread starts, not at load, and written into the source as
-// plain text: a call or an interpolation there would keep the plugin bundle
-// from dropping the source (plugin-bundle-no-bun-sqlite).
-const MMAP_PRAGMA_SLOT = '/*olympus-mmap-pragma*/';
-const mmapPragma = (): string => (sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : '');
+// The worker's connections use the engine's mmap policy (sqlite-mmap.ts).
 const WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
@@ -424,7 +419,7 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
   const limit = lane === 'shared' ? READ_POOL_SIZE : lane === 'rescore' ? READ_POOL_RESCORE_READERS : 1;
   if (threads.filter(reader => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers()) return undefined;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: 'application/javascript' }));
+    const url = URL.createObjectURL(new Blob([sqliteMmapWorkerSource(WORKER_SOURCE)], { type: 'application/javascript' }));
     const worker = workerFactory(url);
     // The reader never keeps a finished command alive.
     (worker as Worker & { unref?: () => void }).unref?.();

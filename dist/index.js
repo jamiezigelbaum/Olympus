@@ -16200,10 +16200,17 @@ var init_credential_health = __esm(() => {
   CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS = 10 * 60 * 1000;
   CREDENTIAL_HEALTH_BOOTSTRAP_GRACE_MS = 2 * 60 * 60 * 1000;
 });
+
+// src/workers/connector-store/sqlite-mmap.ts
+var init_sqlite_mmap = __esm(() => {
+  init_engine_split();
+});
+
 // src/workers/connector-store/off-thread-reads.ts
 var startedStores, storeOpens, queues, openSnapshots, releases;
 var init_off_thread_reads = __esm(() => {
   init_read_progress();
+  init_sqlite_mmap();
   init_answer_latency_trace();
   startedStores = new Set;
   storeOpens = new Map;
@@ -16568,6 +16575,7 @@ var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe
   SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
     AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
+  init_sqlite_mmap();
   init_sqlite_migrations();
   init_sqlite_store();
   init_store_write_guard();
@@ -17520,6 +17528,7 @@ var init_local_index = __esm(() => {
   init_sqlite_memory();
   init_read_progress();
   init_source_size_limits();
+  init_sqlite_mmap();
   init_store_totals();
   init_vector_digest();
   init_boot_progress();
@@ -19805,6 +19814,7 @@ var init_extraction_factory = __esm(() => {
 var NETWORK_ERROR_KINDS, POLICY_DECISIONS, TERMINAL_STATUSES;
 var init_job_store = __esm(() => {
   init_source_size_limits();
+  init_sqlite_mmap();
   init_off_thread_reads();
   init_sqlite_migrations();
   init_sqlite_store();

@@ -42260,8 +42260,25 @@ var init_sniffer_store = __esm(() => {
 });
 
 // src/workers/connector-store/sqlite-mmap.ts
+function sqliteMmapPolicy(env = process.env, { defaultEnabled = true } = {}) {
+  const setting = env.OLYMPUS_SQLITE_MMAP;
+  if (setting === "off")
+    return { enabled: false, reason: "OLYMPUS_SQLITE_MMAP=off" };
+  if (process.platform !== "linux")
+    return { enabled: false, reason: "Linux only" };
+  if (setting === "on")
+    return { enabled: true, reason: "OLYMPUS_SQLITE_MMAP=on" };
+  return { enabled: defaultEnabled && env[ENGINE_ROLE_ENV]?.trim() !== "background", reason: "default" };
+}
 function sqliteMmapEnabled(env = process.env) {
-  return process.platform === "linux" && env.OLYMPUS_SQLITE_MMAP !== "off";
+  return sqliteMmapPolicy(env).enabled;
+}
+function sqliteMmapWorkerSource(source, options) {
+  const pragma = sqliteMmapPolicy(process.env, options).enabled ? `
+    try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
+    catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
+  ` : "";
+  return source.replace("/*olympus-mmap-pragma*/", pragma);
 }
 function applySqliteMmap(db, env = process.env) {
   if (!sqliteMmapEnabled(env))
@@ -42271,6 +42288,9 @@ function applySqliteMmap(db, env = process.env) {
   } catch {}
 }
 var SQLITE_MMAP_BYTES = 2147418112;
+var init_sqlite_mmap = __esm(() => {
+  init_engine_split();
+});
 
 // src/workers/classification/tier-ledger.ts
 import { Database as Database3 } from "bun:sqlite";
@@ -46202,6 +46222,7 @@ var TIER_LEDGER_SCHEMA_VERSION = 16, RETIRED_EMBEDDING_CLEARANCE_REASON = "conte
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
       )`, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
+  init_sqlite_mmap();
   init_sqlite_migrations();
   init_sqlite_store();
   init_store_write_guard();
@@ -52691,7 +52712,7 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: "application/javascript" }));
+    const url = URL.createObjectURL(new Blob([sqliteMmapWorkerSource(WORKER_SOURCE)], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
     counters.starts += 1;
@@ -53172,7 +53193,7 @@ function dispatch() {
     });
   }
 }
-var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, lostReplyCheckMs = 2000, OffThreadReadLostError, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/", mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "", WORKER_SOURCE = `
+var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, lostReplyCheckMs = 2000, OffThreadReadLostError, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
@@ -53307,6 +53328,7 @@ self.onmessage = (event) => {
 `, threads, heldConnections = 0, connectionTotal, nextId = 1, counters, startedStores, storeOpens, queues, turns, lostReplyCheck, openSnapshots, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
   init_read_progress();
+  init_sqlite_mmap();
   init_answer_latency_trace();
   BACKGROUND_READS = { lane: "background" };
   OffThreadReadLostError = class OffThreadReadLostError extends Error {
@@ -68713,6 +68735,7 @@ var init_local_index = __esm(() => {
   init_sqlite_memory();
   init_read_progress();
   init_source_size_limits();
+  init_sqlite_mmap();
   init_store_totals();
   init_vector_digest();
   init_boot_progress();
@@ -126876,6 +126899,7 @@ function terminalRetryPathSql(alias, paths) {
 var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 7, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", AMBIGUOUS_IDENTITY_ERROR_KIND = "store_identity_ambiguous", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART, SAFE_HASH2, POLICY_DECISIONS, TERMINAL_STATUSES, SCOPED_READINESS_CURRENT_SLICE = 2000, ExtractionJobFieldError;
 var init_job_store = __esm(() => {
   init_source_size_limits();
+  init_sqlite_mmap();
   init_off_thread_reads();
   init_sqlite_migrations();
   init_sqlite_store();
@@ -241675,8 +241699,9 @@ function startSqliteCheckpointer(options = {}) {
     pump();
   };
   try {
+    const source = sqliteMmapWorkerSource(WORKER_SOURCE3, { defaultEnabled: false });
     for (let n = 0;n < WORKERS; n += 1) {
-      const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SOURCE3], { type: "text/javascript" })));
+      const worker = new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
       worker.unref?.();
       const entry = { worker, finished: undefined, job: undefined };
       if (typeof SharedArrayBuffer === "function") {
@@ -241957,6 +241982,7 @@ function startSqliteCheckpointer(options = {}) {
 var SQLITE_CHECKPOINT_AT_BYTES, SQLITE_WAL_ROOM_BYTES, TIER_LEDGER_WAL_LIMIT_BYTES, SQLITE_CHECKPOINT_HOT_MS = 1000, SQLITE_CHECKPOINT_IDLE_MS = 5000, SQLITE_WAL_ROOM_READER_WAIT_MS = 2000, READER_POLL_MS = 20, WORKERS = 2, CHECKPOINT_NOTABLE_MS = 1000, CHECKPOINT_NOTABLE_BYTES, ROOM_PASSES = 8, HELD_AFTER_PASSES = 3, ROOM_NOTABLE_MS = 1000, ROOM_SUMMARY_MS = 60000, WORKER_SOURCE3;
 var init_sqlite_checkpointer = __esm(() => {
   init_off_thread_reads();
+  init_sqlite_mmap();
   SQLITE_CHECKPOINT_AT_BYTES = 4 * 1024 * 1024;
   SQLITE_WAL_ROOM_BYTES = 16 * 1024 * 1024;
   TIER_LEDGER_WAL_LIMIT_BYTES = 64 * 1024 * 1024;
@@ -241984,6 +242010,7 @@ self.onmessage = ({ data }) => {
       if (!held) {
         const db = new Database(path, { create: false });
         db.exec('PRAGMA busy_timeout = 0; PRAGMA journal_size_limit = 67108864; PRAGMA wal_autocheckpoint = 0;');
+        /*olympus-mmap-pragma*/
         held = { db, file, frameBytes: db.query('PRAGMA page_size').get().page_size + 24 };
         connections.set(path, held);
       }
@@ -245008,7 +245035,8 @@ function runBacklogCountWorker(message) {
   return new Promise((resolve) => {
     let worker;
     try {
-      worker = new Worker(URL.createObjectURL(new Blob([BACKLOG_COUNT_WORKER_SOURCE], { type: "text/javascript" })));
+      const source = sqliteMmapWorkerSource(BACKLOG_COUNT_WORKER_SOURCE, { defaultEnabled: false });
+      worker = new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
     } catch {
       resolve(undefined);
       return;
@@ -245035,6 +245063,7 @@ self.onmessage = ({ data }) => {
     try {
       db = new Database(ledger.path, { readonly: true, create: false });
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      /*olympus-mmap-pragma*/
       if (ledger.expectedId !== null) {
         const row = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get();
         if (!row || row.value !== ledger.expectedId) { out.push({ unreadable: ledger.path, mismatch: true }); continue; }
@@ -245070,6 +245099,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_override_settle();
   init_secrets_disposition();
   init_child_visibility();
+  init_sqlite_mmap();
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   init_tier_ledger();
@@ -272285,8 +272315,12 @@ async function mainRecordingFrontFailure() {
   }
 }
 async function main() {
-  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole });
+  if (engineRole === "background") {
+    const { enabled, reason } = sqliteMmapPolicy();
+    console.log(`[olympus] engine background SQLite file map ${enabled ? "on" : "off"} (${reason})`);
+  }
   const visibilityBoot = engineRole === "background" ? createBackgroundVisibilityBoot({ env: process.env, step: setEngineStep }) : undefined;
   setVisibilityBootWait(() => visibilityBoot?.pending());
   const checkpointer = engineRole === "background" ? startSqliteCheckpointer() : undefined;
@@ -277536,6 +277570,7 @@ var init_server5 = __esm(async () => {
   init_rss_restart();
   init_front_scheduler();
   init_front_history();
+  init_sqlite_mmap();
   init_tier_auto_prune_sweep();
   init_store_reclaim_admission();
   init_agent_connections();

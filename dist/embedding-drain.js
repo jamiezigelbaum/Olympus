@@ -12204,8 +12204,25 @@ function slug(value) {
 
 // src/workers/connector-store/sqlite-mmap.ts
 var SQLITE_MMAP_BYTES = 2147418112;
+function sqliteMmapPolicy(env = process.env, { defaultEnabled = true } = {}) {
+  const setting = env.OLYMPUS_SQLITE_MMAP;
+  if (setting === "off")
+    return { enabled: false, reason: "OLYMPUS_SQLITE_MMAP=off" };
+  if (process.platform !== "linux")
+    return { enabled: false, reason: "Linux only" };
+  if (setting === "on")
+    return { enabled: true, reason: "OLYMPUS_SQLITE_MMAP=on" };
+  return { enabled: defaultEnabled && env[ENGINE_ROLE_ENV]?.trim() !== "background", reason: "default" };
+}
 function sqliteMmapEnabled(env = process.env) {
-  return process.platform === "linux" && env.OLYMPUS_SQLITE_MMAP !== "off";
+  return sqliteMmapPolicy(env).enabled;
+}
+function sqliteMmapWorkerSource(source, options) {
+  const pragma = sqliteMmapPolicy(process.env, options).enabled ? `
+    try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
+    catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
+  ` : "";
+  return source.replace("/*olympus-mmap-pragma*/", pragma);
 }
 function applySqliteMmap(db, env = process.env) {
   if (!sqliteMmapEnabled(env))
@@ -19147,8 +19164,6 @@ var clock2 = REAL_CLOCK;
 var observer;
 var observeSnapshots = false;
 var workerFactory = (url) => new Worker(url);
-var MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/";
-var mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
 var WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
@@ -19305,7 +19320,7 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: "application/javascript" }));
+    const url = URL.createObjectURL(new Blob([sqliteMmapWorkerSource(WORKER_SOURCE)], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
     counters.starts += 1;
