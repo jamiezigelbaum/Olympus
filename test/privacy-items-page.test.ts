@@ -116,6 +116,30 @@ async function page(items: Item[], options: {
 }
 
 describe('an acknowledged Privacy click across an engine restart', () => {
+  test('Make it Private applies and withholds search while the background waits for front visibility', async () => {
+    const f = await privacyRestartFixture('private', { waitForVisibility: true });
+    try {
+      expect(f.visibilityWaiting()).toBe(true);
+      expect(await f.search()).toEqual({ status: 200, released: true });
+      const receipt = await f.set();
+      expect(receipt.status).toBe(202);
+      const { request_id } = await receipt.json() as { request_id: string };
+      await waitFor(async () => {
+        const result = await f.status(request_id);
+        const body = await result.json();
+        return body.ok === true && body.state !== 'pending';
+      }, { description: 'Private click applied before the visibility build' });
+      // The override commits before the later copy move. Search and release
+      // have to honor it while the original copy is still in its old store.
+      expect(f.readStored()).toEqual({ overrideTier: f.after, contentTier: f.before });
+      expect(await f.search()).toEqual({ status: 200, released: false });
+      expect(await f.answerRelease()).toEqual({ status: 200, released: false });
+      expect(f.visibilityWaiting()).toBe(true);
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
   for (const tier of ['private', 'personal'] as const) {
     for (const point of ['background before commit', 'front before commit', 'front after commit'] as const) {
       const label = tier === 'private' ? 'Private' : 'Personal';

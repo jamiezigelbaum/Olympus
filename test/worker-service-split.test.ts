@@ -1,8 +1,8 @@
 // The engine split under the worker service's own unit (olympus-worker.service,
 // `cli.js __worker-service-run`). There is no engine host on that path, so
 // with worker.engineSplit on the unit's process supervises the two processes
-// itself: the background first, the front once the background answers ready;
-// the front stops first; a background that exits is restarted on the shared
+// itself: the front announces its presence, then the background starts;
+// both stop together and a background that exits is restarted on the shared
 // backoff. These start real child processes (a stand-in for cli.js that
 // records what it was started as), so this file is in the deploy lane.
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -93,13 +93,13 @@ function superviseAsProcess(context: ReturnType<typeof setup>, extraEnv: Record<
 
 
 describe('the worker service runs the engine split itself', () => {
-  test('background first; the front starts once it is ready, told the background\'s socket', async () => {
+  test('front announces its presence before the background starts, both told the background\'s socket', async () => {
     const context = setup();
     await supervise(context);
     const events = await waitFor(() => { const all = context.read(); return all.filter((e) => e.event === 'start').length >= 2 ? all : undefined; });
     const [first, second] = events.filter((e) => e.event === 'start');
-    expect(first!.role).toBe('background');
-    expect(second!.role).toBe('front');
+    expect(first!.role).toBe('front');
+    expect(second!.role).toBe('background');
     const socket = engineBackgroundSocketPath({ env: context.env, platform: 'linux' });
     expect(first!.socket).toBe(socket);
     expect(second!.socket).toBe(socket);
@@ -194,7 +194,7 @@ describe('a busy background is never judged dead (gate7, 13 Nov)', () => {
     expect(events.filter((e) => (e.event as string) === 'gave-up')).toEqual([]);
     expect(events.filter((e) => (e.event as string) === 'blocked')).toHaveLength(2);
     const starts = events.filter((e) => e.event === 'start');
-    expect(starts.map((e) => e.role)).toEqual(['background', 'front']);
+    expect(starts.map((e) => e.role)).toEqual(['front', 'background']);
     expect(events.filter((e) => e.event === 'stop')).toEqual([]);
   }, 180_000);
 
@@ -220,7 +220,7 @@ describe('a busy background is never judged dead (gate7, 13 Nov)', () => {
       const all = context.read();
       return all.some((e) => (e.event as string) === 'serving') ? all : undefined;
     }, { timeoutMs: 30_000, intervalMs: 100 });
-    expect(events.filter((e) => e.event === 'start').map((e) => e.role)).toEqual(['background', 'front']);
+    expect(events.filter((e) => e.event === 'start').map((e) => e.role)).toEqual(['front', 'background']);
     expect(events.filter((e) => e.event === 'stop')).toEqual([]);
   }, 90_000);
 
@@ -234,7 +234,7 @@ describe('a busy background is never judged dead (gate7, 13 Nov)', () => {
       const all = context.read();
       return all.some((e) => (e.event as string) === 'serving') ? all : undefined;
     }, { timeoutMs: 60_000, intervalMs: 200 });
-    expect(events.filter((e) => e.event === 'start').map((e) => e.role)).toEqual(['background', 'front']);
+    expect(events.filter((e) => e.event === 'start').map((e) => e.role)).toEqual(['front', 'background']);
     expect(events.filter((e) => e.event === 'stop')).toEqual([]);
   }, 90_000);
 
@@ -304,9 +304,9 @@ describe('the unit\'s process stays the supervisor for its whole life', () => {
     await waitFor(() => lines.some((line) => /background engine exited unexpectedly/.test(line)) ? true : undefined);
   }, 30_000);
 
-  test('a stop while the background is still starting never starts the front', async () => {
+  test('a stop while the front is still starting never starts the background', async () => {
     const context = setup();
-    context.env.READY_DELAY_MS = '1500';
+    context.env.HOLD_FRONT_PRESENCE = '1';
     const spawnedRoles: string[] = [];
     const supervising = superviseWorkerServiceSplit({
       ...superviseOptions(context),
@@ -315,13 +315,13 @@ describe('the unit\'s process stays the supervisor for its whole life', () => {
         return childProcess.spawn(command, args, options);
       },
     });
-    await waitFor(() => context.read().some((e) => e.role === 'background' && e.event === 'start') ? true : undefined);
+    await waitFor(() => context.read().some((e) => e.role === 'front' && e.event === 'start') ? true : undefined);
     context.signals.get('SIGTERM')!();
     await waitFor(() => context.exits.length > 0 ? true : undefined);
     const handle = await supervising;
     cleanups.push(() => handle.stop());
     expect(context.exits).toEqual([143]);
-    expect(spawnedRoles).toEqual(['background']);
+    expect(spawnedRoles).toEqual(['front']);
   }, 30_000);
 
   // The command runs the way an interpreter-launched tool (ocrmypdf: python3

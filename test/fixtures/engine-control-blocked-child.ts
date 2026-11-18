@@ -12,13 +12,18 @@ import { Database } from 'bun:sqlite';
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedRequest } from '../../src/workers/engine-split/commands.ts';
-import { engineStatusSnapshotPath, startEngineBackgroundServer, startEngineBackgroundStatus } from '../../src/workers/engine-split/runtime.ts';
+import { createBackgroundVisibilityBoot, engineStatusSnapshotPath, startEngineBackgroundServer, startEngineBackgroundStatus } from '../../src/workers/engine-split/runtime.ts';
 import { createOwnerTierItems } from '../../src/workers/classification/tier-owner-items.ts';
 import { createEmailSourceWorker } from '../../src/workers/engine/index.ts';
+import { setVisibilityBootWait } from '../../src/workers/connector-store/local-index.ts';
 
 const [socketPath, dbPath, folder, ...storePaths] = process.argv.slice(2) as [string, string, string, ...string[]];
 mkdirSync(dirname(engineStatusSnapshotPath(process.env)), { recursive: true });
 const privacy = storePaths.length ? createEmailSourceWorker({ ownerTierItems: createOwnerTierItems({ storePaths }) }) : undefined;
+const visibilityBoot = process.env.FIXTURE_WAIT_FOR_VISIBILITY === '1'
+  ? createBackgroundVisibilityBoot({ env: process.env, step: step => writeFileSync(join(folder, 'visibility-step'), step ?? '') })
+  : undefined;
+if (visibilityBoot) setVisibilityBootWait(visibilityBoot.pending);
 
 let applied = 0;
 let collected = 0;
@@ -26,6 +31,7 @@ const commands = startEngineBackgroundServer({
   socketPath,
   authToken: process.env.FIXTURE_TOKEN!,
   handlers: {
+    front_visibility_finished: ({ frontPid }) => { visibilityBoot?.frontFinished(frontPid); },
     tier_override: ({ request }: { request: EngineForwardedRequest }) => {
       if (privacy && request.path === '/dashboard/privacy/items/set') {
         return privacy.fetch(forwardedRequestToRequest('http://olympus-worker.internal', request)).then(responseToForwarded);
@@ -42,6 +48,7 @@ const status = startEngineBackgroundStatus({
   collect: () => ({ scheduler: null, judge: { backlog: null, pending: ++collected, spending: null }, captures: null }),
 });
 commands.markReady();
+void visibilityBoot?.start(async () => { writeFileSync(join(folder, 'visibility-building'), ''); });
 writeFileSync(join(folder, 'ready'), commands.servedBy());
 
 const watch = setInterval(() => {
@@ -60,6 +67,7 @@ const watch = setInterval(() => {
 }, 50);
 
 process.once('SIGTERM', () => {
+  visibilityBoot?.stop();
   status.stop();
   commands.stop();
   process.exit(0);

@@ -79,7 +79,7 @@ export interface NativeWorkerServiceOptions {
   /**
    * The engine split (core/engine-split.ts), set by a host that registered a
    * background service: with `worker.engineSplit` on this worker is the
-   * front and starts only once that background is ready. With the switch
+   * front and waits for the background's boot receipt before opening stores. With the switch
    * off it runs as the one worker, exactly as without this option.
    */
   engineBackground?: { isReady(): boolean };
@@ -100,9 +100,6 @@ export interface NativeWorkerServiceOptions {
    * it is stopped, so the front's own restarts happen behind it.
    */
   holdEndpoint?: boolean;
-  /** Test seams for the front's wait for its background. */
-  engineBackgroundWaitMs?: number;
-  engineBackgroundPollMs?: number;
 }
 
 /** Where the front listens when its host holds the worker's endpoint: front.sock on Linux, a private loopback port elsewhere. */
@@ -146,10 +143,6 @@ function freeLoopbackPort(): Promise<number> {
     });
   });
 }
-
-/** The front's start while the background engine is not ready yet; the host retries. */
-export const WORKER_BACKGROUND_STARTING_MESSAGE = 'Olympus worker is waiting for its background engine, which is starting.';
-const DEFAULT_ENGINE_BACKGROUND_WAIT_MS = 30_000;
 
 /**
  * Who supervises the worker, set after worker.env is loaded so neither it nor an
@@ -230,11 +223,8 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
       delete settings.env[ENGINE_ROLE_ENV];
       delete settings.env[ENGINE_BACKGROUND_SOCKET_ENV];
       if (options.engineBackground && freshConfig(input.context.config, input.initialConfig).config.worker.engineSplit) {
-        // The front serves only after the background has done the boot work
-        // that needs the data root to itself (design, part 3).
-        if (!await waitUntil(options.engineBackground.isReady, options.engineBackgroundWaitMs ?? DEFAULT_ENGINE_BACKGROUND_WAIT_MS, options.engineBackgroundPollMs ?? 100)) {
-          throw new NativeProcessRetryableStartError(WORKER_BACKGROUND_STARTING_MESSAGE);
-        }
+        // Start the front now so it can announce itself while the background
+        // boots. The front waits for the data owner's boot receipt itself.
         settings.env[ENGINE_ROLE_ENV] = 'front';
         settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = engineBackgroundSocketPath({ env: settings.env });
       }
@@ -604,15 +594,6 @@ export async function waitForNativeWorkerOwnership(
     await new Promise((resolve) => setTimeout(resolve, Math.min(50, Math.max(1, deadline - Date.now()))));
   } while (Date.now() <= deadline);
   throw new NativeProcessConfigurationError('Native worker is not ready or does not own its endpoint; native capture was not started.');
-}
-
-async function waitUntil(condition: () => boolean, timeoutMs: number, pollMs: number): Promise<boolean> {
-  const deadline = Date.now() + Math.max(0, timeoutMs);
-  for (;;) {
-    if (condition()) return true;
-    if (Date.now() >= deadline) return false;
-    await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(pollMs, deadline - Date.now()))));
-  }
 }
 
 export const ENGINE_BACKGROUND_SERVICE_ID = 'olympus-worker-background';

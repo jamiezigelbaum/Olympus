@@ -878,6 +878,12 @@ function parseEngineCommandEnvelope(value) {
     case "archive_changed":
     case "model_prepare":
       return { id, command: { kind } };
+    case "front_visibility_finished": {
+      const frontPid = command.frontPid;
+      if (typeof frontPid !== "number" || !Number.isSafeInteger(frontPid) || frontPid <= 0)
+        fail("front_visibility_finished needs a front process id.");
+      return { id, command: { kind, frontPid } };
+    }
     case "dashboard_samples": {
       const samples = command.samples;
       if (!Array.isArray(samples) || samples.length > ENGINE_DASHBOARD_SAMPLES_MAX || samples.some((sample) => !dashboardSample(sample))) {
