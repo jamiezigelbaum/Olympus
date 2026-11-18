@@ -106652,15 +106652,21 @@ async function routePreparedSourceIndexSearch(options) {
     }
     searchableCorpora.push(corpus);
   }
-  const retrievalStates = new Map(await Promise.all(searchableCorpora.map(async (corpus) => [
+  const retrievalStates = new Map(searchableCorpora.map((corpus) => [
     corpus.corpusId,
-    await retrievalStateForAdapter(options.adapters[corpus.corpusId], {
+    retrievalStateForAdapter(options.adapters[corpus.corpusId], {
       query: request.query,
       maxResults: request.maxResults,
       corpus,
       context: request.context
     })
-  ])));
+  ]));
+  const knownRetrievalStates = new Map;
+  for (const [corpusId, answer] of retrievalStates)
+    answer.then((known) => {
+      knownRetrievalStates.set(corpusId, known);
+    });
+  const prepareClock = options.laneClock ?? REAL_LANE_CLOCK;
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
   let prepareKeywordsMaxMs = 0;
   let prepareSemanticMaxMs = 0;
@@ -106674,7 +106680,13 @@ async function routePreparedSourceIndexSearch(options) {
   const prepareStartedAt = Date.now();
   await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
-    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable;
+    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && await new Promise((resolve) => {
+      const timer = prepareClock.setTimeout(() => resolve(false), semanticPrepareBudgetMs);
+      retrievalStates.get(corpus.corpusId).then((known) => {
+        prepareClock.clearTimeout(timer);
+        resolve(known.hybridServable);
+      });
+    });
     const [keywordsMs, semanticMs] = await Promise.all([
       timed(async () => {
         const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
@@ -106711,11 +106723,15 @@ async function routePreparedSourceIndexSearch(options) {
         partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
       }
     };
-    const retrievalState = retrievalStates.get(corpus.corpusId).state;
+    const unreadRetrievalState = () => assessSourceIndexRetrievalState({
+      declaredMode: corpus.activationMode,
+      hybridAvailability: { servable: false, reason: "hybrid_capability_unreported" }
+    });
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneUntilIdle((report) => {
       progress = report;
       return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
+        await retrievalStates.get(corpus.corpusId);
         if (metadataMatches) {
           const response = await metadataMatches(corpusRequest);
           if (request.readWide)
@@ -106738,6 +106754,7 @@ async function routePreparedSourceIndexSearch(options) {
         return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
       }));
     }, laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
+    const retrievalState = knownRetrievalStates.get(corpus.corpusId)?.state ?? unreadRetrievalState();
     return { corpus, outcome, retrievalState, partial };
   }));
   for (const { corpus, outcome, retrievalState, partial } of laneOutcomes) {
