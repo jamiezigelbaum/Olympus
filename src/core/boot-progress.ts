@@ -148,7 +148,7 @@ function stepFront(storeOpened: boolean, now: () => number): void {
   }
 }
 
-/** The front listens. */
+/** The front is listening and its initial visibility build has finished. */
 export function finishFrontProgress(now: () => number = Date.now): void {
   if (!front) return;
   delete front.progress.failures;

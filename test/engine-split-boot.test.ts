@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
+import { readFrontProgress } from '../src/core/boot-progress.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
@@ -29,7 +30,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function spawnWorker(env: Record<string, string>, role: 'background' | 'front'): { output: () => string } {
+function spawnWorker(env: Record<string, string>, role: 'background' | 'front') {
   const child = Bun.spawn([process.execPath, SERVER], {
     env: { PATH: process.env.PATH ?? '', ...env, OLYMPUS_WORKER_ENGINE_ROLE: role },
     cwd: REPO, stdout: 'pipe', stderr: 'pipe',
@@ -42,36 +43,48 @@ function spawnWorker(env: Record<string, string>, role: 'background' | 'front'):
       for await (const chunk of stream as ReadableStream<Uint8Array>) output += decoder.decode(chunk);
     })();
   }
-  return { output: () => output };
+  return { child, output: () => output };
+}
+
+function bootHome() {
+  // Short paths: a unix socket path has a length limit.
+  const home = mkdtempSync(join('/tmp', 'oes-'));
+  roots.push(home);
+  mkdirSync(join(home, 'run'), { mode: 0o700 });
+  const port = (() => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const value = server.port; server.stop(true); return value; })();
+  const env = {
+    HOME: home,
+    XDG_DATA_HOME: join(home, 'd'),
+    XDG_STATE_HOME: join(home, 's'),
+    XDG_CONFIG_HOME: join(home, 'c'),
+    XDG_RUNTIME_DIR: join(home, 'run'),
+    OLYMPUS_EMAIL_SOURCE_PORT: String(port),
+    OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
+    OLYMPUS_WORKER_AUTH_TOKEN: TOKEN,
+    OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
+    NODE_ENV: 'test',
+  };
+  return { home, port, env };
 }
 
 describe('the engine split boots as two processes', () => {
   test('the front waits for the background, then serves; the background serves only its socket', async () => {
-    // Short paths: a unix socket path has a length limit.
-    const home = mkdtempSync(join('/tmp', 'oes-'));
-    roots.push(home);
-    mkdirSync(join(home, 'run'), { mode: 0o700 });
-    const port = (() => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const value = server.port; server.stop(true); return value; })();
-    const env = {
-      HOME: home,
-      XDG_DATA_HOME: join(home, 'd'),
-      XDG_STATE_HOME: join(home, 's'),
-      XDG_CONFIG_HOME: join(home, 'c'),
-      XDG_RUNTIME_DIR: join(home, 'run'),
-      OLYMPUS_EMAIL_SOURCE_PORT: String(port),
-      OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
-      OLYMPUS_WORKER_AUTH_TOKEN: TOKEN,
-      OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
-      NODE_ENV: 'test',
-    };
+    const { port, env } = bootHome();
     const front = spawnWorker(env, 'front');
+    await waitFor(() => readFrontProgress(env)?.pid === front.child.pid);
     // Without a background the front opens nothing and does not listen.
     expect(front.output()).not.toContain('worker listening');
+    front.child.kill('SIGSTOP');
     const background = spawnWorker(env, 'background');
     await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000 });
     expect(background.output()).not.toContain('worker listening');
+    expect(background.output()).toContain('waiting for the front to finish building hidden-copy sets');
+    expect(background.output()).not.toContain('starting hidden-copy build');
+    front.child.kill('SIGCONT');
     await waitFor(() => front.output().includes('worker listening'), { timeoutMs: 60_000 });
     expect(front.output()).not.toContain('FrontStoreWriteError');
+    await waitFor(() => background.output().includes('front build finished'), { timeoutMs: 60_000 });
+    expect(front.output()).toContain('hidden-copy sets in');
 
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
     const health = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
@@ -119,25 +132,27 @@ describe('the engine split boots as two processes', () => {
     expect(await alone.json()).toMatchObject({ engine_background: 'unreachable' });
   }, 120_000);
 
+  test('the background starts the build when the front exits during the wait', async () => {
+    const { env } = bootHome();
+    const front = spawnWorker(env, 'front');
+    await waitFor(() => readFrontProgress(env)?.pid === front.child.pid);
+    front.child.kill('SIGSTOP');
+    const background = spawnWorker(env, 'background');
+    await waitFor(() => background.output().includes('waiting for the front to finish building hidden-copy sets'));
+    expect(background.output()).not.toContain('starting hidden-copy build');
+    front.child.kill('SIGKILL');
+    await front.child.exited;
+    await waitFor(() => background.output().includes('front exited'));
+    expect(background.output()).toMatch(/starting hidden-copy build after waiting \d+ ms \(front exited\)/);
+  }, 60_000);
+
   test('with a connected source, the front reads its stores read-only and serves them', async () => {
-    const home = mkdtempSync(join('/tmp', 'oes-'));
-    roots.push(home);
-    mkdirSync(join(home, 'run'), { mode: 0o700 });
-    const port = (() => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const value = server.port; server.stop(true); return value; })();
+    const { home, port, env: bootEnv } = bootHome();
     const registryPath = join(home, 'c', 'olympus', 'handles.json');
     const env = {
-      HOME: home,
-      XDG_DATA_HOME: join(home, 'd'),
-      XDG_STATE_HOME: join(home, 's'),
-      XDG_CONFIG_HOME: join(home, 'c'),
-      XDG_RUNTIME_DIR: join(home, 'run'),
-      OLYMPUS_EMAIL_SOURCE_PORT: String(port),
-      OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
-      OLYMPUS_WORKER_AUTH_TOKEN: TOKEN,
-      OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
+      ...bootEnv,
       OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true',
       OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath,
-      NODE_ENV: 'test',
     };
     // Local files, connected with a folder approved, and its store already holding an item.
     connectThisComputerSource(registryPath, 'local.files');
@@ -155,6 +170,8 @@ describe('the engine split boots as two processes', () => {
 
     const background = spawnWorker(env, 'background');
     await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000 });
+    expect(background.output()).toMatch(/starting hidden-copy build after waiting \d+ ms \(no front build in progress\)/);
+    expect(background.output()).not.toContain('waiting for the front');
     const front = spawnWorker(env, 'front');
     await waitFor(() => front.output().includes('worker listening') || /FrontStoreWriteError|error/i.test(front.output()), { timeoutMs: 60_000 });
     expect(front.output()).not.toContain('FrontStoreWriteError');

@@ -95,7 +95,7 @@ export interface EngineHostHandle {
 export function engineHostServices(pluginConfig: Record<string, unknown>, moduleUrl: string, paths?: ReturnType<typeof engineServicePaths>, ownerBridgeHostSocket?: string, front?: EngineFront): NativeProcessServiceDefinition[] {
   const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
   // The engine split (core/engine-split.ts): the background writer starts
-  // first and the worker becomes its front, which waits for it to be ready.
+  // asynchronously and the worker starts alongside it, waiting for its boot receipt.
   // Stop runs in reverse, so the front stops before the background.
   const split = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false }).worker.engineSplit;
   const background = split ? createNativeEngineBackgroundService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed }) : undefined;

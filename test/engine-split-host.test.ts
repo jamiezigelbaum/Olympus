@@ -11,7 +11,6 @@ import { join } from 'node:path';
 import {
   createNativeEngineBackgroundService,
   createNativeWorkerService,
-  WORKER_BACKGROUND_STARTING_MESSAGE,
   type NativeWorkerServiceDefinition,
 } from '../src/core/native-worker-service.ts';
 import { createEngineCommandHandler, EngineCommandLedger, type EngineCommandHandlers } from '../src/workers/engine-split/commands.ts';
@@ -43,7 +42,7 @@ function background(handlers: EngineCommandHandlers, instanceId = 'background-1'
   return { ledger, handler, fetch: fetchBackground, setReady: (value: boolean) => { ready = value; } };
 }
 
-describe('the host starts the background, then the front', () => {
+describe('the host starts the split engine', () => {
   test('the front opens its stores on the background\'s receipt, never on its answer or a clock, and never gives up (gate7 on 893087f5)', async () => {
     const clock = createTestClock();
     const at = new Date().toISOString();
@@ -68,15 +67,15 @@ describe('the host starts the background, then the front', () => {
     expect(backgroundBootDone(undefined)).toBe(false);
   });
 
-  test('a front worker service does not start while its background is not ready', async () => {
+  test('the host can launch the front before its background is ready', async () => {
     const fixture = fakeWorker(tempRoot());
     const service = track(createNativeWorkerService({
       initialPluginConfig: fixture.pluginConfig({ engineSplit: true }), moduleUrl: import.meta.url, workerEnvPath: fixture.envPath,
       fetch, startupTimeoutMs: 2_000, readinessPollMs: 10, stopGraceMs: 50, restartDelaysMs: [60_000],
-      engineBackground: { isReady: () => false }, engineBackgroundWaitMs: 0,
+      engineBackground: { isReady: () => false },
     }));
-    await expect(service.start({})).rejects.toThrow(WORKER_BACKGROUND_STARTING_MESSAGE);
-    expect(service.isReady()).toBe(false);
+    await service.start({});
+    expect(JSON.parse(readFileSync(fixture.rolePath, 'utf8')).role).toBe('front');
   });
 
   test('switch on: the front starts with the front role once the background is ready; switch off: no role', async () => {

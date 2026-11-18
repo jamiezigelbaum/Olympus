@@ -270,6 +270,8 @@ export interface SourceSchedulerTask {
   freshnessThresholdMs?: number;
   /** Tasks sharing a key are serialized; different keys may run concurrently. */
   concurrencyKey?: string;
+  /** An embedding sweep awaiting boot visibility keeps its own turn. */
+  visibilityBoot?: () => Promise<void> | undefined;
   /** Seeds restart-safe scheduling before this task has durable scheduler state. */
   bootstrapLastSuccessAt?(): string | undefined;
   /** Seeds a counts-only proof for externally completed work after restart. */
@@ -495,8 +497,8 @@ export interface SourceChangeWatchStatus {
 export interface SourceSchedulerTaskStatus {
   /** Computer dashboard only; never persisted in scheduler state. */
   missing_scope_path?: string;
-  /** Short maintenance hold, never persisted as a failure or provider deferral. */
-  wait_reason?: 'store_reclaim';
+  /** Internal wait, never persisted as a failure or provider deferral. */
+  wait_reason?: 'store_reclaim' | 'boot_visibility';
   id: string;
   kind: SourceSchedulerTaskKind;
   metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
@@ -521,7 +523,7 @@ export interface SourceSchedulerTaskStatus {
 }
 
 interface SchedulerTaskState {
-  waitReason?: 'store_reclaim';
+  waitReason?: SourceSchedulerTaskStatus['wait_reason'];
   task: SourceSchedulerTask;
   source: SourceSchedulerSource;
   running: boolean;
@@ -1057,7 +1059,7 @@ export class SourceScheduler {
     const groups = new Map<string, SchedulerTaskState[]>();
     const keyOf = (state: SchedulerTaskState): string => {
       const own = taskConcurrencyKey(state.source, state.task);
-      if (state.task.kind !== 'embed') return own;
+      if (state.task.kind !== 'embed' || state.task.visibilityBoot?.()) return own;
       // An embedding sweep due with its source's other work joins that turn
       // and runs after it, so it embeds what the listing just wrote. Only
       // while that turn is held by a run already under way does it take a
@@ -1104,7 +1106,7 @@ export class SourceScheduler {
             && !state.running
             && taskCadence(state.source, state.task) === 'continuous'
             && (taskConcurrencyKey(state.source, state.task) === concurrencyKey
-              || (sources.has(state.source) && state.task.kind === 'embed'))
+              || (sources.has(state.source) && state.task.kind === 'embed' && !state.task.visibilityBoot?.()))
             && state.nextRunAt <= now);
           for (const state of due) {
             if (state.running) continue;
@@ -1140,6 +1142,13 @@ export class SourceScheduler {
     provenance: SourceSchedulerRunProvenance,
   ): Promise<void> {
     const stops = this.stops;
+    const visibility = state.task.visibilityBoot?.();
+    if (visibility) {
+      state.waitReason = 'boot_visibility';
+      try { await visibility; }
+      finally { delete state.waitReason; }
+      if (this.stops !== stops) return;
+    }
     for (;;) {
       const holds = [...this.storeReclaims];
       if (holds.length === 0) break;
@@ -2117,6 +2126,8 @@ export function withEmbeddingSweep(
     onProgress?: (target: ConnectorStoreEmbeddingTarget) => void;
     /** True while the owner's Ask runs: a pass starts no new batch, and continues soon after. */
     holdForAsk?: () => boolean;
+    /** Waits before the embedding budget begins, without holding the source's fetch lane. */
+    visibilityBoot?: () => Promise<void> | undefined;
   } = {},
 ): SourceSchedulerSource[] {
   return sources.map((source, sourceIndex) => {
@@ -2124,7 +2135,7 @@ export function withEmbeddingSweep(
     if (!targets) return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk, options.visibilityBoot)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
         ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         : undefined,
@@ -2144,6 +2155,7 @@ function embeddingSweepTask(
   trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean,
   onProgress?: (target: ConnectorStoreEmbeddingTarget) => void,
   holdForAsk?: () => boolean,
+  visibilityBoot?: () => Promise<void> | undefined,
 ): SourceSchedulerTask {
   const maxItems = embeddingSweepMaxItems();
   const askHolds = (): boolean => {
@@ -2162,6 +2174,7 @@ function embeddingSweepTask(
     // waited out every listing; on Sparta (2026-11-04) Gmail's half-hour
     // reconcile left new mail unsearchable for as long.
     concurrencyKey: embeddingSweepConcurrencyKey(source),
+    ...(visibilityBoot ? { visibilityBoot } : {}),
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context?: SourceSchedulerTaskRunContext) => {
