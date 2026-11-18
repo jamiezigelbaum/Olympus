@@ -912,9 +912,12 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const freezeLines: Array<{ at: string; role: Role; line: string }> = [];
   // The product's per-click trace (ingress, each command POST attempt, control receipt, answer), joined to clicks by id.
   const clickTrace = new Map<string, string[]>();
+  // Each role's SQLite file-map line at boot (bounded: per-file size, budget, files), kept whole for the arm's receipt.
+  const fileMapLines: Array<{ role: Role; line: string }> = [];
   const keepEngineLine = (role: Role, line: string) => {
     if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:') || line.includes('[olympus] sqlite checkpoint:') || line.includes('[olympus] sqlite wal room:') || line.includes('[olympus] sqlite wal held:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
     // Keep each freeze frame and held-loop line outside the bounded engine log tail.
+    else if (line.includes('SQLite file map') && fileMapLines.length < 10) fileMapLines.push({ role, line: line.slice(line.indexOf('[olympus]')).slice(0, 400) });
     else if (line.includes('[olympus:click-trace]')) {
       const id = / id=(\S+)/.exec(line)?.[1];
       if (id) { const lines = clickTrace.get(id) ?? []; if (lines.length < 20) lines.push(line.slice(0, 400)); clickTrace.set(id, lines); }
@@ -1213,7 +1216,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
-    sqlite_mmap: options.sqliteMmap ?? 'default', process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
+    sqlite_mmap: options.sqliteMmap ?? 'default', sqlite_mmap_boot: fileMapLines, process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
     ...(options.swapReading ? { swap_reading: true, counts_as_gate: false } : {}),
     vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
     background_timeline: summarizeBackgroundTimeline(backgroundTimelinePath, freezeLines, join(metrics, 'background.freezes.log')),
