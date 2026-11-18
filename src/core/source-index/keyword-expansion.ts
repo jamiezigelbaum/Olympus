@@ -67,6 +67,8 @@ export const KEYWORD_PREPARE_WAIT_MS = 4_000;
  * quick one brings the wait back.
  */
 const lastTranslationMs = new WeakMap<AnalystModel, number>();
+// Start times of this model's calls still running: one already running longer than the wait is slow too.
+const runningTranslations = new WeakMap<AnalystModel, Set<number>>();
 
 export async function expandSourceIndexKeywords(
   query: string,
@@ -92,12 +94,13 @@ export async function expandSourceIndexKeywords(
   full.catch(() => {});
   const builtIn = await expansionModel();
   const lastMs = builtIn?.model ? lastTranslationMs.get(builtIn.model) : undefined;
-  if (lastMs !== undefined && lastMs > (options.waitMs ?? 0)) {
+  const waitMs = options.waitMs ?? 0;
+  const oldestRunning = builtIn?.model ? Math.min(...(runningTranslations.get(builtIn.model) ?? [])) : Infinity;
+  if ((lastMs !== undefined && lastMs > waitMs) || Date.now() - oldestRunning > waitMs) {
     // A finished translation of this question is still used; otherwise the static equivalents.
     // A profile the store already holds settles within a turn; a slow read is not waited for.
-    if (languages === undefined && read) {
-      await Promise.race([read.catch(() => {}), new Promise<void>((resolve) => { setImmediate(resolve); })]);
-    }
+    // The same turn lets a translation that has just come back be stored before it is looked up.
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
     const cached = { missing: false };
     const alternatives = await expandCachedSourceIndexKeywords(query, languages ?? [], cached);
     if (options.status) options.status.incomplete = cached.missing || languages === undefined || failedTranslations.has(alternatives);
@@ -159,10 +162,24 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
     return fallback;
   }
   if (existing && existing.expires > Date.now()) return existing.pending;
-  const startedAt = Date.now();
+  // The model's speed is timed on its own call, never on a store that shares
+  // a finished call (that would read as instant and bring the wait back). A
+  // call that fails says nothing quicker than the last one that finished.
+  let callStartedAt: number | undefined;
   const pending = translate();
-  const model = expander;
-  pending.finally(() => { lastTranslationMs.set(model, Date.now() - startedAt); }).catch(() => {});
+  if (callStartedAt !== undefined) {
+    const model = expander;
+    const startedAt = callStartedAt;
+    let running = runningTranslations.get(model);
+    if (!running) { running = new Set(); runningTranslations.set(model, running); }
+    running.add(startedAt);
+    const calls = running;
+    pending.then((value) => {
+      calls.delete(startedAt);
+      const took = Date.now() - startedAt;
+      lastTranslationMs.set(model, failedTranslations.has(value) ? Math.max(lastTranslationMs.get(model) ?? 0, took) : took);
+    }, () => { calls.delete(startedAt); });
+  }
   const entry: CachedExpansion = {pending, expires: Date.now() + 5 * 60_000};
   cache.set(key, entry);
   pending.then(value => { entry.value = value; }, () => {});
@@ -196,6 +213,7 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
         }])), required: asked, additionalProperties: false,
       },
     }).then(completion => JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')) as unknown);
+    callStartedAt = Date.now();
     const callKey = JSON.stringify([query, asked]);
     shared.calls.set(callKey, { query, languages: asked, pending, expires: Date.now() + 5 * 60_000 });
     // A failed call is not shared with a later request.
