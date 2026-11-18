@@ -1397,7 +1397,7 @@ export class TierSnifferService {
   private closeLedgers(): void {
     for (const ledger of this.ledgers.values()) {
       try {
-        ledger.close();
+        ledger.close({ checkpoint: true });
       } catch {
         // Best effort at shutdown.
       }

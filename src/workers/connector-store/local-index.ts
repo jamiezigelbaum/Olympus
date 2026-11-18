@@ -3914,8 +3914,8 @@ export class LocalConnectorStore {
       this.db.exec(options.readOnly === true
         ? 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;'
         : creatingFile
-        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma()
-        : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma());
+        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath)
+        : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath));
       applySqliteMmap(this.db);
       // New stores need no conversion. Existing stores are converted only by
       // background reclaim, after the sweep, never by opening a request's store.
@@ -4000,7 +4000,7 @@ export class LocalConnectorStore {
       changeMemoryCounter('connector_stores', 1);
       trackSqliteStoreMemory(this.db, this.visibilityJournal);
     } catch (error) {
-      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
       throw error;
     }
   }
@@ -4124,7 +4124,7 @@ export class LocalConnectorStore {
       // do its waiting queries.
       this.closedForPoolReads = true;
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
-      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
     }
   }
 

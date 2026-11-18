@@ -8,13 +8,11 @@
 
 import { statSync } from 'node:fs';
 import { oldestOffThreadSnapshot } from '../connector-store/off-thread-reads.ts';
+import type { SqliteCheckpointFile } from './sqlite-checkpointer.ts';
 
 export interface SqliteJournalSettings { journal_mode: string; synchronous: number; wal_autocheckpoint: number }
 
-export interface SampledSqliteFile {
-  /** A short name for the log: a corpus id or a file kind, never a path. */
-  label: string;
-  dbPath: string;
+export interface SampledSqliteFile extends SqliteCheckpointFile {
   settings?: () => SqliteJournalSettings | undefined;
 }
 
