@@ -272315,8 +272315,8 @@ async function mainRecordingFrontFailure() {
   }
 }
 async function main() {
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
-  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole });
   if (engineRole === "background") {
     const { enabled, reason } = sqliteMmapPolicy();
     console.log(`[olympus] engine background SQLite file map ${enabled ? "on" : "off"} (${reason})`);

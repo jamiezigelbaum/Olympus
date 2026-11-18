@@ -659,8 +659,8 @@ export async function main(): Promise<void> {
   // root. A second worker on it waits a short while (restarts overlap), then
   // exits without mounting anything (core/data-owner-lock.ts). The engine
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
-  dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole });
   if (engineRole === 'background') {
     const { enabled, reason } = sqliteMmapPolicy();
     console.log(`[olympus] engine background SQLite file map ${enabled ? 'on' : 'off'} (${reason})`);
