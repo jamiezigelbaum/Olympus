@@ -9155,6 +9155,12 @@ var init_backup_paths = () => {};
 // src/workers/dashboard/session-marker.ts
 var init_session_marker = () => {};
 
+// src/workers/engine-split/click-trace.ts
+var CLICK_ID_HEADER = "X-Olympus-Click-Id", clickTraces;
+var init_click_trace = __esm(() => {
+  clickTraces = new WeakMap;
+});
+
 // src/core/request-peer.ts
 var ownerSockets, peers;
 var init_request_peer = __esm(() => {
@@ -9195,6 +9201,7 @@ var DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADE
 var init_http = __esm(() => {
   init_backup_paths();
   init_session_marker();
+  init_click_trace();
   init_request_peer();
   init_worker_auth();
   init_dashboard_launch();
@@ -17478,10 +17485,11 @@ var init_commands = __esm(() => {
   init_operation_error();
   init_http();
   init_answer_activity();
+  init_click_trace();
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
   forwardedRecordIds = new WeakMap;
-  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade", CLICK_ID_HEADER.toLowerCase()]);
 });
 
 // src/workers/classification/chunk-release.ts

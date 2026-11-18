@@ -14,6 +14,7 @@
  * not know is handed over again, which the ledger makes safe.
  */
 import { createHash } from 'node:crypto';
+import { logClickTrace } from './click-trace.ts';
 import { EngineCommandError, isDashboardPrivacyRaise, type EngineCommandEnvelope, type EngineCommandReceipt, type EngineCommandRecords } from './commands.ts';
 
 interface MirrorEntry {
@@ -55,7 +56,7 @@ export class EngineCommandMirror implements EngineCommandRecords {
   get instanceId(): string { return this.options.instanceId; }
 
   /** Record a command and hand it to the loop, or return the record of the same id. */
-  submit(envelope: EngineCommandEnvelope): EngineCommandReceipt {
+  submit(envelope: EngineCommandEnvelope, clickId?: string): EngineCommandReceipt {
     this.prune();
     const digest = createHash('sha256').update(JSON.stringify(envelope.command)).digest('hex');
     const existing = this.entries.get(envelope.id);
@@ -70,6 +71,7 @@ export class EngineCommandMirror implements EngineCommandRecords {
       receipt: { id: envelope.id, state: 'received', instance_id: this.options.instanceId },
     };
     this.entries.set(envelope.id, entry);
+    if (clickId) logClickTrace(clickId, envelope.id, 'control_receipt', 'background', 'served_by=control-thread');
     this.options.send(envelope);
     return this.answer(entry);
   }

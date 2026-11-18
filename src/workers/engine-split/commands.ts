@@ -26,6 +26,7 @@ import { OperationError } from '../../core/operation-error.ts';
 import { hasValidWorkerBearerToken } from '../http.ts';
 import { boundedLogErrorMessage, logErrorOrigin } from '../../core/log-redaction.ts';
 import { runAtLocalInferencePriority, type LocalInferencePriority } from '../answer-activity.ts';
+import { CLICK_ID_HEADER, logClickTrace, PRIVACY_ITEM_SET_PATH, readClickId } from './click-trace.ts';
 
 /** Config files the front writes and the background re-reads (design, "Writes the front still needs", B). */
 export const ENGINE_RELOAD_KINDS = ['sources', 'scope', 'exclusions', 'embedding', 'models', 'archive', 'extraction', 'pacing'] as const;
@@ -275,7 +276,7 @@ export interface EngineCommandReceipt {
  */
 export interface EngineCommandRecords {
   readonly instanceId: string;
-  submit(envelope: EngineCommandEnvelope): EngineCommandReceipt;
+  submit(envelope: EngineCommandEnvelope, clickId?: string): EngineCommandReceipt;
   get(id: string): EngineCommandReceipt | undefined;
   settled(id: string, wait: Promise<void>): Promise<EngineCommandReceipt | undefined>;
   hasPendingPrivacyRaise(): boolean;
@@ -369,7 +370,7 @@ export function forwardedRecordId(request: Request): string | undefined {
 }
 
 /** Headers that belong to the hop, not to the request. */
-const HOP_HEADERS = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'keep-alive', 'upgrade']);
+const HOP_HEADERS = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'keep-alive', 'upgrade', CLICK_ID_HEADER.toLowerCase()]);
 
 export async function requestToForwarded(request: Request): Promise<EngineForwardedRequest> {
   const headers: Record<string, string> = {};
@@ -572,7 +573,7 @@ export class EngineCommandLedger implements EngineCommandRecords {
   get instanceId(): string { return this.options.instanceId; }
 
   /** Record and queue a command, or return the record of the same id. A different command under a used id is refused. */
-  submit(envelope: EngineCommandEnvelope): EngineCommandReceipt {
+  submit(envelope: EngineCommandEnvelope, clickId?: string): EngineCommandReceipt {
     this.prune();
     const body = JSON.stringify(envelope.command);
     const existing = this.entries.get(envelope.id);
@@ -587,6 +588,7 @@ export class EngineCommandLedger implements EngineCommandRecords {
     const settled = previous.then(() => this.apply(entry, envelope.command));
     entry.settled = settled;
     this.entries.set(envelope.id, entry);
+    if (clickId) logClickTrace(clickId, envelope.id, 'control_receipt', 'background', 'served_by=loop');
     this.chains.set(key, settled);
     void settled.then(() => { if (this.chains.get(key) === settled) this.chains.delete(key); });
     return { ...receipt };
@@ -686,7 +688,10 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
       if (!options.ready()) return Response.json({ error: 'starting', instance_id: options.ledger.instanceId }, { status: 503 });
       try {
         const envelope = parseEngineCommandEnvelope(await request.json().catch(() => undefined));
-        let receipt = options.ledger.submit(envelope);
+        const clickId = envelope.command.kind === 'tier_override' && envelope.command.request.path === PRIVACY_ITEM_SET_PATH
+          ? readClickId(request)
+          : undefined;
+        let receipt = options.ledger.submit(envelope, clickId);
         // Unlike a wake, judge_now returns the verdicts reached in its bounded turn.
         if (envelope.command.kind === 'judge_now' && receipt.state === 'received') {
           const waitMs = envelope.command.budgetMs + 100;

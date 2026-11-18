@@ -14,6 +14,7 @@
  */
 import { ENGINE_BACKGROUND_ORIGIN, ENGINE_COMMANDS_PATH } from '../../core/engine-split.ts';
 import { randomUUID } from 'node:crypto';
+import { CLICK_ID_HEADER, logClickTrace, type ClickTrace } from './click-trace.ts';
 import { newEngineCommandId, type EngineCommand, type EngineCommandReceipt } from './commands.ts';
 
 export interface EngineCommandClientOptions {
@@ -44,6 +45,7 @@ export interface EngineSendOptions {
   id?: string;
   /** The first acknowledgment, before polling for the result. */
   onReceived?: (receipt: EngineCommandReceipt) => void;
+  clickTrace?: ClickTrace;
 }
 
 export class EngineCommandUnavailableError extends Error {
@@ -75,6 +77,13 @@ const REQUEST_GRACE_MS = 15_000;
 
 class RequestTimedOut extends Error {}
 
+interface ClickAttempt {
+  number: number;
+  startedAt: string;
+  started: number;
+  errorClass?: string;
+}
+
 export class EngineCommandClient {
   /** Owner actions the background has acknowledged and not finished, by command id, with when each was acknowledged. */
   private readonly held = new Map<string, number>();
@@ -96,7 +105,7 @@ export class EngineCommandClient {
   async post(command: EngineCommand, options: EngineSendOptions = {}): Promise<EngineCommandReceipt> {
     const id = options.id ?? this.newId();
     const deadline = this.now() + (options.timeoutMs ?? 30_000);
-    return this.postUntil(id, command, deadline);
+    return this.postUntil(id, command, deadline, options.clickTrace);
   }
 
   /**
@@ -123,7 +132,7 @@ export class EngineCommandClient {
   private async sendUntilSettled(id: string, command: EngineCommand, options: EngineSendOptions): Promise<EngineCommandReceipt> {
     const silenceMs = options.timeoutMs ?? 60_000;
     let deadline = this.now() + silenceMs;
-    let receipt = await this.postUntil(id, command, deadline);
+    let receipt = await this.postUntil(id, command, deadline, options.clickTrace);
     if (receipt.state === 'received' && OWNER_ACTION_KINDS.has(command.kind)) this.held.set(id, this.now());
     if (receipt.state === 'received') options.onReceived?.(receipt);
     deadline = this.now() + silenceMs;
@@ -135,27 +144,44 @@ export class EngineCommandClient {
       // The background answered and still holds the command: it is in progress.
       if (answer?.status === 200) { receipt = answer.body as EngineCommandReceipt; attempt = 0; deadline = this.now() + silenceMs; continue; }
       // 404: the background restarted and lost the record; post it again under the same id.
-      if (answer?.status === 404) { receipt = await this.postUntil(id, command, deadline); continue; }
+      if (answer?.status === 404) { receipt = await this.postUntil(id, command, deadline, options.clickTrace); continue; }
       await this.sleep(RETRY_DELAYS_MS[Math.min(attempt++, RETRY_DELAYS_MS.length - 1)]!);
     }
     return receipt;
   }
 
-  private async postUntil(id: string, command: EngineCommand, deadline: number): Promise<EngineCommandReceipt> {
-    let attempt = 0;
+  private async postUntil(id: string, command: EngineCommand, deadline: number, clickTrace?: ClickTrace): Promise<EngineCommandReceipt> {
+    if (clickTrace) clickTrace.requestId = id;
+    let retry = 0;
     for (;;) {
+      const attempt: ClickAttempt | undefined = clickTrace
+        ? { number: ++clickTrace.attempts, startedAt: new Date().toISOString(), started: performance.now() }
+        : undefined;
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (clickTrace) headers[CLICK_ID_HEADER] = clickTrace.id;
       const answer = await this.request(ENGINE_COMMANDS_PATH, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify({ id, command }),
-      }, deadline);
-      if (answer && (answer.status === 200 || answer.status === 202)) return answer.body as EngineCommandReceipt;
+      }, deadline, 0, attempt);
+      const accepted = answer && (answer.status === 200 || answer.status === 202);
       // A refusal of the command itself is final; anything else is the background not being there yet.
-      if (answer && answer.status >= 400 && answer.status < 500 && answer.status !== 404) {
+      const refused = answer && answer.status >= 400 && answer.status < 500 && answer.status !== 404;
+      const retryDelay = !accepted && !refused && this.now() < deadline
+        ? RETRY_DELAYS_MS[Math.min(retry++, RETRY_DELAYS_MS.length - 1)]!
+        : undefined;
+      if (clickTrace && attempt) {
+        const outcome = answer ? `status=${answer.status}` : `error_class=${attempt.errorClass}`;
+        const delay = retryDelay === undefined ? '' : ` retry_delay_ms=${retryDelay}`;
+        logClickTrace(clickTrace.id, id, 'post_attempt', 'front',
+          `attempt=${attempt.number} ${outcome} elapsed_ms=${Math.round(performance.now() - attempt.started)}${delay}`, attempt.startedAt);
+      }
+      if (accepted) return answer.body as EngineCommandReceipt;
+      if (refused) {
         throw new Error(typeof (answer.body as { error?: unknown })?.error === 'string' ? (answer.body as { error: string }).error : 'The background refused the command.');
       }
-      if (this.now() >= deadline) throw new EngineCommandUnavailableError();
-      await this.sleep(RETRY_DELAYS_MS[Math.min(attempt++, RETRY_DELAYS_MS.length - 1)]!);
+      if (retryDelay === undefined) throw new EngineCommandUnavailableError();
+      await this.sleep(retryDelay);
     }
   }
 
@@ -165,7 +191,7 @@ export class EngineCommandClient {
    * never past the caller's deadline). A request that runs out is aborted and
    * counts as no answer.
    */
-  private async request(path: string, init: RequestInit, deadline: number, waitMs = 0): Promise<{ status: number; body: unknown } | undefined> {
+  private async request(path: string, init: RequestInit, deadline: number, waitMs = 0, attempt?: ClickAttempt): Promise<{ status: number; body: unknown } | undefined> {
     const limitMs = Math.max(1, Math.min(waitMs + REQUEST_GRACE_MS, deadline - this.now()));
     const controller = new AbortController();
     let timedOut!: () => void;
@@ -183,7 +209,14 @@ export class EngineCommandClient {
         if (typeof body?.instance_id === 'string') this.options.onInstance?.(body.instance_id);
         return { status: response.status, body };
       })()]);
-    } catch {
+    } catch (error) {
+      if (attempt) {
+        // Only fixed class names are logged. A thrown error can carry request data.
+        if (error instanceof RequestTimedOut) attempt.errorClass = 'RequestTimedOut';
+        else if (error instanceof TypeError) attempt.errorClass = 'TypeError';
+        else if (error instanceof DOMException) attempt.errorClass = 'DOMException';
+        else attempt.errorClass = error instanceof Error ? 'Error' : 'NonError';
+      }
       return undefined;
     } finally {
       this.clearTimer(timer);

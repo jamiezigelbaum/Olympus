@@ -23596,6 +23596,10 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 
+// src/workers/engine-split/click-trace.ts
+var CLICK_ID_HEADER = "X-Olympus-Click-Id";
+var clickTraces = new WeakMap;
+
 // src/core/request-peer.ts
 var ownerSockets = new WeakSet;
 var peers = new WeakMap;
@@ -23841,7 +23845,7 @@ var REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
 var ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
 var ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
 var forwardedRecordIds = new WeakMap;
-var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade", CLICK_ID_HEADER.toLowerCase()]);
 
 // src/workers/connector-store/tier-visibility.ts
 function childLane(scope) {
