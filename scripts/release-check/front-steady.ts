@@ -143,7 +143,7 @@ export function crashLines(text: string): { frontStoreWrite: number; exitedUnexp
   };
 }
 
-function logSince(paths: readonly string[], offsets: readonly number[]): string {
+export function logSince(paths: readonly string[], offsets: readonly number[]): string {
   return paths.map((path, index) => {
     try {
       const all = readFileSync(path);

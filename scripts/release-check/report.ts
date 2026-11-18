@@ -23,6 +23,8 @@ export interface CheckResult {
   status: CheckStatus;
   detail?: string;
   ms?: number;
+  /** Time the actual failure was observed, when evidence was collected asynchronously. */
+  observedAt?: string;
   /** Set on a result kept from an earlier run of a commit this candidate's change cannot reach (impact.ts, `--carry-from`). */
   carried?: CarriedFrom;
   /** The leg that produced it (run.ts inLeg); absent for the install and setup checks every run makes. */
@@ -127,7 +129,33 @@ export interface UpgradeReport {
   afterVersion?: string;
 }
 
+export interface FailedOperation {
+  id: string;
+  leg: string;
+  stage: string;
+  at: string;
+  journey?: string;
+  step?: string;
+  rerun?: string;
+  rerunFromCheckout?: string;
+}
+
+export interface FailureDiagnosis {
+  first?: FailedOperation;
+  skippedJourneys: { journey: string; leg: string; because: string; stage: string }[];
+  independentFailures: FailedOperation[];
+  rerunJourney?: { journey: string; command: string; fromCheckout?: string };
+}
+
+export function diagnoseFailures(operations: readonly FailedOperation[], skippedJourneys: FailureDiagnosis['skippedJourneys']): FailureDiagnosis {
+  const [first, ...independentFailures] = [...operations].sort((a, b) => a.at.localeCompare(b.at));
+  const journey = [first, ...independentFailures].find(op => op?.journey && op.rerun);
+  return { ...(first ? { first } : {}), skippedJourneys, independentFailures,
+    ...(journey?.journey && journey.rerun ? { rerunJourney: { journey: journey.journey, command: journey.rerun, ...(journey.rerunFromCheckout ? { fromCheckout: journey.rerunFromCheckout } : {}) } } : {}) };
+}
+
 export interface MachineReport {
+  diagnosis?: FailureDiagnosis;
   limits?: import('./fresh-limits.ts').LimitsResult;
   id: string;
   label: string;
@@ -196,8 +224,8 @@ export interface ReleaseReportInput {
    * tested run's results. `files` is the proof: every changed file with the legs it reaches (impact.ts).
    */
   carry?: CarryRecord;
-  /** Settings the run turned on in the install under test that are off by default (`run.ts --engine-split`). */
-  settings?: { engineSplit?: boolean; archiveScale?: boolean };
+  /** Candidate defaults and explicit settings overrides made by the harness. */
+  settings?: { defaultEngineSplit?: boolean; engineSplit?: boolean; archiveScale?: boolean };
 }
 
 export interface CarryRecord {
@@ -495,12 +523,26 @@ export function reviewSection(review: ReviewResult | undefined): string {
     + (rows.length > 0 ? rows.join('') : '<p>No problems reported.</p>') + unanswered;
 }
 
+function diagnosisSection(diagnosis: FailureDiagnosis | undefined): string {
+  if (!diagnosis?.first && !diagnosis?.skippedJourneys.length) return '';
+  const operation = (op: FailedOperation) => escapeHtml([op.stage, op.leg, op.journey ?? op.id, op.step, op.at].filter(Boolean).join(' · '));
+  const skipped = diagnosis.skippedJourneys.map(row => `<li>${escapeHtml(`${row.stage} · ${row.leg} · ${row.journey} · blocked by ${row.because}`)}</li>`).join('');
+  const independent = diagnosis.independentFailures.map(op => `<li>${operation(op)}</li>`).join('');
+  return '<h3>Failure diagnosis</h3>'
+    + (diagnosis.first ? `<p><strong>First failed operation</strong> ${operation(diagnosis.first)}</p>` : '')
+    + (skipped ? `<h4>Journeys skipped after a failed prerequisite</h4><ul>${skipped}</ul>` : '')
+    + (independent ? `<h4>Independent failures</h4><ul>${independent}</ul>` : '')
+    + (diagnosis.rerunJourney?.fromCheckout ? `<h4>Rerun from the checkout</h4><pre>${escapeHtml(diagnosis.rerunJourney.fromCheckout)}</pre>` : '')
+    + (diagnosis.rerunJourney ? `<h4>Rerun ${escapeHtml(diagnosis.rerunJourney.journey)} on the prepared leg machine</h4><pre>${escapeHtml(diagnosis.rerunJourney.command)}</pre>` : '');
+}
+
 function machineSection(machine: MachineReport): string {
   const head = `<section class="machine"><h2>${escapeHtml(machine.label)}</h2>`
     + `<p class="muted">${escapeHtml(machine.os)} · driver ${escapeHtml(machine.driver)}${machine.build ? ` · build ${escapeHtml(machine.build)}` : ''}</p>`;
+  const diagnosis = diagnosisSection(machine.diagnosis);
   const verdicts = phaseVerdicts(machine);
   if (!machine.upgrade) {
-    return head
+    return head + diagnosis
       + timingsLine(machine.timings) + archiveScaleSection(machine.archiveScale) + renderLimits(machine.limits?.rows)
       + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
       + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
@@ -509,7 +551,7 @@ function machineSection(machine: MachineReport): string {
       + `<h3>Logs</h3>${fileLinks(machine.logs)}</section>`;
   }
   const { from, step } = machine.upgrade;
-  return head
+  return head + diagnosis
     + `<p>${verdicts.map((phase, index) => `${index + 1}. ${escapeHtml(phase.id === 'upgrade' ? 'The upgrade' : phase.id === 'after' ? 'After the upgrade' : 'Before the upgrade')} ${badge(phase.verdict)}`).join(' &nbsp; ')}</p>`
     + usageTotals(machine)
     + `<h2>1. Before the upgrade: ${escapeHtml(from.label)} ${badge(verdicts[0]!.verdict)}</h2>`
@@ -589,6 +631,7 @@ export function renderHtml(report: ReleaseReport): string {
     + `<p class="muted">Candidate ${escapeHtml(report.candidate.label)}${report.candidate.sha ? ` (${escapeHtml(report.candidate.sha)})` : ''} · run ${escapeHtml(report.runId)} · ${escapeHtml(report.startedAt)} to ${escapeHtml(report.finishedAt)}</p>`
     + `<p class="muted">${harnessLine(report.harness)}</p>`
     + (report.selfTest ? `<p class="muted">Self-test: ${escapeHtml(report.selfTest)}</p>` : '')
+    + (report.settings?.defaultEngineSplit ? '<p class="muted">Candidate default: engine split enabled</p>' : '')
     + (report.settings?.engineSplit ? '<p class="muted">Engine split on: worker.engineSplit was set to true on the install under test</p>' : '')
     + `<h2>Setup failures (${failures.setup.length})</h2>${checkTable(failures.setup)}`
     + `<h2>Candidate failures (${failures.candidate.length})</h2>${checkTable(failures.candidate)}`

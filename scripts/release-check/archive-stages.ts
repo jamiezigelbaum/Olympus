@@ -668,7 +668,7 @@ export async function removeAllStage(host: ArchiveHost, bounds: ClearBounds = {}
 // ---------------------------------------------------------------------------
 // A file that changes while it is imported
 
-export async function changedStage(host: ArchiveHost, args: { seed: string; sizes: readonly number[]; startS?: number; stopS?: number; removeS?: number }): Promise<ChangedObservation> {
+export async function changedStage(host: ArchiveHost, args: { seed: string; sizes: readonly number[]; onIndexing?: () => void; startS?: number; stopS?: number; removeS?: number }): Promise<ChangedObservation> {
   const obs: ChangedObservation = { ok: false, attempts: [], traces: [] };
   try {
     await host.withBrowser(async (session) => {
@@ -697,6 +697,7 @@ export async function changedStage(host: ArchiveHost, args: { seed: string; size
         }
         const caught = await catchImporting(host, fx, (args.startS ?? ARCHIVE_BOUNDS.startS) * 1_000);
         if (caught.state === 'importing') {
+          args.onIndexing?.();
           changeFixture(path, fx);
           obs.attempts.push({ messages: size, outcome: 'changed', detail: `a message was added to the file while ${caught.items ?? '?'} messages were read` });
           break;

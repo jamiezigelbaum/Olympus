@@ -5,6 +5,7 @@ import { describe, expect, test } from 'bun:test';
 import { forbiddenMarkers, PRIVATE_MARKER, SECRET_MARKER } from '../scripts/release-check/fixture.ts';
 import {
   buildReport,
+  diagnoseFailures,
   escapeHtml,
   renderHtml,
   scanReport,
@@ -200,4 +201,18 @@ describe('release-check report scan', () => {
     const privateLeak = buildReport(input({ errors: [`note ${PRIVATE_MARKER}`] }));
     expect(scanReport(privateLeak, markers).some((f) => f.markerId === 'private-marker')).toBe(true);
   });
+});
+
+test('diagnosis keeps the first operation, blocked journeys, independent failures and surgical rerun apart', () => {
+  const first = { id: 'journey.fix-one-item', leg: 'journeys', stage: 'install', at: '2026-11-18T12:00:00Z', journey: 'fix-one-item', step: '5. Make it Private', rerun: 'bun ~/rc/agent.js journeys --only fix-one-item --skip-screens' };
+  const other = { id: 'limits.scripted', leg: 'limits', stage: 'install', at: '2026-11-18T12:01:00Z' };
+  const skipped = [{ journey: 'backup-for-restore', leg: 'restore', because: first.id, stage: 'install' }];
+  const diagnosis = diagnoseFailures([other, first], skipped);
+  expect(diagnosis).toEqual({ first, skippedJourneys: skipped, independentFailures: [other], rerunJourney: { journey: first.journey, command: first.rerun } });
+  const html = renderHtml(buildReport(input({ machines: [{ ...machine([]), diagnosis }] })));
+  expect(html).toContain('First failed operation');
+  expect(html).toContain('5. Make it Private');
+  expect(html).toContain('Independent failures');
+  expect(html).toContain('blocked by journey.fix-one-item');
+  expect(html).toContain(first.rerun);
 });

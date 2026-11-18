@@ -308,7 +308,13 @@ if (verb === 'provision') {
   else if (sub === 'engine-build') say({ ok: true, build: (upgraded ? '1.0.1' : '1.0.0') + '+abc', version: upgraded ? '1.0.1' : '1.0.0', remoteMode: 'relay', relay: {} });
   else if (sub === 'fixture-judge-stats') say({ ok: true, calls: 3, ms: 1 });
   else if (sub === 'preflight') say({ ok: process.env.FAKE_PREFLIGHT_FAIL !== '1', protocol: 'release-check.preflight.v1', detail: 'browser probe failed' });
-  else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000 });
+  else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000, engineSplit: { front: 1, background: 1 } });
+  else if (sub === 'cutover-report') {
+    const stats = { longestMs: 2_000, answers: 1, timeouts: 0, over1s: 0 };
+    const window = { started: 1, ended: 2001, pages: { Home: stats, Sources: stats } };
+    say({ ok: true, summary: { bothBuilds: true, startup: window, qualification: window } });
+  }
+  else if (sub === 'qualify-private') say({ ok: true, ackMs: 20, finishMs: 300, withheldAfterAck: true, withheldAfterRestart: true, ownerChoiceAfterRestart: true });
   else if (sub === 'connect-source') say({ ok: true, message: 'Connected' });
   else if (sub === 'settle') say({ ok: true, settled: true, polls: 2, waitedMs: 1000, snapshot: counts });
   else if (sub === 'mcp-token') say({ ok: true, connection: 'conn-1' });
@@ -376,6 +382,7 @@ beforeEach(() => {
     writeFileSync(join(bundleDir, 'install-linux.sh'), `#!/bin/sh\nOLYMPUS_VERSION=${version}\nOLYMPUS_SHA256=${'0'.repeat(64)}\nOLYMPUS_BYTES=1\nWHATSAPP_BRIDGE_NAME=${bundle === 'candidateDir' ? NEW_BRIDGE : OLD_BRIDGE}\n`);
     if (bundle === 'candidateDir') candidateDir = bundleDir; else baselineDir = bundleDir;
   }
+  realCandidate();
   writeFileSync(join(dir, 'old.json'), JSON.stringify(OLD_POLICY));
   writeFileSync(join(dir, 'new.json'), JSON.stringify(migrated(OLD_POLICY)));
   const countTier = (tier: string): number => FIXTURE_ITEMS.filter((item) => item.tier === tier).length;
@@ -407,6 +414,17 @@ const failedIds = (report: Awaited<ReturnType<typeof runReleaseCheck>>): string[
   const machine = report.machines[0]!;
   return [...(machine.upgrade?.from.checks ?? []), ...(machine.upgrade?.step.checks ?? []), ...machine.checks].filter((c) => c.status === 'fail').map((c) => c.id);
 };
+
+/** A candidate bundle the broken copy can be made from: a real tarball, its installer's pins and SHA256SUMS. */
+function realCandidate(): void {
+  const work = join(dir, 'pack');
+  mkdirSync(join(work, 'package', 'dist'), { recursive: true });
+  writeFileSync(join(work, 'package', 'dist', 'cli.js'), '#!/usr/bin/env bun\nconsole.log("olympus");\n');
+  rmSync(join(candidateDir, 'olympus-1.0.1.tgz'));
+  expect(Bun.spawnSync(['tar', '-czf', join(candidateDir, 'olympus-1.0.1.tgz'), '-C', work, 'package']).exitCode).toBe(0);
+  writeFileSync(join(candidateDir, 'install-linux.sh'), `#!/bin/sh\nOLYMPUS_VERSION=1.0.1\nOLYMPUS_SHA256=${'0'.repeat(64)}\nOLYMPUS_BYTES=1\nWHATSAPP_BRIDGE_NAME=${NEW_BRIDGE}\n`);
+  writeFileSync(join(candidateDir, 'SHA256SUMS'), `${'0'.repeat(64)}  olympus-1.0.1.tgz\n${'0'.repeat(64)}  install-linux.sh\n`);
+}
 
 describe('the upgrade leg end to end, against a scripted machine', () => {
   test('a failed preflight stops before fixture preparation and upgrade, reports skips and measured duration', async () => {
@@ -455,8 +473,14 @@ describe('the upgrade leg end to end, against a scripted machine', () => {
     expect(report.errors.every((e) => e.includes('no agent asked a question'))).toBe(true);
     expect(driverLog()[0]).toContain(`provision --run-id ${opts.runId} --candidate ${baselineDir}`);
     expect(driverLog().indexOf('agent preflight')).toBeLessThan(driverLog().indexOf('agent prepare-source'));
-    const upgrade = driverLog().find((line) => line.startsWith('upgrade'))!;
-    expect(upgrade).toContain(`--machine fake-${opts.runId} --candidate ${candidateDir}`);
+    const upgrades = driverLog().filter(line => line.startsWith('upgrade '));
+    expect(upgrades).toHaveLength(2);
+    expect(upgrades[0]).toContain('upgrade-broken-front');
+    expect(driverLog()).not.toContain('agent engine-split-on');
+    expect(report.settings).toEqual({ defaultEngineSplit: true });
+    expect(checkOf(report, 'upgrade.cutover.startup')?.status).toBe('pass');
+    expect(checkOf(report, 'front.steady')?.status).toBe('pass');
+    expect(upgrades[1]).toContain(`--machine fake-${opts.runId} --candidate ${candidateDir}`);
     // Provision came first, the update after the baseline's suite, and the machine was destroyed at the end.
     const verbs = driverLog().map((line) => line.split(' ')[0]);
     expect(verbs.indexOf('provision')).toBeLessThan(verbs.indexOf('upgrade'));
@@ -561,20 +585,9 @@ describe('the upgrade leg end to end, against a scripted machine', () => {
 });
 
 describe('the update to a split engine, against a scripted machine (ops#151)', () => {
-  /** A candidate bundle the broken copy can be made from: a real tarball, its installer's pins and SHA256SUMS. */
-  function realCandidate(): void {
-    const work = join(dir, 'pack');
-    mkdirSync(join(work, 'package', 'dist'), { recursive: true });
-    writeFileSync(join(work, 'package', 'dist', 'cli.js'), '#!/usr/bin/env bun\nconsole.log("olympus");\n');
-    rmSync(join(candidateDir, 'olympus-1.0.1.tgz'));
-    expect(Bun.spawnSync(['tar', '-czf', join(candidateDir, 'olympus-1.0.1.tgz'), '-C', work, 'package']).exitCode).toBe(0);
-    writeFileSync(join(candidateDir, 'install-linux.sh'), `#!/bin/sh\nOLYMPUS_VERSION=1.0.1\nOLYMPUS_SHA256=${'0'.repeat(64)}\nOLYMPUS_BYTES=1\nWHATSAPP_BRIDGE_NAME=${NEW_BRIDGE}\n`);
-    writeFileSync(join(candidateDir, 'SHA256SUMS'), `${'0'.repeat(64)}  olympus-1.0.1.tgz\n${'0'.repeat(64)}  install-linux.sh\n`);
-  }
   const splitOptions = () => options({ engineSplit: true });
 
   test('the switch goes on over the store set, a candidate whose front cannot start is installed and rolled back, then the real update keeps its front up', async () => {
-    realCandidate();
     const opts = splitOptions();
     const report = await runReleaseCheck(opts);
     expect(failedIds(report)).toEqual([]);
@@ -591,7 +604,6 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
   }, 120_000);
 
   test('a stalled baseline is reported and kept redacted, while Gmail completed by the candidate passes', async () => {
-    realCandidate();
     process.env.FAKE_SEED_STALLED = '1';
     const marker = forbiddenMarkers()[0]!;
     writeFileSync(join(dir, 'diagnostic.txt'), `full diagnostic before update: ${marker.text}`);
@@ -613,7 +625,6 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
   }, 120_000);
 
   test('a seed that settled before the update cannot hide Gmail still importing on the candidate', async () => {
-    realCandidate();
     process.env.FAKE_GMAIL_AFTER = 'importing';
     const report = await runReleaseCheck(splitOptions());
     expect(checkOf(report, 'baseline.front.gmail')?.status).toBe('pass');
@@ -622,7 +633,6 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
   }, 120_000);
 
   test('an installer that accepts a front that cannot start fails the forced-failure checks; a lost store file fails the store count', async () => {
-    realCandidate();
     process.env.FAKE_BROKEN_ACCEPTED = '1';
     let report = await runReleaseCheck(splitOptions());
     expect(checkOf(report, 'upgrade.forced-failure.installer')?.status).toBe('fail');
@@ -638,6 +648,7 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
   }, 240_000);
 
   test('a candidate the broken copy cannot be made from fails the forced-failure checks instead of reading the untouched release as rolled back', async () => {
+    writeFileSync(join(candidateDir, 'olympus-1.0.1.tgz'), 'invalid tarball');
     const report = await runReleaseCheck(splitOptions());
     for (const id of ['upgrade.forced-failure.installer', 'upgrade.forced-failure.rollback', 'upgrade.forced-failure.stores']) {
       expect(checkOf(report, id)?.status).toBe('fail');
@@ -647,7 +658,6 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
   }, 120_000);
 
   test('a driver error before the broken front started is not read as the installer\'s rejection', async () => {
-    realCandidate();
     process.env.FAKE_DRIVER_ERROR = '1';
     const report = await runReleaseCheck(splitOptions());
     for (const id of ['upgrade.forced-failure.installer', 'upgrade.forced-failure.rollback', 'upgrade.forced-failure.stores']) {
@@ -657,7 +667,6 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
   }, 120_000);
 
   test('a front that crashes after the real update fails front.steady', async () => {
-    realCandidate();
     process.env.FAKE_FRONT_CRASH = '1';
     const report = await runReleaseCheck(splitOptions());
     expect(checkOf(report, 'front.steady')?.status).toBe('fail');

@@ -215,7 +215,7 @@ describe('the archive-import leg in a run', () => {
     expect(verbs()).toContain('archive-scale-cleanup');
     for (const format of ['mbox', 'roam', 'reflect-json', 'reflect-markdown', 'readwise']) expect(failedIds(report)).toContain(`archive.scale.${format}.ran`);
     expect(failedIds(report)).toContain('archive.scale.cleanup');
-    expect(report.settings).toEqual({ engineSplit: true, archiveScale: true });
+    expect(report.settings).toEqual({ defaultEngineSplit: true, archiveScale: true });
     expect(existsSync(join(dir, 'destroyed'))).toBe(true);
   }, 120_000);
 
@@ -233,9 +233,11 @@ describe('the archive-import leg in a run', () => {
     expect(failedIds(report)).toContain('front.steady');
   }, 120_000);
 
-  test('without the split, no front-restart stage', async () => {
-    await runReleaseCheck(options({ skipRestore: true }));
-    expect(agentLog().map((line) => line.split(' ')[0])).not.toContain('front-steady');
+  test('the default run checks front roles and runs front steady without issuing the split override', async () => {
+    const report = await runReleaseCheck(options({ skipRestore: true }));
+    expect(agentLog().map((line) => line.split(' ')[0])).toContain('front-steady');
+    expect(report.settings).toEqual({ defaultEngineSplit: true });
+    expect(failedIds(report)).toContain('engine.split');
   }, 120_000);
 
   test('--skip-archive leaves the leg out: no archive verb is called, nothing is checked', async () => {
