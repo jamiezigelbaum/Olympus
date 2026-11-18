@@ -2108,6 +2108,10 @@ export class TierLedger {
   // A missing or moving parent still needs its Secret override checked, on
   // the same read connection as the rest of an asynchronous parent judgment.
   *itemIsSecretSteps(identity: TierLedgerIdentity): Generator<LedgerRead, boolean, unknown> {
+    return yield* TierLedger.itemIsSecretSteps(identity);
+  }
+
+  static *itemIsSecretSteps(identity: TierLedgerIdentity): Generator<LedgerRead, boolean, unknown> {
     const row = (yield { sql: `SELECT override_json FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
       params: idParams(identity), mode: 'get' }) as { override_json: string } | null;
@@ -2689,6 +2693,13 @@ export class TierLedger {
     identities: readonly TierLedgerIdentity[],
     options: { personalFirst?: boolean } = {},
   ): Generator<LedgerRead, TierVisibilityReads, unknown> {
+    return yield* TierLedger.visibilityReadSteps(identities, options);
+  }
+
+  static *visibilityReadSteps(
+    identities: readonly TierLedgerIdentity[],
+    options: { personalFirst?: boolean } = {},
+  ): Generator<LedgerRead, TierVisibilityReads, unknown> {
     const list = uniqueIdentities(identities);
     const copies = yield* copiesSteps(list);
     const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
@@ -3032,6 +3043,12 @@ export class TierLedger {
   // Release and parent checks can await these reads on the pool; a cold ledger
   // must not make the Ask read every governed item on the request thread.
   *itemStatesSteps(
+    identities: readonly TierLedgerIdentity[],
+  ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>, unknown> {
+    return yield* TierLedger.itemStatesSteps(identities);
+  }
+
+  static *itemStatesSteps(
     identities: readonly TierLedgerIdentity[],
   ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>, unknown> {
     const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>();

@@ -350,6 +350,14 @@ export interface ChildVisibilityStore {
 export interface ChildVisibilityLane {
   ledger(): TierLedger | undefined;
   stores(): readonly ChildVisibilityStore[];
+  /** Existing stores, without any lazy open on the request thread. */
+  mountedStores?(): readonly ChildVisibilityStore[];
+}
+
+/** Ledger effects for a parent judgment that uses a caller's pooled reads. */
+export interface PooledParentLedger {
+  itemStates(identities: readonly TierLedgerIdentity[]): ReturnType<typeof itemStatesOffThread>;
+  itemIsSecret(identity: TierLedgerIdentity): Promise<boolean>;
 }
 
 // An awaited judgment spans store and ledger reads. Prove nothing changed
@@ -392,17 +400,18 @@ export function parentVerdicts(lane: ChildVisibilityLane, parents: readonly Pare
   return visibilityHere(parentVerdictsSteps(lane, parents));
 }
 
-export function* parentVerdictsSteps(lane: ChildVisibilityLane, parents: readonly ParentRef[]): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {
+export function* parentVerdictsSteps(lane: ChildVisibilityLane, parents: readonly ParentRef[], pooledLedger?: PooledParentLedger | null): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {
   const unique = new Map<string, ParentRef>();
   for (const parent of parents) unique.set(parentKey(parent), parent);
   try {
-    return yield* judge(lane, [...unique.values()], 0);
-  } catch {
+    return yield* judge(lane, [...unique.values()], 0, pooledLedger);
+  } catch (error) {
+    if (pooledLedger !== undefined) throw error;
     return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
   }
 }
 
-function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: number): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {
+function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: number, pooledLedger?: PooledParentLedger | null): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {
   const verdicts = new Map<string, ParentVerdict>();
   if (parents.length === 0) return verdicts;
   if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
@@ -420,16 +429,21 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
     }
   }
 
-  const ledger = lane.ledger();
+  const ledger = pooledLedger === undefined ? lane.ledger() : undefined;
   // One read of the ledger for every parent a store knows, so they are judged against one snapshot.
   const identities = new Map<string, TierLedgerIdentity>();
   for (const list of rows.values()) {
     for (const row of list) identities.set(tierLedgerIdentityKey(row.identity), row.identity);
   }
-  const states = ledger && identities.size > 0 ? yield* visibilityRead(
-    () => memoVisibilityItemsHere(ledger, 'states', () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, missing => ledger.itemStatesForMany(missing)),
-    () => itemStatesOffThread(ledger, [...identities.values()]),
-  ) : undefined;
+  const states = identities.size === 0 ? undefined
+    : pooledLedger ? yield* visibilityRead(pooledOnly, () => pooledLedger.itemStates([...identities.values()]))
+      : ledger ? yield* visibilityRead(
+        () => memoVisibilityItemsHere(ledger, 'states', () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, missing => ledger.itemStatesForMany(missing)),
+        () => itemStatesOffThread(ledger, [...identities.values()]),
+      ) : undefined;
+  const secretSteps = (identity: TierLedgerIdentity) => pooledLedger
+    ? visibilityRead(pooledOnly, () => pooledLedger.itemIsSecret(identity))
+    : ledger ? itemSecretSteps(ledger, identity) : undefined;
 
   const climbing = new Map<string, ParentRef>();
   for (const parent of parents) {
@@ -453,7 +467,8 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
       // Secret from before rows were kept. It is not present (nothing says it is listed), and
       // it is not gone either (a classification alone is no deletion): hidden, nothing removed,
       // until its next listing writes the row.
-      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
+      const secret = parent.identity && secretSteps(parent.identity);
+      if (secret && (yield* secret)) {
         verdicts.set(key, HIDDEN);
       } else {
         verdicts.set(key, { visible: false, gone: true });
@@ -461,7 +476,7 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
       continue;
     }
     let visible: boolean;
-    if (!ledger) {
+    if (!ledger && !pooledLedger) {
       visible = active.length > 0;
     } else {
       const state = states?.get(tierLedgerIdentityKey(identity));
@@ -474,7 +489,8 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
       // still active) is present, and its own parent still decides its children like any other
       // item's. Once every row is a tombstone and none is a location, the provider deleted it:
       // the ledger's record of what it was says nothing about whether it is there.
-      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity))) visible = true;
+      const secret = !visible && active.length > 0 && secretSteps(identity);
+      if (secret && (yield* secret)) visible = true;
     }
     if (visible) {
       const above = active.find((row) => row.grandparentLocalItemId !== undefined);
@@ -487,12 +503,16 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
 
   // A parent that is itself a child is visible only while its own parent is.
   if (climbing.size > 0) {
-    const above = yield* judge(lane, [...climbing.values()], depth + 1);
+    const above = yield* judge(lane, [...climbing.values()], depth + 1, pooledLedger);
     for (const [key, grandparent] of climbing) {
       if (above.get(parentKey(grandparent))?.visible !== true) verdicts.set(key, HIDDEN);
     }
   }
   return verdicts;
+}
+
+export function pooledOnly(): never {
+  throw new Error('This visibility read requires the read pool');
 }
 
 /**
@@ -629,10 +649,10 @@ export function childrenWithHiddenParents(lane: ChildVisibilityLane, children: r
   return visibilityHere(childrenWithHiddenParentsSteps(lane, children));
 }
 
-function* childrenWithHiddenParentsSteps(lane: ChildVisibilityLane, children: readonly ChildWithParent[]): Generator<VisibilityRead, Set<string>, unknown> {
+function* childrenWithHiddenParentsSteps(lane: ChildVisibilityLane, children: readonly ChildWithParent[], pooledLedger?: PooledParentLedger | null): Generator<VisibilityRead, Set<string>, unknown> {
   const hidden = new Set<string>();
   if (children.length === 0) return hidden;
-  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
+  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent), pooledLedger);
   for (const child of children) {
     if (verdicts.get(parentKey(child.parent))?.visible !== true) hidden.add(child.key);
   }
@@ -671,13 +691,14 @@ export function hiddenChildKeys(lane: ChildVisibilityLane, probes: readonly Chil
   return visibilityHere(hiddenChildKeysSteps(lane, probes));
 }
 
-export function* hiddenChildKeysSteps(lane: ChildVisibilityLane, probes: readonly ChildProbe[]): Generator<VisibilityRead, Set<string>, unknown> {
+export function* hiddenChildKeysSteps(lane: ChildVisibilityLane, probes: readonly ChildProbe[], pooledLedger?: PooledParentLedger | null): Generator<VisibilityRead, Set<string>, unknown> {
   if (probes.length === 0) return new Set();
   let links: ChildWithParent[];
   try {
     links = yield* childLinksSteps(lane, probes);
-  } catch {
+  } catch (error) {
+    if (pooledLedger !== undefined) throw error;
     return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
   }
-  return yield* childrenWithHiddenParentsSteps(lane, links);
+  return yield* childrenWithHiddenParentsSteps(lane, links, pooledLedger);
 }

@@ -227,7 +227,7 @@ export interface SourceIndexCorpusSearchAdapter {
    * afterwards is reported as usual (semantic_lane_skipped).
    */
   prepareSemantic?: (query: string, budgetMs: number) => Promise<void>;
-  hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability;
+  hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability | Promise<SourceIndexHybridAvailability>;
   /**
    * The corpus's nearest semantic neighbours of the query, nearest first,
    * whatever their similarity: no relevance bar vets them, so they are never
@@ -519,15 +519,15 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   // Each corpus's retrieval state, read once (its hybridAvailability is a
   // store read): preparation uses it to decide whether a semantic lane is
   // worth warming, and the lane's honesty check below uses the same answer.
-  const retrievalStates = new Map(searchableCorpora.map((corpus) => [
+  const retrievalStates = new Map(await Promise.all(searchableCorpora.map(async (corpus) => [
     corpus.corpusId,
-    retrievalStateForAdapter(options.adapters[corpus.corpusId]!, {
+    await retrievalStateForAdapter(options.adapters[corpus.corpusId]!, {
       query: request.query,
       maxResults: request.maxResults,
       corpus,
       context: request.context,
     }),
-  ] as const));
+  ] as const)));
   // Preparation never sees corpus content and owns its own bounded timeout.
   // A cold local model must not spend the store's lock/vector deadline.
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
@@ -1050,13 +1050,13 @@ function semanticLaneDegradation(
   };
 }
 
-function retrievalStateForAdapter(
+async function retrievalStateForAdapter(
   adapter: SourceIndexCorpusSearchAdapter,
   request: SourceIndexCorpusSearchRequest,
-): { state: SourceIndexRetrievalState; hybridServable: boolean } {
+): Promise<{ state: SourceIndexRetrievalState; hybridServable: boolean }> {
   let hybridAvailability: SourceIndexHybridAvailability | undefined;
   try {
-    hybridAvailability = adapter.hybridAvailability?.(request);
+    hybridAvailability = await adapter.hybridAvailability?.(request);
   } catch {
     hybridAvailability = { servable: false, reason: 'hybrid_capability_unreported' };
   }
