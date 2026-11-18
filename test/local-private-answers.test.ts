@@ -1603,6 +1603,29 @@ describe('the Private answers page', () => {
     expect(card.querySelector('.pameta')!.textContent).toContain('Left out: Gmail.');
   });
 
+  test('the in-flight Ask and Inbox use startup progress from the existing poll', async () => {
+    let startup: { stores_done: number; stores_total: number } | undefined = { stores_done: 0, stores_total: 2 };
+    const { promise, resolve } = Promise.withResolvers<{ status: number; body: unknown }>();
+    const page = renderAndRun(body => body.action === 'ask' ? promise : { status: 200, body: {
+      ok: true, startup, questions: [{ id: 'wq_1', question: 'Where is the lease?', state: 'answering', askedAt: '2026-10-01T01:00:00Z' }],
+    } });
+    await page.poll();
+    expect(page.document.querySelector('[data-pa-question] [data-pa-startup]')?.textContent).toContain('0 of 2 sources ready');
+    (page.document.querySelector('textarea') as unknown as { value: string }).value = 'Where is the lease?';
+    page.document.querySelector('form[data-pa-ask]')!.dispatchEvent(new page.document.defaultView!.Event('submit', { cancelable: true }));
+    const notice = () => page.document.querySelector('.pamain > [data-pa-out] [data-pa-startup]');
+    expect(notice()?.textContent).toContain('0 of 2 sources ready');
+    startup = { stores_done: 1, stores_total: 2 };
+    await page.poll();
+    expect(notice()?.textContent).toContain('1 of 2 sources ready');
+    startup = undefined;
+    await page.poll();
+    expect(notice()).toBeNull();
+    expect(page.document.querySelector('[data-pa-question] [data-pa-startup]')).toBeNull();
+    resolve({ status: 200, body: { ok: true, status: 'answered', answer: 'The lease is in Dropbox.' } });
+    await waitFor(() => page.document.querySelector('.pamain > [data-pa-out] .paanswer') !== null);
+  });
+
   test('Ask with an empty question sends nothing and says why beside the button', async () => {
     const page = renderAndRun(() => ({ status: 200, body: { ok: true, status: 'answered', answer: 'never' } }));
     page.document.querySelector('form[data-pa-ask]')!.dispatchEvent(new page.document.defaultView!.Event('submit', { cancelable: true }));

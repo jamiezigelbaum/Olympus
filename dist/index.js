@@ -7519,6 +7519,9 @@ var init_memory_counters = __esm(() => {
   payloadScope = new AsyncLocalStorage;
 });
 
+// src/core/startup-progress.ts
+var init_startup_progress = () => {};
+
 // src/core/secret-patterns.ts
 var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
 var init_secret_patterns = __esm(() => {
@@ -7753,6 +7756,7 @@ function noteSourceAnswerProgress(stage) {
 var SOURCE_ANSWER_JOB_TTL_MS, SOURCE_ANSWER_JOB_IDLE_MS, SOURCE_ANSWER_MAX_RESULT_BYTES, progressSink;
 var init_source_answer_jobs = __esm(() => {
   init_operation_error();
+  init_startup_progress();
   init_opsec();
   init_release_manifest();
   SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
@@ -9239,6 +9243,7 @@ var init_remote_result = __esm(() => {
   init_release_manifest();
   init_secret_location_note();
   init_follow_up();
+  init_startup_progress();
   MAX_ANSWER = 64 * 1024;
   MAX_SENT = 16 * 1024;
   JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
@@ -9449,7 +9454,17 @@ var init_remote_result = __esm(() => {
       job_id: { type: "string", pattern: JOB_ID.source },
       elapsed_ms: { type: "integer", minimum: 0 },
       next_tool: { const: "source_answer_result" },
-      message: { type: "string" }
+      message: { type: "string" },
+      startup: {
+        type: "object",
+        additionalProperties: false,
+        required: ["stores_done", "stores_total"],
+        properties: {
+          stores_done: { type: "integer", minimum: 0 },
+          stores_total: { type: "integer", minimum: 1 },
+          estimated_ready_at: { type: "string", format: "date-time" }
+        }
+      }
     }
   };
   CITATION_SCHEMA = {
@@ -18219,6 +18234,7 @@ var init_evidence_pack = __esm(() => {
   init_keyword_context();
   init_release_manifest();
   init_partial_search();
+  init_startup_progress();
   init_evidence_reranker();
   init_limit_stops();
   init_source_corpus_registry();

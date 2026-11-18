@@ -138,6 +138,7 @@ export interface ChatGptSurfaceOptions {
 
 export interface PrivateMatchProbeResult {
   secretMatch?: true;
+  searchedDuringStartup?: true;
   count: number;
   evidence: readonly PrivateEvidenceItem[];
 }
@@ -717,7 +718,10 @@ function normalizeProbe(value: boolean | number | PrivateMatchProbeResult): Priv
   if (value === true) return { count: 1, evidence: [] };
   if (typeof value === 'number') return { count: Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0, evidence: [] };
   if (value && typeof value === 'object' && Number.isFinite(value.count)) {
-    return { count: Math.max(0, Math.floor(value.count)), evidence: Array.isArray(value.evidence) ? value.evidence : [], ...(value.secretMatch === true ? { secretMatch: true } : {}) };
+    return { count: Math.max(0, Math.floor(value.count)), evidence: Array.isArray(value.evidence) ? value.evidence : [],
+      ...(value.secretMatch === true ? { secretMatch: true } : {}),
+      ...(value.searchedDuringStartup === true ? { searchedDuringStartup: true } : {}),
+    };
   }
   return { count: 0, evidence: [] };
 }
@@ -843,8 +847,8 @@ function beginCheckingPrivateAnswer(pending: PendingPrivateMatch, options: ChatG
       refresh: async (signal, originalMatches) => {
         if (!first) return refresh(signal, originalMatches);
         first = false;
-        const found = normalizeProbe(await result);
-        return Object.assign([...found.evidence], found.secretMatch ? { secretMatch: true as const } : {});
+        const { evidence, count: _count, ...coverage } = normalizeProbe(await result);
+        return Object.assign([...evidence], coverage);
       },
       checking: { waiting: () => late.waiting },
       detail,
@@ -913,9 +917,9 @@ function privateRefresh(
   options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog' | 'appClient'>,
 ): PrivateEvidenceRefresh {
   return async (_signal, originalMatches) => {
-    const current = normalizeProbe(await probeWithinDeadline(
+    const { evidence, count: _count, ...coverage } = normalizeProbe(await probeWithinDeadline(
       (query, ctx) => probe(query, ctx, originalMatches), question, context(), options, 'refresh'));
-    return Object.assign([...current.evidence], current.secretMatch ? { secretMatch: true as const } : {});
+    return Object.assign([...evidence], coverage);
   };
 }
 
@@ -931,6 +935,7 @@ function beginPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfac
       question,
       count: match.count,
       evidence: match.evidence,
+      ...(match.searchedDuringStartup ? { searchedDuringStartup: true } : {}),
       preserveWaiting: match.secretMatch === true,
       refresh,
       ...(match.secretMatch && match.evidence.length === 0 ? { secretMatch: async () => {

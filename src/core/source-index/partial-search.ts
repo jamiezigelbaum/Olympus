@@ -28,6 +28,7 @@ export function laneTimeoutGap(corpusId: string): string {
 }
 
 export const KEYWORD_PREPARATION_INCOMPLETE = 'keyword_preparation_incomplete';
+export const STARTUP_SEARCH_GAP = 'Olympus was still starting when you asked, so the search took longer.';
 const KEYWORDS_PREFIX = 'Keyword preparation unfinished for ';
 export function keywordPreparationGap(corpusId: string): string {
   return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;

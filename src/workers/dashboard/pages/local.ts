@@ -127,7 +127,7 @@ export interface DashboardPageOptions {
   privateAnswers?: {
     available: boolean;
     destinations?: import('../../engine/runtime/venice-inbox-answer.ts').AskDestinationStates | undefined;
-    waiting?: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean };
+    waiting?: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean; startup?: import('../../../core/startup-progress.ts').StartupProgress };
   };
 }
 

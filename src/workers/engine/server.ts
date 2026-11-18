@@ -484,6 +484,7 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { controlPathHeadroom, ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
+import { beginStartupProgress } from '../../core/startup-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { frontLoopSqlHealth, watchFrontLoopSql } from '../../core/front-loop-sql-guard.ts';
@@ -2365,16 +2366,24 @@ export async function main(): Promise<void> {
   // background saves each set after that build (or at once without a front),
   // so a future front can read a saved set inside the ledger's feed.
   let visibilityKeeping = false;
-  async function keepVisibilityCurrent(when: string): Promise<void> {
+  async function keepVisibilityCurrent(when: 'before ready' | 'after start' | 'refresh'): Promise<void> {
     if (visibilityKeeping || sourceRuntimeClosed) return;
     visibilityKeeping = true;
     const started = performance.now();
+    const stores = [...connectorStores];
+    const progress = when === 'refresh' ? undefined : beginStartupProgress(stores.map(store => store.dbPath));
     try {
-      for (const store of [...connectorStores]) {
-        try { await store.keepVisibilityCurrentInTurns(); }
-        catch (error) { console.warn(`[olympus] ${engineRole}: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`); }
+      for (const [index, store] of stores.entries()) {
+        try {
+          await store.keepVisibilityCurrentInTurns();
+        } catch (error) {
+          console.warn(`[olympus] ${engineRole}: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`);
+          continue;
+        }
+        progress?.storeReady(index);
       }
     } finally {
+      progress?.finish();
       visibilityKeeping = false;
     }
     if (when !== 'refresh') {
@@ -6121,7 +6130,8 @@ export async function main(): Promise<void> {
   const chatgptPrivateMatchProbe = sourceAnswerLanes
     ? async (question: string, _ctx: import('../../core/operations.ts').OperationContext, originalMatches?: readonly Readonly<Record<string, unknown>>[]) => {
         const result = await withStoreReadPriority(() => ownerQuestions.run(() => searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) })));
-        return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
+        const { matched, candidates, ...coverage } = result;
+        return { count: matched, evidence: candidates as unknown as readonly Record<string, unknown>[], ...coverage };
       }
     : undefined;
   // The dashboard's install progress follows the built-in model's download.

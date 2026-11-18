@@ -42,7 +42,7 @@ import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { analystEvidenceFormat, analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal, withPromptBudget, type AnalystEvidenceFormat } from '../../core/analyst.ts';
-import { timedOutCoverageNotes } from '../../core/source-index/partial-search.ts';
+import { STARTUP_SEARCH_GAP, timedOutCoverageNotes } from '../../core/source-index/partial-search.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
@@ -368,6 +368,7 @@ export function createAnalystSourceIndexAnswerHandler(
     request: SourceIndexAnswerRequest,
     local: Parameters<SourceIndexAnswerHandler['answer']>[1] | undefined,
     readsDone: boolean,
+    searchedDuringStartup = false,
   ): Promise<SourceIndexAnswerResult> => {
       const reranker = typeof options.reranker === 'function' ? options.reranker() : options.reranker;
       const startedAt = Date.now();
@@ -492,7 +493,8 @@ export function createAnalystSourceIndexAnswerHandler(
         activeLanes: AnalystAnswerLanes,
         attempt: 'keyword' | 'hybrid' | 'selected' | 'self_heal_rebuild',
         build: { excludeSecureSensitivity?: true } = {},
-      ) => observeSourceAnswerRetrievalAttempt(attempt, () => buildEvidencePackDetailed({
+      ) => observeSourceAnswerRetrievalAttempt(attempt, async () => {
+        const detail = await buildEvidencePackDetailed({
           question,
           ...build,
           ...(request.query?.trim() ? { searchQuery: request.query.trim() } : {}),
@@ -517,7 +519,15 @@ export function createAnalystSourceIndexAnswerHandler(
           ...(activeLanes.secretLocations ? { secretLocations: activeLanes.secretLocations } : {}),
           ...(activeLanes.classificationCoverage ? { classificationCoverage: activeLanes.classificationCoverage } : {}),
           ...(activeLanes.parentLabels ? { parentLabels: activeLanes.parentLabels } : {}),
-        }));
+        });
+        const { pack } = detail;
+        if (pack.coverage.extractionGaps.includes(STARTUP_SEARCH_GAP)) searchedDuringStartup = true;
+        else if (searchedDuringStartup) return {
+          ...detail,
+          pack: { ...pack, coverage: { ...pack.coverage, extractionGaps: [...pack.coverage.extractionGaps, STARTUP_SEARCH_GAP] } },
+        };
+        return detail;
+      });
       const initialAttempt = request.selected_items?.length
         ? 'selected'
         : retrievalRequest.retrieval_mode ?? 'hybrid';
@@ -569,7 +579,7 @@ export function createAnalystSourceIndexAnswerHandler(
       if (options.requestOnDemandRead && !readsDone) {
         const reads = await readNamesOnlyMatches(detail, options.requestOnDemandRead,
           options.onDemandReadWaitMs ?? DEFAULT_ON_DEMAND_READ_WAIT_MS);
-        if (reads.started > 0 && reads.pending === 0) return answerOnce(request, local, true);
+        if (reads.started > 0 && reads.pending === 0) return answerOnce(request, local, true, searchedDuringStartup);
         stillReading = reads.pending;
         if (stillReading > 0) {
           const corpora = [...new Set([...(detail.namesOnlyCandidateIndexes ?? []), ...(detail.contentPrivateCandidateIndexes ?? [])]
@@ -2464,9 +2474,11 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
     && nonPublicPack
     && facts.length === 0
     && originalDraftAnswer.trim().length > 0;
+  const startupNotes = input.detail.pack.coverage.extractionGaps.includes(STARTUP_SEARCH_GAP) ? [STARTUP_SEARCH_GAP] : [];
   const releasedUnanswered = appendUniqueCoverageNotes(
     sanitizeReleasedCoverageNotes(input.result.unanswered, input.detail, nonPublicPack),
     [
+      ...startupNotes,
       ...(input.onDemandNotes ?? []),
       ...unreadableMatchedGaps,
       ...(input.result.unanswered.length === 0 && releasedEvidenceCount === 0
@@ -2491,7 +2503,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
   );
   const safeUnsupportedAnswer = WITHHELD_ANSWERS.noAnswerInText;
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer(input.result);
-  const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...(input.onDemandNotes ?? [])];
+  const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...startupNotes, ...(input.onDemandNotes ?? [])];
   const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
   const finalDraftAnswer = composeReleasedAnswer(
     unsupportedNoContent ? safeUnsupportedDraft : plainTrustWords(input.result.answer),
@@ -2733,7 +2745,7 @@ function sanitizeReleasedCoverageNotes(
   if (unanswered.length === 0) return [];
   if (!nonPublicPack) return [...unanswered];
   const categories = new Set<string>(['coverage']);
-  if (detail.pack.coverage.extractionGaps.some((gap) => gap.trim().length > 0)) {
+  if (detail.pack.coverage.extractionGaps.some((gap) => gap !== STARTUP_SEARCH_GAP && gap.trim().length > 0)) {
     categories.add('extraction/readability');
   }
   if ((detail.corpusReadabilityGaps ?? []).some(
@@ -2750,7 +2762,7 @@ function sanitizeReleasedCoverageNotes(
 }
 
 function safeUnsupportedCoverageGaps(pack: EvidencePack, nonPublicPack: boolean): string[] {
-  const gaps = pack.coverage.extractionGaps.filter((gap) => gap.trim().length > 0);
+  const gaps = pack.coverage.extractionGaps.filter((gap) => gap !== STARTUP_SEARCH_GAP && gap.trim().length > 0);
   if (gaps.length === 0) {
     // The safe-unsupported release factually released zero citable evidence.
     // Carry a mechanical, corpus-ids-only coverage note so the honest
@@ -3027,7 +3039,7 @@ function unreadableMatchedReleaseInputs(detail: EvidencePackBuildDetail, release
 }
 
 function unreadableMatchedCandidateIndexes(detail: EvidencePackBuildDetail): number[] {
-  if (detail.pack.coverage.extractionGaps.length === 0) return [];
+  if (!detail.pack.coverage.extractionGaps.some(gap => gap !== STARTUP_SEARCH_GAP)) return [];
   // Contents tiered Private are not unreadable: they are answered from their
   // Private copy, and a name-only copy adds nothing as evidence.
   const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
@@ -3130,6 +3142,7 @@ export interface ReleasedEvidenceCoverage {
   // list. The answer path already names them (#1305); the search tool reads
   // this.
   cut_short?: string[];
+  searched_during_startup?: true;
   // Breadth per family beyond the bounded selection (counts only).
   matches: Array<{ family: string; matched_items: number; in_evidence: number; at_least: boolean }>;
 }
@@ -3320,6 +3333,7 @@ export async function searchReleasedEvidence(input: {
       partially_read_items: (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.partialDocuments, 0),
       unclassified_items: (detail.classificationCoverage ?? []).reduce((sum, note) => sum + note.pendingClassificationItems, 0),
       ...(cutShort.length > 0 ? { cut_short: cutShort } : {}),
+      ...(coverage.extractionGaps.includes(STARTUP_SEARCH_GAP) ? { searched_during_startup: true } : {}),
       matches: (coverage.matchCounts ?? []).map((count) => ({
         family: count.family,
         matched_items: count.matchedItems,
@@ -3341,6 +3355,7 @@ export async function searchReleasedEvidence(input: {
 export interface PrivateEvidenceResult {
   // Location-only Secret match; no metadata leaves this function.
   secretMatch?: true;
+  searchedDuringStartup?: true;
   // Private items the bounded search matched, readable or not.
   matched: number;
   // Every matched Private candidate, with whatever passages its store could
@@ -3390,6 +3405,7 @@ export async function searchPrivateEvidence(input: {
   };
   const lanes = input.lanes(request, 'private_search');
   let secretMatch = false;
+  let searchedDuringStartup = false;
   const build = async (adapters: SourceIndexRouterAdapterMap): Promise<PrivateEvidenceCandidate[]> => {
     const detail = await buildEvidencePackDetailed({
       question,
@@ -3407,6 +3423,7 @@ export async function searchPrivateEvidence(input: {
       ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
     });
     secretMatch ||= (detail.secretLocations?.length ?? 0) > 0;
+    searchedDuringStartup ||= detail.pack.coverage.extractionGaps.includes(STARTUP_SEARCH_GAP);
     assertEvidencePackModelEligible(detail.pack);
     return detail.pack.candidates
       .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
@@ -3453,13 +3470,13 @@ export async function searchPrivateEvidence(input: {
   matches.push(...lowered);
   // Only a question that matched gets neighbours: the count (what leaves this
   // computer) and whether there is a panel at all stay the matches' alone.
-  if (matches.length === 0) return { matched: secretMatch ? 1 : 0, candidates: [], ...(secretMatch ? { secretMatch: true } : {}) };
+  if (matches.length === 0) return { matched: secretMatch ? 1 : 0, candidates: [], ...(secretMatch ? { secretMatch: true } : {}), ...(searchedDuringStartup ? { searchedDuringStartup: true } : {}) };
   // Neighbour hydration selects passages too. Keep it in the same cached-only
   // scope, so a match never queues a translation behind a running analysis.
   const neighbours = matches.some(candidate => candidate.trustDomain === 'secure_local')
     ? await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches))
     : [];
-  return { matched: matches.length, candidates: [...matches, ...neighbours], ...(secretMatch ? { secretMatch: true as const } : {}) };
+  return { matched: matches.length, candidates: [...matches, ...neighbours], ...(secretMatch ? { secretMatch: true } : {}), ...(searchedDuringStartup ? { searchedDuringStartup: true } : {}) };
   });
 }
 

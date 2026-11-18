@@ -22,6 +22,7 @@ import { PRIVATE_QUESTION_META_KEY } from '../../chatgpt/private-question-contra
 import { DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY } from '../vocabulary.ts';
 import { CHATGPT_PRIVATE_ANSWER_CSS, CHATGPT_PRIVATE_ANSWER_JOB_ID, CHATGPT_PRIVATE_ANSWER_KEY_STORE } from './private-answer.ts';
 import { chatgptMarkdownRender } from './markdown.ts';
+import { startupWaitingLine } from '../../../core/startup-progress.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -56,7 +57,7 @@ export const CHATGPT_PRIVATE_QUESTION_REQUEST_TIMEOUT_MS = 20_000;
 /** Its own store: a question's key must never be confused with an answer's. */
 export const CHATGPT_PRIVATE_QUESTION_KEY_STORE = { ...CHATGPT_PRIVATE_ANSWER_KEY_STORE, database: 'olympus-private-question' };
 
-export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConfig): void {
+export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConfig, startupLine: typeof startupWaitingLine): void {
   const doc = document;
   const root = doc.getElementById('panel') as HTMLElement;
   const T = config.copy;
@@ -70,6 +71,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
   let info: Meta | null = null;
   // compose | sending | waiting | done | error | opening | gone
   let phase = 'compose';
+  let startupLineText = '';
   let result: Result | null = null;
   let errorText = '';
   let canRetry = false;
@@ -448,6 +450,7 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
     const mine = ++run;
     const jobId = info.jobId;
     phase = 'sending';
+    startupLineText = '';
     errorText = '';
     render();
     try {
@@ -512,6 +515,11 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
         }
         if (mine !== run) return;
         if (response.status === 202) {
+          const nextLine = startupLine(body?.startup);
+          if (nextLine !== startupLineText) {
+            startupLineText = nextLine;
+            render();
+          }
           const retry = parseInt(response.headers.get('retry-after') || '', 10);
           await wait(Math.min(Math.max(1, isFinite(retry) ? retry : 5), 30) * config.secondMs);
           continue;
@@ -747,7 +755,11 @@ export function chatgptPrivateQuestionProgram(config: ChatGptPrivateQuestionConf
       if (phase === 'compose' || (phase === 'error' && canRetry)) root.appendChild(composeView(info));
       else if (phase === 'sending') root.appendChild(workingView(T.sending));
       else if (phase === 'opening') root.appendChild(workingView(T.opening));
-      else if (phase === 'waiting') root.appendChild(workingView(T.waiting));
+      else if (phase === 'waiting') {
+        const view = workingView(T.waiting);
+        if (startupLineText) view.appendChild(el('p', 'sub', startupLineText));
+        root.appendChild(view);
+      }
       else if (phase === 'done' && result) root.appendChild(doneView(result));
       else if (phase === 'gone') {
         const card = el('div', 'card');
@@ -881,7 +893,7 @@ export function chatgptPrivateQuestionPageHtml(options: ChatGptPrivateQuestionPa
     '</head>',
     '<body>',
     '<div id="panel"></div>',
-    `<script>window.olympusMarkdown=(${chatgptMarkdownRender.toString()});(${chatgptPrivateQuestionProgram.toString()})(${scriptJson(config)});</script>`,
+    `<script>window.olympusMarkdown=(${chatgptMarkdownRender.toString()});(${chatgptPrivateQuestionProgram.toString()})(${scriptJson(config)}, ${startupWaitingLine.toString()});</script>`,
     '</body>',
     '</html>',
     '',

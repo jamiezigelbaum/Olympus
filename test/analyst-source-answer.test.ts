@@ -1,4 +1,6 @@
 import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
+import { beginStartupProgress } from '../src/core/startup-progress.ts';
+import { STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
 // Lane B: the analyst-backed source_answer handler. Proves the contracts path
 // (route -> pack -> Analyst -> release gate) produces the existing Castor-safe
 // wire shape with honest audits, and that the trust postures hold: secure_local
@@ -3802,4 +3804,26 @@ test('unfinished keyword preparation is named in the released answer and coverag
   expect(result.answer).toContain(`Keyword preparation unfinished for ${INTERNAL}`);
   expect(calls[0]?.pack.coverage.extractionGaps.some(gap => gap.includes(`Keyword preparation unfinished for ${INTERNAL}`))).toBe(true);
   expect(result.audit.retrieval_degradations).toContainEqual(expect.objectContaining({ lane_name: `${INTERNAL}:keywords`, detail: 'keyword_preparation_incomplete' }));
+});
+
+test('a search started during startup keeps one coverage note after startup finishes', async () => {
+  const lanes = lanesFixture({ internal: ['ready'] });
+  const adapter = adapterReturning(['ready']);
+  const progress = beginStartupProgress(['/tmp/olympus-startup-coverage.db']);
+  lanes.adapters = { ...lanes.adapters, [INTERNAL]: request => {
+    progress.finish();
+    return adapter(request);
+  } };
+  try {
+    const output = citingFirstCandidate('Available evidence.', 'Available evidence.');
+    const { analyst, calls } = scriptedAnalyst(output);
+    const handler = createAnalystSourceIndexAnswerHandler({ analyst, lanes: () => lanes });
+    const request = { question: 'fixture', include_internal: true, corpus_id: INTERNAL };
+    const result = await handler.answer(request);
+    expect(calls[0]?.pack.coverage.extractionGaps.filter(gap => gap === STARTUP_SEARCH_GAP)).toHaveLength(1);
+    expect(result.answer.split(STARTUP_SEARCH_GAP)).toHaveLength(2);
+    expect((await handler.answer(request)).answer).not.toContain(STARTUP_SEARCH_GAP);
+  } finally {
+    progress.finish();
+  }
 });

@@ -41,6 +41,7 @@ import { checkReleaseChunks, passagesWithheldAtReleasableTiers, privateInputRele
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 import { parseFollowUp } from './follow-up.ts';
+import { startupProgress, startupWaitingLine } from './startup-progress.ts';
 
 /** The operations the remote surface serves (core/public-surface.ts V0_4_PUBLIC_REMOTE_MCP_TOOLS). */
 export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously' | 'source_item_read'
@@ -419,12 +420,15 @@ function pendingOutput(raw: unknown): Record<string, unknown> | undefined {
   if (typeof record.job_id !== 'string' || !JOB_ID.test(record.job_id) || isSecretLike(record.job_id)) {
     throw new OperationError('source_index_error', 'unexpected pending shape');
   }
+  const startup = startupProgress();
+  const starting = startupWaitingLine(startup);
   return {
     status: 'working',
     job_id: record.job_id,
     elapsed_ms: wholeNumber(record.elapsed_ms),
     next_tool: 'source_answer_result',
-    message: REMOTE_PENDING_MESSAGE,
+    message: REMOTE_PENDING_MESSAGE + (starting ? `\n${starting}` : ''),
+    ...(startup ? { startup } : {}),
   };
 }
 
@@ -913,6 +917,16 @@ const PENDING_SCHEMA = {
     elapsed_ms: { type: 'integer', minimum: 0 },
     next_tool: { const: 'source_answer_result' },
     message: { type: 'string' },
+    startup: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['stores_done', 'stores_total'],
+      properties: {
+        stores_done: { type: 'integer', minimum: 0 },
+        stores_total: { type: 'integer', minimum: 1 },
+        estimated_ready_at: { type: 'string', format: 'date-time' },
+      },
+    },
   },
 } as const;
 

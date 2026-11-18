@@ -1,7 +1,8 @@
 import { READ_WIDE_MATCH_LIMIT, markReadWidePack, readWideEnabled, scoresHaveNoLeader } from './read-wide.ts';
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 import { bindReleaseChunks, copyReleaseChunks } from './release-manifest.ts';
-import { KEYWORD_PREPARATION_INCOMPLETE, keywordPreparationGap, RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
+import { KEYWORD_PREPARATION_INCOMPLETE, keywordPreparationGap, RECENT_ITEMS_CUT_SHORT, STARTUP_SEARCH_GAP, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
+import { startupProgress } from './startup-progress.ts';
 import {
   rerankCandidates,
   rerankPassage,
@@ -394,6 +395,7 @@ async function buildPreparedEvidencePackDetailed(
       input.onSeatingLanes?.(lanes, ordinal);
     },
   };
+  const searchedDuringStartup = !input.selectedItems?.length && startupProgress() !== undefined;
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
     : await runRoutedSearches(observed, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
@@ -427,6 +429,7 @@ async function buildPreparedEvidencePackDetailed(
   const candidateHitIds: SourceIndexCandidateId[] = [];
   const candidateExtractionGapIndexes: number[][] = [];
   const extractionGaps: string[] = laneCutShortGaps(routed.degradations, input);
+  if (searchedDuringStartup) extractionGaps.push(STARTUP_SEARCH_GAP);
   const searched = new Set(routed.searchedCorpora);
   const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora
     .filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));

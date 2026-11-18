@@ -20615,7 +20615,17 @@ var PENDING_SCHEMA = {
     job_id: { type: "string", pattern: JOB_ID.source },
     elapsed_ms: { type: "integer", minimum: 0 },
     next_tool: { const: "source_answer_result" },
-    message: { type: "string" }
+    message: { type: "string" },
+    startup: {
+      type: "object",
+      additionalProperties: false,
+      required: ["stores_done", "stores_total"],
+      properties: {
+        stores_done: { type: "integer", minimum: 0 },
+        stores_total: { type: "integer", minimum: 1 },
+        estimated_ready_at: { type: "string", format: "date-time" }
+      }
+    }
   }
 };
 var CITATION_SCHEMA = {

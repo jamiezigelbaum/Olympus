@@ -446,6 +446,22 @@ describe('nothing to show', () => {
 });
 
 describe('the card while the answer is prepared', () => {
+  test('shows startup progress under the waiting text until the computer is ready', async () => {
+    const startup = { stores_done: 5, stores_total: 12, estimated_ready_at: new Date(Date.now() + 150_000).toISOString() };
+    const host = mount({ replies: [
+      { status: 202, body: { status: 'pending', startup }, retryAfter: '30' },
+      { status: 202, body: { status: 'pending' }, retryAfter: '30' },
+      'ready',
+    ] });
+    host.push(ready(3));
+    const line = 'Olympus is still starting (5 of 12 sources ready, about 3 min left). Your answer will arrive by itself.';
+    await host.until(() => host.text().includes(line), 'startup progress');
+    expect(host.doc.querySelector('.sub.working')?.nextElementSibling?.textContent).toBe(line);
+    await host.until(() => host.fetched.length === 2 && !host.text().includes(line), 'the startup line to clear');
+    expect(host.text()).toContain('Preparing the answer on your computer…');
+    await host.until(() => host.text().includes('31 March'), 'the answer');
+  });
+
   test('a ready result starts collecting at once: lock circle, title, spinner line, no button', async () => {
     const host = mount({ replies: [{ status: 202, body: { status: 'pending' }, retryAfter: '30' }] });
     host.push(ready(3));
