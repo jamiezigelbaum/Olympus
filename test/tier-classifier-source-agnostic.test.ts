@@ -43,6 +43,8 @@ const IMPORT_ALLOWLIST = new Set([
   '../../core/contracts.ts',
   // The shared location matcher (review P-5): path prefixes, folder keys, labels; no source names.
   '../../core/location-rules.ts',
+  // Process-local payload byte counters for the memory line; no source names.
+  '../../core/memory-counters.ts',
   '../../core/sender-rules.ts',
   // Shared credential decoding and placeholder exclusions; no connector policy.
   '../../core/secret-patterns.ts',
