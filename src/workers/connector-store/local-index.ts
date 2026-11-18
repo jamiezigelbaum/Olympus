@@ -2697,6 +2697,12 @@ let vectorDigestBackfillHold: () => boolean = () => false;
 export function setVectorDigestBackfillHold(hold?: () => boolean): void {
   vectorDigestBackfillHold = hold ?? (() => false);
 }
+
+/** The split background's boot gate. Per-item ledger reads and writes bypass it. */
+let visibilityBootPending: (() => Promise<void> | undefined) | undefined;
+export function setVisibilityBootWait(wait: () => Promise<void> | undefined): void {
+  visibilityBootPending = wait;
+}
 /**
  * A store that opens with an incomplete digest waits this long before its
  * first turn: on upgrade every store opens at once, and the backfills must
@@ -4759,7 +4765,9 @@ export class LocalConnectorStore {
    * set is current as of the start of the build; a copy hidden after that is
    * caught by the embedding batch recheck right before dispatch.
    */
-  private async tierHiddenItemPksInTurns(): Promise<TierLedgerHiddenItemPks> {
+  private async tierHiddenItemPksInTurns(bootBuild = false): Promise<TierLedgerHiddenItemPks> {
+    const boot = bootBuild ? undefined : visibilityBootPending?.();
+    if (boot) await boot;
     const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
     // Keep the counts' start-of-build semantics during continuous intake.
     // Search and embedding recheck served rows; requiring the whole lane to
@@ -4813,7 +4821,7 @@ export class LocalConnectorStore {
    * front start rebuilt it from the ledger (gate 1, ops#151: about 59 s).
    */
   async keepVisibilityCurrentInTurns(): Promise<void> {
-    await this.tierHiddenItemPksInTurns();
+    await this.tierHiddenItemPksInTurns(true);
     if (!this.readOnly) await this.publishVisibility();
   }
 
@@ -5482,7 +5490,7 @@ export class LocalConnectorStore {
 
   /** Called as feeds move: refreshes and saves this writer's set before a feed drops what the saved stamp needs. */
   private refreshVisibilityIfBehind(options: { anyMovement?: boolean; ledgerCursor?: number } = {}): void {
-    if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing) return;
+    if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing || visibilityBootPending?.()) return;
     try {
       const ledger = this.visibilityRegisteredLedger;
       const state = this.readVisibilityState();
@@ -8077,6 +8085,8 @@ export class LocalConnectorStore {
    * this read once took (#1305).
    */
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
+    const boot = visibilityBootPending?.();
+    if (boot) await boot;
     changeMemoryActivity('people_refresh', 1);
     try {
       if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
@@ -13634,6 +13644,8 @@ export class LocalConnectorStore {
    * a live but stalled holder keeps its lock, so it cannot race a takeover.
    */
   async embedChunks(options: ConnectorStoreEmbedOptions): Promise<ConnectorStoreEmbedSummary> {
+    const boot = visibilityBootPending?.();
+    if (boot) await boot;
     if (this.dbPath === ':memory:') return this.embedChunksUnderLease(options);
     return withFileLease(
       `${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`,
@@ -16773,6 +16785,8 @@ export class LocalConnectorStore {
     scope?: ConnectorStoreStatusScope,
     options: { countsMaxAgeMs?: number } = {},
   ): Promise<ConnectorStoreStatus> {
+    const boot = visibilityBootPending?.();
+    if (boot) await boot;
     // A pool that is full for now (threads still stopping after a missed
     // deadline) is waited for: only a store the pool never reads is counted
     // on this thread.
@@ -17279,6 +17293,10 @@ export async function syncAndEmbedFromConnector(
   if (options.embed === false) {
     options.store.queueEmbedding(selectedIds, options.embeddingProvider);
     return { sync, embed: emptyEmbed() };
+  }
+  if (visibilityBootPending?.()) {
+    options.store.queueEmbedding(selectedIds, options.embeddingProvider);
+    return { sync, embed: { ...emptyEmbed(), deferredReason: 'waiting_for_boot_visibility' } };
   }
   const selectedBatches = selectedIds.length === 0
     ? [[]]

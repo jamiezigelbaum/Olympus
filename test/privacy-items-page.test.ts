@@ -6,6 +6,15 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { beginFrontProgress, finishFrontProgress } from '../src/core/boot-progress.ts';
+import { answerReleaseWithheldReasonOffThread } from '../src/core/release-manifest.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { ownerTierItemId } from '../src/workers/classification/tier-owner-items.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
+import { createPendingItemProtection, createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
 import {
   DASHBOARD_PRIVACY_ITEMS_PATHS,
@@ -13,7 +22,12 @@ import {
   PRIVACY_ITEMS_TOAST_MS,
 } from '../src/workers/dashboard/pages/privacy-items.ts';
 import { DASHBOARD_PRIVACY_ITEMS_COPY as C, judgeReasonPhrase } from '../src/workers/dashboard/vocabulary.ts';
-import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
+import { createEngineFront, createEngineFrontRoutes, createFrontGate } from '../src/workers/engine-split/runtime.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
+import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
+import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture } from './helpers/tier-fixtures.ts';
 
 const URL_ITEMS = new URL('http://127.0.0.1:8010/dashboard?privacy-items');
 
@@ -109,6 +123,88 @@ async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean
   const text = (selector: string) => $(selector)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
   return { window, document, clock, posts, sets, $, click, dialogOpen, text, release: () => { settled = true; release(); } };
 }
+
+test('Make it Private applies and withholds search while the background waits for front visibility', async () => {
+  const root = mkdtempSync('/tmp/olympus-privacy-boot-');
+  const env = { HOME: root, XDG_DATA_HOME: root, PATH: process.env.PATH ?? '', FIXTURE_TOKEN: randomUUID(), FIXTURE_WAIT_FOR_VISIBILITY: '1' };
+  const socketPath = join(root, 'bg.sock');
+  const identity = identityOf('boot-item');
+  const front = createEngineFront({ env, socketPath, authToken: env.FIXTURE_TOKEN });
+  let background: ReturnType<typeof Bun.spawn> | undefined;
+  let reader: TierLedger | undefined;
+  let store: LocalConnectorStore | undefined;
+  try {
+    const seed = openTierFixture(root, { embed: false });
+    try {
+      seed.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+      await seed.set.sync(fixtureConnector(() => [{ id: identity.providerItemId, name: 'Orchard', text: 'Synthetic orchard notes.' }]), {
+        fetchContent: true, placement: FIXTURE_PLACEMENT,
+      });
+    } finally {
+      seed.close();
+    }
+    const ledger = reader = new TierLedger({ dbPath: seed.ledger.dbPath, readOnly: true });
+    const internal = store = new LocalConnectorStore({ dbPath: seed.paths.internal, corpusId: CORPORA.internal, trustDomain: 'internal', family: 'file', tierLedger: ledger, readOnly: true });
+    beginFrontProgress(env);
+    background = Bun.spawn([process.execPath, join(import.meta.dir, 'fixtures', 'engine-control-blocked-child.ts'),
+      socketPath, join(root, 'held.sqlite'), root, seed.paths.internal, seed.paths.secure_local], { env, stdout: 'ignore', stderr: 'inherit' });
+    const building = () => existsSync(join(root, 'visibility-building'));
+    const waiting = () => existsSync(join(root, 'visibility-step')) && !building()
+      && readFileSync(join(root, 'visibility-step'), 'utf8').startsWith('waiting for the front');
+    await waitFor(waiting, { description: 'background waiting for front visibility' });
+
+    const protection = createPendingItemProtection();
+    const scopes = () => [{ ledger, corpusIds: new Set([CORPORA.internal]), stores: () => [internal] }];
+    const visibility = createTierVisibilityGate(scopes, undefined, protection);
+    const release = createReleaseTierCheck(scopes, () => 'allow', {}, protection);
+    const worker = createEmailSourceWorker({ connectorStores: [internal], sourceIndexVisibilityGate: visibility });
+    const routes = createEngineFrontRoutes({ client: front.client, pendingItemProtection: protection, gate: createFrontGate(), restartFront: () => {} });
+    const serve = withWorkerBearerAuth(async request => (await routes(request)) ?? worker.fetch(request), { authToken: env.FIXTURE_TOKEN });
+    const origin = 'http://127.0.0.1:8010';
+    const local = await ownerLocalMint(serve, origin, env.FIXTURE_TOKEN);
+    expect(local.status).toBe(200);
+    const { csrf_token: csrf } = await local.json() as { csrf_token: string };
+    const cookie = local.headers.get('Set-Cookie')!.split(';')[0]!;
+    const post = (path: string, body: object, headers: Record<string, string>) => serve(new Request(origin + path, {
+      method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
+    }));
+    const dashboard = (path: string, body: object) => post(path, body, { Cookie: cookie, 'X-Olympus-CSRF': csrf });
+    const search = async () => {
+      const response = await post('/v1/source/index/search', { corpus_id: CORPORA.internal, query: 'orchard', all_tiers: false }, { Authorization: `Bearer ${env.FIXTURE_TOKEN}` });
+      expect(response.status).toBe(200);
+      const { hits } = await response.json() as { hits: Array<{ sourceItem: { providerItemId: string } }> };
+      return hits.some(hit => hit.sourceItem.providerItemId === identity.providerItemId);
+    };
+    expect(await search()).toBe(true);
+    const receipt = await dashboard(DASHBOARD_PRIVACY_ITEMS_PATHS.set, { item_id: ownerTierItemId(identity), tier: 'private' });
+    expect(receipt.status).toBe(202);
+    const { request_id } = await receipt.json() as { request_id: string };
+    await waitFor(async () => {
+      const result = await dashboard(DASHBOARD_PRIVACY_ITEMS_PATHS.status, { request_id });
+      const body = await result.json();
+      return body.ok === true && body.state !== 'pending';
+    }, { description: 'Private click applied before the visibility build' });
+    expect(ledger.getOverride(identity)).toMatchObject({ kind: 'tier', tier: 'secure' });
+    expect(ledger.getCurrent(identity)?.contentTier).toBe('private');
+    expect(await search()).toBe(false);
+    expect(await answerReleaseWithheldReasonOffThread([{
+      inputs: [{ ...identity, corpusId: CORPORA.internal, privateAtAnswer: false, layer: 'names' }],
+      constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false },
+    }], release)).toBeDefined();
+    expect(waiting()).toBe(true);
+    finishFrontProgress();
+    front.visibilityFinished();
+    await waitFor(building, { description: 'background building after the front receipt' });
+  } finally {
+    front.stop();
+    finishFrontProgress();
+    background?.kill('SIGKILL');
+    await background?.exited;
+    store?.close();
+    reader?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 30_000);
 
 test.each([false, true])('a pending receipt leaves the row saving until the background settles (refusal %s)', async (refuse) => {
   const p = await page([appointment()], { pending: true, refuse });

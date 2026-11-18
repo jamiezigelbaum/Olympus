@@ -62903,6 +62903,12 @@ function parseEngineCommandEnvelope(value) {
     case "archive_changed":
     case "model_prepare":
       return { id, command: { kind } };
+    case "front_visibility_finished": {
+      const frontPid = command.frontPid;
+      if (typeof frontPid !== "number" || !Number.isSafeInteger(frontPid) || frontPid <= 0)
+        fail("front_visibility_finished needs a front process id.");
+      return { id, command: { kind, frontPid } };
+    }
     case "dashboard_samples": {
       const samples = command.samples;
       if (!Array.isArray(samples) || samples.length > ENGINE_DASHBOARD_SAMPLES_MAX || samples.some((sample) => !dashboardSample(sample))) {
@@ -65087,6 +65093,9 @@ function vectorDigestSearchDisabled(env = process.env) {
 function setVectorDigestBackfillHold(hold) {
   vectorDigestBackfillHold = hold ?? (() => false);
 }
+function setVisibilityBootWait(wait) {
+  visibilityBootPending = wait;
+}
 function nextVectorDigestBackfillRows(rows, turnMs) {
   if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
     return Math.max(VECTOR_DIGEST_BACKFILL_MIN_ROWS, Math.floor(rows / 2));
@@ -65343,6 +65352,10 @@ async function syncAndEmbedFromConnector(options) {
   if (options.embed === false) {
     options.store.queueEmbedding(selectedIds, options.embeddingProvider);
     return { sync, embed: emptyEmbed() };
+  }
+  if (visibilityBootPending?.()) {
+    options.store.queueEmbedding(selectedIds, options.embeddingProvider);
+    return { sync, embed: { ...emptyEmbed(), deferredReason: "waiting_for_boot_visibility" } };
   }
   const selectedBatches = selectedIds.length === 0 ? [[]] : [...batched(selectedIds, MAX_SELECTED_EMBED_ITEM_IDS)];
   let embed;
@@ -68234,7 +68247,7 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, visibilityBootPending, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 // core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
@@ -69135,7 +69148,10 @@ var init_local_index = __esm(() => {
       })();
       return this.tierHiddenCountsRefresh;
     }
-    async tierHiddenItemPksInTurns() {
+    async tierHiddenItemPksInTurns(bootBuild = false) {
+      const boot = bootBuild ? undefined : visibilityBootPending?.();
+      if (boot)
+        await boot;
       const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
       return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
     }
@@ -69158,7 +69174,7 @@ var init_local_index = __esm(() => {
       return runHiddenStepsHere(this.tierLedgerHiddenSteps());
     }
     async keepVisibilityCurrentInTurns() {
-      await this.tierHiddenItemPksInTurns();
+      await this.tierHiddenItemPksInTurns(true);
       if (!this.readOnly)
         await this.publishVisibility();
     }
@@ -69723,7 +69739,7 @@ var init_local_index = __esm(() => {
       }
     }
     refreshVisibilityIfBehind(options = {}) {
-      if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing)
+      if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing || visibilityBootPending?.())
         return;
       try {
         const ledger = this.visibilityRegisteredLedger;
@@ -71577,6 +71593,9 @@ ${parentKey(ref)}`, { ref, origin });
       }
     }
     async peopleObservationsOffThread() {
+      const boot = visibilityBootPending?.();
+      if (boot)
+        await boot;
       changeMemoryActivity("people_refresh", 1);
       try {
         if (!offThreadReadsSupported(this.dbPath))
@@ -75041,6 +75060,9 @@ ${parentKey(ref)}`, { ref, origin });
       this.embeddingDeferral = reason;
     }
     async embedChunks(options) {
+      const boot = visibilityBootPending?.();
+      if (boot)
+        await boot;
       if (this.dbPath === ":memory:")
         return this.embedChunksUnderLease(options);
       return withFileLease(`${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`, () => this.embedChunksUnderLease(options), {
@@ -77035,6 +77057,9 @@ ${parentKey(ref)}`, { ref, origin });
       return step.value;
     }
     async statusOffThread(scope, options = {}) {
+      const boot = visibilityBootPending?.();
+      if (boot)
+        await boot;
       if (!offThreadReadsSupported(this.dbPath))
         return this.status(scope, options);
       return withOffThreadSnapshot(this.dbPath, async (read) => {
@@ -80446,9 +80471,6 @@ function createNativeWorkerService(options) {
       delete settings.env[ENGINE_ROLE_ENV];
       delete settings.env[ENGINE_BACKGROUND_SOCKET_ENV];
       if (options.engineBackground && freshConfig(input.context.config, input.initialConfig).config.worker.engineSplit) {
-        if (!await waitUntil(options.engineBackground.isReady, options.engineBackgroundWaitMs ?? DEFAULT_ENGINE_BACKGROUND_WAIT_MS, options.engineBackgroundPollMs ?? 100)) {
-          throw new NativeProcessRetryableStartError(WORKER_BACKGROUND_STARTING_MESSAGE);
-        }
         settings.env[ENGINE_ROLE_ENV] = "front";
         settings.env[ENGINE_BACKGROUND_SOCKET_ENV] = engineBackgroundSocketPath({ env: settings.env });
       }
@@ -80758,16 +80780,6 @@ function stripGatewayBootstrapSecrets(env) {
 function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
-async function waitUntil(condition, timeoutMs, pollMs) {
-  const deadline = Date.now() + Math.max(0, timeoutMs);
-  for (;; ) {
-    if (condition())
-      return true;
-    if (Date.now() >= deadline)
-      return false;
-    await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(pollMs, deadline - Date.now()))));
-  }
-}
 function engineBackgroundLaunch(input) {
   input.env[ENGINE_ROLE_ENV] = "background";
   input.env[ENGINE_BACKGROUND_SOCKET_ENV] = input.socketPath;
@@ -80879,7 +80891,7 @@ function createNativeEngineBackgroundService(options) {
     }
   };
 }
-var WORKER_DATA_OWNER_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its data. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. Retrying automatically.", WORKER_ENDPOINT_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its endpoint. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.", WORKER_SOCKET_RETAINED_MESSAGE = "Olympus worker cannot start because a stopped worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket. The socket is kept until process and listener custody are verified.", SERVICE_ID = "olympus-worker", SERVICE_LABEL = "worker", READINESS_PROBE_TIMEOUT_MS = 1000, ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250, DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4, DEFAULT_WORKER_STABLE_UPTIME_MS = 30000, WORKER_BACKGROUND_STARTING_MESSAGE = "Olympus worker is waiting for its background engine, which is starting.", DEFAULT_ENGINE_BACKGROUND_WAIT_MS = 30000, WORKER_SUPERVISOR_ENV = "OLYMPUS_WORKER_SUPERVISOR", ENGINE_BACKGROUND_SERVICE_ID = "olympus-worker-background";
+var WORKER_DATA_OWNER_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its data. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. Retrying automatically.", WORKER_ENDPOINT_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its endpoint. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.", WORKER_SOCKET_RETAINED_MESSAGE = "Olympus worker cannot start because a stopped worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket. The socket is kept until process and listener custody are verified.", SERVICE_ID = "olympus-worker", SERVICE_LABEL = "worker", READINESS_PROBE_TIMEOUT_MS = 1000, ENDPOINT_OCCUPANCY_TIMEOUT_MS = 250, DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 1e4, DEFAULT_WORKER_STABLE_UPTIME_MS = 30000, WORKER_SUPERVISOR_ENV = "OLYMPUS_WORKER_SUPERVISOR", ENGINE_BACKGROUND_SERVICE_ID = "olympus-worker-background";
 var init_native_worker_service = __esm(() => {
   init_engine_heartbeat();
   init_upgrade_store_copies();
@@ -225970,7 +225982,7 @@ class SourceScheduler {
     const groups = new Map;
     const keyOf = (state) => {
       const own = taskConcurrencyKey(state.source, state.task);
-      if (state.task.kind !== "embed")
+      if (state.task.kind !== "embed" || state.task.visibilityBoot?.())
         return own;
       const sourceKey = state.source.corpusId;
       const joins = !this.busyConcurrencyKeys.has(sourceKey) && states.some((other) => other !== state && other.source === state.source && taskConcurrencyKey(other.source, other.task) === sourceKey);
@@ -226002,7 +226014,7 @@ class SourceScheduler {
           const ran = new Set(group);
           const now = this.now().getTime();
           const sources = new Set(group.map((state) => state.source));
-          const due = this.states.filter((state) => !ran.has(state) && !state.running && taskCadence(state.source, state.task) === "continuous" && (taskConcurrencyKey(state.source, state.task) === concurrencyKey || sources.has(state.source) && state.task.kind === "embed") && state.nextRunAt <= now);
+          const due = this.states.filter((state) => !ran.has(state) && !state.running && taskCadence(state.source, state.task) === "continuous" && (taskConcurrencyKey(state.source, state.task) === concurrencyKey || sources.has(state.source) && state.task.kind === "embed" && !state.task.visibilityBoot?.()) && state.nextRunAt <= now);
           for (const state of due) {
             if (state.running)
               continue;
@@ -226030,6 +226042,17 @@ class SourceScheduler {
   }
   async runTaskSharingThread(state, dueAt, provenance) {
     const stops = this.stops;
+    const visibility = state.task.visibilityBoot?.();
+    if (visibility) {
+      state.waitReason = "boot_visibility";
+      try {
+        await visibility;
+      } finally {
+        delete state.waitReason;
+      }
+      if (this.stops !== stops)
+        return;
+    }
     for (;; ) {
       const holds = [...this.storeReclaims];
       if (holds.length === 0)
@@ -226729,7 +226752,7 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
       return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk, options.visibilityBoot)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined) ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON : undefined
     };
   });
@@ -226737,7 +226760,7 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
 function embeddingSweepConcurrencyKey(source) {
   return `${source.corpusId}.embeddings`;
 }
-function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0, trickle, onProgress, holdForAsk) {
+function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0, trickle, onProgress, holdForAsk, visibilityBoot) {
   const maxItems = embeddingSweepMaxItems();
   const askHolds = () => {
     try {
@@ -226758,6 +226781,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
     kind: "embed",
     writer: true,
     concurrencyKey: embeddingSweepConcurrencyKey(source),
+    ...visibilityBoot ? { visibilityBoot } : {},
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context) => {
@@ -245119,6 +245143,60 @@ async function waitForBackgroundBootDone(input) {
   while (!backgroundBootDone(read(), input.alive))
     await sleep(input.pollMs ?? 250);
 }
+function createBackgroundVisibilityBoot(input) {
+  const log = input.log ?? console.log;
+  const ready = Promise.withResolvers();
+  const watching = new AbortController;
+  let pending = true;
+  let frontPid;
+  let releaseFront;
+  const waitForFront = (pid) => {
+    frontPid = pid;
+    const signal = Promise.withResolvers();
+    releaseFront = signal.resolve;
+    waitForProcessExit(pid, { timeoutMs: Infinity, signal: watching.signal }).then((exited) => {
+      if (exited)
+        signal.resolve("front exited");
+    });
+    return signal.promise;
+  };
+  const complete = () => {
+    pending = false;
+    ready.resolve();
+  };
+  return {
+    pending: () => pending ? ready.promise : undefined,
+    frontFinished: (pid) => {
+      if (pid === frontPid)
+        releaseFront?.("front build finished");
+    },
+    async start(build) {
+      const started = performance.now();
+      const front = readFrontProgress(input.env);
+      let reason = "no front build in progress";
+      if (front?.phase === "starting" && Number.isSafeInteger(front.pid) && front.pid > 0 && processAlive2(front.pid)) {
+        input.step("waiting for the front to finish building hidden-copy sets");
+        log("[olympus] background: waiting for the front to finish building hidden-copy sets");
+        reason = await waitForFront(front.pid);
+      }
+      if (watching.signal.aborted)
+        return;
+      watching.abort();
+      input.step("building hidden-copy sets");
+      log(`[olympus] background: starting hidden-copy build after waiting ${Math.round(performance.now() - started)} ms (${reason})`);
+      try {
+        await build();
+      } finally {
+        input.step(undefined);
+        complete();
+      }
+    },
+    stop() {
+      watching.abort();
+      releaseFront?.("background stopping");
+    }
+  };
+}
 function listenWhileStarting(input) {
   const answer = (request) => engineStartingResponse(request, input.env);
   try {
@@ -245177,16 +245255,44 @@ function createEngineFront(input) {
       relay?.observeInstance(read.snapshot.instance_id);
     return read ? judged(read, read.age_ms) : undefined;
   };
+  let oweVisibility = false;
+  let sendingVisibility = false;
+  const reportVisibility = async () => {
+    if (!oweVisibility || sendingVisibility)
+      return;
+    sendingVisibility = true;
+    try {
+      const receipt = await client.send({ kind: "front_visibility_finished", frontPid: process.pid });
+      oweVisibility = receipt.state !== "done";
+    } catch {
+      console.warn("[engine-split] the front could not report that its hidden-copy build finished; it will retry.");
+    } finally {
+      sendingVisibility = false;
+    }
+  };
   const poll = setInterval(() => {
     status();
+    reportVisibility();
   }, 2000);
   poll.unref?.();
   const completeModel = (request) => completeModelInBackground(fetchBackground, input.authToken, request);
   const backgroundReady = async () => backgroundBootDone(readBootProgress(input.env));
-  return { client, ownerBusy: relay, status, backgroundActivity: () => cached?.read?.snapshot.activity ?? "idle", completeModel, backgroundReady, stop: () => {
-    clearInterval(poll);
-    relay?.stop();
-  } };
+  return {
+    client,
+    ownerBusy: relay,
+    status,
+    backgroundActivity: () => cached?.read?.snapshot.activity ?? "idle",
+    completeModel,
+    backgroundReady,
+    visibilityFinished: () => {
+      oweVisibility = true;
+      reportVisibility();
+    },
+    stop: () => {
+      clearInterval(poll);
+      relay?.stop();
+    }
+  };
 }
 function restartingResponse(request) {
   if ((request.headers.get("accept") ?? "").includes("text/html")) {
@@ -245378,7 +245484,7 @@ async function waitForProcessExit(pid, options = {}) {
   });
   const deadline = now() + (options.timeoutMs ?? 60000);
   while (alive(pid)) {
-    if (now() >= deadline)
+    if (options.signal?.aborted || now() >= deadline)
       return false;
     await sleep(options.intervalMs ?? 250);
   }
@@ -271622,6 +271728,8 @@ async function mainRecordingFrontFailure() {
 async function main() {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  const visibilityBoot = engineRole === "background" ? createBackgroundVisibilityBoot({ env: process.env, step: setEngineStep }) : undefined;
+  setVisibilityBootWait(() => visibilityBoot?.pending());
   const checkpointer = engineRole === "background" ? startSqliteCheckpointer() : undefined;
   setSqliteCheckpointsOffLoop(checkpointer !== undefined);
   if (checkpointer)
@@ -271647,7 +271755,8 @@ async function main() {
       } catch {}
     };
     setInterval(writeSqlSites, 1e4).unref?.();
-  } else {
+  }
+  if (engineRole === "front") {
     beginFrontProgress(process.env);
     const exitOnError = (error) => {
       failFrontProgress(error);
@@ -274363,7 +274472,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         if (embedsOnThisComputer(target.provider))
           localPacer.noteLocalWork();
       },
-      holdForAsk: () => standBack.holds("embed")
+      holdForAsk: () => standBack.holds("embed"),
+      ...visibilityBoot ? { visibilityBoot: visibilityBoot.pending } : {}
     });
     const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
@@ -276039,10 +276149,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
     return response;
   } })) : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
-  if (engineFront) {
-    const warming = keepVisibilityCurrent("before ready");
+  const frontVisibility = engineFront ? keepVisibilityCurrent("before ready") : undefined;
+  if (frontVisibility) {
     let bound;
-    await Promise.race([warming, new Promise((resolve) => {
+    await Promise.race([frontVisibility, new Promise((resolve) => {
       bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS);
     })]);
     clearTimeout(bound);
@@ -276052,8 +276162,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     finishBootProgress();
     setEngineStep(undefined);
   }
-  if (engineFront)
+  frontVisibility?.then(() => {
     finishFrontProgress();
+    engineFront.visibilityFinished();
+  });
   if (listens) {
     await Promise.resolve().then(() => init_private_agent_listeners());
     privateAgentListeners = createPrivateAgentListeners({
@@ -276228,10 +276340,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     refreshFrontMounts();
   }, 2000) : undefined;
   frontMountRetry?.unref?.();
-  if (!engineFront)
+  if (engineRole === "single")
     keepVisibilityCurrent("after start");
   const visibilityRefresh = setInterval(() => {
-    keepVisibilityCurrent("refresh");
+    if (!visibilityBoot?.pending())
+      keepVisibilityCurrent("refresh");
   }, VISIBILITY_REFRESH_MS);
   visibilityRefresh.unref?.();
   if (engineFront) {
@@ -276256,7 +276369,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     memory: memoryDiagnostic
   }) : undefined;
   let engineBackground;
-  if (engineRole === "background") {
+  if (engineRole === "background" && visibilityBoot) {
     if (!authToken)
       throw new Error("The engine background needs the worker auth token.");
     const refreshSchedulerSources = () => {
@@ -276276,6 +276389,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       log: (line) => console.warn(line),
       ...answerBuiltInModel ? { modelComplete: (request) => answerBuiltInModel.complete(request) } : {},
       handlers: {
+        front_visibility_finished: ({ frontPid }) => {
+          visibilityBoot.frontFinished(frontPid);
+        },
         model_prepare: () => {
           if (workerBuiltInModel)
             workerBuiltInModel.model.prepare();
@@ -276437,7 +276553,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     };
     commands.markReady();
     finishBootProgress();
-    setEngineStep(undefined);
+    visibilityBoot.start(() => keepVisibilityCurrent("after start"));
     const refreshSnapshot = sourceIndexStatus?.refreshSnapshot;
     statusRecount = refreshSnapshot ? startPacedStatusRecount({
       holds: () => standBack.holds("status"),
@@ -276520,6 +276636,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     shuttingDown = true;
     privateAgentListeners?.close();
     sourceRuntimeClosed = true;
+    visibilityBoot?.stop();
     loopStallFixture?.stop();
     localFilesCleanupRecovery?.close();
     sourceScheduler?.stop();
@@ -277284,6 +277401,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve34 } from "node:path";
 
 // src/core/worker-service-split.ts
+init_boot_progress();
 init_engine_split();
 init_descendant_groups();
 init_native_process_service();
@@ -277358,13 +277476,14 @@ async function superviseWorkerServiceSplit(input) {
     descendantGroupsPath: descendantGroupsPath("olympus-worker", input.env),
     prepareStart: async () => {
       clearLeftFrontSocket(frontSocket);
+      const env = { ...launchEnv(), [ENGINE_ROLE_ENV]: "front", [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath, [WORKER_LISTEN_SOCKET_ENV]: frontSocket };
       return {
         command: input.runtimePath,
         args,
-        env: { ...launchEnv(), [ENGINE_ROLE_ENV]: "front", [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath, [WORKER_LISTEN_SOCKET_ENV]: frontSocket },
+        env,
         startupTimeoutMs,
         endpointOccupied: false,
-        readinessProbe: async (child) => child.exitCode === null && child.signalCode === null
+        readinessProbe: async (child) => child.exitCode === null && child.signalCode === null && readFrontProgress(env)?.pid === child.pid
       };
     }
   });
@@ -277398,11 +277517,11 @@ async function superviseWorkerServiceSplit(input) {
   signals.once("SIGINT", () => {
     stop().finally(() => exit(130));
   });
-  log("Olympus worker service: engine split on; starting the background, then the front.");
-  await background.start(context).catch(() => log("Olympus worker service: the background engine did not start yet; retrying."));
+  log("Olympus worker service: engine split on; starting the front, then the background.");
+  await front.start(context).catch(() => log("Olympus worker service: the worker front did not start yet; retrying."));
   if (stopping)
     return { stop };
-  await front.start(context).catch(() => log("Olympus worker service: the worker front did not start yet; retrying."));
+  await background.start(context).catch(() => log("Olympus worker service: the background engine did not start yet; retrying."));
   return { stop };
 }
 

@@ -16,7 +16,7 @@
 // front does, then record that it serves.
 import { appendFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beginBootProgress, finishBootProgress, reportBootStep } from '../../src/core/boot-progress.ts';
+import { beginBootProgress, beginFrontProgress, finishBootProgress, reportBootStep } from '../../src/core/boot-progress.ts';
 import { startEngineHeartbeat, stopEngineHeartbeat } from '../../src/core/engine-heartbeat.ts';
 import { waitForBackgroundBootDone } from '../../src/workers/engine-split/runtime.ts';
 import { runExtractionCommand } from '../../src/workers/file-extraction/extractors/command-runner.ts';
@@ -49,6 +49,7 @@ if (process.env.SAY) {
   console.log(`hello from the ${role} on stdout`);
   console.error(`hello from the ${role} on stderr`);
 }
+if (role === 'front' && process.env.HOLD_FRONT_PRESENCE !== '1') beginFrontProgress(process.env);
 
 const serve = () => {
   const socket = process.env.OLYMPUS_ENGINE_BACKGROUND_SOCKET!;

@@ -3,9 +3,10 @@
  * on Linux, `cli.js __worker-service-run`, rendered by worker-service.ts).
  * That path has no engine host, so with `worker.engineSplit` on the unit's
  * process supervises the two processes itself, as the engine host does
- * (engine-host.ts, engineHostServices): the background first, launched and
- * proved ready by the same engineBackgroundLaunch; then the front, told the
- * background's socket; each under the shared supervision kernel
+ * (engine-host.ts, engineHostServices): the front announces its presence,
+ * then the background starts and proves ready through engineBackgroundLaunch.
+ * The front waits for the background's boot receipt before opening stores.
+ * Each runs under the shared supervision kernel
  * (native-process-service.ts: its own process group, restart on exit with the
  * shared backoff, a bounded SIGTERM then SIGKILL on stop). On SIGTERM or
  * SIGINT it stops both and exits.
@@ -27,6 +28,7 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { spawn as spawnProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFrontProgress } from './boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_ROLE_ENV, engineBackgroundSocketPath, engineRoleFromEnv, prepareEngineBackgroundSocketDirectory } from './engine-split.ts';
 import { descendantGroupsPath } from './descendant-groups.ts';
 import { createNativeProcessService, setNativeProcessChildStdio, type NativeProcessChildStdio, type NativeProcessServiceContext } from './native-process-service.ts';
@@ -143,14 +145,16 @@ export async function superviseWorkerServiceSplit(input: {
     prepareStart: async () => {
       // The kernel starts no front over a live one: a socket left here is the last front's.
       clearLeftFrontSocket(frontSocket);
+      const env = { ...launchEnv(), [ENGINE_ROLE_ENV]: 'front', [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath, [WORKER_LISTEN_SOCKET_ENV]: frontSocket };
       return {
-      command: input.runtimePath,
-      args,
-      env: { ...launchEnv(), [ENGINE_ROLE_ENV]: 'front', [ENGINE_BACKGROUND_SOCKET_ENV]: socketPath, [WORKER_LISTEN_SOCKET_ENV]: frontSocket },
-      startupTimeoutMs,
-      endpointOccupied: false,
-      // The front waits for the background itself before it serves; running is enough here.
-      readinessProbe: async (child) => child.exitCode === null && child.signalCode === null,
+        command: input.runtimePath,
+        args,
+        env,
+        startupTimeoutMs,
+        endpointOccupied: false,
+        // The background needs to see this front before it chooses its build order.
+        readinessProbe: async (child) => child.exitCode === null && child.signalCode === null
+          && readFrontProgress(env)?.pid === child.pid,
       };
     },
   });
@@ -178,14 +182,13 @@ export async function superviseWorkerServiceSplit(input: {
   const exit = input.exit ?? ((code: number) => process.exit(code));
   signals.once('SIGTERM', () => { void stop().finally(() => exit(143)); });
   signals.once('SIGINT', () => { void stop().finally(() => exit(130)); });
-  log('Olympus worker service: engine split on; starting the background, then the front.');
+  log('Olympus worker service: engine split on; starting the front, then the background.');
   // A start that fails is retried on the backoff by the kernel; the front
-  // still starts, and waits for the background itself.
-  await background.start(context).catch(() => log('Olympus worker service: the background engine did not start yet; retrying.'));
-  // A stop that came while the background was starting has already stopped
-  // the front; starting it now would outlive the stop.
-  if (stopping) return { stop };
+  // still starts even when its peer could not be started.
   await front.start(context).catch(() => log('Olympus worker service: the worker front did not start yet; retrying.'));
+  // A stop that came while the front was starting has stopped both services.
+  if (stopping) return { stop };
+  await background.start(context).catch(() => log('Olympus worker service: the background engine did not start yet; retrying.'));
   return { stop };
 }
 
