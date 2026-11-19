@@ -9,6 +9,7 @@ import type { MemoryActivity } from '../../core/memory-counters.ts';
  * on the background for status.
  */
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 
 export const ENGINE_STATUS_SNAPSHOT_SCHEMA = 'olympus.engine.background-status.v1';
@@ -110,17 +111,33 @@ export function writeEngineStatusSnapshot(path: string, snapshot: EngineStatusSn
 /** The last snapshot, or undefined when there is none or it cannot be read. Never throws. */
 export function readEngineStatusSnapshot(path: string, now: () => number = () => Date.now()): EngineStatusRead | undefined {
   try {
-    const snapshot = JSON.parse(readFileSync(path, 'utf8')) as EngineStatusSnapshot;
-    if (snapshot?.schema !== ENGINE_STATUS_SNAPSHOT_SCHEMA || typeof snapshot.instance_id !== 'string') return undefined;
-    const written = Date.parse(snapshot.written_at);
-    if (!Number.isFinite(written)) return undefined;
-    const at = now();
-    const age = Math.max(0, at - written);
-    const collected = typeof snapshot.state_at === 'string' ? Date.parse(snapshot.state_at) : Number.NaN;
-    return { snapshot, age_ms: age, state_age_ms: Number.isFinite(collected) ? Math.max(0, at - collected) : age, stale: age > ENGINE_STATUS_STALE_MS };
+    const snapshot = parseSnapshot(readFileSync(path, 'utf8'));
+    return snapshot && engineStatusAge(snapshot, now());
   } catch {
     return undefined;
   }
+}
+
+export async function readEngineStatusSnapshotAsync(path: string): Promise<EngineStatusSnapshot | undefined> {
+  try {
+    return parseSnapshot(await readFile(path, 'utf8'));
+  } catch {
+    // Missing, unreadable and malformed snapshots offer no current status.
+    return undefined;
+  }
+}
+
+function parseSnapshot(text: string): EngineStatusSnapshot | undefined {
+  const snapshot = JSON.parse(text) as EngineStatusSnapshot;
+  if (snapshot?.schema !== ENGINE_STATUS_SNAPSHOT_SCHEMA || typeof snapshot.instance_id !== 'string'
+    || !Number.isFinite(Date.parse(snapshot.written_at))) return undefined;
+  return snapshot;
+}
+
+export function engineStatusAge(snapshot: EngineStatusSnapshot, at: number): EngineStatusRead {
+  const age = Math.max(0, at - Date.parse(snapshot.written_at));
+  const collected = typeof snapshot.state_at === 'string' ? Date.parse(snapshot.state_at) : Number.NaN;
+  return { snapshot, age_ms: age, state_age_ms: Number.isFinite(collected) ? Math.max(0, at - collected) : age, stale: age > ENGINE_STATUS_STALE_MS };
 }
 
 /**

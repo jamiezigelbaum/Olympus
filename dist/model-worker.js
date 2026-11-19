@@ -1771,6 +1771,7 @@ import {
   writeFileSync as writeFileSync3,
   writeSync as writeSync2
 } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { basename as basename2, dirname as dirname8, isAbsolute as isAbsolute6, join as join7 } from "node:path";
 
 // src/workers/source-index/built-in-embedding/manifest.ts
@@ -2033,6 +2034,33 @@ function installedBuiltInEmbedding(paths, model = BUILT_IN_EMBEDDING_MODEL, plat
 function currentPlatform() {
   return `${process.platform}-${process.arch}`;
 }
+var frontAssetReads = new Map;
+function readAssetState(path) {
+  if (!isMainThread3 || process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() !== "front") {
+    return JSON.parse(readFileSync4(path, "utf8"));
+  }
+  let entry = frontAssetReads.get(path);
+  if (!entry) {
+    entry = { checkedAt: -Infinity, pending: false };
+    frontAssetReads.set(path, entry);
+  }
+  const cached = entry;
+  if (!cached.pending && Date.now() - cached.checkedAt >= 2000) {
+    cached.checkedAt = Date.now();
+    cached.pending = true;
+    refreshAssetState(path, cached);
+  }
+  return cached.value;
+}
+async function refreshAssetState(path, entry) {
+  try {
+    entry.value = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    entry.value = undefined;
+  } finally {
+    entry.pending = false;
+  }
+}
 function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDING_MODEL) {
   const fallback = {
     state: "not_started",
@@ -2044,7 +2072,7 @@ function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDIN
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync4(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
+    const parsed = readAssetState(builtInEmbeddingPaths(env, model).statusPath);
     return parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? parsed : fallback;
   } catch {
     return fallback;

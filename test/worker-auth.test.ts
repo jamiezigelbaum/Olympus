@@ -8,6 +8,7 @@ import { DirectHttpEmailTransport } from '../src/core/email.ts';
 import {
   applyWorkerSetupEnv,
   dashboardQueryTokenFromWorkerAuthToken,
+  readWorkerSetupEnvAsync,
   unquoteEnvValue,
   workerAuthTokenFromConfig,
   workerAuthTokenProvider,
@@ -607,6 +608,23 @@ describe('worker HTTP bind and auth', () => {
       expect(workerAuthTokenProvider(config, { env: { HOME: home } })()).toBeUndefined();
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('the asynchronous setup probe checks the current private file on every read', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-worker-auth-'));
+    const path = join(dir, 'worker.env');
+    const options = { workerEnvPath: path };
+    try {
+      expect(await readWorkerSetupEnvAsync(options)).toBeUndefined();
+      writeFileSync(path, "OLYMPUS_SERVER_MODE='on'\n", { mode: 0o600 });
+      expect(await readWorkerSetupEnvAsync(options)).toEqual({ OLYMPUS_SERVER_MODE: 'on' });
+      writeFileSync(path, 'OLYMPUS_SERVER_MODE=auto\n');
+      expect(await readWorkerSetupEnvAsync(options)).toEqual({ OLYMPUS_SERVER_MODE: 'auto' });
+      chmodSync(path, 0o644);
+      expect(await readWorkerSetupEnvAsync(options)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

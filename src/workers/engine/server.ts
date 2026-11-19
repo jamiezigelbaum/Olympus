@@ -1,6 +1,6 @@
 import { SQLiteError } from 'bun:sqlite';
 import { memoryActivity, statusMemoryActivity } from '../../core/memory-counters.ts';
-import { createMemoryDiagnostic } from '../engine-split/memory.ts';
+import { createMemoryDiagnostic, processMemoryAsync } from '../engine-split/memory.ts';
 import { sampleSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
 import { modelWorkerMemoryPayloads, sampleModelWorkerMemory } from '../source-index/built-in-reasoning/off-thread.ts';
 import { readTinfoilStatus } from '../../core/analyst-tinfoil.ts';
@@ -62,11 +62,12 @@ import { unlinkHelper } from './dashboard/dashboard-messaging-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
-import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
+import { environmentWithWorkerSetupEnv, mergeWorkerSetupEnv, readWorkerSetupEnv, readWorkerSetupEnvAsync, workerSetupEnvPath } from '../../core/worker-auth.ts';
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -339,7 +340,7 @@ import {
   builtInEmbeddingDashboardState,
   loadedBuiltInEmbedding,
 } from '../source-index/built-in-embedding/provider.ts';
-import { installBuiltInReranker, readBuiltInEmbeddingStatus, readBuiltInRerankerStatus } from '../source-index/built-in-embedding/assets.ts';
+import { installBuiltInReranker, readBuiltInEmbeddingStatus, readBuiltInEmbeddingVision, readBuiltInRerankerStatus } from '../source-index/built-in-embedding/assets.ts';
 import { LocalWorkPacer, embedsOnThisComputer, systemIdlePowerProbe } from '../local-pacing.ts';
 import { builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
@@ -486,7 +487,7 @@ import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classificati
 import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { controlPathHeadroom, ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { controlPathHeadroom, ingestionTurn, serializeDiagnosticWrites, startCpuSampleLog } from '../control-path-headroom.ts';
 import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { beginStartupProgress } from '../../core/startup-progress.ts';
@@ -664,6 +665,30 @@ export async function main(): Promise<void> {
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  const setupEnvPath = engineRole === 'front' ? workerSetupEnvPath() : undefined;
+  const freshSetupEnv = setupEnvPath ? () => readWorkerSetupEnvAsync({ workerEnvPath: setupEnvPath }) : undefined;
+  let frontSetupEnv: Record<string, string> | undefined;
+  let setupEnvRead: Promise<void> | undefined;
+  let setupEnvCheckedAt = -Infinity;
+  let setupEnvGeneration = 0;
+  const refreshSetupEnv = () => {
+    if (!freshSetupEnv || setupEnvRead || Date.now() - setupEnvCheckedAt < 2_000) return;
+    setupEnvCheckedAt = Date.now();
+    const generation = setupEnvGeneration;
+    setupEnvRead = freshSetupEnv()
+      .then((env) => { if (generation === setupEnvGeneration) frontSetupEnv = env; })
+      .finally(() => { setupEnvRead = undefined; });
+  };
+  // Synchronous display callbacks use the last completed probe. Credential
+  // changes and provider calls read through the fresh path below.
+  const readSetupEnv = () => {
+    if (!setupEnvPath) return readWorkerSetupEnv();
+    refreshSetupEnv();
+    return frontSetupEnv;
+  };
+  const freshCredentialEnv = async () => mergeWorkerSetupEnv(
+    process.env, process.env.HOME?.trim() ? await freshSetupEnv?.() : undefined,
+  );
   // The background's loop connections leave checkpoints to a worker of their
   // own (sqlite-checkpointer.ts), from before the first store opens.
   const checkpointer = engineRole === 'background' ? startSqliteCheckpointer() : undefined;
@@ -675,8 +700,16 @@ export async function main(): Promise<void> {
   // (loop-stall step-back, 15 Nov 2026): the next stall names itself.
   // The loop-stall test also collects them as JSON lines (site and text id, never values).
   const slowSqlFile = process.env.OLYMPUS_MAIN_THREAD_SQL_LOG;
+  const queueSlowSql = engineRole === 'front' && slowSqlFile ? serializeDiagnosticWrites((error) => {
+    console.warn(`[olympus] slow SQL log write failed: ${error instanceof Error ? error.name : 'error'}`);
+  }) : undefined;
   startSlowMainThreadSqlLog(LOOP_SLOW_SQL_MS, slowSqlFile
-    ? (line, entry) => { console.warn(line); appendFileSync(slowSqlFile, `${JSON.stringify({ pid: process.pid, ...entry })}\n`); }
+    ? (line, entry) => {
+      console.warn(line);
+      const record = `${JSON.stringify({ pid: process.pid, ...entry })}\n`;
+      if (queueSlowSql) queueSlowSql(() => appendFile(slowSqlFile, record));
+      else appendFileSync(slowSqlFile, record);
+    }
     : undefined);
   // The waits on this boot read its progress, not a fixed ceiling (#1494). The
   // front does not own the data root's boot work and never writes that file;
@@ -692,9 +725,16 @@ export async function main(): Promise<void> {
   const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
   if (sqlSitesDir) {
     const sqlSites = startMainThreadSqlSiteCount(Number(process.env.OLYMPUS_MAIN_THREAD_SQL_SITE_FRAMES) || 2);
+    const path = join(sqlSitesDir, `${engineRole}.sql-sites.json`);
+    const queue = engineRole === 'front' ? serializeDiagnosticWrites(() => {
+      // A measuring aid: the engine runs on without it.
+    }) : undefined;
     const writeSqlSites = () => {
-      try { writeFileSync(join(sqlSitesDir, `${engineRole}.sql-sites.json`), JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() })); }
-      catch { /* a measuring aid: the engine runs on without it */ }
+      try {
+        const record = JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() });
+        if (queue) queue(() => writeFile(path, record));
+        else writeFileSync(path, record);
+      } catch { /* a measuring aid: the engine runs on without it */ }
     };
     setInterval(writeSqlSites, 10_000).unref?.();
   }
@@ -736,6 +776,8 @@ export async function main(): Promise<void> {
     await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
+    void engineFront.refreshStatus();
+    refreshSetupEnv();
     // The previous front's hold died with it. Let its accepted Private
     // commands settle before this front opens stores or starts answer work.
     await engineFront.waitForPendingPrivacyRaises();
@@ -1091,9 +1133,11 @@ export async function main(): Promise<void> {
   };
   // Only used inside this process to distinguish stored from applied keys.
   const bootModelCredentials = new Map(requiredProfiles.map(({ id, profile }) => [id, safeModelCredential(profile, process.env)]));
-  const modelCredentialState = (id: string, profile: typeof requiredProfiles[number]['profile']): ModelCredentialState => {
+  const modelCredentialState = (
+    id: string, profile: typeof requiredProfiles[number]['profile'], setupEnv: () => Record<string, string> | undefined = readSetupEnv,
+  ): ModelCredentialState => {
     if (!profile.secretRef && profile.provider !== 'tinfoil') return bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)) ? 'missing' : 'ready';
-    const storedEnv = { ...process.env, ...(readWorkerSetupEnv() ?? {}) };
+    const storedEnv = { ...process.env, ...(setupEnv() ?? {}) };
     const current = safeModelCredential(profile, storedEnv);
     if (!current) return 'missing';
     if (current !== bootModelCredentials.get(id)
@@ -1217,7 +1261,15 @@ export async function main(): Promise<void> {
   const connectModelKey = async (provider: 'gemini' | 'venice' | 'tinfoil', apiKey: string): Promise<void> => {
     if (provider === 'gemini') await connectGeminiApiKey({ apiKey });
     else await connectPublicApiKeySource({ source: provider, apiKey });
-    const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile));
+    const generation = ++setupEnvGeneration;
+    const stored = freshSetupEnv ? await freshSetupEnv() : undefined;
+    if (setupEnvPath && generation === setupEnvGeneration) {
+      // Discard display reads that began before the post-write reading completed.
+      setupEnvGeneration++;
+      frontSetupEnv = stored;
+      setupEnvCheckedAt = Date.now();
+    }
+    const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile, setupEnvPath ? () => stored : readWorkerSetupEnv));
     if (!credentials.includes('missing') && credentials.includes('applying')) {
       modelReloadUnavailable = !requestModelReload();
     }
@@ -5117,10 +5169,11 @@ export async function main(): Promise<void> {
   closeDesktopBridge = () => { desktopBridge?.close(); privateAgentListeners?.close(); };
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
   let desktopPollingClosed = false;
-  const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
+  const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
   const updateChecker = createUpdateChecker({
     runningVersion: runningOlympusVersion(), platform: process.platform,
-    env: process.env, fileEnv: () => readWorkerSetupEnv(),
+    env: process.env, fileEnv: readSetupEnv,
+    ...(freshSetupEnv ? { freshFileEnv: freshSetupEnv } : {}),
   });
   // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
   const ownerTierItemsContext: OwnerTierItemsContext = {
@@ -5323,7 +5376,10 @@ export async function main(): Promise<void> {
               spending: judgeSpending, cloud: cloudJudgeRuntime, tinfoil: tinfoilJudgeRuntime,
               local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'local', stop: null, remainingDollars: 0 }),
               ledgerPath: resolveClassificationLedgerPath(process.env), promptVersion: () => snifferPromptVersions(privacyOwnerWords()).approval,
-              credentialReady: lane => Boolean(safeModelCredential(lane.profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) })),
+              credentialReady: lane => {
+                const ready = (env: Record<string, string> | undefined) => Boolean(safeModelCredential(lane.profile, { ...process.env, ...env }));
+                return freshSetupEnv ? freshSetupEnv().then(ready) : ready(readWorkerSetupEnv());
+              },
               requestReload: () => requestModelReload(),
               observed: () => judgeObservations.observed(),
               secondRoundStatePath: judgeSecondRoundStatePath(process.env),
@@ -5739,7 +5795,7 @@ export async function main(): Promise<void> {
   let chatgptModelProblem: { at: string; message: string } | undefined;
   const privateAnswers = new PrivateAnswerJobs({
     inboxRemote: () => {
-      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
+      const mode = resolveServerMode({ env: process.env, fileEnv: readSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
       return mode.remote ? remoteOpenInstructions({ port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}),
         ...(process.platform === 'linux' ? { socketPath: workerSocketPath()! } : {}), target: { kind: 'private_answers' } }) : undefined;
     },
@@ -5854,7 +5910,7 @@ export async function main(): Promise<void> {
       },
       sourceName,
     });
-    const destinations = (): import('./runtime/venice-inbox-answer.ts').AskDestinationStates => {
+    const destinations = (setupEnv = readSetupEnv): import('./runtime/venice-inbox-answer.ts').AskDestinationStates => {
       let venice: import('./runtime/venice-inbox-answer.ts').AskDestinationState = 'not_allowed';
       let veniceModel: string | undefined;
       try {
@@ -5862,10 +5918,10 @@ export async function main(): Promise<void> {
         veniceModel = members[0]?.profile.model;
         const bootMembers = privateVeniceMembers(sovereigntyEngine);
         if (members.length) {
-          venice = members.length === bootMembers.length && members.every(member => bootMembers.some(boot => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile) === 'ready') && sourceAnswer ? 'ready' : 'not_set_up';
+          venice = members.length === bootMembers.length && members.every(member => bootMembers.some(boot => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile, setupEnv) === 'ready') && sourceAnswer ? 'ready' : 'not_set_up';
         } else {
           // A saved key does not grant permission for Private: policy stays explicit.
-          const storedEnv = { ...process.env, ...(readWorkerSetupEnv() ?? {}) };
+          const storedEnv = { ...process.env, ...(setupEnv() ?? {}) };
           venice = safeModelCredential({ provider: 'venice', trust: 'encrypted_cloud', model: 'unused', secretRef: 'store:venice.api_key' }, storedEnv) ? 'not_allowed' : 'not_set_up';
         }
       } catch { venice = 'not_allowed'; }
@@ -5874,7 +5930,9 @@ export async function main(): Promise<void> {
       return { computer: workerBuiltInModel?.available() ? 'ready' : 'not_set_up', venice, ...(computerModel ? { computerModel } : {}), ...(veniceModel ? { veniceModel } : {}), ...(['downloading', 'verifying', 'loading'].includes(modelState ?? '') ? { computerReason: PRIVATE_ANSWERS_COPY.downloading } : {}) };
     };
     const veniceAnswer = sourceAnswer ? createVeniceInboxAnswer({
-      state: () => destinations().venice, handler: sourceAnswer, sourceName,
+      // This runs after the final live release checks. Keep the credential
+      // decision fresh and synchronous so there is no new yield before dispatch.
+      state: () => destinations(readWorkerSetupEnv).venice, handler: sourceAnswer, sourceName,
       corpusIds: () => sourceAnswerLanes!({ question: 'scope', retrieval_mode: 'keyword' }).registry.list().filter(corpus => corpus.trustDomain === 'internal' || corpus.trustDomain === 'secure_local').map(corpus => corpus.corpusId),
       eligible: local.eligible,
     }) : undefined;
@@ -5988,9 +6046,9 @@ export async function main(): Promise<void> {
     // The funding date follows the policy file (`olympus zkapi funding-date`) without a restart.
     const { zkapiFundingDateRefresher } = await import('../../core/zkapi-funding-date.ts');
     const zkapiProfiles = zkapiFundingDateRefresher(sovereigntyEngine.source === 'file' ? sovereigntyEngine.path : undefined);
-    const transport = (model: string) => resolveZkapiConsultTransport(
+    const transport = (model: string, credentialEnv: () => NodeJS.ProcessEnv) => resolveZkapiConsultTransport(
       zkapiProfiles(sovereigntyEngine.config.modelProfiles),
-      (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
+      (secretRef) => resolveSecretRefValueSync(secretRef, { env: credentialEnv() }),
       { env: process.env, model },
     );
     // The route's settings and today's record only: no key is resolved for this check.
@@ -6004,12 +6062,12 @@ export async function main(): Promise<void> {
     // is resolved per call from the same environment as the route's and
     // never logged.
     type WriterControl = { kill: AbortSignal; deadlineMs: number; level: import('../../core/consult-settings.ts').ConsultLevel; writer: import('../../core/consult-settings.ts').ConsultWriterChoice | null };
-    const runChosenWriter = (input: import('../../core/consult-writer.ts').ConsultWriterInput, control: WriterControl) => {
+    const runChosenWriter = async (input: import('../../core/consult-writer.ts').ConsultWriterInput, control: WriterControl) => {
       const choice = control.writer;
       if (choice) {
         let apiKey: string | undefined;
         try {
-          apiKey = choice.secretRef ? resolveSecretRefValueSync(choice.secretRef, { env: environmentWithWorkerSetupEnv() }) : undefined;
+          apiKey = choice.secretRef ? resolveSecretRefValueSync(choice.secretRef, { env: setupEnvPath ? await freshCredentialEnv() : environmentWithWorkerSetupEnv() }) : undefined;
         } catch {
           apiKey = undefined;
         }
@@ -6050,7 +6108,8 @@ export async function main(): Promise<void> {
           // resolved, so the same-provider rule is checked on the model that
           // is actually sent.
           send: async (text, authorize, { model, signal }) => {
-            const route = transport(model);
+            const env = setupEnvPath ? await freshCredentialEnv() : undefined;
+            const route = transport(model, () => env ?? environmentWithWorkerSetupEnv());
             if (!route) return undefined;
             const opened = await openZkapiConsultSession(route, signal ? { signal } : {});
             if (!opened.ok) return { ok: false, error: opened.error };
@@ -6189,8 +6248,11 @@ export async function main(): Promise<void> {
       source: sovereigntyEngine.source,
       ...(sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}),
     },
-    credentialPresent: (_id, profile) => profile.secretRef === undefined
-      || safeModelCredential(profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) }) !== undefined,
+    credentialPresent: (_id, profile) => {
+      if (profile.secretRef === undefined) return true;
+      const present = (env: Record<string, string> | undefined) => safeModelCredential(profile, { ...process.env, ...env }) !== undefined;
+      return freshSetupEnv ? freshSetupEnv().then(present) : present(readWorkerSetupEnv());
+    },
     requestReload: () => requestModelReload(),
     retryModel: (model) => {
       if (model === 'transcription') {
@@ -6216,10 +6278,10 @@ export async function main(): Promise<void> {
   // worker module itself never imports the writer; its routes are served
   // only inside an authenticated local control session (workers/http.ts).
   const { createDashboardConsultAdapter } = await import('./dashboard/dashboard-consult.ts');
-  const consultRouteKey = (secretRef: string | undefined): string | undefined => {
+  const consultRouteKey = (secretRef: string | undefined, env?: NodeJS.ProcessEnv): string | undefined => {
     if (!secretRef) return undefined;
     try {
-      return resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() })?.trim() || undefined;
+      return resolveSecretRefValueSync(secretRef, { env: env ?? environmentWithWorkerSetupEnv() })?.trim() || undefined;
     } catch {
       return undefined;
     }
@@ -6234,10 +6296,10 @@ export async function main(): Promise<void> {
     // written to worker.env reads as present before the restart applies it.
     // The adapter gets a yes/no; the key itself is resolved only here, for
     // the recovery session, and handed straight to the transport.
-    secretPresent: (secretRef) => consultRouteKey(secretRef) !== undefined,
+    secretPresent: (secretRef) => consultRouteKey(secretRef, setupEnvPath ? mergeWorkerSetupEnv(process.env, readSetupEnv()) : undefined) !== undefined,
     recoverSession: async (route, secretRef) => {
       const { recoverZkapiSession } = await import('../../core/consult-transport-zkapi.ts');
-      const apiKey = consultRouteKey(secretRef);
+      const apiKey = consultRouteKey(secretRef, setupEnvPath && secretRef ? await freshCredentialEnv() : undefined);
       return recoverZkapiSession({ ...route, ...(apiKey ? { apiKey } : {}) });
     },
     requestReload: () => requestModelReload(),
@@ -6252,7 +6314,7 @@ export async function main(): Promise<void> {
       const read = readConsultSettings();
       const choice = read.state === 'valid' ? read.settings.writer : undefined;
       if (read.state !== 'valid' || !choice) throw new Error('Choose your model and save it first.');
-      const apiKey = consultRouteKey(choice.secretRef);
+      const apiKey = consultRouteKey(choice.secretRef, setupEnvPath && choice.secretRef ? await freshCredentialEnv() : undefined);
       if (choice.secretRef && !apiKey) throw new Error(`The key reference ${choice.secretRef} is not set on this computer.`);
       const { consultStandardInstruction } = await import('../../core/consult-settings.ts');
       // Standard: the instruction the user chose (as written has no model step to test: light cleanup is tested).
@@ -6368,6 +6430,14 @@ export async function main(): Promise<void> {
     return model ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env, model)) : undefined;
   };
 
+  if (engineFront) {
+    // Start the reads before the listener serves the first dashboard or health request.
+    readBuiltInEmbeddingStatus();
+    chatgptEmbeddingState();
+    readBuiltInEmbeddingVision();
+    if (builtInRerankerMayRun(process.env)) readBuiltInRerankerStatus();
+  }
+
   // ChatGPT's dashboard and setup tools, as /mcp runs them. The same options
   // serve the panel on Olympus's own hosts (dashboard-panel-tools.ts): the
   // computer's /dashboard and the OpenClaw Control UI tab.
@@ -6398,7 +6468,7 @@ export async function main(): Promise<void> {
     // computer for them; anywhere else (a hand-run worker, or a Hermes
     // install that turned the route off) the panel shows the by-hand lines only.
     remote: () => {
-      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
+      const mode = resolveServerMode({ env: process.env, fileEnv: readSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
       const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw';
       return mode.remote
         ? { port, ...(process.platform === 'linux' ? { socketPath: workerSocketPath()! } : {}), ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw && mode.agentRoute }
@@ -6721,7 +6791,9 @@ export async function main(): Promise<void> {
         // only reads the current snapshot and cannot spawn systemctl.
         const desktop = await linuxGraphicalSessionReadinessAsync();
         if (desktopPollingClosed) return;
-        ready = desktop.ready && !resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => desktop.ready }).remote;
+        const fileEnv = desktop.ready ? (freshSetupEnv ? await freshSetupEnv() : readWorkerSetupEnv()) : undefined;
+        if (desktopPollingClosed) return;
+        ready = desktop.ready && !resolveServerMode({ env: process.env, fileEnv, desktopReady: () => desktop.ready }).remote;
       } catch { ready = false; }
       finally { probing = false; if (!desktopPollingClosed) desktopBridge?.refresh(); }
     };
@@ -6955,6 +7027,7 @@ export async function main(): Promise<void> {
   const frontMemory = engineRole !== 'background' ? startEngineRssRestart({
     thresholdMb: 0, batchRunning: () => false, restart: () => false, record: () => {},
     previous: { count: 0 }, memory: memoryDiagnostic,
+    ...(engineRole === 'front' ? { sampleAsync: processMemoryAsync } : {}),
   }) : undefined;
   let engineBackground: { stop(): void } | undefined;
   if (engineRole === 'background') {

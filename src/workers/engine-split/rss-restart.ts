@@ -42,6 +42,7 @@ export function startEngineRssRestart(input: {
   thresholdMb: number;
   rss?: () => number;
   sample?: () => ProcessMemory;
+  sampleAsync?: () => Promise<ProcessMemory>;
   /** Judge or scheduler work is running: the restart waits for it to end. */
   batchRunning: () => boolean;
   /** The clean reload; false when nothing supervises this process. */
@@ -108,8 +109,7 @@ export function startEngineRssRestart(input: {
   let samplesSinceCheck = 0;
   // Record the latest sample before checking so the first check at five
   // minutes sees a complete window, even when both would be due together.
-  const sampler = setTimer(() => {
-    const sampled = sample();
+  const recordSample = (sampled: ProcessMemory) => {
     const rss = input.rss?.() ?? sampled.anon ?? sampled.rss;
     memory.sample(sampled, rss);
     if (input.thresholdMb > 0) {
@@ -125,10 +125,21 @@ export function startEngineRssRestart(input: {
     if (++samplesSinceCheck * MEMORY_SAMPLE_INTERVAL_MS < ENGINE_RSS_CHECK_INTERVAL_MS) return;
     samplesSinceCheck = 0;
     check(sampled, rss);
+  };
+  const sampleAsync = input.sampleAsync;
+  let reading = false;
+  let stopped = false;
+  const sampler = setTimer(() => {
+    if (!sampleAsync) { recordSample(sample()); return; }
+    if (reading) return;
+    reading = true;
+    void sampleAsync().then((sampled) => {
+      if (!stopped) recordSample(sampled);
+    }).finally(() => { reading = false; });
   }, MEMORY_SAMPLE_INTERVAL_MS);
   return {
     restarts: () => restarts,
-    stop: () => clearTimer(sampler),
+    stop: () => { stopped = true; clearTimer(sampler); },
   };
 }
 
