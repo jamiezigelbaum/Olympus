@@ -2166,12 +2166,14 @@ function embeddingSweepTask(
   // it is embedded on the next pass as before. A full pass still runs every
   // EMBEDDING_SWEEP_IDLE_FULL_PASS_MS for anything the markers do not see.
   const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() === 'on';
-  const quiet = new WeakMap<object, { key: string; at: number; run: Awaited<ReturnType<typeof embedPendingChunks>>[number] }>();
+  // Remembered per store and per target: one store can be swept under two targets.
+  const quiet = new WeakMap<object, Map<string, { key: string; at: number; run: Awaited<ReturnType<typeof embedPendingChunks>>[number] }>>();
+  const quietSlot = (target: ConnectorStoreEmbeddingTarget): string => JSON.stringify([target.provider.modelId, target.provider.epochId ?? null,
+    target.wholeStore === true, target.accountScope ?? null, target.filters ?? null]);
   const quietKey = (target: ConnectorStoreEmbeddingTarget): string | undefined => {
     const writes = target.store.writeSequence();
     if (writes === undefined) return undefined;
-    return JSON.stringify([writes, target.store.visibilityMarker(), target.provider.modelId, target.provider.epochId ?? null,
-      target.wholeStore === true, target.accountScope ?? null, target.filters ?? null]);
+    return JSON.stringify([writes, target.store.visibilityMarker()]);
   };
   return {
     id: `${source.sourceId}_embeddings`,
@@ -2194,14 +2196,15 @@ function embeddingSweepTask(
         const paced = tricklingTarget(target);
         trickled ||= paced;
         const keyBefore = idleBackoff ? quietKey(target) : undefined;
-        const rested = keyBefore === undefined ? undefined : quiet.get(target.store);
+        const slot = idleBackoff ? quietSlot(target) : '';
+        const rested = keyBefore === undefined ? undefined : quiet.get(target.store)?.get(slot);
         if (rested && rested.key === keyBefore && Date.now() - rested.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS
           && target.store.queuedEmbeddingItemIds().length === 0 && target.store.embeddingDeferredReason() === undefined) {
           runs.push(rested.run);
           restedRuns.add(runs.length - 1);
           continue;
         }
-        quiet.delete(target.store);
+        quiet.get(target.store)?.delete(slot);
         const overran = Symbol('overran');
         let timer: ReturnType<typeof setTimeout> | undefined;
         // The pass stops starting batches at half the deadline, so a store
@@ -2230,7 +2233,8 @@ function embeddingSweepTask(
             && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0
             && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1
             && target.store.embeddingFailedItemCount() === 0 && quietKey(target) === keyBefore) {
-            quiet.set(target.store, { key: keyBefore, at: Date.now(), run: only });
+            const slots = quiet.get(target.store) ?? new Map();
+            quiet.set(target.store, slots.set(slot, { key: keyBefore, at: Date.now(), run: only }));
           }
           continue;
         }

@@ -227701,19 +227701,18 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
   };
   const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() === "on";
   const quiet = new WeakMap;
+  const quietSlot = (target) => JSON.stringify([
+    target.provider.modelId,
+    target.provider.epochId ?? null,
+    target.wholeStore === true,
+    target.accountScope ?? null,
+    target.filters ?? null
+  ]);
   const quietKey = (target) => {
     const writes = target.store.writeSequence();
     if (writes === undefined)
       return;
-    return JSON.stringify([
-      writes,
-      target.store.visibilityMarker(),
-      target.provider.modelId,
-      target.provider.epochId ?? null,
-      target.wholeStore === true,
-      target.accountScope ?? null,
-      target.filters ?? null
-    ]);
+    return JSON.stringify([writes, target.store.visibilityMarker()]);
   };
   return {
     id: `${source.sourceId}_embeddings`,
@@ -227731,13 +227730,14 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         const paced = tricklingTarget(target);
         trickled ||= paced;
         const keyBefore = idleBackoff ? quietKey(target) : undefined;
-        const rested = keyBefore === undefined ? undefined : quiet.get(target.store);
+        const slot = idleBackoff ? quietSlot(target) : "";
+        const rested = keyBefore === undefined ? undefined : quiet.get(target.store)?.get(slot);
         if (rested && rested.key === keyBefore && Date.now() - rested.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS && target.store.queuedEmbeddingItemIds().length === 0 && target.store.embeddingDeferredReason() === undefined) {
           runs.push(rested.run);
           restedRuns.add(runs.length - 1);
           continue;
         }
-        quiet.delete(target.store);
+        quiet.get(target.store)?.delete(slot);
         const overran = Symbol("overran");
         let timer;
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
@@ -227757,7 +227757,8 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined ? { ...run, deferredReason: outage } : run));
           const only = result.length === 1 ? result[0] : undefined;
           if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0 && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1 && target.store.embeddingFailedItemCount() === 0 && quietKey(target) === keyBefore) {
-            quiet.set(target.store, { key: keyBefore, at: Date.now(), run: only });
+            const slots = quiet.get(target.store) ?? new Map;
+            quiet.set(target.store, slots.set(slot, { key: keyBefore, at: Date.now(), run: only }));
           }
           continue;
         }
