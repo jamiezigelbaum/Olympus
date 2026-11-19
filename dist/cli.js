@@ -65750,11 +65750,7 @@ async function runStepsInTurns(steps) {
   }
   return step.value;
 }
-async function pkSetInTurns(lists, {
-  keep,
-  set = new Set,
-  turn = ingestionTurn
-} = {}) {
+async function pkSetInTurns(lists, keep, set = new Set) {
   let added = 0;
   for (const list of lists) {
     for (const pk of list) {
@@ -65762,7 +65758,7 @@ async function pkSetInTurns(lists, {
         continue;
       set.add(pk);
       if (++added % PK_SET_SLICE === 0)
-        await turn();
+        await ingestionTurn();
     }
   }
   return set;
@@ -65770,7 +65766,7 @@ async function pkSetInTurns(lists, {
 async function embeddingExcludedPksInTurns(tierHidden, allowHeld) {
   const eligibleHeld = allowHeld ? await pkSetInTurns([tierHidden.heldForJudgment]) : undefined;
   const excluded = await pkSetInTurns([tierHidden.hidden, tierHidden.metadataLayer]);
-  return pkSetInTurns([tierHidden.held], { keep: (pk) => !eligibleHeld?.has(pk), set: excluded });
+  return pkSetInTurns([tierHidden.held], (pk) => !eligibleHeld?.has(pk), excluded);
 }
 
 class MutablePkList {
@@ -76891,7 +76887,7 @@ ${parentKey(ref)}`, { ref, origin });
         ...selectedAccount ? { accountScope: selectedAccount } : {},
         ...filters ? { filters } : {}
       };
-      const excludedItemPks = await this.vectorScanExcludedItemPks();
+      const excludedItemPks = this.vectorScanExcludedItemPks();
       if (excludedItemPks)
         pageOptions.excludedItemPks = excludedItemPks;
       const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
@@ -76942,11 +76938,6 @@ ${parentKey(ref)}`, { ref, origin });
       };
     }
     vectorScanExcludedItemPks() {
-      return this.vectorScanExclusionBuild ??= this.buildVectorScanExclusion().finally(() => {
-        this.vectorScanExclusionBuild = undefined;
-      });
-    }
-    async buildVectorScanExclusion() {
       if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
         let ledger;
         try {
@@ -76959,35 +76950,30 @@ ${parentKey(ref)}`, { ref, origin });
           return;
         }
       }
+      let base;
+      let children;
       try {
-        const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
-        const basePks = [base.hidden, base.held, base.metadataLayer];
-        const memo = this.tierLedgerHiddenMemo;
-        if (memo ? memo.value !== base : basePks.some((pks) => pks.length > 0))
-          return;
-        const lists = memo ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : [];
-        const generations = lists.map((list) => list.generation);
-        const baseCurrent = () => this.tierLedgerHiddenMemo === memo && lists.every((list, at) => list.generation === generations[at]);
-        const children = await this.hiddenChildItemPksInTurns();
-        const childMemo = this.hiddenChildMemo;
-        if (!baseCurrent())
-          return;
-        const cached = this.vectorScanExclusion;
-        const excluded = memo && cached?.lists.every((list, at) => list === lists[at] && cached.generations[at] === generations[at]) ? cached.set : await pkSetInTurns(basePks, { turn: yieldConnectorStoreVectorScan });
-        const hiddenChildren = children.length > 0 ? await pkSetInTurns([children], { turn: yieldConnectorStoreVectorScan }) : undefined;
-        if (!baseCurrent() || this.hiddenChildMemo !== childMemo)
-          return;
-        if (excluded !== cached?.set)
-          this.vectorScanExclusion = memo ? { lists, generations, set: excluded } : undefined;
-        if (hiddenChildren)
-          return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
-        return excluded.size > 0 ? excluded : undefined;
+        base = this.tierLedgerHiddenItemPks();
+        children = this.hiddenChildItemPks();
       } catch {
         return;
       }
+      const memo = this.tierLedgerHiddenMemo;
+      const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
+      const cached = this.vectorScanExclusion;
+      let excluded;
+      if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
+        excluded = cached.set;
+      } else {
+        excluded = new Set([...base.hidden, ...base.held, ...base.metadataLayer]);
+        this.vectorScanExclusion = lists ? { lists, generations: lists.map((list) => list.generation), set: excluded } : undefined;
+      }
+      if (children.length === 0)
+        return excluded.size > 0 ? excluded : undefined;
+      const hiddenChildren = new Set(children);
+      return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
     }
     vectorScanExclusion;
-    vectorScanExclusionBuild;
     async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
       const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
