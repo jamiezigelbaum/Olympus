@@ -156,3 +156,19 @@ test('with the idle back-off switched off, every pass walks the store', async ()
   await f.pass();
   expect(walks.mock.calls.length).toBeGreaterThan(settled);
 });
+
+test('an item that failed for good does not keep its store walked, stays reported, and a change wakes the store', async () => {
+  const f = await fixture();
+  f.store.markEmbeddingFailed(localId('synthetic-id'), 'synthetic');
+  const walks = spyOn(f.store, 'embeddingSweepInventory');
+  expect(await f.pass()).toMatchObject({ skipped_failed_chunks: 1, eligible_chunks: 0, rested: 0 });
+  const settled = walks.mock.calls.length;
+  for (let i = 0; i < 2; i++) expect(await f.pass()).toMatchObject({ skipped_failed_chunks: 1, items_failed: 0, rested: 1 });
+  expect(walks.mock.calls.length).toBe(settled);
+  expect(f.store.embeddingFailedItemCount()).toBe(1);
+  await f.set.sync(fixtureConnector(() => [
+    { id: 'synthetic-id', name: 'synthetic-name.txt', text: 'Synthetic body marker.' },
+    { id: 'synthetic-id-3', name: 'synthetic-name-3.txt', text: 'A third synthetic body.' },
+  ]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
+});

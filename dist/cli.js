@@ -228137,7 +228137,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           const outage = target.store.embeddingDeferredReason();
           runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined ? { ...run, deferredReason: outage } : run));
           const only = result.length === 1 ? result[0] : undefined;
-          if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0 && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1 && target.store.embeddingFailedItemCount() === 0 && quietKey(target) === keyBefore) {
+          if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0 && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1 && quietKey(target) === keyBefore) {
             const slots = quiet.get(target.store) ?? new Map;
             quiet.set(target.store, slots.set(slot, { key: keyBefore, at: Date.now(), run: only }));
           }
