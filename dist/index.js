@@ -16311,6 +16311,12 @@ var init_off_thread_reads = __esm(() => {
 
 // src/core/embedding-cost-estimates.ts
 var init_embedding_cost_estimates = () => {};
+
+// src/workers/source-index/status-count-reuse.ts
+var STORE_UNCHANGED_REUSE_MS;
+var init_status_count_reuse = __esm(() => {
+  STORE_UNCHANGED_REUSE_MS = 30 * 60000;
+});
 // src/core/file-scope-sources.ts
 function registerFileScopeSource(definition) {
   const { sourceId, provider } = definition;
@@ -17627,6 +17633,7 @@ var init_local_index = __esm(() => {
   init_source_size_limits();
   init_store_totals();
   init_vector_digest();
+  init_status_count_reuse();
   init_boot_progress();
   init_evidence_reranker();
   init_engine_heartbeat();
@@ -20954,13 +20961,14 @@ var init_telegram_messages = __esm(() => {
 });
 
 // src/workers/source-index/status.ts
-var DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, STORE_UNCHANGED_REUSE_MS;
+var DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS;
 var init_status = __esm(() => {
   init_off_thread_reads();
   init_corpus();
   init_embedding_cost_estimates();
   init_source_corpus_registry();
   init_answer_ready_coverage();
+  init_status_count_reuse();
   init_corpora();
   init_readwise();
   init_x_bookmarks();
@@ -20979,7 +20987,6 @@ var init_status = __esm(() => {
     readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS
   });
   STORE_STATUS_REUSE_MS = 5 * 60000;
-  STORE_UNCHANGED_REUSE_MS = 30 * 60000;
 });
 
 // src/core/public-source-capabilities.ts

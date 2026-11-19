@@ -25,6 +25,7 @@ import type {
   CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON,
   ConnectorStoreStatusScope,
 } from '../connector-store/local-index.ts';
+import { STORE_UNCHANGED_REUSE_MS } from './status-count-reuse.ts';
 import type { SourceEmbeddingBackend } from './embeddings.ts';
 import {
   defineGmailSecureLocalCorpus,
@@ -447,8 +448,7 @@ export const STORE_STATUS_REUSE_MS = 5 * 60_000;
  * dashboard polling every few seconds sees each change one poll later.
  */
 export const STATUS_SNAPSHOT_REFRESH_MS = 0;
-/** Recount even an unchanged store for inputs outside its write and visibility feeds. */
-export const STORE_UNCHANGED_REUSE_MS = 30 * 60_000;
+export { STORE_UNCHANGED_REUSE_MS };
 /** A corpus whose recount takes this long is named in the log, with its phases. */
 const STATUS_RECOUNT_CORPUS_LOG_MS = 2_000;
 
