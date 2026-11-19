@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /** Synthetic Ask benchmark. Build outside the memory scope, then run both engine roles inside it. */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Database } from 'bun:sqlite';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
@@ -452,6 +452,16 @@ function limitsFor(build: BuildReceipt, args: Args): Limits {
   return { memory_max, memory_swap_max };
 }
 
+let idleLog: string[] | undefined;
+function threadReads(pid: number): Array<{ tid: string; comm: string; read_bytes: number; rchar: number }> {
+  const tasks = `/proc/${pid}/task`;
+  if (!existsSync(tasks)) return [];
+  return readdirSync(tasks).map((tid) => {
+    const io = optionalText(`${tasks}/${tid}/io`);
+    return { tid, comm: optionalText(`${tasks}/${tid}/comm`)?.trim() ?? '', read_bytes: procNumber(io, 'read_bytes') ?? 0, rchar: procNumber(io, 'rchar') ?? 0 };
+  }).sort((left, right) => right.read_bytes - left.read_bytes);
+}
+
 function idleSample(pid: number, scope: string | undefined, readyAt: number) {
   const status = optionalText(`/proc/${pid}/status`);
   const io = optionalText(`/proc/${pid}/io`);
@@ -626,6 +636,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
             partial = lines.pop() ?? '';
             for (const line of lines) {
               tails[role] = (tails[role] + line + '\n').slice(-16_000);
+              if (role === 'background' && idleLog) idleLog.push(line);
               if (line.includes("a store's hidden-copy set could not be built yet")) error = line;
               if (line.includes(`${role}: built ${stores.length} stores' hidden-copy sets`)) {
                 ready[role] = { at: new Date().toISOString(), line };
@@ -646,6 +657,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
       await Bun.sleep(100);
     }
     const readyAt = Date.now();
+    idleLog = [];
     console.log(`READY after ${readyAt - started} ms, idle ${args.secondsIdle} s, scope=systemd`);
     for (let offset = 0; offset <= args.secondsIdle * 1000; offset += MINUTE_MS) {
       await Bun.sleep(Math.max(0, readyAt + offset - Date.now()));
@@ -654,6 +666,16 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
       idle.push(sample);
       console.log(`Idle ${JSON.stringify(sample)}`);
     }
+    // Who read the disk while nothing was asked: the background's threads by
+    // bytes read, and what it logged, each distinct line shape once with a count.
+    console.log(`Idle threads ${JSON.stringify(threadReads(background.pid).slice(0, 10))}`);
+    const shapes = new Map<string, { n: number; last: string }>();
+    for (const line of idleLog) {
+      const shape = line.replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, '').replace(/[\d.]+/g, '#').slice(0, 120);
+      shapes.set(shape, { n: (shapes.get(shape)?.n ?? 0) + 1, last: line });
+    }
+    idleLog = undefined;
+    for (const { n, last } of [...shapes.values()].sort((left, right) => right.n - left.n).slice(0, 60)) console.log(`Idle log x${n} ${last.slice(0, 600)}`);
     await Bun.sleep(Math.max(0, readyAt + args.secondsIdle * 1000 - Date.now()));
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
     for (const [label, index] of [['q1-new', 0], ['q1-repeat', 0], ['q2-new', 1], ['q3-new', 2], ['q4-new', 3], ['q5-new', 4]] as const) {
