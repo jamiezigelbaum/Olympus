@@ -22,7 +22,6 @@
 // the store.
 
 import type { Database } from 'bun:sqlite';
-import type { StoreRead } from './off-thread-reads.ts';
 
 export type StoreTotalsName = 'items' | 'tombstoned_items' | 'chunks' | 'sync_runs' | `vectors:${string}`;
 
@@ -145,28 +144,11 @@ export function storeTotalsInstalled(db: Database): boolean {
   return row.n === 2 + STORE_TOTALS_TRIGGERS.length;
 }
 
-const storeTotalsStateRead: StoreRead = {
-  sql: 'SELECT reconciled_at, drift FROM store_totals_state WHERE id = 1', params: [], mode: 'get', site: 'dashboardStoreTotalsState',
-};
-const storeTotalsRowsRead: StoreRead = {
-  sql: 'SELECT name, n FROM store_totals', params: [], mode: 'all', site: 'dashboardStoreTotalsRows',
-};
-
-/** The kept totals, or undefined until the first reconcile has filled them. */
+/** The kept totals, or undefined until the first reconcile has filled them. One small read. */
 export function readStoreTotals(db: Database): StoreTotals | undefined {
-  const steps = readStoreTotalsSteps();
-  let step = steps.next();
-  while (!step.done) {
-    const { sql, mode } = step.value;
-    step = steps.next(db.query(sql)[mode]());
-  }
-  return step.value;
-}
-
-export function* readStoreTotalsSteps(): Generator<StoreRead, StoreTotals | undefined, unknown> {
-  const state = (yield storeTotalsStateRead) as { reconciled_at: string; drift: number } | null;
+  const state = db.query('SELECT reconciled_at, drift FROM store_totals_state WHERE id = 1').get() as { reconciled_at: string; drift: number } | null;
   if (!state) return undefined;
-  const rows = (yield storeTotalsRowsRead) as Array<{ name: string; n: number }>;
+  const rows = db.query('SELECT name, n FROM store_totals').all() as Array<{ name: string; n: number }>;
   const totals = storeTotalsFromRows(rows, state.reconciled_at);
   if (state.drift === WALK_OWED_NOW) totals.walkOwed = 'now';
   else if (state.drift === WALK_OWED_LATER) totals.walkOwed = 'later';

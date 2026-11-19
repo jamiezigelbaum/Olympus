@@ -27,7 +27,6 @@ import {
 } from '../src/workers/classification/tier-classifier.ts';
 import { PERSONAL_FIRST_SETTLE_DONE, TIER_LEDGER_SQLITE_STORE_ID, TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { releaseOffThreadReads } from '../src/workers/connector-store/off-thread-reads.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { decideItemTiers, resolveStoreTierClassification, type ConnectorStoreTierClassification } from '../src/workers/connector-store/tier-placement.ts';
@@ -240,14 +239,7 @@ test('held content rests in Private with its embedding held; cleared names stay 
   expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'pending', contentPending: true, contentTier: 'private' });
   expect(f.ledger.getCurrent(identity)?.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
   // "Still checking" counts the item once, not once per store holding a copy.
-  const corpora = [CORPORA.internal, CORPORA.secure_local];
-  const held = f.ledger.heldItemCount(corpora);
-  expect(held).toBe(1);
-  try {
-    expect(await f.ledger.heldItemCountInBackground(corpora)).toBe(held);
-  } finally {
-    releaseOffThreadReads(f.ledger.dbPath);
-  }
+  expect(f.ledger.heldItemCount([CORPORA.internal, CORPORA.secure_local])).toBe(1);
   expect(f.stores.internal.searchItems('Orchard', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['picnic']);
   expect(f.stores.internal.searchItems(BODY_MARKER, 10)).toEqual([]);
   expect(f.stores.internal.localContent(localId('picnic'))?.chunks ?? []).toEqual([]);

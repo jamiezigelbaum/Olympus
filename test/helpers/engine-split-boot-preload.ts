@@ -2,64 +2,13 @@ import { mock } from 'bun:test';
 import * as starting from '../../src/core/worker-front-proxy.ts';
 import { LocalConnectorStore } from '../../src/workers/connector-store/local-index.ts';
 import * as cleanup from '../../src/workers/local-files/own-roots-cleanup.ts';
-import { startMainThreadSqlSiteCount } from '../../src/workers/connector-store/main-thread-sql-trace.ts';
-import { createDashboardHeldRead } from '../../src/workers/dashboard/held-read.ts';
 
 const gates = {
   cleanup: Promise.withResolvers<void>(),
   visibility: Promise.withResolvers<void>(),
   response: Promise.withResolvers<void>(),
 };
-let trace: ReturnType<typeof startMainThreadSqlSiteCount> | undefined;
-const sendToWorker = Worker.prototype.postMessage;
-const delayed: Array<() => void> = [];
-let holdDashboardReads = true;
-let dashboardTime: number | undefined;
-const createHeldRead = createDashboardHeldRead;
-mock.module('../../src/workers/dashboard/held-read.ts', () => ({
-  createDashboardHeldRead: <T>(refreshMs: number, reportError: (error: unknown) => void) =>
-    createHeldRead<T>(refreshMs, reportError, () => dashboardTime ??= Date.now()),
-}));
-
-Worker.prototype.postMessage = function (message: unknown, options?: StructuredSerializeOptions | Transferable[]) {
-  const send = () => Reflect.apply(sendToWorker, this, options === undefined ? [message] : [message, options]);
-  const { sql, params } = (message ?? {}) as { sql?: string; params?: unknown[] };
-  const read = sql?.includes('FROM source_dashboard_samples')
-    ? (sql.includes('COUNT(*)') ? 'history count' : 'history progress')
-    : sql?.includes('FROM source_dashboard_movement') ? 'history movement'
-    : sql?.includes('SELECT COUNT(*) AS n FROM tier_items t') && sql.includes('metadata_pending = 1') ? 'held items'
-    : sql?.startsWith('SELECT reconciled_at, drift FROM store_totals_state') ? 'totals state'
-    : sql === 'SELECT name, n FROM store_totals' ? 'totals rows'
-    : sql?.includes('AS has_content') && sql.includes('ORDER BY i.item_pk') ? 'exclusion debt'
-    : undefined;
-  if (read) {
-    process.send!({ dashboardRead: read, key: params?.[0] });
-    if (holdDashboardReads) {
-      delayed.push(send);
-      return;
-    }
-  }
-  send();
-};
-
-process.on('message', (phase: string) => {
-  if (phase === 'trace-start') {
-    trace = startMainThreadSqlSiteCount(8);
-    process.send!('trace-started');
-  } else if (phase.startsWith('trace-stop:')) {
-    process.send!({ dashboardTrace: phase, sites: trace?.sites() });
-    trace?.stop();
-  } else if (phase === 'release-dashboard-reads') {
-    holdDashboardReads = false;
-    for (const send of delayed.splice(0)) send();
-  } else if (phase === 'hold-dashboard-refresh') {
-    holdDashboardReads = true;
-    dashboardTime = (dashboardTime ?? Date.now()) + 61_000;
-    process.send!('dashboard-refresh-held');
-  } else {
-    gates[phase as keyof typeof gates]?.resolve();
-  }
-});
+process.on('message', (phase: keyof typeof gates) => gates[phase].resolve());
 
 const createRecovery = cleanup.createLocalFilesOwnRootsRecovery;
 mock.module('../../src/workers/local-files/own-roots-cleanup.ts', () => ({

@@ -4,7 +4,7 @@ import { noteSourceIndexReadProgress } from '../../core/source-index/read-progre
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
-  applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreTotalsSteps, readStoreWriteSequence, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
+  applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreWriteSequence, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
   type StoreTotals,
 } from './store-totals.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
@@ -3864,32 +3864,6 @@ export interface ImageContentOutsidePrivateRow {
   provider_conversation_id: string | null;
 }
 
-type LocatorCensusRow = { item_pk: number; locator_uri: string | null; has_content: number };
-const LOCATOR_CENSUS_SQL = `
-  SELECT i.item_pk, i.locator_uri AS locator_uri,
-    EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk) AS has_content
-  FROM items i
-`;
-
-function emptyExclusionDebt() {
-  return { excluded: { items: 0, unevaluable: 0 }, metadataOnlyContent: { items: 0, unevaluable: 0 } };
-}
-
-function countExclusionDebt(
-  debt: ReturnType<typeof emptyExclusionDebt>,
-  exclusions: SourceExclusionMatcher,
-  locator: string | null,
-  hasContent: boolean,
-): void {
-  const decision = exclusions.evaluatePath(locator);
-  // A metadata-only row owes a strip only while it still holds content.
-  const count = decision.excluded ? debt.excluded
-    : decision.disposition === 'metadata_only' && hasContent ? debt.metadataOnlyContent : undefined;
-  if (!count) return;
-  count.items += 1;
-  if (sourceExclusionOutcomeIsUnevaluable(decision.outcome)) count.unevaluable += 1;
-}
-
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
@@ -6628,13 +6602,13 @@ export class LocalConnectorStore {
   }
 
   /** Drives store reads on this store's background read worker, in one snapshot; here when the pool never reads this store. */
-  private async readStepsInBackground<T>(steps: Generator<StoreRead, T, unknown>, snapshot = false): Promise<T> {
-    if (!snapshot && !offThreadReadsSupported(this.dbPath)) return this.readHere(steps);
+  private async readStepsInBackground<T>(steps: Generator<StoreRead, T, unknown>): Promise<T> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.readHere(steps);
     return withOffThreadSnapshot(this.dbPath, async (read) => {
       let next = steps.next();
       while (!next.done) next = steps.next(await read(next.value));
       return next.value;
-    }, { ...BACKGROUND_READS, perRead: !snapshot });
+    }, BACKGROUND_READS);
   }
 
   private *activeChildParentsSteps(after: ParentRef | undefined, limit: number): Generator<StoreRead, ParentRef[], unknown> {
@@ -10987,32 +10961,26 @@ export class LocalConnectorStore {
     excluded: { items: number; unevaluable: number };
     metadataOnlyContent: { items: number; unevaluable: number };
   } {
-    const debt = emptyExclusionDebt();
-    if (!this.exclusions.active) return debt;
-    for (const row of this.itemLocatorCensus()) countExclusionDebt(debt, this.exclusions, row.locator, row.hasContent);
-    return debt;
-  }
-
-  /** Count both debts over one worker snapshot, keeping only one page of locators on the front. */
-  static async exclusionDebtInBackground(dbPath: string, exclusions: SourceExclusionMatcher): Promise<ReturnType<typeof emptyExclusionDebt>> {
-    const debt = emptyExclusionDebt();
-    if (!exclusions.active) return debt;
-    const pageSize = 512;
-    return withOffThreadSnapshot(dbPath, async (read) => {
-      let after: number | undefined;
-      for (;;) {
-        const where = after === undefined ? '' : ' WHERE i.item_pk > ?';
-        const rows = await read({
-          sql: LOCATOR_CENSUS_SQL + where + ' ORDER BY i.item_pk LIMIT ?',
-          params: after === undefined ? [pageSize] : [after, pageSize],
-          mode: 'all', site: 'dashboardExclusionDebt',
-        }) as LocatorCensusRow[];
-        for (const row of rows) countExclusionDebt(debt, exclusions, row.locator_uri, row.has_content === 1);
-        if (rows.length < pageSize) return debt;
-        after = rows[rows.length - 1]!.item_pk;
-        await ingestionTurn();
+    const empty = { excluded: { items: 0, unevaluable: 0 }, metadataOnlyContent: { items: 0, unevaluable: 0 } };
+    if (!this.exclusions.active) return empty;
+    const excluded = { items: 0, unevaluable: 0 };
+    const metadataOnlyContent = { items: 0, unevaluable: 0 };
+    for (const row of this.itemLocatorCensus()) {
+      const decision = this.exclusions.evaluatePath(row.locator);
+      const unevaluable = sourceExclusionOutcomeIsUnevaluable(decision.outcome);
+      if (decision.excluded) {
+        excluded.items += 1;
+        if (unevaluable) excluded.unevaluable += 1;
+        continue;
       }
-    }, { ...BACKGROUND_READS, perRead: false });
+      // Strip debt is content that a metadata-only rule says should not be
+      // there, so a row holding no content is not debt no matter what rule
+      // covers it.
+      if (decision.disposition !== 'metadata_only' || !row.hasContent) continue;
+      metadataOnlyContent.items += 1;
+      if (unevaluable) metadataOnlyContent.unevaluable += 1;
+    }
+    return { excluded, metadataOnlyContent };
   }
 
   /**
@@ -11029,7 +10997,12 @@ export class LocalConnectorStore {
    * the caller only needs each locator once, to fold into a tree.
    */
   *itemLocatorCensus(): Generator<{ locator: string | null; hasContent: boolean }> {
-    const rows = iterateRows<LocatorCensusRow>(this.db, LOCATOR_CENSUS_SQL);
+    const rows = iterateRows<{ locator_uri: string | null; has_content: number }>(this.db, `
+      SELECT
+        i.locator_uri AS locator_uri,
+        EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk) AS has_content
+      FROM items i
+    `);
     for (const row of rows) {
       yield { locator: row.locator_uri, hasContent: row.has_content === 1 };
     }
@@ -17073,10 +17046,6 @@ export class LocalConnectorStore {
 
   totals(): StoreTotals | undefined {
     try { return readStoreTotals(this.db); } catch { return undefined; }
-  }
-
-  totalsInBackground(): Promise<StoreTotals | undefined> {
-    return this.readStepsInBackground(readStoreTotalsSteps(), true);
   }
 
   /**

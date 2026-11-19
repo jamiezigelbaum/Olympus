@@ -205,7 +205,7 @@ export interface ChatGptDashboardOptions {
   embedding?: DashboardViewModelV1['models']['embedding'];
   /** The owner's privacy settings, counts only (olympus_privacy_get). Absent: not reported. */
   privacy?: {
-    configured: boolean; pendingCount?: number; ruleCount: number; stateAgeSeconds?: number;
+    configured: boolean; pendingCount: number; ruleCount: number;
     /** The privacy check waits for the owner to approve its model (sniffer-service `awaiting_owner_approval`). */
     classifierAwaitingApproval?: boolean;
     /** What waits: its lane and model name (sniffer-service backlog `awaitingApproval`), no item content. */
@@ -421,7 +421,7 @@ export function buildChatGptDashboardViewModel(
   // Items waiting for the private model are machine work, In progress on
   // Home. They need the owner only when the check has stopped: then the
   // sentence says exactly why, and the button opens the model to look at.
-  else if (options.privacy?.judgeStopped && options.privacy.pendingCount !== undefined && options.privacy.pendingCount > 0) {
+  else if (options.privacy?.judgeStopped && options.privacy.pendingCount > 0) {
     const copy = DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY;
     needsYou.push({
       id: 'privacy:judge_stopped',
@@ -433,8 +433,6 @@ export function buildChatGptDashboardViewModel(
 
   const transcription = transcriptionModel(options.transcription);
 
-  const stateAgeSeconds = Math.max(view.engine_state?.state_age_seconds ?? 0, options.privacy?.stateAgeSeconds ?? 0);
-  const applying = view.engine_state?.applying;
   const progress = overallProgress(rows);
   const connected = rows.some(({ card }) => dashboardIsConnectedSource(card));
   const anyAnswerReady = rows.some(({ card }) => card.answer_readiness.state === 'ready');
@@ -463,7 +461,7 @@ export function buildChatGptDashboardViewModel(
       ? {
           privacy: {
             configured: options.privacy.configured,
-            ...(options.privacy.pendingCount !== undefined ? { pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)) } : {}),
+            pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)),
             ruleCount: Math.max(0, Math.floor(options.privacy.ruleCount)),
             ...(typeof options.privacy.judgePerMinute === 'number' && Number.isFinite(options.privacy.judgePerMinute) && options.privacy.judgePerMinute > 0
               ? { judgePerMinute: options.privacy.judgePerMinute } : {}),
@@ -472,9 +470,9 @@ export function buildChatGptDashboardViewModel(
       : {}),
     ...(options.remote ? { remote: options.remote } : {}),
     computerControls: { href: openPageUrl({ kind: 'dashboard' }) },
-    ...(stateAgeSeconds > 0 || applying !== undefined ? { engine: {
-      ...(stateAgeSeconds > 0 ? { stateAgeSeconds } : {}),
-      ...(applying !== undefined ? { applying } : {}),
+    ...(view.engine_state ? { engine: {
+      ...(view.engine_state.state_age_seconds !== undefined ? { stateAgeSeconds: view.engine_state.state_age_seconds } : {}),
+      ...(view.engine_state.applying !== undefined ? { applying: view.engine_state.applying } : {}),
     } } : {}),
     generatedAt: isoOrNow(view.generated_at, now),
   };

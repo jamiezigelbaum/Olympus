@@ -219,7 +219,7 @@ describe('live totals beside kept counts', () => {
   test("the front's dashboard shows live totals when the store mounted after startup", async () => {
     const dir = mkdtempSync(join(tmpdir(), 'status-totals-'));
     const snapshotPath = join(dir, 'source-status-snapshot.json');
-    const store = new LocalConnectorStore({ dbPath: join(dir, 'store.sqlite'), corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
     let now = 1_000_000;
     try {
       await store.reconcileTotals();
@@ -230,29 +230,20 @@ describe('live totals beside kept counts', () => {
       const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: mounted, nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
       await front.settled!();
       mounted.push(store);
-      const readFront = () => front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
-      const before = await waitFor(async () => {
-        const corpus = (await readFront()).corpora[0] as SourceIndexConnectorStoreStatus;
-        return corpus?.totals ? corpus : undefined;
-      });
+      const before = (await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)).corpora[0] as { counts: Record<string, number>; totals?: { items: number; sync_runs: number } };
       expect(before.totals).toMatchObject({ items: 1, sync_runs: 1 });
       await store.syncFromConnector(connector([file('a.txt', 'alpha'), file('b.txt', 'beta')]), { fetchContent: true });
-      now += 5_000;
-      const after = await within(readFront());
+      now += 2_000;
+      const after = await within(front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT));
       expect(after).not.toBe('waited');
-      if (after === 'waited') throw new Error('front waited for live totals');
-      expect((after.corpora[0] as typeof before).totals).toEqual(before.totals);
-      expect(after.live_totals_age_ms).toBe(5_000);
-      const shown = await waitFor(async () => {
-        const result = await readFront();
-        return (result.corpora[0] as typeof before).totals?.items === 2 ? result : undefined;
-      });
+      const shown = after as Awaited<ReturnType<typeof front.status>>;
       expect((shown.corpora[0] as typeof before).totals).toMatchObject({ items: 2, sync_runs: 2 });
-      // Fresh totals bring counts forward without resetting the snapshot age.
+      // The counts an import moves are brought forward by the totals at once;
+      // the snapshot keeps its age for what only a recount can say.
       expect((shown.corpora[0] as typeof before).counts.indexed_items).toBe(before.counts.indexed_items! + 1);
       expect((shown.corpora[0] as typeof before).counts.chunks).toBe(before.counts.chunks! + 1);
       expect((shown.corpora[0] as { counts_brought_forward?: unknown }).counts_brought_forward).toEqual({ items: 1, chunks: 1, embedded_chunks: 0 });
-      expect(shown.snapshot_age_ms).toBe(5_000);
+      expect(shown.snapshot_age_ms).toBe(2_000);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });

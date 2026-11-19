@@ -88,10 +88,6 @@ export interface SourceDispositionsSource {
    */
   excludedItemsPresent?: () => { items: number; unevaluable: number };
   metadataOnlyContentPresent?: () => { items: number; unevaluable: number };
-  dashboardDebt?: {
-    paths: string[];
-    read: () => Promise<{ excluded: { items: number; unevaluable: number }; metadataOnlyContent: { items: number; unevaluable: number } }>;
-  };
   /**
    * Why this source could not be prepared, when it could not.
    *
