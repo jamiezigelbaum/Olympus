@@ -254,7 +254,7 @@
     "src/workers/source-index/embeddings.ts": 5,
     "src/workers/source-index/local-analyst-window.ts": 1,
     "src/workers/source-index/pinned-download.ts": 2,
-    "src/workers/source-index/status.ts": 7,
+    "src/workers/source-index/status.ts": 6,
     "src/workers/source-scheduler-state.ts": 2,
     "src/workers/source-scheduler.ts": 4,
     "src/workers/source-scope-runtime.ts": 2,

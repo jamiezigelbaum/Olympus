@@ -20979,7 +20979,7 @@ var init_status = __esm(() => {
     readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS
   });
   STORE_STATUS_REUSE_MS = 5 * 60000;
-  STORE_UNCHANGED_REUSE_MS = 60 * 60000;
+  STORE_UNCHANGED_REUSE_MS = 30 * 60000;
 });
 
 // src/core/public-source-capabilities.ts

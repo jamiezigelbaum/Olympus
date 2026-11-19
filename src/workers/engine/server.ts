@@ -7289,7 +7289,7 @@ export async function main(): Promise<void> {
               }
             }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
-              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
+              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS, reuseCounts: true });
             }
           },
           log: (line) => console.warn(line),
