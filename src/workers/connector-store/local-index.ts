@@ -264,6 +264,7 @@ const KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8;
 // minimum-signal filter, so a recent count serves: every search of a
 // question (plain, content, relaxed) and the next question reuse it.
 const CONCEPT_COUNT_MAX_AGE_MS = 5 * 60_000;
+const KEYWORD_POPULATION_SQL = 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0';
 const CONCEPT_COUNT_MEMO_LIMIT = 512;
 // Titles are compact, user-assigned metadata. A small source-neutral boost
 // keeps an exact title match inside the bounded keyword lane when longer body
@@ -15363,6 +15364,36 @@ export class LocalConnectorStore {
   // Created on first use: a field initializer that constructs an object
   // keeps this class in bundles that never use it (dist/index.js).
   private conceptCountMemo?: Map<string, { count: number; at: number }>;
+  // The keyword lane's population (live items) for concept weights. Counting
+  // it scans items: 9 to 10 s on a large store whose pages are not in memory
+  // (LANEAB2, 19 Nov 2026), and it used to expire with the concept counts, so
+  // the first new question after five idle minutes paid it on every store. A
+  // search now uses the remembered count however old; the engine refreshes it
+  // off the search's path (keepKeywordPopulationCurrent), and only a store
+  // that has never counted reads it inline.
+  private keywordPopulation?: { count: number; at: number; used: boolean };
+  private keywordPopulationRefreshing = false;
+
+  /**
+   * Counts the keyword population off any search's path. `seed`: count even
+   * if no search has asked yet (once after start). Otherwise only when the
+   * count is older than the concept counts' age and a search has used it
+   * since, so an idle store is not scanned on a timer.
+   */
+  async keepKeywordPopulationCurrent(seed = false): Promise<void> {
+    const known = this.keywordPopulation;
+    if (this.keywordPopulationRefreshing || this.closedForPoolReads) return;
+    if (seed ? known !== undefined : !known || !known.used || Date.now() - known.at < CONCEPT_COUNT_MAX_AGE_MS) return;
+    this.keywordPopulationRefreshing = true;
+    try {
+      const row = await this.readOffThread((function* (): Generator<StoreRead, { count: number }, unknown> {
+        return (yield { mode: 'get', site: 'keyword_population_count', sql: KEYWORD_POPULATION_SQL, params: [] }) as { count: number };
+      })());
+      this.keywordPopulation = { count: row.count, at: Date.now(), used: false };
+    } finally {
+      this.keywordPopulationRefreshing = false;
+    }
+  }
 
   /** Drives a read generator on this store's own connection. */
   private readHere<T>(steps: Generator<StoreRead | VisibilityRead, T, unknown>): T {
@@ -15729,12 +15760,13 @@ export class LocalConnectorStore {
       if (memo.size >= CONCEPT_COUNT_MEMO_LIMIT) memo.clear();
       memo.set(key, { count, at: Date.now() });
     };
-    const POPULATION = '\u0000items';
-    let items = remembered(POPULATION);
-    if (items === undefined) {
-      items = ((yield { mode: 'get', sql: 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0', params: [] }) as { count: number }).count;
-      remember(POPULATION, items);
+    let population = this.keywordPopulation;
+    if (!population) {
+      const counted = ((yield { mode: 'get', site: 'keyword_population_count', sql: KEYWORD_POPULATION_SQL, params: [] }) as { count: number }).count;
+      population = this.keywordPopulation ??= { count: counted, at: Date.now(), used: true };
     }
+    population.used = true;
+    const items = population.count;
     const counts: number[] = [];
     const traceCounts = beginSourceAnswerConceptCounts();
     for (const group of groups) {

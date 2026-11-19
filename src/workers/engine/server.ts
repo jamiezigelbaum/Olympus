@@ -2385,6 +2385,16 @@ export async function main(): Promise<void> {
       progress?.finish();
       visibilityKeeping = false;
     }
+    // The keyword lane's population count, off any search's path: seeded once
+    // after a start where searches are served, then refreshed for stores a
+    // search has used. One store at a time, never awaited by this build.
+    if (engineRole !== 'background') void (async () => {
+      for (const store of stores) {
+        if (sourceRuntimeClosed) return;
+        try { await store.keepKeywordPopulationCurrent(when !== 'refresh'); }
+        catch (error) { console.warn(`[olympus] ${engineRole}: a store's keyword population could not be counted: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    })();
     if (when !== 'refresh') {
       console.log(`[olympus] ${engineRole}: built ${connectorStores.length} stores' hidden-copy sets in ${Math.round(performance.now() - started)} ms`);
     }

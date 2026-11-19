@@ -24171,6 +24171,7 @@ var KEYWORD_RANKED_BOUND_MIN = 256;
 var KEYWORD_RANKED_BOUND_MAX = 8192;
 var KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8;
 var CONCEPT_COUNT_MAX_AGE_MS = 5 * 60000;
+var KEYWORD_POPULATION_SQL = "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0";
 var CONCEPT_COUNT_MEMO_LIMIT = 512;
 var CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5;
 var EMBEDDING_BATCH_SIZE = 32;
@@ -32871,6 +32872,24 @@ ${parentKey(ref)}`, { ref, origin });
   }
   closedForPoolReads = false;
   conceptCountMemo;
+  keywordPopulation;
+  keywordPopulationRefreshing = false;
+  async keepKeywordPopulationCurrent(seed = false) {
+    const known = this.keywordPopulation;
+    if (this.keywordPopulationRefreshing || this.closedForPoolReads)
+      return;
+    if (seed ? known !== undefined : !known || !known.used || Date.now() - known.at < CONCEPT_COUNT_MAX_AGE_MS)
+      return;
+    this.keywordPopulationRefreshing = true;
+    try {
+      const row = await this.readOffThread(function* () {
+        return yield { mode: "get", site: "keyword_population_count", sql: KEYWORD_POPULATION_SQL, params: [] };
+      }());
+      this.keywordPopulation = { count: row.count, at: Date.now(), used: false };
+    } finally {
+      this.keywordPopulationRefreshing = false;
+    }
+  }
   readHere(steps) {
     let step = steps.next();
     while (!step.done) {
@@ -33136,12 +33155,13 @@ ${parentKey(ref)}`, { ref, origin });
         memo.clear();
       memo.set(key, { count, at: Date.now() });
     };
-    const POPULATION = "\x00items";
-    let items = remembered(POPULATION);
-    if (items === undefined) {
-      items = (yield { mode: "get", sql: "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", params: [] }).count;
-      remember(POPULATION, items);
+    let population = this.keywordPopulation;
+    if (!population) {
+      const counted = (yield { mode: "get", site: "keyword_population_count", sql: KEYWORD_POPULATION_SQL, params: [] }).count;
+      population = this.keywordPopulation ??= { count: counted, at: Date.now(), used: true };
     }
+    population.used = true;
+    const items = population.count;
     const counts = [];
     const traceCounts = beginSourceAnswerConceptCounts();
     for (const group of groups) {

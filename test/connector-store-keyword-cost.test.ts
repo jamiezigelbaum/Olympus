@@ -6,7 +6,8 @@
 // alternatives), and counted each concept's matches store-wide again on
 // every search. These pin the cheaper shape with
 // synthetic data: the work done, not wall time.
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, setSystemTime, test } from 'bun:test';
+import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import {
@@ -77,6 +78,30 @@ test('store-wide concept counts are read once, not on every search', async () =>
   const second = traceKeywordSearch(store, QUESTION, undefined, undefined).runs as Array<{ statements: Record<string, { calls: number }> }>;
   expect(first[0]!.statements.concept_weight_count?.calls).toBeGreaterThan(0);
   for (const run of [first[1]!, ...second]) expect(run.statements.concept_weight_count).toBeUndefined();
+});
+
+test('the population count is read once and then only off the search path, however long the store sat idle', async () => {
+  const store = await openStore();
+  let counts = 0;
+  setReadPoolObserverForTests((_dbPath, read) => { if (read.sql.includes('COUNT(*) AS count FROM items WHERE tombstoned')) counts += 1; }, { snapshots: true });
+  cleanups.push(() => setReadPoolObserverForTests(undefined));
+  try {
+    await store.searchItemsDetailedOffThread(QUESTION, 5, undefined, undefined, {});
+    expect(counts).toBe(1);
+    // Ten idle minutes later a different question does not count the store again.
+    setSystemTime(Date.now() + 10 * 60_000);
+    const later = await store.searchItemsDetailedOffThread('garden supplies invoice running total spring', 5, undefined, undefined, {});
+    expect(later.rows.length).toBeGreaterThan(0);
+    expect(counts).toBe(1);
+    // The engine's refresh counts it, once, because a search used it; an unused count is left alone.
+    await store.keepKeywordPopulationCurrent();
+    expect(counts).toBe(2);
+    setSystemTime(Date.now() + 10 * 60_000);
+    await store.keepKeywordPopulationCurrent();
+    expect(counts).toBe(2);
+  } finally {
+    setSystemTime();
+  }
 });
 
 // The ranked page orders a large store's matches by bm25 (#1242). Ranking
