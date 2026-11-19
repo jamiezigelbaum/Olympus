@@ -23,6 +23,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
   ARCTIC_EMBED_M_V1_5,
@@ -166,6 +167,39 @@ export function currentPlatform(): string {
   return `${process.platform}-${process.arch}`;
 }
 
+type AssetRead = { checkedAt: number; value?: unknown; pending: boolean };
+const frontAssetReads = new Map<string, AssetRead>();
+
+/** The split front's synchronous status callers get the last completed read. */
+function readAssetState(path: string): unknown {
+  if (!isMainThread || process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() !== 'front') {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  }
+  let entry = frontAssetReads.get(path);
+  if (!entry) {
+    entry = { checkedAt: -Infinity, pending: false };
+    frontAssetReads.set(path, entry);
+  }
+  const cached = entry;
+  if (!cached.pending && Date.now() - cached.checkedAt >= 2_000) {
+    cached.checkedAt = Date.now();
+    cached.pending = true;
+    void refreshAssetState(path, cached);
+  }
+  return cached.value;
+}
+
+async function refreshAssetState(path: string, entry: AssetRead): Promise<void> {
+  try {
+    entry.value = JSON.parse(await readFile(path, 'utf8'));
+  } catch {
+    // A missing, unreadable or malformed record restores the caller's fallback.
+    entry.value = undefined;
+  } finally {
+    entry.pending = false;
+  }
+}
+
 /** The last status any process wrote, or `not_started`. Never throws. */
 export function readBuiltInEmbeddingStatus(
   env: Record<string, string | undefined> = process.env,
@@ -181,7 +215,7 @@ export function readBuiltInEmbeddingStatus(
     updatedAt: new Date(0).toISOString(),
   };
   try {
-    const parsed = JSON.parse(readFileSync(builtInEmbeddingPaths(env, model).statusPath, 'utf8')) as BuiltInEmbeddingStatus;
+    const parsed = readAssetState(builtInEmbeddingPaths(env, model).statusPath) as BuiltInEmbeddingStatus;
     return parsed && typeof parsed === 'object' && parsed.modelId === model.modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -197,7 +231,7 @@ export function readBuiltInRerankerStatus(
   model: BuiltInRerankerModelSpec = MMARCO_MMINILMV2_L12_H384_V1,
 ): BuiltInEmbeddingStatus {
   try {
-    const parsed = JSON.parse(readFileSync(join(builtInEmbeddingPaths(env).root, 'reranker-status.json'), 'utf8')) as BuiltInEmbeddingStatus;
+    const parsed = readAssetState(join(builtInEmbeddingPaths(env).root, 'reranker-status.json')) as BuiltInEmbeddingStatus;
     if (parsed && typeof parsed === 'object' && parsed.modelId === model.modelId) return parsed;
   } catch { /* not started */ }
   return { state: 'not_started', modelId: model.modelId, percent: 0, label: 'Built-in reranker not downloaded yet', bytesDone: 0, bytesTotal: 0, updatedAt: new Date(0).toISOString() };
@@ -215,11 +249,11 @@ export function readBuiltInEmbeddingVision(
 ): 'ready' | 'unavailable' | 'unknown' {
   if (!model.vision) return 'unknown';
   try {
-    const parsed = JSON.parse(readFileSync(join(builtInEmbeddingPaths(env, model).root, 'vision.json'), 'utf8')) as {
+    const parsed = readAssetState(join(builtInEmbeddingPaths(env, model).root, 'vision.json')) as {
       modelId?: unknown;
       vision?: unknown;
     };
-    if (parsed.modelId !== model.modelId || typeof parsed.vision !== 'boolean') return 'unknown';
+    if (parsed?.modelId !== model.modelId || typeof parsed.vision !== 'boolean') return 'unknown';
     return parsed.vision ? 'ready' : 'unavailable';
   } catch {
     return 'unknown';

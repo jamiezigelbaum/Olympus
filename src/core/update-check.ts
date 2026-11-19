@@ -75,6 +75,8 @@ interface UpdateCheckOptions {
   platform: string;
   env: Record<string, string | undefined>;
   fileEnv: () => Record<string, string | undefined> | undefined;
+  /** A fresh off-loop probe where a periodic check may send a request. */
+  freshFileEnv?: () => Promise<Record<string, string | undefined> | undefined>;
   fetchImpl?: typeof fetch;
   debug?: (line: string) => void;
   /** Test seams for the clock; production always uses ten seconds. */
@@ -98,8 +100,10 @@ export function createUpdateChecker(options: UpdateCheckOptions) {
   const proxied = () => ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']
     .some(key => Boolean(options.env[key]?.trim()));
   const off = (value: string | undefined) => ['off', '0', 'false', 'no'].includes(value?.trim().toLowerCase() ?? '');
-  const enabled = () => Boolean(installer) && !proxied() && !off(options.env.OLYMPUS_UPDATE_CHECK)
-    && !off(options.fileEnv()?.OLYMPUS_UPDATE_CHECK);
+  const enabledHere = () => Boolean(installer) && !proxied() && !off(options.env.OLYMPUS_UPDATE_CHECK);
+  const enabled = () => enabledHere() && !off(options.fileEnv()?.OLYMPUS_UPDATE_CHECK);
+  const freshFileEnv = options.freshFileEnv;
+  const enabledFresh = async (read: NonNullable<typeof freshFileEnv>) => enabledHere() && !off((await read())?.OLYMPUS_UPDATE_CHECK);
   async function check(): Promise<void> {
     // Everything, including reading worker.env and calling the debug sink, is
     // advisory. Neither a timer nor a request failure may reject into the worker.
@@ -107,8 +111,9 @@ export function createUpdateChecker(options: UpdateCheckOptions) {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      if (stopped || !enabled()) { result = undefined; return; }
+      if (stopped) { result = undefined; return; }
       controller = new AbortController();
+      if (!(freshFileEnv ? await enabledFresh(freshFileEnv) : enabled()) || stopped) { result = undefined; return; }
       timeout = setTimeout(() => controller?.abort(), options.timeoutMs ?? UPDATE_TIMEOUT_MS);
       const response = await (options.fetchImpl ?? fetch)(installer!.url, {
         method: 'GET', headers: { 'User-Agent': 'Olympus' }, credentials: 'omit', redirect: 'error',
@@ -129,7 +134,8 @@ export function createUpdateChecker(options: UpdateCheckOptions) {
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
       const version = parseInstallerVersion(new TextDecoder().decode(bytes));
-      result = !stopped && enabled() && version && newerVersion(version, options.runningVersion) ? { version } : undefined;
+      const stillEnabled = !stopped && (freshFileEnv ? await enabledFresh(freshFileEnv) : enabled());
+      result = !stopped && stillEnabled && version && newerVersion(version, options.runningVersion) ? { version } : undefined;
     } catch {
       result = undefined;
       try { options.debug?.('[update] check unavailable'); } catch { /* Silent even if logging fails. */ }

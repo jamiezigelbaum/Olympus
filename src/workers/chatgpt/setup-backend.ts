@@ -72,7 +72,7 @@ export interface ChatGptSetupBackendOptions {
   scopeSummaries?: () => ReadonlyArray<Record<string, unknown>>;
   sovereignty: { config: SovereigntyConfig; source: string; path?: string };
   /** Whether a profile's credential is on the Mac (never the value). */
-  credentialPresent: (id: string, profile: SovereigntyModelProfile) => boolean;
+  credentialPresent: (id: string, profile: SovereigntyModelProfile) => boolean | Promise<boolean>;
   /** Restarts the worker to apply a policy change; false when it cannot restart itself. */
   requestReload: () => boolean;
   /** Items held for the privacy check across every tier ledger (counts only). */
@@ -283,9 +283,11 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
     },
 
     async setModels(choice) {
+      const tinfoil = options.credentialPresent(ANSWER_PROFILE_IDS.tinfoil, policy.modelProfiles[ANSWER_PROFILE_IDS.tinfoil] ?? answerProfile('tinfoil'));
+      const venice = options.credentialPresent(ANSWER_PROFILE_IDS.venice, policy.modelProfiles[ANSWER_PROFILE_IDS.venice] ?? answerProfile('venice'));
       const configured = {
-        tinfoil: options.credentialPresent(ANSWER_PROFILE_IDS.tinfoil, policy.modelProfiles[ANSWER_PROFILE_IDS.tinfoil] ?? answerProfile('tinfoil')),
-        venice: options.credentialPresent(ANSWER_PROFILE_IDS.venice, policy.modelProfiles[ANSWER_PROFILE_IDS.venice] ?? answerProfile('venice')),
+        tinfoil: typeof tinfoil === 'boolean' ? tinfoil : await tinfoil,
+        venice: typeof venice === 'boolean' ? venice : await venice,
         local: Object.values(policy.modelProfiles).some((profile) => profile.provider === 'local-openai-compatible' && profile.purpose !== 'embedding'),
       };
       // Decided against the policy in memory (so a refusal needs no file
