@@ -43,6 +43,8 @@
 // Source-neutral: nothing here names a source or a format.
 
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type LedgerRead, type TierVisibilityReads, type TierCopy } from '../classification/tier-ledger.ts';
+import { changeMemoryActivity } from '../../core/memory-counters.ts';
+import { ingestionTurn } from '../control-path-headroom.ts';
 import { currentSourceAnswerTrace } from '../source-index/answer-latency-trace.ts';
 import { offThreadReadsSupported, releaseOffThreadReads, withOffThreadSnapshot, type ReadPoolLane } from './off-thread-reads.ts';
 
@@ -258,23 +260,22 @@ export async function ledgerReadOffThread<T>(ledger: TierLedger, steps: Generato
   }, options);
 }
 
-/**
- * Settles the copies older builds left held on a decided item (tier-ledger.ts,
- * STALE_EMBED_HOLDS_SETTLED): found a page at a time on the read worker, set
- * by key here, then marked so no later boot looks again. Returns how many.
- */
-export async function settleStaleEmbedHolds(ledger: TierLedger, pageSize = 500): Promise<number> {
-  if (ledger.staleEmbedHoldsSettled()) return 0;
-  let settled = 0;
-  let after: { corpusId: string; rowId: number } | undefined;
-  for (;;) {
-    const page = await ledgerReadOffThread(ledger, ledger.staleEmbedHoldSteps(after, pageSize), { lane: 'background' });
-    settled += ledger.settleStaleEmbedHoldRows(page.rowIds);
-    if (!page.next) break;
-    after = page.next;
+/** Finds stale holds on the read worker and rechecks each page before releasing it. */
+export async function settleStaleEmbedHolds(ledger: TierLedger, pageSize = 500, turn = ingestionTurn): Promise<number> {
+  changeMemoryActivity('embedding_settlement', 1);
+  try {
+    let settled = 0;
+    let after: { corpusId: string; rowId: number } | undefined;
+    do {
+      if (after) await turn();
+      const page = await ledgerReadOffThread(ledger, ledger.staleEmbedHoldSteps(after, pageSize), { lane: 'background' });
+      settled += ledger.settleStaleEmbedHoldRows(page.rowIds);
+      after = page.next;
+    } while (after);
+    return settled;
+  } finally {
+    changeMemoryActivity('embedding_settlement', -1);
   }
-  ledger.markStaleEmbedHoldsSettled();
-  return settled;
 }
 
 /** The item a child came inside, as the child's row names it. */

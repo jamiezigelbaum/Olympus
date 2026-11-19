@@ -26,6 +26,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { OperationError } from '../../core/operation-error.ts';
+import type { EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore, loopWalAutocheckpointPragma, type SqliteCloseOptions } from '../../core/sqlite-store.ts';
@@ -2391,6 +2392,9 @@ export class TierLedger {
         state, staleFlip, prior.decidedBy, reasonsJson, prior.engineVersion, prior.mapRevision, decidedAt,
         ...decisionFlags(prior), ...idParams(identity),
       );
+      if (state === 'current' && copies.some(copy => copy.state === 'current' && copy.embedHold)) {
+        this.releaseDecidedEmbedHolds(identity, decidedAt);
+      }
       this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
       return 'cancelled';
     }
@@ -3682,9 +3686,8 @@ export class TierLedger {
       >;
       /**
        * The placement's embedding hold, applied to every copy the flip makes
-       * current. A source copy re-layered in place otherwise keeps the hold
-       * an earlier pending decision put on it, and a decided item stays
-       * "awaiting classification" and unembedded forever.
+       * current. A decided flip also clears holds inherited from its source
+       * copies or from an older receipt without a placement hold.
        */
       embedHold?: boolean;
     },
@@ -3782,6 +3785,10 @@ export class TierLedger {
           ...idParams(identity),
         );
       }
+      const finalDecision = options.decision ?? existing;
+      if (options.embedHold !== false && !finalDecision.metadataPending && !finalDecision.contentPending) {
+        this.releaseDecidedEmbedHolds(identity, now);
+      }
     })();
     return this.getCurrent(identity)!;
   }
@@ -3845,6 +3852,7 @@ export class TierLedger {
         reasons: existing.reasons,
         decidedAt: now,
       });
+      if (!existing.metadataPending && !existing.contentPending) this.releaseDecidedEmbedHolds(identity, now);
     })();
     return this.getCurrent(identity)!;
   }
@@ -3890,6 +3898,9 @@ export class TierLedger {
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
       `).run(state, ...idParams(identity), existing.generation);
+      if (state === 'current' && copies.some(copy => copy.state === 'current' && copy.embedHold)) {
+        this.releaseDecidedEmbedHolds(identity, now);
+      }
       this.appendHistory(
         identity,
         existing.generation,
@@ -4417,11 +4428,6 @@ export class TierLedger {
     };
   }
 
-  /** True once this ledger's stale embedding holds were settled. One keyed read. */
-  staleEmbedHoldsSettled(): boolean {
-    return this.db.query('SELECT 1 FROM tier_ledger_meta WHERE key = ?').get(STALE_EMBED_HOLDS_SETTLED) !== null;
-  }
-
   /**
    * Reads for the read worker: up to `limit` rowids of current copies still
    * held on a decided item, after `after` (corpus, rowid), each corpus
@@ -4453,19 +4459,45 @@ export class TierLedger {
     }
   }
 
+  /** Reads the reasons for current holds in one store, in copy row order. */
+  *embeddingHoldReasonSteps(corpusId: string, after: number): Generator<LedgerRead, Array<{
+    rowId: number; key: string; reason: EmbeddingHoldReason;
+  }>, unknown> {
+    const rows = (yield {
+      sql: `SELECT tier_copies.rowid AS row_id, tier_copies.provider, tier_copies.account_scope,
+          tier_copies.conversation_key, tier_copies.provider_item_id,
+          CASE
+            WHEN t.state = 'moving' THEN 'held_while_moving'
+            WHEN ${STALE_EMBED_HOLD_DECIDED} THEN 'held_after_decision'
+            WHEN t.content_read = 0 THEN 'held_while_text_is_unread'
+            WHEN t.state = 'pending' OR t.metadata_pending = 1 OR t.content_pending = 1 THEN 'held_for_judgment'
+            ELSE 'held_for_other_reasons'
+          END AS reason
+        FROM tier_copies LEFT JOIN tier_items t USING (provider, account_scope, conversation_key, provider_item_id)
+        WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1 AND tier_copies.rowid > ?
+        ORDER BY tier_copies.rowid LIMIT 500`,
+      params: [corpusId, after], mode: 'all',
+    }) as Array<TierIdentityRow & { row_id: number; reason: EmbeddingHoldReason }>;
+    return rows.map(row => ({ rowId: row.row_id, key: tierLedgerIdentityKey(identityFromRow(row)), reason: row.reason }));
+  }
+
   /** Clears these copies' holds by key, where they are still current, held and decided. Returns how many. */
   settleStaleEmbedHoldRows(rowIds: readonly number[]): number {
     if (this.readOnly || rowIds.length === 0) return 0;
-    return this.db.query(`
+    const released = this.db.query(`
       UPDATE tier_copies SET embed_hold = 0, updated_at = ?
       WHERE rowid IN (SELECT value FROM json_each(?)) AND copy_state = 'current' AND embed_hold = 1 AND ${STALE_EMBED_HOLD_DECIDED}
-    `).run(this.now().toISOString(), JSON.stringify(rowIds)).changes;
+      RETURNING rowid
+    `).all(this.now().toISOString(), JSON.stringify(rowIds));
+    return released.length;
   }
 
-  /** Records that every stale hold was settled, so no later boot looks again. */
-  markStaleEmbedHoldsSettled(): void {
-    if (this.readOnly) return;
-    this.db.query('INSERT OR REPLACE INTO tier_ledger_meta (key, value) VALUES (?, ?)').run(STALE_EMBED_HOLDS_SETTLED, this.now().toISOString());
+  private releaseDecidedEmbedHolds(identity: TierLedgerIdentity, now: string): void {
+    this.db.query(`
+      UPDATE tier_copies SET embed_hold = 0, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND copy_state = 'current' AND embed_hold = 1 AND ${STALE_EMBED_HOLD_DECIDED}
+    `).run(now, ...idParams(identity));
   }
 
   *corpusCopyIdentitiesSteps(
@@ -5509,27 +5541,24 @@ function rowOf(record: TierLedgerRecord): EffectiveRow {
   };
 }
 
-/**
- * An embedding hold belongs only to an item with an open question (state
- * pending, or a pending flag): placementFor holds a copy for nothing else.
- * Before completeMove applied the placement's hold, a move flip kept the hold
- * an earlier pending decision had put on a re-layered source copy, so a
- * decided item stayed held, unembedded and counted as "awaiting privacy
- * classification" with nothing left to decide it. This settles such copies at
- * open: idempotent, and it touches only decided items' current copies (the
- * hold is cleared where the decision already placed the copy).
- */
-// Copies left held on a decided item. completeMove applies the placement's
-// hold, so no build since makes one; the ones older builds left are settled
-// once per ledger, found off the loop and set by key (settleStaleEmbedHolds
-// in child-visibility.ts). Settling them at every open walked every held
-// copy on the loop: 49 s, then 10.5 s, on lane 6's fixture (16 Nov).
-const STALE_EMBED_HOLDS_SETTLED = 'settled:stale_embed_holds:v1';
+// Recheck the same conditions when writing, since the finder reads a snapshot.
 const STALE_EMBED_HOLD_DECIDED = `EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
           AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
+          AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+          AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_overrides o
+        WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+          AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+          AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = tier_copies.provider AND w.account_scope = tier_copies.account_scope
+          AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
+          AND w.kind IN ('secret', 'deletion')
       )`;
 
 /** One chat (`conversationKey`) or one source (`provider`, optionally one account) the owner asked to re-check. */

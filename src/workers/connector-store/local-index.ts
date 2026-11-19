@@ -1,4 +1,5 @@
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
+import { EMBEDDING_HOLD_REASONS, type EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
 import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
@@ -13416,6 +13417,39 @@ export class LocalConnectorStore {
     };
   }
 
+  private async countEmbeddingHolds(
+    visibility: TierVisibilityMemo,
+    counts: Record<string, number>,
+    read: (query: StoreRead) => Promise<unknown>,
+    stopAtMs?: number,
+  ): Promise<void> {
+    const { ledger, members } = visibility;
+    let after = 0;
+    while (stopAtMs === undefined || Date.now() < stopAtMs) {
+      const page = await ledgerReadOffThread(ledger, ledger.embeddingHoldReasonSteps(this.corpusId, after), BACKGROUND_READS);
+      if (page.length === 0) break;
+      const reasons = new Map<number, EmbeddingHoldReason>();
+      for (const { key, reason } of page) for (const pk of members.get(key)?.pks ?? []) reasons.set(pk, reason);
+      if (reasons.size) {
+        // Held items can already have vectors, or have no text yet. Count the
+        // entire live copy using the item and chunk indexes.
+        const rows = await read({
+          sql: `SELECT i.item_pk, (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks
+            FROM json_each(?) ids CROSS JOIN items i ON i.item_pk = ids.value
+            WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'`,
+          params: [JSON.stringify([...reasons.keys()])], mode: 'all',
+        }) as Array<{ item_pk: number; chunks: number }>;
+        for (const row of rows) {
+          const reason = reasons.get(row.item_pk)!;
+          counts[`${reason}_chunks`]! += row.chunks;
+          counts[`${reason}_items`]! += 1;
+        }
+      }
+      after = page[page.length - 1]!.rowId;
+      await ingestionTurn();
+    }
+  }
+
   /**
    * Missing vectors are not necessarily work: superseded copies deliberately
    * retain chunks. Report the reasons without reading text or returning ids.
@@ -13439,7 +13473,8 @@ export class LocalConnectorStore {
     const namesOnly = await pkSetInTurns([tier.metadataLayer]);
     const moving = new Set<number>();
     let walked = 0;
-    for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+    const visibility = this.tierLedgerHiddenMemo;
+    for (const member of visibility?.members.values() ?? []) {
       if (member.flags.moving) for (const pk of member.pks) moving.add(pk);
       if (++walked % 2_000 === 0) await ingestionTurn();
     }
@@ -13455,6 +13490,12 @@ export class LocalConnectorStore {
       skipped_held_recent_chunks: 0, skipped_out_of_scope_recent_chunks: 0,
       skipped_private_tier_chunks: 0, skipped_retired_chunks: 0, inventory_complete: 0,
     };
+    for (const reason of EMBEDDING_HOLD_REASONS) {
+      counts[`${reason}_chunks`] = 0;
+      counts[`${reason}_items`] = 0;
+    }
+    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
+    if (visibility && held.size) await this.countEmbeddingHolds(visibility, counts, read, stopAtMs);
     // Only chunks that owe a vector come back: the rest count for nothing.
     const windowSql = `
       SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
@@ -13466,7 +13507,6 @@ export class LocalConnectorStore {
       ORDER BY c.chunk_pk
     `;
     const recentSince = new Date(started - 3 * 24 * 60 * 60_000).toISOString();
-    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
     let after = 0;
     while (stopAtMs === undefined || Date.now() < stopAtMs) {

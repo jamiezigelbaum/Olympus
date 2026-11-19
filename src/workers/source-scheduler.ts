@@ -290,7 +290,7 @@ export interface SourceSchedulerTaskRunResult {
   status: 'progress' | 'idle';
   counts?: Record<string, number>;
   warnings?: string[];
-  /** Ephemeral counts-only sweep receipts. Logged once the actual next run is known, never persisted. */
+  /** Ephemeral counts-only sweep receipts for status and logs. */
   embeddingSweep?: Array<{
     source_index: number;
     store_index: number;
@@ -516,6 +516,7 @@ export interface SourceSchedulerTaskStatus {
   last_error_hash?: string;
   last_error_kind?: string;
   degraded_reason?: string;
+  embedding_sweep?: SourceSchedulerTaskRunResult['embeddingSweep'];
   last_result?: {
     status: 'progress' | 'idle' | 'failed';
     counts?: Record<string, number>;
@@ -540,6 +541,7 @@ interface SchedulerTaskState {
   lastErrorKind?: string;
   effectiveIntervalMs?: number;
   degradedReason?: string;
+  embeddingSweep?: SourceSchedulerTaskRunResult['embeddingSweep'];
   lastResult?: SourceSchedulerTaskStatus['last_result'];
   pendingUnpark?: PendingSourceSchedulerUnpark;
   /** Woken while running: run again within seconds of completing. */
@@ -1294,6 +1296,7 @@ export class SourceScheduler {
       }
       state.nextRunAt = nextRunAt;
       state.retryNotBeforeAt = retryAt ? nextRunAt : undefined;
+      state.embeddingSweep = result.embeddingSweep;
       for (const { counts, ...store } of result.embeddingSweep ?? []) {
         console.info(`[olympus:embedding-sweep] ${JSON.stringify({
           ...store, ...counts,
@@ -1668,6 +1671,7 @@ export class SourceScheduler {
         ? { degraded_reason: state.degradedReason }
         : {}),
       ...(state.lastResult ? { last_result: state.lastResult } : {}),
+      ...(state.embeddingSweep ? { embedding_sweep: state.embeddingSweep } : {}),
     };
   }
 }

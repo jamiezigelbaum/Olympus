@@ -451,33 +451,108 @@ describe('embedding holds follow the decision through a move', () => {
     store.close();
   });
 
-  test('a decided item left held by an older flip is settled once, off the loop; a pending one stays held', async () => {
+  test('a decided flip without a placement hold releases the retained copy', () => {
+    const store = ledger();
+    try {
+      const generation = heldThenDecidedPersonal(store);
+      store.completeMove(ITEM, { expectedGeneration: generation, destination: whole(INTERNAL).copies });
+      expect(store.copies(ITEM).find(copy => copy.state === 'current')?.embedHold).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a second pass releases new decided holds and preserves pending holds', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-ledger-hold-'));
     try {
       const dbPath = join(dir, 'store.tier-ledger.sqlite');
       const first = new TierLedger({ dbPath });
-      const generation = heldThenDecidedPersonal(first);
-      // The flip as it was before the fix: no hold passed, the re-layered copy keeps it.
-      first.completeMove(ITEM, { expectedGeneration: generation, destination: [{ ...INTERNAL, layers: 'both' }] });
+      expect(await settleStaleEmbedHolds(first, 1)).toBe(0);
+      first.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL));
       const pending = { ...ITEM, providerItemId: 'item-2' };
       first.recordRoutedPlacement(pending, decision({ state: 'pending', contentPending: true }), { copies: split, embedHold: true });
-      expect(first.corpusCopyCounts(INTERNAL.corpusId).held).toBe(2);
       first.close();
-      // Such a ledger came from a build before the fix, which never marked it settled.
       const raw = new Database(dbPath);
-      raw.query("DELETE FROM tier_ledger_meta WHERE key = 'settled:stale_embed_holds:v1'").run();
+      raw.query("INSERT OR IGNORE INTO tier_ledger_meta (key, value) VALUES ('settled:stale_embed_holds:v1', 'done')").run();
+      raw.query('UPDATE tier_copies SET embed_hold = 1 WHERE provider_item_id = ?').run(ITEM.providerItemId);
       raw.close();
 
       const reopened = new TierLedger({ dbPath });
       expect(await settleStaleEmbedHolds(reopened, 1)).toBe(1);
       expect(await settleStaleEmbedHolds(reopened, 1)).toBe(0);
-      expect(reopened.staleEmbedHoldsSettled()).toBe(true);
       expect(reopened.copies(ITEM).find((copy) => copy.state === 'current')?.embedHold).toBe(false);
       expect(reopened.copies(pending).every((copy) => copy.embedHold)).toBe(true);
       expect(reopened.corpusCopyCounts(INTERNAL.corpusId).held).toBe(1);
       reopened.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('abandoning a decided lowering releases the hold on the retained copy', () => {
+    const store = ledger();
+    try {
+      store.recordRoutedPlacement(ITEM, decision({ state: 'pending', contentPending: true }), whole(SECURE, true));
+      expect(store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL))).toMatchObject({ outcome: 'queued_move', raise: false });
+      const moving = store.getCurrent(ITEM)!;
+      expect(store.copies(ITEM)[0]?.embedHold).toBe(true);
+      expect(store.abandonMove(ITEM, { expectedGeneration: moving.generation })).toMatchObject({ state: 'current', contentPending: false });
+      expect(store.copies(ITEM)[0]).toMatchObject({ corpusId: SECURE.corpusId, state: 'current', embedHold: false });
+    } finally {
+      store.close();
+    }
+  });
+
+  test('rolling back to a copy from a pending placement releases its old hold', () => {
+    const store = ledger();
+    try {
+      store.recordRoutedPlacement(ITEM, decision({ metadataTier: 'secure', contentTier: 'secure', state: 'pending', contentPending: true }), whole(SECURE, true));
+      store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL));
+      const moving = store.getCurrent(ITEM)!;
+      store.stageMove(ITEM, { expectedGeneration: moving.generation, target: { metadataTier: 'private', contentTier: 'private' },
+        destination: whole(INTERNAL).copies, hideSource: false });
+      const flipped = store.completeMove(ITEM, { expectedGeneration: moving.generation, destination: whole(INTERNAL).copies, embedHold: false });
+      expect(store.copies(ITEM).find(copy => copy.corpusId === SECURE.corpusId)?.embedHold).toBe(true);
+      expect(store.rollbackMove(ITEM, { expectedGeneration: flipped.generation }).state).toBe('current');
+      expect(store.copies(ITEM).find(copy => copy.state === 'current')).toMatchObject({ corpusId: SECURE.corpusId, embedHold: false });
+    } finally {
+      store.close();
+    }
+  });
+
+  test('revoking an override that retargeted a decided move releases the retained hold', () => {
+    const store = ledger();
+    try {
+      const secure = { metadataTier: 'secure', contentTier: 'secure' } as const;
+      store.recordRoutedPlacement(ITEM, decision({ ...secure, state: 'pending', contentPending: true }), whole(SECURE, true));
+      expect(store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL)).outcome).toBe('queued_move');
+      store.setOverride(ITEM, { kind: 'tier', tier: 'secure' });
+      expect(store.queueOwnerRaise(ITEM, decision({ ...secure, decidedBy: 'override' }), SECURE.trustDomain)).toBe('retargeted');
+      expect(store.clearOverride(ITEM)).toBe(true);
+      expect(store.getCurrent(ITEM)).toMatchObject({ state: 'current', contentPending: false });
+      expect(store.copies(ITEM)[0]).toMatchObject({ corpusId: SECURE.corpusId, state: 'current', embedHold: false });
+    } finally {
+      store.close();
+    }
+  });
+
+  test('release rechecks decisions and Secret overrides after finding held copies', () => {
+    const store = ledger();
+    try {
+      const pending = { ...ITEM, providerItemId: 'pending' };
+      const moving = { ...ITEM, providerItemId: 'moving' };
+      const secret = { ...ITEM, providerItemId: 'secret' };
+      for (const identity of [ITEM, pending, moving, secret]) store.recordRoutedPlacement(identity, decision(), whole(INTERNAL, true));
+      const page = store.readSteps(store.staleEmbedHoldSteps(undefined, 10));
+      expect(page.rowIds).toHaveLength(4);
+      store.recordRoutedPlacement(pending, decision({ state: 'pending', contentPending: true }), whole(INTERNAL, true));
+      store.beginMove(moving, { metadataTier: 'secure', contentTier: 'secure' }, 1);
+      store.setOverride(secret, { kind: 'tier', tier: 'secrets' });
+      expect(store.settleStaleEmbedHoldRows(page.rowIds)).toBe(1);
+      for (const identity of [pending, moving, secret]) expect(store.copies(identity)[0]?.embedHold).toBe(true);
+      expect(store.copies(ITEM)[0]?.embedHold).toBe(false);
+    } finally {
+      store.close();
     }
   });
 });

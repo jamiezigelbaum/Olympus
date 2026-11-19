@@ -74,6 +74,9 @@ async function fixture(options: { accountScope?: string; empty?: boolean } = {})
     const record = JSON.parse(lines[0]!.slice('[olympus:embedding-sweep] '.length));
     expect(record).toMatchObject({ source_index: 0, store_index: 0 });
     expect(record.next_run_at).toBe(status.sources[0]!.tasks[0]!.next_run_at);
+    const sweep = status.sources[0]!.tasks[0]!.embedding_sweep?.[0];
+    expect(sweep?.counts).toBeDefined();
+    expect(record).toMatchObject(sweep!.counts);
     now = new Date(record.next_run_at);
     return record;
   };
@@ -107,9 +110,33 @@ test('a superseded-only Private backlog is an explained idle pass, never revived
 
 test('pending judgments embed early under the shared local identity and idle is still logged after completion', async () => {
   const f = await fixture();
-  expect(await f.pass()).toMatchObject({ eligible_chunks: 1, pending_chunks: 1, skipped_held_chunks: 0, chunks_embedded: 1 });
-  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, chunks_embedded: 0 });
+  expect(await f.pass()).toMatchObject({ eligible_chunks: 1, pending_chunks: 1, skipped_held_chunks: 0, held_for_judgment_chunks: 1, chunks_embedded: 1 });
+  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, chunks_embedded: 0, held_for_judgment_chunks: 1, held_for_judgment_items: 1 });
   expect(f.ledger.getCurrent(identityOf('synthetic-id'))?.contentPending).toBe(true);
+});
+
+test('per-store sweep receipts count held items and chunks by reason', async () => {
+  const f = await fixture({ empty: true });
+  const ids = ['for-judgment', 'decided', 'unread', 'moving'];
+  await f.set.sync(fixtureConnector(() => ids.map(id => ({ id, name: 'Sample.txt', text: 'Sample text.' }))),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  f.store.usePersonalEmbeddingProvider(() => undefined);
+  const db = new Database(f.ledger.dbPath);
+  try {
+    db.query("UPDATE tier_items SET state = 'current', metadata_pending = 0, content_pending = 0 WHERE provider_item_id = 'decided'").run();
+    db.query("UPDATE tier_items SET content_read = 0 WHERE provider_item_id = 'unread'").run();
+    db.query("UPDATE tier_items SET state = 'moving' WHERE provider_item_id = 'moving'").run();
+  } finally {
+    db.close();
+  }
+  const holds = {
+    held_for_judgment_chunks: 1, held_for_judgment_items: 1,
+    held_after_decision_chunks: 1, held_after_decision_items: 1,
+    held_while_text_is_unread_chunks: 1, held_while_text_is_unread_items: 1,
+    held_while_moving_chunks: 1, held_while_moving_items: 1,
+    held_for_other_reasons_chunks: 0, held_for_other_reasons_items: 0,
+  };
+  expect(await f.pass()).toMatchObject({ ...holds, pending_chunks: 4, eligible_chunks: 0, inventory_complete: 1 });
 });
 
 test('held, moving and failed reasons remain distinct', async () => {
@@ -208,7 +235,10 @@ test('the first pass after reopening the scheduler, ledger and store runs no chu
   f.restart();
   expect(f.store.writeSequence()).toBe(sequence);
   expect(f.store.visibilityMarker()).toBe(visibility);
-  expect(await f.pass()).toMatchObject({ inventory_complete: 1, rested: 1, chunks_embedded: 0 });
+  expect(await f.pass()).toMatchObject({
+    inventory_complete: 1, rested: 1, chunks_embedded: 0,
+    held_for_judgment_items: 1, held_for_judgment_chunks: 1,
+  });
   expect(f.walks).toEqual({ inventory: 0, workList: 0 });
 });
 
