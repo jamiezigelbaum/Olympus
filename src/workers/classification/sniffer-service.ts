@@ -2526,7 +2526,7 @@ function runBacklogCountWorker(message: unknown): Promise<BacklogWorkerResult[] 
     let worker: Worker;
     try {
       // The backlog worker uses SQLite's unmapped default unless explicitly enabled.
-      const source = sqliteMmapWorkerSource(BACKLOG_COUNT_WORKER_SOURCE, { defaultEnabled: false });
+      const source = sqliteMmapWorkerSource(BACKLOG_COUNT_WORKER_SOURCE);
       worker = new Worker(URL.createObjectURL(new Blob([source], { type: 'text/javascript' })));
     } catch {
       resolve(undefined);

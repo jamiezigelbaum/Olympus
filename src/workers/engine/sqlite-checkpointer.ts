@@ -214,7 +214,7 @@ export function startSqliteCheckpointer(options: {
   };
   try {
     // Checkpoint connections use SQLite's unmapped default unless explicitly enabled.
-    const source = sqliteMmapWorkerSource(WORKER_SOURCE, { defaultEnabled: false });
+    const source = sqliteMmapWorkerSource(WORKER_SOURCE);
     for (let n = 0; n < WORKERS; n += 1) {
       const worker = new Worker(URL.createObjectURL(new Blob([source], { type: 'text/javascript' })));
       (worker as unknown as { unref?: () => void }).unref?.();

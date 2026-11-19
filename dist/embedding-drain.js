@@ -12291,7 +12291,7 @@ function slug(value) {
 
 // src/workers/connector-store/sqlite-mmap.ts
 var SQLITE_MMAP_BYTES = 2147418112;
-function sqliteMmapPolicy(env = process.env, { defaultEnabled = true } = {}) {
+function sqliteMmapPolicy(env = process.env) {
   const setting = env.OLYMPUS_SQLITE_MMAP;
   if (setting === "off")
     return { enabled: false, reason: "OLYMPUS_SQLITE_MMAP=off" };
@@ -12299,13 +12299,13 @@ function sqliteMmapPolicy(env = process.env, { defaultEnabled = true } = {}) {
     return { enabled: false, reason: "Linux only" };
   if (setting === "on")
     return { enabled: true, reason: "OLYMPUS_SQLITE_MMAP=on" };
-  return { enabled: defaultEnabled && env[ENGINE_ROLE_ENV]?.trim() !== "background", reason: "default" };
+  return { enabled: false, reason: "default" };
 }
 function sqliteMmapEnabled(env = process.env) {
   return sqliteMmapPolicy(env).enabled;
 }
-function sqliteMmapWorkerSource(source, options) {
-  const pragma = sqliteMmapPolicy(process.env, options).enabled ? `
+function sqliteMmapWorkerSource(source) {
+  const pragma = sqliteMmapEnabled() ? `
     try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
     catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
   ` : "";

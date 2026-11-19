@@ -1,5 +1,4 @@
-// Memory-mapped reads for the engine's SQLite files. The default has changed
-// twice; a third change needs numbers that beat both of these.
+// History of memory-mapped reads for the engine's SQLite files.
 //
 // 15 Nov 2026, on everywhere (loop-stall step-back): the background read
 // 265.6 GB through read() in ten minutes against 4.74 GB from disk, a copy
@@ -15,26 +14,33 @@
 // mapped), and items per second rose (12.2 to 17.5, 2.0 to 13.2). On a live
 // install the front waited 81 s on page faults at boot while the background's
 // mapped file RSS grew to 17 GB. Page faults under memory pressure cost more
-// than the read() copies. The front keeps the map: its numbers were measured
+// than the read() copies. The front kept the map: its numbers were measured
 // with it on.
+//
+// 19 Nov 2026, off everywhere: on a 14-store, 1.15 million-item, 9.7 GB
+// benchmark under a 4.8 GB memory cap, gathering evidence for an Ask took
+// 24 to 26.5 s with the map and 2.8 to 5.8 s without it (one took 15.5 s).
+// The front incurred 107,000 to 138,000 major faults per Ask with the map
+// and at most 5,300 without it. On the 600,000-item fixture, scope swap
+// fell from 141 MiB with the map to 18 MiB without it, with zero front
+// swap. Switching the map off costs about twice the read() volume
+// (52 to 65 GB versus 25 to 27 GB). Under memory pressure, a page fault
+// on a mapped file costs more than the read() copy.
 //
 // Mapped pages are the files' own page cache; they add no anonymous memory
 // and never go to swap, but they count in total RSS, so the memory restart
-// reads anonymous RSS (rss-restart.ts). Linux only. OLYMPUS_SQLITE_MMAP=on or
-// =off forces it either way in any process.
-
-import { ENGINE_ROLE_ENV } from '../../core/engine-split.ts';
+// reads anonymous RSS (rss-restart.ts). OLYMPUS_SQLITE_MMAP=on enables the
+// map in any process on Linux. OLYMPUS_SQLITE_MMAP=off explicitly disables it.
 
 /** SQLite's compiled ceiling in Bun (SQLITE_MAX_MMAP_SIZE 0x7fff0000): a larger file is mapped up to here. */
 export const SQLITE_MMAP_BYTES = 0x7fff0000;
 
-export function sqliteMmapPolicy(env: NodeJS.ProcessEnv = process.env, { defaultEnabled = true } = {}): { enabled: boolean; reason: string } {
+export function sqliteMmapPolicy(env: NodeJS.ProcessEnv = process.env): { enabled: boolean; reason: string } {
   const setting = env.OLYMPUS_SQLITE_MMAP;
   if (setting === 'off') return { enabled: false, reason: 'OLYMPUS_SQLITE_MMAP=off' };
   if (process.platform !== 'linux') return { enabled: false, reason: 'Linux only' };
   if (setting === 'on') return { enabled: true, reason: 'OLYMPUS_SQLITE_MMAP=on' };
-  // The split launcher puts the role in the child's environment before any worker starts.
-  return { enabled: defaultEnabled && env[ENGINE_ROLE_ENV]?.trim() !== 'background', reason: 'default' };
+  return { enabled: false, reason: 'default' };
 }
 
 export function sqliteMmapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -43,8 +49,8 @@ export function sqliteMmapEnabled(env: NodeJS.ProcessEnv = process.env): boolean
 
 // Fill in the parent's decision at worker start. Keeping the inline source a
 // plain string lets the Node plugin bundle drop the unused bun:sqlite code.
-export function sqliteMmapWorkerSource(source: string, options?: { defaultEnabled?: boolean }): string {
-  const pragma = sqliteMmapPolicy(process.env, options).enabled ? `
+export function sqliteMmapWorkerSource(source: string): string {
+  const pragma = sqliteMmapEnabled() ? `
     try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
     catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
   ` : '';

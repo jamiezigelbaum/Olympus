@@ -666,10 +666,8 @@ export async function main(): Promise<void> {
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
-  if (engineRole === 'background') {
-    const { enabled, reason } = sqliteMmapPolicy();
-    console.log(`[olympus] engine background SQLite file map ${enabled ? 'on' : 'off'} (${reason})`);
-  }
+  const { enabled: sqliteMmapOn, reason: sqliteMmapReason } = sqliteMmapPolicy();
+  console.log(`[olympus] engine ${engineRole} SQLite file map ${sqliteMmapOn ? 'on' : 'off'} (${sqliteMmapReason})`);
   const setupEnvPath = engineRole === 'front' ? workerSetupEnvPath() : undefined;
   const freshSetupEnv = setupEnvPath ? () => readWorkerSetupEnvAsync({ workerEnvPath: setupEnvPath }) : undefined;
   let frontSetupEnv: Record<string, string> | undefined;
