@@ -68,7 +68,7 @@ import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './a
 import type { StoreView } from './archive-leg.ts';
 import { frontSteadyStage, logMark, logSince, seedFrontStoreSet, seedTelegramAfterUpdate, watchFront, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
 import { compareStoreFiles, leftoverFileNames, storeFiles } from './upgrade-split.ts';
-import { cutoverReport, hiddenCopyBuilds, watchCutover } from './cutover.ts';
+import { cutoverReport, hiddenCopyBuilds, watchCutover, type StartupAsk } from './cutover.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -1877,6 +1877,33 @@ async function askWhileIndexing(local: Awaited<ReturnType<typeof mintLocalDashbo
   return observeAsk(status, body, ms, firstEvidenceMs(logSince(engineLogs, mark)));
 }
 
+/**
+ * One known-answer Ask taken while the new engine is still starting. It is not judged on time: it must say Olympus is still
+ * starting, never be cancelled, and complete by itself (owner-run-24h.md). The session is minted as soon as the starting front
+ * allows; the Ask's own wait is the leg's, not a clock of ours (20 minutes only marks it lost).
+ */
+async function askDuringStartup(workerFetch: Platform['workerFetch'], bearer: () => string): Promise<StartupAsk> {
+  let local: Awaited<ReturnType<typeof mintLocalDashboard>> | undefined;
+  for (let attempt = 0; !local && attempt < 300; attempt++) {
+    try { local = await mintLocalDashboard(workerFetch, bearer); } catch { await new Promise(resolve => setTimeout(resolve, 2_000)); }
+  }
+  if (!local) return { status: null, ms: 0, saidStarting: false, completed: false, error: 'no dashboard session while starting' };
+  const started = performance.now();
+  try {
+    const response = await local('/dashboard/private-answers', { action: 'ask', question: QUALIFY_QUESTION.text }, 20 * 60_000);
+    const text = await response.text();
+    const ms = Math.round(performance.now() - started);
+    let body: any;
+    try { body = JSON.parse(text); } catch { body = undefined; }
+    const completed = response.status === 200 && body?.ok === true && body.status === 'answered';
+    // The engine's start-up wording (STARTUP_SEARCH_GAP, the waiting line) or its startup progress field.
+    const saidStarting = /still starting/i.test(text) || (body && typeof body === 'object' && 'startup' in body);
+    return { status: response.status, ms, saidStarting: Boolean(saidStarting), completed };
+  } catch (error) {
+    return { status: null, ms: Math.round(performance.now() - started), saidStarting: false, completed: false, error: String(error).slice(0, 200) };
+  }
+}
+
 async function qualifyPrivacyCommand(): Promise<never> {
   const obs: PrivacyObservation = {};
   const localSession = () => mintLocalDashboard(platform().workerFetch, () => workerBearer(5_000));
@@ -2938,6 +2965,7 @@ async function main(): Promise<void> {
       await watchCutover(WORKDIR, p.dataDir, seconds, p.workerFetch, async () => (await ownerSession(5_000, bearer)).request, {
         fresh,
         newFront,
+        ...(splitStartup ? { startupAsk: () => askDuringStartup(p.workerFetch, () => bearer) } : {}),
         ...(splitStartup ? { observeBuilds: () => {
           const front = newFront();
           const boot = instance(readBootProgress());

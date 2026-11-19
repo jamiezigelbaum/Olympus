@@ -37,12 +37,13 @@ export function observeAsk(status: number, body: any, ms: number, evidenceMs?: n
 
 export function qualifyAskCheck(obs?: AskObservation): CheckResult {
   const passed = obs?.answered && obs.factsStated && obs.cited;
-  const lateEvidence = obs?.firstEvidenceMs !== undefined && obs.firstEvidenceMs > 5_000;
-  const evidence = obs?.firstEvidenceMs === undefined ? 'unobserved' : `${obs.firstEvidenceMs} ms${lateEvidence ? ' (over 5 s)' : ''}`;
+  // On a ready engine: evidence within 10 s, the whole answer reported against about 20 s; 1.5 does not stream (owner-run-24h.md).
+  const lateEvidence = obs?.firstEvidenceMs !== undefined && obs.firstEvidenceMs > 10_000;
+  const evidence = obs?.firstEvidenceMs === undefined ? 'unobserved' : `${obs.firstEvidenceMs} ms${lateEvidence ? ' (over 10 s)' : ''}`;
   return {
     id: 'qualify.ask', title: 'Ask cites the expected fixture while the engine is indexing an archive',
     status: passed ? (lateEvidence ? 'warn' : 'pass') : 'fail',
-    detail: obs ? `Archive importing at dispatch · HTTP ${obs.status} · answer ${obs.answered ? 'received' : 'missing'} · expected facts ${obs.factsStated ? 'present' : 'missing'} · expected citation ${obs.cited ? 'present' : 'missing'} · first evidence (engine retrieval) ${evidence} · first streamed token unavailable on the dashboard JSON endpoint`
+    detail: obs ? `Archive importing at dispatch · HTTP ${obs.status} · answer ${obs.answered ? 'received' : 'missing'} · expected facts ${obs.factsStated ? 'present' : 'missing'} · expected citation ${obs.cited ? 'present' : 'missing'} · first evidence (engine retrieval) ${evidence} · whole answer ${obs.ms} ms (target about 20 s${obs.ms > 20_000 ? ', over' : ''}) · no streaming in 1.5`
       : 'No Ask result from an observed active import',
     ...(obs ? { ms: obs.ms } : {}),
   };
